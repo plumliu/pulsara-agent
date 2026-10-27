@@ -600,16 +600,6 @@ class KernelContextSourceCollector:
             PlanHandoffKind.ENTERED_PLAN
         )
         workflow_full, _workflow_compact = _render_plan_workflow_body()
-        turn_ref = "turn:" + ("a" * 26)
-        freshness = json.dumps(
-            {
-                "current_turn_ref": turn_ref,
-                "immediate_predecessor_turn_ref": turn_ref,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
         return (
             self._value_observation_message(
                 kind=ContextSourceKind.RUN_PERMISSION,
@@ -626,11 +616,6 @@ class KernelContextSourceCollector:
                 lifecycle=SourceObservationLifecycle.SNAPSHOT,
                 body=workflow_full,
             ),
-            self._value_observation_message(
-                kind=ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
-                lifecycle=SourceObservationLifecycle.TURN,
-                body=freshness,
-            ),
         )
 
     def freeze_exited_plan_source_upper(
@@ -643,14 +628,6 @@ class KernelContextSourceCollector:
             overlay=RunPermissionOverlay.NONE,
         )
         handoff, _ = _render_plan_handoff_kind(PlanHandoffKind.EXITED_PLAN)
-        freshness = json.dumps(
-            {
-                "current_turn_ref": "turn:" + "a" * 26,
-                "immediate_predecessor_turn_ref": "turn:" + "a" * 26,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
         return (
             self._value_observation_message(
                 kind=ContextSourceKind.RUN_PERMISSION,
@@ -661,11 +638,6 @@ class KernelContextSourceCollector:
                 kind=ContextSourceKind.PLAN_HANDOFF,
                 lifecycle=SourceObservationLifecycle.ONE_SHOT,
                 body=handoff,
-            ),
-            self._value_observation_message(
-                kind=ContextSourceKind.TOOL_OBSERVATION_FRESHNESS,
-                lifecycle=SourceObservationLifecycle.TURN,
-                body=freshness,
             ),
         )
 

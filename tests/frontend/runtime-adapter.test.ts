@@ -2936,12 +2936,12 @@ describe('source text fidelity hard cut', () => {
     const entries = [
       request('read-request', 1, 'read-call', 'read_file'),
       result('read-result', 2, 'read-request', 'read-call', {
-        status: 'ok', path: 'notes.txt', offset: 20, limit: 2, total_lines: 100,
+        status: 'ok', target: {kind:'PATH', path:'notes.txt'}, offset: 20, limit: 2, total_lines: 100,
         truncated: true, content: '20|甲\n21|乙',
       }),
       request('write-request', 3, 'write-call', 'write_file'),
       result('write-result', 4, 'write-request', 'write-call', {
-        status: 'ok', path: 'created.txt', bytes_written: 9,
+        status: 'ok', target: {kind:'PATH', path:'created.txt'}, bytes_written: 9,
       }),
       request('mcp-request', 5, 'mcp-call', 'mcp__external__report'),
       result('mcp-result', 6, 'mcp-request', 'mcp-call', {
@@ -3472,7 +3472,7 @@ it('refreshes TODOs once per live batch without jumping interaction state or its
 
 it('presents only fresh authenticated complete root results, without history replay or blocking observe', async () => {
   const assistant = {entry_id:'open-call',turn_id:'turn-open',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'open-1',tool_name:'open_in_pulsara'}]};
-  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{type:'panel',name:'tasks'}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
+  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{target:{kind:'PANEL',name:'tasks'}}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
   let committed: unknown[] = [];
   let cut = '9007199254740993';
   let releaseWindow!: () => void;
@@ -3509,7 +3509,7 @@ it('presents only fresh authenticated complete root results, without history rep
 
 it('announces only a fresh, complete, host-owned manage_capability OAuth success', async () => {
   const authorization = {owner:{kind:'local',scope_key:'user',server_id:'notion',plugin_id:null},config_identity:'config',display_identity:'config',package_install_id:null};
-  const value = {action:'AUTHORIZE_MCP',status:'APPLIED',scope:'USER',identity:{server_id:'notion'},current:{authorized:true},authorization};
+  const value = {action:'AUTHORIZE_MCP',status:'APPLIED',target:{kind:'MCP_CONNECTION',scope:'USER',source_kind:'LOCAL',server_id:'notion'},current:{authorized:true},authorization};
   const assistant = {entry_id:'auth-call',turn_id:'turn-auth',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'auth-1',tool_name:'manage_capability'}]};
   const result = {entry_id:'auth-result',turn_id:'turn-auth',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify(value)),tool_result:{assistant_entry_id:'auth-call',tool_call_id:'auth-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
   let committed: unknown[] = [];

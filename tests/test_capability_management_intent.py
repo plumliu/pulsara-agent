@@ -5,49 +5,24 @@ from pulsara_agent.capability.management_intent import (
 )
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"action": "ADD_LOCAL_MCP", "server_id": "test"},
-        {
-            "action": "UPDATE_LOCAL_MCP",
-            "server_id": "test",
-            "config": {"enabled": False},
-        },
-        {
-            "action": "REMOVE_LOCAL_MCP",
-            "server_id": "test",
-            "expected_identity": "exact-current",
-        },
-        {
-            "action": "INSTALL_PLUGIN",
-            "source_path": "/tmp/user-selected-plugin",
-            "replace": False,
-        },
-        {
-            "action": "SET_PLUGIN_ENABLED",
-            "plugin_id": "example.plugin",
-            "enabled": True,
-        },
-        {"action": "REMOVE_PLUGIN", "plugin_id": "example.plugin"},
-        {
-            "action": "CONFIGURE_PLUGIN_MCP_CONNECTION",
-            "plugin_id": "example.plugin",
-            "server_id": "test",
-            "overlay": None,
-        },
-        {"action": "AUTHORIZE_MCP", "server_id": "test"},
-        {
-            "action": "CLEAR_MCP_AUTHORIZATION",
-            "server_id": "test",
-            "plugin_id": "example.plugin",
-        },
-    ],
-)
 @pytest.mark.parametrize("scope", ["USER", "WORKSPACE"])
-def test_closed_public_actions_round_trip_without_reinterpreting_scope(payload, scope):
-    value = {**payload, "scope": scope}
+@pytest.mark.parametrize("source", ["LOCAL", "PLUGIN"])
+def test_authorization_target_keeps_source_specific_guards(scope, source):
+    target = {
+        "kind": "MCP_CONNECTION",
+        "scope": scope,
+        "source_kind": source,
+        "server_id": "docs",
+    }
+    guard = "expected_identity"
+    if source == "PLUGIN":
+        target["plugin_id"] = "package"
+        guard = "expected_package_install_id"
+    value = {"action": "AUTHORIZE_MCP", "target": target, guard: "observed"}
     assert parse_capability_management_intent(value).to_dict() == value
+    wrong = "expected_identity" if source == "PLUGIN" else "expected_package_install_id"
+    with pytest.raises(ValueError):
+        parse_capability_management_intent({**value, wrong: "foreign"})
 
 
 @pytest.mark.parametrize(
@@ -65,55 +40,110 @@ def test_closed_public_actions_round_trip_without_reinterpreting_scope(payload, 
         {"capability_effects": {"workspace_write": True}},
         {"external_process_acceptance": "ACCEPTED"},
         {"command": "pulsara mcp add"},
+        {"scope": "USER"},
+        {"server_id": "docs"},
     ],
 )
-def test_model_cannot_supply_private_values_or_authority_labels(extra):
+def test_model_cannot_supply_private_values_authority_or_flat_identity(extra):
     with pytest.raises(ValueError):
         parse_capability_management_intent(
             {
                 "action": "ADD_LOCAL_MCP",
-                "scope": "USER",
-                "server_id": "test",
+                "target": {
+                    "kind": "MCP_CONNECTION",
+                    "scope": "USER",
+                    "source_kind": "LOCAL",
+                    "server_id": "docs",
+                },
                 **extra,
             }
         )
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"action": "ADD_LOCAL_MCP", "server_id": "test", "config": '{"transport":{}}'},
-        {"action": "REMOVE_LOCAL_MCP", "server_id": "test", "config": {}},
-        {"action": "INSTALL_PLUGIN", "source_path": "relative/plugin"},
-        {"action": "SET_PLUGIN_ENABLED", "plugin_id": "example", "enabled": 1},
-        {
-            "action": "AUTHORIZE_MCP",
-            "server_id": "test",
-            "expected_package_install_id": "package",
-        },
-        {
-            "action": "AUTHORIZE_MCP",
-            "server_id": "test",
-            "plugin_id": "example",
-            "expected_identity": "local",
-        },
-        {"action": "INSTALL_SKILL", "source_path": "/tmp/skill"},
-    ],
-)
-def test_action_specific_shapes_reject_ambiguous_or_unsupported_inputs(payload):
-    with pytest.raises(ValueError):
-        parse_capability_management_intent({"scope": "USER", **payload})
-
-
-def test_explicit_no_overlay_guard_remains_distinct_from_omitted_guard():
+def test_overlay_absence_null_and_object_survive_public_round_trip():
     value = {
         "action": "CONFIGURE_PLUGIN_MCP_CONNECTION",
-        "scope": "USER",
-        "plugin_id": "example",
-        "server_id": "test",
+        "target": {
+            "kind": "MCP_CONNECTION",
+            "scope": "USER",
+            "source_kind": "PLUGIN",
+            "plugin_id": "example",
+            "server_id": "docs",
+        },
     }
     omitted = parse_capability_management_intent(value)
-    empty = parse_capability_management_intent({**value, "expected_overlay": None})
-    assert omitted != empty
-    assert "expected_overlay" not in omitted.to_dict()
-    assert empty.to_dict()["expected_overlay"] is None
+    assert (
+        "overlay" not in omitted.to_dict()
+        and "expected_overlay" not in omitted.to_dict()
+    )
+    for overlay in (None, {"server_id": "docs"}):
+        candidate = {**value, "overlay": overlay, "expected_overlay": overlay}
+        assert parse_capability_management_intent(candidate).to_dict() == candidate
+        assert parse_capability_management_intent(candidate) != omitted
+
+
+def test_identity_semantics_are_checked_without_changing_values():
+    value = {
+        "action": "REMOVE_LOOSE_SKILL",
+        "target": {"kind": "SKILL", "skill_path": "/exact/root/SKILL.md"},
+    }
+    intent = parse_capability_management_intent(value)
+    assert intent.scope is None and intent.to_dict() == value
+    for path in ("relative/SKILL.md", "  ", None):
+        with pytest.raises(ValueError):
+            parse_capability_management_intent(
+                {**value, "target": {"kind": "SKILL", "skill_path": path}}
+            )
+    target = {
+        "kind": "MCP_CONNECTION",
+        "scope": "USER",
+        "source_kind": "LOCAL",
+        "server_id": " id ",
+    }
+    assert (
+        parse_capability_management_intent(
+            {"action": "REMOVE_LOCAL_MCP", "target": target}
+        ).to_dict()["target"]
+        == target
+    )
+    for replacement in (
+        {**target, "server_id": "  "},
+        {**target, "kind": "MCP_SERVER"},
+        {"kind": "MCP_SERVER", "runtime_server_id": "id"},
+    ):
+        with pytest.raises(ValueError):
+            parse_capability_management_intent(
+                {"action": "REMOVE_LOCAL_MCP", "target": replacement}
+            )
+
+
+def test_install_destination_and_options_are_separate_from_result_identity():
+    value = {
+        "action": "INSTALL_PLUGIN",
+        "scope": "WORKSPACE",
+        "source_path": "/source/plugin",
+        "replace": False,
+    }
+    assert parse_capability_management_intent(value).to_dict() == value
+    for extra in (
+        {"replace": 1},
+        {"source_path": "relative"},
+        {"target": {"kind": "PLUGIN", "scope": "WORKSPACE", "plugin_id": "guessed"}},
+    ):
+        with pytest.raises(ValueError):
+            parse_capability_management_intent({**value, **extra})
+
+
+def test_local_config_null_does_not_mean_open_editor():
+    value = {
+        "action": "ADD_LOCAL_MCP",
+        "target": {
+            "kind": "MCP_CONNECTION",
+            "scope": "USER",
+            "source_kind": "LOCAL",
+            "server_id": "docs",
+        },
+    }
+    assert "config" not in parse_capability_management_intent(value).to_dict()
+    with pytest.raises(ValueError):
+        parse_capability_management_intent({**value, "config": None})

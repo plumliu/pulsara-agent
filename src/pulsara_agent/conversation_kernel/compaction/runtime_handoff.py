@@ -267,7 +267,7 @@ def _payload(
     return {
         "terminal_processes": tuple(
             {
-                "process_id": item.process_id,
+                "target": {"kind": "PROCESS", "process_id": item.process_id},
                 "status": item.status,
                 "command_preview": item.command_preview,
                 "cwd": item.cwd,
@@ -276,8 +276,8 @@ def _payload(
         ),
         "terminal_monitors": tuple(
             {
-                "monitor_id": item.monitor_id,
-                "process_id": item.process_id,
+                "target": {"kind": "MONITOR", "monitor_id": item.monitor_id},
+                "process_target": {"kind": "PROCESS", "process_id": item.process_id},
                 "state": item.state,
                 "pending_observation": item.pending_observation,
             }

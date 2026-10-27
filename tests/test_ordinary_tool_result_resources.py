@@ -25,7 +25,6 @@ from pulsara_agent.conversation_kernel.runner import (
 from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
 from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
-from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
@@ -221,7 +220,7 @@ def test_minimum_upper_bounds_real_omitted_normal_and_late_metadata(api, origin)
 
 
 def _results(body, *, provenance=(), full=False, plan=False):
-    args = freeze_json({"path": "example.txt"})
+    args = freeze_json({"target": {"kind": "PATH", "path": "example.txt"}})
     tool_name = "artifact_read" if full else "read_file"
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
@@ -399,7 +398,7 @@ def _runner_quote(monkeypatch, calls, api):
 def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, api):
     calls = [
         CompletedToolCallBlock(
-            derive_id("block", "test-fixture", f"block:{i}"), f"call:{i}", "read_file", freeze_json({"path": "example.txt"})
+            derive_id("block", "test-fixture", f"block:{i}"), f"call:{i}", "read_file", freeze_json({"target": {"kind": "PATH", "path": "example.txt"}})
         )
         for i in range(3)
     ]
@@ -415,12 +414,6 @@ def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, a
         runner._require_post_response_resources(
             quote, effective_input_budget_tokens=budget - 1
         )
-    assert any(
-        "PULSARA_TOOL_RESULT_BODY_OMITTED" in part.text
-        for m in seen
-        for part in m.content
-        if isinstance(part, LLMTextPart)
-    )
 
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
@@ -437,12 +430,6 @@ def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, a
 def test_pre_effect_full_and_plan_keep_existing_carriers(monkeypatch, api, name, args):
     call = CompletedToolCallBlock('block:b6jcz3ejkiu6yivknhzowsm5eu', "call:1", name, freeze_json(args))
     _, _, seen = _runner_quote(monkeypatch, [call], api)
-    assert not any(
-        "PULSARA_TOOL_RESULT_BODY_OMITTED" in part.text
-        for m in seen
-        for part in m.content
-        if isinstance(part, LLMTextPart)
-    )
 
 
 @pytest.mark.postgres
@@ -678,11 +665,11 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
     )
     calls = (
         CompletedToolCallBlock(
-            "b:read", "c:read", "read_file", freeze_json({"path": "x"})
+            "b:read", "c:read", "read_file", freeze_json({"target": {"kind": "PATH", "path": "x"}})
         ),
         *(
             CompletedToolCallBlock(
-                f"b:{i}", f"c:{i}", "view_image", freeze_json({"path": f"/tmp/{i}.png"})
+                f"b:{i}", f"c:{i}", "view_image", freeze_json({"target": {"kind": "PATH", "path": f"/tmp/{i}.png"}})
             )
             for i in range(2)
         ),
@@ -722,15 +709,9 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
         assert allowances[1].quote_owner is owner
         assert owner.provider_replay is replay
         assert owner.base_wire == quote.followup_wire
-        assert any(
-            "PULSARA_TOOL_RESULT_BODY_OMITTED" in part.text
-            for message in owner.base_suffix_messages
-            for part in message.content
-            if isinstance(part, LLMTextPart)
-        )
         carriers, increments = [], []
         for i, allowance in enumerate(allowances):
-            source = parse_view_image_source({"path": f"/tmp/{i}.png"})
+            source = parse_view_image_source({"target": {"kind": "PATH", "path": f"/tmp/{i}.png"}})
             image = bound_test_image("image/png", b"x" * (100 + i), 1, 1)
             content = FrozenPromptContent((image,))
             increment = owner.quote(

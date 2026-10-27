@@ -234,7 +234,7 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
                         port,
                         session_id=session_id,
                         tool_name="write_file",
-                        arguments={"path": str(path), "content": "value"},
+                        arguments={"target": {"kind": "PATH", "path": str(path)}, "content": "value"},
                         tool_call_id=f"call:{ordinal}:{path_ordinal}",
                         turn_id=derive_id("turn", "test-fixture", f"turn:{ordinal}:{path_ordinal}"),
                         assistant_entry_id=derive_id("entry", "test-fixture", f"entry:{ordinal}:{path_ordinal}"),

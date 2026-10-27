@@ -103,7 +103,7 @@ MCP, Skills, memory, and running tasks. Therefore:
 - Retain an exact previously seen, usable reference or handle only when continuing
   explicitly pending work genuinely requires it.
 - Only when continuing the task requires viewing an image again, copy its previously
-  seen image_ref unchanged and briefly state its purpose. Do not compute, guess, or
+  seen IMAGE_REF target unchanged and briefly state its purpose. Do not compute, guess, or
   enumerate all image references.
 - Do not claim that a runtime status will still be current after the handoff.
 

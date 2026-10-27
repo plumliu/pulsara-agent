@@ -103,7 +103,7 @@ def runtime_rows(runtime, plan, scope):
             if route.route is ToolCapabilityRouteKind.DIRECT:
                 status = "可直接调用；参数见工具定义。"
             elif route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY:
-                status = "先用 inspect_capability 查看参数，再用返回的 tool_ref 调用。"
+                status = "先用 inspect_capability 查看参数，再用返回的 invocation.target 调用。"
             else:
                 status = f"当前不可调用：{route.public_reason_code.value}。"
             rows.append(

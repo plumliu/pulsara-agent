@@ -161,7 +161,7 @@ def test_terminal_cursor_rejection_returns_actionable_tool_error(foreign: bool) 
     result = _execute_terminal_tool_call(
         _DirectTerminalProcessTool(Manager(), 'host:umsmaqdnqz3cpmtzml56ydq7ei'),
         ToolCall("call:cursor", "terminal_process", {
-            "action": "poll", "process_id": 'process:72qov6ocdngiw5hv6gjo4g2o7i', "since_cursor": cursor,
+            "action": "poll", "target": {"kind": "PROCESS", "process_id": 'process:72qov6ocdngiw5hv6gjo4g2o7i'}, "since_cursor": cursor,
         }),
         None,
         TerminalProcessOrigin('turn:nzc36cttgo7xxki7bcjc7ops7a', "ROOT"),

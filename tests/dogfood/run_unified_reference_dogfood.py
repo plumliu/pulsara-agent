@@ -95,7 +95,7 @@ async def run(args, report, saved):
                 await turn(
                     "text_history_recovery",
                     PromptContent.text(
-                        "Use read_session_content to locate the image I uploaded earlier in this same conversation. Then pass its exact returned image_ref to view_image. Explain honestly whether your current model can see it; do not infer pixels from the reference."
+                        "Use read_session_content to locate the image I uploaded earlier in this same conversation. Then copy its returned IMAGE_REF target into view_image. Explain honestly whether your current model can see it; do not infer pixels from the reference."
                     ),
                 )
                 tools = common.tool_calls(
@@ -116,7 +116,7 @@ async def run(args, report, saved):
                 await turn(
                     "memory_roundtrip",
                     PromptContent.text(
-                        "For this disposable test project, remember the factual fixture 'The reference validation canary is ORCHID-731.' in CURRENT_PROJECT, then use memory_get with the exact returned memory ID and report the retrieved statement."
+                        "For this disposable test project, remember the factual fixture 'The reference validation canary is ORCHID-731.' in CURRENT_PROJECT, then use memory_get with the exact returned MEMORY target and report the retrieved statement."
                     ),
                 )
                 tools = common.tool_calls(
@@ -124,7 +124,7 @@ async def run(args, report, saved):
                 )
                 assert any(t["tool_name"] == "remember" for t in tools)
                 ids = [
-                    json.loads(t["arguments"])["memory_id"]
+                    json.loads(t["arguments"])["target"]["memory_id"]
                     for t in tools
                     if t["tool_name"] == "memory_get"
                 ]

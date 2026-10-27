@@ -215,7 +215,7 @@ async def _start_background_process(
     payload = json.loads(result.content)
     assert payload["status"] == "running"
     assert payload["yielded_to_background"] is True
-    return str(payload["process_id"]), turn_id, entry_id
+    return str(payload["target"]["process_id"]), turn_id, entry_id
 
 
 def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
@@ -243,13 +243,13 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
             port,
             session_id=session_id,
             tool_name="terminal_process",
-            arguments={"action": "poll", "process_id": process_id},
+            arguments={"action": "poll", "target": {"kind": "PROCESS", "process_id": process_id}},
             tool_call_id=_name("call"),
             attempt_id=_name("attempt"),
             turn_id=turn_id,
             assistant_entry_id=entry_id,
         )
-        assert json.loads(poll.content)["process_id"] == process_id
+        assert json.loads(poll.content)["target"]["process_id"] == process_id
         assert deadlines.owners[-1] is KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
         assert (
             port._terminal.live_process_count(  # noqa: SLF001
@@ -302,7 +302,7 @@ def test_host_scoped_writes_and_terminal_cwd_follow_exact_permission_snapshot(
                 session_id=session_id,
                 tool_name="write_file",
                 arguments={
-                    "path": str(outside / "host.txt"),
+                    "target": {"kind": "PATH", "path": str(outside / "host.txt")},
                     "content": "host write",
                 },
                 tool_call_id=_name("call"),
@@ -367,7 +367,7 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
                 new,
                 session_id=new_session_id,
                 tool_name="terminal_process",
-                arguments={"action": "poll", "process_id": process_id},
+                arguments={"action": "poll", "target": {"kind": "PROCESS", "process_id": process_id}},
                 tool_call_id=_name("call"),
                 attempt_id=_name("attempt"),
                 turn_id=turn_id,
@@ -420,7 +420,7 @@ def test_tool_close_blocks_until_cancelled_physical_thread_exits(
                 port,
                 session_id=session_id,
                 tool_name="read_file",
-                arguments={"path": "ignored"},
+                arguments={"target": {"kind": "PATH", "path": "ignored"}},
                 tool_call_id=_name("call"),
                 attempt_id=_name("attempt"),
                 turn_id=_name("turn"),

@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from pulsara_agent.identity import require_id
+from pulsara_agent.memory.targets import memory_target, parse_memory_target
 
 from pulsara_agent.conversation_kernel.history_search import (
     PostgresHistoryQuery,
     FrozenHistoryReadScope,
 )
 from pulsara_agent.conversation_kernel.history_excerpt import HistoryCandidate
-from pulsara_agent.ports.session_content import session_content_range
+from pulsara_agent.ports.session_content import session_content_range, session_entry_target
 
 import asyncio
 from dataclasses import dataclass, replace
@@ -289,7 +289,7 @@ class KernelMemoryToolPort:
             "statement",
             "context_target",
             "kind",
-            "based_on_memory_ids",
+            "based_on",
         }:
             raise ValueError("remember contains an unsupported argument")
         context_target = str(arguments.get("context_target") or "")
@@ -303,7 +303,10 @@ class KernelMemoryToolPort:
                 )
         else:
             raise ValueError("context_target must be GLOBAL or CURRENT_PROJECT")
-        basis_ids = tuple(require_id(value, "memory") for value in _string_sequence(arguments.get("based_on_memory_ids")))
+        basis = arguments.get("based_on", ())
+        if not isinstance(basis, (list, tuple)):
+            raise ValueError("memory basis must be an array of MEMORY targets")
+        basis_ids = tuple(parse_memory_target(value) for value in basis)
         kind = MemoryFactKind(str(arguments["kind"]))
         statement = str(arguments.get("statement") or "")
         basis_refs = await self._resolve_basis(basis_ids, source_context_id=context_id)
@@ -333,10 +336,12 @@ class KernelMemoryToolPort:
     ) -> KernelToolResult:
         if context.conversation_scope_kind != "ROOT":
             raise ValueError("only the root Agent may mark memory relations")
+        if set(arguments) != {"source", "target", "relation_kind"}:
+            raise ValueError("memory relation requires source, target and relation_kind")
         mutation = PreparedMemoryRelationWrite(
             memory_domain_id=self._read_binding.memory_domain_id,
-            source_memory_id=require_id(arguments.get("source_memory_id"), "memory"),
-            target_memory_id=require_id(arguments.get("target_memory_id"), "memory"),
+            source_memory_id=parse_memory_target(arguments.get("source")),
+            target_memory_id=parse_memory_target(arguments.get("target")),
             relation_kind=MemoryRelationKind(str(arguments.get("relation_kind") or "")),
         )
         return KernelToolResult(
@@ -540,7 +545,7 @@ class KernelMemoryToolPort:
         )
         memories = [
             {
-                "memory_id": item.fact_id,
+                "target": memory_target(item.fact_id),
                 "kind": item.fact_kind,
                 "context_product_label": memory_context_product_label(item.context_id),
                 "current_context": item.context_id != CTX_GLOBAL,
@@ -564,8 +569,8 @@ class KernelMemoryToolPort:
                 "relation_warnings": [
                     {
                         "kind": "ACTIVE_CONTRADICTION",
-                        "memory_id": relation.source_fact_id,
-                        "other_memory_id": relation.target_fact_id,
+                        "source": memory_target(relation.source_fact_id),
+                        "target": memory_target(relation.target_fact_id),
                     }
                     for relation in relations
                 ],
@@ -576,9 +581,9 @@ class KernelMemoryToolPort:
         )
 
     async def _get(self, arguments: Mapping[str, object]) -> KernelToolResult:
-        memory_id = require_id(arguments.get("memory_id"), "memory")
-        if not memory_id:
-            raise ValueError("memory_id is required")
+        if set(arguments) != {"target"}:
+            raise ValueError("memory_get requires target")
+        memory_id = parse_memory_target(arguments.get("target"))
         item = await self._io.run(
             self._query.get,
             read_binding=self._read_binding,
@@ -598,7 +603,7 @@ class KernelMemoryToolPort:
             ),
         )
         payload: dict[str, object] = {
-            "memory_id": item.fact_id,
+            "target": memory_target(item.fact_id),
             "kind": item.fact_kind,
             "context_product_label": memory_context_product_label(item.context_id),
             "current_context": item.context_id != CTX_GLOBAL,
@@ -608,8 +613,8 @@ class KernelMemoryToolPort:
             "relations": [
                 {
                     "relation_id": relation.relation_id,
-                    "source_memory_id": relation.source_fact_id,
-                    "target_memory_id": relation.target_fact_id,
+                    "source": memory_target(relation.source_fact_id),
+                    "target": memory_target(relation.target_fact_id),
                     "kind": relation.relation_kind,
                     "supersede_mode": relation.supersede_mode,
                 }
@@ -1096,7 +1101,7 @@ class KernelMemoryToolPort:
 
         def item_payload(item):
             return {
-                "memory_id": item.fact_id,
+                "target": memory_target(item.fact_id),
                 "kind": item.fact_kind,
                 "scope": "shared across conversations" if item.context_id == CTX_GLOBAL else "current project",
                 "statement": item.statement,
@@ -1116,8 +1121,23 @@ class KernelMemoryToolPort:
                 for relation in relations
             )
         )
+
+        def history_model_item(item):
+            # Targets are model-facing read addresses, not rerank document text.
+            return {
+                **item.projection(),
+                "target": session_entry_target(item.session_id, item.q1_entry_id),
+                "messages": [
+                    {
+                        "target": session_entry_target(item.session_id, message["entry_id"]),
+                        **{key: message[key] for key in ("role", "label", "at", "text")},
+                    }
+                    for message in item.messages
+                ],
+            }
+
         full_items = tuple(
-            item.projection()
+            history_model_item(item)
             if isinstance(item, HistoryCandidate)
             else {"source": "memory", **item_payload(item)}
             for item in result.facts
@@ -1125,17 +1145,14 @@ class KernelMemoryToolPort:
         )
         compact_items = full_items[: min(3, len(full_items))]
         ref_items = tuple(
-            {
-                "memory_id": item.fact_id,
-                "read_with": "memory_get",
-            }
+            memory_target(item.fact_id)
             for item in presentation[:3]
         )
         relation_warnings = tuple(
             {
                 "kind": "ACTIVE_CONTRADICTION",
-                "memory_id": relation.source_fact_id,
-                "other_memory_id": relation.target_fact_id,
+                "source": memory_target(relation.source_fact_id),
+                "target": memory_target(relation.target_fact_id),
             }
             for relation in relations
         )
@@ -1144,7 +1161,7 @@ class KernelMemoryToolPort:
             payload = {"advisory": True}
             if references:
                 if ref_items:
-                    payload["memory_refs"] = [item["memory_id"] for item in ref_items]
+                    payload["memory_refs"] = list(ref_items)
                     payload["read_memory_with"] = "memory_get"
                 omitted_history = history
                 if len(presentation) > len(ref_items):
@@ -1161,7 +1178,7 @@ class KernelMemoryToolPort:
                     payload["selected_memories_omitted"] = len(presentation) - shown_memories
             if omitted_history:
                 payload["omitted_conversations"] = [
-                    {"session_id": item.session_id, "entry_id": item.q1_entry_id,
+                    {"target": session_entry_target(item.session_id, item.q1_entry_id),
                      "read_with": "read_session_content"} for item in omitted_history
                 ]
             if relation_warnings:
@@ -1394,18 +1411,6 @@ class KernelMemoryToolPort:
         if remaining <= 0:
             raise TimeoutError(f"{owner.value} deadline expired")
         return remaining
-
-
-def _string_sequence(value: object) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, (list, tuple)) or any(
-        not isinstance(item, str) for item in value
-    ):
-        raise ValueError("memory reference list is invalid")
-    return tuple(value)
-
-
 
 
 def _filter_match(tier: int) -> str:

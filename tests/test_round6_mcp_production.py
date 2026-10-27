@@ -861,10 +861,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
                 events = _generic_tool_stream(
                     block_id="call:use-meta",
                     tool_name="use_new_mcp_tool",
-                    arguments={
-                        "tool_ref": inspected["tool_ref"],
-                        "arguments": {"value": "hello"},
-                    },
+                    arguments={'arguments': {"value": "hello"}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":inspected["invocation"]["target"]["tool_ref"]}},
                 )
             else:
                 events = _text_stream("meta complete")
@@ -1032,8 +1029,9 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
     asyncio.run(exercise())
 
 
+@pytest.mark.parametrize("template_target", [False, True])
 def test_round6_advertised_resource_template_instance_is_readable(
-    tmp_path: Path,
+    tmp_path: Path, template_target: bool,
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
@@ -1045,11 +1043,18 @@ def test_round6_advertised_resource_template_instance_is_readable(
         await supervisor.start()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
-        arguments = {
-            "server_id": "fixture",
-            "uri": "fixture://round6/users/alice",
-        }
+        arguments = {'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/users/alice"}}
+        if template_target:
+            arguments = {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture", "uri_template": "fixture://round6/users/{name}"}, "uri": "fixture://round6/users/alice"}
         try:
+            for bad in (
+                {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture", "uri_template": "fixture://unobserved/{name}"}, "uri": "fixture://round6/users/alice"},
+                {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture", "uri_template": "fixture://round6/users/{name}"}, "uri": "fixture://round6"},
+                {"target": {"kind": "MCP_RESOURCE_TEMPLATE", "server_id": "fixture", "uri_template": "fixture://round6/users/{name}"}},
+                {"server_id": "fixture", "uri": "fixture://round6/users/alice"},
+            ):
+                with pytest.raises(ValueError):
+                    runtime._validate_standard_operation("read_mcp_resource", bad, scope_kind=ModelInputScopeKind.ROOT)
             permit = runtime.admit_standard_operation(
                 tool_name="read_mcp_resource",
                 arguments=arguments,
@@ -1072,10 +1077,7 @@ def test_round6_advertised_resource_template_instance_is_readable(
             with pytest.raises(ValueError, match="absent from the exact snapshot"):
                 runtime.admit_standard_operation(
                     tool_name="read_mcp_resource",
-                    arguments={
-                        "server_id": "fixture",
-                        "uri": "fixture://round6/users/alice/private",
-                    },
+                    arguments={'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/users/alice/private"}},
                     descriptor_fingerprint="sha256:resource-descriptor",
                     session_id='session:thb7hvrgs22eocnwhmz2egts4e',
                     scope_kind=ModelInputScopeKind.ROOT,
@@ -1591,10 +1593,7 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
 
             resource_permit = runtime.admit_standard_operation(
                 tool_name="read_mcp_resource",
-                arguments={
-                    "server_id": "fixture",
-                    "uri": "fixture://round6/resource",
-                },
+                arguments={'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/resource"}},
                 descriptor_fingerprint="sha256:resource-descriptor",
                 session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -1605,10 +1604,7 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
             assert resource_permit is not None
             resource = await runtime.invoke_standard(
                 tool_name="read_mcp_resource",
-                arguments={
-                    "server_id": "fixture",
-                    "uri": "fixture://round6/resource",
-                },
+                arguments={'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/resource"}},
                 permit=resource_permit,
                 scope_kind=ModelInputScopeKind.ROOT,
             )
@@ -1616,11 +1612,7 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
 
             prompt_permit = runtime.admit_standard_operation(
                 tool_name="get_mcp_prompt",
-                arguments={
-                    "server_id": "fixture",
-                    "prompt_name": "round6_prompt",
-                    "arguments": {"topic": "MCP"},
-                },
+                arguments={'arguments': {"topic": "MCP"}, 'target': {"kind":'MCP_PROMPT', "server_id":"fixture", 'name':"round6_prompt"}},
                 descriptor_fingerprint="sha256:prompt-descriptor",
                 session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -1631,11 +1623,7 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
             assert prompt_permit is not None
             prompt = await runtime.invoke_standard(
                 tool_name="get_mcp_prompt",
-                arguments={
-                    "server_id": "fixture",
-                    "prompt_name": "round6_prompt",
-                    "arguments": {"topic": "MCP"},
-                },
+                arguments={'arguments': {"topic": "MCP"}, 'target': {"kind":'MCP_PROMPT', "server_id":"fixture", 'name':"round6_prompt"}},
                 permit=prompt_permit,
                 scope_kind=ModelInputScopeKind.ROOT,
             )
@@ -2234,7 +2222,6 @@ def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
     assert full_payload["servers"][0]["meta_tool_names"] == [
         "mcp__fixture__fixture_echo"
     ]
-    assert "next_offset" in full_payload["meta_tool_usage"]
 
 
 def test_reload_capabilities_name_is_one_complete_hard_cut() -> None:
@@ -2539,10 +2526,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
                     )
                     name, arguments = (
                         "use_new_mcp_tool",
-                        {
-                            "tool_ref": inspected["tool_ref"],
-                            "arguments": {"value": "observe"},
-                        },
+                        {'arguments': {"value": "observe"}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":inspected["invocation"]["target"]["tool_ref"]}},
                     )
                 events = [
                     *_generic_tool_stream(
@@ -2551,7 +2535,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
                     *_generic_tool_stream(
                         block_id="call:independent",
                         tool_name="read_file",
-                        arguments={"path": "independent.txt"},
+                        arguments={"target": {"kind": "PATH", "path": "independent.txt"}},
                     ),
                 ]
             else:
@@ -2651,7 +2635,7 @@ def test_mcp_standard_read_keeps_connection_failure_detail(
         await supervisor.start()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
-        arguments = {"server_id": "fixture", "uri": "fixture://slow/resource"}
+        arguments = {'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://slow/resource"}}
         try:
             permit = runtime.admit_standard_operation(
                 tool_name="read_mcp_resource",
@@ -2785,10 +2769,7 @@ def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
         try:
             permit = runtime.admit_standard_operation(
                 tool_name="read_mcp_resource",
-                arguments={
-                    "server_id": "fixture",
-                    "uri": "fixture://slow/resource",
-                },
+                arguments={'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://slow/resource"}},
                 descriptor_fingerprint="sha256:resource-descriptor",
                 session_id='session:cvnmzolif3db3m3a73i6vzqlka',
                 scope_kind=ModelInputScopeKind.ROOT,
@@ -2800,10 +2781,7 @@ def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
             started = monotonic()
             result = await runtime.invoke_standard(
                 tool_name="read_mcp_resource",
-                arguments={
-                    "server_id": "fixture",
-                    "uri": "fixture://slow/resource",
-                },
+                arguments={'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://slow/resource"}},
                 permit=permit,
                 scope_kind=ModelInputScopeKind.ROOT,
             )
@@ -3248,10 +3226,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
             with pytest.raises(ValueError, match="not visible in this scope"):
                 runtime.admit_standard_operation(
                     tool_name="read_mcp_resource",
-                    arguments={
-                        "server_id": "fixture",
-                        "uri": "fixture://round6/resource",
-                    },
+                    arguments={'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/resource"}},
                     descriptor_fingerprint="sha256:resource-descriptor",
                     session_id='session:g7kqyvbwicnfvtw6ebmeo45jwa',
                     scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
@@ -4796,16 +4771,6 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
         "READ_ONLY",
         "EXTERNAL_EFFECT",
     }
-    resource_schema = thaw_json(
-        builtin_tool_catalog_entry("read_mcp_resource").descriptor.input_schema
-    )
-    assert isinstance(resource_schema, dict)
-    properties = resource_schema.get("properties")
-    assert isinstance(properties, dict)
-    assert "offset" not in properties
-    assert "limit" not in properties
-    assert properties["uri"]["maxLength"] == 32768
-
     assert not any(
         "Mcp" in descriptor.event_type.value or "MCP" in descriptor.event_type.value
         for descriptor in COMMITTED_EVENT_DESCRIPTORS

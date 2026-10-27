@@ -288,7 +288,7 @@ def _seed_artifact_result_with_memory_provenance(
                 block_id=_name("block"),
                 tool_call_id=tool_call_id,
                 tool_name="artifact_read",
-                arguments=freeze_json({"artifact_id": _name("artifact")}),
+                arguments=freeze_json({"target": {"kind": "ARTIFACT", "artifact_id": _name("artifact")}}),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -6702,7 +6702,8 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
             assert len(result_messages) == 1
             observed = result_messages[0]
             assert "citation_handle" not in observed
-            basis_id = json.loads(observed["body"])["memory_id"]
+            basis_target = json.loads(observed["body"])["target"]
+            basis_id = basis_target["memory_id"]
             assert observed["model_visible_memory_ids"] == [basis_id]
             items = _named_tool_stream(
                 tool_name="remember",
@@ -6711,7 +6712,7 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
                     "statement": "The design review needs a slide deck.",
                     "context_target": "CURRENT_PROJECT",
                     "kind": "FACT",
-                    "based_on_memory_ids": [basis_id],
+                    "based_on": [basis_target],
                 },
             )
         else:
@@ -8143,17 +8144,12 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
     )
     service = preparation(tmp_path)
     target = LocalMcpTarget("fixture", service.workspace_root)
-    args = {
-        "action": "ADD_LOCAL_MCP",
-        "scope": "WORKSPACE",
-        "server_id": "fixture",
-        "config": {
+    args = {'action': "ADD_LOCAL_MCP", 'config': {
             "transport": {
                 "type": "streamable_http",
                 "endpoint": "https://example.org/mcp",
             }
-        },
-    }
+        }, 'target': {"kind": "MCP_CONNECTION", 'scope': "WORKSPACE", 'source_kind': 'LOCAL', 'server_id': "fixture"}}
     model = _ScriptedModel(
         [
             _named_tool_stream(

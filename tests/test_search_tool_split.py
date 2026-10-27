@@ -37,35 +37,35 @@ def tree(tmp_path):
     ('name', []),
 ])
 def test_relative_glob_and_exact_basename(tree, pattern, expected):
-    assert invoke(FindFilesTool(tree), glob=pattern)['files'] == expected
+    assert [item["path"] for item in invoke(FindFilesTool(tree), glob=pattern)["targets"]] == expected
 
 
 def test_all_content_modes_pages_and_odd_names(tree):
     tool = SearchContentTool(tree)
     first = invoke(tool, pattern='needle', limit=1)
     assert first['total_count'] == 14
-    assert first['matches'] == [{'path': 'A.py', 'line': 1, 'content': 'needle needle'}]
+    assert first['matches'] == [{"target": {"kind": "PATH", "path": 'A.py'}, 'line': 1, 'content': 'needle needle'}]
     assert first['_hint'].endswith('offset=1.')
     second = invoke(tool, pattern='needle', limit=1, offset=1)
     assert second['matches'][0]['line'] == 2
     files = invoke(tool, pattern='needle', output_mode='files_only')
-    assert files['files'] == sorted(['A.py', 'z.py', 'src/a.py', 'src/deep/a.py', 'colon:name.py', 'new\nline.py', 'other.txt'])
+    assert [item["path"] for item in files["targets"]] == sorted(['A.py', 'z.py', 'src/a.py', 'src/deep/a.py', 'colon:name.py', 'new\nline.py', 'other.txt'])
     counts = invoke(tool, pattern='needle', output_mode='count', limit=1, offset=2)
     assert counts['total_count'] == 14
-    assert counts['counts'] == {'new\nline.py': 2}
+    assert {item["target"]["path"]: item["count"] for item in counts["counts"]} == {'new\nline.py': 2}
     assert counts['truncated'] and counts['_hint'].endswith('offset=3.')
     final = invoke(tool, pattern='needle', output_mode='count', offset=6)
-    assert final['counts'] == {'z.py': 2} and not final['truncated']
-    assert invoke(tool, pattern='needle', output_mode='count', offset=100)['counts'] == {}
+    assert {item["target"]["path"]: item["count"] for item in final["counts"]} == {'z.py': 2} and not final['truncated']
+    assert {item["target"]["path"]: item["count"] for item in invoke(tool, pattern='needle', output_mode='count', offset=100)["counts"]} == {}
     assert 'target' not in counts
 
 
 def test_single_file_filter_leading_option_and_invalid_regex(tree):
     tool = SearchContentTool(tree)
-    assert invoke(tool, pattern='-needle', path='colon:name.py')['total_count'] == 1
-    assert invoke(tool, pattern='needle', path='colon:name.py', file_glob='other.py')['matches'] == []
-    assert invoke(tool, pattern='needle', path='src', file_glob='*.py')['total_count'] == 4
-    assert invoke(FindFilesTool(tree), glob='*.py', path='colon:name.py')['files'] == ['colon:name.py']
+    assert invoke(tool, pattern='-needle', target={"kind":"PATH","path":'colon:name.py'})['total_count'] == 1
+    assert invoke(tool, pattern='needle', target={"kind":"PATH","path":'colon:name.py'}, file_glob='other.py')['matches'] == []
+    assert invoke(tool, pattern='needle', target={"kind":"PATH","path":'src'}, file_glob='*.py')['total_count'] == 4
+    assert [item["path"] for item in invoke(FindFilesTool(tree), glob='*.py', target={"kind":"PATH","path":'colon:name.py'})["targets"]] == ['colon:name.py']
     with pytest.raises(RuntimeError, match='regex'):
         invoke(tool, pattern='(', file_glob='no-match')
 
@@ -81,7 +81,7 @@ def test_single_file_filter_leading_option_and_invalid_regex(tree):
     (SearchContentTool, {'pattern': 'x', 'limit': '50'}),
     (SearchContentTool, {'pattern': 'x', 'limit': 1001}),
     (FindFilesTool, {'glob': '*', 'output_mode': 'count'}),
-    (FindFilesTool, {'glob': '*', 'path': ''}),
+    (FindFilesTool, {'glob': '*', "target": {"kind": "PATH", "path": ''}}),
 ])
 def test_closed_schema_and_runtime(tree, tool_type, arguments):
     tool = tool_type(tree)
@@ -104,7 +104,7 @@ def test_private_backend_config_ignore_hidden_binary_symlink(tree, monkeypatch):
     (tree / '.hidden.py').write_text('needle')
     (tree / 'binary.bin').write_bytes(b'\0needle\n')
     (tree / 'link.py').symlink_to(tree / 'A.py')
-    files = invoke(FindFilesTool(tree), glob='*.py')['files']
+    files = [item["path"] for item in invoke(FindFilesTool(tree), glob='*.py')["targets"]]
     assert files == ['A.py', 'colon:name.py', 'new\nline.py', 'src/a.py', 'src/deep/a.py']
     tool = SearchContentTool(tree)
     for mode in ['content', 'files_only', 'count']:
@@ -138,7 +138,7 @@ def test_closed_aliases_and_repeat_state_pages(tree):
     assert tool_matcher_subject('find_files').candidates == ('find_files', 'Glob')
     assert tool_matcher_subject('read_file').candidates == ('read_file', 'Read')
     for offset in range(5):
-        assert invoke(FindFilesTool(tree), glob='*.py', offset=offset, limit=1)['files']
+        assert [item["path"] for item in invoke(FindFilesTool(tree), glob='*.py', offset=offset, limit=1)["targets"]]
         assert invoke(SearchContentTool(tree), pattern='needle', offset=offset, limit=1)['matches']
 
 
@@ -165,12 +165,12 @@ def test_find_files_external_scope_and_search_observations_do_not_authorize_edit
     external.mkdir()
     path = external / 'sample.py'
     path.write_text('needle\n')
-    found = invoke(FindFilesTool(workspace), glob='*.py', path='../external')
-    assert found['workspace_relative'] is False and found['files'] == [str(path)]
-    assert invoke(FindFilesTool(workspace), glob='*', path='/')['error'] == 'SEARCH_ROOT_TOO_BROAD'
+    found = invoke(FindFilesTool(workspace), glob='*.py', target={"kind":"PATH","path":'../external'})
+    assert found['workspace_relative'] is False and [item["path"] for item in found["targets"]] == [str(path)]
+    assert invoke(FindFilesTool(workspace), glob='*', target={"kind":"PATH","path":'/'})['error'] == 'SEARCH_ROOT_TOO_BROAD'
     (workspace / 'sample.py').write_text('needle\n')
-    assert invoke(FindFilesTool(workspace), glob='*.py')['files'] == ['sample.py']
-    result = invoke(EditFileTool(workspace), path='sample.py', base_revision=content_revision(b'needle\n'), operations=[{'kind':'replace_lines','start_line':1,'end_line':1,'lines':['changed']}])
+    assert [item["path"] for item in invoke(FindFilesTool(workspace), glob='*.py')["targets"]] == ['sample.py']
+    result = invoke(EditFileTool(workspace), target={"kind":"PATH","path":'sample.py'}, base_revision=content_revision(b'needle\n'), operations=[{'kind':'replace_lines','start_line':1,'end_line':1,'lines':['changed']}])
     assert result['error'] == 'READ_OBSERVATION_REQUIRED'
 
 

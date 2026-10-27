@@ -42,4 +42,4 @@ The live host pauses ordinary `requestAnimationFrame`, function timers, CSS/WAAP
 
 ## Inspect current content
 
-Use `view_image` when inspecting a saved image or current HTML would help. The returned pixels are for the model, independently of the user's tabs; publishing does not require prior inspection. An HTML screenshot captures appearance at that moment. Check interactions separately when they matter, and inspect changed content before describing it as reviewed.
+Use `view_image` with a PATH target for a local image or current HTML, or copy an IMAGE_REF target for a saved conversation image. The returned pixels are for the model, independently of the user's tabs; publishing does not require prior inspection. An HTML screenshot captures appearance at that moment. Check interactions separately when they matter, and inspect changed content before describing it as reviewed.

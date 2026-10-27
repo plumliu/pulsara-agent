@@ -396,7 +396,7 @@ def _complete_footer(
 ) -> str:
     if artifact_inline_result:
         return ""
-    result = f"\nSaved output: artifact_id={artifact_id}." if artifact_id else ""
+    result = "\nSaved output: target=" + json.dumps({"kind": "ARTIFACT", "artifact_id": artifact_id}, separators=(",", ":")) + "." if artifact_id else ""
     if disposition is ToolOutputArtifactDisposition.UNAVAILABLE:
         result += "\nNo separate readable artifact was retained."
     return result + _coverage_warning(candidate)
@@ -436,7 +436,7 @@ def _omission_marker(
 ) -> str:
     result = f"\n[… omitted {omitted} characters of tool output …]\n"
     if artifact_id is not None:
-        return result + (f"Saved output: artifact_id={artifact_id}. "
+        return result + ("Saved output: target=" + json.dumps({"kind": "ARTIFACT", "artifact_id": artifact_id}, separators=(",", ":")) + ". " +
             f"For the next retained text after this visible head, use offset_chars={head}.\n")
     return result + "No readable artifact was retained. Do not rerun the tool just to recover omitted output.\n"
 

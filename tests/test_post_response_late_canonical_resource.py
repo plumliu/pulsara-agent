@@ -68,7 +68,7 @@ def _preview_and_late_charge(body: str) -> tuple[CompletedToolCallBlock, int]:
     preview = projection.canonical_preview.canonical_bytes.decode("utf-8")
     assert preview.startswith(body)
     call = CompletedToolCallBlock(
-        'block:eahusw3qjz45fyozavqv6xlbxa', "call:7", "read_file", freeze_json({"path": "control.txt"})
+        'block:eahusw3qjz45fyozavqv6xlbxa', "call:7", "read_file", freeze_json({"target": {"kind": "PATH", "path": "control.txt"}})
     )
     # Match the reader's plain LATE_TOOL_OUTCOME storage contract, then charge
     # the hydrated item with the production canonical resource owner.
@@ -142,7 +142,7 @@ def test_late_image_canonical_charge_fits_text_base_plus_exact_image_increment()
     frozen = freeze_canonical_prompt(content)
     public_text = frozen_tool_result_public_text(content)
     call = CompletedToolCallBlock(
-        'block:mst7dl2g5akhu3ok7gosyqjp2q', "call:7", "view_image", freeze_json({"path": "image.png"})
+        'block:mst7dl2g5akhu3ok7gosyqjp2q', "call:7", "view_image", freeze_json({"target": {"kind": "PATH", "path": "image.png"}})
     )
     late_body = canonical_json_bytes(
         {

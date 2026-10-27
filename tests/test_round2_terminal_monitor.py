@@ -215,7 +215,7 @@ def test_round2_foreground_and_yielded_cd_leave_workspace_default(
             tool_name="terminal_process",
             arguments={
                 "action": "wait",
-                "process_id": yielded["process_id"],
+                "target": {"kind": "PROCESS", "process_id": yielded["target"]["process_id"]},
                 "timeout_seconds": 2,
             },
             tool_call_id=_name("call"),
@@ -609,7 +609,9 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
             turn_id='turn:via4gs2quwbuwtie6oncitgyhe',
             assistant_entry_id='entry:z55igztunmp7kmov6htjk6vw2y',
         )
-        process_id = json.loads(started.content)["process_id"]
+        process_target = json.loads(started.content)["target"]
+        process_id = process_target["process_id"]
+        assert started.remote_identity == process_id
 
         async def invoke_root(label: str, tool_name: str, arguments: dict[str, object]):
             return await invoke_direct_tool(
@@ -638,7 +640,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
             try:
                 await port.invoke(
                     tool_name="terminal_monitor",
-                    arguments={"action": "register", "process_id": process_id},
+                    arguments={"action": "register", "target": process_target},
                     tool_call_id="call:mismatch",
                     attempt_id='attempt:fk2b4bgdvgqqfszf3rakbgz6tm',
                     turn_id='turn:ygjjkr3ma6p3qedf4csngaglcu',
@@ -663,7 +665,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
                 session_id=session_id,
                 workspace_id='workspace:n6yg6xfimeb4eiul4gaa43wgmu',
                 tool_name="terminal_monitor",
-                arguments={"action": "register", "process_id": process_id},
+                arguments={"action": "register", "target": process_target},
                 tool_call_id="call:SUBAGENT_TASK",
                 attempt_id='attempt:scc6tomtfah2vnphmqnf4npzjy',
                 turn_id='turn:evue3iiyois6caa2g3in2f7rnu',
@@ -675,8 +677,11 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         registered = await invoke_root(
             "ROOT",
             "terminal_monitor",
-            {"action": "register", "process_id": process_id},
+            {"action": "register", "target": process_target},
         )
+        registration_result = json.loads(registered.content)
+        assert registration_result["process_target"] == process_target
+        assert "process_id" not in registration_result and "monitor_id" not in registration_result
         token = registered.process_local_settlement
         assert token is not None
         assert tuple(token.__dataclass_fields__) == (  # type: ignore[attr-defined]
@@ -691,7 +696,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         duplicate = await invoke_root(
             "duplicate",
             "terminal_monitor",
-            {"action": "register", "process_id": process_id},
+            {"action": "register", "target": process_target},
         )
         assert json.loads(duplicate.content) == {
             "reason": "DUPLICATE_PROCESS_MONITOR",
@@ -700,7 +705,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         unknown = await invoke_root(
             "missing",
             "terminal_monitor",
-            {"action": "register", "process_id": 'process:vxwpzdmzto7uhw6jrpqmtojroy'},
+            {"action": "register", "target": {"kind": "PROCESS", "process_id": 'process:vxwpzdmzto7uhw6jrpqmtojroy'}},
         )
         assert json.loads(unknown.content) == {
             "reason": "PROCESS_NOT_FOUND",
@@ -709,12 +714,21 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         inventory = await invoke_root("list", "terminal_monitor", {"action": "list"})
         monitors = json.loads(inventory.content)["monitors"]
         assert len(monitors) == 1 and monitors[0]["state"] == "ACTIVE"
+        assert monitors[0]["target"] == registration_result["target"]
+        assert monitors[0]["process_target"] == process_target
         cancelled = await invoke_root(
             "cancel",
             "terminal_monitor",
-            {"action": "cancel", "monitor_id": monitors[0]["monitor_id"]},
+            {"action": "cancel", "target": monitors[0]["target"]},
         )
         assert json.loads(cancelled.content)["cancellation_outcome"] == "cancelled"
+        assert json.loads(cancelled.content)["target"] == registration_result["target"]
+        cancelled_again = await invoke_root(
+            "cancel-again", "terminal_monitor",
+            {"action": "cancel", "target": registration_result["target"]},
+        )
+        assert json.loads(cancelled_again.content)["cancellation_outcome"] == "already_terminal"
+        assert json.loads(cancelled_again.content)["status"] == "REJECTED"
         processes = await invoke_root(
             "list-processes", "terminal_process", {"action": "list"}
         )
@@ -726,7 +740,7 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
             "duration_seconds",
             "exit_code",
             "output_cursor",
-            "process_id",
+            "target",
             "retained_from_cursor",
             "status",
             "stdin_closed",
@@ -735,12 +749,12 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
         await invoke_root(
             "kill-process",
             "terminal_process",
-            {"action": "kill", "process_id": process_id},
+            {"action": "kill", "target": {"kind": "PROCESS", "process_id": process_id}},
         )
         terminal = await invoke_root(
             "terminal-process",
             "terminal_monitor",
-            {"action": "register", "process_id": process_id},
+            {"action": "register", "target": process_target},
         )
         assert json.loads(terminal.content) == {
             "reason": "PROCESS_ALREADY_TERMINAL",
@@ -753,8 +767,8 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
 
 @pytest.mark.parametrize("arguments, expected_detail", [
     ({"action": "malformed"}, "invalid tool arguments"),
-    ({"action": "cancel", "monitor_id": "terminal-monitor:" + "0" * 32}, "INVALID_ID"),
-    ({"action": "cancel", "monitor_id": "process:" + "a" * 26}, "INVALID_ID"),
+    ({"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": "terminal-monitor:" + "0" * 32}}, "INVALID_ID"),
+    ({"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": "process:" + "a" * 26}}, "INVALID_ID"),
 ])
 def test_round2_malformed_monitor_input_uses_common_invalid_arguments_contract(
     tmp_path: Path, arguments, expected_detail,

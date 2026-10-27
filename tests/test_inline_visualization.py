@@ -434,7 +434,7 @@ def test_html_source_limits_are_independent_of_image_allowance(tmp_path):
     tool = ViewImageTool(tmp_path)
     candidate = _read_browser_image_candidate(
         tool,
-        ToolCall("call", "view_image", {"path": "chart.html"}),
+        ToolCall("call", "view_image", {"target": {"kind": "PATH", "path": "chart.html"}}),
         100,
         deadline_monotonic=monotonic() + 10,
     )

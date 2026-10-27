@@ -654,7 +654,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             )
             port.pausing = {
                 "action": "pause",
-                "task_id": task["id"],
+                "target": {"kind": "SCHEDULE", "task_id": task["id"]},
                 "expected_revision": task["revision"],
             }
             await service.run_now(

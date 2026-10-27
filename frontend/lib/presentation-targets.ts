@@ -16,17 +16,28 @@ export function parsePresentationResult(text: string): PresentationResult | unde
   try {
     const result = JSON.parse(text);
     if (!result || !Array.isArray(result.targets) || Object.keys(result).some(key => !['targets', 'errors'].includes(key))) return;
-    for (const target of result.targets) {
+    const targets: PresentationTarget[] = [];
+    for (const item of result.targets) {
+      if (!item || typeof item !== 'object') return;
+      if (item.type === 'task') {
+        if (Object.keys(item).length !== 2 || typeof item.task_id !== 'string' || !item.task_id.trim()) return;
+        targets.push(item);
+        continue;
+      }
+      const target = item.target;
       if (!target || typeof target !== 'object') return;
-      const fields: Record<string, string[]> = { file: ['path'], browser: ['url'], task: ['task_id'], terminal: ['process_id', 'host_session_id'], mcp: ['runtime_server_id', 'host_session_id'], panel: ['name'] };
-      const required = fields[target.type];
-      if (!required || Object.keys(target).length !== required.length + 1 || required.some(key => typeof target[key] !== 'string' || !target[key].trim())) return;
-      if (target.type === 'file' && !target.path.startsWith('/')) return;
-      // URL policy belongs to the browser owner: one rejected URL must not discard other targets.
-      if (target.type === 'panel' && !['capabilities', 'tasks', 'background', 'browser'].includes(target.name)) return;
+      const kinds: Record<string, [string, string]> = { PATH: ['file', 'path'], URL: ['browser', 'url'], PROCESS: ['terminal', 'process_id'], MCP_SERVER: ['mcp', 'runtime_server_id'], PANEL: ['panel', 'name'] };
+      const shape = kinds[target.kind];
+      if (!shape || Object.keys(target).length !== 2 || typeof target[shape[1]] !== 'string' || !target[shape[1]].trim()) return;
+      const bound = target.kind === 'PROCESS' || target.kind === 'MCP_SERVER';
+      if (Object.keys(item).length !== (bound ? 2 : 1) || (bound && (typeof item.host_session_id !== 'string' || !item.host_session_id.trim()))) return;
+      if (target.kind === 'PATH' && !target.path.startsWith('/')) return;
+      // Browser policy remains with the browser owner so one bad URL cannot discard other views.
+      if (target.kind === 'PANEL' && !['capabilities', 'tasks', 'background', 'browser'].includes(target.name)) return;
+      targets.push({ type: shape[0], [shape[1]]: target[shape[1]], ...(bound ? { host_session_id: item.host_session_id } : {}) } as PresentationTarget);
     }
     if (result.errors !== undefined && (!Array.isArray(result.errors) || result.errors.some((error: { index: number; message: string }) => !error || !Number.isSafeInteger(error.index) || error.index < 0 || typeof error.message !== 'string'))) return;
-    return result;
+    return { ...result, targets };
   } catch { return; }
 }
 export function presentationLabel(target: PresentationTarget) {

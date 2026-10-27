@@ -86,7 +86,7 @@ if event == "SessionStart":
 elif event == "UserPromptSubmit":
     print(f"USER_PROMPT_CONTEXT:{label}:{value['prompt']}")
 elif event == "PreToolUse":
-    path = value["tool_input"].get("path", "")
+    path = value["tool_input"].get("target", {}).get("path", "")
     if path == "denied.txt":
         print("PRE_TOOL_BLOCKED", file=sys.stderr)
         raise SystemExit(2)
@@ -256,7 +256,7 @@ class _ActiveCompactionModel(CallbackScriptedKernelModel):
             items = _tool_stream(
                 "read_file",
                 "call:active-read",
-                {"path": "active-input.txt"},
+                {"target": {"kind": "PATH", "path": "active-input.txt"}},
             )
         elif index == 5:
             items = _text_stream("ACTIVE_COMPACTION_COMPLETE", "text:active-final")
@@ -281,7 +281,7 @@ class _QueuedContextIsolationModel(CallbackScriptedKernelModel):
             items = _tool_stream(
                 "read_file",
                 "call:queued-context-isolation",
-                {"path": "queued-input.txt"},
+                {"target": {"kind": "PATH", "path": "queued-input.txt"}},
             )
         elif index == 2:
             items = _text_stream("ACTIVE_TURN_A_COMPLETE", "text:queued:A")
@@ -805,9 +805,7 @@ def test_k2_host_queued_image_hook_is_empty_once_and_conflict_is_exact(
         and message.content
         == (
             LLMTextPart(
-                '{"pulsara_image":{"image_ref":"'
-                + projected_image.image_ref
-                + '"}}'
+                json.dumps({'pulsara_image': {'target': {'kind': 'IMAGE_REF', 'image_ref': projected_image.image_ref}}}, separators=(',', ':'), sort_keys=True)
             ),
             projected_image,
         )
@@ -841,12 +839,12 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
             _tool_stream(
                 "write_file",
                 "call:denied",
-                {"path": "denied.txt", "content": "must not exist"},
+                {"target": {"kind": "PATH", "path": "denied.txt"}, "content": "must not exist"},
             ),
             _tool_stream(
                 "write_file",
                 "call:allowed",
-                {"path": "allowed.txt", "content": "allowed"},
+                {"target": {"kind": "PATH", "path": "allowed.txt"}, "content": "allowed"},
             ),
             _text_stream("TOOLS_COMPLETE", "text:final"),
         ]
@@ -924,8 +922,8 @@ def test_round9_2_pre_permission_post_real_command_and_canonical_settlement(
     ]
     assert all(value["tool_name"] == "write_file" for value in tool_logs)
     assert all(value["tool_name"] == "write_file" and "pulsara_tool_name" not in value for value in tool_logs)
-    assert tool_logs[0]["tool_input"]["path"] == "denied.txt"  # type: ignore[index]
-    assert tool_logs[2]["tool_input"]["path"] == "allowed.txt"  # type: ignore[index]
+    assert tool_logs[0]["tool_input"]["target"]["path"] == "denied.txt"  # type: ignore[index]
+    assert tool_logs[2]["tool_input"]["target"]["path"] == "allowed.txt"  # type: ignore[index]
     assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"  # type: ignore[index]
 
 
@@ -996,7 +994,7 @@ def test_round9_2_reload_uses_exact_predecessor_for_own_pre_and_post(
             items = _tool_stream(
                 "read_file",
                 "call:after-reload",
-                {"path": "after-reload.txt"},
+                {"target": {"kind": "PATH", "path": "after-reload.txt"}},
             )
         elif index == 3:
             items = _text_stream("RELOAD_COMPLETE", "text:reload-final")
@@ -1146,7 +1144,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
     first_batch = _tool_stream(
         "write_file",
         "call:barrier-sibling",
-        {"path": "plan-sibling-must-not-exist.txt", "content": "blocked"},
+        {"target": {"kind": "PATH", "path": "plan-sibling-must-not-exist.txt"}, "content": "blocked"},
     ) + _tool_stream("ask_plan_question", "call:plan-question", question)
     model = ScriptedKernelModel(
         [
@@ -1508,7 +1506,7 @@ def test_round9_2_compact_before_resumed_first_open_supersedes_resume_once(
             _tool_stream(
                 "read_file",
                 "call:resume-after-compact",
-                {"path": "resume-input.txt"},
+                {"target": {"kind": "PATH", "path": "resume-input.txt"}},
             ),
             _text_stream("RESUME_COMPACTION_COMPLETE", "text:resume-final"),
         )
@@ -1737,7 +1735,7 @@ def test_joint_hook_review_full_production_host_includes_agent_owner(tmp_path, m
         core = KernelHostCore.production(model_runtime=_runtime(stage2_migrated_postgres_database.runtime_dsn))
         session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=workspace))
         try:
-            prepared = await session._tools._capability_management.prepare({'action': 'TRUST_HOOK_SOURCE', 'scope': 'WORKSPACE', 'source_kind': 'LOCAL'})
+            prepared = await session._tools._capability_management.prepare({'action': 'TRUST_HOOK_SOURCE', 'target': {'kind': 'HOOK_SOURCE', 'scope': 'WORKSPACE', 'source_kind': 'LOCAL'}})
             hook = thaw_json(prepared.public_prefill)['hook_source']
             assert hook['definitions'][0]['matched_operations'] == ['创建子任务']
             assert hook['definitions'][0]['matching_aliases'] == [{'tool_name': 'spawn_agent', 'aliases': ['Agent']}]

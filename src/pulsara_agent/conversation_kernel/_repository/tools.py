@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.conversation_kernel.memory.writes import PreparedRememberWrite
+from pulsara_agent.memory.targets import memory_target, parse_memory_target
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
@@ -890,20 +891,20 @@ class _ToolOperations:
             raise ConversationKernelConflict("direct memory success status drifted")
         mutation = candidate.side_branch.mutation
         if isinstance(mutation, PreparedRememberWrite):
-            memory_id = payload.get("memory_id")
             related = payload.get("related_memories")
             if (
-                not isinstance(memory_id, str)
-                or not memory_id.startswith("memory:")
-                or not isinstance(related, list)
+                not isinstance(related, list)
                 or len(related) > 3
-                or any(not isinstance(item, dict) or
-                       not isinstance(item.get("memory_id"), str)
-                       for item in related)
+                or any(not isinstance(item, dict) for item in related)
             ):
                 raise ConversationKernelConflict("remember result shape drifted")
+            try:
+                memory_id = parse_memory_target(payload.get("target"))
+                related_ids = tuple(parse_memory_target(item.get("target")) for item in related)
+            except ValueError as exc:
+                raise ConversationKernelConflict("remember result shape drifted") from exc
             expected_ids = tuple(dict.fromkeys(
-                (memory_id, *(item["memory_id"] for item in related))
+                (memory_id, *related_ids)
             ))
             if visible_ids != expected_ids:
                 raise ConversationKernelConflict("remember exposure drifted")
@@ -923,8 +924,8 @@ class _ToolOperations:
                 else (mutation.source_memory_id, mutation.target_memory_id)
             )
             if (
-                payload.get("source_memory_id") != expected_relation_endpoints[0]
-                or payload.get("target_memory_id") != expected_relation_endpoints[1]
+                payload.get("source") != memory_target(expected_relation_endpoints[0])
+                or payload.get("target") != memory_target(expected_relation_endpoints[1])
                 or payload.get("relation_kind") != mutation.relation_kind.value
                 or not isinstance(payload.get("relation_id"), str)
                 or visible_ids != expected_relation_endpoints

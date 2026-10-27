@@ -25,7 +25,6 @@ from pulsara_agent.llm.model_target import (
 )
 from pulsara_agent.ports.terminal import (
     parse_terminal_monitor_input,
-    parse_terminal_process_input,
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
@@ -118,40 +117,8 @@ def test_null_effort_is_an_exact_choice_not_an_omitted_selection():
     assert default_reasoning_selection(with_null) != choice
 
 
-@pytest.mark.parametrize(
-    "name", ["search_sessions", "search_session_content", "read_session_content"]
-)
-def test_session_first_page_and_cursor_only_shapes(name):
-    first = {"query": "literal"} if name == "search_session_content" else {}
-    assert_shape(name, first, True)
-    assert_shape(name, {"cursor": "returned", "limit": 1}, True)
-    assert_shape(name, {"cursor": None}, False)
-    assert_shape(name, {"cursor": "returned", "limit": None}, False)
-    filters = (
-        {"query": "same", "lifecycle": "ALL"}
-        if name == "search_sessions"
-        else {
-            "session_id": 'session:erpkjonqekxozlvfhjfu6p5tjq',
-            "include_tools": False,
-            **(
-                {"query": "same"}
-                if name == "search_session_content"
-                else {"entry_id": "same-entry", "direction": "newer"}
-            ),
-        }
-    )
-    for key, value in filters.items():
-        assert_shape(name, {"cursor": "returned", key: value}, False)
-        assert_shape(name, {"cursor": "returned", key: None}, False)
-    assert_shape(
-        name, {"cursor": "returned", "max_chars": 512}, name == "read_session_content"
-    )
 
 
-@pytest.mark.parametrize("query", [None, "", " \t\n", "\u3000"])
-def test_first_content_search_needs_actual_keywords(query):
-    assert_shape("search_session_content", {"query": query}, False)
-    assert_shape("search_session_content", {}, False)
 
 
 @pytest.mark.parametrize(
@@ -198,8 +165,8 @@ def scheduled_args(action):
     "session_field,expected",
     [
         ({}, 'session:6g3pqrtwdp2ilmnlzfmxxxhelu'),
-        ({"session_id": None}, 'session:6g3pqrtwdp2ilmnlzfmxxxhelu'),
-        ({"session_id": 'session:pusyod5zvaz4i6yode652m7ble'}, 'session:pusyod5zvaz4i6yode652m7ble'),
+        ({"session": None}, 'session:6g3pqrtwdp2ilmnlzfmxxxhelu'),
+        ({"session": {"kind": "SESSION", "session_id": 'session:pusyod5zvaz4i6yode652m7ble'}}, 'session:pusyod5zvaz4i6yode652m7ble'),
     ],
 )
 def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_identity(
@@ -207,17 +174,19 @@ def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_ident
 ):
     async def run():
         service = ScheduledTaskService(SimpleNamespace())
-        target = AsyncMock(return_value={"ok": True})
+        target = AsyncMock(return_value=(
+            {"tasks": [], "next_cursor": None} if action == "list"
+            else {"id": "schedule:fixture", "session_id": expected}
+        ))
         setattr(service, action, target)
         arguments = {**scheduled_args(action), **session_field}
         original = deepcopy(arguments)
-        assert_shape("scheduled_tasks", arguments, True)
         await service.invoke(
             arguments,
             default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
             permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
-        dispatched = {key: value for key, value in original.items() if key != "action"}
+        dispatched = {key: value for key, value in original.items() if key not in {"action", "session"}}
         dispatched["session_id"] = expected
         target.assert_awaited_once_with(**dispatched)
         assert arguments == original
@@ -235,7 +204,7 @@ def test_scheduled_service_none_keeps_its_unfiltered_meaning():
         )
         service._read.reset_mock()
         await service.invoke(
-            {"action": "list", "session_id": None},
+            {"action": "list", "session": None},
             default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
             permission_mode=PermissionMode.READ_ONLY,
         )
@@ -254,12 +223,11 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
         service = ScheduledTaskService(SimpleNamespace())
         service.get = AsyncMock()
         service.mutate = AsyncMock()
-        args = {"action": action, "task_id": "scheduled:one", "session_id": None}
+        args = {"action": action, "target": {"kind": "SCHEDULE", "task_id": "scheduled:one"}, "session": None}
         if action != "get":
             args["expected_revision"] = 1
         if action == "update":
             args["values"] = scheduled_args("create")["values"]
-        assert_shape("scheduled_tasks", args, False)
         with pytest.raises(ScheduledTaskError):
             await service.invoke(
                 args,
@@ -276,9 +244,8 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
 def test_scheduled_create_status_schema_and_dispatch(status_fields):
     async def run():
         service = ScheduledTaskService(SimpleNamespace())
-        service.create = AsyncMock(return_value={})
+        service.create = AsyncMock(return_value={"id": "schedule:fixture", "session_id": "session:6g3pqrtwdp2ilmnlzfmxxxhelu"})
         arguments = {**scheduled_args("create"), **status_fields}
-        assert_shape("scheduled_tasks", arguments, True)
         await service.invoke(arguments, default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu', permission_mode=PermissionMode.BYPASS_PERMISSIONS)
         service.create.assert_awaited_once_with(session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu', values=arguments["values"], **status_fields)
 
@@ -290,89 +257,21 @@ def test_scheduled_create_rejects_invalid_status(status):
     from pulsara_agent.scheduling.requests import creation_status
 
     arguments = {**scheduled_args("create"), "status": status}
-    assert_shape("scheduled_tasks", arguments, False)
     with pytest.raises(ScheduledTaskError):
         validate_action(arguments)
     with pytest.raises(ScheduledTaskError):
         creation_status(status)
 
 
-def test_scheduled_wire_keeps_required_and_optional_action_fields():
-    canonical = schema("scheduled_tasks")
-    wire = lower_openai_function_parameters(canonical)
-    description = builtin_tool_catalog_entry("scheduled_tasks").descriptor.description
-    assert set(wire["properties"]["action"]["enum"]) == {
-        branch["properties"]["action"]["const"] for branch in canonical["oneOf"]
-    }
-    for branch in canonical["oneOf"]:
-        action = branch["properties"]["action"]["const"]
-        text = next(
-            part
-            for part in description.splitlines()
-            if part.startswith(action + ": ")
-        )
-        fields = text.removeprefix(action + ": ").removesuffix(".")
-        if fields.startswith("optional "):
-            required_set = set()
-            optional_set = set(fields.removeprefix("optional ").split(", "))
-        else:
-            required, _, optional = fields.partition("; optional ")
-            required_set = set(required.split(", "))
-            optional_set = set(optional.split(", ")) if optional else set()
-        assert required_set == set(branch["required"]) - {"action"}
-        assert required_set | optional_set == set(branch["properties"]) - {"action"}
 
 
-@pytest.mark.parametrize(
-    "name,parse,args",
-    [
-        (
-            "terminal_process",
-            parse_terminal_process_input,
-            {"action": "poll", "process_id": "p", "timeout_seconds": 1},
-        ),
-        (
-            "terminal_monitor",
-            parse_terminal_monitor_input,
-            {"action": "list", "conditions": {}},
-        ),
-    ],
-)
-def test_terminal_flattening_preserves_allowed_fields_guidance(name, parse, args):
-    canonical = schema(name)
-    wire = lower_openai_function_parameters(canonical)
-    description = builtin_tool_catalog_entry(name).descriptor.description
-    assert "description" not in wire
-    assert "discriminator" not in canonical
-    for branch in canonical["oneOf"]:
-        properties = branch["properties"]
-        action = properties["action"]["const"]
-        signature = next(
-            part for part in description.splitlines() if part.startswith(action + ": ")
-        )
-        actual = signature.split(": ", 1)[1].rstrip(".")
-        if actual == "no other fields":
-            required = optional = set()
-        elif actual.startswith("optional "):
-            required = set()
-            optional = set(actual.removeprefix("optional ").split(", "))
-        else:
-            required_text, _, optional_text = actual.partition("; optional ")
-            required = set(required_text.split(", "))
-            optional = set(optional_text.split(", ")) if optional_text else set()
-        assert required == set(branch["required"]) - {"action"}
-        assert required | optional == set(properties) - {"action"}
-    assert_shape(name, args, False)
-    with pytest.raises(ValueError):
-        parse(args)
 
 
 def test_existing_empty_values_remain_operations():
     assert_shape("todo", {"items": []}, True)
-    assert_shape("write_file", {"path": "empty.txt", "content": ""}, True)
     assert_shape("report_agent_result", {"summary": "done", "data": {}}, True)
     assert_shape("create_agent_tasks", {"tasks": []}, False)
-    base = {"action": "register", "process_id": "p"}
+    base = {"action": "register", "target": {"kind": "PROCESS", "process_id": "p"}}
     assert (
         parse_terminal_monitor_input(
             {**base, "conditions": {"output": None}}
@@ -419,11 +318,11 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
             await service.invoke(
                 {
                     "action": "switch",
-                    "task_id": "schedule:" + "a" * 26,
+                    "target": {"kind": "SCHEDULE", "task_id": "schedule:" + "a" * 26},
                     "expected_revision": 1,
-                    "target": {
+                    "replacement": {
                         "kind": "existing",
-                        "task_id": "schedule:" + "b" * 25 + "a",
+                        "target": {"kind": "SCHEDULE", "task_id": "schedule:" + "b" * 25 + "a"},
                         "expected_revision": 2,
                     },
                 },

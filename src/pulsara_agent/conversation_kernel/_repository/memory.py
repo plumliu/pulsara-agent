@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.identity import derive_id
+from pulsara_agent.memory.targets import memory_target
 
 from dataclasses import dataclass
 from datetime import datetime
@@ -130,18 +131,19 @@ class _MemoryOperations(_MemoryManagementOperations):
                 or arguments.get("kind") != mutation.kind.value
                 or arguments.get("context_target") != expected_target
                 or "kind_hint" in arguments
-                or arguments.get("based_on_memory_ids", [])
-                != [ref.target_fact_id for ref in mutation.basis_refs]
+                or arguments.get("based_on", [])
+                != [memory_target(ref.target_fact_id) for ref in mutation.basis_refs]
                 or set(arguments)
-                - {"statement", "context_target", "kind", "based_on_memory_ids"}
+                - {"statement", "context_target", "kind", "based_on"}
             ):
                 raise ConversationKernelConflict(
                     "remember write does not exact-join its tool call"
                 )
         elif (
             call["tool_name"] != "mark_memory_relation"
-            or arguments.get("source_memory_id") != mutation.source_memory_id
-            or arguments.get("target_memory_id") != mutation.target_memory_id
+            or set(arguments) != {"source", "target", "relation_kind"}
+            or arguments.get("source") != memory_target(mutation.source_memory_id)
+            or arguments.get("target") != memory_target(mutation.target_memory_id)
             or arguments.get("relation_kind") != mutation.relation_kind.value
         ):
             raise ConversationKernelConflict(
@@ -216,7 +218,7 @@ class _MemoryOperations(_MemoryManagementOperations):
         accepted_at = candidate.observed_at
         related_preview = [
             {
-                "memory_id": item.memory_id,
+                "target": memory_target(item.memory_id),
                 "kind": item.kind.value,
                 "context_id": item.context_id,
                 "statement": item.statement,
@@ -228,7 +230,7 @@ class _MemoryOperations(_MemoryManagementOperations):
         _body(
             {
                 "status": "ALREADY_PRESENT",
-                "memory_id": new_id,
+                "target": memory_target(new_id),
                 "related_memories": related_preview,
                 "retrieval_summary": thaw_json(write.retrieval_summary),
                 "advisory": True,
@@ -329,11 +331,11 @@ class _MemoryOperations(_MemoryManagementOperations):
                         accepted_at,
                     ),
                 )
-        related = [item for item in related_preview if item["memory_id"] != memory_id]
+        related = [item for item in related_preview if item["target"]["memory_id"] != memory_id]
         body = _body(
             {
                 "status": status,
-                "memory_id": memory_id,
+                "target": memory_target(memory_id),
                 "related_memories": related,
                 "retrieval_summary": thaw_json(write.retrieval_summary),
                 "advisory": True,
@@ -341,7 +343,7 @@ class _MemoryOperations(_MemoryManagementOperations):
             }
         )
         ids = tuple(
-            dict.fromkeys((memory_id, *(item["memory_id"] for item in related)))
+            dict.fromkeys((memory_id, *(item["target"]["memory_id"] for item in related)))
         )
         return DirectMemoryOutcome("SUCCESS", body, ids)
 
@@ -446,8 +448,8 @@ class _MemoryOperations(_MemoryManagementOperations):
                     {
                         "status": "ALREADY_PRESENT",
                         "relation_id": str(existing["id"]),
-                        "source_memory_id": source_id,
-                        "target_memory_id": target_id,
+                        "source": memory_target(source_id),
+                        "target": memory_target(target_id),
                         "relation_kind": kind.value,
                         "advisory": True,
                     }
@@ -466,8 +468,8 @@ class _MemoryOperations(_MemoryManagementOperations):
             {
                 "status": "SAVED",
                 "relation_id": relation_id,
-                "source_memory_id": source_id,
-                "target_memory_id": target_id,
+                "source": memory_target(source_id),
+                "target": memory_target(target_id),
                 "relation_kind": kind.value,
                 "advisory": True,
             }

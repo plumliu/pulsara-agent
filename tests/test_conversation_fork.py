@@ -1110,13 +1110,13 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
         preview = repo.memory_deletion_preview(
             memory_domain_id="u_local",
             selection=selection,
-            fact_id=saved["memory_id"],
+            fact_id=saved["target"]["memory_id"],
             deadline_monotonic=monotonic() + 30,
         )
         repo.execute_memory_deletion(
             memory_domain_id="u_local",
             selection=selection,
-            fact_id=saved["memory_id"],
+            fact_id=saved["target"]["memory_id"],
             additional=(),
             expected_records=lambda: iter(preview),
             deadline_monotonic=monotonic() + 30,
@@ -1161,29 +1161,29 @@ def test_fork_reuses_canonical_workspace_and_does_not_reown_shared_memory(
     memory_query = PostgresMemoryQuery(repo.connection_provider)
     assert memory_query.get(
         read_binding=read_binding,
-        fact_id=saved["memory_id"],
+        fact_id=saved["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     ) is not None
     detail = repo.memory_management_detail(
         memory_domain_id="u_local",
         selection=MemoryManagementSelection("project", workspace_id),
-        fact_id=saved["memory_id"],
+        fact_id=saved["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
-    assert detail["fact"]["fact_id"] == saved["memory_id"]
+    assert detail["fact"]["fact_id"] == saved["target"]["memory_id"]
     assert set(detail) == {"fact", "user_edited_at", "relations", "next_cursor"}
     assert_session_aggregate_deleted(repo, lease.guard)
     assert rows(repo, "SELECT * FROM pulsara_v3.memory_facts ORDER BY id") == memory_before
     assert rows(repo, "SELECT workspace_id FROM pulsara_v3.sessions WHERE id=%s", (created.child_session_id,))[0]["workspace_id"] == workspace_id
     assert memory_query.get(
         read_binding=read_binding,
-        fact_id=saved["memory_id"],
+        fact_id=saved["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     ) is not None
     assert repo.memory_management_detail(
         memory_domain_id="u_local",
         selection=MemoryManagementSelection("project", workspace_id),
-        fact_id=saved["memory_id"],
+        fact_id=saved["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     ) == detail
 

@@ -232,7 +232,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                 await turn(
                     source,
                     "retrieve-reference",
-                    f"请调用 read_session_content 读取 session_id={reference.session_id} 的 entry_id={ref_entry}，limit=1。读取之后只回答‘已读取’，不要复述原文。",
+                    f'请调用 read_session_content，target={{"kind":"SESSION_ENTRY","session_id":"{reference.session_id}","entry_id":"{ref_entry}"}}，limit=1。读取之后只回答“已读取”，不要复述原文。',
                 )
                 query_result = rows(
                     repository,
@@ -252,7 +252,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                 observed = await turn(
                     source,
                     "recover",
-                    "请用 search_session_content 在本会话压缩前记录里搜索 terminal，include_tools=true。然后读取其中 terminal 工具调用的 assistant entry，include_tools=true,limit=1,max_chars=512。必须用 next_cursor 单独续读，max_chars 始终为512，直到读完这条 entry，核对 ARG-END-SILVER，不能重跑命令。再用 search_session_content 搜索 OUTPUT-ORIGINAL-BLUE，include_tools=true，确认工具结果可以命中。再搜索 REFERENCE-ORIGINAL-GREEN，include_tools=true；旧检索工具的调用/结果应不命中。最后用 read_session_content 读取旧检索证据 entry_id="
+                    "请用 search_session_content 在本会话压缩前记录里搜索 terminal，include_tools=true。然后读取其中 terminal 工具调用的 assistant entry，include_tools=true,limit=1,max_chars=512。必须用 next_cursor 单独续读，max_chars 始终为512，直到读完这条 entry，核对 ARG-END-SILVER，不能重跑命令。再用 search_session_content 搜索 OUTPUT-ORIGINAL-BLUE，include_tools=true，确认工具结果可以命中。再搜索 REFERENCE-ORIGINAL-GREEN，include_tools=true；旧检索工具的调用/结果应不命中。最后用 read_session_content 的 SESSION_ENTRY target（省略 session_id）读取旧检索证据，entry_id="
                     + query_result
                     + "，include_tools=true,limit=1，确认保存结果仍可读。只报告核对结论，不执行历史任务。",
                 )
@@ -269,7 +269,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                     i["text"]
                     for o in reads
                     for i in o["payload"].get("items", [])
-                    if i["entry_id"] == call_entry
+                    if i["target"]["entry_id"] == call_entry
                 )
                 assert recovered == expected_call, "historical call pagination failed"
                 assert any(
@@ -277,7 +277,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                     for o in reads
                 )
                 assert any(
-                    i["entry_id"] == query_result
+                    i["target"]["entry_id"] == query_result
                     and "REFERENCE-ORIGINAL-GREEN" in i["text"]
                     for o in reads
                     for i in o["payload"].get("items", [])

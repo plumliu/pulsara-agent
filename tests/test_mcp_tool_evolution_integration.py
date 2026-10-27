@@ -289,8 +289,8 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                         value = json.JSONDecoder().raw_decode(body)[0]
                     except (ValueError, TypeError):
                         continue
-                    if isinstance(value, dict) and "tool_ref" in value:
-                        return value["tool_ref"]
+                    if isinstance(value, dict) and value.get("invocation", {}).get("mode") == "META":
+                        return value["invocation"]["target"]["tool_ref"]
                 raise AssertionError("No FULL inspect result reached the model")
 
             async def stream(request):
@@ -319,13 +319,13 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                         retained_ref = latest_ref(request)
                         name, args = (
                             "use_new_mcp_tool",
-                            {"tool_ref": retained_ref, "arguments": {"number": index}},
+                            {'arguments': {"number": index}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":retained_ref}},
                         )
                 elif stage == 3:
                     if index == 1:
                         name, args = (
                             "use_new_mcp_tool",
-                            {"tool_ref": retained_ref, "arguments": {"number": 1}},
+                            {'arguments': {"number": 1}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":retained_ref}},
                         )
                     elif index == 2:
                         name, args = (
@@ -341,10 +341,7 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                     elif index == 3:
                         name, args = (
                             "use_new_mcp_tool",
-                            {
-                                "tool_ref": latest_ref(request),
-                                "arguments": {"number": 9},
-                            },
+                            {'arguments': {"number": 9}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":latest_ref(request)}},
                         )
                 elif stage == 4:
                     if index == 1:
@@ -361,7 +358,7 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                     elif index == 2:
                         name, args = (
                             "use_new_mcp_tool",
-                            {"tool_ref": latest_ref(request), "arguments": {}},
+                            {'arguments': {}, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":latest_ref(request)}},
                         )
                 elif stage == 5 and index == 1:
                     name, args = native, {"value": "removed"}

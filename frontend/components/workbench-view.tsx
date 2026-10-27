@@ -318,7 +318,7 @@ function buildMcpToolRefIndex(messages: Message[]): ReadonlyMap<string, McpToolI
   for (const trace of collectMessageTraces(messages)) {
     if (trace.toolName !== 'inspect_capability') continue;
     const descriptor = parseJsonObject(trace.resultText);
-    const toolRef = stringValue(descriptor?.tool_ref);
+    const toolRef = stringValue(objectField(objectField(descriptor, 'invocation'), 'target')?.tool_ref);
     const target = objectField(descriptor, 'target');
     const serverId = stringValue(target?.server_id);
     const remoteToolName = stringValue(target?.tool_name);
@@ -337,7 +337,7 @@ function normalizedSkillDocumentPath(value: string): string {
 
 function traceSkill(trace: ToolTrace, skills: SkillCapability[]): SkillCapability | undefined {
   if (trace.toolName !== 'read_file') return undefined;
-  const requested = stringValue(parseJsonObject(trace.argumentsJson)?.path);
+  const requested = stringValue(objectField(parseJsonObject(trace.argumentsJson), 'target')?.path);
   const normalized = normalizedSkillDocumentPath(requested);
   if (!normalized || normalized.split('/').at(-1) !== 'SKILL.md') return undefined;
   return skills.find((skill) => (
@@ -382,7 +382,7 @@ function mcpTraceDetail(
       items: [], suppressGenericSuccess: true,
     };
   }
-  const toolRef = stringValue(args?.tool_ref);
+  const toolRef = stringValue(objectField(args, 'target')?.tool_ref);
   const identity = toolRefs.get(toolRef);
   const rows: McpDetailRow[] = identity
     ? [

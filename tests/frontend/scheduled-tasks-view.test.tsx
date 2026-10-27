@@ -99,7 +99,7 @@ it('switches atomically when enabling another plan without a confirmation dialog
  vi.mocked(api.list).mockImplementation(async(status)=>({tasks:status==='ACTIVE'?[task]:[task,target],next_cursor:null}));
  vi.spyOn(api,'switch').mockResolvedValue({paused:{...task,status:'PAUSED'},active:{...target,status:'ACTIVE'}});
  show(api);fireEvent.click(await screen.findByRole('switch',{name:'启用每周整理'}));
- await waitFor(()=>expect(api.switch).toHaveBeenCalledWith(task,{kind:'existing',task_id:target.id,expected_revision:target.revision}));
+ await waitFor(()=>expect(api.switch).toHaveBeenCalledWith(task,{kind:'existing',target:{kind:'SCHEDULE',task_id:target.id},expected_revision:target.revision}));
  expect(api.action).not.toHaveBeenCalled();expect(screen.queryByRole('dialog')).toBeNull();
 });
 it('does not replace a newer filter result with a late older page',async()=>{

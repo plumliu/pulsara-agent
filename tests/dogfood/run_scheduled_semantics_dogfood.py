@@ -280,7 +280,7 @@ async def run(destination: Path):
                 ]
                 assert (
                     switches
-                    and switches[-1]["arguments"]["target"]["kind"] == "existing"
+                    and switches[-1]["arguments"]["replacement"]["kind"] == "existing"
                 ), switches
                 await ask(
                     "把当前自动计划换成一个新的单次计划，明天同一时间运行；名称叫‘单次文字检查’，提示词只写‘只回复 ONCE_CHECK_OK，不使用终端或检索。’。"
@@ -294,7 +294,7 @@ async def run(destination: Path):
                     if t["name"] == "scheduled_tasks"
                     and t["arguments"].get("action") == "switch"
                 ]
-                assert switches[-1]["arguments"]["target"]["kind"] == "create", switches
+                assert switches[-1]["arguments"]["replacement"]["kind"] == "create", switches
                 await run_once(once)
                 assert "ONCE_CHECK_OK" in evidence["turns"][-1]["reply"]
                 once_tools = [

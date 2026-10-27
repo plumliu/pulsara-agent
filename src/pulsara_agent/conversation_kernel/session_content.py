@@ -31,6 +31,7 @@ from pulsara_agent.ports.session_content import (
     SESSION_QUERY_MAX_ITEMS,
     SESSION_QUERY_TOOL_NAMES,
     SessionContentRange,
+    session_entry_target,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_observation import (
@@ -107,6 +108,29 @@ def _string(value, name):
     if not isinstance(value, str) or not value:
         raise SessionQueryError("INVALID_REQUEST", f"Invalid {name}.")
     return value
+
+
+def _target(arguments, operation, current_session_id):
+    if "target" not in arguments:
+        return current_session_id, None
+    target = arguments["target"]
+    if not isinstance(target, dict):
+        raise SessionQueryError("INVALID_REQUEST", "Invalid session target.")
+    kind = target.get("kind")
+    if kind == "SESSION":
+        if set(target) != {"kind", "session_id"}:
+            raise SessionQueryError("INVALID_REQUEST", "Invalid SESSION target fields.")
+        return _string(target["session_id"], "session_id"), None
+    if kind == "SESSION_ENTRY" and operation == "read_session_content":
+        if not {"kind", "entry_id"} <= set(target) or not set(target) <= {
+            "kind", "session_id", "entry_id"
+        }:
+            raise SessionQueryError("INVALID_REQUEST", "Invalid SESSION_ENTRY target fields.")
+        return (
+            _string(target.get("session_id", current_session_id), "session_id"),
+            _string(target["entry_id"], "entry_id"),
+        )
+    raise SessionQueryError("INVALID_REQUEST", "Unsupported session target kind.")
 
 
 def _fits(payload, tool_call_id):
@@ -193,9 +217,9 @@ class SessionContentQuery:
         allowed |= (
             {"query", "lifecycle"}
             if operation == "search_sessions"
-            else {"session_id", "include_tools", "query"}
+            else {"target", "include_tools", "query"}
             if operation == "search_session_content"
-            else {"session_id", "include_tools", "entry_id", "direction", "max_chars"}
+            else {"target", "include_tools", "direction", "max_chars"}
         )
         if not set(arguments) <= allowed:
             raise SessionQueryError(
@@ -372,20 +396,22 @@ class SessionContentQuery:
         items = []
         for row in found:
             item = {
-                "session_id": row["id"],
+                "target": {"kind": "SESSION", "session_id": row["id"]},
                 "title": row["title"]
                 or "会话 " + row["id"].removeprefix("session:")[:8],
                 "project": row["workspace_label"] or row["workspace_root"],
                 "updated_at": row["updated_at"].isoformat(),
             }
             if "entry_id" in row:
-                item.update(
-                    {key: row[key] for key in ("entry_id", "role", "at", "text")}
-                )
+                hit = {
+                    "target": session_entry_target(row["id"], row["entry_id"]),
+                    **{key: row[key] for key in ("role", "at", "text")},
+                }
                 if row["partial"]:
-                    item["partial"] = True
+                    hit["partial"] = True
                 if row["scheduled_input"] is not None:
-                    item["origin"] = "scheduled"
+                    hit["origin"] = "scheduled"
+                item["hit"] = hit
             # A live keyset cursor after this row permits a smaller response page.
             row_cursor = _encode(
                 {
@@ -422,11 +448,11 @@ class SessionContentQuery:
         caller_workspace_id,
     ):
         if cursor is None:
-            target = _string(arguments.get("session_id", self.session_id), "session_id")
+            target, anchor_id = _target(arguments, operation, self.session_id)
             tools = arguments.get("include_tools", False)
             query = arguments.get("query")
             direction = arguments.get(
-                "direction", "newer" if "entry_id" in arguments else "older"
+                "direction", "newer" if anchor_id is not None else "older"
             )
             excluded = actual.excluded_entry_id if target == self.session_id else None
         else:
@@ -477,7 +503,7 @@ class SessionContentQuery:
             )
             offset = 0
             position = end if direction == "older" else 1
-            if "entry_id" in arguments:
+            if anchor_id is not None:
                 anchor = connection.execute(
                     """SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
                        WHERE e.session_id=%s AND e.id=%s AND e.conversation_scope_kind='ROOT'
@@ -485,7 +511,7 @@ class SessionContentQuery:
                     + _ELIGIBLE,
                     (
                         target,
-                        _string(arguments["entry_id"], "entry_id"),
+                        anchor_id,
                         end,
                         excluded,
                         tools,
@@ -584,8 +610,7 @@ class SessionContentQuery:
             else "assistant"
         )
         item = {
-            "session_id": entry["session_id"],
-            "entry_id": entry["id"],
+            "target": session_entry_target(entry["session_id"], entry["id"]),
             "role": role,
             "at": entry["accepted_at"].isoformat(),
         }
@@ -721,7 +746,7 @@ class SessionContentQuery:
 
         if cursor is None:
             query = arguments.get("query")
-            target = arguments.get("session_id", self.session_id)
+            target, _ = _target(arguments, "search_session_content", self.session_id)
             tools = arguments.get("include_tools", False)
             end, excluded = actual.through_sequence, actual.excluded_entry_id
             previous = None
@@ -819,12 +844,14 @@ class SessionContentQuery:
                 consumed.append(row["q1_entry_id"])
                 continue
             item = {
-                "session_id": candidate.session_id,
-                "entry_id": candidate.q1_entry_id,
+                "target": session_entry_target(candidate.session_id, candidate.q1_entry_id),
                 "title": candidate.title,
                 "score": candidate.score,
                 "messages": [
-                    {k: m[k] for k in ("entry_id", "role", "label", "at", "text")}
+                    {
+                        "target": session_entry_target(candidate.session_id, m["entry_id"]),
+                        **{k: m[k] for k in ("role", "label", "at", "text")},
+                    }
                     for m in candidate.messages
                 ],
             }

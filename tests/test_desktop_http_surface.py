@@ -2117,18 +2117,35 @@ def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path)
                 assert tasks.run_now.await_count == 1
                 target = {
                     "kind": "existing",
-                    "task_id": target_id,
+                    "target": {"kind": "SCHEDULE", "task_id": target_id},
                     "expected_revision": 2,
                 }
                 async with client.post(
                     url + "/switch",
-                    json={"expected_revision": 1, "target": target},
+                    json={"expected_revision": 1, "replacement": target},
                     headers=headers,
                 ) as response:
                     assert response.status == 200
                 tasks.switch.assert_awaited_once_with(
-                    task_id=task_id, expected_revision=1, target=target
+                    task_id=task_id, expected_revision=1, replacement=target
                 )
+                replacement = {"kind": "create", "values": {"name": "new"}}
+                async with client.post(
+                    url + "/switch",
+                    json={"expected_revision": 3, "replacement": replacement},
+                    headers=headers,
+                ) as response:
+                    assert response.status == 200
+                tasks.switch.assert_awaited_with(
+                    task_id=task_id, expected_revision=3, replacement=replacement
+                )
+                async with client.post(
+                    url + "/switch",
+                    json={"expected_revision": 3, "target": replacement},
+                    headers=headers,
+                ) as response:
+                    assert response.status == 400
+                assert tasks.switch.await_count == 2
         finally:
             await server.aclose()
 

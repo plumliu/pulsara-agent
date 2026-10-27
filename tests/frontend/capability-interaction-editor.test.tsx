@@ -8,7 +8,7 @@ afterEach(cleanup);
 it('uses the shared connection editor and submits private values once, separately from the public candidate', async () => {
   const resolve = vi.fn<(value: RuntimeInteractionResolution) => Promise<boolean>>(async () => true);
   render(<CapabilityInteractionEditor onResolve={resolve} form={{action: 'ADD_LOCAL_MCP', scope: 'USER',
-    prefill: {server_id: 'docs', config: {transport: {type: 'streamable_http', endpoint: 'https://example.org/mcp'}}},
+    prefill: {target: {kind: 'MCP_CONNECTION', scope: 'USER', source_kind: 'LOCAL', server_id: 'docs'}, config: {transport: {type: 'streamable_http', endpoint: 'https://example.org/mcp'}}},
     credential_owner: {kind: 'local', scope_key: 'user', server_id: 'docs', plugin_id: null}}} />);
   expect((screen.getByLabelText('服务 ID') as HTMLInputElement).disabled).toBe(true);
   fireEvent.change(screen.getByLabelText('认证方式'), {target: {value: 'bearer'}});
@@ -28,7 +28,7 @@ it('does not turn a shared editor post-save close into a second CANCEL', async (
   let complete!: (value: boolean) => void;
   const resolve = vi.fn(() => new Promise<boolean>(done => { complete = done; }));
   render(<CapabilityInteractionEditor onResolve={resolve} form={{action: 'ADD_LOCAL_MCP', scope: 'USER',
-    prefill: {server_id: 'docs', config: {transport: {type: 'streamable_http', endpoint: 'https://example.org/mcp'}}},
+    prefill: {target: {kind: 'MCP_CONNECTION', scope: 'USER', source_kind: 'LOCAL', server_id: 'docs'}, config: {transport: {type: 'streamable_http', endpoint: 'https://example.org/mcp'}}},
     credential_owner: {kind: 'local', scope_key: 'user', server_id: 'docs', plugin_id: null}}} />);
   fireEvent.click(screen.getByRole('button', {name: '保存并继续'}));
   expect(resolve).toHaveBeenCalledTimes(1);
@@ -40,7 +40,7 @@ it('does not turn a shared editor post-save close into a second CANCEL', async (
 it('shows normalized Plugin components and requires an explicit review before enable', async () => {
   const resolve = vi.fn(async () => true);
   render(<CapabilityInteractionEditor onResolve={resolve} form={{action: 'SET_PLUGIN_ENABLED', scope: 'USER',
-    prefill: {plugin_id: 'example', enabled: true}, plugin: {skills: [{name: 'research', description: 'Investigate sources'}],
+    prefill: {target: {kind: 'PLUGIN', scope: 'USER', plugin_id: 'example'}, enabled: true}, plugin: {skills: [{name: 'research', description: 'Investigate sources'}],
       mcp: [{server_id: 'docs', config: {transport: {type: 'streamable_http', endpoint: 'https://example.org/mcp'}, auth: {type: 'bearer'}}, credentials: [{name: 'bearer', present: true}]}], hooks: [{event: 'SessionStart', command: 'node hooks/start.js'}]}}} />);
   const confirm = screen.getByRole('button', {name: '启用插件'}) as HTMLButtonElement;
   expect(confirm.disabled).toBe(true);
@@ -57,7 +57,7 @@ it('shows normalized Plugin components and requires an explicit review before en
 
 it('cancels without a boolean ALLOW and without submitting a draft', async () => {
   const resolve = vi.fn(async () => true);
-  render(<CapabilityInteractionEditor onResolve={resolve} form={{action: 'REMOVE_LOCAL_MCP', scope: 'USER', prefill: {server_id: 'docs'}}} />);
+  render(<CapabilityInteractionEditor onResolve={resolve} form={{action: 'REMOVE_LOCAL_MCP', scope: 'USER', prefill: {target: {kind: 'MCP_CONNECTION', scope: 'USER', source_kind: 'LOCAL', server_id: 'docs'}}}} />);
   fireEvent.click(screen.getByRole('button', {name: '取消'}));
   await waitFor(() => expect(resolve).toHaveBeenCalledWith({kind: 'capability', decision: 'CANCEL'}));
 });

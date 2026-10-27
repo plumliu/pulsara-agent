@@ -12,7 +12,8 @@ export interface ScheduledTask extends ScheduledValues {
   revision: number; pending_queue_item_id?: string | null; last_turn_status?: string | null;
   last_turn_id?: string | null; last_entry_id?: string | null; prepare_error?: string | null;
 }
-export type ScheduledSwitchTarget = { kind: 'existing'; task_id: string; expected_revision: number } | { kind: 'create'; values: ScheduledValues };
+export type ScheduleTarget = { kind: 'SCHEDULE'; task_id: string };
+export type ScheduledReplacement = { kind: 'existing'; target: ScheduleTarget; expected_revision: number } | { kind: 'create'; values: ScheduledValues };
 export interface ScheduledRunRequest { client_command_id: string; request_at_utc: string; task_id: string; session_id: string; expected_revision: number }
 export interface ScheduledPage { tasks: ScheduledTask[]; next_cursor: string | null }
 export interface ScheduledSession { id: string; title: string }
@@ -32,7 +33,7 @@ export class LocalScheduledTasksApi {
   create(session_id: string, values: ScheduledValues, status?: ScheduledTask['status'] | null) { return this.request<ScheduledTask>('', 'POST', { session_id, values, status }); }
   update(task: ScheduledTask, values: ScheduledValues) { return this.request<ScheduledTask>(`/${encodeURIComponent(task.id)}`, 'PATCH', { expected_revision: task.revision, values }); }
   action(task: ScheduledTask, action: 'pause' | 'resume' | 'delete') { return this.request<{task: ScheduledTask | null}>(`/${encodeURIComponent(task.id)}/${action}`, 'POST', { expected_revision: task.revision }); }
-  switch(task: ScheduledTask, target: ScheduledSwitchTarget) { return this.request<{paused: ScheduledTask; active: ScheduledTask}>(`/${encodeURIComponent(task.id)}/switch`, 'POST', { expected_revision: task.revision, target }); }
+  switch(task: ScheduledTask, replacement: ScheduledReplacement) { return this.request<{paused: ScheduledTask; active: ScheduledTask}>(`/${encodeURIComponent(task.id)}/switch`, 'POST', { expected_revision: task.revision, replacement }); }
   runNow(request: ScheduledRunRequest) { return this.request<{queue_item_id: string; status: string; coalesced: boolean}>(`/${encodeURIComponent(request.task_id)}/run-now`, 'POST', request); }
   preview(schedule: ScheduleRule, timezone: string, signal?: AbortSignal) { return this.request<{next_run_at: string; local_time_fold: 0 | 1 | null}>('/preview', 'POST', { schedule, timezone }, signal); }
   localOnce(run_at_local: string, timezone: string, signal?: AbortSignal) { return this.request<{schedule: ScheduleRule}>('/local-once', 'POST', { run_at_local, timezone }, signal); }

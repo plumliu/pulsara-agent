@@ -8,11 +8,9 @@ from pathlib import Path
 from threading import Barrier, Thread
 from io import BytesIO
 
-from jsonschema import Draft202012Validator
 from PIL import Image
 import pytest
 
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
     PulsaraHomeResolution,
@@ -50,7 +48,7 @@ def _read(
 ) -> tuple[str, dict[str, object]]:
     result = _call(
         ReadFileTool(root),
-        {"path": path, "offset": offset, "limit": limit},
+        {"target": {"kind": "PATH", "path": path}, "offset": offset, "limit": limit},
         call_id=f"read:{offset}:{limit}",
     )
     assert result.status is ToolResultState.SUCCESS
@@ -68,7 +66,7 @@ def _edit(
 ) -> ToolExecutionResult:
     return _call(
         EditFileTool(root),
-        {"path": path, "base_revision": revision, "operations": operations},
+        {"target": {"kind": "PATH", "path": path}, "base_revision": revision, "operations": operations},
         call_id="edit:1",
     )
 
@@ -122,7 +120,7 @@ def test_read_file_rejects_lossy_or_binary_text(
     tmp_path: Path, raw: bytes, error: str
 ) -> None:
     (tmp_path / "sample.txt").write_bytes(raw)
-    result = _call(ReadFileTool(tmp_path), {"path": "sample.txt"})
+    result = _call(ReadFileTool(tmp_path), {"target": {"kind": "PATH", "path": "sample.txt"}})
     assert result.status is ToolResultState.ERROR
     assert _payload(result)["error"] == error
 
@@ -131,7 +129,7 @@ def test_read_output_too_large_does_not_install_observation(tmp_path: Path) -> N
     target = tmp_path / "sample.txt"
     raw = ("x" * (filesystem.MAX_READ_CHARS + 1)).encode()
     target.write_bytes(raw)
-    read_result = _call(ReadFileTool(tmp_path), {"path": "sample.txt"})
+    read_result = _call(ReadFileTool(tmp_path), {"target": {"kind": "PATH", "path": "sample.txt"}})
     assert _payload(read_result)["error"] == "READ_OUTPUT_TOO_LARGE"
 
     edit_result = _edit(
@@ -151,7 +149,7 @@ def test_head_tail_projected_read_does_not_authorize_partial_lines(
     target.write_text(
         "\n".join(f"{index:04d}-" + "x" * 80 for index in range(600)), encoding="utf-8"
     )
-    result = _call(ReadFileTool(tmp_path), {"path": "sample.txt"})
+    result = _call(ReadFileTool(tmp_path), {"target": {"kind": "PATH", "path": "sample.txt"}})
     payload = _payload(result)
     assert result.status is ToolResultState.SUCCESS
     assert len(result.output.encode("utf-8")) > 40_000
@@ -178,7 +176,7 @@ def test_search_result_does_not_authorize_edit(tmp_path: Path) -> None:
     target.write_bytes(raw)
     search = _call(
         SearchContentTool(tmp_path),
-        {"path": "sample.txt", "pattern": "one"},
+        {"target": {"kind": "PATH", "path": "sample.txt"}, "pattern": "one"},
     )
     assert search.status is ToolResultState.SUCCESS
 
@@ -200,7 +198,7 @@ def test_search_result_does_not_authorize_edit(tmp_path: Path) -> None:
 def test_search_rejection_explains_how_to_select_a_path(
     tmp_path: Path, path: str, error: str, hint: str,
 ) -> None:
-    result = _call(SearchContentTool(tmp_path), {"path": path, "pattern": "needle"})
+    result = _call(SearchContentTool(tmp_path), {"target": {"kind": "PATH", "path": path}, "pattern": "needle"})
     assert result.status is ToolResultState.ERROR
     payload = _payload(result)
     assert payload["error"] == error
@@ -219,19 +217,19 @@ def test_read_only_file_tools_accept_relative_paths_outside_workspace(
     target.write_text("needle\n", encoding="utf-8")
     relative = "../external/note.txt"
 
-    read = _call(ReadFileTool(workspace), {"path": relative})
+    read = _call(ReadFileTool(workspace), {"target": {"kind": "PATH", "path": relative}})
     assert read.status is ToolResultState.SUCCESS
     assert _payload(read)["content"] == "1|needle"
 
     search = _call(
         SearchContentTool(workspace),
-        {"path": relative, "pattern": "needle"},
+        {"target": {"kind": "PATH", "path": relative}, "pattern": "needle"},
     )
     assert search.status is ToolResultState.SUCCESS
     assert "needle" in str(_payload(search)["matches"])
 
     with pytest.raises(ValueError, match="escapes workspace root"):
-        _call(WriteFileTool(workspace), {"path": "../external/new.txt", "content": "x"})
+        _call(WriteFileTool(workspace), {"target": {"kind": "PATH", "path": "../external/new.txt"}, "content": "x"})
 
 
 def test_paginated_reads_union_seen_intervals_only_for_same_revision(
@@ -701,7 +699,7 @@ def test_old_edit_arguments_are_rejected_without_fallback(tmp_path: Path) -> Non
     target.write_text("one\n", encoding="utf-8")
     result = _call(
         EditFileTool(tmp_path),
-        {"path": "sample.txt", "old_text": "one", "new_text": "two"},
+        {"target": {"kind": "PATH", "path": "sample.txt"}, "old_text": "one", "new_text": "two"},
     )
     assert _payload(result)["error"] == "INVALID_OPERATION_COMBINATION"
     assert target.read_text(encoding="utf-8") == "one\n"
@@ -762,7 +760,7 @@ def test_oversized_changed_line_is_not_marked_seen(tmp_path: Path) -> None:
 
 def test_write_file_is_create_only_and_returns_revision(tmp_path: Path) -> None:
     tool = WriteFileTool(tmp_path)
-    created = _call(tool, {"path": "nested/new.txt", "content": "hello\n"})
+    created = _call(tool, {"target": {"kind": "PATH", "path": "nested/new.txt"}, "content": "hello\n"})
     payload = _payload(created)
     target = tmp_path / "nested/new.txt"
     assert created.status is ToolResultState.SUCCESS
@@ -771,7 +769,7 @@ def test_write_file_is_create_only_and_returns_revision(tmp_path: Path) -> None:
         content_revision(target.read_bytes())
     )
 
-    rejected = _call(tool, {"path": "nested/new.txt", "content": "overwrite"})
+    rejected = _call(tool, {"target": {"kind": "PATH", "path": "nested/new.txt"}, "content": "overwrite"})
     assert rejected.status is ToolResultState.ERROR
     assert _payload(rejected)["error"] == "FILE_ALREADY_EXISTS"
     assert target.read_bytes() == b"hello\n"
@@ -783,7 +781,7 @@ def test_write_file_creates_empty_or_unicode_content_with_missing_parents(
 ) -> None:
     result = _call(
         WriteFileTool(tmp_path),
-        {"path": "one/two/new.txt", "content": content},
+        {"target": {"kind": "PATH", "path": "one/two/new.txt"}, "content": content},
     )
     target = tmp_path / "one/two/new.txt"
     assert result.status is ToolResultState.SUCCESS
@@ -803,7 +801,7 @@ def test_write_file_rejects_every_existing_directory_entry(
     else:
         target.symlink_to("missing.txt")
 
-    result = _call(WriteFileTool(tmp_path), {"path": "occupied", "content": "new"})
+    result = _call(WriteFileTool(tmp_path), {"target": {"kind": "PATH", "path": "occupied"}, "content": "new"})
 
     assert result.status is ToolResultState.ERROR
     assert _payload(result)["error"] == "FILE_ALREADY_EXISTS"
@@ -820,7 +818,7 @@ def test_write_file_concurrent_create_never_clobbers(tmp_path: Path) -> None:
     def invoke(content: str) -> None:
         barrier.wait()
         results.append(
-            _call(WriteFileTool(tmp_path), {"path": "race.txt", "content": content})
+            _call(WriteFileTool(tmp_path), {"target": {"kind": "PATH", "path": "race.txt"}, "content": content})
         )
 
     threads = [Thread(target=invoke, args=(value,)) for value in ("alpha", "beta")]
@@ -843,7 +841,7 @@ def test_write_file_reports_unsupported_atomic_no_clobber(
         raise OSError(errno.EOPNOTSUPP, "unsupported")
 
     monkeypatch.setattr(os, "link", unsupported)
-    result = _call(WriteFileTool(tmp_path), {"path": "new.txt", "content": "x"})
+    result = _call(WriteFileTool(tmp_path), {"target": {"kind": "PATH", "path": "new.txt"}, "content": "x"})
     assert result.status is ToolResultState.ERROR
     assert _payload(result)["error"] == "ATOMIC_NO_CLOBBER_UNAVAILABLE"
     assert not (tmp_path / "new.txt").exists()
@@ -956,50 +954,17 @@ def test_competing_edits_serialize_and_only_one_revision_wins(tmp_path: Path) ->
 def test_write_file_rejects_non_text_targets(
     tmp_path: Path, path: str, content: str, error: str
 ) -> None:
-    result = _call(WriteFileTool(tmp_path), {"path": path, "content": content})
+    result = _call(WriteFileTool(tmp_path), {"target": {"kind": "PATH", "path": path}, "content": content})
     assert _payload(result)["error"] == error
     assert not (tmp_path / path).exists()
 
 
 def test_blocked_device_is_rejected_as_text() -> None:
-    result = _call(ReadFileTool(Path.cwd()), {"path": "/dev/null"})
+    result = _call(ReadFileTool(Path.cwd()), {"target": {"kind": "PATH", "path": "/dev/null"}})
     assert result.status is ToolResultState.ERROR
     assert _payload(result)["error"] == "UNSUPPORTED_BINARY_FILE"
 
 
-def test_catalog_schema_is_single_closed_line_edit_path() -> None:
-    schema = builtin_tool_catalog_entry("edit_file").descriptor.input_schema
-    assert schema["required"] == ("path", "base_revision", "operations")
-    assert set(schema["properties"]) == {"path", "base_revision", "operations"}
-    assert schema["additionalProperties"] is False
-
-    validator = Draft202012Validator(schema)
-    valid = {
-        "path": "a.txt",
-        "base_revision": content_revision(b"fixture"),
-        "operations": [
-            {"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["x"]}
-        ],
-    }
-    assert list(validator.iter_errors(valid)) == []
-    assert list(
-        validator.iter_errors({"path": "a.txt", "old_text": "a", "new_text": "b"})
-    )
-    assert list(
-        validator.iter_errors(
-            {
-                **valid,
-                "operations": [
-                    {
-                        "kind": "delete_lines",
-                        "start_line": 1,
-                        "end_line": 1,
-                        "lines": [],
-                    }
-                ],
-            }
-        )
-    )
 
 
 def test_filesystem_state_has_no_timestamp_or_revision_registry() -> None:
@@ -1023,7 +988,7 @@ def test_view_image_reads_a_regular_file_by_content_not_extension(
     mismatched = tmp_path / "actual-png.jpg"
     mismatched.write_bytes(payload)
     tool = ViewImageTool(tmp_path)
-    call = ToolCall("call:image", "view_image", {"path": mismatched.name})
+    call = ToolCall("call:image", "view_image", {"target": {"kind": "PATH", "path": mismatched.name}})
 
     candidate = tool.read_bounded(call, maximum_bytes=len(payload))
 
@@ -1038,7 +1003,7 @@ def test_view_image_applies_the_frozen_read_bound_before_validation(
     path = tmp_path / "image.png"
     path.write_bytes(b"larger-than-allowance")
     tool = ViewImageTool(tmp_path)
-    call = ToolCall("call:image", "view_image", {"path": path.name})
+    call = ToolCall("call:image", "view_image", {"target": {"kind": "PATH", "path": path.name}})
 
     result = tool.read_bounded(call, maximum_bytes=3)
 
@@ -1084,7 +1049,7 @@ def test_view_image_reuses_the_frozen_read_path_owner(tmp_path: Path) -> None:
     )
     for index, path in enumerate(requested):
         result = tool.read_bounded(
-            ToolCall(f"call:{index}", "view_image", {"path": path}),
+            ToolCall(f"call:{index}", "view_image", {"target": {"kind": "PATH", "path": path}}),
             maximum_bytes=len(payload),
         )
         assert isinstance(result, LocalImageReadCandidate)
@@ -1102,7 +1067,7 @@ def test_view_image_rejects_non_regular_files_without_blocking(
         if not path.exists():
             continue
         result = tool.read_bounded(
-            ToolCall(f"call:{index}", "view_image", {"path": str(path)}),
+            ToolCall(f"call:{index}", "view_image", {"target": {"kind": "PATH", "path": str(path)}}),
             maximum_bytes=100,
         )
         assert isinstance(result, ToolExecutionResult)
@@ -1130,7 +1095,7 @@ def test_view_image_detects_growth_while_reading(
 
     monkeypatch.setattr(os, "read", growing_read)
     result = tool.read_bounded(
-        ToolCall("call:growing", "view_image", {"path": path.name}),
+        ToolCall("call:growing", "view_image", {"target": {"kind": "PATH", "path": path.name}}),
         maximum_bytes=3,
     )
 

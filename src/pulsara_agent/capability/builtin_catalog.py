@@ -18,6 +18,7 @@ from pulsara_agent.memory.product_contract import (
     MEMORY_CONTEXT_PRODUCT_GUIDE,
     memory_kind_product_guide,
 )
+from pulsara_agent.memory.targets import memory_target_schema
 
 from pulsara_agent.capability.descriptor import (
     BuiltinToolAdvertisePolicy,
@@ -206,17 +207,13 @@ def _descriptor(
 def _remember_parameters() -> dict[str, Any]:
     return object_schema(
         properties={
-            "based_on_memory_ids": {
+            "based_on": {
                 "description": "Saved items this statement depends on, rather than merely "
                 "related items, paraphrases or wider-scope copies. GLOBAL "
                 "may depend only on GLOBAL; CURRENT_PROJECT may depend on "
                 "GLOBAL or this project's memories. Deleting any basis "
                 "also deletes this dependent item.",
-                "items": {
-                    "description": "Exact memory_id from a memory result.",
-                    "minLength": 1,
-                    "type": "string",
-                },
+                "items": memory_target_schema(),
                 "maxItems": 8,
                 "type": "array",
             },
@@ -270,32 +267,22 @@ _MEMORY_SEARCH_PARAMETERS = object_schema(
 )
 _MEMORY_GET_PARAMETERS = object_schema(
     properties={
-        "memory_id": {
-            "description": "Exact memory_id from a memory result or reference.",
-            "minLength": 1,
-            "type": "string",
-        }
+        "target": memory_target_schema(
+            "Copy a MEMORY target from a memory result or reference."
+        )
     },
-    required=["memory_id"],
+    required=["target"],
 )
 _REMEMBER_PARAMETERS = _remember_parameters()
 _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
     properties={
         "relation_kind": {"enum": ["CONTRADICTS", "SUPERSEDES"], "type": "string"},
-        "source_memory_id": {
-            "description": "Exact memory_id from a memory result; for SUPERSEDES, the "
-            "replacement that remains active.",
-            "minLength": 1,
-            "type": "string",
-        },
-        "target_memory_id": {
-            "description": "Exact memory_id from a memory result; for SUPERSEDES, the "
-            "item made inactive.",
-            "minLength": 1,
-            "type": "string",
-        },
+        "source": memory_target_schema(
+            "For SUPERSEDES, the supported replacement that remains active."
+        ),
+        "target": memory_target_schema("For SUPERSEDES, the item made inactive."),
     },
-    required=["source_memory_id", "target_memory_id", "relation_kind"],
+    required=["source", "target", "relation_kind"],
 )
 
 _SUBAGENT_TASK_DESCRIPTION = (
@@ -397,72 +384,105 @@ def _wait_agent_schema() -> dict[str, Any]:
     }
 
 
-OPEN_IN_PULSARA_DESCRIPTION = (
-    "ROOT only. Show files, webpages, subagent tasks, existing terminal "
-    "processes, MCP connections or overview panels in this conversation's tabs. "
-    "Group related targets in one call; the last accepted target is selected. "
-    "Invalid targets are reported by zero-based input index while valid targets "
-    "proceed. The result acknowledges display requests; display occurs afterward "
-    "and does not return webpage contents. The tasks panel shows subagents. A "
-    "browser panel target creates a blank tab; duplicates share one tab within a "
-    "call and later calls create new tabs."
-)
-OPEN_IN_PULSARA_SCHEMA = object_schema(
-    required=["targets"],
-    properties={"targets": {
-        "type": "array",
-        "minItems": 1,
-        "items": {"anyOf": [
-            object_schema(required=["type", "path"], properties={
-                "type": {"const": "file"},
-                "path": {"type": "string", "minLength": 1, "description": (
-                    'File path; workspace-relative, absolute, ~ and ${PULSARA_HOME} paths are supported.'
-                )},
-            }),
-            object_schema(required=["type", "url"], properties={
-                "type": {"const": "browser"},
-                "url": {"type": "string", "minLength": 1,
-                        "description": 'HTTP(S) URL without embedded credentials.'},
-            }),
-            object_schema(required=["type", "process_id"], properties={
-                "type": {"const": "terminal"},
-                "process_id": {"type": "string", "minLength": 1,
-                               "description": 'process_id from terminal or terminal_process.'},
-            }),
-            object_schema(required=["type", "task_id"], properties={
-                "type": {"const": "task"},
-                "task_id": {"type": "string", "minLength": 1, "description": (
-                    'task_id from spawn_agent, create_agent_tasks or list_agents; opens its group and selects the task.'
-                )},
-            }),
-            object_schema(required=["type", "runtime_server_id"], properties={
-                "type": {"const": "mcp"},
-                "runtime_server_id": {"type": "string", "minLength": 1,
-                                      "description": 'runtime_server_id from inspect_capability.'},
-            }),
-            object_schema(required=["type", "name"], properties={
-                "type": {"const": "panel"},
-                "name": {"type": "string", "enum": ["capabilities", "tasks", "background", "browser"],
-                         },
-            }),
-        ]},
-    }},
-)
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "open_in_pulsara": _descriptor(
-        name="open_in_pulsara", description=OPEN_IN_PULSARA_DESCRIPTION,
-        input_schema=OPEN_IN_PULSARA_SCHEMA, is_read_only=True, permission_category="filesystem_read",
+        name="open_in_pulsara", description=("ROOT only. Show targets in this conversation's tabs: PATH files, URL webpages, PROCESS "
+ 'terminals, runtime MCP_SERVER connections, or PANEL overview entries. Use {type:"task",task_id} '
+ 'for a subagent task. Group related targets; the last accepted target is selected. Invalid items '
+ 'return their zero-based index while valid items proceed. Results acknowledge requests, not '
+ "completed display or webpage contents. Copy each non-task result item's target for reuse. The "
+ 'tasks panel shows subagents. PANEL browser creates a blank tab; duplicates share one tab within '
+ 'a call and later calls create new tabs.'),
+        input_schema={'additionalProperties': False,
+ 'properties': {'targets': {'items': {'anyOf': [{'additionalProperties': False,
+                                                 'properties': {'path': {'description': 'File '
+                                                                                        'path; '
+                                                                                        'workspace-relative, '
+                                                                                        'absolute, '
+                                                                                        '~ and '
+                                                                                        '${PULSARA_HOME} '
+                                                                                        'paths are '
+                                                                                        'supported.',
+                                                                         'minLength': 1,
+                                                                         'type': 'string'},
+                                                                'kind': {'type': 'string',
+                                                                         'const': 'PATH'}},
+                                                 'required': ['kind', 'path'],
+                                                 'type': 'object'},
+                                                {'additionalProperties': False,
+                                                 'properties': {'url': {'description': 'HTTP(S) '
+                                                                                       'URL '
+                                                                                       'without '
+                                                                                       'embedded '
+                                                                                       'credentials.',
+                                                                        'minLength': 1,
+                                                                        'type': 'string'},
+                                                                'kind': {'type': 'string',
+                                                                         'const': 'URL'}},
+                                                 'required': ['kind', 'url'],
+                                                 'type': 'object'},
+                                                {'additionalProperties': False,
+                                                 'properties': {'process_id': {'description': 'process_id '
+                                                                                              'from '
+                                                                                              'terminal '
+                                                                                              'or '
+                                                                                              'terminal_process.',
+                                                                               'minLength': 1,
+                                                                               'type': 'string'},
+                                                                'kind': {'type': 'string',
+                                                                         'const': 'PROCESS'}},
+                                                 'required': ['kind', 'process_id'],
+                                                 'type': 'object'},
+                                                {'additionalProperties': False,
+                                                 'properties': {'task_id': {'description': 'task_id '
+                                                                                           'from '
+                                                                                           'spawn_agent, '
+                                                                                           'create_agent_tasks '
+                                                                                           'or '
+                                                                                           'list_agents; '
+                                                                                           'opens '
+                                                                                           'its '
+                                                                                           'group '
+                                                                                           'and '
+                                                                                           'selects '
+                                                                                           'the '
+                                                                                           'task.',
+                                                                            'minLength': 1,
+                                                                            'type': 'string'},
+                                                                'type': {'const': 'task'}},
+                                                 'required': ['type', 'task_id'],
+                                                 'type': 'object'},
+                                                {'additionalProperties': False,
+                                                 'properties': {'runtime_server_id': {'description': 'runtime_server_id '
+                                                                                                     'from '
+                                                                                                     'inspect_capability.',
+                                                                                      'minLength': 1,
+                                                                                      'type': 'string'},
+                                                                'kind': {'type': 'string',
+                                                                         'const': 'MCP_SERVER'}},
+                                                 'required': ['kind', 'runtime_server_id'],
+                                                 'type': 'object'},
+                                                {'additionalProperties': False,
+                                                 'properties': {'name': {'enum': ['capabilities',
+                                                                                  'tasks',
+                                                                                  'background',
+                                                                                  'browser'],
+                                                                         'type': 'string'},
+                                                                'kind': {'type': 'string',
+                                                                         'const': 'PANEL'}},
+                                                 'required': ['kind', 'name'],
+                                                 'type': 'object'}]},
+                            'minItems': 1,
+                            'type': 'array'}},
+ 'required': ['targets'],
+ 'type': 'object'}, is_read_only=True, permission_category="filesystem_read",
     ),
     "list_capabilities": _descriptor(
         name="list_capabilities",
         description=(
-            'Find Skills, Hooks, MCP servers, tools, resources, templates and prompts. Use {} for '
-            "an overview, or filter the list. Copy an item's target into inspect_capability; use "
-            "source.target as parent to find a Plugin's components. Continue with next_offset and "
-            'the same filters. Results describe the observed catalog and its completeness. SUBAGENT'
-            ' callers can query only their assigned MCP runtime.'
+            "Find Skills, Hooks, MCP servers, tools, resources, templates and prompts. Use {} for an overview, or filter the list. Copy an item's target into inspect_capability or a supported manage_capability action; use source.target as parent to find a Plugin's components. Continue with next_offset and the same filters. Results describe the observed catalog and its completeness. SUBAGENT callers can query only their assigned MCP runtime."
         ),
         input_schema=list_input_schema(),
         is_read_only=True,
@@ -471,12 +491,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "inspect_capability": _descriptor(
         name="inspect_capability",
         description=(
-            'Inspect a known capability target; list_capabilities supplies copyable targets. Read '
-            'Skill bodies with read_file. For MCP tools, follow invocation.mode: DIRECT uses the '
-            'listed named tool; META uses the returned input_schema and tool_ref with '
-            'use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE '
-            'gives the current obstacle. This reads metadata. Use read_mcp_resource for resource '
-            'content and get_mcp_prompt for rendered prompts.'
+            'Inspect a known capability target; list_capabilities supplies copyable targets. Read Skill bodies with read_file using a PATH target built from skill_path. For MCP tools, follow invocation.mode: DIRECT uses the listed named tool; META uses the returned input_schema and invocation.target with use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE gives the current obstacle. This reads metadata. Use read_mcp_resource for resource content and get_mcp_prompt for rendered prompts.'
         ),
         input_schema=inspect_input_schema(),
         is_read_only=True,
@@ -485,47 +500,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            'Install and manage capabilities requested by the user. ROOT agent only; available in '
-            'every permission mode. action and scope are required. Send only the additional fields '
-            'listed for that action; fields are required unless marked optional.\n'
-            'INSTALL_LOOSE_SKILL: source_path; optional name, description. Install an independent '
-            'Skill into a new destination.\n'
-            'SET_LOOSE_SKILL_ENABLED: skill_path, enabled. Toggle an eligible independent Skill.\n'
-            'REMOVE_LOOSE_SKILL: skill_path. Remove an independent Skill directory after inspecting'
-            ' removal eligibility.\n'
-            'TRUST_HOOK_SOURCE: source_kind; optional plugin_id. Review and trust current Hook '
-            'definitions.\n'
-            'REVOKE_HOOK_TRUST: source_kind; optional plugin_id. Remove trust, keeping definitions.'
-            '\n'
-            'SET_HOOK_SOURCE_ENABLED: source_kind, enabled; optional plugin_id. Toggle the Hook '
-            'source.\n'
-            'ADD_LOCAL_MCP: server_id; optional config. Add an independent connection.\n'
-            'UPDATE_LOCAL_MCP: server_id; optional config, expected_identity. Replace an '
-            "independent connection's settings.\n"
-            'REMOVE_LOCAL_MCP: server_id; optional expected_identity. Remove the entry and '
-            'dedicated local credentials, keeping the server program.\n'
-            'INSTALL_PLUGIN: source_path; optional replace, source_format. Install the whole Plugin'
-            ' disabled; enable separately.\n'
-            'SET_PLUGIN_ENABLED: plugin_id, enabled; optional expected_package_install_id. Toggle '
-            'the whole Plugin, with component review on enable.\n'
-            'REMOVE_PLUGIN: plugin_id; optional expected_package_install_id. Remove the Plugin and '
-            'dedicated credentials, preserving its data and original source.\n'
-            'CONFIGURE_PLUGIN_MCP_CONNECTION: plugin_id, server_id; optional overlay, '
-            'expected_overlay, expected_package_install_id. Configure a Plugin connection.\n'
-            'AUTHORIZE_MCP: server_id; optional plugin_id, expected_identity, '
-            'expected_package_install_id. Authorize an already configured OAuth connection.\n'
-            'CLEAR_MCP_AUTHORIZATION: server_id; optional plugin_id, expected_identity, '
-            'expected_package_install_id. Clear local OAuth grants, keeping configuration and '
-            'remote tokens.\n'
-            'Use list_capabilities/inspect_capability for identities and eligibility. Loose-Skill '
-            'actions apply to independent copies; Plugin components are managed through their '
-            'Plugin, and bundled Skills are read-only. Hook trust, Hook enablement and Plugin '
-            'enablement are separate settings. Edit loose Skill content with file tools or '
-            'terminal; pulsara-skill-creator describes authoring.\n'
-            'The runtime collects required review and confirmation; READ_ONLY mutations use a user-'
-            'submitted form. Users enter credentials privately in the editor. Wait for the result: '
-            'status reports the mutation, current the resulting state, and adoption its '
-            'availability for future use. A completed mutation needs no routine reload or replay.'
+            "Install and manage capabilities requested by the user. ROOT agent only; available in every permission mode.\nSet action and send only its listed fields; fields are required unless marked optional. Copy targets from list/inspect or a management result; a known exact target can be used directly. For ADD_LOCAL_MCP, construct a LOCAL MCP_CONNECTION target with the destination scope and new server_id. Installation targets use source-local IDs, not runtime_server_id; runtime and MCP tool/resource/prompt targets are for inspection, not management.\nINSTALL_LOOSE_SKILL: scope, source_path; optional name, description. Install an independent Skill into a new destination.\nSET_LOOSE_SKILL_ENABLED: target (SKILL), enabled. Toggle an eligible independent Skill.\nREMOVE_LOOSE_SKILL: target (SKILL). Remove an eligible independent Skill directory.\nTRUST_HOOK_SOURCE: target (HOOK_SOURCE). Review and trust current Hook definitions.\nREVOKE_HOOK_TRUST: target (HOOK_SOURCE). Remove trust, keeping definitions.\nSET_HOOK_SOURCE_ENABLED: target (HOOK_SOURCE), enabled. Toggle the Hook source.\nADD_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config. Add an independent connection.\nUPDATE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config, expected_identity. Replace an independent connection's settings.\nREMOVE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional expected_identity. Remove the entry and dedicated local credentials, keeping the server program.\nINSTALL_PLUGIN: scope, source_path; optional replace, source_format. Install the whole Plugin disabled; enable separately.\nSET_PLUGIN_ENABLED: target (PLUGIN), enabled; optional expected_package_install_id. Toggle the whole Plugin, with component review on enable.\nREMOVE_PLUGIN: target (PLUGIN); optional expected_package_install_id. Remove the Plugin and dedicated credentials, preserving its data and original source.\nCONFIGURE_PLUGIN_MCP_CONNECTION: target (PLUGIN MCP_CONNECTION); optional overlay, expected_overlay, expected_package_install_id. Configure a Plugin connection.\nAUTHORIZE_MCP: target (LOCAL or PLUGIN MCP_CONNECTION). Authorize an already configured OAuth connection.\nCLEAR_MCP_AUTHORIZATION: target (LOCAL or PLUGIN MCP_CONNECTION). Clear local OAuth grants, keeping configuration and remote tokens.\nFor both OAuth actions, optional expected_identity applies only to LOCAL targets; optional expected_package_install_id applies only to PLUGIN targets. For MCP_CONNECTION and HOOK_SOURCE targets, LOCAL/PLUGIN selects source_kind.\nUse inspect_capability for eligibility. Plugin Skills are managed through their source Plugin; bundled Skills are read-only. Hook trust, Hook enablement and Plugin enablement are separate settings. Edit loose Skill content with file tools or terminal; pulsara-skill-creator describes authoring.\nThe runtime collects required review and confirmation; READ_ONLY mutations use a user-submitted form. Users enter credentials privately in the editor. Wait for the result: status reports the mutation, current the resulting state, and adoption its availability for future use. A completed mutation needs no routine reload or replay."
         ),
         input_schema=capability_management_input_schema(),
         is_read_only=False,
@@ -549,38 +524,30 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "artifact_read": _descriptor(
         name="artifact_read",
         description=(
-            "Read a page of saved tool output using its artifact_id. Continue with "
-            "next_offset_chars while has_more is true; pages may be shorter than "
-            "max_chars. source_coverage identifies whether the body covers the original "
-            "observation or only its retained portion; offsets address that saved body. "
-            "Use artifact_export for extensive retrieval or processing."
+            ('Read a page of saved tool output using its ARTIFACT target. Continue with next_offset_chars '
+ 'while has_more is true; pages may be shorter than max_chars. Offsets address the saved body; '
+ 'source_coverage says whether it covers the original observation or only its retained portion. '
+ 'Use artifact_export for extensive retrieval or processing.')
         ),
-        input_schema=object_schema(
-            properties={
-                "artifact_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        'artifact_id returned by a tool result in this conversation and project.'
-                    ),
-                },
-                "offset_chars": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "default": 0,
-                    "description": (
-                        'Zero-based character offset; copy next_offset_chars to continue.'
-                    ),
-                },
-                "max_chars": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 32_000,
-                    "default": DEFAULT_ARTIFACT_READ_CHARS,
-                },
-            },
-            required=["artifact_id"],
-        ),
+        input_schema={'additionalProperties': False,
+ 'properties': {'max_chars': {'default': 20000, 'maximum': 32000, 'minimum': 1, 'type': 'integer'},
+                'offset_chars': {'default': 0,
+                                 'description': 'Zero-based character offset; copy '
+                                                'next_offset_chars to continue.',
+                                 'minimum': 0,
+                                 'type': 'integer'},
+                'target': {'type': 'object',
+                           'properties': {'kind': {'type': 'string', 'const': 'ARTIFACT'},
+                                          'artifact_id': {'description': 'Exact saved tool-output '
+                                                                         'ID from this '
+                                                                         'conversation and '
+                                                                         'project.',
+                                                          'minLength': 1,
+                                                          'type': 'string'}},
+                           'required': ['kind', 'artifact_id'],
+                           'additionalProperties': False}},
+ 'required': ['target'],
+ 'type': 'object'},
         is_read_only=True,
         permission_category="artifact_read",
         artifact_mode=ToolArtifactMode.NEVER,
@@ -588,29 +555,28 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "artifact_export": _descriptor(
         name="artifact_export",
         description=(
-            "Export a saved tool-result artifact to a new UTF-8 file for searching, "
-            "processing or extensive retrieval. artifact_read provides paged excerpts "
-            "instead; a prior page read is unnecessary. The file contains the saved body "
-            "itself, including plain output text for terminal artifacts. Its coverage is "
-            "the original observation or its retained portion, as reported by "
-            "source_coverage. Parent directories are created; an existing path is left "
-            "unchanged. The exported file remains independently of the conversation."
+            ('Export an ARTIFACT target to a new UTF-8 file at path. A prior artifact_read is unnecessary. '
+ 'Export preserves the saved body, including plain terminal output; source_coverage reports '
+ 'original or retained coverage. Parent directories are created and existing paths left unchanged. '
+ 'The exported file remains independently of the conversation.')
         ),
-        input_schema=object_schema(
-            properties={
-                "artifact_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": 'artifact_id returned by a tool result in this conversation and project.',
-                },
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": 'New file path, relative to the workspace or absolute; ~ is supported.',
-                },
-            },
-            required=["artifact_id", "path"],
-        ),
+        input_schema={'additionalProperties': False,
+ 'properties': {'path': {'description': 'New file path, relative to the workspace or absolute; ~ '
+                                        'is supported.',
+                         'minLength': 1,
+                         'type': 'string'},
+                'target': {'type': 'object',
+                           'properties': {'kind': {'type': 'string', 'const': 'ARTIFACT'},
+                                          'artifact_id': {'description': 'Exact saved tool-output '
+                                                                         'ID from this '
+                                                                         'conversation and '
+                                                                         'project.',
+                                                          'minLength': 1,
+                                                          'type': 'string'}},
+                           'required': ['kind', 'artifact_id'],
+                           'additionalProperties': False}},
+ 'required': ['target', 'path'],
+ 'type': 'object'},
         is_read_only=False,
         permission_category="filesystem_write",
         is_destructive=True,
@@ -619,29 +585,25 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "use_new_mcp_tool": _descriptor(
         name="use_new_mcp_tool",
         description=(
-            'Execute an MCP tool inspected with invocation.mode=META, using its returned '
-            'input_schema even when an older same-name tool remains listed. The remote action may '
-            'require confirmation. Reuse tool_ref for later calls; inspect again if it is rejected.'
+            'Execute an MCP tool inspected with invocation.mode=META. Copy invocation.target and supply arguments matching the returned input_schema, including when an older same-name tool remains listed. The remote action may require confirmation. Reuse the target for later calls; inspect again if it is rejected.'
         ),
-        input_schema=object_schema(
-            properties={
-                "tool_ref": {
-                    "type": "string",
-                    "pattern": "^mcpref_[A-Za-z0-9_-]+$",
-                    "maxLength": 160,
-                    "description": (
-                        'Exact inspected tool_ref, scoped to this agent and conversation.'
-                    ),
-                },
-                "arguments": {
-                    "type": "object",
-                    "description": (
-                        'Arguments matching the inspected input_schema; use {} when no inputs are needed.'
-                    ),
-                },
-            },
-            required=["tool_ref", "arguments"],
-        ),
+        input_schema={'type': 'object',
+ 'properties': {'target': {'type': 'object',
+                           'properties': {'kind': {'const': 'MCP_TOOL_REF'},
+                                          'tool_ref': {'description': 'Exact reference from '
+                                                                      'invocation.target, scoped '
+                                                                      'to this agent and '
+                                                                      'conversation.',
+                                                       'maxLength': 160,
+                                                       'pattern': '^mcpref_[A-Za-z0-9_-]+$',
+                                                       'type': 'string'}},
+                           'required': ['kind', 'tool_ref'],
+                           'additionalProperties': False},
+                'arguments': {'description': 'Arguments matching the inspected input_schema; use '
+                                             '{} when no inputs are needed.',
+                              'type': 'object'}},
+ 'required': ['target', 'arguments'],
+ 'additionalProperties': False},
         is_read_only=False,
         permission_category="mcp_dynamic",
         artifact_mode=ToolArtifactMode.DEFAULT,
@@ -649,268 +611,290 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_mcp_resource": _descriptor(
         name="read_mcp_resource",
         description=(
-            'Fetch one listed MCP resource. Use a fixed URI or fill a listed URI template. This '
-            'returns external reference content. If the preview supplies artifact_id, continue '
-            'through artifact_read: it pages the saved result. Another remote read fetches fresh '
-            'content, not the next page.'
+            'Read an MCP resource. Copy its target from list/inspect. MCP_RESOURCE: target only, with the concrete URI in target.uri. MCP_RESOURCE_TEMPLATE: target and uri; supply a concrete URI matching target.uri_template. Results are external reference content. If the saved-output guidance supplies an ARTIFACT target, copy it into artifact_read to page the saved result. Another remote read fetches fresh content, not the next page.'
         ),
-        input_schema=object_schema(
-            properties={
-                "server_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256,
-                    "description": (
-                        'Copy from the resource or template listing that supplied the URI.'
-                    ),
-                },
-                "uri": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 32768,
-                    "description": (
-                        'Exact listed resource URI, or a concrete URI with all listed template variables '
-                        'filled.'
-                    ),
-                },
-            },
-            required=["server_id", "uri"],
-        ),
+        input_schema={'type': 'object',
+ 'oneOf': [{'type': 'object',
+            'properties': {'target': {'type': 'object',
+                                      'properties': {'kind': {'const': 'MCP_RESOURCE'},
+                                                     'server_id': {'type': 'string',
+                                                                   'minLength': 1,
+                                                                   'maxLength': 256},
+                                                     'uri': {'type': 'string',
+                                                             'minLength': 1,
+                                                             'maxLength': 32768}},
+                                      'required': ['kind', 'server_id', 'uri'],
+                                      'additionalProperties': False}},
+            'required': ['target'],
+            'additionalProperties': False},
+           {'type': 'object',
+            'properties': {'target': {'type': 'object',
+                                      'properties': {'kind': {'const': 'MCP_RESOURCE_TEMPLATE'},
+                                                     'server_id': {'type': 'string',
+                                                                   'minLength': 1,
+                                                                   'maxLength': 256},
+                                                     'uri_template': {'type': 'string',
+                                                                      'minLength': 1,
+                                                                      'maxLength': 32768}},
+                                      'required': ['kind', 'server_id', 'uri_template'],
+                                      'additionalProperties': False},
+                           'uri': {'description': 'Concrete URI matching the selected template.',
+                                   'maxLength': 32768,
+                                   'minLength': 1,
+                                   'type': 'string'}},
+            'required': ['target', 'uri'],
+            'additionalProperties': False}]},
         is_read_only=True,
         permission_category="mcp_read",
     ),
     "get_mcp_prompt": _descriptor(
         name="get_mcp_prompt",
         description=(
-            'Fetch and render a prompt advertised by list_capabilities. Use the listed name as '
-            'prompt_name and copy server_id from that same item. The returned messages are external'
-            ' guidance for the current request; fetching them does not execute tools.'
+            'Fetch and render a listed MCP prompt. Copy its MCP_PROMPT target and supply any declared arguments. The returned messages are external guidance for the current request; fetching them does not execute tools.'
         ),
-        input_schema=object_schema(
-            properties={
-                "server_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 256,
-                },
-                "prompt_name": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 8192,
-                },
-                "arguments": {
-                    "type": "object",
-                    "additionalProperties": {"type": "string"},
-                    "description": (
-                        'Use declared argument names, including every required name, with string values. Omit '
-                        'or use {} when none are needed.'
-                    ),
-                },
-            },
-            required=["server_id", "prompt_name"],
-        ),
+        input_schema={'type': 'object',
+ 'properties': {'target': {'type': 'object',
+                           'properties': {'kind': {'const': 'MCP_PROMPT'},
+                                          'server_id': {'type': 'string',
+                                                        'minLength': 1,
+                                                        'maxLength': 256},
+                                          'name': {'type': 'string',
+                                                   'minLength': 1,
+                                                   'maxLength': 8192}},
+                           'required': ['kind', 'server_id', 'name'],
+                           'additionalProperties': False},
+                'arguments': {'additionalProperties': {'type': 'string'},
+                              'description': 'Use declared argument names, including every '
+                                             'required name, with string values. Omit or use {} '
+                                             'when none are needed.',
+                              'type': 'object'}},
+ 'required': ['target'],
+ 'additionalProperties': False},
         is_read_only=True,
         permission_category="mcp_read",
     ),
     "read_file": _descriptor(
         name="read_file",
         description=(
-            "Read lines from a local UTF-8 file and obtain its current content_revision "
-            "for edit_file. Lines are displayed as N|text; N| is a line label, while text"
-            " is the file content. Read the lines or adjacent gaps needed for line edits;"
-            " a whole-file replacement needs the current revision but not a full display."
-            " Follow the returned offset hint for truncated output."
+            ('Read a local UTF-8 file at a PATH target. Returns content_revision for edit_file. Lines use '
+ 'N|text labels; only text is file content. Read the affected lines or adjacent gaps before line '
+ 'edits. Whole-file replacement needs a current revision but not a full display. Continue '
+ 'truncated reads with the returned offset hint.')
         ),
-        input_schema=object_schema(
-            properties={
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "Local text path; relative paths start at the workspace. ../, absolute paths,"
-                        " ~ and cataloged ${PULSARA_HOME}/ paths are supported."
-                    ),
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "default": 1,
-                    "description": (
-                        'First line to return, numbered from 1.'
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "default": DEFAULT_READ_LINES,
-                    "maximum": MAX_READ_LINES,
-                },
-            },
-            required=["path"],
-        ),
+        input_schema={'additionalProperties': False,
+ 'properties': {'limit': {'default': 2000, 'maximum': 2000, 'minimum': 1, 'type': 'integer'},
+                'offset': {'default': 1,
+                           'description': 'First line to return, numbered from 1.',
+                           'minimum': 1,
+                           'type': 'integer'},
+                'target': {'type': 'object',
+                           'properties': {'kind': {'type': 'string', 'const': 'PATH'},
+                                          'path': {'description': 'Local text path; relative paths '
+                                                                  'start at the workspace. ../, '
+                                                                  'absolute paths, ~ and cataloged '
+                                                                  '${PULSARA_HOME}/ paths are '
+                                                                  'supported.',
+                                                   'minLength': 1,
+                                                   'type': 'string'}},
+                           'required': ['kind', 'path'],
+                           'additionalProperties': False}},
+ 'required': ['target'],
+ 'type': 'object'},
         is_read_only=True,
         permission_category="filesystem_read",
     ),
     "view_image": _descriptor(
         name="view_image",
         description=(
-            "Inspect a local PNG, JPEG, static WebP or SVG, or capture a local HTML file "
-            "as an image for the model. Supply exactly one of path or image_ref. SVG is "
-            "rendered without cropping, with scripts and external resources disabled. "
-            "HTML uses a 1200×800 light-theme viewport with reduced motion and network "
-            "access disabled, capturing the content root or viewport. The image is a "
-            "still view of the current file. Use open_in_pulsara to show content to the "
-            "user."
+            ('Inspect an image using one target: PATH for a local PNG, JPEG, static WebP, SVG or HTML file; '
+ 'IMAGE_REF for a saved image reference. SVG renders without cropping, scripts or external '
+ 'resources. HTML captures its content root or a 1200×800 light-theme viewport with reduced motion '
+ 'and network access disabled. This is a still view for the model. Use open_in_pulsara to show '
+ 'files to the user.')
         ),
-        input_schema=object_schema(
-            properties={
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        'Local image or HTML path; workspace-relative, ../, absolute and ~ paths are supported.'
-                    ),
-                },
-                "image_ref": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        'Exact image: reference from an earlier image or historical image placeholder in this workspace.'
-                    ),
-                },
-            },
-            required=[],
-        ),
+        input_schema={'type': 'object',
+ 'properties': {'target': {'oneOf': [{'type': 'object',
+                                      'properties': {'kind': {'type': 'string', 'const': 'PATH'},
+                                                     'path': {'type': 'string', 'minLength': 1}},
+                                      'required': ['kind', 'path'],
+                                      'additionalProperties': False},
+                                     {'type': 'object',
+                                      'properties': {'kind': {'type': 'string',
+                                                              'const': 'IMAGE_REF'},
+                                                     'image_ref': {'description': 'Exact image: '
+                                                                                  'reference from '
+                                                                                  'an earlier '
+                                                                                  'image or '
+                                                                                  'historical '
+                                                                                  'image '
+                                                                                  'placeholder in '
+                                                                                  'this workspace.',
+                                                                   'minLength': 1,
+                                                                   'type': 'string'}},
+                                      'required': ['kind', 'image_ref'],
+                                      'additionalProperties': False}]}},
+ 'required': ['target'],
+ 'additionalProperties': False},
         is_read_only=True,
         permission_category="filesystem_read",
     ),
     "search_content": _descriptor(
         name="search_content",
         description=(
-            "Search text with a Rust regular expression. content returns matching lines; "
-            "files_only returns paths; count returns matching-line counts per file. "
-            "Results are sorted by path and line and paginate in every mode. read_file "
-            "provides the revision and line context needed for edits."
+            ('Search text with a Rust regular expression. Optional PATH target selects a file or directory; '
+ 'omit it for the workspace root. content returns matching lines; files_only returns file targets; '
+ 'count returns matching-line counts per file. Results are sorted by path and line and paginate in '
+ 'every mode. Copy a file target to read_file for its revision and edit context.')
         ),
-        input_schema=object_schema(
-            properties={
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "default": ".",
-                    "description": (
-                        "File or directory; relative to the workspace or an explicit external path. "
-                        "Broad external roots are rejected."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": MAX_SEARCH_LIMIT,
-                    "default": DEFAULT_SEARCH_LIMIT,
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "default": 0,
-                    "description": 'Zero-based result offset; count mode pages files. Use the returned continuation hint.',
-                },
-                "pattern": {"type": "string", "minLength": 1},
-                "file_glob": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": 'Basename or relative-path glob, also applied to a single-file query.',
-                },
-                "output_mode": {
-                    "type": "string",
-                    "enum": ["content", "files_only", "count"],
-                    "default": "content",
-                },
-            },
-            required=["pattern"],
-        ),
+        input_schema={'additionalProperties': False,
+ 'properties': {'file_glob': {'description': 'Basename or relative-path glob, also applied to a '
+                                             'single-file query.',
+                              'minLength': 1,
+                              'type': 'string'},
+                'limit': {'default': 50, 'maximum': 1000, 'minimum': 1, 'type': 'integer'},
+                'offset': {'default': 0,
+                           'description': 'Zero-based result offset; count mode pages files. Use '
+                                          'the returned continuation hint.',
+                           'minimum': 0,
+                           'type': 'integer'},
+                'output_mode': {'default': 'content',
+                                'enum': ['content', 'files_only', 'count'],
+                                'type': 'string'},
+                'pattern': {'minLength': 1, 'type': 'string'},
+                'target': {'type': 'object',
+                           'properties': {'kind': {'type': 'string', 'const': 'PATH'},
+                                          'path': {'description': 'File or directory; relative to '
+                                                                  'the workspace or an explicit '
+                                                                  'external path. Broad external '
+                                                                  'roots are rejected.',
+                                                   'minLength': 1,
+                                                   'type': 'string'}},
+                           'required': ['kind', 'path'],
+                           'additionalProperties': False,
+                           'description': 'Omit to search the workspace root.'}},
+ 'required': ['pattern'],
+ 'type': 'object'},
         is_read_only=True,
         permission_category="filesystem_read",
     ),
     "find_files": _descriptor(
         name="find_files",
         description=(
-            "Find paths by basename or relative-path glob without reading file contents. "
-            "*.py matches all depths; src/*.py matches one level; src/**/*.py is "
-            "recursive. Use *name* for a name fragment. Results are sorted by path; "
-            "continue with the returned offset hint."
+            ('Find file paths by basename or relative-path glob. Optional PATH target selects a file or '
+ 'directory; omit it for the workspace root. *.py matches all depths; src/*.py one level; '
+ 'src/**/*.py recursively. Use *name* for a name fragment. Results are sorted by path; continue '
+ 'with the returned offset hint and same query. Copy a returned file target to a file tool.')
         ),
-        input_schema=object_schema(
-            properties={
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "default": ".",
-                    "description": (
-                        "File or directory; relative to the workspace or an explicit external path. "
-                        "Broad external roots are rejected."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": MAX_SEARCH_LIMIT,
-                    "default": DEFAULT_SEARCH_LIMIT,
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "default": 0,
-                    "description": 'Zero-based file offset; use the returned continuation hint.',
-                },
-                "glob": {"type": "string", "minLength": 1},
-            },
-            required=["glob"],
-        ),
+        input_schema={'additionalProperties': False,
+ 'properties': {'glob': {'minLength': 1, 'type': 'string'},
+                'limit': {'default': 50, 'maximum': 1000, 'minimum': 1, 'type': 'integer'},
+                'offset': {'default': 0,
+                           'description': 'Zero-based file offset; use the returned continuation '
+                                          'hint.',
+                           'minimum': 0,
+                           'type': 'integer'},
+                'target': {'type': 'object',
+                           'properties': {'kind': {'type': 'string', 'const': 'PATH'},
+                                          'path': {'description': 'File or directory; relative to '
+                                                                  'the workspace or an explicit '
+                                                                  'external path. Broad external '
+                                                                  'roots are rejected.',
+                                                   'minLength': 1,
+                                                   'type': 'string'}},
+                           'required': ['kind', 'path'],
+                           'additionalProperties': False,
+                           'description': 'Omit to search the workspace root.'}},
+ 'required': ['glob'],
+ 'type': 'object'},
         is_read_only=True,
         permission_category="filesystem_read",
     ),
     "edit_file": _descriptor(
         name="edit_file",
         description=(
-            "Edit an existing UTF-8 file using the content_revision from read_file. All "
-            "line anchors are 1-based in that original revision; ranges are inclusive and"
-            " operations use distinct, non-overlapping ranges or gaps. Line edits require"
-            " the affected lines or adjacent gaps to have been read. replace_file "
-            "replaces the whole file as the sole operation and needs a current revision, "
-            "without requiring the whole file to be displayed. Results provide a diff, "
-            "the new revision and changed line windows; NO_OP means no bytes changed. Use"
-            " write_file for a new path."
+            ('Edit an existing UTF-8 file at a PATH target. Supply base_revision from read_file and operations '
+ 'separately. Anchors are 1-based in that revision; ranges are inclusive and operations must not '
+ 'overlap. Line edits require the affected lines or adjacent gaps to have been read. replace_file '
+ 'must be the sole operation; it needs a current revision but not a full display. Results include '
+ 'the new revision, diff and changed line windows. NO_OP means no bytes changed. Use write_file '
+ 'for a new path.')
         ),
-        input_schema=object_schema(
-            properties={
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        'Existing file path, relative to the workspace or absolute; ~ is supported.'
-                    ),
-                },
-                "base_revision": {
-                    "type": "string",
-                    "pattern": "^revision:[a-z2-7]{51}[aq]$",
-                    "description": (
-                        'Exact content_revision returned by read_file for this path.'
-                    ),
-                },
-                "operations": {
-                    "type": "array",
-                    "minItems": 1,
-                    "items": _edit_operation_schema(),
-                    "description": (
-                        "Replacement text is literal file content without read_file line labels. Each"
-                        " lines item contains one line without CR, LF or NUL; an empty string is a "
-                        "blank line."
-                    ),
-                },
-            },
-            required=["path", "base_revision", "operations"],
-        ),
+        input_schema={'additionalProperties': False,
+ 'properties': {'base_revision': {'description': 'Exact content_revision returned by read_file for '
+                                                 'this path.',
+                                  'pattern': '^revision:[a-z2-7]{51}[aq]$',
+                                  'type': 'string'},
+                'operations': {'description': 'Replacement text is literal file content without '
+                                              'read_file line labels. Each lines item contains one '
+                                              'line without CR, LF or NUL; an empty string is a '
+                                              'blank line.',
+                               'items': {'oneOf': [{'additionalProperties': False,
+                                                    'properties': {'end_line': {'minimum': 1,
+                                                                                'type': 'integer'},
+                                                                   'kind': {'const': 'replace_lines'},
+                                                                   'lines': {'items': {'type': 'string'},
+                                                                             'minItems': 1,
+                                                                             'type': 'array'},
+                                                                   'start_line': {'minimum': 1,
+                                                                                  'type': 'integer'}},
+                                                    'required': ['kind',
+                                                                 'start_line',
+                                                                 'end_line',
+                                                                 'lines'],
+                                                    'type': 'object'},
+                                                   {'additionalProperties': False,
+                                                    'properties': {'end_line': {'minimum': 1,
+                                                                                'type': 'integer'},
+                                                                   'kind': {'const': 'delete_lines'},
+                                                                   'start_line': {'minimum': 1,
+                                                                                  'type': 'integer'}},
+                                                    'required': ['kind', 'start_line', 'end_line'],
+                                                    'type': 'object'},
+                                                   {'additionalProperties': False,
+                                                    'properties': {'kind': {'const': 'insert_before'},
+                                                                   'line': {'minimum': 1,
+                                                                            'type': 'integer'},
+                                                                   'lines': {'items': {'type': 'string'},
+                                                                             'minItems': 1,
+                                                                             'type': 'array'}},
+                                                    'required': ['kind', 'line', 'lines'],
+                                                    'type': 'object'},
+                                                   {'additionalProperties': False,
+                                                    'properties': {'kind': {'const': 'insert_after'},
+                                                                   'line': {'minimum': 1,
+                                                                            'type': 'integer'},
+                                                                   'lines': {'items': {'type': 'string'},
+                                                                             'minItems': 1,
+                                                                             'type': 'array'}},
+                                                    'required': ['kind', 'line', 'lines'],
+                                                    'type': 'object'},
+                                                   {'additionalProperties': False,
+                                                    'properties': {'content': {'description': 'Complete '
+                                                                                              'replacement '
+                                                                                              'text; '
+                                                                                              'an '
+                                                                                              'empty '
+                                                                                              'string '
+                                                                                              'empties '
+                                                                                              'the '
+                                                                                              'file.',
+                                                                               'type': 'string'},
+                                                                   'kind': {'const': 'replace_file'}},
+                                                    'required': ['kind', 'content'],
+                                                    'type': 'object'}]},
+                               'minItems': 1,
+                               'type': 'array'},
+                'target': {'type': 'object',
+                           'properties': {'kind': {'type': 'string', 'const': 'PATH'},
+                                          'path': {'description': 'Existing file path, relative to '
+                                                                  'the workspace or absolute; ~ is '
+                                                                  'supported.',
+                                                   'minLength': 1,
+                                                   'type': 'string'}},
+                           'required': ['kind', 'path'],
+                           'additionalProperties': False}},
+ 'required': ['target', 'base_revision', 'operations'],
+ 'type': 'object'},
         is_read_only=False,
         permission_category="filesystem_write",
         is_destructive=True,
@@ -918,28 +902,25 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "write_file": _descriptor(
         name="write_file",
         description=(
-            "Create a new UTF-8 text file, creating parent directories as needed. "
-            "Existing paths are left unchanged. Use read_file followed by edit_file to "
-            "change or replace an existing file."
+            ('Create a new UTF-8 text file at a PATH target, creating parent directories as needed. The path '
+ 'may not exist yet. Existing paths are left unchanged. Use read_file then edit_file to change an '
+ 'existing file.')
         ),
-        input_schema=object_schema(
-            properties={
-                "path": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        'New file path, relative to the workspace or absolute; ~ is supported.'
-                    ),
-                },
-                "content": {
-                    "type": "string",
-                    "description": (
-                        'Complete file text; an empty string creates an empty file.'
-                    ),
-                },
-            },
-            required=["path", "content"],
-        ),
+        input_schema={'additionalProperties': False,
+ 'properties': {'content': {'description': 'Complete file text; an empty string creates an empty '
+                                           'file.',
+                            'type': 'string'},
+                'target': {'type': 'object',
+                           'properties': {'kind': {'type': 'string', 'const': 'PATH'},
+                                          'path': {'description': 'New file path, relative to the '
+                                                                  'workspace or absolute; ~ is '
+                                                                  'supported.',
+                                                   'minLength': 1,
+                                                   'type': 'string'}},
+                           'required': ['kind', 'path'],
+                           'additionalProperties': False}},
+ 'required': ['target', 'content'],
+ 'type': 'object'},
         is_read_only=False,
         permission_category="filesystem_write",
         is_destructive=True,
@@ -976,14 +957,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "search_sessions": _descriptor(
         name="search_sessions",
         description=(
-            "Find saved conversations by title or message keywords; omit query to list by "
-            "activity. This session's message hits cover only earlier content removed by "
-            "compaction; other accessible sessions use saved ROOT conversation history. "
-            "Body hits provide session_id and entry_id for read_session_content; "
-            "title-only hits have no entry.\n"
-            "First page: optional query, lifecycle, limit.\n"
-            "Continue: cursor; optional limit. Send no other fields on continuation. Omit "
-            "unused fields; null is not accepted."
+            "Find saved conversations by title or message keywords; omit query to list by activity. This session's body hits cover only earlier content removed by compaction; other accessible sessions use saved ROOT history. Copy item.target (SESSION) to search/read a conversation, or hit.target (SESSION_ENTRY) to read a body hit. Title-only hits have no hit.\n"
+            'First page: optional query, lifecycle, limit.\n'
+            'Continue: cursor; optional limit. Send no other fields on continuation. Omit unused fields; null is not accepted.'
         ),
         input_schema=session_query_input_schema(
             "search_sessions",
@@ -997,17 +973,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "search_session_content": _descriptor(
         name="search_session_content",
         description=(
-            "Find saved questions and their answer process by keyword relevance. Omit "
-            "session_id for this conversation's earlier messages removed by compaction; "
-            "messages still in context are excluded. Other accessible conversations use "
-            "saved ROOT conversation history. Results preserve speakers, times and "
-            "historical quotes/comments; [truncated] marks omitted text. Each item's "
-            "entry_id anchors its question; use a message's entry_id with "
-            "read_session_content to expand that message. Images are presence markers; "
-            "generated markers and image metadata are not search terms.\n"
-            "First page: query; optional session_id, include_tools, limit.\n"
-            "Continue: cursor; optional limit. Send no other fields on continuation. Omit "
-            "unused fields; null is not accepted."
+            "Find saved questions and their answer process by keyword relevance. First page: query; optional target (SESSION), include_tools, limit. Omit target for this conversation's earlier content removed by compaction; messages still in context are excluded. Other accessible conversations use saved ROOT history. Results preserve speakers, times and historical quotes/comments; [truncated] marks omitted text. Each item.target anchors its question; copy a message.target to read_session_content to expand that message. Images are presence markers; generated markers and image metadata are not search terms.\n"
+            'Continue: cursor; optional limit. Send no other fields on continuation. Omit unused fields; null is not accepted.'
         ),
         input_schema=session_query_input_schema(
             "search_session_content",
@@ -1021,19 +988,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_session_content": _descriptor(
         name="read_session_content",
         description=(
-            "Read saved messages directly or expand a search hit; searching first is "
-            "optional. Omit session_id for this conversation's earlier messages removed "
-            "by compaction. Other accessible conversations use saved ROOT conversation "
-            "history. An entry_id anchor is read first. Long messages start at the "
-            "beginning and continue across pages before adjacent messages; partial marks "
-            "a slice. Tool output may have missing saved content as shown by "
-            "source_coverage, display_kind and artifact_disposition; pagination cannot "
-            "recover it. Images are text placeholders; only same-workspace placeholders "
-            "include image_ref. Increase max_chars if a placeholder is incomplete.\n"
-            "First page: optional session_id, entry_id, direction, include_tools, limit, "
-            "max_chars.\n"
-            "Continue: cursor; optional limit, max_chars. Send no other fields on "
-            "continuation. Omit unused fields; null is not accepted."
+            "Read saved messages directly or expand a search hit; searching first is optional. First page: optional target (SESSION or SESSION_ENTRY), direction, include_tools, limit, max_chars. Omit target for this conversation's earlier content removed by compaction; SESSION_ENTRY may omit session_id for the same range. Other accessible conversations use saved ROOT history. A SESSION_ENTRY anchor is read first. Long messages start at the beginning and continue across pages before adjacent messages; partial marks a slice. Tool output may have missing saved content as shown by source_coverage, display_kind and artifact_disposition; pagination cannot recover it. Images are text placeholders; same-workspace placeholders provide an IMAGE_REF target to copy into view_image. Increase max_chars if a placeholder cannot fit.\n"
+            'Continue: cursor; optional limit, max_chars. Send no other fields on continuation. Omit unused fields; null is not accepted.'
         ),
         input_schema=session_query_input_schema(
             "read_session_content",
@@ -1047,40 +1003,20 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "scheduled_tasks": _descriptor(
         name="scheduled_tasks",
         description=(
-            'Manage saved schedules in the ROOT conversation. Set action and send only its listed '
-            'fields; fields are required unless marked optional.\n'
-            'list: optional session_id, status, cursor.\n'
-            'get: task_id.\n'
-            'create: values; optional session_id, status.\n'
-            'update: task_id, expected_revision, values.\n'
-            'pause: task_id, expected_revision.\n'
-            'resume: task_id, expected_revision.\n'
-            'delete: task_id, expected_revision.\n'
-            'switch: task_id, expected_revision, target.\n'
-            'Use list/get to find existing work and obtain its current values and revision. Update '
-            'an existing task or create a separate task as requested. Reread on revision conflict.\n'
-            'values is the complete configuration; preserve unrequested fields on update. Choose a '
-            'short name if unspecified. prompt contains self-contained future instructions and '
-            'output expectations; timing and permissions use their own fields. timezone is an IANA '
-            'name, defaulting to Asia/Shanghai for new tasks unless requested otherwise. For '
-            'create, use current permissions or a requested narrower preset. Saving requires '
-            'current permissions to cover permission_mode; preserve saved permissions unless a '
-            'change is requested.\n'
-            'Each session supports one ACTIVE plan and any number of PAUSED plans. create with '
-            'omitted/null status saves PAUSED; use ACTIVE to start automatic scheduling. An '
-            'authorized replacement uses switch to atomically pause the source ACTIVE plan and '
-            'activate an existing PAUSED target or create an ACTIVE target in the same session. '
-            'Adding a task alone does not request replacement. Separate automatic plans need '
-            'separate sessions.\n'
-            'Calendar rules use local HH:mm and YYYY-MM-DD start_date in the saved timezone; '
-            'weekdays are Monday=1 through Sunday=7. once and interval timestamps are whole-second '
-            'UTC; new or changed once times must be in the future. Intervals use their fixed '
-            'anchor. Missing month days and nonexistent DST times are skipped; repeated DST times '
-            'fire once. Explain saved times in ordinary language.\n'
-            'Edits preserve queued instructions. pause/delete/switch cancel the affected source '
-            "task's pending inputs and leave running replies alone; delete keeps the chat. Stopping"
-            ' a reply leaves its schedule active. Resume uses the next future recurrence without '
-            'catch-up; an overdue untriggered once plan becomes due.'
+            'Manage saved schedules from the ROOT conversation. Set action and send only its listed fields; fields are required unless marked optional. Copy SCHEDULE targets from results or use a known exact target. session takes a SESSION target; omission/null means this session.\n'
+            'list: optional session, status, cursor.\n'
+            'get: target.\n'
+            'create: values; optional session, status.\n'
+            'update: target, expected_revision, values.\n'
+            'pause: target, expected_revision.\n'
+            'resume: target, expected_revision.\n'
+            'delete: target, expected_revision.\n'
+            'switch: target, expected_revision, replacement. target is the source ACTIVE schedule. replacement is {kind:"existing",target,expected_revision} for a PAUSED schedule, or {kind:"create",values} for a new schedule in the same session.\n'
+            "Use list/get for current values and revision; reread on revision conflict. session filters a list or selects a new schedule's parent, never changes an existing schedule's owner. Continue lists with next_cursor and the same filters.\n"
+            'values is the complete configuration; preserve unrequested fields on update. Choose a short name if unspecified. prompt contains self-contained future instructions and output expectations; timing and permissions have separate fields. Supply an IANA timezone; use Asia/Shanghai for new tasks unless requested otherwise. For create, use current permissions or a requested narrower preset. Saving configuration requires current permissions to cover permission_mode; preserve saved permissions unless a change is requested.\n'
+            'Each session supports one ACTIVE plan and any number of PAUSED plans. create with omitted/null status saves PAUSED; use ACTIVE to start automatic scheduling. An authorized replacement uses switch atomically; adding a task alone does not request replacement. Separate automatic plans need separate sessions.\n'
+            'Calendar rules use local HH:mm and YYYY-MM-DD start_date; weekdays are Monday=1 through Sunday=7. once and interval timestamps are whole-second UTC; new or changed once times must be in the future. Intervals keep their fixed anchor. Missing month days and nonexistent DST times are skipped; repeated DST times fire once. Explain saved times in ordinary language.\n'
+            "Edits preserve queued instructions. pause/delete/switch cancel the affected source plan's pending inputs and leave running replies alone; delete keeps the chat. Stopping a reply leaves its schedule active. Resume uses the next future recurrence without catch-up; an overdue untriggered once plan becomes due."
         ),
         input_schema=action_schema(),
         provider_kind=BuiltinToolDomainKind.BUILTIN,
@@ -1566,8 +1502,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         name="memory_search",
         description=(
             "Find saved user or project information by meaning or keywords across "
-            "readable memory contexts. Use memory_get when you already have the "
-            "memory_id. retrieval_summary reports search completeness, filter expansion, "
+            "readable memory contexts. Use memory_get when you already have a MEMORY "
+            "target; copy a result's target to read it. retrieval_summary reports search completeness, filter expansion, "
             "ranking and relation-check availability; filter_match identifies relaxed "
             "matches, and relation_warnings identifies active contradictions."
         ),
@@ -1579,9 +1515,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "memory_get": _descriptor(
         name="memory_get",
         description=(
-            "Read a saved memory by its exact ID, including its statement, kind, context, "
-            "recorded time, lifecycle, direct relations and any user-edit note. Use "
-            "memory_search to discover an ID."
+            "Read a saved memory by target, including its statement, kind, context, "
+            "recorded time, lifecycle, direct relations and any user-edit note. Copy a "
+            "MEMORY target from memory_search or another memory result; a known exact "
+            "target can be used directly."
         ),
         input_schema=_MEMORY_GET_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
@@ -1598,8 +1535,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
             "results. Exclude secrets, credentials, raw tool dumps, detailed executable "
             "procedures and permission overrides. Saving takes effect immediately and "
             "creates no task, reminder or execution authority. SAVED returns the new "
-            "memory_id; ALREADY_PRESENT returns the existing item without changing its "
-            "origin or dependencies. Users can delete saved items on the Memory page."
+            "MEMORY target; ALREADY_PRESENT returns the existing item without changing its "
+            "origin or dependencies. Users can delete saved items on the Memory page. "
+            "Supply statement, context_target and kind; optional based_on contains the "
+            "MEMORY targets this statement depends on."
         ),
         input_schema=_REMEMBER_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,
@@ -1610,12 +1549,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         name="mark_memory_relation",
         description=(
             "Relate two inspected saved memories about the same subject and conditions. "
-            "Both must be active and in the same context. Related memories returned by "
+            "Supply source and target as MEMORY targets, plus relation_kind. New relations "
+            "require both items active and in the same context. Related memories returned by "
             "remember are suggestions to inspect, not established relations.\n"
             "CONTRADICTS: keep two incompatible memories of the same kind active when "
-            "neither is the supported replacement.\n"
-            "SUPERSEDES: the source is the supported replacement, including a corrected "
-            "statement or kind; make the target inactive without deleting it."
+            "neither is the supported replacement; endpoint order does not matter.\n"
+            "SUPERSEDES: source is the supported replacement, including a corrected "
+            "statement or kind; make target inactive without deleting it."
         ),
         input_schema=_MARK_MEMORY_RELATION_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,

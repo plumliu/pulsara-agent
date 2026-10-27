@@ -27,17 +27,16 @@ must pass validation. Installation does not promise the original host behavior.
    bypassed. Parameterized sources needing user input use the GUI import wizard;
    details are in `references/conversion-contract.md`.
 2. Installation and replacement both produce a disabled instance. Reuse the
-   result's `identity.plugin_id` and scope; never derive the ID from a path.
-   `current.package_root` is the installed package. Inspect it with
-   `target={kind:"PLUGIN",scope:<returned scope>,plugin_id:<returned id>}`.
+   result's `target` for inspection and management. `current.package_root` is
+   the installed package; never derive its ID from a path.
 3. Configure existing package MCP connections with
-   `CONFIGURE_PLUGIN_MCP_CONNECTION`, `plugin_id` and their local `server_id`;
+   `CONFIGURE_PLUGIN_MCP_CONNECTION` and their `MCP_CONNECTION` target;
    omit `overlay` for the shared editor. Users enter credentials privately there.
-   Configured OAuth connections use `AUTHORIZE_MCP` with both IDs.
+   Configured OAuth connections use `AUTHORIZE_MCP` with the same target.
 4. Enable the whole instance with `SET_PLUGIN_ENABLED` and `enabled:true`:
 
 ```json
-{"action":"SET_PLUGIN_ENABLED","scope":"WORKSPACE","plugin_id":"example","enabled":true}
+{"action":"SET_PLUGIN_ENABLED","target":{"kind":"PLUGIN","scope":"WORKSPACE","plugin_id":"example"},"enabled":true}
 ```
 
 Only user submission accepts the current component/credential-destination review.

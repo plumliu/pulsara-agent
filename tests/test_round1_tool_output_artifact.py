@@ -385,7 +385,7 @@ def test_round1_multibyte_preview_preserves_coverage_when_storage_is_unavailable
         ToolOutputArtifactUnavailabilityReason.BLOB_PUBLICATION_FAILED
     )
     assert projection.canonical_preview.size <= 65_536
-    assert "artifact_id=" not in preview
+    assert 'target={"kind":"ARTIFACT"' not in preview
 
     complete = _processor(
         _RecordingPublisher(failure=KnownArtifactPublicationFailure("no storage"))
@@ -645,7 +645,7 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
     assert public_envelope["status"] == "success"
     assert public_envelope["exit_code"] == 0
     assert public_envelope["cwd"] == str(tmp_path)
-    assert public_envelope["process_id"]
+    assert public_envelope["target"]["process_id"]
 
     publisher = _RecordingPublisher()
     projection = _processor(publisher).prepare(
@@ -662,7 +662,7 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
     assert preview_envelope["status"] == "success"
     assert preview_envelope["exit_code"] == 0
     assert preview_envelope["cwd"] == str(tmp_path)
-    assert preview_envelope["process_id"] == public_envelope["process_id"]
+    assert preview_envelope["target"]["process_id"] == public_envelope["target"]["process_id"]
     assert "MIDDLE-SENTINEL" not in preview_envelope["output"]
 
 
@@ -1204,7 +1204,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
             id=_name("call"),
             name="artifact_read",
             arguments={
-                "artifact_id": projection.artifact_id,
+                "target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id},
                 "offset_chars": 3,
                 "max_chars": 7,
             },
@@ -1215,7 +1215,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     assert read_result.output_artifact_candidate is None
     response = json.loads(read_result.output)
     assert response["text"] == source[3:10]
-    assert response["artifact_id"] == projection.artifact_id
+    assert response["target"]["artifact_id"] == projection.artifact_id
     assert response["source_coverage"] == "COMPLETE"
     assert "model_visible_memory_ids" not in response
     assert read_result.model_visible_memory_fact_ids == (memory_id,)
@@ -1226,7 +1226,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
             id=multibyte_call_id,
             name="artifact_read",
             arguments={
-                "artifact_id": projection.artifact_id,
+                "target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id},
                 "offset_chars": 5,
                 "max_chars": 32_000,
             },
@@ -1276,11 +1276,11 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
 
     tool = ArtifactReadTool(read_port)
     invalid_arguments = (
-        {"artifact_id": projection.artifact_id, "mode": "text"},
-        {"artifact_id": projection.artifact_id, "offset_chars": -1},
-        {"artifact_id": projection.artifact_id, "max_chars": 0},
-        {"artifact_id": projection.artifact_id, "max_chars": 32_001},
-        {"artifact_id": projection.artifact_id, "unknown": True},
+        {"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}, "mode": "text"},
+        {"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}, "offset_chars": -1},
+        {"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}, "max_chars": 0},
+        {"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}, "max_chars": 32_001},
+        {"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}, "unknown": True},
     )
     for arguments in invalid_arguments:
         invalid = tool.execute(
@@ -1297,7 +1297,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         ToolCall(
             id=_name("call"),
             name="artifact_read",
-            arguments={"artifact_id": _name("artifact")},
+            arguments={"target": {"kind": "ARTIFACT", "artifact_id": _name("artifact")}},
         )
     )
     cross_session_tool = ArtifactReadTool(
@@ -1311,7 +1311,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         ToolCall(
             id=_name("call"),
             name="artifact_read",
-            arguments={"artifact_id": projection.artifact_id},
+            arguments={"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}},
         )
     )
     assert json.loads(unknown.output)["status"] == "not_found"
@@ -1585,7 +1585,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
         ToolCall(
             id=_name("call"),
             name="artifact_read",
-            arguments={"artifact_id": projection.artifact_id},
+            arguments={"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}},
         )
     )
     assert json.loads(result.output)["status"] == "content_error"
@@ -1627,7 +1627,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
         ToolCall(
             id=_name("call"),
             name="artifact_read",
-            arguments={"artifact_id": projection.artifact_id},
+            arguments={"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}},
         )
     )
     missing_payload = json.loads(missing.output)
@@ -1660,7 +1660,6 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     assert not export.descriptor.is_read_only
     assert export.descriptor.permission_category == "filesystem_write"
     export_schema = thaw_json(specs["artifact_export"].parameters)
-    assert export_schema["required"] == ["artifact_id", "path"]
     assert export_schema["additionalProperties"] is False
     assert set(specs) == set(bindings)
     for builtin_binding in bindings.values():

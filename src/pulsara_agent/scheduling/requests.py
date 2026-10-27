@@ -3,17 +3,38 @@
 from __future__ import annotations
 from pulsara_agent.identity import is_valid_id
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
+from pulsara_agent.ports.session_content import session_target_schema
 
 _FIELDS = {
-    "list": (set(), {"cursor", "status", "session_id"}),
-    "get": ({"task_id"}, set()),
-    "create": ({"values"}, {"session_id", "status"}),
-    "update": ({"task_id", "expected_revision", "values"}, set()),
-    "pause": ({"task_id", "expected_revision"}, set()),
-    "resume": ({"task_id", "expected_revision"}, set()),
-    "delete": ({"task_id", "expected_revision"}, set()),
-    "switch": ({"task_id", "expected_revision", "target"}, set()),
+    "list": (set(), {"cursor", "status", "session"}),
+    "get": ({"target"}, set()),
+    "create": ({"values"}, {"session", "status"}),
+    "update": ({"target", "expected_revision", "values"}, set()),
+    "pause": ({"target", "expected_revision"}, set()),
+    "resume": ({"target", "expected_revision"}, set()),
+    "delete": ({"target", "expected_revision"}, set()),
+    "switch": ({"target", "expected_revision", "replacement"}, set()),
 }
+
+
+def schedule_target(task_id):
+    return {"kind": "SCHEDULE", "task_id": task_id}
+
+
+def schedule_target_schema():
+    return {
+        "type": "object",
+        "properties": {"kind": {"const": "SCHEDULE"}, "task_id": {"type": "string"}},
+        "required": ["kind", "task_id"],
+        "additionalProperties": False,
+    }
+
+
+def _validate_target(value, kind, field, identity_kind):
+    if not isinstance(value, dict) or set(value) != {"kind", field} or value["kind"] != kind:
+        raise ScheduledTaskError("INVALID_REQUEST", "任务目标字段无效。")
+    if not is_valid_id(value[field], identity_kind):
+        raise ScheduledTaskError("INVALID_ID", "任务身份字段无效。")
 
 
 def creation_status(value=None):
@@ -35,9 +56,12 @@ def validate_action(value):
     keys = set(value) - {"action"}
     if not required <= keys or keys - required - optional:
         raise ScheduledTaskError("INVALID_REQUEST", "任务操作字段无效。")
-    for key in keys & {"task_id", "session_id", "cursor"}:
-        if not is_valid_id(value[key], "session" if key == "session_id" else "schedule"):
-            raise ScheduledTaskError("INVALID_ID", "任务身份字段无效。")
+    if "target" in keys:
+        _validate_target(value["target"], "SCHEDULE", "task_id", "schedule")
+    if "session" in keys:
+        _validate_target(value["session"], "SESSION", "session_id", "session")
+    if "cursor" in keys and not is_valid_id(value["cursor"], "schedule"):
+        raise ScheduledTaskError("INVALID_ID", "任务身份字段无效。")
     if "expected_revision" in value and (
         type(value["expected_revision"]) is not int or value["expected_revision"] < 1
     ):
@@ -45,41 +69,40 @@ def validate_action(value):
     if value["action"] == "create":
         creation_status(value.get("status"))
     if value["action"] == "switch":
-        target = value["target"]
-        if not isinstance(target, dict) or target.get("kind") not in (
+        replacement = value["replacement"]
+        if not isinstance(replacement, dict) or replacement.get("kind") not in (
             "existing",
             "create",
         ):
             raise ScheduledTaskError("INVALID_REQUEST", "切换目标无效。")
-        if target["kind"] == "existing":
-            if set(target) != {"kind", "task_id", "expected_revision"}:
+        if replacement["kind"] == "existing":
+            if set(replacement) != {"kind", "target", "expected_revision"}:
                 raise ScheduledTaskError("INVALID_REQUEST", "切换目标字段无效。")
             validate_action(
                 {
                     "action": "resume",
-                    "task_id": target["task_id"],
-                    "expected_revision": target["expected_revision"],
+                    "target": replacement["target"],
+                    "expected_revision": replacement["expected_revision"],
                 }
             )
-            if target["task_id"] == value["task_id"]:
+            if replacement["target"] == value["target"]:
                 raise ScheduledTaskError("INVALID_REQUEST", "请选择另一个计划。")
-        elif set(target) != {"kind", "values"}:
+        elif set(replacement) != {"kind", "values"}:
             raise ScheduledTaskError("INVALID_REQUEST", "切换目标字段无效。")
     return value
 
 
 def action_schema():
     properties = {
-        "task_id": {"type": "string"},
-        "session_id": {
-            "type": ["string", "null"],
-            "minLength": 1,
-            "description": 'Omit or use null for this session; otherwise copy the target session ID.',
+        "target": schedule_target_schema(),
+        "session": {
+            "oneOf": [session_target_schema(), {"type": "null"}],
+            "description": "Omit or use null for this session; otherwise copy a SESSION target. This is the list filter or creation parent.",
         },
         "expected_revision": {"type": "integer", "minimum": 1},
         "cursor": {
             "type": "string",
-            "description": "Copy next_cursor and repeat the same status/session_id filters.",
+            "description": "Copy next_cursor and repeat the same status/session filters.",
         },
         "status": {
             "type": ["string", "null"],
@@ -155,15 +178,15 @@ def action_schema():
             },
         },
     }
-    properties["target"] = {
+    properties["replacement"] = {
         "oneOf": [
             {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["kind", "task_id", "expected_revision"],
+                "required": ["kind", "target", "expected_revision"],
                 "properties": {
                     "kind": {"const": "existing"},
-                    "task_id": properties["task_id"],
+                    "target": properties["target"],
                     "expected_revision": properties["expected_revision"],
                 },
             },

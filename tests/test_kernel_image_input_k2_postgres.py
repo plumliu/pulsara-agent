@@ -399,7 +399,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
                 block_id=_id("block"),
                 tool_call_id=call_id,
                 tool_name="view_image",
-                arguments=freeze_json({"path": f"/tmp/{ordinal}.png"}),
+                arguments=freeze_json({"target": {"kind": "PATH", "path": f"/tmp/{ordinal}.png"}}),
             )
             for ordinal, call_id in enumerate(call_ids)
         ),
@@ -543,7 +543,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
         assert shared_image.content_digest not in str(projected)
         assert HISTORICAL_IMAGE_MARKER not in str(projected["fields"])
     page = SessionContentQuery(repository, session_id=lease.guard.session_id, memory_domain_id=state["memory_domain_id"]).invoke(
-        "read_session_content", {"entry_id": entry["id"], "include_tools": True, "limit": 1},
+        "read_session_content", {"target": {"kind": "SESSION_ENTRY", "entry_id": entry["id"]}, "include_tools": True, "limit": 1},
         current_range=SessionContentRange(state["latest_entry_sequence"]),
         tool_call_id="call:history", deadline_monotonic=monotonic() + 30,
     )

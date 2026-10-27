@@ -30,13 +30,11 @@ class _BlockingModel(_DetachedDraftModel):
     async def stream(self, request):
         self.requests.append(request)
         if len(self.requests) == 1:
-            first = _tool_call('manage_capability', 'call:configuration', {
-                'action': 'ADD_LOCAL_MCP', 'scope': 'USER', 'server_id': 'steer-fixture',
-            }) if self.capability else _tool_call('write_file', 'call:first-write', {
-                'path': str(self.root/'first.txt'), 'content': 'must not be written',
+            first = _tool_call('manage_capability', 'call:configuration', {'action': 'ADD_LOCAL_MCP', 'target': {"kind": "MCP_CONNECTION", 'scope': 'USER', 'source_kind': 'LOCAL', 'server_id': 'steer-fixture'}}) if self.capability else _tool_call('write_file', 'call:first-write', {
+                "target": {"kind": "PATH", "path": str(self.root/'first.txt')}, 'content': 'must not be written',
             })
             events = [*first, *_tool_call('write_file', 'call:second-write', {
-                'path': str(self.root/'second.txt'), 'content': 'must not run after steer',
+                "target": {"kind": "PATH", "path": str(self.root/'second.txt')}, 'content': 'must not run after steer',
             })]
         elif len(self.requests) == 2:
             current = request.compiled_input
@@ -238,7 +236,7 @@ if __name__ == "__main__":
                     inspected = next(json.loads(json.loads(body)['pulsara_tool_result']['body'])
                         for body in reversed(bodies) if '"pulsara_tool_result"' in body)
                     assert inspected['invocation']['mode'] == 'META'
-                    name, arguments = 'use_new_mcp_tool', {'tool_ref':inspected['tool_ref'], 'arguments':arguments}
+                    name, arguments = 'use_new_mcp_tool', {'arguments': arguments, 'target': {"kind":"MCP_TOOL_REF", "tool_ref":inspected['invocation']['target']['tool_ref']}}
                 else:
                     assert name in {spec.name for spec in request.compiled_input.tools}
                 events = _tool_call(name, 'call:external-effect', arguments)
@@ -266,7 +264,7 @@ if __name__ == "__main__":
         async def resume(_):
             return SimpleNamespace(session_id=session.session_id, host_session_id=session.host_session_id, session=session)
 
-        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume), protocol_server=gateway)
+        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, host_writer_unavailable=lambda _host: False), protocol_server=gateway)
         try:
             await gateway.start()
             connection = await bridge.connect(session.session_id, browser_instance_id='00000000-0000-4000-8000-000000000001')

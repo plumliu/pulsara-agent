@@ -409,7 +409,7 @@ def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
         "\n".join(f"old-{index}" for index in range(2_001)), encoding="utf-8"
     )
     tool = ReadFileTool(tmp_path)
-    first = tool.execute(ToolCall("call:first", "read_file", {"path": "skill.md"}))
+    first = tool.execute(ToolCall("call:first", "read_file", {"target": {"kind": "PATH", "path": "skill.md"}}))
     first_payload = json.loads(first.output)
     assert first.status is ToolResultState.SUCCESS
     assert first_payload["limit"] == 2_000
@@ -417,7 +417,7 @@ def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
     assert "2000|old-1999" in first_payload["content"]
 
     path.write_text("new-first\nsecond\n", encoding="utf-8")
-    second = tool.execute(ToolCall("call:second", "read_file", {"path": "skill.md"}))
+    second = tool.execute(ToolCall("call:second", "read_file", {"target": {"kind": "PATH", "path": "skill.md"}}))
     second_payload = json.loads(second.output)
     assert second.status is ToolResultState.SUCCESS
     assert second_payload["content"] == "1|new-first\n2|second"
@@ -445,7 +445,7 @@ def test_round9_1_pulsara_home_catalog_location_is_ordinary_readable(
         ToolCall(
             id="read-home-skill",
             name="read_file",
-            arguments={"path": home_skill.location},
+            arguments={"target": {"kind": "PATH", "path": home_skill.location}},
         )
     )
     assert read.status is ToolResultState.SUCCESS

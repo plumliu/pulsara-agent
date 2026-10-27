@@ -80,7 +80,7 @@ def _plugin_observation(prepared, root):
     if plugin is None:
         return PreparedPluginInstanceObservation(
             _request_identity(
-                PluginScopeKind(prepared.intent.scope.value),
+                PluginScopeKind(prepared.resolved_scope.value),
                 thaw_json(prepared.expected_current)["plugin_id"],
                 root,
             ),
@@ -118,7 +118,14 @@ class CapabilityManagementCall:
             raise RuntimeError("capability call was already transferred")
         self._state = "form"
         prepared = self.prepared
-        fields = thaw_json(prepared.intent.fields)
+        fields = {
+            **thaw_json(prepared.intent.fields),
+            **(
+                thaw_json(prepared.intent.target)
+                if prepared.intent.target is not None
+                else {}
+            ),
+        }
         editor = {}
         plugin = prepared.plugin
         if plugin is None and "server_id" in fields:
@@ -177,7 +184,7 @@ class CapabilityManagementCall:
             freeze_json(
                 {
                     "action": prepared.intent.action.value,
-                    "scope": prepared.intent.scope.value,
+                    "scope": prepared.resolved_scope.value,
                     "prefill": thaw_json(prepared.public_prefill),
                     "expected_current": thaw_json(prepared.expected_current),
                     "user_inputs": list(prepared.user_inputs),
@@ -279,28 +286,30 @@ class CapabilityManagementCall:
         elif action is Action.CONFIGURE_PLUGIN_MCP_CONNECTION:
             plugin = candidate.plugin
             assert plugin is not None
-            owner = plugin_connection_owner(plugin.identity, arguments["server_id"])
+            server_id = arguments["target"]["server_id"]
+            owner = plugin_connection_owner(plugin.identity, server_id)
             if any(change.binding.owner != owner for change in changes):
                 raise ValueError("credential does not belong to this Plugin component")
             server = next(
                 item
                 for item in plugin.summary.mcp.mcp_servers
-                if item.local_server_id == arguments["server_id"]
+                if item.local_server_id == server_id
             )
             current_config = self.service._connection(plugin, server)
             overlay = (
                 overlay_from_dict(arguments["overlay"])
-                if arguments["overlay"] is not None else None
+                if arguments["overlay"] is not None
+                else None
             )
             overlays = tuple(
                 item
                 for item in plugin.mcp_connection_overlays
-                if item.local_server_id != arguments["server_id"]
+                if item.local_server_id != server_id
             )
             if overlay is not None:
-                overlays = tuple(sorted(
-                    (*overlays, overlay), key=lambda item: item.local_server_id
-                ))
+                overlays = tuple(
+                    sorted((*overlays, overlay), key=lambda item: item.local_server_id)
+                )
             next_config = self.service._connection(
                 replace(plugin, mcp_connection_overlays=overlays), server
             )
@@ -335,6 +344,15 @@ class CapabilityManagementCall:
 
     def _same_target(self, candidate):
         if (
+            candidate.intent.action != self.prepared.intent.action
+            or candidate.intent.target != self.prepared.intent.target
+            or candidate.intent.scope != self.prepared.intent.scope
+            or thaw_json(candidate.intent.fields).get("source_path")
+            != thaw_json(self.prepared.intent.fields).get("source_path")
+            or candidate.resolved_scope != self.prepared.resolved_scope
+        ):
+            raise McpManagementConflict("capability target or resolved scope changed")
+        if (
             candidate.skill_target != self.prepared.skill_target
             or candidate.skill_validation != self.prepared.skill_validation
             or candidate.skill_removal != self.prepared.skill_removal
@@ -349,7 +367,12 @@ class CapabilityManagementCall:
             raise McpManagementConflict(
                 "Plugin connection review changed while the form was open"
             )
-        if candidate.plugin is not None or self.prepared.plugin is not None or candidate.plugin_instance is not None or self.prepared.plugin_instance is not None:
+        if (
+            candidate.plugin is not None
+            or self.prepared.plugin is not None
+            or candidate.plugin_instance is not None
+            or self.prepared.plugin_instance is not None
+        ):
             root = self._root()
             if _plugin_observation(candidate, root) != _plugin_observation(
                 self.prepared, root
@@ -359,7 +382,7 @@ class CapabilityManagementCall:
     def _root(self):
         return (
             self.service.workspace_root
-            if self.prepared.intent.scope is CapabilityManagementScope.WORKSPACE
+            if self.prepared.resolved_scope is CapabilityManagementScope.WORKSPACE
             else None
         )
 
@@ -381,7 +404,14 @@ class CapabilityManagementCall:
             raise ValueError("capability call requires user input")
         changes = values.secret_changes if values else ()
         retained = values.retain_credentials_confirmed if values else False
-        fields = thaw_json(prepared.intent.fields)
+        fields = {
+            **thaw_json(prepared.intent.fields),
+            **(
+                thaw_json(prepared.intent.target)
+                if prepared.intent.target is not None
+                else {}
+            ),
+        }
         action = prepared.intent.action
         root = self._root()
         service = self.service
@@ -426,7 +456,7 @@ class CapabilityManagementCall:
         if action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}:
             return await self._authorization(prepared, steer_event=steer_event)
         observed = _plugin_observation(prepared, root)
-        scope = PluginScopeKind(prepared.intent.scope.value)
+        scope = PluginScopeKind(prepared.resolved_scope.value)
         if action is Action.INSTALL_PLUGIN:
             outcome = await service.plugins.install_local_plugin(
                 InstallLocalPluginRequest(
@@ -528,14 +558,20 @@ class CapabilityManagementCall:
             },
         )
         if isinstance(outcome, SuccessfulPluginInstallOutcome):
-            result["identity"]["plugin_id"] = outcome.identity.plugin_id
+            result["target"] = {
+                "kind": "PLUGIN",
+                "scope": outcome.identity.scope.value,
+                "plugin_id": outcome.identity.plugin_id,
+            }
             result["current"]["package_root"] = str(outcome.package_root)
-            result["diagnostics"] = [diagnostic_payload(item) for item in outcome.diagnostics]
+            result["diagnostics"] = [
+                diagnostic_payload(item) for item in outcome.diagnostics
+            ]
         return result
 
     async def _skill(self, prepared, fields, root):
         service = self.service
-        scope = LocalSkillInstallScope(prepared.intent.scope.value.lower())
+        scope = LocalSkillInstallScope(prepared.resolved_scope.value.lower())
         action = prepared.intent.action
         candidate = await service.prepare(prepared.intent.to_dict())
         self._same_target(candidate)
@@ -565,11 +601,16 @@ class CapabilityManagementCall:
                 else "REJECTED"
             )
             result = self._result(
-                prepared, status,
+                prepared,
+                status,
                 {
                     "operation_status": outcome.disposition.value,
-                    "skill_root": str(outcome.destination_path) if applied and outcome.destination_path is not None else None,
-                    "skill_path": str(outcome.destination_path / "SKILL.md") if applied and outcome.destination_path is not None else None,
+                    "skill_root": str(outcome.destination_path)
+                    if applied and outcome.destination_path is not None
+                    else None,
+                    "skill_path": str(outcome.destination_path / "SKILL.md")
+                    if applied and outcome.destination_path is not None
+                    else None,
                     "cleanup_attention": outcome.disposition
                     is LocalSkillInstallDisposition.CLEANUP_UNAVAILABLE,
                     "prior_operation_status": outcome.prior_disposition.value
@@ -584,7 +625,10 @@ class CapabilityManagementCall:
                 },
             )
             if applied and outcome.destination_path is not None:
-                result["identity"]["skill_path"] = str(outcome.destination_path / "SKILL.md")
+                result["target"] = {
+                    "kind": "SKILL",
+                    "skill_path": str(outcome.destination_path / "SKILL.md"),
+                }
             return result
         if action is Action.SET_LOOSE_SKILL_ENABLED:
             await _settled_call(
@@ -700,14 +744,29 @@ class CapabilityManagementCall:
             "APPLIED",
             {
                 "path": str(snapshot.provenance.identity.canonical_path),
-                **({"enabled": fields["enabled"]} if action is Action.SET_HOOK_SOURCE_ENABLED else {}),
-                **({"trust_revoked": True} if action is Action.REVOKE_HOOK_TRUST else {}),
+                **(
+                    {"enabled": fields["enabled"]}
+                    if action is Action.SET_HOOK_SOURCE_ENABLED
+                    else {}
+                ),
+                **(
+                    {"trust_revoked": True}
+                    if action is Action.REVOKE_HOOK_TRUST
+                    else {}
+                ),
             },
         )
 
     async def _authorization(self, prepared, *, steer_event=None):
         service = self.service
-        fields = thaw_json(prepared.intent.fields)
+        fields = {
+            **thaw_json(prepared.intent.fields),
+            **(
+                thaw_json(prepared.intent.target)
+                if prepared.intent.target is not None
+                else {}
+            ),
+        }
         if prepared.plugin is None:
             target = LocalMcpTarget(fields["server_id"], self._root())
             owner = target.owner
@@ -739,7 +798,11 @@ class CapabilityManagementCall:
             await manager.logout(owner, require_current=current)
         else:
             if steer_event is not None and steer_event.is_set():
-                return {"status": "CANCELLED", "message": "等待登录被用户取消", "adoption": "NOT_APPLICABLE"}
+                return {
+                    "status": "CANCELLED",
+                    "message": "等待登录被用户取消",
+                    "adoption": "NOT_APPLICABLE",
+                }
             manager = await service.mcp.prepare_oauth()
             flow = await manager.begin(owner, current)
             assert flow.task is not None
@@ -748,9 +811,15 @@ class CapabilityManagementCall:
             else:
                 redirected = asyncio.create_task(steer_event.wait())
                 try:
-                    await asyncio.wait((flow.task, redirected), return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.wait(
+                        (flow.task, redirected), return_when=asyncio.FIRST_COMPLETED
+                    )
                     if steer_event.is_set():
-                        return {"status": "CANCELLED", "message": "等待登录被用户取消", "adoption": "NOT_APPLICABLE"}
+                        return {
+                            "status": "CANCELLED",
+                            "message": "等待登录被用户取消",
+                            "adoption": "NOT_APPLICABLE",
+                        }
                     await asyncio.shield(flow.task)
                 finally:
                     redirected.cancel()
@@ -767,22 +836,22 @@ class CapabilityManagementCall:
                 "owner": asdict(owner),
                 "config_identity": flow.config.resolved_config_identity,
                 "display_identity": config_guard(flow.config),
-                "package_install_id": prepared.plugin.package_install_id if prepared.plugin else None,
+                "package_install_id": prepared.plugin.package_install_id
+                if prepared.plugin
+                else None,
             }
         return result
 
     @staticmethod
     def _result(prepared, status, current):
-        fields = thaw_json(prepared.intent.fields)
         return {
             "status": status,
             "action": prepared.intent.action.value,
-            "scope": prepared.intent.scope.value,
-            "identity": {
-                key: fields[key]
-                for key in ("server_id", "plugin_id", "skill_path", "source_kind")
-                if key in fields
-            },
+            **(
+                {"target": thaw_json(prepared.intent.target)}
+                if prepared.intent.target is not None
+                else {}
+            ),
             "current": current,
             "adoption": "NOT_APPLICABLE",
         }

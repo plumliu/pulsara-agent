@@ -379,25 +379,25 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         item for item in result.candidates if item.name == "pulsara-skill-installer"
     )
     skill_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:skill", "read_file", {"path": str(installer.path)})
+        ToolCall("call:skill", "read_file", {"target": {"kind": "PATH", "path": str(installer.path)}})
     )
     reference = installer.base_dir / "references" / "directory-contract.md"
     reference_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:reference", "read_file", {"path": str(reference)})
+        ToolCall("call:reference", "read_file", {"target": {"kind": "PATH", "path": str(reference)}})
     )
     assert skill_read.status is ToolResultState.SUCCESS
     assert reference_read.status is ToolResultState.SUCCESS
-    assert json.loads(skill_read.output)["path"] == str(installer.path)
-    assert json.loads(reference_read.output)["path"] == str(reference)
+    assert json.loads(skill_read.output)["target"]["path"] == str(installer.path)
+    assert json.loads(reference_read.output)["target"]["path"] == str(reference)
 
     plugin_installer = next(
         item for item in result.candidates if item.name == "pulsara-plugin-installer"
     )
     plugin_skill_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:plugin-skill", "read_file", {"path": str(plugin_installer.path)})
+        ToolCall("call:plugin-skill", "read_file", {"target": {"kind": "PATH", "path": str(plugin_installer.path)}})
     )
     assert plugin_skill_read.status is ToolResultState.SUCCESS
-    assert json.loads(plugin_skill_read.output)["path"] == str(plugin_installer.path)
+    assert json.loads(plugin_skill_read.output)["target"]["path"] == str(plugin_installer.path)
     for reference_name in (
         "conversion-contract.md",
         "codex-compatible.md",
@@ -408,11 +408,11 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             ToolCall(
                 f"call:plugin-reference:{reference_name}",
                 "read_file",
-                {"path": str(plugin_reference)},
+                {"target": {"kind": "PATH", "path": str(plugin_reference)}},
             )
         )
         assert plugin_reference_read.status is ToolResultState.SUCCESS
-        assert json.loads(plugin_reference_read.output)["path"] == str(
+        assert json.loads(plugin_reference_read.output)["target"]["path"] == str(
             plugin_reference
         )
 
@@ -420,16 +420,16 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         item for item in result.candidates if item.name == "pulsara-mcp-installer"
     )
     mcp_skill_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:mcp-skill", "read_file", {"path": str(mcp_installer.path)})
+        ToolCall("call:mcp-skill", "read_file", {"target": {"kind": "PATH", "path": str(mcp_installer.path)}})
     )
     assert mcp_skill_read.status is ToolResultState.SUCCESS
-    assert json.loads(mcp_skill_read.output)["path"] == str(mcp_installer.path)
+    assert json.loads(mcp_skill_read.output)["target"]["path"] == str(mcp_installer.path)
     mcp_reference = mcp_installer.base_dir / "references" / "connection-configuration.md"
     mcp_reference_read = ReadFileTool(tmp_path).execute(
-        ToolCall("call:mcp-config-reference", "read_file", {"path": str(mcp_reference)})
+        ToolCall("call:mcp-config-reference", "read_file", {"target": {"kind": "PATH", "path": str(mcp_reference)}})
     )
     assert mcp_reference_read.status is ToolResultState.SUCCESS
-    assert json.loads(mcp_reference_read.output)["path"] == str(mcp_reference)
+    assert json.loads(mcp_reference_read.output)["target"]["path"] == str(mcp_reference)
 
     analysis = next(item for item in result.candidates if item.name == "pulsara-data-analysis")
     assert analysis.source is SkillSource.BUNDLED
@@ -449,11 +449,11 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             ToolCall(
                 f"call:analysis-resource:{relative_path}",
                 "read_file",
-                {"path": str(resource)},
+                {"target": {"kind": "PATH", "path": str(resource)}},
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["path"] == str(resource)
+        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
 
     docs = next(item for item in result.candidates if item.name == "pulsara-docs")
     assert docs.source is SkillSource.BUNDLED
@@ -478,11 +478,11 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             ToolCall(
                 f"call:docs-resource:{relative_path}",
                 "read_file",
-                {"path": str(resource)},
+                {"target": {"kind": "PATH", "path": str(resource)}},
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["path"] == str(resource)
+        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
 
     pdf = next(item for item in result.candidates if item.name == "pulsara-pdf")
     assert pdf.source is SkillSource.BUNDLED
@@ -497,11 +497,11 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             ToolCall(
                 f"call:pdf-resource:{relative_path}",
                 "read_file",
-                {"path": str(resource)},
+                {"target": {"kind": "PATH", "path": str(resource)}},
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["path"] == str(resource)
+        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
 
     sheets = next(item for item in result.candidates if item.name == "pulsara-sheets")
     assert sheets.source is SkillSource.BUNDLED
@@ -522,11 +522,11 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
             ToolCall(
                 f"call:sheets-resource:{relative_path}",
                 "read_file",
-                {"path": str(resource)},
+                {"target": {"kind": "PATH", "path": str(resource)}},
             )
         )
         assert resource_read.status is ToolResultState.SUCCESS
-        assert json.loads(resource_read.output)["path"] == str(resource)
+        assert json.loads(resource_read.output)["target"]["path"] == str(resource)
 
 
 def _inspect(

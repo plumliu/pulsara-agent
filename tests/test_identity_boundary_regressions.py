@@ -407,7 +407,7 @@ def test_scheduled_http_mutation_rejects_invalid_id_before_service(action, bad):
         if action == "update":
             body["values"] = {}
         if action == "switch":
-            body["target"] = {"kind": "create", "values": {}}
+            body["replacement"] = {"kind": "create", "values": {}}
         request = NS(
             match_info={"task_id": bad, "action": action},
             json=AsyncMock(return_value=body),
@@ -466,7 +466,7 @@ def test_monitor_cancel_invalid_id_rejected_by_parser_and_owner(identity):
     from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 
     with pytest.raises(ValueError, match="INVALID_ID"):
-        parse_terminal_monitor_input({"action": "cancel", "monitor_id": identity})
+        parse_terminal_monitor_input({"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": identity}})
     # Validation must precede even looking up the live collection.
     owner = object.__new__(TerminalMonitorCoordinator)
     with pytest.raises(ValueError, match="INVALID_ID"):

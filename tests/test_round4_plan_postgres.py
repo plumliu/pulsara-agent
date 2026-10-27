@@ -210,7 +210,7 @@ def _commit_plan_batch(
         sibling_block_id,
         sibling_call_id,
         "write_file",
-        freeze_json({"path": "never.txt", "content": "must not run"}),
+        freeze_json({"target": {"kind": "PATH", "path": "never.txt"}, "content": "must not run"}),
     )
     selected = AssistantToolCallBlock(
         selected_block_id,

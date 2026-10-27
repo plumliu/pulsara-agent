@@ -70,7 +70,8 @@ def test_query_inputs_are_closed(arguments):
 @pytest.mark.parametrize(
     "target",
     [
-        {"kind": "MCP_SERVER", "runtime_server_id": "s", "scope": "USER"},
+        {'kind': "MCP_CONNECTION", 'runtime_server_id': "s", 'scope': "USER"},
+        {"kind": "MCP_SERVER", "scope": "USER", "source_kind": "LOCAL", "server_id": "s"},
         {"kind": "PLUGIN", "scope": "USER", "plugin_id": "*", "search": "a"},
         {"kind": "SKILL", "skill_path": "SKILL.md"},
         {"kind": "MCP_TOOL", "server_id": "s", "tool_name": "t", "permit": True},
@@ -108,12 +109,7 @@ def test_query_catalog_hard_cut_and_local_availability():
         ({"target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "known"}}, True),
         (
             {
-                "target": {
-                    "kind": "MCP_SERVER",
-                    "scope": "USER",
-                    "source_kind": "LOCAL",
-                    "server_id": "a",
-                }
+                "target": {'kind': "MCP_CONNECTION", 'scope': "USER", 'source_kind': "LOCAL", 'server_id': "a"}
             },
             True,
         ),
@@ -165,7 +161,7 @@ def test_no_mcp_port_lists_local_and_bundled_without_full_configuration(
             scope="WORKSPACE",
             source_path=str(source),
         )
-        path = installed["identity"]["skill_path"]
+        path = installed["target"]["skill_path"]
         listed = await query(service, {"kind": "SKILL"})
         item = next(
             item for item in listed["items"] if item["target"]["skill_path"] == path
@@ -257,10 +253,7 @@ def test_mcp_paths_and_advanced_configuration_are_not_list_payload(tmp_path):
         }
         result = await invoke(
             service,
-            action="ADD_LOCAL_MCP",
-            scope="USER",
-            server_id="docs",
-            config=config,
+            action="ADD_LOCAL_MCP", config=config, target={"kind":'MCP_CONNECTION', 'scope':"USER", 'source_kind':'LOCAL', 'server_id':"docs"},
         )
         assert "config" not in result["current"]
         assert result["current"]["config_path"] == str(service.mcp.user_config_path)
@@ -320,17 +313,17 @@ def test_current_project_selection_applies_to_user_rows(tmp_path):
         items = {item["target"]["skill_path"]: item for item in listing["items"]}
         user_detail = await query(
             service,
-            {"target": items[user["identity"]["skill_path"]]["target"]},
+            {"target": items[user["target"]["skill_path"]]["target"]},
             inspect=True,
         )
         project_detail = await query(
             service,
-            {"target": items[project["identity"]["skill_path"]]["target"]},
+            {"target": items[project["target"]["skill_path"]]["target"]},
             inspect=True,
         )
         assert user_detail["selected"] is False
         assert project_detail["selected"] is True
-        assert "覆盖" in items[user["identity"]["skill_path"]]["status"]
+        assert "覆盖" in items[user["target"]["skill_path"]]["status"]
         await service.mcp.aclose()
 
     asyncio.run(run())
@@ -715,13 +708,7 @@ def test_plugin_connection_detail_uses_input_defaults_and_saved_overlay(tmp_path
             connections=service.mcp,
         )
         assert installed.disposition.value == "REPLACED"
-        target = {
-            "kind": "MCP_SERVER",
-            "scope": "USER",
-            "source_kind": "PLUGIN",
-            "plugin_id": "example",
-            "server_id": "docs",
-        }
+        target = {'kind': "MCP_CONNECTION", 'scope': "USER", 'source_kind': "PLUGIN", 'plugin_id': "example", 'server_id': "docs"}
         detail = await query(service, {"target": target}, inspect=True)
         assert detail["connection"]["endpoint"] == "https://default.example/mcp"
         from pulsara_agent.plugins.mcp_connection import (
@@ -731,15 +718,11 @@ def test_plugin_connection_detail_uses_input_defaults_and_saved_overlay(tmp_path
 
         configured = await invoke(
             service,
-            action="CONFIGURE_PLUGIN_MCP_CONNECTION",
-            scope="USER",
-            plugin_id="example",
-            server_id="docs",
-            overlay=overlay_to_dict(
+            action="CONFIGURE_PLUGIN_MCP_CONNECTION", overlay=overlay_to_dict(
                 PluginMcpConnectionOverlay(
                     "docs", "streamable_http", endpoint="https://configured.example/mcp"
                 )
-            ),
+            ), target={"kind":'MCP_CONNECTION', 'scope':"USER", 'source_kind':'PLUGIN', 'plugin_id':"example", 'server_id':"docs"},
         )
         assert configured["status"] == "APPLIED"
         detail = await query(service, {"target": target}, inspect=True)
@@ -793,7 +776,7 @@ def test_local_query_never_materializes_credentials_or_runtime_config(
         monkeypatch.setattr(service.mcp.settings, "read", forbidden)
         (row,) = (
             await query(
-                service, {"kind": "MCP_SERVER", "scope": "USER", "source_kind": "LOCAL"}
+                service, {'kind': "MCP_SERVER", 'scope': "USER", 'source_kind': "LOCAL"}
             )
         )["items"]
         detail = await query(service, {"target": row["target"]}, inspect=True)
@@ -1050,7 +1033,7 @@ def test_large_hook_query_artifact_roundtrips_through_canonical_postgres_owner(
     )
 
 
-@pytest.mark.parametrize("kind", ["HOOK_SOURCE", "MCP_SERVER"])
+@pytest.mark.parametrize("kind", ["HOOK_SOURCE", "MCP_CONNECTION"])
 def test_exact_plugin_child_unavailable_preserves_real_source_failure(tmp_path, kind):
     async def run():
         from pulsara_agent.plugins.contracts import PluginScopeKind
@@ -1070,7 +1053,7 @@ def test_exact_plugin_child_unavailable_preserves_real_source_failure(tmp_path, 
             "source_kind": "PLUGIN",
             "plugin_id": "broken",
         }
-        if kind == "MCP_SERVER":
+        if kind == "MCP_CONNECTION":
             target["server_id"] = "docs"
         with pytest.raises(CapabilityQueryError) as error:
             await query(service, {"target": target}, inspect=True)
@@ -1092,12 +1075,7 @@ def test_local_mcp_unavailable_is_not_absent_but_complete_missing_target_is_abse
 ):
     async def run():
         service = preparation(tmp_path)
-        target = {
-            "kind": "MCP_SERVER",
-            "scope": "USER",
-            "source_kind": "LOCAL",
-            "server_id": "docs",
-        }
+        target = {'kind': "MCP_CONNECTION", 'scope': "USER", 'source_kind': "LOCAL", 'server_id': "docs"}
         service.mcp.user_config_path.write_text("servers: [invalid]")
         with pytest.raises(CapabilityQueryError) as error:
             await query(service, {"target": target}, inspect=True)

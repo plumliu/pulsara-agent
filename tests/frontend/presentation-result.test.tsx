@@ -27,3 +27,15 @@ it('keeps an exact task target actionable without accepting session or tab overr
   fireEvent.click(screen.getByRole('button', {name:target.task_id}));
   expect(open).toHaveBeenCalledWith([target]);
 });
+it('adapts public file and host-bound process targets to native display requests', () => {
+  const result = parsePresentationResult(JSON.stringify({targets:[
+    {target:{kind:'PATH',path:'/project/a.md'}},
+    {target:{kind:'PROCESS',process_id:'p1'},host_session_id:'host:one'},
+  ]}));
+  expect(result?.targets).toEqual([
+    {type:'file',path:'/project/a.md'},
+    {type:'terminal',process_id:'p1',host_session_id:'host:one'},
+  ]);
+  expect(parsePresentationResult(JSON.stringify({targets:[{target:{kind:'PROCESS',process_id:'p1'}}]}))).toBeUndefined();
+  expect(parsePresentationResult(JSON.stringify({targets:[{type:'file',path:'/project/a.md'}]}))).toBeUndefined();
+});

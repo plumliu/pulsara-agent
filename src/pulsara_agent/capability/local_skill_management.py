@@ -223,6 +223,37 @@ class LocalSkillManagementService:
             description=request.description,
         )
 
+    def resolve_loose_skill_scope(
+        self, *, skill_path: Path, workspace_root: Path, removal: bool
+    ) -> LocalSkillInstallScope:
+        """Resolve only the native action's supported roots, before effects.
+
+        Definition/configuration and removal observations remain with their
+        existing owners. In particular, removal does not scan all definitions.
+        """
+        if not skill_path.is_absolute() or skill_path.name != SKILL_FILE_NAME:
+            raise ValueError("Skill management requires an exact installed SKILL.md path")
+        user_home = self._user_home_resolution or resolve_user_home()
+        producer = self._loose_producer or LooseSkillDefinitionProducer(
+            pulsara_home_resolution=self._home_resolution(user_home_resolution=user_home),
+            user_home_resolution=user_home,
+        )
+        scopes = {
+            LocalSkillRootKind.USER_PULSARA: LocalSkillInstallScope.USER,
+            LocalSkillRootKind.USER_AGENTS: LocalSkillInstallScope.USER,
+            LocalSkillRootKind.WORKSPACE_PULSARA: LocalSkillInstallScope.WORKSPACE,
+        }
+        if not removal:
+            scopes[LocalSkillRootKind.WORKSPACE_AGENTS] = LocalSkillInstallScope.WORKSPACE
+        matches = {
+            scopes[root.root_kind]
+            for root in producer.prepare_root_policy(workspace_root).roots
+            if root.root_kind in scopes and root.path == skill_path.parent.parent
+        }
+        if len(matches) != 1:
+            raise ValueError("Skill target has no unique supported management scope")
+        return matches.pop()
+
     def inspect_loose_skill_removal(
         self,
         *,

@@ -89,6 +89,7 @@ from pulsara_agent.primitives.context import (
 @dataclass(frozen=True, slots=True)
 class PreparedCapabilityManagementInvocation:
     intent: CapabilityManagementIntent
+    resolved_scope: CapabilityManagementScope
     effects: ResolvedCapabilityEffectProjection
     user_inputs: tuple[str, ...]
     public_prefill: FrozenJsonObjectFact
@@ -130,9 +131,28 @@ class CapabilityManagementPreparation:
     ) -> PreparedCapabilityManagementInvocation:
         intent = parse_capability_management_intent(arguments)
         fields = thaw_json(intent.fields)
+        target = thaw_json(intent.target) if intent.target is not None else {}
+        if target.get("kind") == "SKILL":
+            native_scope = await asyncio.to_thread(
+                self.skills.resolve_loose_skill_scope,
+                skill_path=Path(target["skill_path"]),
+                workspace_root=self.workspace_root,
+                removal=intent.action is Action.REMOVE_LOOSE_SKILL,
+            )
+            resolved_scope = CapabilityManagementScope(native_scope.value.upper())
+        else:
+            resolved_scope = intent.scope or CapabilityManagementScope(target["scope"])
+        # These are native owner arguments, never a second public request/parser.
+        fields.update(
+            {
+                key: value
+                for key, value in target.items()
+                if key not in {"kind", "scope"}
+            }
+        )
         root = (
             self.workspace_root
-            if intent.scope is CapabilityManagementScope.WORKSPACE
+            if resolved_scope is CapabilityManagementScope.WORKSPACE
             else None
         )
         if (
@@ -187,6 +207,9 @@ class CapabilityManagementPreparation:
                     raise ValueError("save an OAuth connection before authorizing it")
                 return PreparedCapabilityManagementInvocation(
                     intent,
+                    CapabilityManagementScope.WORKSPACE
+                    if root is not None
+                    else CapabilityManagementScope.USER,
                     ResolvedCapabilityEffectProjection(
                         outside_workspace_write=True,
                         destructive=intent.action is Action.CLEAR_MCP_AUTHORIZATION,
@@ -222,6 +245,9 @@ class CapabilityManagementPreparation:
             )
             return PreparedCapabilityManagementInvocation(
                 intent,
+                CapabilityManagementScope.WORKSPACE
+                if root is not None
+                else CapabilityManagementScope.USER,
                 ResolvedCapabilityEffectProjection(
                     outside_workspace_write=True, process_control=process
                 ),
@@ -231,7 +257,7 @@ class CapabilityManagementPreparation:
                 plugin=current,
             )
         if intent.action is Action.REMOVE_PLUGIN:
-            scope = PluginScopeKind(intent.scope.value)
+            scope = PluginScopeKind(resolved_scope.value)
             identity = _request_identity(scope, fields["plugin_id"], root)
             observed = await asyncio.to_thread(
                 self.plugins.observe_local_plugin_instance,
@@ -240,8 +266,14 @@ class CapabilityManagementPreparation:
             )
             current = observed.current
             if current is None:
-                raise McpManagementConflict("Plugin is no longer installed in this scope")
-            self._exact(fields, "expected_package_install_id", current.current_package_install_id)
+                raise McpManagementConflict(
+                    "Plugin is no longer installed in this scope"
+                )
+            self._exact(
+                fields,
+                "expected_package_install_id",
+                current.current_package_install_id,
+            )
             process = current.enabled
             if process:
                 # Optional component observation refines effects for healthy packages;
@@ -251,13 +283,26 @@ class CapabilityManagementPreparation:
                 except ValueError:
                     pass
                 else:
-                    if component.package_install_id == current.current_package_install_id:
+                    if (
+                        component.package_install_id
+                        == current.current_package_install_id
+                    ):
                         process = self._has_process(component)
             return PreparedCapabilityManagementInvocation(
                 intent,
-                ResolvedCapabilityEffectProjection(outside_workspace_write=True, destructive=True, process_control=process),
-                (), freeze_json(intent.to_dict()),
-                freeze_json({"expected_package_install_id": current.current_package_install_id}),
+                CapabilityManagementScope.WORKSPACE
+                if root is not None
+                else CapabilityManagementScope.USER,
+                ResolvedCapabilityEffectProjection(
+                    outside_workspace_write=True,
+                    destructive=True,
+                    process_control=process,
+                ),
+                (),
+                freeze_json(intent.to_dict()),
+                freeze_json(
+                    {"expected_package_install_id": current.current_package_install_id}
+                ),
                 plugin_instance=observed,
             )
         plugin = await self._plugin(root, fields["plugin_id"])
@@ -367,6 +412,9 @@ class CapabilityManagementPreparation:
                 raise ValueError("unsupported Plugin management action")
         return PreparedCapabilityManagementInvocation(
             intent,
+            CapabilityManagementScope.WORKSPACE
+            if root is not None
+            else CapabilityManagementScope.USER,
             ResolvedCapabilityEffectProjection(
                 outside_workspace_write=True,
                 process_control=process,
@@ -381,9 +429,14 @@ class CapabilityManagementPreparation:
         )
 
     async def _skill(self, intent, fields, root):
-        scope = LocalSkillInstallScope(intent.scope.value.lower())
+        scope = (
+            LocalSkillInstallScope.WORKSPACE
+            if root is not None
+            else LocalSkillInstallScope.USER
+        )
         effects = ResolvedCapabilityEffectProjection(
-            workspace_write=root is not None, outside_workspace_write=root is None,
+            workspace_write=root is not None,
+            outside_workspace_write=root is None,
             destructive=intent.action is Action.REMOVE_LOOSE_SKILL,
         )
         target = validation = removal = None
@@ -417,6 +470,9 @@ class CapabilityManagementPreparation:
             )
         return PreparedCapabilityManagementInvocation(
             intent,
+            CapabilityManagementScope.WORKSPACE
+            if root is not None
+            else CapabilityManagementScope.USER,
             effects,
             (),
             freeze_json(intent.to_dict()),
@@ -553,6 +609,9 @@ class CapabilityManagementPreparation:
         }
         return PreparedCapabilityManagementInvocation(
             intent,
+            CapabilityManagementScope.WORKSPACE
+            if root is not None
+            else CapabilityManagementScope.USER,
             ResolvedCapabilityEffectProjection(outside_workspace_write=True),
             ("hook_source_review",)
             if intent.action is Action.TRUST_HOOK_SOURCE
@@ -563,7 +622,9 @@ class CapabilityManagementPreparation:
             hook=snapshot,
         )
 
-    def inspect_plugin_skill_definitions(self, root, *, cancellation=None, deadline_monotonic=None) -> FrozenPluginSkillDefinitions:
+    def inspect_plugin_skill_definitions(
+        self, root, *, cancellation=None, deadline_monotonic=None
+    ) -> FrozenPluginSkillDefinitions:
         # Same native package view and producer used by Host activation and CLI.
         from pulsara_agent.plugins.view import EnabledPluginViewOwner
         from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
@@ -576,8 +637,12 @@ class CapabilityManagementPreparation:
             store=store, credential_boundary=self.plugins._credential_boundary
         ).observe(
             workspace_root=root,
-            deadline_monotonic=deadline_monotonic if deadline_monotonic is not None else self.deadline(),
-            cancellation=cancellation if cancellation is not None else NeverCancelPluginOperation(),
+            deadline_monotonic=deadline_monotonic
+            if deadline_monotonic is not None
+            else self.deadline(),
+            cancellation=cancellation
+            if cancellation is not None
+            else NeverCancelPluginOperation(),
         )
         try:
             return PluginSkillDefinitionProducer().observe(view)
@@ -623,6 +688,9 @@ class CapabilityManagementPreparation:
                 }
                 return PreparedCapabilityManagementInvocation(
                     intent,
+                    CapabilityManagementScope.WORKSPACE
+                    if root is not None
+                    else CapabilityManagementScope.USER,
                     ResolvedCapabilityEffectProjection(
                         workspace_write=root is not None,
                         outside_workspace_write=root is None,
@@ -641,6 +709,9 @@ class CapabilityManagementPreparation:
             requirements.append("credential_destination_confirmation")
         return PreparedCapabilityManagementInvocation(
             intent,
+            CapabilityManagementScope.WORKSPACE
+            if root is not None
+            else CapabilityManagementScope.USER,
             mutation.effects,
             tuple(requirements),
             freeze_json(

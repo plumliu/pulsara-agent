@@ -531,7 +531,7 @@ def test_round7_custom_tool_cannot_promote_claimed_trusted_duration(
         try:
             result = await port.invoke(
                 tool_name="read_file",
-                arguments={"path": "ignored"},
+                arguments={"target": {"kind": "PATH", "path": "ignored"}},
                 tool_call_id=context.tool_call_id,
                 attempt_id=context.attempt_id,
                 turn_id=context.turn_id,

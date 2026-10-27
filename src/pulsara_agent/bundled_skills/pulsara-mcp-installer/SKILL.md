@@ -10,14 +10,14 @@ description: Set up MCP connections from authoritative endpoints or commands, co
 Use `manage_capability` with the user's scope and a new independent `server_id`:
 
 ```json
-{"action":"ADD_LOCAL_MCP","scope":"USER","server_id":"docs"}
+{"action":"ADD_LOCAL_MCP","target":{"kind":"MCP_CONNECTION","scope":"USER","source_kind":"LOCAL","server_id":"docs"}}
 ```
 
 Omitting `config` opens the shared connection editor. For an existing independent
-connection use `UPDATE_LOCAL_MCP` with its observed scope and ID; omission opens
+connection use `UPDATE_LOCAL_MCP` with its observed `MCP_CONNECTION` target; omission opens
 its prefilled editor. A supplied config replaces the complete entry, not selected
 fields. The editor also controls enablement. Plugin connections instead use
-`CONFIGURE_PLUGIN_MCP_CONNECTION` with `plugin_id` and the package-local `server_id`;
+`CONFIGURE_PLUGIN_MCP_CONNECTION` with their `MCP_CONNECTION` target;
 omit `overlay` for that editor. Package declarations remain package-owned.
 
 1. Establish the vendor's exact endpoint or stdio command/args/cwd. A vendor CLI
@@ -25,12 +25,12 @@ omit `overlay` for that editor. Package declarations remain package-owned.
    and explicit legacy SSE; do not guess transport from a product name.
 2. Reuse `USER` or `WORKSPACE` from the user's intent; ask only if ambiguous.
    List `kind:"MCP_SERVER"` to avoid duplicates. Inspect an observed target for
-   the connection location and details; copy identity fields into management.
+   the connection location and details; copy its `MCP_CONNECTION` target into management.
 3. Use the editor for unknown settings or credentials. Never put secret values
    in arguments, conversation, logs or packages. Do not read private settings or
    repository implementation to construct config, or broaden trust/network access.
-4. For an already configured OAuth connection use `AUTHORIZE_MCP` with `server_id`;
-   add `plugin_id` for a Plugin connection. The user authorizes interactively.
+4. For an already configured OAuth connection use `AUTHORIZE_MCP` with its
+   `MCP_CONNECTION` target. The user authorizes interactively.
    `CLEAR_MCP_AUTHORIZATION` clears local grants, not remote tokens. A background
    connection cannot initiate browser login. Optional guards can normally be omitted.
 
@@ -67,12 +67,13 @@ provider roots. For partial adoption, inspect the reported failures and retry
 observation/adoption, not the completed mutation. Explicit `reload_capabilities`
 is for partial adoption or out-of-band changes, not a routine second step.
 
-List `kind:"MCP_TOOL"` with the copied MCP_SERVER target as `parent`, then inspect
+List `kind:"MCP_TOOL"` with the copied MCP_CONNECTION or runtime MCP_SERVER target as `parent`, then inspect
 an exact tool target. Its `input_schema` and `invocation.mode` decide the call:
-`DIRECT` uses the named native tool; `META` uses the returned `tool_ref` with
-`use_new_mcp_tool`; `UNAVAILABLE` explains the obstacle. Never guess schemas,
-names or availability. Resource/prompt metadata is inspected before
-`read_mcp_resource` / `get_mcp_prompt`.
+`DIRECT` uses the named native tool; `META` copies `invocation.target` into
+`use_new_mcp_tool.target` and supplies the tool's `arguments`; `UNAVAILABLE` explains the obstacle. Never guess schemas,
+names or availability. Copy resource/prompt targets from list/inspect into
+`read_mcp_resource` / `get_mcp_prompt`. A resource-template target also needs a concrete
+`uri` matching its `uri_template`.
 
 Perform a representative call only when requested and appropriate; report what
 passed and what remains unavailable. Authentication failures or disconnects do

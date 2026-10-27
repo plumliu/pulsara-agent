@@ -57,7 +57,7 @@ def _call(ordinal: int) -> CompletedToolCallBlock:
         derive_id("block", "test-fixture", f"block:{ordinal}"),
         f"call:{ordinal}",
         "view_image",
-        freeze_json({"path": f"/tmp/{ordinal}.png"}),
+        freeze_json({"target": {"kind": "PATH", "path": f"/tmp/{ordinal}.png"}}),
     )
 
 
@@ -66,7 +66,7 @@ def _reference_call(ordinal: int) -> CompletedToolCallBlock:
         derive_id("block", "test-fixture", f"block:{ordinal}"),
         f"call:{ordinal}",
         "view_image",
-        freeze_json({"image_ref": derive_id("image", "test-fixture", str(ordinal))}),
+        freeze_json({"target": {"kind": "IMAGE_REF", "image_ref": derive_id("image", "test-fixture", str(ordinal))}}),
     )
 
 
@@ -381,7 +381,7 @@ def test_view_image_uses_the_frozen_target_modality_tristate_before_read(
             )
             result = await port.invoke(
                 tool_name="view_image",
-                arguments={"path": "missing.png"},
+                arguments={"target": {"kind": "PATH", "path": "missing.png"}},
                 tool_call_id="call:image",
                 attempt_id='attempt:g6lyg5qu5b6lsmxjrpkv3wjm4y',
                 turn_id='turn:hei4tpo3ncy7wcxg6s4x3caeae',
@@ -470,7 +470,7 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
         try:
             result = await port.invoke(
                 tool_name="view_image",
-                arguments={"image_ref": image.image_ref},
+                arguments={"target": {"kind": "IMAGE_REF", "image_ref": image.image_ref}},
                 tool_call_id="call:image-reference",
                 attempt_id='attempt:b2fgctpyeklxqoxnhe3qgawn54',
                 turn_id='turn:rqybqkquqqfi6dff7gc7kjykdm',
@@ -541,7 +541,7 @@ def test_view_image_reference_rejects_text_only_target_before_database_read(
         try:
             result = await port.invoke(
                 tool_name="view_image",
-                arguments={"image_ref": "image:" + "a" * 26},
+                arguments={"target": {"kind": "IMAGE_REF", "image_ref": "image:" + "a" * 26}},
                 tool_call_id="call:image-reference-text-only",
                 attempt_id='attempt:37tsqlhbithvq6qpgl372ha2mq',
                 turn_id='turn:ap2ak63go72kw6rpjrsxslbr5q',
@@ -566,10 +566,10 @@ def test_view_image_reference_rejects_text_only_target_before_database_read(
     "arguments",
     (
         {},
-        {"path": "x.png", "image_ref": "sha256:" + "0" * 64},
-        {"path": None},
-        {"image_ref": "sha256:not-a-digest"},
-        {"path": "x.png", "unexpected": True},
+        {"target": {"kind": "PATH", "path": "x.png", "image_ref": "image:" + "a" * 26}},
+        {"target": {"kind": "PATH", "path": None}},
+        {"target": {"kind": "IMAGE_REF", "image_ref": "sha256:not-a-digest"}},
+        {"target": {"kind": "PATH", "path": "x.png"}, "unexpected": True},
     ),
 )
 def test_view_image_source_parser_rejects_every_non_union_shape(arguments) -> None:
@@ -762,7 +762,7 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
                 executor_binding_fingerprint=binding.executor_binding_fingerprint,
                 canonical_bytes=10 if mode == 'png_budget' else 4096, logical_bytes=4096,wire_bytes=4096,input_tokens=4096,
                 quote_owner=SimpleNamespace(quote=quote))
-            result = await port.invoke(tool_name='view_image', arguments={'path':'missing.html' if mode == 'missing' else 'chart.html'},
+            result = await port.invoke(tool_name='view_image', arguments={"target": {"kind": "PATH", "path": 'missing.html' if mode == 'missing' else 'chart.html'}},
                 tool_call_id='call:html',attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm',turn_id='turn:4s6voic575fjaadstkw7z4cttq',assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=replace(context,input_modalities=('text',) if mode=='text_only' else ('text','image'),image_resource_allowance=allowance))
             if mode in {'success', 'dependencies'}:
@@ -820,7 +820,7 @@ def test_svg_view_image_real_browser_preserves_complete_frame(tmp_path, dimensio
             canonical_bytes=1_000_000, logical_bytes=1_000_000, wire_bytes=1_000_000, input_tokens=10000,
             quote_owner=SimpleNamespace(quote=lambda **kwargs: FrozenImageToolResourceIncrement(canonical_bytes=100, logical_bytes=100, wire_bytes=100, input_tokens=100)))
         try:
-            result = await port.invoke(tool_name='view_image', arguments={'path':'完整图.svg'}, tool_call_id='call:svg',
+            result = await port.invoke(tool_name='view_image', arguments={"target": {"kind": "PATH", "path": '完整图.svg'}}, tool_call_id='call:svg',
                 attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm', turn_id='turn:4s6voic575fjaadstkw7z4cttq', assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 invocation_context=replace(context, input_modalities=('text','image'), image_resource_allowance=allowance))
             assert result.state == 'SUCCESS', result.content

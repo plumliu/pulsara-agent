@@ -92,6 +92,7 @@ async def _search(
             document={"identity": [i]},
             messages=(
                 {
+                    "entry_id": derive_id("entry", "test-fixture", f"entry:q:{i}"),
                     "role": "assistant",
                     "label": "助手回答",
                     "at": "2026-01-01",
@@ -222,7 +223,7 @@ def test_rerank_can_promote_a_candidate_outside_the_return_limit(
     tmp_path, monkeypatch, limit
 ):
     body, observed = asyncio.run(_search(tmp_path, monkeypatch, limit=limit))
-    ids = tuple(item["memory_id"] for item in body["memories"])
+    ids = tuple(item["target"]["memory_id"] for item in body["memories"])
     expected = ('memory:wnc5htbuf7tyr364wwomqvp6wu', *(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(40) if index != 11))
     assert ids == expected[:limit]
     assert len(observed.candidates) == max(20, limit)
@@ -237,7 +238,7 @@ def test_rerank_fallback_returns_only_the_requested_rrf_prefix(
     tmp_path, monkeypatch, mode
 ):
     body, observed = asyncio.run(_search(tmp_path, monkeypatch, limit=5, mode=mode))
-    ids = tuple(item["memory_id"] for item in body["memories"])
+    ids = tuple(item["target"]["memory_id"] for item in body["memories"])
     assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
     assert len(observed.candidates) == 20
     assert observed.relations == ids
@@ -255,7 +256,7 @@ def test_rerank_pool_preserves_requested_kind_priority_and_relaxation_threshold(
     if exact_count == 2:
         assert observed.stages == ["DECISION", None]
         assert len(observed.documents) == 20
-        assert [item["memory_id"] for item in body["memories"]] == [
+        assert [item["target"]["memory_id"] for item in body["memories"]] == [
             'memory:wjqlt4qvqiyumufn5ztzwrzlba',
             'memory:cw6aa73zp6zcl2gg23ht25tx5e',
             'memory:wnc5htbuf7tyr364wwomqvp6wu',
@@ -283,7 +284,7 @@ def test_automatic_recall_still_selects_five_rrf_results_without_rerank(
     body, observed = asyncio.run(
         _search(tmp_path, monkeypatch, limit=5, automatic=True)
     )
-    ids = tuple(item["memory_id"] for item in body["items"])
+    ids = tuple(item["target"]["memory_id"] for item in body["items"])
     assert ids == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(5))
     assert observed.candidates == tuple(derive_id("memory", "test-fixture", f"memory:{index}") for index in range(20))
     assert observed.documents == ()
@@ -304,7 +305,7 @@ def test_implicit_recall_ranks_twenty_before_injecting_five(
             mode=mode,
         )
     )
-    ids = tuple(item["memory_id"] for item in body["items"])
+    ids = tuple(item["target"]["memory_id"] for item in body["items"])
     assert len(observed.candidates) == 20
     assert len(observed.documents) == 20
     assert observed.purpose == "automatic_recall"
@@ -357,6 +358,17 @@ def test_mixed_pool_is_elastic_and_one_decision_selects_directly(
     for x in body["items"]:
         if x.get("source") == "session_history":
             assert "memory_id" not in x
+            assert x["target"]["kind"] == "SESSION_ENTRY"
+            assert x["target"]["session_id"]
+            assert x["target"]["entry_id"]
+            for message in x["messages"]:
+                assert message["target"]["kind"] == "SESSION_ENTRY"
+                assert message["target"]["session_id"] == x["target"]["session_id"]
+                assert message["target"]["entry_id"]
+    for document in seen.documents:
+        if document.get("source") == "session_history":
+            assert "target" not in document
+            assert all("target" not in message for message in document["messages"])
 
 
 @pytest.mark.parametrize("mode", ["failure", "malformed", "unconfigured"])
@@ -380,7 +392,7 @@ def test_mixed_no_decision_fallback_has_elastic_four_plus_one(
         )
     )
     assert (
-        sum("memory_id" in x for x in body["items"]),
+        sum(x.get("source") == "memory" for x in body["items"]),
         sum(x.get("source") == "session_history" for x in body["items"]),
     ) == expected
 
@@ -423,7 +435,7 @@ def test_automatic_route_timeout_preserves_other_source(
     assert len(body["items"]) == 1
     assert len(observed.documents) == int(rank_automatic)
     if timed_out_route == "history":
-        assert body["items"][0]["memory_id"] == 'memory:wjqlt4qvqiyumufn5ztzwrzlba'
+        assert body["items"][0]["target"]["memory_id"] == 'memory:wjqlt4qvqiyumufn5ztzwrzlba'
         assert observed.candidates == ('memory:wjqlt4qvqiyumufn5ztzwrzlba',)
     else:
         assert body["items"][0]["source"] == "session_history"
@@ -452,7 +464,7 @@ def test_implicit_decision_admission_filters_before_top_five(
             scores=scores,
         )
     )
-    assert tuple(item["memory_id"] for item in body["items"]) == expected
+    assert tuple(item["target"]["memory_id"] for item in body["items"]) == expected
     assert seen.purpose == "automatic_recall"
     assert seen.calls == 1
     assert len(seen.documents) == len(scores)
@@ -475,7 +487,7 @@ def test_implicit_decision_uses_same_threshold_for_memory_and_history(
             scores=[0.699, 0.7, 0.9, 0.699, 0.7],
         )
     )
-    assert [item.get("memory_id", item.get("title")) for item in body["items"]] == [
+    assert [item["target"].get("memory_id", item.get("title")) for item in body["items"]] == [
         "history 0",
         'memory:cw6aa73zp6zcl2gg23ht25tx5e',
         "history 2",
@@ -512,7 +524,7 @@ def test_failed_implicit_decision_does_not_bypass_history_admission(
             scores=[1.1] * (memory_count + 3) if mode == "bad_probability" else None,
         )
     )
-    assert tuple(item["memory_id"] for item in body["items"]) == tuple(
+    assert tuple(item["target"]["memory_id"] for item in body["items"]) == tuple(
         derive_id("memory", "test-fixture", f"memory:{i}") for i in range(memory_count)
     )
     assert seen.relations == tuple(derive_id("memory", "test-fixture", f"memory:{i}") for i in range(memory_count))
@@ -543,7 +555,7 @@ def test_explicit_decision_and_related_inspection_do_not_use_implicit_threshold(
         assert coverage["rerank"] == "APPLIED"
         assert seen.purpose == "related_memory"
     else:
-        assert tuple(item["memory_id"] for item in result["memories"]) == (
+        assert tuple(item["target"]["memory_id"] for item in result["memories"]) == (
             'memory:cw6aa73zp6zcl2gg23ht25tx5e',
             'memory:vsoux3qrotuascpf7m6x65toni',
             'memory:4mstzwylibbbjah5uvrqv37oia',

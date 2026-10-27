@@ -408,7 +408,7 @@ def test_host_discards_entire_bad_generation_and_executes_accepted_tool_once(
                 "name": "write_file",
                 "arguments": json.dumps(
                     {
-                        "path": "discarded.txt",
+                        "target": {"kind": "PATH", "path": "discarded.txt"},
                         "content": "must not exist",
                     }
                 ),
@@ -420,7 +420,7 @@ def test_host_discards_entire_bad_generation_and_executes_accepted_tool_once(
         _tool_chunks(
             json.dumps(
                 {
-                    "path": "accepted.txt",
+                    "target": {"kind": "PATH", "path": "accepted.txt"},
                     "content": "written once",
                 }
             ),
@@ -439,7 +439,7 @@ def test_host_discards_entire_bad_generation_and_executes_accepted_tool_once(
     original_write = WriteFileTool.execute
 
     def observe_write(self, call, **kwargs):
-        physical_write_paths.append(call.arguments["path"])
+        physical_write_paths.append(call.arguments["target"]["path"])
         return original_write(self, call, **kwargs)
 
     monkeypatch.setattr(WriteFileTool, "execute", observe_write)

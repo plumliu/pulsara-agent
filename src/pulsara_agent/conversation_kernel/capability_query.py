@@ -245,7 +245,7 @@ class CapabilitySourceQuery:
             )
         for server in item.summary.mcp.mcp_servers:
             target = {
-                "kind": "MCP_SERVER",
+                "kind": "MCP_CONNECTION",
                 "scope": scope,
                 "source_kind": "PLUGIN",
                 "plugin_id": plugin_id,
@@ -663,7 +663,7 @@ class CapabilitySourceQuery:
                     continue
                 for config in configs:
                     target = {
-                        "kind": "MCP_SERVER",
+                        "kind": "MCP_CONNECTION",
                         "scope": scope,
                         "source_kind": "LOCAL",
                         "server_id": config.server_id,
@@ -838,8 +838,7 @@ class CapabilitySourceQuery:
             )
             if (
                 target
-                and target["kind"] == "MCP_SERVER"
-                and "runtime_server_id" not in target
+                and target["kind"] == "MCP_CONNECTION"
             ):
                 need_sources = True
             if need_sources:
@@ -908,7 +907,7 @@ class CapabilitySourceQuery:
                     for item in observed.instances:
                         if (
                             inspect
-                            and kind == "MCP_SERVER"
+                            and kind == "MCP_CONNECTION"
                             and item.summary.mcp.disposition.value
                             in {"INVALID", "UNAVAILABLE"}
                         ):
@@ -924,7 +923,7 @@ class CapabilitySourceQuery:
                         )
                 if not self.exact_plugin:
                     local_arguments = dict(arguments)
-                    if target and target["kind"] == "MCP_SERVER":
+                    if target and target["kind"] == "MCP_CONNECTION":
                         local_arguments.update(
                             kind="MCP_SERVER",
                             scope=target.get("scope"),
@@ -932,7 +931,7 @@ class CapabilitySourceQuery:
                         )
                     if inspect and kind != "SKILL":
                         local_arguments.update(
-                            kind=kind,
+                            kind="MCP_SERVER" if kind == "MCP_CONNECTION" else kind,
                             scope=target.get("scope"),
                             source_kind=target.get("source_kind"),
                         )
@@ -968,7 +967,7 @@ class CapabilitySourceQuery:
                             and not live["catalog_discovered"]
                         ):
                             self.unavailable_kinds.add(kind)
-                    unavailable = kind in self.unavailable_kinds
+                    unavailable = ("MCP_SERVER" if kind == "MCP_CONNECTION" else kind) in self.unavailable_kinds
                     raise CapabilityQueryError(
                         "SOURCE_OBSERVATION_UNAVAILABLE"
                         if unavailable

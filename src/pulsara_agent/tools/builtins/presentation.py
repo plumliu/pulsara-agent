@@ -19,13 +19,17 @@ class OpenInPulsaraTool(WorkspaceTool):
     def normalize_target(self, target: object) -> dict:
         if not isinstance(target, dict):
             raise ValueError("目标必须是对象")
-        kind = target.get("type")
+        if "kind" in target and not isinstance(target["kind"], str):
+            raise ValueError("不支持的目标类型")
+        task = target.get("type") == "task"
+        tag = "type" if task else "kind"
+        kind = "task" if task else {"PATH": "file", "URL": "browser", "PROCESS": "terminal", "MCP_SERVER": "mcp", "PANEL": "panel"}.get(target.get("kind"))
         fields = {"file": "path", "browser": "url", "task": "task_id", "terminal": "process_id", "mcp": "runtime_server_id", "panel": "name"}
         if not isinstance(kind, str) or kind not in fields:
             raise ValueError("不支持的目标类型")
         field = fields[kind]
-        if set(target) != {"type", field}:
-            raise ValueError(f"该目标只接受 type 和 {field}")
+        if set(target) != {tag, field}:
+            raise ValueError(f"该目标只接受 {tag} 和 {field}")
         value = target[field]
         if not isinstance(value, str) or not value.strip() or '\x00' in value:
             raise ValueError(f"{field} 必须是非空文本")
@@ -56,7 +60,12 @@ class OpenInPulsaraTool(WorkspaceTool):
                 raise ValueError("入口名称只支持 capabilities、tasks、background、browser")
         else:
             result["host_session_id"] = self.host_session_id
-        return result
+        if task:
+            return result
+        public = {"target": {"kind": target["kind"], field: result[field]}}
+        if "host_session_id" in result:
+            public["host_session_id"] = result["host_session_id"]
+        return public
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         targets, errors = [], []

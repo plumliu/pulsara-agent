@@ -189,7 +189,7 @@ def image_reference_text(*, image_ref: str, media_type: str, width: int, height:
     """Render neutral metadata from an already validated image or descriptor."""
     return (
         "[历史图片引用；此处未包含图像内容]\n"
-        f"image_ref: {require_id(image_ref, 'image')}\n"
+        f'target={{"kind":"IMAGE_REF","image_ref":"{require_id(image_ref, "image")}"}}\n'
         f"media_type: {media_type}; width: {width}; height: {height}"
     )
 

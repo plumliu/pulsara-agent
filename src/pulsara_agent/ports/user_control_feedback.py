@@ -300,10 +300,18 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
     if monitor is not None:
         _validate_monitor_mapping(monitor)
     provider_value = {field: value[field] for field in (
-        "process_id", "command", "cwd", "process", "public_code", "public_detail",
+        "command", "cwd", "process", "public_code", "public_detail",
     )}
+    provider_value["target"] = {"kind": "PROCESS", "process_id": value["process_id"]}
     provider_value["origin"] = "ROOT" if origin_subagent_task_id is None else {"subagent_task_id": origin_subagent_task_id}
-    provider_value["monitor_result"] = monitor
+    provider_value["monitor_result"] = (
+        None
+        if monitor is None
+        else {
+            **{key: item for key, item in monitor.items() if key != "monitor_id"},
+            "target": {"kind": "MONITOR", "monitor_id": monitor["monitor_id"]},
+        }
+    )
     return json.dumps(
         {
             "pulsara_user_control_feedback": provider_value,

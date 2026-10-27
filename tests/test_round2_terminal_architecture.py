@@ -257,11 +257,11 @@ def test_round2_strict_three_tool_input_contracts_fail_closed() -> None:
         parse_terminal_input({"command": "true", "unexpected": True})
     with pytest.raises(ValidationError):
         parse_terminal_process_input(
-            {"action": "wait", "process_id": "p", "timeout_seconds": "1"}
+            {"action": "wait", "target": {"kind": "PROCESS", "process_id": "p"}, "timeout_seconds": "1"}
         )
     with pytest.raises(ValidationError):
         parse_terminal_monitor_input(
-            {"action": "cancel", "monitor_id": "m", "extra": "open"}
+            {"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": "m"}, "extra": "open"}
         )
 
 

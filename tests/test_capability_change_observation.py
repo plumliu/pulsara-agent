@@ -268,7 +268,7 @@ def test_damaged_plugin_inspection_remove_and_reinstall_share_native_owner(
         assert detail["status"] == "UNAVAILABLE" and detail["remove_eligible"]
         assert all(c["count"] is None for c in detail["components"].values())
         removed = await invoke(
-            service, action="REMOVE_PLUGIN", scope="USER", plugin_id="example"
+            service, action="REMOVE_PLUGIN", target={"kind":'PLUGIN', 'scope':"USER", 'plugin_id':"example"}
         )
         assert removed["status"] == "APPLIED"
         assert (tmp_path / "source" / "plugin.json").exists()
@@ -293,7 +293,7 @@ def test_plugin_removal_rejects_a_changed_instance_without_package_health(tmp_pa
         service = preparation(tmp_path)
         await install_plugin(service, tmp_path)
         prepared = await service.prepare(
-            {"action": "REMOVE_PLUGIN", "scope": "USER", "plugin_id": "example"}
+            {'action': "REMOVE_PLUGIN", 'target': {"kind": "PLUGIN", 'scope': "USER", 'plugin_id': "example"}}
         )
         await invoke(
             service,
@@ -357,7 +357,7 @@ def test_enabled_damaged_plugin_keeps_process_effect_and_cleans_only_owned_crede
             other.owner, ((other, "fixture-workspace-secret"),)
         )
         prepared = await service.prepare(
-            {"action": "REMOVE_PLUGIN", "scope": "USER", "plugin_id": "example"}
+            {'action': "REMOVE_PLUGIN", 'target': {"kind": "PLUGIN", 'scope': "USER", 'plugin_id': "example"}}
         )
         assert prepared.effects.process_control
         result = await CapabilityManagementCall(service, prepared).execute()
@@ -391,7 +391,7 @@ def test_loose_skill_damage_uses_directory_identity_and_ordinary_install(
         )
         from pathlib import Path
 
-        path = Path(result["identity"]["skill_path"])
+        path = Path(result["target"]["skill_path"])
         if damage == "missing_directory":
             shutil.rmtree(path.parent)
         elif damage == "missing_document":
@@ -407,9 +407,7 @@ def test_loose_skill_damage_uses_directory_identity_and_ordinary_install(
             assert (
                 await invoke(
                     service,
-                    action="REMOVE_LOOSE_SKILL",
-                    scope="USER",
-                    skill_path=str(path),
+                    action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':str(path)},
                 )
             )["status"] == "APPLIED"
         assert (
@@ -433,40 +431,27 @@ def test_missing_mcp_config_uses_add_without_an_artificial_remove(tmp_path, miss
             service.mcp.user_config_path.write_text("servers: {}\n")
         result = await invoke(
             service,
-            action="ADD_LOCAL_MCP",
-            scope="USER",
-            server_id="demo",
-            config={"transport": {"type": "stdio", "command": "/missing/demo"}},
+            action="ADD_LOCAL_MCP", config={"transport": {"type": "stdio", "command": "/missing/demo"}}, target={"kind":'MCP_CONNECTION', 'scope':"USER", 'source_kind':'LOCAL', 'server_id':"demo"},
         )
         assert result["status"] == "APPLIED"
         assert (
             await invoke(
-                service, action="REMOVE_LOCAL_MCP", scope="USER", server_id="demo"
+                service, action="REMOVE_LOCAL_MCP", target={"kind":'MCP_CONNECTION', 'scope':"USER", 'source_kind':'LOCAL', 'server_id':"demo"}
             )
         )["status"] == "APPLIED"
         service.mcp.user_config_path.write_text("servers: [")
         with pytest.raises(ParserError):
             await service.prepare(
-                {
-                    "action": "ADD_LOCAL_MCP",
-                    "scope": "USER",
-                    "server_id": "demo",
-                    "config": {
+                {'action': "ADD_LOCAL_MCP", 'config': {
                         "transport": {"type": "stdio", "command": "/missing/demo"}
-                    },
-                }
+                    }, 'target': {"kind": "MCP_CONNECTION", 'scope': "USER", 'source_kind': 'LOCAL', 'server_id': "demo"}}
             )
         from pulsara_agent.capability.source_query import CapabilityQueryError
 
         with pytest.raises(CapabilityQueryError) as unavailable:
             await query_sources(
                 service,
-                target={
-                    "kind": "MCP_SERVER",
-                    "source_kind": "LOCAL",
-                    "scope": "USER",
-                    "server_id": "demo",
-                },
+                target={'kind': "MCP_CONNECTION", 'source_kind': "LOCAL", 'scope': "USER", 'server_id': "demo"},
             )
         assert unavailable.value.code == "SOURCE_OBSERVATION_UNAVAILABLE"
         assert service.mcp.user_config_path.read_text() == "servers: ["
@@ -498,7 +483,7 @@ def test_local_hook_damage_reuses_disable_and_revoke_without_granting_trust(
             {"action": "SET_HOOK_SOURCE_ENABLED", "enabled": False},
         ):
             result = await invoke(
-                service, scope="USER", source_kind="LOCAL", **arguments
+                service, target={"kind": "HOOK_SOURCE", "scope": "USER", "source_kind": "LOCAL"}, **arguments
             )
             assert result["status"] == "APPLIED"
             if arguments["action"] == "SET_HOOK_SOURCE_ENABLED":
@@ -589,7 +574,7 @@ def test_hook_model_projections_share_unknown_enablement(tmp_path, damage):
             else:
                 trust_path.mkdir()
         elif damage == "disabled":
-            await invoke(service, action="SET_HOOK_SOURCE_ENABLED", scope="USER", source_kind="LOCAL", enabled=False)
+            await invoke(service, action="SET_HOOK_SOURCE_ENABLED", enabled=False, target={"kind":'HOOK_SOURCE', 'scope':"USER", 'source_kind':"LOCAL"})
         view = service.hooks.discover()
         snapshot = next(s for s in view.source_snapshots if s.provenance.identity.kind is HookSourceKind.USER_FILE)
         expected = True if damage == "untrusted" else False if damage == "disabled" else None

@@ -133,7 +133,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
     try {
       if (action === 'resume') {
         const active = (await api.list('ACTIVE', undefined, undefined, task.session_id)).tasks.find(item => item.id !== task.id);
-        if (active) await api.switch(active, {kind: 'existing', task_id: task.id, expected_revision: task.revision});
+        if (active) await api.switch(active, {kind: 'existing', target: {kind: 'SCHEDULE', task_id: task.id}, expected_revision: task.revision});
         else await api.action(task, 'resume');
       }
       else if (action === 'run') {

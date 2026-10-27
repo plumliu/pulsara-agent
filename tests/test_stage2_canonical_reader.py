@@ -699,7 +699,7 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
                 tool_name="artifact_read",
                 arguments=freeze_json(
                     {
-                        "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy',
+                        "target": {"kind": "ARTIFACT", "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy'},
                         "offset_chars": 0,
                         "max_chars": 20_000,
                     }

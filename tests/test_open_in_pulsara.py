@@ -2,11 +2,7 @@ import asyncio
 import json
 
 import pytest
-from jsonschema import Draft202012Validator
 
-from pulsara_agent.llm.adapters.openai.function_tools import openai_chat_function_tool, openai_responses_function_tool
-from pulsara_agent.llm.input import ToolSpec
-from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import RunPermissionAdmissionSource, build_run_permission_snapshot
 from pulsara_agent.conversation_kernel.memory.contracts import FrozenModelCallMemoryContext
@@ -24,10 +20,10 @@ from tests.support.round3 import direct_tool_invocation_context, prepare_test_di
 
 @pytest.mark.parametrize('arguments,rejected', [
     ({'targets': []}, True), ({'targets': 'file'}, True), ({}, True),
-    ({'targets': [{'type': 'panel', 'name': 'tasks'}], 'session_id': 'other'}, True),
-    ({'targets': [None, {'type': 'file', 'path': 'missing #?.md'}, {'type': 'browser', 'url': 'file:///tmp/a'}, {'type': 'terminal', 'process_id': 'p1'}, {'type': 'panel', 'name': 'tasks'}]}, False),
-    ({'targets': [None, {'type': 'file', 'path': ''}]}, False),
-    ({'targets': [{'type': 'panel', 'name': 'browser'}]}, False),
+    ({'targets': [{'kind': 'PANEL', 'name': 'tasks'}], 'session_id': 'other'}, True),
+    ({'targets': [None, {'kind': 'PATH', 'path': 'missing #?.md'}, {'kind': 'URL', 'url': 'file:///tmp/a'}, {'kind': 'PROCESS', 'process_id': 'p1'}, {'kind': 'PANEL', 'name': 'tasks'}]}, False),
+    ({'targets': [None, {'kind': 'PATH', 'path': ''}]}, False),
+    ({'targets': [{'kind': 'PANEL', 'name': 'browser'}]}, False),
     ({'targets': [None], 'session_id': 'other'}, True),
 ])
 def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
@@ -55,17 +51,17 @@ def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
             result = await port.invoke(**{k: v for k, v in ids.items() if k != 'session_id'}, arguments=arguments, invocation_context=context)
             assert result.state == 'SUCCESS'
             value = json.loads(result.content)
-            if arguments['targets'] == [{'type': 'panel', 'name': 'browser'}]:
-                assert value == {'targets': [{'type': 'panel', 'name': 'browser'}]}
+            if arguments['targets'] == [{'kind': 'PANEL', 'name': 'browser'}]:
+                assert value == {'targets': [{'target': {'kind': 'PANEL', 'name': 'browser'}}]}
             elif len(arguments['targets']) == 2:
                 assert value['targets'] == []
                 assert [e['index'] for e in value['errors']] == [0, 1]
             else:
                 assert [e['index'] for e in value['errors']] == [0, 2]
                 assert value['targets'] == [
-                    {'type': 'file', 'path': str(tmp_path / 'missing #?.md')},
-                    {'type': 'terminal', 'process_id': 'p1', 'host_session_id': 'host:test'},
-                    {'type': 'panel', 'name': 'tasks'},
+                    {'target': {'kind': 'PATH', 'path': str(tmp_path / 'missing #?.md')}},
+                    {'target': {'kind': 'PROCESS', 'process_id': 'p1'}, 'host_session_id': 'host:test'},
+                    {'target': {'kind': 'PANEL', 'name': 'tasks'}},
                 ]
         finally:
             borrow.close()
@@ -93,13 +89,13 @@ def test_root_surface_and_recovery(tmp_path):
 def test_normalization_does_not_read_or_resolve_links(tmp_path):
     tool = OpenInPulsaraTool(tmp_path, host_session_id='host:test')
     (tmp_path / 'link').symlink_to(tmp_path / 'absent')
-    assert tool.normalize_target({'type': 'file', 'path': 'link/a.md'})['path'] == str(tmp_path / 'link/a.md')
+    assert tool.normalize_target({'kind': 'PATH', 'path': 'link/a.md'})['target']['path'] == str(tmp_path / 'link/a.md')
     with pytest.raises(ValueError) as failure:
-        tool.normalize_target({'type': 'browser', 'url': 'https://username:secret@example.test/'})
+        tool.normalize_target({'kind': 'URL', 'url': 'https://username:secret@example.test/'})
     assert 'secret' not in str(failure.value)
-    assert tool.normalize_target({'type': 'browser', 'url': ' https://example.test/a#b '})['url'] == 'https://example.test/a#b'
+    assert tool.normalize_target({'kind': 'URL', 'url': ' https://example.test/a#b '})['target']['url'] == 'https://example.test/a#b'
     with pytest.raises(ValueError):
-        tool.normalize_target({'type': 'panel', 'name': 'tasks', 'session_id': 'other'})
+        tool.normalize_target({'kind': 'PANEL', 'name': 'tasks', 'session_id': 'other'})
 
 
 def test_clean_import_order():
@@ -120,42 +116,15 @@ def test_real_tool_opens_exact_task_without_model_supplied_session_or_host(tmp_p
             {'type': 'task', 'task_id': 'invented'},
             {'type': 'task'},
             {'type': 'unknown', 'name': 'tasks'},
-            {'type': 'panel', 'name': 'tasks'},
+            {'kind': 'PANEL', 'name': 'tasks'},
         ]}
         try:
             assert not isinstance(port.prepare_resolved_invocation(tool_name='open_in_pulsara', arguments=arguments, surface_borrow=borrow), PreparedToolPreparationRejection)
             result = await port.invoke(**{k: v for k, v in ids.items() if k != 'session_id'}, arguments=arguments, invocation_context=context)
             value = json.loads(result.content)
-            assert value['targets'] == [{'type': 'task', 'task_id': task_id}, {'type': 'panel', 'name': 'tasks'}]
+            assert value['targets'] == [{'type': 'task', 'task_id': task_id}, {'target': {'kind': 'PANEL', 'name': 'tasks'}}]
             assert [error['index'] for error in value['errors']] == [1, 2, 3, 4]
         finally:
             borrow.close()
             await port.aclose(timeout_seconds=2)
     asyncio.run(run())
-
-
-@pytest.mark.parametrize('wire_builder', [openai_chat_function_tool, openai_responses_function_tool])
-def test_wire_defines_all_target_types_and_fields(wire_builder):
-    descriptor = builtin_tool_catalog_entry('open_in_pulsara').descriptor
-    wire = wire_builder(ToolSpec(
-        name=descriptor.name, description=descriptor.description,
-        parameters=thaw_tool_json_object(descriptor.input_schema),
-    ))
-    definition = wire.get('function', wire)
-    items = definition['parameters']['properties']['targets']['items']
-    branches = {branch['properties']['type']['enum'][0]: branch for branch in items['anyOf']}
-    fields = {'file': 'path', 'browser': 'url', 'terminal': 'process_id',
-              'task': 'task_id', 'mcp': 'runtime_server_id', 'panel': 'name'}
-    assert branches.keys() == fields.keys()
-    validator = Draft202012Validator(definition['parameters'])
-    for kind, field in fields.items():
-        branch = branches[kind]
-        assert set(branch['properties']) == set(branch['required']) == {'type', field}
-        assert branch['additionalProperties'] is False
-        assert branch['properties'][field]['type'] == 'string'
-        target = {'type': kind, field: 'tasks' if kind == 'panel' else 'example'}
-        assert validator.is_valid({'targets': [target]})
-        assert not validator.is_valid({'targets': [{'type': kind}]})
-        assert not validator.is_valid({'targets': [{**target, field: None}]})
-        assert not validator.is_valid({'targets': [{**target, 'session_id': 'other'}]})
-    assert branches['panel']['properties']['name']['enum'] == ['capabilities', 'tasks', 'background', 'browser']

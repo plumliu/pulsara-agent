@@ -160,7 +160,11 @@ model: string
 For every event, `cwd` and the hook command's working directory are the current
 workspace root. A prior terminal command's `cd` does not change either value.
 For terminal tool events, inspect `tool_input.workdir` for that command's explicit
-working directory; its omission also means the workspace root.
+working directory; its omission also means the workspace root. For `terminal_process`
+object actions and `terminal_monitor` register/cancel, the selected object is in
+`tool_input.target`: `PROCESS` carries `process_id`, and `MONITOR` carries
+`monitor_id`. List actions have no target. Hooks receive these public objects
+unchanged.
 
 Event-specific fields are:
 
@@ -178,7 +182,7 @@ Event-specific fields are:
 | `Stop` | `turn_id`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
 
 `permission_mode` is one of `default`, `acceptEdits`, `plan`, `dontAsk`, or
-`bypassPermissions`. Scripts always receive native tool names and native parameters; aliases never translate stdin or script-internal comparisons. There is no pulsara_tool_name field. Configuration conversion does not prove arbitrary vendor scripts work.
+`bypassPermissions`. Scripts receive Pulsara tool names and parameters; aliases never translate stdin or script-internal comparisons. File operations identify their file in `tool_input.target.path`; terminal process and monitor actions use `tool_input.target` for the selected PROCESS or MONITOR. The `terminal` startup command and workdir remain top-level parameters. There is no pulsara_tool_name field. Configuration conversion does not prove arbitrary vendor scripts work.
 
 `transcript_path` and `agent_transcript_path` are deliberately null. Hook stdin
 does not contain Plugin identity, install paths, private replay, raw artifacts, or

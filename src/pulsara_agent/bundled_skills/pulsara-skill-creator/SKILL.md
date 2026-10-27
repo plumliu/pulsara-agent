@@ -12,7 +12,8 @@ its exact target. Read the returned `current.skill_path`; `current.skill_root`
 is the installed directory. Do not infer the target from terminal cwd.
 
 Edit an installed **loose Skill** directly in that directory. Prefer
-`read_file` / `edit_file`; `write_file` and terminal are also available for new
+`read_file` / `edit_file` with a `PATH` target whose `path` is the file path;
+`write_file` and terminal are also available for new
 resources or other file operations, subject to ordinary permissions. Content
 edits need no removal or reinstallation. Preserve its name, location and
 enablement unless the user requests those changes. Later capability snapshots

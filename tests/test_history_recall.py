@@ -103,13 +103,13 @@ def test_engine_actual_fields_byte_positions_and_shared_tool_results(repo, query
         repo, session_id=caller.guard.session_id, memory_domain_id=domain
     ).invoke(
         "search_session_content",
-        {"session_id": target.guard.session_id, "query": query},
+        {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': query},
         current_range=scope.current_range,
         tool_call_id="call:history",
         deadline_monotonic=monotonic() + 30,
     )
     assert tool["items"][0]["messages"] == [
-        {k: m[k] for k in ("entry_id", "role", "label", "at", "text")}
+        {"target": {"kind": "SESSION_ENTRY", "session_id": target.guard.session_id, "entry_id": m["entry_id"]}, **{k: m[k] for k in ("role", "label", "at", "text")}}
         for m in candidates[0].messages
     ]
     if query == "runs":
@@ -269,19 +269,19 @@ def test_relevance_cursor_lossless_and_old_cursor_rejected(repo, stage2_migrated
         )
 
     all_items = invoke(
-        {"session_id": target.guard.session_id, "query": "page-keyword"}
+        {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'page-keyword'}
     )["items"]
     page = invoke(
-        {"session_id": target.guard.session_id, "query": "page-keyword", "limit": 2}
+        {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'page-keyword', 'limit': 2}
     )
     items = list(page["items"])
     while page["next_cursor"]:
         page = invoke({"cursor": page["next_cursor"], "limit": 2})
         items.extend(page["items"])
-    assert [(x["entry_id"], x["score"]) for x in items] == [
-        (x["entry_id"], x["score"]) for x in all_items
+    assert [(x["target"]["entry_id"], x["score"]) for x in items] == [
+        (x["target"]["entry_id"], x["score"]) for x in all_items
     ]
-    assert len({x["entry_id"] for x in items}) == 7
+    assert len({x["target"]["entry_id"] for x in items}) == 7
 
 
 def doc(texts):
@@ -505,10 +505,10 @@ def test_explicit_pagination_continues_after_a_full_page_of_invalid_excerpts(rep
     monkeypatch.setattr(history_search, 'refetch_history', reject_first_page)
     def invoke(arguments):
         return owner.invoke('search_session_content', arguments, current_range=SessionContentRange(0), tool_call_id='call:pagination', deadline_monotonic=monotonic()+30)
-    page = invoke({'session_id':target.guard.session_id,'query':'continueprobe','limit':1})
+    page = invoke({'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'continueprobe', 'limit': 1})
     assert page['items'] == [] and page['next_cursor'] is not None
     following = invoke({'cursor':page['next_cursor'],'limit':1})
-    assert following['items'] and following['items'][0]['entry_id'] not in skipped
+    assert following['items'] and following['items'][0]["target"]["entry_id"] not in skipped
 
 
 @pytest.mark.parametrize("quote_length", [20, 700])
@@ -628,7 +628,7 @@ def test_relevance_paging_survives_corpus_score_drift(isolated_history_repo):
     def invoke(args):
         return owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:drift', deadline_monotonic=monotonic()+30)
 
-    args = {'session_id': target.guard.session_id, 'query': 'scoredriftneedle'}
+    args = {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'scoredriftneedle'}
     before = invoke(args)['items']
     first = invoke({**args, 'limit': 1})
     assert len(before) == 2 and first['next_cursor']
@@ -637,12 +637,12 @@ def test_relevance_paging_survives_corpus_score_drift(isolated_history_repo):
         turn(repo, unrelated.guard, f'unrelated corpus document {i}', answer='independent background material ' * 400)
     maintain_history(repo)
     now = invoke(args)['items']
-    assert [item['entry_id'] for item in now] == [item['entry_id'] for item in before]
+    assert [item["target"]["entry_id"] for item in now] == [item["target"]["entry_id"] for item in before]
     # This is the actual failure condition, not merely a mock score change:
     # the old score cursor would now exclude *both* unchanged source units.
     assert min(item['score'] for item in now) > first['items'][0]['score']
     second = invoke({'cursor': first['next_cursor'], 'limit': 1})
-    assert [item['entry_id'] for item in first['items'] + second['items']] == [item['entry_id'] for item in before]
+    assert [item["target"]["entry_id"] for item in first['items'] + second['items']] == [item["target"]["entry_id"] for item in before]
     assert second['next_cursor'] is None
 
 
@@ -658,8 +658,8 @@ def test_relevance_cursor_does_not_consume_budget_rejected_item(repo, monkeypatc
     def invoke(args):
         return owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:budget', deadline_monotonic=monotonic()+30)
 
-    args = {'session_id': target.guard.session_id, 'query': 'pagebudgetneedle'}
-    expected = [i['entry_id'] for i in invoke(args)['items']]
+    args = {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'pagebudgetneedle'}
+    expected = [i["target"]["entry_id"] for i in invoke(args)['items']]
     real_fits = session_content._fits
     monkeypatch.setattr(session_content, '_fits', lambda payload, call_id: len(payload.get('items', [])) <= 1 and real_fits(payload, call_id))
     page = invoke({**args, 'limit': 2})
@@ -667,7 +667,7 @@ def test_relevance_cursor_does_not_consume_budget_rejected_item(repo, monkeypatc
     while page['next_cursor']:
         page = invoke({'cursor': page['next_cursor'], 'limit': 2})
         items.extend(page['items'])
-    assert [i['entry_id'] for i in items] == expected
+    assert [i["target"]["entry_id"] for i in items] == expected
 
 
 def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo, monkeypatch):
@@ -683,8 +683,8 @@ def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo,
     def invoke(args, query_owner=owner):
         return query_owner.invoke('search_session_content', args, current_range=SessionContentRange(0), tool_call_id='call:reorder', deadline_monotonic=monotonic()+30)
 
-    args = {'session_id': target.guard.session_id, 'query': 'reorderneedle'}
-    expected = [i['entry_id'] for i in invoke(args)['items']]
+    args = {'target': {'kind': 'SESSION', 'session_id': target.guard.session_id}, 'query': 'reorderneedle'}
+    expected = [i["target"]["entry_id"] for i in invoke(args)['items']]
     first = invoke({**args, 'limit': 1})
     first_cursor = first['next_cursor']
     original = history_search.search_history
@@ -696,7 +696,7 @@ def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo,
         return sorted(found, key=lambda row: expected.index(row['q1_entry_id']), reverse=True)[:limit]
     monkeypatch.setattr(history_search, 'search_history', changed_order)
     second = invoke({'cursor': first_cursor, 'limit': 1})
-    assert second['items'][0]['entry_id'] == expected[-1]
+    assert second['items'][0]["target"]["entry_id"] == expected[-1]
     replay = invoke({'cursor': first_cursor, 'limit': 1})
     assert replay['items'] == second['items']
     items = first['items'] + second['items']
@@ -705,7 +705,7 @@ def test_relevance_paging_reorders_unseen_results_and_replays_prior_cursor(repo,
         page = invoke({'cursor': page['next_cursor'], 'limit': 1})
         items.extend(page['items'])
     assert len(items) == len(expected)
-    assert {i['entry_id'] for i in items} == set(expected)
+    assert {i["target"]["entry_id"] for i in items} == set(expected)
     # No cross-restart recovery or cursor authority: restart explicitly, and
     # never permit a real continuation to be paired with changed query values.
     restarted = SessionContentQuery(repo, session_id=caller.guard.session_id, memory_domain_id=domain)

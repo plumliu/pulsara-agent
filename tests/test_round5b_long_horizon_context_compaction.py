@@ -484,7 +484,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             ),
             tool_call_ordinal=call_ordinal if image is not None else None,
             tool_call_arguments=(
-                freeze_json({"path": f"/tmp/{call_ordinal}.png"})
+                freeze_json({"target": {"kind": "PATH", "path": f"/tmp/{call_ordinal}.png"}})
                 if image is not None
                 else None
             ),
@@ -621,10 +621,10 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     assert first_result not in rendered
     assert second_result not in rendered
     user_reference = canonical_json_bytes(
-        {"pulsara_image": {"image_ref": user_image.image_ref}}
+        {"pulsara_image": {"target": {"kind": "IMAGE_REF", "image_ref": user_image.image_ref}}}
     ).decode("utf-8")
     tool_reference = canonical_json_bytes(
-        {"pulsara_image": {"image_ref": tool_image.image_ref}}
+        {"pulsara_image": {"target": {"kind": "IMAGE_REF", "image_ref": tool_image.image_ref}}}
     ).decode("utf-8")
     assert rendered.count(user_reference) == 1
     assert tool_reference not in rendered
@@ -919,7 +919,7 @@ def test_snapshot_lowering_labels_active_recent_and_historical_images_once() -> 
         if not isinstance(part, LLMImagePart):
             continue
         expected = canonical_json_bytes(
-            {"pulsara_image": {"image_ref": part.image_ref}}
+            {"pulsara_image": {"target": {"kind": "IMAGE_REF", "image_ref": part.image_ref}}}
         ).decode("utf-8")
         assert index > 0
         assert lowered[index - 1] == LLMTextPart(expected)
@@ -2133,7 +2133,7 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
     )
     assert handoff is not None
     payload = json.loads(handoff.full_text)
-    assert [item["process_id"] for item in payload["terminal_processes"]] == [
+    assert [item["target"]["process_id"] for item in payload["terminal_processes"]] == [
         'process:nfei6gwtp3dcs62w3tvew5w34i',
         'process:nihhtj3io4t4xhypmulh24ebgm',
     ]
@@ -2350,7 +2350,7 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
     assert reduced.estimated_tokens == 0
 
 
-def test_round5b_retained_skill_proves_older_full_from_installed_message() -> None:
+def test_round5b_retained_skill_proves_older_full_from_installed_message(tmp_path) -> None:
     timing_values = {
         "source_turn_ref": 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
         "observed_at_utc": "2026-08-21T01:02:03.000000Z",
@@ -2486,7 +2486,8 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message() -> No
     exact_body = json.dumps(
         {
             "status": "ok",
-            "path": location,
+            "target": {"kind": "PATH", "path": location},
+            "content_revision": "revision:" + "a" * 52,
             "access_scope": "external_absolute",
             "workspace_relative": False,
             "offset": 1,
@@ -2518,6 +2519,24 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message() -> No
         )
         == "Retained body"
     )
+
+
+    # Exercise the real producer contract, including its required content_revision.
+    from dataclasses import replace
+    from pulsara_agent.tools.builtins.filesystem import ReadFileTool
+    from pulsara_agent.ports.tool_execution import ToolCall
+    skill_path = tmp_path / "inspect" / "SKILL.md"
+    skill_path.parent.mkdir()
+    skill_path.write_text(document)
+    actual = ReadFileTool(tmp_path / "workspace").execute(ToolCall(
+        "read:actual", "read_file", {"target": {"kind": "PATH", "path": str(skill_path)}}
+    ))
+    actual_item = replace(exact_item, content=(LLMTextPart(actual.output),), tool_result_body_text=actual.output)
+    actual_row = {**row, "location": str(skill_path)}
+    assert _exact_historical_read(actual_item, catalog_row=actual_row, root_policy=SimpleNamespace(roots=())) == "Retained body"
+    malformed = json.loads(actual.output)
+    malformed["content_revision"] = "invalid"
+    assert _exact_historical_read(replace(actual_item, content=(LLMTextPart(json.dumps(malformed)),), tool_result_body_text=json.dumps(malformed)), catalog_row=actual_row, root_policy=SimpleNamespace(roots=())) is None
 
 
 def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -> None:
@@ -2589,7 +2608,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
     )
 
     def request(entry_id: str, sequence: int) -> FrozenProviderInputItem:
-        arguments = freeze_json({"path": entry_id})
+        arguments = freeze_json({"target": {"kind": "PATH", "path": entry_id}})
         return FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
             entry_id,

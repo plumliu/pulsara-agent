@@ -163,7 +163,7 @@ async def run():
                 await turn(
                     source,
                     "own",
-                    "请使用 search_session_content 搜索当前会话压缩前原文的 ARCHIVE-START，再用 read_session_content 从该 entry_id 开始读取，limit=1,max_chars=16000。必须仅用返回的 next_cursor 和可选页预算继续读取同一条消息，直到找到 ARCHIVE-MIDDLE 和 ARCHIVE-END 的完整标记。不要靠摘要猜测；最终报告两个标记和原项目决定，不要重跑原任务。",
+                    "请使用 search_session_content 搜索当前会话压缩前原文的 ARCHIVE-START，再把命中消息的 target 原样交给 read_session_content 读取，limit=1,max_chars=16000。必须仅用返回的 next_cursor 和可选页预算继续读取同一条消息，直到找到 ARCHIVE-MIDDLE 和 ARCHIVE-END 的完整标记。不要靠摘要猜测；最终报告两个标记和原项目决定，不要重跑原任务。",
                 )
                 own = queries[start:]
                 assert any(

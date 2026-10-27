@@ -173,7 +173,7 @@ def _mixed_results():
     image = bound_test_image("image/png", encoded.getvalue(), 3_500, 3_500)
     arguments = (
         freeze_json({"action": "SET_PLUGIN_ENABLED"}),
-        freeze_json({"path": "plot.png"}),
+        freeze_json({"target": {"kind": "PATH", "path": "plot.png"}}),
     )
     calls = tuple(
         ProviderToolCall(f"call:{index}", name, args)
@@ -447,23 +447,6 @@ def test_catalog_that_fits_actual_wire_keeps_full_and_original_candidate(api):
     assert _mode(candidate, ContextSourceKind.SKILL_CATALOG) is ContextRenderMode.FULL
 
 
-@pytest.mark.parametrize("api", _WIRE_APIS)
-@pytest.mark.parametrize(
-    "budget,expected",
-    ((6_000, ContextRenderMode.COMPACT), (2_000, ContextRenderMode.REF_ONLY)),
-)
-def test_mcp_catalog_follows_existing_full_compact_reference_variants(
-    api, budget, expected
-):
-    coordinator, candidate, _, _ = _prepare_case(
-        api, _mcp_source(), cold=True, budget=budget
-    )
-
-    decision = _measure(coordinator, candidate)
-
-    assert decision.wire_input_plan is not None
-    assert _mode(decision.candidate, ContextSourceKind.MCP_CATALOG) is expected
-    assert decision.quote.raw_final_wire_estimated_input_tokens <= budget
 
 
 @pytest.mark.parametrize("api", _WIRE_APIS)

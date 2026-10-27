@@ -92,7 +92,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                 f"‘项目 {marker} 的办公地点是 A 楼。’ 保存后简短报告工具结果。",
                 f"地点已改为 B 楼。请先调用 remember 把‘项目 {marker} 的办公地点是 B 楼。’"
                 "存成 GLOBAL FACT，再用 mark_memory_relation 将新事实标为取代旧事实。"
-                "如工具返回相关记忆，请使用精确 memory_id。最后简短报告结果。",
+                "如工具返回相关记忆，请使用完整 MEMORY target。最后简短报告结果。",
                 *(
                     f"请调用 remember，将‘项目 {marker} 的第 Q{index} 季营收为 "
                     f"{index * 10}。’存成 GLOBAL FACT；只需报告工具状态。"
@@ -159,7 +159,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                         f"请另存一条与办公地点事实语义不同的 CURRENT_PROJECT DECISION："
                         f"项目 {marker} 的访客指引应标注 A 楼入口。"
                         f"这项决定基于已保存的地点记忆 {project_source_id}，"
-                        "调用 remember 时将该精确 ID 放进 based_on_memory_ids。"
+                        "调用 remember 时将该记忆的完整 MEMORY target 放进 based_on。"
                         "不要再保存一条同义的地点 FACT。最后简短报告状态。"
                     ),
                     command_id=random_id("command"),
@@ -251,7 +251,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                 await resumed.update_model_call_binding(_binding(runtime, connection))
                 result = await resumed.run_turn(
                     PromptContent.text(
-                        f"请用 memory_get 读取 memory_id={replacement_id}，"
+                        f'请用 memory_get 读取 target={{"kind":"MEMORY","memory_id":"{replacement_id}"}}，'
                         "并简短告诉我保存的地点。"
                     ),
                     command_id=random_id("command"),

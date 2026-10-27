@@ -178,7 +178,7 @@ class _PlanHostModel(_PreflightModel):
             payloads = _tool_call(
                 "write_file",
                 "call:blocked-write",
-                {"path": "must-not-exist.txt", "content": "blocked"},
+                {"target": {"kind": "PATH", "path": "must-not-exist.txt"}, "content": "blocked"},
             )
         elif call_index == 3:
             self.question_opened.set()

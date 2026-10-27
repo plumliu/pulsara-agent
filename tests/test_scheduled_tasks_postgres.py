@@ -256,7 +256,7 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
             )
 
         service._read = read_repository
-        arguments = {"action": "list", "session_id": None, "status": "PAUSED"}
+        arguments = {"action": "list", "session": None, "status": "PAUSED"}
         ids = []
         while True:
             page = await service.invoke(
@@ -264,9 +264,9 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
                 default_session_id=lease.guard.session_id,
                 permission_mode=DEFAULT_PERMISSION_MODE,
             )
-            ids.extend(row["id"] for row in page["tasks"])
+            ids.extend(row["target"]["task_id"] for row in page["tasks"])
             assert all(
-                row["session_id"] == lease.guard.session_id for row in page["tasks"]
+                row["session"]["session_id"] == lease.guard.session_id for row in page["tasks"]
             )
             if page["next_cursor"] is None:
                 break
@@ -274,11 +274,11 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
         assert ids == sorted(row["id"] for row in current)
         assert active["id"] not in ids and other["id"] not in ids
         selected = await service.invoke(
-            {"action": "list", "session_id": other_lease.guard.session_id},
+            {"action": "list", "session": {"kind": "SESSION", "session_id": other_lease.guard.session_id}},
             default_session_id=lease.guard.session_id,
             permission_mode=DEFAULT_PERMISSION_MODE,
         )
-        assert [row["id"] for row in selected["tasks"]] == [other["id"]]
+        assert [row["target"]["task_id"] for row in selected["tasks"]] == [other["id"]]
         all_ids = []
         cursor = None
         while True:
@@ -784,7 +784,7 @@ def switch(owner, source, target, **kwargs):
         memory_domain_id="u_local",
         guard=lease.guard,
         expected_revision=source["revision"],
-        target=target,
+        replacement=target,
 
         model_resolution_snapshot=cut,
         deadline_monotonic=monotonic() + 30,
@@ -808,7 +808,7 @@ def test_atomic_switch_cancels_only_old_pending_and_enables_target(owner, new):
         if new
         else {
             "kind": "existing",
-            "task_id": destination["id"],
+            "target": {"kind": "SCHEDULE", "task_id": destination["id"]},
             "expected_revision": destination["revision"],
         }
     )
@@ -846,7 +846,7 @@ def test_switch_failure_rolls_back_both_plans_and_pending(owner, monkeypatch, fa
     before = [read(owner, t["id"]) for t in (source, destination)]
     target = {
         "kind": "existing",
-        "task_id": destination["id"],
+        "target": {"kind": "SCHEDULE", "task_id": destination["id"]},
         "expected_revision": destination["revision"],
     }
     if failure == "stale_target":

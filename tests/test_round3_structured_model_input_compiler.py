@@ -3559,7 +3559,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
         try:
             authorization = await owner.authorize(
                 tool_name="read_file",
-                arguments={"path": "README.md"},
+                arguments={"target": {"kind": "PATH", "path": "README.md"}},
                 tool_call_id="call:test",
                 turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
@@ -3602,7 +3602,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
             with pytest.raises(RuntimeError, match="surface borrow is not active"):
                 await owner.invoke(
                     tool_name="read_file",
-                    arguments={"path": "README.md"},
+                    arguments={"target": {"kind": "PATH", "path": "README.md"}},
                     tool_call_id="call:test",
                     attempt_id='attempt:wfltiqfg6cmo6cuivaxvkm4dr4',
                     turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',

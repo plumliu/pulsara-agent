@@ -145,8 +145,8 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
     : name === 'terminal_monitor' ? monitorActions[action] : undefined) ?? label[0];
   let target = '';
   if (['read_file', 'view_image', 'edit_file', 'write_file', 'search_content', 'find_files'].includes(name)) {
-    target = text(result.path) || text(args.path);
-    if (name === 'view_image' && args.image_ref) target = '对话中已保存的图片';
+    target = text(record(result.target).path) || text(record(args.target).path);
+    if (name === 'view_image' && record(args.target).kind === 'IMAGE_REF') target = '对话中已保存的图片';
     if (name === 'search_content' || name === 'find_files') target = [text(name === 'find_files' ? args.glob : args.pattern), target].filter(Boolean).join(' · ');
   } else if (name === 'terminal') target = trace.command ?? text(args.command);
   else if (name === 'spawn_agent') target = text(args.task_name);
@@ -172,7 +172,7 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
       case 'search_content':
       case 'find_files': {
         const total = number(result.total_count);
-        if (total !== undefined) detail = `找到 ${total} ${name === 'find_files' ? '个文件' : Array.isArray(result.files) ? '个包含匹配的文件' : '行匹配'}${result.truncated === true || (number(args.offset) ?? 0) > 0 ? '，本次仅返回部分结果' : ''}`;
+        if (total !== undefined) detail = `找到 ${total} ${name === 'find_files' ? '个文件' : result.output_mode === 'files_only' ? '个包含匹配的文件' : '行匹配'}${result.truncated === true || (number(args.offset) ?? 0) > 0 ? '，本次仅返回部分结果' : ''}`;
         break;
       }
       case 'write_file': {
@@ -273,4 +273,8 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
     }
   }
   return { title, subtitle: [detail, compact(target)].filter(Boolean).join(' · ') };
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }

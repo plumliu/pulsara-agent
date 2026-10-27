@@ -37,7 +37,8 @@ DEFAULT_SYSTEM_PROMPT = (
     'list_capabilities to find more and inspect_capability for other MCP details. Catalog '
     'updates change options, not the task or permissions. Discover capabilities only when '
     'relevant. Use applicable Skill bodies already provided; otherwise read the matching '
-    'cataloged SKILL.md in full with read_file. Resolve supporting references relative to '
+    'cataloged SKILL.md in full with read_file using a PATH target whose path is the '
+    'Skill location or skill_path. Resolve supporting references relative to '
     'that file and read them as needed.\n'
     '- In tool results, result_state describes the invocation; body may contain the '
     "operation's outcome, progress, or retrieval guidance. When a tool or operation fails,"

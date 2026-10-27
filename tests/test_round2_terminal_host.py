@@ -120,7 +120,7 @@ class _TerminalMonitorDogfoodModel:
                     text_part_values(item.content)[0]
                 )
                 decoded = json.loads(str(provider_result["body"]))
-                candidate = decoded.get("process_id")
+                candidate = decoded.get("target", {}).get("process_id")
                 if isinstance(candidate, str):
                     process_id = candidate
                     break
@@ -128,7 +128,7 @@ class _TerminalMonitorDogfoodModel:
             payloads = _tool_call(
                 "terminal_monitor",
                 "call:round2-monitor",
-                {"action": "register", "process_id": process_id},
+                {"action": "register", "target": {"kind": "PROCESS", "process_id": process_id}},
             )
         elif call_index == 3:
             monitor_result = next(

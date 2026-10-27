@@ -22,6 +22,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     conservative_artifact_page_logical_utf8_bytes,
 )
 from pulsara_agent.tools.builtins.filesystem import (
+    file_target,
     _AtomicFileCreationError,
     _AtomicNoClobberUnavailable,
     _AtomicTargetExists,
@@ -76,7 +77,7 @@ class ArtifactReadTool:
                 status=ToolResultState.ERROR,
                 payload={
                     "status": "content_error",
-                    "artifact_id": artifact_id,
+                    "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
                     "error_code": str(exc),
                     "error": "artifact content is unavailable or corrupt",
                 },
@@ -87,7 +88,7 @@ class ArtifactReadTool:
                 status=ToolResultState.ERROR,
                 payload={
                     "status": "resource_boundary",
-                    "artifact_id": artifact_id,
+                    "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
                     "error_code": "ARTIFACT_PAGE_NOT_INLINEABLE",
                     "error": "artifact page metadata exceeds its logical FULL bound",
                 },
@@ -98,7 +99,7 @@ class ArtifactReadTool:
                 status=ToolResultState.ERROR,
                 payload={
                     "status": "error",
-                    "artifact_id": artifact_id,
+                    "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
                     "error": str(exc),
                 },
             )
@@ -146,16 +147,15 @@ class ArtifactExportTool(WorkspaceTool):
         self, call: ToolCall, *, write_scope: WritePathScope = WritePathScope.WORKSPACE
     ) -> ToolExecutionResult:
         args = call.arguments
-        if set(args) != {"artifact_id", "path"} or any(
-            not isinstance(args.get(key), str) or not args[key].strip()
-            for key in ("artifact_id", "path")
-        ):
+        if (set(args) != {"target", "path"} or _artifact_target_id(args) is None
+            or not isinstance(args.get("path"), str) or not args["path"].strip()):
             return _export_error(
                 call,
                 "INVALID_ARGUMENTS",
-                "artifact_id and path must be non-empty strings; no other fields are accepted.",
+                "An ARTIFACT target and non-empty destination path are required; no other fields are accepted.",
             )
-        artifact_id = args["artifact_id"]
+        artifact_id = _artifact_target_id(args)
+        assert artifact_id is not None
         try:
             body = self.artifact_read_port.read_body(artifact_id)
         except KeyError:
@@ -165,7 +165,7 @@ class ArtifactExportTool(WorkspaceTool):
                 call,
                 {
                     "status": "content_error",
-                    "artifact_id": artifact_id,
+                    "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
                     "error_code": str(exc),
                     "error": "artifact content is unavailable or corrupt",
                 },
@@ -180,8 +180,8 @@ class ArtifactExportTool(WorkspaceTool):
             record = body.record
             payload = {
                 "status": "success",
-                "artifact_id": artifact_id,
-                "path": str(path),
+                "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
+                "file_target": file_target(str(path)),
                 "bytes_written": len(body.content),
                 "source_coverage": record.source_coverage.value,
                 "source_coverage_reason": (
@@ -291,6 +291,15 @@ def _export_error(
     )
 
 
+def _artifact_target_id(arguments: dict) -> str | None:
+    target = arguments.get("target")
+    if (not isinstance(target, dict) or set(target) != {"kind", "artifact_id"}
+        or target.get("kind") != "ARTIFACT" or not isinstance(target.get("artifact_id"), str)
+        or not target["artifact_id"].strip()):
+        return None
+    return target["artifact_id"]
+
+
 def _request(
     arguments: object,
 ) -> tuple[str, int, int] | str:
@@ -298,12 +307,12 @@ def _request(
         # FrozenToolJsonDict is a dict subclass; keep the check deliberately
         # closed so arbitrary Mapping implementations cannot smuggle values.
         return "artifact_read arguments must be an object"
-    allowed_keys = {"artifact_id", "offset_chars", "max_chars"}
+    allowed_keys = {"target", "offset_chars", "max_chars"}
     if not set(arguments).issubset(allowed_keys):
         return "artifact_read arguments contain unknown properties"
-    artifact_id = arguments.get("artifact_id")
+    artifact_id = _artifact_target_id(arguments)
     if not isinstance(artifact_id, str) or not artifact_id:
-        return "artifact_id must be a non-empty string"
+        return "target must be an ARTIFACT object with a non-empty artifact_id"
     offset = arguments.get("offset_chars", 0)
     maximum = arguments.get("max_chars", DEFAULT_ARTIFACT_READ_CHARS)
     if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
@@ -320,7 +329,7 @@ def _request(
 def _base_payload(record: object) -> dict[str, Any]:
     return {
         "status": "success",
-        "artifact_id": record.artifact_id,
+        "target": {"kind": "ARTIFACT", "artifact_id": record.artifact_id},
         "role": record.role,
         "media_type": record.media_type,
         "size_bytes": record.size_bytes,
@@ -401,7 +410,7 @@ def _bounded_text_payload(
 def _not_found_payload(artifact_id: str) -> dict[str, Any]:
     return {
         "status": "not_found",
-        "artifact_id": artifact_id,
+        "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
         "error": "artifact not found",
     }
 

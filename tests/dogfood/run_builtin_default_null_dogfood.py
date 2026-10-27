@@ -162,10 +162,10 @@ async def run(args, report, saved, save):
                     source,
                     "scheduled",
                     (
-                        "Exercise scheduled_tasks in this isolated test. First list with explicit session_id:null. "
+                        "Exercise scheduled_tasks in this isolated test. First list with explicit session:null. "
                         f"Create one new once task named Null contract fixture for UTC {future}, Asia/Shanghai, "
-                        "read-only permissions, status:ACTIVE, prompt 'Reply SOURCE_TASK only.', also with session_id:null. "
-                        "Then list this session with session_id:null and list the reference session "
+                        "read-only permissions, status:ACTIVE, prompt 'Reply SOURCE_TASK only.', also with session:null. "
+                        "Then list this session with session:null and list the reference session "
                         f"{reference.session_id}. Get the created source task, pause it using its revision, "
                         "then delete that source task using the updated revision. Do not modify the reference task. "
                         "Use only applicable fields for each action. Report whether the two lists stayed separate."
@@ -178,14 +178,14 @@ async def run(args, report, saved, save):
                     and r["arguments"]["action"] == "list"
                 ]
                 assert any(
-                    "session_id" in r["arguments"]
-                    and r["arguments"]["session_id"] is None
+                    "session" in r["arguments"]
+                    and r["arguments"]["session"] is None
                     for r in lists
                 )
                 for row in lists:
-                    expected = row["arguments"].get("session_id") or source.session_id
+                    expected = (row["arguments"].get("session") or {}).get("session_id", source.session_id)
                     assert all(
-                        t["session_id"] == expected for t in row["result"]["tasks"]
+                        t["session"]["session_id"] == expected for t in row["result"]["tasks"]
                     )
                 assert (await service.get(other["id"]))[
                     "session_id"
@@ -197,7 +197,7 @@ async def run(args, report, saved, save):
                     and r["arguments"]["action"] == "create"
                 ]
                 assert (
-                    created and created[0]["result"]["session_id"] == source.session_id
+                    created and created[0]["result"]["session"]["session_id"] == source.session_id
                 )
 
                 history = await turn(

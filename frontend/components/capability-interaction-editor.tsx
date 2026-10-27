@@ -27,6 +27,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
   const [reviewed, setReviewed] = useState(false);
   const action = String(form.action);
   const prefill = record(form.prefill);
+  const target = record(prefill.target);
   const plugin = record(form.plugin);
   const scope = form.scope === 'WORKSPACE' ? '当前项目' : '所有会话';
   const submit = async (submission: Record<string, unknown>) => {
@@ -50,7 +51,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
     const config = record(prefill.config);
     const transport = record(config.transport);
     const server: UserMcpServerCapability = {
-      id: String(prefill.server_id), name: String(config.display_name ?? prefill.server_id), config,
+      id: String(target.server_id), name: String(config.display_name ?? target.server_id), config,
       currentIdentity: String(record(form.expected_current).expected_identity ?? ''), enabled: config.enabled !== false,
       status: 'configured', required: false, availableToSubagents: Boolean(config.available_to_subagents),
       toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0,
@@ -78,7 +79,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
   const enableReview = action === 'SET_PLUGIN_ENABLED' && prefill.enabled === true;
   const config = record(prefill.config);
   const transport = record(config.transport);
-  const identity = String(prefill.plugin_id ?? prefill.server_id ?? prefill.skill_path ?? prefill.source_path ?? record(prefill.hook_source).path ?? '');
+  const identity = String(target.plugin_id ?? target.server_id ?? target.skill_path ?? prefill.source_path ?? record(prefill.hook_source).path ?? '');
   const name = String(plugin.name ?? config.display_name ?? prefill.name ?? identity);
   const removing = action === 'REMOVE_LOCAL_MCP' || action === 'REMOVE_PLUGIN' || action === 'REMOVE_LOOSE_SKILL';
   const isHook = action.includes('HOOK');

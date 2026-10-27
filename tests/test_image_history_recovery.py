@@ -96,7 +96,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
         PostgresCanonicalBlobStore, "read_exact_in_connection", metadata_only
     )
     page = read(
-        entry_id=entries[0],
+        target={"kind": "SESSION_ENTRY", "entry_id": entries[0]},
         limit=1,
         max_chars=len("needle-left\n") + len(placeholder) - 1,
     )
@@ -105,17 +105,17 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
     chunks = [page["items"][0]["text"]]
     while cursor:
         page = read(cursor=cursor, limit=1, max_chars=len(placeholder))
-        if page["items"][0]["entry_id"] != entries[0]:
+        if page["items"][0]["target"]["entry_id"] != entries[0]:
             break
         chunk = page["items"][0]["text"]
-        assert not ("image_ref:" in chunk and placeholder not in chunk)
+        assert not ('"kind":"IMAGE_REF"' in chunk and placeholder not in chunk)
         chunks.append(chunk)
         cursor = page["next_cursor"]
     assert "".join(chunks) == f"needle-left\n{placeholder}\n右侧\n{placeholder}"
     with pytest.raises(SessionQueryError, match="Increase max_chars") as exc:
-        read(entry_id=entries[1], limit=1, max_chars=len(placeholder) - 1)
+        read(target={"kind": "SESSION_ENTRY", "entry_id": entries[1]}, limit=1, max_chars=len(placeholder) - 1)
     assert exc.value.code == "RESULT_BUDGET_EXCEEDED"
-    first = read(entry_id=entries[1], limit=1, max_chars=len(placeholder))
+    first = read(target={"kind": "SESSION_ENTRY", "entry_id": entries[1]}, limit=1, max_chars=len(placeholder))
     assert first["items"][0]["text"] == placeholder
     old = _decode(first["next_cursor"], "read_session_content")
     old["operation"] = "read_session_content.v2"
@@ -130,7 +130,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
     assert (
         query.invoke(
             "read_session_content",
-            {"session_id": session["id"]},
+            {"target": {"kind": "SESSION", "session_id": session["id"]}},
             current_range=SessionContentRange(0),
             tool_call_id="call:h",
             deadline_monotonic=monotonic() + 30,
@@ -188,7 +188,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
     )
     page = cross.invoke(
         "read_session_content",
-        {"session_id": session["id"], "entry_id": entries[1], "limit": 1},
+        {"target": {"kind": "SESSION_ENTRY", "session_id": session["id"], "entry_id": entries[1]}, "limit": 1},
         current_range=SessionContentRange(0),
         tool_call_id="call:h",
         deadline_monotonic=monotonic() + 30,
@@ -242,7 +242,7 @@ def test_annotation_near_body_quota_remains_searchable_with_image(
         message
         for hit in hits["items"]
         for message in hit["messages"]
-        if message["entry_id"] == intent.entry_id
+        if message["target"]["entry_id"] == intent.entry_id
     )
     # The 1016-token annotation fits the 1024-token body quota. The image
     # label must not turn this real search hit into a discarded candidate.

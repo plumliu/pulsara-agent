@@ -39,18 +39,18 @@ package and are not edited as loose sources.
 ## Trust, enable, disable or revoke
 
 ```json
-{"action":"TRUST_HOOK_SOURCE","scope":"WORKSPACE","source_kind":"LOCAL"}
+{"action":"TRUST_HOOK_SOURCE","target":{"kind":"HOOK_SOURCE","scope":"WORKSPACE","source_kind":"LOCAL"}}
 ```
 
 ```json
-{"action":"SET_HOOK_SOURCE_ENABLED","scope":"WORKSPACE","source_kind":"LOCAL","enabled":false}
+{"action":"SET_HOOK_SOURCE_ENABLED","target":{"kind":"HOOK_SOURCE","scope":"WORKSPACE","source_kind":"LOCAL"},"enabled":false}
 ```
 
 ```json
-{"action":"REVOKE_HOOK_TRUST","scope":"WORKSPACE","source_kind":"LOCAL"}
+{"action":"REVOKE_HOOK_TRUST","target":{"kind":"HOOK_SOURCE","scope":"WORKSPACE","source_kind":"LOCAL"}}
 ```
 
-For any Plugin mutation, replace LOCAL with PLUGIN and add its exact `plugin_id`.
+For a Plugin source, set target.source_kind to PLUGIN and include target.plugin_id.
 Never send `source_path`, `skill_path`, a digest, `--yes` or an acceptance boolean.
 `TRUST_HOOK_SOURCE` requires GUI review of all current commands, environment,
 events, matchers and execution fields, even in full-access mode. Enable/disable

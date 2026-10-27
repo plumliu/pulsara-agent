@@ -1,6 +1,8 @@
 """Clean-v0 direct memory writes through canonical ToolResult settlement."""
 
 from __future__ import annotations
+
+from pulsara_agent.memory.targets import memory_target
 from uuid import uuid4
 
 import asyncio
@@ -200,7 +202,7 @@ def _open_direct_memory_session(repository, *, workspace_root: str | None = None
                 "statement": statement,
                 "kind": kind.value,
                 "context_target": "CURRENT_PROJECT" if project else "GLOBAL",
-                "based_on_memory_ids": list(based_on),
+                "based_on": [memory_target(item) for item in based_on],
             },
             mutation,
         )
@@ -224,14 +226,14 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
     invoke(
         "mark_memory_relation",
         {
-            "source_memory_id": current["memory_id"],
-            "target_memory_id": old["memory_id"],
+            'source': memory_target(current["target"]["memory_id"]),
+            'target': memory_target(old["target"]["memory_id"]),
             "relation_kind": "SUPERSEDES",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=current["memory_id"],
-            target_memory_id=old["memory_id"],
+            source_memory_id=current["target"]["memory_id"],
+            target_memory_id=old["target"]["memory_id"],
             relation_kind=MemoryRelationKind.SUPERSEDES,
         ),
     )
@@ -243,7 +245,7 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
             deadline_monotonic=monotonic() + 30,
         )
 
-    before = detail(current["memory_id"])
+    before = detail(current["target"]["memory_id"])
     assert before["user_edited_at"] is None
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -256,20 +258,20 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
                SELECT memory_domain_id, id, fact_semantic_digest, 'test', 1,
                       ('[' || repeat('0,', 1023) || '0]')::public.vector
                FROM pulsara_v3.memory_facts WHERE id=%s""",
-            (current["memory_id"],),
+            (current["target"]["memory_id"],),
         )
     changed = repository.memory_management_edit_statement(
         memory_domain_id="u_local", selection=selection,
-        fact_id=current["memory_id"],
+        fact_id=current["target"]["memory_id"],
         statement="  The site is violet-hall on Tuesday.  ",
         expected_updated_at=before["fact"]["updated_at"],
         deadline_monotonic=monotonic() + 30,
     )
     assert changed["changed"] is True
     assert changed["fact"]["statement"] == "The site is violet-hall on Tuesday."
-    assert changed["fact"]["fact_id"] == current["memory_id"]
+    assert changed["fact"]["fact_id"] == current["target"]["memory_id"]
     assert changed["fact"]["updated_at"] != before["fact"]["updated_at"]
-    after = detail(current["memory_id"])
+    after = detail(current["target"]["memory_id"])
     assert after["user_edited_at"] == changed["user_edited_at"]
     assert [r["relation_id"] for r in after["relations"]] == [
         r["relation_id"] for r in before["relations"]
@@ -288,7 +290,7 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
                       e.fact_id AS embedding_fact_id
                FROM pulsara_v3.memory_facts f LEFT JOIN pulsara_v3.memory_embeddings e
                  ON e.memory_domain_id=f.memory_domain_id AND e.fact_id=f.id
-               WHERE f.id=%s""", (current["memory_id"],),
+               WHERE f.id=%s""", (current["target"]["memory_id"],),
         ).fetchone()
     assert "violet" in row[0] and "amber" not in row[0]
     assert row[1] is True and row[2] is False
@@ -298,7 +300,7 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
         host_workspace_id='workspace:oktyd2yb2hmhohnpgzxtd56ada',
     )
     query_row = PostgresMemoryQuery(repository.connection_provider).get(
-        read_binding=binding, fact_id=current["memory_id"],
+        read_binding=binding, fact_id=current["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     assert query_row is not None and query_row.user_edited_at == changed["user_edited_at"]
@@ -313,7 +315,7 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
         )
         try:
             return json.loads((await port._get(
-                {"memory_id": current["memory_id"]},
+                {'target': memory_target(current["target"]["memory_id"])},
             )).content)
         finally:
             await port.aclose()
@@ -325,14 +327,14 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
     assert "provenance" not in memory
     assert repository.memory_management_edit_statement(
         memory_domain_id="u_local", selection=selection,
-        fact_id=current["memory_id"], statement=changed["fact"]["statement"],
+        fact_id=current["target"]["memory_id"], statement=changed["fact"]["statement"],
         expected_updated_at=changed["fact"]["updated_at"],
         deadline_monotonic=monotonic() + 30,
     )["changed"] is False
     with pytest.raises(MemoryManagementError) as stale:
         repository.memory_management_edit_statement(
             memory_domain_id="u_local", selection=selection,
-            fact_id=current["memory_id"], statement="A stale edit.",
+            fact_id=current["target"]["memory_id"], statement="A stale edit.",
             expected_updated_at=before["fact"]["updated_at"],
             deadline_monotonic=monotonic() + 30,
         )
@@ -342,25 +344,25 @@ def test_user_text_edit_preserves_identity_and_relations_but_refreshes_retrieval
     with pytest.raises(MemoryManagementError) as duplicate:
         repository.memory_management_edit_statement(
             memory_domain_id="u_local", selection=selection,
-            fact_id=current["memory_id"], statement="Another active fact.",
+            fact_id=current["target"]["memory_id"], statement="Another active fact.",
             expected_updated_at=changed["fact"]["updated_at"],
             deadline_monotonic=monotonic() + 30,
         )
     assert duplicate.value.status == 409
-    assert detail(current["memory_id"])["fact"]["statement"] == changed["fact"]["statement"]
-    old_before = detail(old["memory_id"])
+    assert detail(current["target"]["memory_id"])["fact"]["statement"] == changed["fact"]["statement"]
+    old_before = detail(old["target"]["memory_id"])
     assert old_before["fact"]["lifecycle"] == "SUPERSEDED"
     old_edit = repository.memory_management_edit_statement(
-        memory_domain_id="u_local", selection=selection, fact_id=old["memory_id"],
+        memory_domain_id="u_local", selection=selection, fact_id=old["target"]["memory_id"],
         statement="The prior site was indigo-hall.",
         expected_updated_at=old_before["fact"]["updated_at"],
         deadline_monotonic=monotonic() + 30,
     )
     assert old_edit["fact"]["lifecycle"] == "SUPERSEDED"
-    assert other["memory_id"] != current["memory_id"]
+    assert other["target"]["memory_id"] != current["target"]["memory_id"]
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local", selection=selection,
-        fact_id=current["memory_id"], deadline_monotonic=monotonic() + 30,
+        fact_id=current["target"]["memory_id"], deadline_monotonic=monotonic() + 30,
     )
     assert b"The prior site was indigo-hall." in b"\n".join(preview)
     assert b"The site is violet-hall on Tuesday." in b"\n".join(preview)
@@ -374,11 +376,11 @@ def test_user_text_edit_obeys_original_scope_and_kind_limits(direct_memory_sessi
     selection = MemoryManagementSelection()
     before = repository.memory_management_detail(
         memory_domain_id="u_local", selection=selection,
-        fact_id=preference["memory_id"], deadline_monotonic=monotonic() + 30,
+        fact_id=preference["target"]["memory_id"], deadline_monotonic=monotonic() + 30,
     )
     edit_args = dict(
         memory_domain_id="u_local", selection=selection,
-        fact_id=preference["memory_id"],
+        fact_id=preference["target"]["memory_id"],
         expected_updated_at=before["fact"]["updated_at"],
         deadline_monotonic=monotonic() + 30,
     )
@@ -392,7 +394,7 @@ def test_user_text_edit_obeys_original_scope_and_kind_limits(direct_memory_sessi
     assert wrong_scope.value.status == 404
     after = repository.memory_management_detail(
         memory_domain_id="u_local", selection=selection,
-        fact_id=preference["memory_id"], deadline_monotonic=monotonic() + 30,
+        fact_id=preference["target"]["memory_id"], deadline_monotonic=monotonic() + 30,
     )
     assert after["fact"]["statement"] == before["fact"]["statement"]
     assert after["user_edited_at"] is None
@@ -403,12 +405,12 @@ def test_memory_page_returns_facts_and_relations_without_creation_metadata(direc
     _, old, _ = remember("The delivery date is Friday.")
     _, current, _ = remember("The delivery date is Monday.")
     _, relation, _ = invoke("mark_memory_relation", {
-        "source_memory_id": current["memory_id"], "target_memory_id": old["memory_id"],
+        'source': memory_target(current["target"]["memory_id"]), 'target': memory_target(old["target"]["memory_id"]),
         "relation_kind": "SUPERSEDES",
-    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["memory_id"],
-        target_memory_id=old["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
-    _, dependent, _ = remember("Prepare against the revised delivery date.", based_on=(current["memory_id"],))
-    for fact_id in (current["memory_id"], dependent["memory_id"]):
+    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["target"]["memory_id"],
+        target_memory_id=old["target"]["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
+    _, dependent, _ = remember("Prepare against the revised delivery date.", based_on=(current["target"]["memory_id"],))
+    for fact_id in (current["target"]["memory_id"], dependent["target"]["memory_id"]):
         detail = repository.memory_management_detail(memory_domain_id="u_local",
             selection=MemoryManagementSelection(), fact_id=fact_id, deadline_monotonic=monotonic()+30)
         assert set(detail) == {"fact", "user_edited_at", "relations", "next_cursor"}
@@ -417,7 +419,7 @@ def test_memory_page_returns_facts_and_relations_without_creation_metadata(direc
         assert all(set(item) == {"relation_id", "subject", "companion", "relative_role", "recorded_at"}
                    for item in detail["relations"])
     assert relation["relation_id"] in {r["relation_id"] for r in repository.memory_management_detail(
-        memory_domain_id="u_local", selection=MemoryManagementSelection(), fact_id=current["memory_id"],
+        memory_domain_id="u_local", selection=MemoryManagementSelection(), fact_id=current["target"]["memory_id"],
         deadline_monotonic=monotonic()+30)["relations"]}
 
 
@@ -460,26 +462,26 @@ def test_memory_project_list_contains_only_projects_with_persisted_facts(
     detail = repository.memory_management_detail(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=project_fact["memory_id"],
+        fact_id=project_fact["target"]["memory_id"],
         deadline_monotonic=deadline(),
     )
     assert "source" not in detail
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=project_fact["memory_id"],
+        fact_id=project_fact["target"]["memory_id"],
         deadline_monotonic=deadline(),
     )
     repository.execute_memory_deletion(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=project_fact["memory_id"],
+        fact_id=project_fact["target"]["memory_id"],
         additional=(),
         expected_records=lambda: iter(preview),
         deadline_monotonic=deadline(),
     )
     assert projects() == []
-    assert global_fact["memory_id"] != project_fact["memory_id"]
+    assert global_fact["target"]["memory_id"] != project_fact["target"]["memory_id"]
 
 
 def test_project_memory_directory_survives_zero_sessions_and_pages_stably(
@@ -497,7 +499,7 @@ def test_project_memory_directory_survives_zero_sessions_and_pages_stably(
             project=True,
         )
         workspace_id = workspace_context_id(workspace_root)
-        created.append((lease.guard.session_id, workspace_id, fact["memory_id"]))
+        created.append((lease.guard.session_id, workspace_id, fact["target"]["memory_id"]))
         repository.release_host_writer(lease.guard, deadline_monotonic=monotonic() + 30)
         assert repository.delete_session(
             required_lifecycle=None,
@@ -539,29 +541,29 @@ def test_direct_save_duplicate_relation_and_deleted_ack(direct_memory_session):
     repository, lease, invoke, remember = direct_memory_session
     saved, first, _ = remember("The release target is Friday.")
     assert first["status"] == "SAVED"
-    assert saved.model_visible_memory_fact_ids == (first["memory_id"],)
+    assert saved.model_visible_memory_fact_ids == (first["target"]["memory_id"],)
     duplicate, second, _ = remember("The release target is Friday.")
     assert second["status"] == "ALREADY_PRESENT"
-    assert second["memory_id"] == first["memory_id"]
-    assert duplicate.model_visible_memory_fact_ids == (first["memory_id"],)
+    assert second["target"]["memory_id"] == first["target"]["memory_id"]
+    assert duplicate.model_visible_memory_fact_ids == (first["target"]["memory_id"],)
     _, updated, _ = remember("The release target is Monday.")
     relation, result, _ = invoke(
         "mark_memory_relation",
         {
-            "source_memory_id": updated["memory_id"],
-            "target_memory_id": first["memory_id"],
+            'source': memory_target(updated["target"]["memory_id"]),
+            'target': memory_target(first["target"]["memory_id"]),
             "relation_kind": "SUPERSEDES",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=updated["memory_id"],
-            target_memory_id=first["memory_id"],
+            source_memory_id=updated["target"]["memory_id"],
+            target_memory_id=first["target"]["memory_id"],
             relation_kind=MemoryRelationKind.SUPERSEDES,
         ),
     )
     assert result["status"] == "SAVED"
     assert relation.model_visible_memory_fact_ids == (
-        updated["memory_id"], first["memory_id"]
+        updated["target"]["memory_id"], first["target"]["memory_id"]
     )
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -570,11 +572,11 @@ def test_direct_save_duplicate_relation_and_deleted_ack(direct_memory_session):
         rows = connection.execute(
             "SELECT f.id,f.lifecycle FROM pulsara_v3.memory_facts AS f "
             "WHERE f.id=ANY(%s::text[]) ORDER BY f.id",
-            ([first["memory_id"], updated["memory_id"]],),
+            ([first["target"]["memory_id"], updated["target"]["memory_id"]],),
         ).fetchall()
     assert {str(row[0]): str(row[1]) for row in rows} == {
-        first["memory_id"]: "SUPERSEDED",
-        updated["memory_id"]: "ACTIVE",
+        first["target"]["memory_id"]: "SUPERSEDED",
+        updated["target"]["memory_id"]: "ACTIVE",
     }
 
 
@@ -585,11 +587,11 @@ def test_memory_rows_survive_tool_history_deletion_and_remain_editable(
     _, old, old_call = remember("The launch room is A.")
     accepted, current, current_call = remember("The launch room is B.")
     _, relation, relation_call = invoke("mark_memory_relation", {
-        "source_memory_id": current["memory_id"], "target_memory_id": old["memory_id"],
+        'source': memory_target(current["target"]["memory_id"]), 'target': memory_target(old["target"]["memory_id"]),
         "relation_kind": "SUPERSEDES",
-    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["memory_id"],
-        target_memory_id=old["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
-    ids = [old["memory_id"], current["memory_id"]]
+    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["target"]["memory_id"],
+        target_memory_id=old["target"]["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
+    ids = [old["target"]["memory_id"], current["target"]["memory_id"]]
     def rows():
         with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
             return (c.execute("SELECT * FROM pulsara_v3.memory_facts WHERE id=ANY(%s) ORDER BY id", (ids,)).fetchall(),
@@ -600,17 +602,17 @@ def test_memory_rows_survive_tool_history_deletion_and_remain_editable(
                   ([old_call.result_id, current_call.result_id, relation_call.result_id],))
     assert rows() == before
     detail = repository.memory_management_detail(memory_domain_id="u_local", selection=MemoryManagementSelection(),
-        fact_id=current["memory_id"], deadline_monotonic=monotonic()+30)
+        fact_id=current["target"]["memory_id"], deadline_monotonic=monotonic()+30)
     assert set(detail) == {"fact", "relations", "user_edited_at", "next_cursor"}
     edited = repository.memory_management_edit_statement(memory_domain_id="u_local", selection=MemoryManagementSelection(),
-        fact_id=current["memory_id"], statement="The launch room is B after history deletion.",
+        fact_id=current["target"]["memory_id"], statement="The launch room is B after history deletion.",
         expected_updated_at=detail["fact"]["updated_at"], deadline_monotonic=monotonic()+30)
     assert edited["changed"] is True
     _, repeated, _ = invoke("mark_memory_relation", {
-        "source_memory_id": current["memory_id"], "target_memory_id": old["memory_id"],
+        'source': memory_target(current["target"]["memory_id"]), 'target': memory_target(old["target"]["memory_id"]),
         "relation_kind": "SUPERSEDES",
-    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["memory_id"],
-        target_memory_id=old["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
+    }, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=current["target"]["memory_id"],
+        target_memory_id=old["target"]["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
     assert repeated["status"] == "ALREADY_PRESENT"
     assert repeated["relation_id"] == relation["relation_id"]
     with pytest.raises(InsufficientPrivilege):
@@ -632,14 +634,14 @@ def test_contradiction_identity_survives_tool_history_deletion(
     _, saved, candidate = invoke(
         "mark_memory_relation",
         {
-            "source_memory_id": left["memory_id"],
-            "target_memory_id": right["memory_id"],
+            'source': memory_target(left["target"]["memory_id"]),
+            'target': memory_target(right["target"]["memory_id"]),
             "relation_kind": "CONTRADICTS",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=left["memory_id"],
-            target_memory_id=right["memory_id"],
+            source_memory_id=left["target"]["memory_id"],
+            target_memory_id=right["target"]["memory_id"],
             relation_kind=MemoryRelationKind.CONTRADICTS,
         ),
     )
@@ -651,14 +653,14 @@ def test_contradiction_identity_survives_tool_history_deletion(
     _, repeated, _ = invoke(
         "mark_memory_relation",
         {
-            "source_memory_id": right["memory_id"],
-            "target_memory_id": left["memory_id"],
+            'source': memory_target(right["target"]["memory_id"]),
+            'target': memory_target(left["target"]["memory_id"]),
             "relation_kind": "CONTRADICTS",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=right["memory_id"],
-            target_memory_id=left["memory_id"],
+            source_memory_id=right["target"]["memory_id"],
+            target_memory_id=left["target"]["memory_id"],
             relation_kind=MemoryRelationKind.CONTRADICTS,
         ),
     )
@@ -667,8 +669,8 @@ def test_contradiction_identity_survives_tool_history_deletion(
         "status": "ALREADY_PRESENT",
         "relation_id": saved["relation_id"],
         "relation_kind": "CONTRADICTS",
-        "source_memory_id": min(left["memory_id"], right["memory_id"]),
-        "target_memory_id": max(left["memory_id"], right["memory_id"]),
+        'source': memory_target(min(left["target"]["memory_id"], right["target"]["memory_id"])),
+        'target': memory_target(max(left["target"]["memory_id"], right["target"]["memory_id"])),
     }
 
 
@@ -685,7 +687,7 @@ def test_relation_endpoint_kinds_must_match_canonical_facts(
                 (id,memory_domain_id,source_context_id,source_fact_id,source_fact_kind,relation_kind,
                  target_context_id,target_fact_id,target_fact_kind)
                 VALUES (%s,'u_local','ctx:global',%s,%s,'CONTRADICTS','ctx:global',%s,%s)""",
-                (_name("relation"), first["memory_id"], endpoint_kind, second["memory_id"], endpoint_kind))
+                (_name("relation"), first["target"]["memory_id"], endpoint_kind, second["target"]["memory_id"], endpoint_kind))
             c.execute("SET CONSTRAINTS ALL IMMEDIATE")
 
 
@@ -701,14 +703,14 @@ def test_project_relation_requires_current_workspace_but_global_is_domain_scoped
     rejected, rejected_body, _ = invoke_a(
         "mark_memory_relation",
         {
-            "source_memory_id": project_b_right["memory_id"],
-            "target_memory_id": project_b_left["memory_id"],
+            'source': memory_target(project_b_right["target"]["memory_id"]),
+            'target': memory_target(project_b_left["target"]["memory_id"]),
             "relation_kind": "SUPERSEDES",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=project_b_right["memory_id"],
-            target_memory_id=project_b_left["memory_id"],
+            source_memory_id=project_b_right["target"]["memory_id"],
+            target_memory_id=project_b_left["target"]["memory_id"],
             relation_kind=MemoryRelationKind.SUPERSEDES,
         ),
     )
@@ -718,14 +720,14 @@ def test_project_relation_requires_current_workspace_but_global_is_domain_scoped
     accepted, accepted_body, _ = invoke_b(
         "mark_memory_relation",
         {
-            "source_memory_id": project_b_right["memory_id"],
-            "target_memory_id": project_b_left["memory_id"],
+            'source': memory_target(project_b_right["target"]["memory_id"]),
+            'target': memory_target(project_b_left["target"]["memory_id"]),
             "relation_kind": "SUPERSEDES",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=project_b_right["memory_id"],
-            target_memory_id=project_b_left["memory_id"],
+            source_memory_id=project_b_right["target"]["memory_id"],
+            target_memory_id=project_b_left["target"]["memory_id"],
             relation_kind=MemoryRelationKind.SUPERSEDES,
         ),
     )
@@ -737,14 +739,14 @@ def test_project_relation_requires_current_workspace_but_global_is_domain_scoped
     cross_workspace, global_relation, _ = invoke_b(
         "mark_memory_relation",
         {
-            "source_memory_id": global_left["memory_id"],
-            "target_memory_id": global_right["memory_id"],
+            'source': memory_target(global_left["target"]["memory_id"]),
+            'target': memory_target(global_right["target"]["memory_id"]),
             "relation_kind": "CONTRADICTS",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=global_left["memory_id"],
-            target_memory_id=global_right["memory_id"],
+            source_memory_id=global_left["target"]["memory_id"],
+            target_memory_id=global_right["target"]["memory_id"],
             relation_kind=MemoryRelationKind.CONTRADICTS,
         ),
     )
@@ -758,20 +760,20 @@ def test_memory_page_deletion_restores_superseded_and_cascades_basis(
     repository, _, invoke, remember = direct_memory_session
     _, original, _ = remember("The original venue is Building A.")
     _, dependent, _ = remember(
-        "The map points to Building A.", based_on=(original["memory_id"],)
+        "The map points to Building A.", based_on=(original["target"]["memory_id"],)
     )
     _, replacement, _ = remember("The venue is Building B.")
     invoke(
         "mark_memory_relation",
         {
-            "source_memory_id": replacement["memory_id"],
-            "target_memory_id": original["memory_id"],
+            'source': memory_target(replacement["target"]["memory_id"]),
+            'target': memory_target(original["target"]["memory_id"]),
             "relation_kind": "SUPERSEDES",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=replacement["memory_id"],
-            target_memory_id=original["memory_id"],
+            source_memory_id=replacement["target"]["memory_id"],
+            target_memory_id=original["target"]["memory_id"],
             relation_kind=MemoryRelationKind.SUPERSEDES,
         ),
     )
@@ -779,7 +781,7 @@ def test_memory_page_deletion_restores_superseded_and_cascades_basis(
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=replacement["memory_id"],
+        fact_id=replacement["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     relation_effects = [
@@ -794,7 +796,7 @@ def test_memory_page_deletion_restores_superseded_and_cascades_basis(
     repository.execute_memory_deletion(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=replacement["memory_id"],
+        fact_id=replacement["target"]["memory_id"],
         additional=(),
         expected_records=lambda: iter(preview),
         deadline_monotonic=monotonic() + 30,
@@ -805,25 +807,25 @@ def test_memory_page_deletion_restores_superseded_and_cascades_basis(
     ) as connection:
         original_row = connection.execute(
             "SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s",
-            (original["memory_id"],),
+            (original["target"]["memory_id"],),
         ).fetchone()
         dependent_row = connection.execute(
             "SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s",
-            (dependent["memory_id"],),
+            (dependent["target"]["memory_id"],),
         ).fetchone()
     assert original_row == ("ACTIVE",)
     assert dependent_row == ("ACTIVE",)
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=original["memory_id"],
+        fact_id=original["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     assert sum(json.loads(item).get("type") == "FACT_DELETE" for item in preview) == 2
     repository.execute_memory_deletion(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=original["memory_id"],
+        fact_id=original["target"]["memory_id"],
         additional=(),
         expected_records=lambda: iter(preview),
         deadline_monotonic=monotonic() + 30,
@@ -842,20 +844,20 @@ def test_memory_deletion_http_round_trip_commits_the_actual_preview(
     repository, _, invoke, remember = direct_memory_session
     suffix = uuid4().hex
     _, original, _ = remember(f"The original audit venue {suffix} is Building A.")
-    root = original["memory_id"]
+    root = original["target"]["memory_id"]
     other = None
     if relation_kind == "BASED_ON":
         _, other, _ = remember(f"The audit map {suffix} points to Building A.", based_on=(root,))
     elif relation_kind is not None:
         _, other, _ = remember(f"The replacement audit venue {suffix} is Building B.")
         invoke("mark_memory_relation", {
-            "source_memory_id": other["memory_id"], "target_memory_id": root,
+            'source': memory_target(other["target"]["memory_id"]), 'target': memory_target(root),
             "relation_kind": relation_kind,
         }, PreparedMemoryRelationWrite(
-            memory_domain_id="u_local", source_memory_id=other["memory_id"],
+            memory_domain_id="u_local", source_memory_id=other["target"]["memory_id"],
             target_memory_id=root, relation_kind=MemoryRelationKind(relation_kind),
         ))
-        root = other["memory_id"]
+        root = other["target"]["memory_id"]
 
     core = object.__new__(KernelHostCore)
     async def resources():
@@ -908,9 +910,9 @@ def test_memory_deletion_http_round_trip_commits_the_actual_preview(
     ) as c:
         assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE id=%s", (root,)).fetchone() is None
         if relation_kind in {"SUPERSEDES", "CONTRADICTS"}:
-            assert c.execute("SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s", (original["memory_id"],)).fetchone() == ("ACTIVE",)
+            assert c.execute("SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s", (original["target"]["memory_id"],)).fetchone() == ("ACTIVE",)
         elif relation_kind == "BASED_ON":
-            assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE id=%s", (other["memory_id"],)).fetchone() is None
+            assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE id=%s", (other["target"]["memory_id"],)).fetchone() is None
 
 
 @pytest.mark.parametrize("growth_scope", ("global", "same_project", "cross_project"))
@@ -930,28 +932,28 @@ def test_memory_deletion_replans_when_the_locked_graph_grows(
         selection = MemoryManagementSelection(
             view="project", workspace_id=project_a_id
         )
-        protected_ids = [root["memory_id"]]
+        protected_ids = [root["target"]["memory_id"]]
 
         def grow_graph():
             return remember_a(
                 "A concurrently added fact depends on the same-project root.",
                 project=True,
-                based_on=(root["memory_id"],),
+                based_on=(root["target"]["memory_id"],),
                 based_on_contexts=(project_a_id,),
             )[1]
 
     else:
         _, root, _ = remember_a(f"Concurrency root for {growth_scope} growth.")
         selection = MemoryManagementSelection()
-        protected_ids = [root["memory_id"]]
+        protected_ids = [root["target"]["memory_id"]]
         if growth_scope == "cross_project":
             _, project_a_dependent, _ = remember_a(
                 "Project A depends on the global concurrency root.",
                 project=True,
-                based_on=(root["memory_id"],),
+                based_on=(root["target"]["memory_id"],),
                 based_on_contexts=(CTX_GLOBAL,),
             )
-            protected_ids.append(project_a_dependent["memory_id"])
+            protected_ids.append(project_a_dependent["target"]["memory_id"])
 
             def grow_graph():
                 _lease_b, _invoke_b, remember_b = _open_direct_memory_session(
@@ -960,7 +962,7 @@ def test_memory_deletion_replans_when_the_locked_graph_grows(
                 return remember_b(
                     "Project B concurrently depends on the global concurrency root.",
                     project=True,
-                    based_on=(root["memory_id"],),
+                    based_on=(root["target"]["memory_id"],),
                     based_on_contexts=(CTX_GLOBAL,),
                 )[1]
 
@@ -969,14 +971,14 @@ def test_memory_deletion_replans_when_the_locked_graph_grows(
             def grow_graph():
                 return remember_a(
                     "A concurrently added global fact depends on the global root.",
-                    based_on=(root["memory_id"],),
+                    based_on=(root["target"]["memory_id"],),
                     based_on_contexts=(CTX_GLOBAL,),
                 )[1]
 
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=root["memory_id"],
+        fact_id=root["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     planning_started = Event()
@@ -1002,7 +1004,7 @@ def test_memory_deletion_replans_when_the_locked_graph_grows(
             repository.execute_memory_deletion,
             memory_domain_id="u_local",
             selection=selection,
-            fact_id=root["memory_id"],
+            fact_id=root["target"]["memory_id"],
             additional=(),
             expected_records=lambda: iter(preview),
             deadline_monotonic=monotonic() + 30,
@@ -1010,7 +1012,7 @@ def test_memory_deletion_replans_when_the_locked_graph_grows(
         assert planning_started.wait(timeout=10)
         try:
             added = grow_graph()
-            protected_ids.append(added["memory_id"])
+            protected_ids.append(added["target"]["memory_id"])
         finally:
             allow_locking.set()
         with pytest.raises(MemoryManagementError) as drifted:
@@ -1357,7 +1359,7 @@ def test_memory_mutation_rolls_back_if_tool_result_publication_fails(direct_memo
             if operation == "remember":
                 assert connection.execute("SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s", ("This write must roll back.",)).fetchone()
             else:
-                assert connection.execute("SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s", (first["memory_id"],)).fetchone()["lifecycle"] == "SUPERSEDED"
+                assert connection.execute("SELECT lifecycle FROM pulsara_v3.memory_facts WHERE id=%s", (first["target"]["memory_id"],)).fetchone()["lifecycle"] == "SUPERSEDED"
             raise ConversationKernelConflict("injected result publication failure")
         return insert(connection, **kwargs)
     monkeypatch.setattr(repository, "_insert_entry", reject)
@@ -1365,10 +1367,10 @@ def test_memory_mutation_rolls_back_if_tool_result_publication_fails(direct_memo
         if operation == "remember":
             remember("This write must roll back.")
         else:
-            invoke("mark_memory_relation", {"source_memory_id":second["memory_id"],
-                "target_memory_id":first["memory_id"], "relation_kind":"SUPERSEDES"},
-                PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=second["memory_id"],
-                    target_memory_id=first["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
+            invoke("mark_memory_relation", {'source':memory_target(second["target"]["memory_id"]),
+                'target':memory_target(first["target"]["memory_id"]), "relation_kind":"SUPERSEDES"},
+                PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=second["target"]["memory_id"],
+                    target_memory_id=first["target"]["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES))
     assert snapshot() == before
     assert len(unpublished) == 1
     with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
@@ -1389,8 +1391,8 @@ def test_relation_repeats_and_late_relation_failure_do_not_undo_saved_fact(
         _, body, _ = invoke(
             "mark_memory_relation",
             {
-                "source_memory_id": source,
-                "target_memory_id": target,
+                'source': memory_target(source),
+                'target': memory_target(target),
                 "relation_kind": kind.value,
             },
             PreparedMemoryRelationWrite(
@@ -1402,7 +1404,7 @@ def test_relation_repeats_and_late_relation_failure_do_not_undo_saved_fact(
         )
         return body
 
-    a, b, c = (item["memory_id"] for item in (first, second, third))
+    a, b, c = (item["target"]["memory_id"] for item in (first, second, third))
     assert relate(a, b, MemoryRelationKind.CONTRADICTS)["status"] == "SAVED"
     assert relate(b, a, MemoryRelationKind.CONTRADICTS)["status"] == "ALREADY_PRESENT"
     assert relate(c, a, MemoryRelationKind.SUPERSEDES)["status"] == "SAVED"
@@ -1430,14 +1432,14 @@ def test_preferences_remain_storable_beyond_projection_head_and_conflicts_are_ex
         remember(
             f"For response style case {index:02d}, use concise wording.",
             kind=MemoryFactKind.RESPONSE_PREFERENCE,
-        )[1]["memory_id"]
+        )[1]["target"]["memory_id"]
         for index in range(20)
     ]
     invoke(
         "mark_memory_relation",
         {
-            "source_memory_id": ids[0],
-            "target_memory_id": ids[1],
+            'source': memory_target(ids[0]),
+            'target': memory_target(ids[1]),
             "relation_kind": "CONTRADICTS",
         },
         PreparedMemoryRelationWrite(
@@ -1478,7 +1480,7 @@ def test_remember_related_preview_returns_three_exact_context_facts(
     repository, lease, _invoke, remember = direct_memory_session
     ids = tuple(
         remember(f"Project Orion quarterly revenue for Q{index} is {index * 10}.")[1][
-            "memory_id"
+            "target"]["memory_id"
         ]
         for index in range(1, 4)
     )
@@ -1539,7 +1541,7 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
             settings=LocalSettingsStore(tmp_path / "settings.yaml"),
         )
         try:
-            return json.loads((await port._get({"memory_id": saved["memory_id"]})).content)
+            return json.loads((await port._get({'target': memory_target(saved["target"]["memory_id"])})).content)
         finally:
             await port.aclose()
             await io.aclose(deadline_monotonic=monotonic() + 10)
@@ -1549,7 +1551,7 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
     assert same == foreign
     assert same["statement"] == "The design review is on Tuesday."
     assert set(same) == {
-        "memory_id", "kind", "context_product_label", "current_context",
+        "target", "kind", "context_product_label", "current_context",
         "lifecycle", "statement", "recorded_at", "relations",
         "advisory", "may_be_stale_or_incomplete",
     }
@@ -1557,7 +1559,7 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
     page_detail = repository.memory_management_detail(
         memory_domain_id="u_local",
         selection=MemoryManagementSelection(),
-        fact_id=saved["memory_id"],
+        fact_id=saved["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     assert "source" not in page_detail
@@ -1578,7 +1580,7 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
     closed_page = repository.memory_management_detail(
         memory_domain_id="u_local",
         selection=MemoryManagementSelection(),
-        fact_id=saved["memory_id"],
+        fact_id=saved["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     assert closed_page == page_detail
@@ -1588,12 +1590,12 @@ def test_memory_management_domain_is_independent_of_creation_session(direct_memo
     repository, lease, invoke, remember = direct_memory_session
     _, first, _ = remember("The review starts at noon.")
     _, second, _ = remember("The review starts at midnight.")
-    invoke("mark_memory_relation", {"source_memory_id":first["memory_id"], "target_memory_id":second["memory_id"],
-        "relation_kind":"CONTRADICTS"}, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=first["memory_id"],
-        target_memory_id=second["memory_id"], relation_kind=MemoryRelationKind.CONTRADICTS))
+    invoke("mark_memory_relation", {'source':memory_target(first["target"]["memory_id"]), 'target':memory_target(second["target"]["memory_id"]),
+        "relation_kind":"CONTRADICTS"}, PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=first["target"]["memory_id"],
+        target_memory_id=second["target"]["memory_id"], relation_kind=MemoryRelationKind.CONTRADICTS))
     def detail(domain):
         return repository.memory_management_detail(memory_domain_id=domain, selection=MemoryManagementSelection(),
-            fact_id=first["memory_id"], deadline_monotonic=monotonic()+30)
+            fact_id=first["target"]["memory_id"], deadline_monotonic=monotonic()+30)
     before = detail("u_local")
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as c:
         c.execute("""INSERT INTO pulsara_v3.workspaces (memory_domain_id,id,workspace_kind,workspace_root,workspace_label)
@@ -1618,7 +1620,7 @@ def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(
             "statement": statement,
             "kind": "FACT",
             "context_target": "GLOBAL",
-            "based_on_memory_ids": ['memory:f4ekao4ik3kbehvawlzrh6b7ke'],
+            'based_on': [memory_target(item) for item in ['memory:f4ekao4ik3kbehvawlzrh6b7ke']],
         },
         PreparedRememberWrite(
             memory_domain_id="u_local",
@@ -1642,7 +1644,7 @@ def test_stale_basis_rejects_even_an_exact_duplicate_without_a_partial_write(
             "SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s",
             (statement,),
         ).fetchall()
-    assert rows == [(original["memory_id"],)]
+    assert rows == [(original["target"]["memory_id"],)]
 
 
 def test_exact_tool_result_confirmation_survives_memory_page_edit_and_deletion(
@@ -1652,11 +1654,11 @@ def test_exact_tool_result_confirmation_survives_memory_page_edit_and_deletion(
     accepted, body, candidate = remember("The release note draft is approved.")
     selection = MemoryManagementSelection()
     detail = repository.memory_management_detail(
-        memory_domain_id="u_local", selection=selection, fact_id=body["memory_id"],
+        memory_domain_id="u_local", selection=selection, fact_id=body["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     changed = repository.memory_management_edit_statement(
-        memory_domain_id="u_local", selection=selection, fact_id=body["memory_id"],
+        memory_domain_id="u_local", selection=selection, fact_id=body["target"]["memory_id"],
         statement="The user has revised the release note draft.",
         expected_updated_at=detail["fact"]["updated_at"],
         deadline_monotonic=monotonic() + 30,
@@ -1668,13 +1670,13 @@ def test_exact_tool_result_confirmation_survives_memory_page_edit_and_deletion(
     preview = repository.memory_deletion_preview(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=body["memory_id"],
+        fact_id=body["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     repository.execute_memory_deletion(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=body["memory_id"],
+        fact_id=body["target"]["memory_id"],
         additional=(),
         expected_records=lambda: iter(preview),
         deadline_monotonic=monotonic() + 30,
@@ -1690,7 +1692,7 @@ def test_embedding_contract_overwrite_scan_and_dense_query_use_actual_binding(di
     from tests.retrieval_fixtures import connection as fixture_connection
     repository, _lease, _invoke, remember = direct_memory_session
     _, saved, _ = remember('Project Vermilion uses PostgreSQL for storage.')
-    fact_id = saved['memory_id']
+    fact_id = saved["target"]["memory_id"]
     binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:j5tgmxkn2ghgc3kb5sjppgjte4')
     old = fixture_connection('embedding', 'key', model='first').embedding_contract
     new = fixture_connection('embedding', 'key', model='second').embedding_contract
@@ -1728,7 +1730,7 @@ def test_embedding_maintainer_discards_old_binding_and_resumes_partial_overwrite
     from pulsara_agent.conversation_kernel.memory.embedding_maintainer import MemoryEmbeddingMaintainer
     from tests.retrieval_fixtures import save_model
     repository, lease, _, remember = direct_memory_session
-    fact_ids = {remember(f'Project Cobalt storage fact {i} uses PostgreSQL.')[1]['memory_id'] for i in range(3)}
+    fact_ids = {remember(f'Project Cobalt storage fact {i} uses PostgreSQL.')[1]["target"]["memory_id"] for i in range(3)}
     binding = freeze_memory_read_context_binding(domain=MemoryDomainContext('u_local', 'transient'), host_workspace_id='workspace:dub6upjnxhf4bj6mjtxuemx7gi')
     async def exercise():
         settings = LocalSettingsStore(tmp_path / 'local-settings.yaml')
@@ -1813,5 +1815,5 @@ def test_memory_sparse_search_reuses_bilingual_query_stopwords(direct_memory_ses
         read_binding=binding, query='the 的 API_key', kind_filter=None, limit=20,
         automatic=True, deadline_monotonic=monotonic() + 30,
     )
-    assert tuple(item.fact_id for item in candidates) == (relevant['memory_id'],)
-    assert irrelevant['memory_id'] != relevant['memory_id']
+    assert tuple(item.fact_id for item in candidates) == (relevant["target"]["memory_id"],)
+    assert irrelevant["target"]["memory_id"] != relevant["target"]["memory_id"]

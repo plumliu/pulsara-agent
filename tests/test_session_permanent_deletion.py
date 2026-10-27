@@ -1,5 +1,7 @@
 """Session deletion hard-cut: real constraints, independent memory, and fences."""
 
+from pulsara_agent.memory.targets import memory_target
+
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from time import monotonic
 
@@ -322,24 +324,24 @@ def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_pat
     _, decision, _ = remember(
         "Deletion test: prepare slides Thursday.",
         project=True,
-        based_on=(old["memory_id"],),
+        based_on=(old["target"]["memory_id"],),
     )
     _, newer, _ = remember("Deletion test: review is Monday.", project=True)
     invoke(
         "mark_memory_relation",
         {
-            "source_memory_id": newer["memory_id"],
-            "target_memory_id": old["memory_id"],
+            'source': memory_target(newer["target"]["memory_id"]),
+            'target': memory_target(old["target"]["memory_id"]),
             "relation_kind": "SUPERSEDES",
         },
         PreparedMemoryRelationWrite(
             memory_domain_id="u_local",
-            source_memory_id=newer["memory_id"],
-            target_memory_id=old["memory_id"],
+            source_memory_id=newer["target"]["memory_id"],
+            target_memory_id=old["target"]["memory_id"],
             relation_kind=MemoryRelationKind.SUPERSEDES,
         ),
     )
-    ids = [x["memory_id"] for x in (old, decision, newer)]
+    ids = [x["target"]["memory_id"] for x in (old, decision, newer)]
     before = rows(
         repo,
         "SELECT * FROM pulsara_v3.memory_facts WHERE id=ANY(%s) ORDER BY id",
@@ -408,13 +410,13 @@ def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_pat
     detail = repo.memory_management_detail(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=newer["memory_id"],
+        fact_id=newer["target"]["memory_id"],
         deadline_monotonic=monotonic() + 30,
     )
     changed = repo.memory_management_edit_statement(
         memory_domain_id="u_local",
         selection=selection,
-        fact_id=newer["memory_id"],
+        fact_id=newer["target"]["memory_id"],
         statement="Deletion test: review is Tuesday.",
         expected_updated_at=detail["fact"]["updated_at"],
         deadline_monotonic=monotonic() + 30,
@@ -426,13 +428,13 @@ def test_memory_graph_and_project_survive_unchanged_with_user_edit(repo, tmp_pat
         preview = repo.memory_deletion_preview(
             memory_domain_id="u_local",
             selection=selection,
-            fact_id=fact["memory_id"],
+            fact_id=fact["target"]["memory_id"],
             deadline_monotonic=monotonic() + 30,
         )
         repo.execute_memory_deletion(
             memory_domain_id="u_local",
             selection=selection,
-            fact_id=fact["memory_id"],
+            fact_id=fact["target"]["memory_id"],
             additional=(),
             expected_records=lambda: iter(preview),
             deadline_monotonic=monotonic() + 30,

@@ -546,19 +546,21 @@ class _DirectTerminalProcessTool:
                 {
                     "status": "success",
                     "terminal_process_action": action,
-                    "processes": [item.to_payload() for item in processes],
+                    "processes": [
+                        _terminal_process_payload(item.to_payload()) for item in processes
+                    ],
                 },
             )
         if action == "poll":
             result = self.manager.poll_process(
-                request.process_id,
+                request.target.process_id,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
                 since_cursor=request.since_cursor,
             )
         elif action == "wait":
             result = self.manager.wait_process(
-                request.process_id,
+                request.target.process_id,
                 timeout_seconds=request.timeout_seconds,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
@@ -573,7 +575,7 @@ class _DirectTerminalProcessTool:
             )
         elif action == "write":
             result = self.manager.write_process(
-                request.process_id,
+                request.target.process_id,
                 request.data,
                 append_newline=False,
                 yield_time_ms=request.yield_time_ms,
@@ -582,7 +584,7 @@ class _DirectTerminalProcessTool:
             )
         elif action == "submit":
             result = self.manager.write_process(
-                request.process_id,
+                request.target.process_id,
                 request.data,
                 append_newline=True,
                 yield_time_ms=request.yield_time_ms,
@@ -591,13 +593,13 @@ class _DirectTerminalProcessTool:
             )
         elif action == "close_stdin":
             result = self.manager.close_process_stdin(
-                request.process_id,
+                request.target.process_id,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
             )
         elif action == "kill":
             result = self.manager.kill_process(
-                request.process_id,
+                request.target.process_id,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
             )
@@ -1284,7 +1286,8 @@ class DirectKernelToolPort:
                     f"invalid tool arguments: {exc.message}",
                 )
         if tool_name == "use_new_mcp_tool":
-            token = arguments.get("tool_ref")
+            target = arguments.get("target")
+            token = target.get("tool_ref") if isinstance(target, Mapping) and target.get("kind") == "MCP_TOOL_REF" else None
             inner = arguments.get("arguments")
             if not isinstance(token, str) or not isinstance(inner, Mapping):
                 return reject(
@@ -1307,7 +1310,7 @@ class DirectKernelToolPort:
                 return reject(
                     KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                     "mcp-meta:ref-unavailable",
-                    f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and tool_ref. Do not repeat earlier actions whose outcome is uncertain.",
+                    f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and invocation.target. Do not repeat earlier actions whose outcome is uncertain.",
                 )
             resolved_name = executor.semantic.provider_tool_name
             frozen_inner = freeze_json(dict(inner))
@@ -2177,7 +2180,8 @@ class DirectKernelToolPort:
         permission_snapshot: FrozenRunPermissionSnapshot,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> KernelToolAuthorization:
-        token = arguments.get("tool_ref")
+        target = arguments.get("target")
+        token = target.get("tool_ref") if isinstance(target, Mapping) and target.get("kind") == "MCP_TOOL_REF" else None
         inner = arguments.get("arguments")
         if not isinstance(token, str) or not isinstance(inner, Mapping):
             return KernelToolAuthorization(
@@ -2200,7 +2204,7 @@ class DirectKernelToolPort:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "mcp-meta:ref-unavailable",
-                f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and tool_ref. Do not repeat earlier actions whose outcome is uncertain.",
+                f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and invocation.target. Do not repeat earlier actions whose outcome is uncertain.",
             )
         schema = thaw_json(executor.semantic.input_schema)
         if not isinstance(schema, dict):
@@ -3191,7 +3195,8 @@ class DirectKernelToolPort:
                 if permit is not None and permit.state.value == "ADMITTED":
                     permit.release()
                 raise RuntimeError("MCP meta invocation admission is incomplete")
-            token = arguments.get("tool_ref")
+            target = arguments.get("target")
+            token = target.get("tool_ref") if isinstance(target, Mapping) and target.get("kind") == "MCP_TOOL_REF" else None
             inner = arguments.get("arguments")
             frozen_inner = (
                 freeze_json(dict(inner)) if isinstance(inner, Mapping) else None
@@ -3625,7 +3630,7 @@ class DirectKernelToolPort:
                     return KernelToolResult(
                         state="APPLICATION_ERROR",
                         content=json.dumps(
-                            {"error": code, "path": candidate.requested_path},
+                            {"error": code, "target": {"kind": "PATH", "path": candidate.requested_path}},
                             ensure_ascii=False,
                             separators=(",", ":"),
                             sort_keys=True,
@@ -3779,7 +3784,12 @@ class DirectKernelToolPort:
             except json.JSONDecodeError:
                 payload = None
             if isinstance(payload, dict):
-                process_id = payload.get("process_id")
+                target = payload.get("target")
+                process_id = (
+                    target.get("process_id")
+                    if isinstance(target, dict) and target.get("kind") == "PROCESS"
+                    else None
+                )
                 if isinstance(process_id, str) and process_id:
                     remote_identity = process_id
         return KernelToolResult(
@@ -3834,19 +3844,22 @@ class DirectKernelToolPort:
                     call,
                     {
                         "status": "INVENTORY",
-                        "monitors": list(tool.coordinator.list_current()),
+                        "monitors": [
+                            _terminal_monitor_payload(item)
+                            for item in tool.coordinator.list_current()
+                        ],
                     },
                 ),
                 None,
             )
         if request.action == "cancel":
-            outcome = tool.coordinator.cancel(request.monitor_id)
+            outcome = tool.coordinator.cancel(request.target.monitor_id)
             return (
                 _success(
                     call,
                     {
                         "status": "CANCELLED" if outcome == "cancelled" else "REJECTED",
-                        "monitor_id": request.monitor_id,
+                        "target": request.target.model_dump(),
                         "cancellation_outcome": outcome,
                     },
                 ),
@@ -3857,7 +3870,7 @@ class DirectKernelToolPort:
         output_condition = request.conditions.output
         try:
             prepared = tool.coordinator.prepare_registration(
-                process_id=request.process_id,
+                process_id=request.target.process_id,
                 origin_turn_id=context.turn_id,
                 origin_attempt_id=context.attempt_id,
                 origin_result_entry_id=context.result_entry_id,
@@ -3896,8 +3909,8 @@ class DirectKernelToolPort:
                 call,
                 {
                     "status": "REGISTERED",
-                    "monitor_id": prepared.monitor_id,
-                    "process_id": prepared.process_id,
+                    "target": {"kind": "MONITOR", "monitor_id": prepared.monitor_id},
+                    "process_target": request.target.model_dump(),
                     "baseline_cursor": prepared.baseline_cursor,
                     "expires_at": prepared.expires_at.isoformat(),
                     "policy": {
@@ -4414,6 +4427,19 @@ def _execute_terminal_tool_call(
         )
 
 
+def _terminal_process_payload(native: Mapping[str, object]) -> dict[str, object]:
+    payload = dict(native)
+    payload["target"] = {"kind": "PROCESS", "process_id": payload.pop("process_id")}
+    return payload
+
+
+def _terminal_monitor_payload(native: Mapping[str, object]) -> dict[str, object]:
+    payload = dict(native)
+    payload["target"] = {"kind": "MONITOR", "monitor_id": payload.pop("monitor_id")}
+    payload["process_target"] = {"kind": "PROCESS", "process_id": payload.pop("process_id")}
+    return payload
+
+
 def _terminal_execution_result(
     call: ToolCall,
     result: TerminalResult,
@@ -4430,7 +4456,6 @@ def _terminal_execution_result(
         "truncated": result.truncated,
         "error": result.error if action == "start" else None,
         "reason": None if result.reason is None else result.reason.value,
-        "process_id": result.process_id,
         "yielded_to_background": result.status.value == "running",
         "output_disposition": result.output_disposition.value,
         "output_cursor": result.output_cursor,
@@ -4439,6 +4464,8 @@ def _terminal_execution_result(
         "truncated_by_response_bound": result.truncated_by_response_bound,
         "source_coverage": result.source_coverage.value,
     }
+    if result.process_id is not None:
+        payload["target"] = {"kind": "PROCESS", "process_id": result.process_id}
     state = (
         ToolResultState.SUCCESS
         if action != "start" or result.status.value in {"success", "running"}
@@ -4615,7 +4642,7 @@ def _mcp_unavailable_direct_message(reason: str, target, provider_tool_name: str
         return (
             "This direct tool entry has been replaced; this call was not dispatched. "
             f"Use inspect_capability with target={inspect_target} and follow invocation.mode. "
-            "For META, use the returned input_schema and tool_ref with use_new_mcp_tool."
+            "For META, use the returned input_schema and invocation.target with use_new_mcp_tool."
         )
     return (
         "This call was not dispatched. " + _mcp_unavailable_reason(reason)

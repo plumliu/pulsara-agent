@@ -9,6 +9,41 @@ SESSION_QUERY_TOOL_NAMES = frozenset(
 SESSION_QUERY_MAX_ITEMS = 50  # Existing cold-search page budget, never corpus size.
 
 
+def session_target_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "kind": {"const": "SESSION"},
+            "session_id": {"type": "string", "minLength": 1, "description": "Exact session ID."},
+        },
+        "required": ["kind", "session_id"],
+        "additionalProperties": False,
+    }
+
+
+def session_entry_target_schema():
+    return {
+        "type": "object",
+        "properties": {
+            "kind": {"const": "SESSION_ENTRY"},
+            "session_id": {
+                "type": "string", "minLength": 1,
+                "description": "Exact session ID; omit for this conversation.",
+            },
+            "entry_id": {
+                "type": "string", "minLength": 1,
+                "description": "Exact entry ID in the selected session.",
+            },
+        },
+        "required": ["kind", "entry_id"],
+        "additionalProperties": False,
+    }
+
+
+def session_entry_target(session_id: str, entry_id: str):
+    return {"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": entry_id}
+
+
 @dataclass(frozen=True, slots=True)
 class SessionContentRange:
     """Actual call's installed raw suffix floor, with its active-request exclusion."""
@@ -59,11 +94,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
     else:
         properties.update(
             {
-                "session_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Exact session_id; omit for this conversation.",
-                },
+                "target": session_target_schema(),
                 "include_tools": {
                     "type": "boolean",
                     "description": (
@@ -80,17 +111,14 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
     if name == "read_session_content":
         properties.update(
             {
-                "entry_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "Exact message entry_id in the selected session.",
-                },
+                "target": {"oneOf": [session_target_schema(), session_entry_target_schema()]},
                 "direction": {
                     "type": "string",
                     "enum": ["older", "newer"],
                     "description": (
-                        "With entry_id, default newer; older reads preceding messages. "
-                        "Without entry_id, default older starts at latest; newer starts at earliest."
+                        "With SESSION_ENTRY, default newer; otherwise default older. "
+                        "The anchor is read first; older then reads preceding messages, newer following messages. "
+                        "Without an anchor, older starts at latest and newer at earliest."
                     ),
                 },
                 "max_chars": {

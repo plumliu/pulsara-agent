@@ -317,7 +317,7 @@ async def run(args, report, saved):
                 calls = phase_calls(report, "placeholder_reread")
                 assert any(
                     b["tool_name"] == "view_image"
-                    and json.loads(b["arguments"]).get("image_ref")
+                    and json.loads(b["arguments"]).get("target", {}).get("image_ref")
                     == fixtures[0]["image_ref"]
                     for b in tool_calls(calls)
                 )
@@ -432,7 +432,7 @@ async def run(args, report, saved):
             assert any(b["tool_name"] == "read_session_content" for b in tools), tools
             assert any(
                 b["tool_name"] == "view_image"
-                and json.loads(b["arguments"]).get("image_ref")
+                and json.loads(b["arguments"]).get("target", {}).get("image_ref")
                 == fixtures[1]["image_ref"]
                 for b in tools
             ), tools

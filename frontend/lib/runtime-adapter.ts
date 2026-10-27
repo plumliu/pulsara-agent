@@ -5526,7 +5526,8 @@ function summarizeToolResult(toolName: string | undefined, content: string): str
     if (planControl === 'QUESTION_ANSWERED') return '已记录你的选择。';
     if (planControl === 'DRAFT_SUBMITTED_FOR_REVIEW') return '方案已提交，等待你的确认。';
     if (toolName === 'edit_file' && typeof value.diff === 'string' && value.diff) return value.diff;
-    const path = typeof value.path === 'string' ? value.path : '';
+    const fileTarget = value.target as { kind?: string; path?: unknown } | undefined;
+    const path = fileTarget?.kind === 'PATH' && typeof fileTarget.path === 'string' ? fileTarget.path : '';
     if (toolName === 'write_file' && path && typeof value.bytes_written === 'number') {
       return `已创建 ${path} · ${value.bytes_written} 字节`;
     }

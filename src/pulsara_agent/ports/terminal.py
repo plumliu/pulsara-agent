@@ -24,48 +24,50 @@ MIN_TERMINAL_OUTPUT_CHARS = 512
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 
 TERMINAL_TOOL_DESCRIPTION = (
-    "Run one local shell command. Each call starts a new shell, so its directory "
-    "and environment changes stay within that call. A running command returns "
-    "process_id for terminal_process to inspect or interact with it. In the ROOT "
+    "Run one local shell command. Each call starts a new shell, so its directory and "
+    "environment changes stay within that call. A running command returns a PROCESS "
+    "target for terminal_process to inspect or interact with it. In the ROOT "
     "conversation, terminal_monitor can resume work on completion or configured "
-    "progress. Response size and initial wait settings do not limit the command's"
-    " lifetime. Use artifact_read for omitted output or artifact_export for "
-    "extensive processing."
+    "progress. Response size and initial wait settings do not limit the command's "
+    "lifetime. Use artifact_read for omitted output or artifact_export for extensive "
+    "processing."
 )
+
 TERMINAL_PROCESS_TOOL_DESCRIPTION = (
-    "Control commands started by terminal. Set action to the operation below. "
-    "Fields listed for an action are required unless marked optional; use only "
-    "that action's fields.\n"
+    "Control commands started by terminal. Copy a PROCESS target from terminal or the "
+    "process list; reuse it across actions. Set action to the operation below. Fields "
+    "listed for an action are required unless marked optional; use only that action's "
+    "fields.\n"
     "list: optional include_running, include_finished.\n"
-    "poll: process_id; optional since_cursor, max_output_chars.\n"
-    "wait: process_id; optional since_cursor, timeout_seconds, max_output_chars.\n"
-    "write: process_id, data; optional yield_time_ms.\n"
-    "submit: process_id, data; optional yield_time_ms.\n"
-    "close_stdin: process_id.\n"
-    "kill: process_id.\n"
-    "poll reads now; wait waits up to timeout_seconds. write sends data "
-    "unchanged; submit adds one newline to data supplied without its final "
-    "newline. close_stdin closes input; kill stops the command and its children "
-    "and waits for exit. Omitted optional fields use their defaults; only "
-    "since_cursor accepts null. status and exit_code describe process completion;"
-    " output or echo alone does not establish completion. Use terminal_monitor in"
-    " the ROOT conversation for later updates, artifact_read for omitted logs, "
-    "and artifact_export for extensive retrieval."
+    "poll: target (PROCESS); optional since_cursor, max_output_chars.\n"
+    "wait: target (PROCESS); optional since_cursor, timeout_seconds, max_output_chars.\n"
+    "write: target (PROCESS), data; optional yield_time_ms.\n"
+    "submit: target (PROCESS), data; optional yield_time_ms.\n"
+    "close_stdin: target (PROCESS).\n"
+    "kill: target (PROCESS).\n"
+    "poll reads now; wait waits up to timeout_seconds. write sends data unchanged; "
+    "submit adds one newline to data supplied without its final newline. close_stdin "
+    "closes input; kill stops the command and its children and waits for exit. Omitted "
+    "optional fields use their defaults; only since_cursor accepts null. status and "
+    "exit_code describe process completion; output or echo alone does not establish "
+    "completion. Use terminal_monitor in the ROOT conversation for later updates, "
+    "artifact_read for omitted logs, and artifact_export for extensive retrieval."
 )
+
 TERMINAL_MONITOR_TOOL_DESCRIPTION = (
-    "ROOT only. Resume the conversation when a running command completes or meets"
-    " configured progress conditions. Set action as follows; fields are required "
-    "unless marked optional, and each action uses only its listed fields.\n"
-    "register: process_id; optional conditions, delivery, lifetime.\n"
+    "ROOT only. Resume the conversation when a running command completes or meets "
+    "configured progress conditions. Set action as follows; fields are required unless "
+    "marked optional, and each action uses only its listed fields.\n"
+    "register: target (PROCESS); optional conditions, delivery, lifetime.\n"
     "list: no other fields.\n"
-    "cancel: monitor_id.\n"
-    "register returns immediately; the current turn may end while monitoring "
-    "continues. Omitting conditions requests completion only; configured progress"
-    " updates also resume the conversation. list shows active monitors, not "
-    "process completion. cancel stops updates while the command continues. "
-    "Monitoring also ends on expiry or when its terminal environment closes. Use "
-    "terminal_process poll for current output or status, and kill to stop a "
-    "command."
+    "cancel: target (MONITOR).\n"
+    "Copy a PROCESS target from terminal/process results and a MONITOR target from "
+    "register/list. register returns immediately; the current turn may end while "
+    "monitoring continues. Omitting conditions requests completion only; configured "
+    "progress updates also resume the conversation. list shows active monitors, not "
+    "process completion. cancel stops updates while the command continues. Monitoring "
+    "also ends on expiry or when its terminal environment closes. Use terminal_process "
+    "poll for current output or status, and kill to stop a command."
 )
 
 
@@ -119,11 +121,29 @@ class TerminalProcessListInput(_StrictInput):
     )
 
 
-class _ProcessInput(_StrictInput):
+class TerminalProcessTarget(_StrictInput):
+    kind: Literal["PROCESS"]
     process_id: str = Field(
         min_length=1,
         description="Exact process_id from this terminal environment.",
     )
+
+
+class TerminalMonitorTarget(_StrictInput):
+    kind: Literal["MONITOR"]
+    monitor_id: str = Field(
+        min_length=1,
+        description="Exact monitor_id from this terminal environment.",
+    )
+
+    @field_validator("monitor_id")
+    @classmethod
+    def canonical_monitor_id(cls, value: str) -> str:
+        return require_id(value, "monitor")
+
+
+class _ProcessInput(_StrictInput):
+    target: TerminalProcessTarget
 
 
 class TerminalProcessPollInput(_ProcessInput):
@@ -266,10 +286,7 @@ class TerminalMonitorLifetime(_StrictInput):
 
 class TerminalMonitorRegisterInput(_StrictInput):
     action: Literal["register"]
-    process_id: str = Field(
-        min_length=1,
-        description="process_id from a running terminal command.",
-    )
+    target: TerminalProcessTarget
     conditions: TerminalMonitorConditions = Field(
         default=TerminalMonitorConditions(),
         description=(
@@ -290,15 +307,7 @@ class TerminalMonitorListInput(_StrictInput):
 
 class TerminalMonitorCancelInput(_StrictInput):
     action: Literal["cancel"]
-    monitor_id: str = Field(
-        min_length=1,
-        description=("monitor_id returned by register."),
-    )
-
-    @field_validator("monitor_id")
-    @classmethod
-    def canonical_monitor_id(cls, value: str) -> str:
-        return require_id(value, "monitor")
+    target: TerminalMonitorTarget
 
 
 TerminalMonitorInput: TypeAlias = Annotated[

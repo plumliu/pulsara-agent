@@ -196,8 +196,9 @@ def test_round7_1_variant_validator_accepts_ordered_subsets_without_full() -> No
         ToolResultProviderRenderMode.REF_ONLY,
     ):
         text = by_mode[mode].message.content[0].text
-        assert "use artifact_read for pages" in text
-        assert "artifact_id=" in text
+        body = json.loads(text)["pulsara_tool_result"]["body"]
+        target, _ = json.JSONDecoder().raw_decode(body.split("target=", 1)[1])
+        assert target == {"kind": "ARTIFACT", "artifact_id": item.tool_result_context.artifact_id}
         assert "offset/limit" not in text
     ref_and_omitted = (
         by_mode[ToolResultProviderRenderMode.REF_ONLY],

@@ -85,7 +85,7 @@ async def run(args, report):
                 "submit_then_wait": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=0, then call wait with timeout_seconds=1. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
                 "submit_window": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=1000. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
                 "monitor_wake": 'Start "sleep 30; printf MONITOR_WAKE_DONE" with yield_time_ms=0. Register its completion monitor, then finish the turn immediately. When the monitor resumes the conversation, report the completion output and do not start another command. If registration says PROCESS_ALREADY_TERMINAL, poll that exact process and report the final output.',
-                "monitor_long_wake": 'Start "sleep 120; printf MONITOR_LONG_DONE" with yield_time_ms=0. Register a completion-only monitor for its exact process_id, then finish this turn immediately. Do not poll or send another command. When the monitor resumes the conversation, report MONITOR_LONG_DONE and the exit code.',
+                "monitor_long_wake": 'Start "sleep 120; printf MONITOR_LONG_DONE" with yield_time_ms=0. Register a completion-only monitor using its returned PROCESS target, then finish this turn immediately. Do not poll or send another command. When the monitor resumes the conversation, report MONITOR_LONG_DONE and the exit code.',
             }
             selected = args.cases.split(",") if args.cases else list(prompts)
             report["prompts"] = {name: prompts[name] for name in selected}
@@ -139,16 +139,16 @@ async def run(args, report):
                                 or starts[0]["result"].get("status") != "running"
                                 or len(monitors) != 1
                                 or monitors[0]["result"].get("status") != "REGISTERED"
-                                or monitors[0]["result"].get("process_id")
-                                != starts[0]["result"].get("process_id")
+                                or monitors[0]["result"].get("process_target")
+                                != starts[0]["result"].get("target")
                                 or len(initial_trace) != 2
                                 or case["elapsed_seconds"] >= 120
                             ):
                                 raise RuntimeError(
                                     "Long monitor case did not register and end its initial turn before process completion"
                                 )
-                            case["registered_process_id"] = starts[0]["result"]["process_id"]
-                            case["registered_monitor_id"] = monitors[0]["result"]["monitor_id"]
+                            case["registered_process_id"] = starts[0]["result"]["target"]["process_id"]
+                            case["registered_monitor_id"] = monitors[0]["result"]["target"]["monitor_id"]
                             case["manual_followup_turns"] = 0
                         # Experiment deadline only; no runtime monitor/lifetime cap.
                         deadline = monotonic() + (

@@ -114,7 +114,7 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                     assert "direct tool entry has been replaced" in message
                     assert "inspect_capability" in message and "use_new_mcp_tool" in message
                     assert "input_schema" in message and "invocation.mode" in message
-                    assert "tool_ref" in message
+                    assert "invocation.target" in message
                     assert "cold context" not in message
                     assert "same-schema reconnect" not in message
                     assert "server connection is currently unavailable" not in message

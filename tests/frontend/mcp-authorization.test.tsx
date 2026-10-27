@@ -1,5 +1,5 @@
 import type { RuntimeAdapter, RuntimeConnection } from '../../frontend/lib/runtime-adapter';
-import type { McpAuthorizationRequest } from '../../frontend/lib/mcp-authorization-result';
+import { parseMcpAuthorizationResult, type McpAuthorizationRequest } from '../../frontend/lib/mcp-authorization-result';
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { mcpAuthorizationKey, useMcpAuthorization, useModelMcpAuthorization } from '../../frontend/components/mcp-authorization';
@@ -103,7 +103,10 @@ it.each([
     return auth;
   });
   const target = { owner: { kind, scope_key: 'scope', server_id: 'notion', plugin_id: kind === 'plugin' ? 'plugin-test' : null }, config_identity: 'config', display_identity: 'display', package_install_id: kind === 'plugin' ? 'package-test' : null };
-  await act(async () => receive({ signal: new AbortController().signal, read: async () => ({ scope, authorization: target }) } as McpAuthorizationRequest));
+  const publicTarget = {kind: 'MCP_CONNECTION', scope, source_kind: kind === 'plugin' ? 'PLUGIN' : 'LOCAL', server_id: 'notion', ...(kind === 'plugin' ? {plugin_id: 'plugin-test'} : {})};
+  const publicResult = {action: 'AUTHORIZE_MCP', status: 'APPLIED', current: {authorized: true}, target: publicTarget, authorization: target};
+  expect(parseMcpAuthorizationResult(JSON.stringify({...publicResult, target: {...publicTarget, server_id: 'other'}}))).toBeUndefined();
+  await act(async () => receive({ signal: new AbortController().signal, read: async () => parseMcpAuthorizationResult(JSON.stringify(publicResult)) } as McpAuthorizationRequest));
   expect(readStatus).toHaveBeenCalledWith(target);
   expect(result.current.statuses[key]).toEqual(authorized);
   expect(focus).toHaveBeenCalledTimes(1);

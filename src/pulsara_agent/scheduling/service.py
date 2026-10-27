@@ -11,7 +11,7 @@ import logging
 
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.session_text import display_title
-from pulsara_agent.scheduling.requests import validate_action
+from pulsara_agent.scheduling.requests import schedule_target, validate_action
 from pulsara_agent.conversation_kernel.host import (
     PromptBlockedByHook,
     KernelHostCoreClosing,
@@ -39,6 +39,15 @@ def task_payload(row: dict) -> dict:
         if isinstance(value, datetime)
         else value
         for key, value in row.items()
+    }
+
+
+def model_task_payload(payload: dict) -> dict:
+    """Model identity handoff; native service/HTTP rows keep their own fields."""
+    return {
+        "target": schedule_target(payload["id"]),
+        "session": {"kind": "SESSION", "session_id": payload["session_id"]},
+        **{key: value for key, value in payload.items() if key not in {"id", "session_id"}},
     }
 
 
@@ -159,13 +168,13 @@ class ScheduledTaskService:
         self.wake()
         return None if result is None else self._payload(result)
 
-    async def switch(self, *, task_id, expected_revision, target):
+    async def switch(self, *, task_id, expected_revision, replacement):
         validate_action(
             dict(
                 action="switch",
-                task_id=task_id,
+                target=schedule_target(task_id),
                 expected_revision=expected_revision,
-                target=target,
+                replacement=replacement,
             )
         )
         source = await self.get(task_id)
@@ -174,7 +183,7 @@ class ScheduledTaskService:
             session_id=source["session_id"],
             task_id=task_id,
             expected_revision=expected_revision,
-            target=target,
+            replacement=replacement,
             model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
         )
         self._prepare_errors.pop(task_id, None)
@@ -185,22 +194,22 @@ class ScheduledTaskService:
     async def invoke(self, arguments, *, default_session_id, permission_mode):
         value = dict(arguments)
         # Tool-only default: service/HTTP list(None) still means all sessions.
-        # Never discard null on a branch where session_id is forbidden.
+        # Never discard null on a branch where session is forbidden.
         if (
             value.get("action") in ("list", "create")
-            and value.get("session_id") is None
+            and value.get("session") is None
         ):
-            value["session_id"] = default_session_id
+            value["session"] = {"kind": "SESSION", "session_id": default_session_id}
         value = dict(validate_action(value))
         action = value.pop("action")
         if action in {"create", "update", "switch"}:
             values = value.get("values")
             if action == "switch":
-                target = value["target"]
+                replacement = value["replacement"]
                 values = (
-                    target["values"]
-                    if target["kind"] == "create"
-                    else await self.get(target["task_id"])
+                    replacement["values"]
+                    if replacement["kind"] == "create"
+                    else await self.get(replacement["target"]["task_id"])
                 )
             # A model can preserve or narrow its current preset, never grant
             # itself broader future permissions by saving task text/config.
@@ -213,15 +222,23 @@ class ScheduledTaskService:
                     "PERMISSION_ESCALATION",
                     "当前会话权限不足以保存此任务配置，请由用户调整会话权限后再试。",
                 )
+        if "session" in value:
+            value["session_id"] = value.pop("session")["session_id"]
+        if "target" in value:
+            value["task_id"] = value.pop("target")["task_id"]
         if action == "list":
-            return await self.list(**value)
+            page = await self.list(**value)
+            return {"tasks": [model_task_payload(task) for task in page["tasks"]], "next_cursor": page["next_cursor"]}
         if action == "get":
-            return await self.get(**value)
-        if action == "create":
-            return await self.create(**value)
-        if action == "switch":
-            return await self.switch(**value)
-        return await self.mutate(action=action, **value)
+            result = await self.get(**value)
+        elif action == "create":
+            result = await self.create(**value)
+        elif action == "switch":
+            result = await self.switch(**value)
+            return {key: model_task_payload(result[key]) for key in ("paused", "active")}
+        else:
+            result = await self.mutate(action=action, **value)
+        return None if result is None else model_task_payload(result)
 
     async def preview(self, *, schedule, timezone):
         rule = validate_rule(schedule, timezone)

@@ -968,13 +968,13 @@ def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() 
         LLMTextPart("before"),
         LLMTextPart(
             "[历史图片引用；此处未包含图像内容]\n"
-            f"image_ref: {_image(b'same').image_ref}\n"
+            f'target={{"kind":"IMAGE_REF","image_ref":"{_image(b"same").image_ref}"}}\n'
             "media_type: image/png; width: 512; height: 512"
         ),
         LLMTextPart("between"),
         LLMTextPart(
             "[历史图片引用；此处未包含图像内容]\n"
-            f"image_ref: {_image(b'same').image_ref}\n"
+            f'target={{"kind":"IMAGE_REF","image_ref":"{_image(b"same").image_ref}"}}\n'
             "media_type: image/png; width: 512; height: 512"
         ),
     )
@@ -1426,7 +1426,7 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
         items = tuple(chat_semantic_wire_group(message)[0] for message in messages)
         return ProviderFollowupWireResourceQuote(sum(len(canonical_json_bytes(item)) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), sum(estimator.estimate_wire_json_component(item) for item in items), len(items))
     monkeypatch.setattr(module, 'quote_provider_followup_wire_resources', quote_wire)
-    completed = CompletedAssistantMessage('draft:test', (CompletedToolCallBlock('block:dweyobrw6nyayfeqqkfqzbmtgu', 'call:test', 'manage_capability', freeze_json({'action':'SET_PLUGIN_ENABLED','scope':'USER','plugin_id':'ponytail','enabled':True})),), '')
+    completed = CompletedAssistantMessage('draft:test', (CompletedToolCallBlock('block:dweyobrw6nyayfeqqkfqzbmtgu', 'call:test', 'manage_capability', freeze_json({'action': 'SET_PLUGIN_ENABLED', 'enabled': True, 'target': {"kind": "PLUGIN", 'scope': 'USER', 'plugin_id': 'ponytail'}})),), '')
     quote = runner._quote_post_response_resources(
         request=SimpleNamespace(wire_input_plan=wire_plan, compiled_input=SimpleNamespace(canonical_input_identity=identity)),
         permit=SimpleNamespace(scope=None, epoch_nonce='epoch', epoch_revision=1),

@@ -295,7 +295,7 @@ class _ScheduledTaskOperations:
         memory_domain_id,
         guard,
         expected_revision,
-        target,
+        replacement,
         model_resolution_snapshot,
         cancelled_candidates=None,
         deadline_monotonic,
@@ -323,16 +323,16 @@ class _ScheduledTaskOperations:
                     "MODEL_CONFIGURATION_REQUIRED", "请先为会话选择模型。"
                 )
             model_resolution_snapshot.reconcile(binding)
-            if target["kind"] == "existing":
+            if replacement["kind"] == "existing":
                 destination = c.execute(
                     "SELECT * FROM pulsara_v3.scheduled_tasks WHERE id=%s AND session_id=%s FOR UPDATE",
-                    (target["task_id"], session_id),
+                    (replacement["target"]["task_id"], session_id),
                 ).fetchone()
                 if destination is None:
-                    raise KeyError(target["task_id"])
+                    raise KeyError(replacement["target"]["task_id"])
                 if (
                     destination["status"] != "PAUSED"
-                    or destination["revision"] != target["expected_revision"]
+                    or destination["revision"] != replacement["expected_revision"]
                 ):
                     raise ScheduledTaskError(
                         "REVISION_CONFLICT", "目标计划已改变，请重新加载后选择。"
@@ -350,13 +350,13 @@ class _ScheduledTaskOperations:
                     }
                 )
             else:
-                values = self._validate_scheduled_values(target["values"])
+                values = self._validate_scheduled_values(replacement["values"])
             due = next_occurrence(
                 values["schedule"], values["timezone"], session["database_now"]
             )
             if (
                 due is None
-                and target["kind"] == "existing"
+                and replacement["kind"] == "existing"
                 and values["schedule"]["kind"] == "once"
             ):
                 due = utc_instant(values["schedule"]["run_at_utc"])
@@ -371,10 +371,10 @@ class _ScheduledTaskOperations:
                 "UPDATE pulsara_v3.scheduled_tasks SET status='PAUSED',next_run_at=NULL,revision=revision+1,updated_at=clock_timestamp() WHERE id=%s RETURNING *",
                 (task_id,),
             ).fetchone()
-            if target["kind"] == "existing":
+            if replacement["kind"] == "existing":
                 active = c.execute(
                     "UPDATE pulsara_v3.scheduled_tasks SET status='ACTIVE',next_run_at=%s,revision=revision+1,updated_at=clock_timestamp() WHERE id=%s RETURNING *",
-                    (due, target["task_id"]),
+                    (due, replacement["target"]["task_id"]),
                 ).fetchone()
             else:
                 while monotonic() < deadline_monotonic:

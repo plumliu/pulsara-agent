@@ -102,7 +102,7 @@ def wire_image_references(record):
             label = content[index - 1]
             assert label.get("type") in {"text", "input_text"}
             payload = json.loads(label["text"])
-            references.append(payload["pulsara_image"]["image_ref"])
+            references.append(payload["pulsara_image"]["target"]["image_ref"])
     return tuple(references)
 
 
@@ -468,7 +468,7 @@ async def run(args, report, saved):
             view_reply = await turn(
                 "view_image_tool",
                 PromptContent.text(
-                    "Call view_image exactly once with this exact path: "
+                    "Call view_image exactly once with a PATH target using this exact path: "
                     f"{workspace_card}. After the tool result, reply with only "
                     "the three-digit number printed in that image. Do not use other tools."
                 ),
@@ -496,7 +496,7 @@ async def run(args, report, saved):
             reference_reply = await turn(
                 "view_image_reference",
                 PromptContent.text(
-                    "Call view_image exactly once with this exact image_ref: "
+                    "Call view_image exactly once with an IMAGE_REF target using this exact image_ref: "
                     f"{fixture_refs[0]}. After the tool result, reply with only "
                     "the three-digit number printed in that image. Do not use other tools."
                 ),
@@ -517,7 +517,7 @@ async def run(args, report, saved):
             ]
             assert len(reference_tool_calls) == 1
             assert json.loads(reference_tool_calls[0]["arguments"]) == {
-                "image_ref": fixture_refs[0]
+                "target": {"kind": "IMAGE_REF", "image_ref": fixture_refs[0]}
             }
             reference_carriers = tool_image_carriers(reference_calls[-1])
             assert len(reference_carriers) == 2
@@ -566,9 +566,9 @@ async def run(args, report, saved):
             ]
             assert len(first_batch) == 3, first_batch
             assert [json.loads(block["arguments"]) for block in first_batch] == [
-                {"path": str(workspace_card)},
-                {"path": str(missing_card)},
-                {"image_ref": fixture_refs[1]},
+                {"target": {"kind": "PATH", "path": str(workspace_card)}},
+                {"target": {"kind": "PATH", "path": str(missing_card)}},
+                {"target": {"kind": "IMAGE_REF", "image_ref": fixture_refs[1]}},
             ]
             before_carriers = tool_image_carriers(multi_calls[0])
             carriers = tool_image_carriers(multi_calls[-1])
@@ -697,7 +697,7 @@ async def run(args, report, saved):
                 "reference_after_compaction",
                 PromptContent.text(
                     "The earlier image is no longer present in the active provider "
-                    "context. Call view_image exactly once with this exact image_ref: "
+                    "context. Call view_image exactly once with an IMAGE_REF target using this exact image_ref: "
                     f"{fixture_refs[0]}. Reply only with the three-digit number shown."
                 ),
                 session,
@@ -717,7 +717,7 @@ async def run(args, report, saved):
                     if block.get("kind") == "tool_call"
                     and block.get("tool_name") == "view_image"
                 )
-            ) == {"image_ref": fixture_refs[0]}
+            ) == {"target": {"kind": "IMAGE_REF", "image_ref": fixture_refs[0]}}
             assert fixture_refs[0] in wire_image_digests(reread_calls[-1])
             report["checks"]["known_reference_after_image_left_successor"] = True
 

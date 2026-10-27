@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
+from pulsara_agent.identity import REVISION_PATTERN
 import json
 
 from pulsara_agent.capability.local_skills import (
@@ -186,7 +188,8 @@ def freeze_retained_skill_context(
             continue
         if item.tool_request_entry_id != call[0].source_entry_id:
             continue
-        path = call[2].get("path")
+        target = call[2].get("target")
+        path = target.get("path") if isinstance(target, dict) and target.get("kind") == "PATH" else None
         offset = call[2].get("offset", 1)
         if not isinstance(path, str) or offset != 1:
             continue
@@ -413,7 +416,8 @@ def _exact_historical_read(
         return None
     required = {
         "status",
-        "path",
+        "target",
+        "content_revision",
         "access_scope",
         "workspace_relative",
         "offset",
@@ -427,11 +431,17 @@ def _exact_historical_read(
         set(payload) - required
     ).issubset({"had_utf8_bom", "_hint", "_warning"}):
         return None
+    target = payload.get("target")
+    revision = payload.get("content_revision")
+    if (not isinstance(target, dict) or set(target) != {"kind", "path"}
+        or target.get("kind") != "PATH" or not isinstance(revision, str)
+        or re.fullmatch(REVISION_PATTERN, revision) is None):
+        return None
     content = payload.get("content")
     total_lines = payload.get("total_lines")
     if not (
         payload.get("status") == "ok"
-        and payload.get("path")
+        and target.get("path")
         == _project_historical_public_path(catalog_row["location"], root_policy)
         and payload.get("offset") == 1
         and isinstance(payload.get("limit"), int)

@@ -97,7 +97,7 @@ def call(path="output.txt", artifact_id='artifact:3uxyc2nlsokzkts3xmlji4zimy', *
         id="call:export",
         name="artifact_export",
         arguments={
-            "artifact_id": artifact_id,
+            "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
             "path": str(path),
             **extra,
         },
@@ -127,8 +127,8 @@ def test_export_exact_bytes_coverage_and_nonrecursive_location(
     assert target.read_bytes() == content
     assert payload == {
         "status": "success",
-        "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy',
-        "path": str(target),
+        "target": {"kind": "ARTIFACT", "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy'},
+        "file_target": {"kind": "PATH", "path": str(target)},
         "bytes_written": len(content),
         "source_coverage": port.record.source_coverage.value,
         "source_coverage_reason": port.record.source_coverage_reason.value
@@ -282,7 +282,7 @@ def test_export_cancel_after_publication_keeps_exact_single_outcome(
                 port,
                 session_id='session:yovkoffbw6sro643t4zfhazd24',
                 tool_name="artifact_export",
-                arguments={"artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy', "path": "output.txt"},
+                arguments={"target": {"kind": "ARTIFACT", "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy'}, "path": "output.txt"},
                 tool_call_id="call:export",
                 attempt_id='attempt:u3xrx7rpcwqzvgtl24sz2q7u7y',
                 turn_id='turn:kkdrrjecidt6ni3sgr7kc4p6ge',
@@ -478,7 +478,7 @@ def test_export_uses_existing_file_write_permissions(tmp_path, mode, outside):
             ToolDispatchAuthorizationRequest(
                 "artifact_export",
                 "call:export",
-                {"artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy', "path": str(path)},
+                {"target": {"kind": "ARTIFACT", "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy'}, "path": str(path)},
                 'turn:kkdrrjecidt6ni3sgr7kc4p6ge',
                 'entry:5nuy4yboonqd6fi6ppzl54b42i',
                 permission,
@@ -513,7 +513,7 @@ def test_export_relative_and_authorized_home_paths(tmp_path, monkeypatch):
     denied = tool.execute(call("~/out.txt"))
     assert denied.status is ToolResultState.ERROR
     allowed = tool.execute(call("~/out.txt"), write_scope=WritePathScope.HOST_LOCAL)
-    assert json.loads(allowed.output)["path"] == str(home / "out.txt")
+    assert json.loads(allowed.output)["file_target"]["path"] == str(home / "out.txt")
     assert (home / "out.txt").read_bytes() == b"retained text"
 
 
@@ -645,9 +645,9 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
             _tool_stream(
                 1,
                 tool_name="artifact_export",
-                arguments='{"artifact_id":"artifact:3uxyc2nlsokzkts3xmlji4zimy","path":"result.txt"}',
+                arguments='{"target":{"kind":"ARTIFACT","artifact_id":"artifact:3uxyc2nlsokzkts3xmlji4zimy"},"path":"result.txt"}',
             ),
-            _tool_stream(2, tool_name="read_file", arguments='{"path":"result.txt"}'),
+            _tool_stream(2, tool_name="read_file", arguments='{"target":{"kind":"PATH","path":"result.txt"}}'),
             _text_stream("source checked", block_id="answer"),
         ]
     )
@@ -694,9 +694,9 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
         if isinstance(part, LLMTextPart)
     ]
     exported = json.loads(bodies[0]["body"])
-    assert exported["path"] == str(tmp_path / "result.txt")
+    assert exported["file_target"]["path"] == str(tmp_path / "result.txt")
     assert exported["source_coverage"] == "COMPLETE"
-    assert bodies[0]["model_visible_memory_ids"] == []
+    assert "model_visible_memory_ids" not in bodies[0]
     assert "exact source" in bodies[1]["body"]
     for before, after in zip(model.requests, model.requests[1:]):
         assert after.compiled_input.tools == before.compiled_input.tools

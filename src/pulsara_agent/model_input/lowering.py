@@ -126,7 +126,7 @@ def image_reference_id_part(image_ref: str) -> LLMTextPart:
     require_id(image_ref, "image")
     return LLMTextPart(
         canonical_json_bytes(
-            {"pulsara_image": {"image_ref": image_ref}}
+            {"pulsara_image": {"target": {"kind": "IMAGE_REF", "image_ref": image_ref}}}
         ).decode("utf-8")
     )
 
@@ -291,6 +291,7 @@ def scheduled_request_parts(provenance) -> tuple[LLMContentPart, ...]:
     if provenance is None:
         return ()
     from pulsara_agent.scheduling.contracts import ScheduledTriggerSource
+    from pulsara_agent.scheduling.requests import schedule_target
 
     source_text = {
         ScheduledTriggerSource.TIMER: "Automatic timer",
@@ -298,7 +299,7 @@ def scheduled_request_parts(provenance) -> tuple[LLMContentPart, ...]:
     }[provenance.trigger_source]
     return (LLMTextPart(
         f"Saved task ({source_text}; requested at {provenance.due_at_utc}; "
-        f"task_id: {provenance.task_id}). Execute the saved instruction:\n"
+        f"target: {canonical_json_bytes(schedule_target(provenance.task_id)).decode('utf-8')}). Execute the saved instruction:\n"
     ),)
 
 
@@ -729,11 +730,9 @@ def _project_terminal_observation(text: str) -> dict[str, object]:
         "delivery_coverage": "delivery_coverage",
         "exit_code": "exit_code",
         "gap_before_output": "gap",
-        "monitor_id": "monitor_id",
         "observation_kind": "observation_kind",
         "output": "output",
         "output_disposition": "display_kind",
-        "process_id": "process_id",
         "process_status": "status",
     }
     result = {
@@ -741,6 +740,10 @@ def _project_terminal_observation(text: str) -> dict[str, object]:
         for storage, projected in sorted(renames.items())
         if storage in value
     }
+    if "monitor_id" in value:
+        result["target"] = {"kind": "MONITOR", "monitor_id": value["monitor_id"]}
+    if "process_id" in value:
+        result["process_target"] = {"kind": "PROCESS", "process_id": value["process_id"]}
     if result.get("status") == "running" and result.get("exit_code") is None:
         result.pop("exit_code", None)
     return result
@@ -881,7 +884,7 @@ def _saved_tool_output_guidance(
     assert metadata is not None
     if metadata.artifact_id is None:
         return "No readable artifact was retained. Do not rerun the tool just to recover omitted output."
-    result = f"artifact_id={metadata.artifact_id}; "
+    result = "Saved output: target=" + canonical_json_bytes({"kind": "ARTIFACT", "artifact_id": metadata.artifact_id}).decode("utf-8") + "; "
     if artifact_read_available and artifact_export_available:
         result += "use artifact_read for pages or artifact_export for extensive processing."
     elif artifact_read_available:

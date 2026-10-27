@@ -962,7 +962,7 @@ class McpInstalledRuntimeGeneration:
             "read_mcp_resource",
             "get_mcp_prompt",
         }:
-            value = arguments.get("server_id")
+            value = _standard_operation_target(tool_name, arguments)["server_id"]
             return value if isinstance(value, str) else None
         return None
 
@@ -1025,17 +1025,11 @@ class McpInstalledRuntimeGeneration:
         if candidate is None:
             raise McpSnapshotStale("MCP server is not installed")
         if tool_name == "read_mcp_resource":
-            uri = arguments.get("uri")
-            if not isinstance(uri, str) or not _resource_uri_in_snapshot(
-                uri, candidate.discovery_snapshot
-            ):
-                raise ValueError(
-                    "MCP resource URI is absent from the exact snapshot"
-                )
+            _standard_resource_uri(arguments, candidate.discovery_snapshot)
             return candidate
         if tool_name != "get_mcp_prompt":
             raise ValueError("unknown MCP standard operation")
-        prompt_name = arguments.get("prompt_name")
+        prompt_name = _standard_operation_target(tool_name, arguments)["name"]
         if not isinstance(prompt_name, str):
             raise ValueError("MCP prompt name is invalid")
         prompt = next(
@@ -1049,7 +1043,7 @@ class McpInstalledRuntimeGeneration:
         if prompt is None:
             raise ValueError("MCP prompt is absent from the exact snapshot")
         raw_arguments = arguments.get("arguments")
-        if raw_arguments is not None and not isinstance(raw_arguments, Mapping):
+        if "arguments" in arguments and not isinstance(raw_arguments, Mapping):
             raise ValueError("MCP prompt arguments must be an object")
         if isinstance(raw_arguments, Mapping) and any(
             not isinstance(key, str) or not isinstance(value, str)
@@ -1235,9 +1229,7 @@ async def _invoke_standard_remote_result(
 
     request_state: str | None = None
     if tool_name == "read_mcp_resource":
-        uri = str(arguments["uri"])
-        if not _resource_uri_in_snapshot(uri, candidate.discovery_snapshot):
-            raise ValueError("MCP resource URI is absent from the exact snapshot")
+        uri = _standard_resource_uri(arguments, candidate.discovery_snapshot)
         while True:
             result = await client.session.read_resource(
                 uri,
@@ -1259,7 +1251,7 @@ async def _invoke_standard_remote_result(
             request_state = input_owner.prepare_state_only_continuation(result)
     if tool_name != "get_mcp_prompt":
         raise RuntimeError("unknown MCP standard operation")
-    prompt_name = str(arguments["prompt_name"])
+    prompt_name = _standard_operation_target(tool_name, arguments)["name"]
     prompt = next(
         (
             item
@@ -1271,7 +1263,7 @@ async def _invoke_standard_remote_result(
     if prompt is None:
         raise ValueError("MCP prompt is absent from the exact snapshot")
     raw_arguments = arguments.get("arguments")
-    if raw_arguments is not None and not isinstance(raw_arguments, Mapping):
+    if "arguments" in arguments and not isinstance(raw_arguments, Mapping):
         raise ValueError("MCP prompt arguments must be an object")
     prompt_arguments = (
         {
@@ -3372,6 +3364,49 @@ def _mcp_schema_dialect(value: Mapping[str, object]) -> str:
 _URI_TEMPLATE_VARIABLE = re.compile(
     r"^[A-Za-z0-9_.%]+(?::[1-9][0-9]{0,3}|\*)?$"
 )
+
+
+def _standard_operation_target(tool_name, arguments):
+    target = arguments.get("target")
+    if not isinstance(target, Mapping):
+        raise ValueError("MCP standard operation requires a target")
+    kind = target.get("kind")
+    if tool_name == "read_mcp_resource" and kind in {"MCP_RESOURCE", "MCP_RESOURCE_TEMPLATE"}:
+        identity = "uri" if kind == "MCP_RESOURCE" else "uri_template"
+        allowed = {"target"} if kind == "MCP_RESOURCE" else {"target", "uri"}
+        if set(arguments) != allowed:
+            raise ValueError("MCP resource fields do not match its target kind")
+    elif tool_name == "get_mcp_prompt" and kind == "MCP_PROMPT":
+        identity = "name"
+        if set(arguments) - {"target", "arguments"}:
+            raise ValueError("MCP prompt fields are unsupported")
+    else:
+        raise ValueError("MCP standard target kind is unsupported")
+    if set(target) != {"kind", "server_id", identity}:
+        raise ValueError("MCP standard target fields are incomplete or unsupported")
+    for identity_field, maximum in (("server_id", 256), (identity, 8192 if identity == "name" else 32768)):
+        value = target[identity_field]
+        if not isinstance(value, str) or not value or len(value) > maximum:
+            raise ValueError("MCP standard target identity is invalid")
+    return target
+
+
+def _standard_resource_uri(arguments, snapshot):
+    target = _standard_operation_target("read_mcp_resource", arguments)
+    if target["kind"] == "MCP_RESOURCE":
+        uri = target["uri"]
+        admitted = _resource_uri_in_snapshot(uri, snapshot)
+    else:
+        uri = arguments["uri"]
+        template = target["uri_template"]
+        admitted = (
+            isinstance(uri, str)
+            and any(item.uri_template == template for item in snapshot.resource_templates)
+            and _resource_uri_matches_template(uri, template)
+        )
+    if not admitted:
+        raise ValueError("MCP resource URI is absent from the exact snapshot or selected template")
+    return uri
 
 
 def _resource_uri_in_snapshot(

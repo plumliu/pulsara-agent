@@ -240,32 +240,36 @@ class ViewImageSource:
         ):
             raise ValueError("view_image image_ref is invalid")
 
-    def provider_value(self) -> dict[str, str]:
-        return {self.kind.value: self.value}
+    def provider_value(self) -> dict[str, object]:
+        return {"target": {"kind": self.kind.name, self.kind.value: self.value}}
+
+
+def path_target_arg(arguments: Mapping[str, object], *, default: str | None = None) -> str:
+    if "target" not in arguments and default is not None:
+        return default
+    target = arguments.get("target")
+    if (not isinstance(target, Mapping) or set(target) != {"kind", "path"}
+        or target.get("kind") != "PATH" or not isinstance(target.get("path"), str)
+        or not target["path"]):
+        raise ValueError("target must be a PATH object with a non-empty path")
+    return target["path"]
+
+
+def file_target(path: str) -> dict[str, str]:
+    return {"kind": "PATH", "path": path}
 
 
 def parse_view_image_source(arguments: Mapping[str, object]) -> ViewImageSource:
-    """Parse path xor image_ref without adding a general media-source layer."""
-
-    if not isinstance(arguments, Mapping) or any(
-        key not in {"path", "image_ref"} for key in arguments
-    ):
-        raise ValueError("view_image requires exactly one supported source")
-    path = arguments.get("path")
-    image_ref = arguments.get("image_ref")
-    has_path = isinstance(path, str) and bool(path)
-    has_ref = isinstance(image_ref, str) and bool(image_ref)
-    if has_path == has_ref:
-        raise ValueError("view_image requires exactly one of path or image_ref")
-    if "path" in arguments and not has_path:
-        raise ValueError("view_image path is invalid")
-    if "image_ref" in arguments and not has_ref:
-        raise ValueError("view_image image_ref is invalid")
-    if has_path:
-        assert isinstance(path, str)
-        return ViewImageSource(ViewImageSourceKind.PATH, path)
-    assert isinstance(image_ref, str)
-    return ViewImageSource(ViewImageSourceKind.IMAGE_REF, image_ref)
+    """Parse the closed PATH / IMAGE_REF target without granting read authority."""
+    if not isinstance(arguments, Mapping) or set(arguments) != {"target"}:
+        raise ValueError("view_image requires exactly one target")
+    target = arguments["target"]
+    if isinstance(target, Mapping) and target.get("kind") == "PATH":
+        return ViewImageSource(ViewImageSourceKind.PATH, path_target_arg(arguments))
+    if (not isinstance(target, Mapping) or set(target) != {"kind", "image_ref"}
+        or target.get("kind") != "IMAGE_REF" or not isinstance(target.get("image_ref"), str)):
+        raise ValueError("view_image target must be PATH or IMAGE_REF")
+    return ViewImageSource(ViewImageSourceKind.IMAGE_REF, target["image_ref"])
 
 
 @dataclass(slots=True)
@@ -275,7 +279,7 @@ class ViewImageTool(WorkspaceTool):
     def read_bounded(
         self, call: ToolCall, *, maximum_bytes: int
     ) -> LocalImageReadCandidate | ToolExecutionResult:
-        requested_path = str_arg(call.arguments, "path")
+        requested_path = path_target_arg(call.arguments)
         path = self._resolve_read_path(requested_path)
         try:
             return LocalImageReadCandidate(
@@ -297,7 +301,7 @@ class ViewImageTool(WorkspaceTool):
         return self._result(
             call,
             status=ToolResultState.ERROR,
-            output=json_text({"error": code, "path": requested_path}),
+            output=json_text({"error": code, "target": file_target(requested_path)}),
             metadata={"requested_path": requested_path},
         )
 
@@ -317,7 +321,9 @@ class ReadFileTool(WorkspaceTool):
     name: str = "read_file"
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
-        path = self._resolve_read_path(str_arg(call.arguments, "path"))
+        if set(call.arguments) - {"target", "offset", "limit"}:
+            raise ValueError("Unknown read_file arguments")
+        path = self._resolve_read_path(path_target_arg(call.arguments))
         access_scope = _path_access_scope(
             path, self.workspace_root, self._resolved_user_home()
         )
@@ -351,7 +357,7 @@ class ReadFileTool(WorkspaceTool):
                                     f"Read produced {len(content):,} characters, exceeding "
                                     f"the safety limit of {MAX_READ_CHARS:,}."
                                 ),
-                                "path": _relpath(path, self.workspace_root),
+                                "target": file_target(_relpath(path, self.workspace_root)),
                                 "access_scope": access_scope,
                                 "workspace_relative": workspace_relative,
                                 "total_lines": total_lines,
@@ -373,7 +379,7 @@ class ReadFileTool(WorkspaceTool):
 
                 payload: dict[str, Any] = {
                     "status": "ok",
-                    "path": _relpath(path, self.workspace_root),
+                    "target": file_target(_relpath(path, self.workspace_root)),
                     "content_revision": revision,
                     "access_scope": access_scope,
                     "workspace_relative": workspace_relative,
@@ -434,7 +440,7 @@ class _SearchTool(WorkspaceTool):
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         content_search = self.name == "search_content"
         expression_name = "pattern" if content_search else "glob"
-        allowed = {expression_name, "path", "limit", "offset"}
+        allowed = {expression_name, "target", "limit", "offset"}
         if content_search:
             allowed.update({"file_glob", "output_mode"})
         if set(call.arguments) - allowed:
@@ -443,7 +449,7 @@ class _SearchTool(WorkspaceTool):
                 + ", ".join(sorted(set(call.arguments) - allowed))
             )
         expression = _search_string(call.arguments, expression_name)
-        raw_path = _search_string(call.arguments, "path", ".")
+        raw_path = path_target_arg(call.arguments, default=".")
         limit = _search_integer(
             call.arguments, "limit", DEFAULT_SEARCH_LIMIT, 1, MAX_SEARCH_LIMIT
         )
@@ -564,7 +570,7 @@ class _SearchTool(WorkspaceTool):
                 _relpath(file, self.workspace_root) for file in files if selected(file)
             )
             page = entries[offset : offset + limit]
-            payload.update(files=page, total_count=len(entries))
+            payload.update(targets=[file_target(file) for file in page], total_count=len(entries))
         elif mode == "count":
             counts: dict[str, int] = {}
             remaining = completed.stdout
@@ -579,7 +585,7 @@ class _SearchTool(WorkspaceTool):
             entries = sorted(counts)
             page = entries[offset : offset + limit]
             payload.update(
-                counts={file: counts[file] for file in page},
+                counts=[{"target": file_target(file), "count": counts[file]} for file in page],
                 total_count=sum(counts.values()),
             )
         else:
@@ -602,7 +608,7 @@ class _SearchTool(WorkspaceTool):
                     )
             entries.sort(key=lambda item: (item["path"], item["line"]))
             page = entries[offset : offset + limit]
-            payload.update(matches=page, total_count=len(entries))
+            payload.update(matches=[{"target": file_target(item["path"]), "line": item["line"], "content": item["content"]} for item in page], total_count=len(entries))
         payload["truncated"] = offset + len(page) < len(entries)
         if payload["truncated"]:
             payload["_hint"] = (
@@ -681,7 +687,7 @@ class EditFileTool(WorkspaceTool):
         write_scope: WritePathScope = WritePathScope.WORKSPACE,
     ) -> ToolExecutionResult:
         path = self._resolve_path(
-            str_arg(call.arguments, "path"), write_scope=write_scope
+            path_target_arg(call.arguments), write_scope=write_scope
         )
         state = _state_for_workspace(self.workspace_root)
         path_lock = state.lock_for_path(path)
@@ -755,7 +761,7 @@ class EditFileTool(WorkspaceTool):
             output=json_text(
                 {
                     "status": "ok",
-                    "path": _relpath(path, self.workspace_root),
+                    "target": file_target(_relpath(path, self.workspace_root)),
                     "base_revision": base_revision,
                     "content_revision": new_revision,
                     "operations_applied": operations_applied,
@@ -779,7 +785,9 @@ class WriteFileTool(WorkspaceTool):
         *,
         write_scope: WritePathScope = WritePathScope.WORKSPACE,
     ) -> ToolExecutionResult:
-        raw_path = str_arg(call.arguments, "path")
+        if set(call.arguments) != {"target", "content"}:
+            raise ValueError("write_file requires target and content only")
+        raw_path = path_target_arg(call.arguments)
         path = self._resolve_path(raw_path, write_scope=write_scope)
         requested_leaf = _requested_leaf_path(raw_path, self.workspace_root)
         if "content" not in call.arguments:
@@ -834,7 +842,7 @@ class WriteFileTool(WorkspaceTool):
         revision = _content_revision(verified_bytes)
         payload: dict[str, Any] = {
             "status": "ok",
-            "path": _relpath(path, self.workspace_root),
+            "target": file_target(_relpath(path, self.workspace_root)),
             "content_revision": revision,
             "bytes_written": len(verified_bytes),
             "files_modified": [_relpath(path, self.workspace_root)],
@@ -870,7 +878,7 @@ def _application_error_result(
     payload: dict[str, object] = {
         "error": error.code,
         "message": error.message,
-        "path": _relpath(path, tool.workspace_root),
+        "target": file_target(_relpath(path, tool.workspace_root)),
         "_hint": error.hint,
     }
     payload.update(error.details)
@@ -984,11 +992,11 @@ def _validate_new_text_content(path: Path, content: str) -> bytes:
 def _parse_edit_arguments(
     arguments: Mapping[str, object],
 ) -> tuple[str, tuple[_LineOperation, ...]]:
-    required = {"path", "base_revision", "operations"}
+    required = {"target", "base_revision", "operations"}
     if set(arguments) != required:
         raise _FileApplicationError(
             "INVALID_OPERATION_COMBINATION",
-            "edit_file accepts only path, base_revision, and operations.",
+            "edit_file accepts only target, base_revision, and operations.",
             hint="Use the current line-operation schema; old_text/new_text are not supported.",
         )
     base_revision = arguments.get("base_revision")

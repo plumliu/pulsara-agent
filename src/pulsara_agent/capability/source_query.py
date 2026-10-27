@@ -46,26 +46,51 @@ def _target(kind, fields):
     return _object({"kind": {"const": kind}, **fields})
 
 
+def capability_target_schema(kind, *, source_kind=None):
+    """One closed object identity, shared by query and management contracts."""
+    if kind == "PLUGIN":
+        return _target(kind, {"scope": SCOPE, "plugin_id": TEXT})
+    if kind in {"HOOK_SOURCE", "MCP_CONNECTION"}:
+        if source_kind not in {"LOCAL", "PLUGIN"}:
+            raise ValueError("installation target requires a source kind")
+        fields = {"scope": SCOPE, "source_kind": {"const": source_kind}}
+        if source_kind == "PLUGIN":
+            fields["plugin_id"] = TEXT
+        if kind == "MCP_CONNECTION":
+            fields["server_id"] = TEXT
+        return _target(kind, fields)
+    if kind == "MCP_SERVER":
+        return _target(kind, {"runtime_server_id": TEXT})
+    if kind == "SKILL":
+        return _target(kind, {"skill_path": TEXT})
+    names = {
+        "MCP_TOOL": "tool_name",
+        "MCP_RESOURCE": "uri",
+        "MCP_RESOURCE_TEMPLATE": "uri_template",
+        "MCP_PROMPT": "name",
+    }
+    return _target(kind, {"server_id": TEXT, names[kind]: TEXT})
+
+
 def target_schema(*, parent=False):
-    shapes = [_target("PLUGIN", {"scope": SCOPE, "plugin_id": TEXT})]
-    for kind in ("MCP_SERVER",) if parent else ("HOOK_SOURCE", "MCP_SERVER"):
-        for source in ("LOCAL", "PLUGIN"):
-            fields = {"scope": SCOPE, "source_kind": {"const": source}}
-            if source == "PLUGIN":
-                fields["plugin_id"] = TEXT
-            if kind == "MCP_SERVER":
-                fields["server_id"] = TEXT
-            shapes.append(_target(kind, fields))
-    shapes.append(_target("MCP_SERVER", {"runtime_server_id": TEXT}))
+    shapes = [capability_target_schema("PLUGIN")]
+    for kind in ("MCP_CONNECTION",) if parent else ("HOOK_SOURCE", "MCP_CONNECTION"):
+        shapes.extend(
+            capability_target_schema(kind, source_kind=source)
+            for source in ("LOCAL", "PLUGIN")
+        )
+    shapes.append(capability_target_schema("MCP_SERVER"))
     if not parent:
-        shapes.append(_target("SKILL", {"skill_path": TEXT}))
-        for kind, name in (
-            ("MCP_TOOL", "tool_name"),
-            ("MCP_RESOURCE", "uri"),
-            ("MCP_RESOURCE_TEMPLATE", "uri_template"),
-            ("MCP_PROMPT", "name"),
-        ):
-            shapes.append(_target(kind, {"server_id": TEXT, name: TEXT}))
+        shapes.extend(
+            capability_target_schema(kind)
+            for kind in (
+                "SKILL",
+                "MCP_TOOL",
+                "MCP_RESOURCE",
+                "MCP_RESOURCE_TEMPLATE",
+                "MCP_PROMPT",
+            )
+        )
     return {"oneOf": shapes}
 
 
@@ -123,9 +148,7 @@ def parse_query(arguments: Mapping[str, object], *, inspect=False, subagent=Fals
             target
             and (
                 target["kind"] in {"PLUGIN", "SKILL", "HOOK_SOURCE"}
-                or (
-                    target["kind"] == "MCP_SERVER" and "runtime_server_id" not in target
-                )
+                or (target["kind"] == "MCP_CONNECTION")
             )
         )
     ):
@@ -162,8 +185,7 @@ def parse_query(arguments: Mapping[str, object], *, inspect=False, subagent=Fals
                 "scope conflicts with the configured server parent.",
             )
         if (
-            target["kind"] == "MCP_SERVER"
-            and "source_kind" in target
+            target["kind"] == "MCP_CONNECTION"
             and values.get("source_kind", target["source_kind"])
             != target["source_kind"]
         ):

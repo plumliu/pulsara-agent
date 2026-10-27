@@ -271,7 +271,7 @@ def test_shared_publication_history_chunks_fork_and_gc(
     def history(**kwargs):
         return query.invoke(
             "read_session_content",
-            {"session_id": b.guard.session_id, "entry_id": entry, "limit": 1, **kwargs},
+            {"target": {"kind": "SESSION_ENTRY", "session_id": b.guard.session_id, "entry_id": entry}, "limit": 1, **kwargs},
             current_range=SessionContentRange(0),
             tool_call_id="call:history",
             deadline_monotonic=monotonic() + 30,

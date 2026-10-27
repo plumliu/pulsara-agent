@@ -79,19 +79,16 @@ def test_skill_lifecycle_keeps_source_and_uses_frozen_target(
         inspected = await query_sources(service, kind="SKILL", scope=scope, source_kind="LOCAL")
         assert inspected["completeness"] == "COMPLETE"
         assert inspected["items"][0]["target"]["skill_path"] == str(skill)
-        assert result["identity"]["skill_path"] == str(skill)
+        assert result["target"]["skill_path"] == str(skill)
         enabled = await invoke(
             service,
-            action="SET_LOOSE_SKILL_ENABLED",
-            scope=scope,
-            skill_path=str(skill),
-            enabled=False,
+            action="SET_LOOSE_SKILL_ENABLED", enabled=False, target={"kind":'SKILL', 'skill_path':str(skill)},
         )
         assert enabled["status"] == "APPLIED"
         inspected = await query_sources(service, target={"kind":"SKILL", "skill_path":str(skill)})
         assert inspected["enabled"] is False and inspected["selected"] is False
         removed = await invoke(
-            service, action="REMOVE_LOOSE_SKILL", scope=scope, skill_path=str(skill)
+            service, action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':str(skill)}
         )
         assert removed["status"] == "APPLIED" and not skill.exists()
         await service.mcp.aclose()
@@ -153,26 +150,19 @@ def test_inventory_preserves_shadowed_invalid_and_distinct_removal_eligibility(
         assert (
             await invoke(
                 service,
-                action="SET_LOOSE_SKILL_ENABLED",
-                scope="WORKSPACE",
-                skill_path=agent["skill_path"],
-                enabled=False,
+                action="SET_LOOSE_SKILL_ENABLED", enabled=False, target={"kind":'SKILL', 'skill_path':agent["skill_path"]},
             )
         )["status"] == "APPLIED"
         with pytest.raises(ValueError):
             await service.prepare(
                 dict(
-                    action="REMOVE_LOOSE_SKILL",
-                    scope="WORKSPACE",
-                    skill_path=agent["skill_path"],
+                    action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':agent["skill_path"]},
                 )
             )
         assert (
             await invoke(
                 service,
-                action="REMOVE_LOOSE_SKILL",
-                scope="WORKSPACE",
-                skill_path=str(invalid / "SKILL.md"),
+                action="REMOVE_LOOSE_SKILL", target={"kind":'SKILL', 'skill_path':str(invalid / "SKILL.md")},
             )
         )["status"] == "APPLIED"
         await service.mcp.aclose()
@@ -214,7 +204,7 @@ def test_hook_trust_requires_full_review_then_future_source_adopts_trust(tmp_pat
     async def run():
         service = preparation(tmp_path)
         write_hook(service)
-        args = dict(action="TRUST_HOOK_SOURCE", scope="WORKSPACE", source_kind="LOCAL")
+        args = dict(action="TRUST_HOOK_SOURCE", target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"})
         prepared = await service.prepare(args)
         assert prepared.user_inputs == ("hook_source_review",)
         assert (
@@ -238,21 +228,15 @@ def test_hook_trust_requires_full_review_then_future_source_adopts_trust(tmp_pat
         assert service.hooks.discover().source_snapshots[-1].runnable
         await invoke(
             service,
-            action="SET_HOOK_SOURCE_ENABLED",
-            scope="WORKSPACE",
-            source_kind="LOCAL",
-            enabled=False,
+            action="SET_HOOK_SOURCE_ENABLED", enabled=False, target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"},
         )
         assert not service.hooks.discover().source_snapshots[-1].runnable
         await invoke(
-            service, action="REVOKE_HOOK_TRUST", scope="WORKSPACE", source_kind="LOCAL"
+            service, action="REVOKE_HOOK_TRUST", target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"}
         )
         await invoke(
             service,
-            action="SET_HOOK_SOURCE_ENABLED",
-            scope="WORKSPACE",
-            source_kind="LOCAL",
-            enabled=True,
+            action="SET_HOOK_SOURCE_ENABLED", enabled=True, target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"},
         )
         assert not service.hooks.discover().source_snapshots[-1].runnable
         await service.mcp.aclose()
@@ -268,7 +252,7 @@ def test_hook_review_never_retargets_changed_definitions(tmp_path, after_submiss
         call = CapabilityManagementCall(
             service,
             await service.prepare(
-                dict(action="TRUST_HOOK_SOURCE", scope="WORKSPACE", source_kind="LOCAL")
+                dict(action="TRUST_HOOK_SOURCE", target={"kind":'HOOK_SOURCE', 'scope':"WORKSPACE", 'source_kind':"LOCAL"})
             ),
         )
         form = call.form("review")
@@ -325,14 +309,14 @@ def test_transient_workspace_rejects_project_capability_scope(tmp_path, action):
         service = preparation(tmp_path)
         service.workspace_kind = "transient"
         fields = (
-            {"source_path": str(skill_source(tmp_path))}
+            {"scope": "WORKSPACE", "source_path": str(skill_source(tmp_path))}
             if action == "INSTALL_LOOSE_SKILL"
-            else {"source_kind": "LOCAL"}
+            else {"target": {"kind": "HOOK_SOURCE", "scope": "WORKSPACE", "source_kind": "LOCAL"}}
             if action == "TRUST_HOOK_SOURCE"
             else {}
         )
         with pytest.raises(ValueError, match="GUI project"):
-            await service.prepare(dict(action=action, scope="WORKSPACE", **fields))
+            await service.prepare(dict(action=action, **fields))
         assert not (service.workspace_root / ".pulsara").exists()
         await service.mcp.aclose()
 
@@ -355,9 +339,11 @@ def test_transient_workspace_rejects_project_capability_scope(tmp_path, action):
 )
 def test_hook_model_intent_is_closed_and_cannot_supply_review_authority(fields):
     with pytest.raises(ValueError):
-        parse_capability_management_intent(
-            dict(action="TRUST_HOOK_SOURCE", scope="USER", **fields)
-        )
+        parse_capability_management_intent({
+            "action": "TRUST_HOOK_SOURCE",
+            "target": {"kind": "HOOK_SOURCE", "scope": "USER", **{key: value for key, value in fields.items() if key in {"source_kind", "plugin_id"}}},
+            **{key: value for key, value in fields.items() if key not in {"source_kind", "plugin_id"}},
+        })
 
 
 def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_path):
@@ -381,10 +367,7 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
             service,
             await service.prepare(
                 dict(
-                    action="TRUST_HOOK_SOURCE",
-                    scope="USER",
-                    source_kind="PLUGIN",
-                    plugin_id="example",
+                    action="TRUST_HOOK_SOURCE", target={"kind":'HOOK_SOURCE', 'scope':"USER", 'source_kind':"PLUGIN", 'plugin_id':"example"},
                 )
             ),
         )
@@ -409,10 +392,7 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
             service,
             await service.prepare(
                 dict(
-                    action="SET_PLUGIN_ENABLED",
-                    scope="USER",
-                    plugin_id="example",
-                    enabled=True,
+                    action="SET_PLUGIN_ENABLED", enabled=True, target={"kind":'PLUGIN', 'scope':"USER", 'plugin_id':"example"},
                 )
             ),
         )
@@ -667,10 +647,7 @@ def test_unavailable_native_hook_composition_remains_unknown_in_query(
             service,
             await service.prepare(
                 dict(
-                    action="SET_PLUGIN_ENABLED",
-                    scope="USER",
-                    plugin_id="example",
-                    enabled=True,
+                    action="SET_PLUGIN_ENABLED", enabled=True, target={"kind":'PLUGIN', 'scope':"USER", 'plugin_id':"example"},
                 )
             ),
         )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.identity import derive_id
+from pulsara_agent.memory.targets import memory_target
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -102,7 +103,7 @@ def memory_response_preference_item_payload(
 ) -> Mapping[str, object]:
     validate_canonical_memory_recorded_at(recorded_at)
     return {
-        "memory_id": memory_id,
+        "target": memory_target(memory_id),
         "scope": "shared across conversations" if context_id == CTX_GLOBAL else "current project",
         "statement": statement,
         "recorded_at": recorded_at,

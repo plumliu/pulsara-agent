@@ -73,7 +73,7 @@ def follow(manager, action, process_id, **kwargs):
             "terminal_process",
             {
                 "action": action,
-                "process_id": process_id,
+                "target": {"kind": "PROCESS", "process_id": process_id},
                 **kwargs,
             },
         )
@@ -88,11 +88,11 @@ def test_removed_inputs_are_rejected_and_windows_have_only_per_call_bounds():
     with pytest.raises(ValidationError):
         parse_terminal_input({"command": "true", "terminal_session_id": "default"})
     with pytest.raises(ValidationError):
-        parse_terminal_process_input({"action": "log", "process_id": "proc_old"})
+        parse_terminal_process_input({"action": "log", "target": {"kind": "PROCESS", "process_id": "proc_old"}})
     for action in ("write", "submit"):
         assert (
             parse_terminal_process_input(
-                {"action": action, "process_id": "p", "data": "x"}
+                {"action": action, "target": {"kind": "PROCESS", "process_id": "p"}, "data": "x"}
             ).yield_time_ms
             == 1000
         )
@@ -101,7 +101,7 @@ def test_removed_inputs_are_rejected_and_windows_have_only_per_call_bounds():
                 parse_terminal_process_input(
                     {
                         "action": action,
-                        "process_id": "p",
+                        "target": {"kind": "PROCESS", "process_id": "p"},
                         "data": "x",
                         "yield_time_ms": value,
                     }
@@ -147,7 +147,7 @@ def test_input_observation_waits_past_echo_and_preserves_text_and_newlines(
         tty=tty,
         yield_time_ms=100,
     )
-    pid = json.loads(result.output)["process_id"]
+    pid = json.loads(result.output)["target"]["process_id"]
     before = monotonic()
     written = follow(terminal, "write", pid, data="hé", yield_time_ms=0)
     assert monotonic() - before < 0.8
@@ -171,7 +171,7 @@ def test_input_observation_waits_past_echo_and_preserves_text_and_newlines(
 def test_reading_failed_process_is_a_successful_observation(terminal, action):
     initial = start(terminal, "printf FAILURE_OUTPUT; exit 7")
     assert initial.status is ToolResultState.ERROR
-    pid = json.loads(initial.output)["process_id"]
+    pid = json.loads(initial.output)["target"]["process_id"]
     observed = follow(terminal, action, pid)
     data = json.loads(observed.output)
     assert observed.status is ToolResultState.SUCCESS
@@ -185,13 +185,13 @@ def test_capacity_failure_is_unstarted_and_kill_is_successful_control(terminal):
     # Eight is the existing Host process-group/reader/retained-output admission
     # boundary, preserved by section 3.4 of the active cognitive-subtraction spec.
     pids = [
-        json.loads(start(terminal, "sleep 30", yield_time_ms=0).output)["process_id"]
+        json.loads(start(terminal, "sleep 30", yield_time_ms=0).output)["target"]["process_id"]
         for _ in range(8)
     ]
     rejected = json.loads(start(terminal, "printf MUST_NOT_RUN").output)
     assert rejected["status"] == "blocked"
     assert rejected["reason"] == "PROCESS_CAPACITY_EXHAUSTED"
-    assert rejected["process_id"] is None and rejected["output"] == ""
+    assert "target" not in rejected and rejected["output"] == ""
     killed = follow(terminal, "kill", pids[0])
     assert killed.status is ToolResultState.SUCCESS
     assert json.loads(killed.output)["status"] == "killed"
@@ -208,7 +208,7 @@ def test_cancellation_after_input_preserves_exact_result_and_does_not_resend(ter
             ),
             yield_time_ms=0,
         )
-        pid = json.loads(initial.output)["process_id"]
+        pid = json.loads(initial.output)["target"]["process_id"]
         io = KernelSessionIO()
 
         def submit_once(*, deadline_monotonic):
@@ -293,7 +293,7 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
                     port._terminal, "printf HANDOFF; sleep 30", yield_time_ms=100
                 ).output
             )
-            pid = result["process_id"]
+            pid = result["target"]["process_id"]
             coordinator = port.terminal_monitor_coordinator
             registration = coordinator.prepare_registration(
                 process_id=pid,
@@ -352,10 +352,10 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
                 maximum_utf8_bytes=8192,
             )
             payload = json.loads(handoff.full_text)
-            assert payload["terminal_processes"][0]["process_id"] == pid
+            assert payload["terminal_processes"][0]["target"]["process_id"] == pid
             assert "terminal_session_id" not in handoff.full_text
             assert (
-                payload["terminal_monitors"][0]["monitor_id"] == registration.monitor_id
+                payload["terminal_monitors"][0]["target"]["monitor_id"] == registration.monitor_id
             )
             successor = prepare_test_direct_tool_surface(port)
             borrow = port.borrow_tool_surface(successor)
@@ -377,3 +377,48 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
             await port.aclose()
 
     asyncio.run(scenario())
+
+
+def test_process_target_is_reused_for_observation_input_and_termination(terminal):
+    initial = json.loads(start(
+        terminal, program("import sys; print(sys.stdin.read(), end='')"),
+        yield_time_ms=0,
+    ).output)
+    target = initial["target"]
+    controller = _DirectTerminalProcessTool(terminal, 'host:45aj6sixiaarr5ta455q3trmwi')
+
+    def invoke(action, **arguments):
+        result = controller.execute(ToolCall(
+            "call:copy-target", "terminal_process",
+            {"action": action, "target": target, **arguments},
+        ))
+        payload = json.loads(result.output)
+        assert payload["target"] == target
+        assert "process_id" not in payload
+        return payload
+
+    assert invoke("poll")["status"] == "running"
+    inventory = json.loads(controller.execute(ToolCall(
+        "call:inventory", "terminal_process", {"action": "list"},
+    )).output)
+    assert inventory["processes"][0]["target"] == target
+    invoke("write", data="alpha", yield_time_ms=0)
+    invoke("submit", data="beta", yield_time_ms=0)
+    invoke("close_stdin")
+    completed = invoke("wait", timeout_seconds=5)
+    assert completed["status"] == "success"
+    assert completed["output"] == "alphabeta\n"
+    assert invoke("kill")["status"] == "success"
+
+
+@pytest.mark.parametrize("action", ["poll", "wait", "write", "submit", "close_stdin", "kill"])
+def test_flat_process_identity_and_wrong_target_are_rejected(action):
+    extra = {"data": ""} if action in {"write", "submit"} else {}
+    with pytest.raises(ValidationError):
+        parse_terminal_process_input({"action": action, "process_id": "p", **extra})
+    with pytest.raises(ValidationError):
+        parse_terminal_process_input({
+            "action": action,
+            "target": {"kind": "MONITOR", "monitor_id": "m"},
+            **extra,
+        })

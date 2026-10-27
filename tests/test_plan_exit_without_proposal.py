@@ -57,14 +57,14 @@ class _ExitModel(_PreflightModel):
                 *_tool_call(
                     "write_file",
                     "call:sibling",
-                    {"path": "sibling.txt", "content": "must not run"},
+                    {"target": {"kind": "PATH", "path": "sibling.txt"}, "content": "must not run"},
                 ),
             )
         elif index == 2:
             payloads = _tool_call(
                 "write_file",
                 "call:write-after-exit",
-                {"path": "after-exit.txt", "content": "resumed"},
+                {"target": {"kind": "PATH", "path": "after-exit.txt"}, "content": "resumed"},
             )
         elif index == 3:
             payloads = _text("EXIT_CONTINUED")
