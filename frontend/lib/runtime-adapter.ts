@@ -1,3 +1,4 @@
+import { requestExecutionFromWire, type RequestExecution } from './request-execution';
 import { parseMcpAuthorizationResult, type McpAuthorizationRequest, type McpAuthorizationResult } from './mcp-authorization-result';
 import { parsePresentationResult, type PresentationRequest } from './presentation-targets';
 import { desktopHost } from './desktop-host';
@@ -495,6 +496,7 @@ export interface LocalPromptSubmission {
   lastCheckedEventSequence?: number;
   lastCheckedConnectionGeneration?: number;
   status: 'sending' | 'synchronizing' | 'queued' | 'unknown' | 'consumed' | 'rejected' | 'cancelled';
+  execution?: RequestExecution | null;
   outcomeCode?: string;
   detail?: string;
 }
@@ -1031,6 +1033,7 @@ export interface CommandReceipt {
     queueStatus: string;
     consumedEntryId?: string;
     deliveryMode: 'new-turn' | 'steer';
+    execution: RequestExecution | null;
   };
   planDraftDecision?: 'approve' | 'revise' | 'cancel';
   planContinuationTurnId?: string;
@@ -1450,6 +1453,7 @@ interface ProtocolCommandOutcome {
   prompt_delivery?: {
     queue_item_id?: string; queue_status?: string; consumed_entry_id?: string;
     delivery_mode?: string;
+    execution?: { status?: string; terminal_reason?: string };
   };
   plan_draft_decision?: string;
   plan_continuation_turn_id?: string;
@@ -4215,6 +4219,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       receipt.publicCode,
       receipt.publicMessage,
       receipt.promptDelivery.consumedEntryId,
+      receipt.promptDelivery.execution,
     ));
     if (status === 'consumed' && receipt.promptDelivery.consumedEntryId) {
       void this.locateEntry(receipt.promptDelivery.consumedEntryId, new AbortController().signal).then(() => this.changed()).catch(() => undefined);
@@ -4227,6 +4232,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     outcomeCode?: string,
     detail?: string,
     consumedEntryId?: string,
+    execution?: RequestExecution | null,
   ): LocalPromptSubmission {
     const hasInlineBody = item.content?.inline_content !== undefined;
     const queueItemId = item.queue_item_id!;
@@ -4236,6 +4242,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       commandId: item.command_id!,
       queueItemId,
       consumedEntryId,
+      execution,
       content: hasInlineBody
         ? decodePromptContent(item.content, { kind: 'queue', queueItemId })
         : undefined,
@@ -6051,6 +6058,15 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
         ? 'failed'
         : 'rejected';
   const prompt = value.prompt_delivery;
+  let requestExecution: RequestExecution | null = null;
+  if (prompt) {
+    if (prompt.delivery_mode === 'NEW_TURN') {
+      if (!prompt.execution) throw new Error('NEW_TURN delivery requires execution');
+      requestExecution = requestExecutionFromWire(prompt.execution);
+    } else if (prompt.execution) {
+      throw new Error('Steer delivery cannot have request execution');
+    }
+  }
   const control = asRecord(value.user_control);
   const process = asRecord(control.process);
   const monitor = asRecord(control.monitor);
@@ -6072,6 +6088,7 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
         queueStatus: prompt.queue_status ?? '',
         consumedEntryId: prompt.consumed_entry_id || undefined,
         deliveryMode: deliveryMode(prompt.delivery_mode),
+        execution: requestExecution,
       }
       : undefined,
     planDraftDecision: ({

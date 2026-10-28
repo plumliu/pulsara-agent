@@ -323,7 +323,7 @@ class ScheduledTaskService:
     def _run_result(row, request):
         return {
             "queue_item_id": row["id"],
-            "status": "RUNNING" if row.get("execution_status") == "RUNNING" else row["status"],
+            "execution": row["request_execution"].to_dict(),
             "coalesced": row["command_id"] != request["client_command_id"],
         }
 
@@ -365,7 +365,7 @@ class ScheduledTaskService:
             await self.sessions.resume_session(a.session_id, scheduled=True)
         ).session
         outcome = await self._submit(host, a)
-        if outcome.status == "REJECTED":
+        if outcome.status == "REJECTED" and outcome.prompt_delivery is None:
             raise ScheduledTaskError(
                 outcome.public_code or "PREPARE_REJECTED",
                 outcome.public_message or "任务未被接受。",

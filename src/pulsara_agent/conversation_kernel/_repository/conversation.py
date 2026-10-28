@@ -20,6 +20,9 @@ from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from .request_execution import REQUEST_EXECUTION_COLUMNS, request_execution_from_row
+from pulsara_agent.conversation_kernel.request_execution import RequestExecution
+
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionAdoptionConfirmation,
     CompactionCanonicalWritePreconditions,
@@ -3285,17 +3288,15 @@ class _ConversationOperations:
             isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT c.*, t.status AS turn_status, t.final_entry_id,
+                       {REQUEST_EXECUTION_COLUMNS},
                        t.terminal_reason,
                        q.status AS queue_status,
                        q.delivery_mode AS queue_delivery_mode,
                        q.terminal_reason AS queue_terminal_reason,
                        q.consumed_entry_id,
                        qe.turn_id AS consumed_turn_id,
-                       qt.status AS consumed_turn_status,
-                       qt.final_entry_id AS consumed_turn_final_entry_id,
-                       qt.terminal_reason AS consumed_turn_terminal_reason,
                        te.turn_id AS target_entry_turn_id,
                        te.source_subagent_task_id AS target_entry_source_subagent_task_id,
                        d.decision AS interaction_decision,
@@ -3344,7 +3345,35 @@ class _ConversationOperations:
                 """,
                 (session_id, command_id),
             ).fetchone()
-            return dict(row) if row is not None else None
+            if row is None:
+                return None
+            result = dict(row)
+            if row["target_queue_item_id"] is not None:
+                result["request_execution"] = request_execution_from_row(row)
+            return result
+
+    def query_request_execution(
+        self, *, session_id: str, queue_item_id: str, deadline_monotonic: float,
+    ) -> RequestExecution | None:
+        """Read an accepted NEW_TURN by its stable queue identity."""
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            row = connection.execute(
+                f"""SELECT {REQUEST_EXECUTION_COLUMNS}
+                FROM pulsara_v3.prompt_queue_items q
+                LEFT JOIN pulsara_v3.transcript_entries qe
+                  ON qe.session_id=q.session_id AND qe.id=q.consumed_entry_id
+                 AND qe.entry_owner_kind='EXECUTED_TURN'
+                LEFT JOIN pulsara_v3.turns qt
+                  ON qt.session_id=qe.session_id AND qt.id=qe.turn_id
+                WHERE q.session_id=%s AND q.id=%s""",
+                (session_id, queue_item_id),
+            ).fetchone()
+            return None if row is None else request_execution_from_row(row)
 
     def events_after(
         self,

@@ -145,12 +145,9 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
         const result = await api.runNow(request);
         if (!mounted.current) return;
         runRequests.current.delete(task.id); setUncertainRun(null);
-        setItems(current => current.map(item => item.id !== task.id ? item : {
-          ...item,
-          pending_queue_item_id: result.status === 'PENDING' ? result.queue_item_id : null,
-          last_turn_status: result.status === 'RUNNING' ? 'RUNNING' : item.last_turn_status,
-        }));
-        onNotify(result.status === 'RUNNING' ? '任务正在运行' : result.coalesced && result.status === 'PENDING' ? '任务已在队列中' : '已提交', '可在会话中查看', 'success');
+        const state = result.execution.status;
+        const title = { queued: result.coalesced ? '任务已在队列中' : '已提交', running: '任务正在运行', completed: '任务已完成', stopped: '任务已停止' }[state];
+        onNotify(title, result.execution.terminal_reason ?? '可在会话中查看', state === 'stopped' ? 'warning' : 'success');
       }
       else await api.action(task, action);
       if (!mounted.current) return;
@@ -159,7 +156,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
     } catch (e) {
       if (!mounted.current) return;
       if (action === 'run') {
-        const definite = e instanceof ScheduledApiError && e.status >= 400 && e.status < 500;
+        const definite = e instanceof ScheduledApiError && e.status >= 400 && e.status < 500 && !e.retryable;
         if (definite) { runRequests.current.delete(task.id); setUncertainRun(null); }
         else setUncertainRun(task);
         onNotify(definite ? '未能运行任务' : '提交结果尚未确认', (e as Error).message, 'warning');

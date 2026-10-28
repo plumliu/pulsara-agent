@@ -158,6 +158,7 @@ function submissionFromReceipt(
     queueItemId: receipt.promptDelivery?.queueItemId ?? submission.queueItemId,
     consumedEntryId: receipt.promptDelivery?.consumedEntryId ?? submission.consumedEntryId,
     deliveryMode: receipt.promptDelivery?.deliveryMode ?? submission.deliveryMode,
+    execution: receipt.promptDelivery?.execution,
     outcomeCode: receipt.publicCode,
     detail: receipt.publicMessage,
   };
@@ -447,7 +448,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     acceptedDetail: string,
   ) => {
     const queueStatus = receipt.promptDelivery?.queueStatus.toUpperCase();
-    if (queueStatus === 'CONSUMED' && receipt.publicCode === 'TURN_INTERRUPTED') {
+    if (queueStatus === 'CONSUMED' && receipt.promptDelivery?.execution?.status === 'stopped') {
       notify(
         '输入已接收，执行已中断',
         productMessage(receipt.publicMessage, '输入已写入会话，但对应任务已中断。'),

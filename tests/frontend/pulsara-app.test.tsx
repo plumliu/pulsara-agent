@@ -3422,7 +3422,7 @@ describe('PulsaraApp', () => {
     expect(active.submitPrompt).toHaveBeenCalledTimes(1);
   });
 
-  it('separates consumed input delivery from an interrupted turn outcome', async () => {
+  it.each(['USER_STOPPED', 'HOST_TAKEOVER'])('separates consumed input delivery from stopped execution with reason %s', async terminalReason => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
@@ -3432,11 +3432,12 @@ describe('PulsaraApp', () => {
     adapter.lastConnection?.submitPrompt.mockImplementationOnce(async commandId => ({
       commandId,
       status: 'rejected',
-      publicCode: 'TURN_INTERRUPTED',
+      publicCode: terminalReason,
       publicMessage: 'The turn was interrupted and will not be replayed.',
       promptDelivery: {
         queueItemId: 'queue-consumed', queueStatus: 'CONSUMED',
         consumedEntryId: 'entry-consumed', deliveryMode: 'new-turn',
+        execution: { status: 'stopped', terminal_reason: terminalReason },
       },
     }));
 
@@ -3506,10 +3507,11 @@ describe('PulsaraApp', () => {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
     };
     adapter.queryCommandResult = {
-      commandId: 'resolved-by-query', status: 'rejected', publicCode: 'TURN_INTERRUPTED',
+      commandId: 'resolved-by-query', status: 'rejected', publicCode: 'HOST_TAKEOVER',
       promptDelivery: {
         queueItemId: 'queue-network', queueStatus: 'CONSUMED',
         consumedEntryId: 'entry-network', deliveryMode: 'new-turn',
+        execution: { status: 'stopped', terminal_reason: 'HOST_TAKEOVER' },
       },
     };
     renderWorkbench(<PulsaraApp adapter={adapter} />);

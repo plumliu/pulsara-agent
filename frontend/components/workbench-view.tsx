@@ -2142,7 +2142,7 @@ export function WorkbenchView({
           : local?.status === 'unknown' ? '提交状态未知'
             : local?.status === 'rejected' ? '队列已拒绝'
               : local?.status === 'cancelled' ? '队列已取消'
-                : local?.status === 'consumed' && local.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断'
+                : local?.status === 'consumed' && local.execution?.status === 'stopped' ? '已接收 · 执行已中断'
                   : undefined;
         return <article key={item.commandId}
           data-queue-item-id={queued?.queueItemId} data-command-id={item.commandId} aria-busy={busy}>
@@ -2891,7 +2891,7 @@ export function WorkbenchView({
                   : item.status === 'rejected' ? `发送失败${item.detail ? `：${item.detail}` : ''}`
                     : item.status === 'cancelled' ? '发送已取消'
                       : item.status === 'unknown' ? '发送状态待确认'
-                        : item.status === 'consumed' ? item.outcomeCode === 'TURN_INTERRUPTED' ? '已接收 · 执行已中断' : '已接收'
+                        : item.status === 'consumed' ? item.execution?.status === 'stopped' ? '已接收 · 执行已中断' : '已接收'
                           : '已送达'} />
             </div>
           ))}

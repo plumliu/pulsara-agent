@@ -947,6 +947,20 @@ message PromptDelivery {
   string queue_status = 2;
   string consumed_entry_id = 3;
   string delivery_mode = 4;
+  RequestExecution execution = 5;
+}
+
+enum RequestExecutionStatus {
+  REQUEST_EXECUTION_STATUS_UNSPECIFIED = 0;
+  REQUEST_EXECUTION_QUEUED = 1;
+  REQUEST_EXECUTION_RUNNING = 2;
+  REQUEST_EXECUTION_COMPLETED = 3;
+  REQUEST_EXECUTION_STOPPED = 4;
+}
+
+message RequestExecution {
+  RequestExecutionStatus status = 1;
+  string terminal_reason = 2;
 }
 
 message QueryCommandRequest {

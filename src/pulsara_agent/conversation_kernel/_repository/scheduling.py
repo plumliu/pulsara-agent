@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from time import monotonic
 import json
 from datetime import datetime, timezone
+from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pulsara_agent.scheduling.contracts import (
@@ -40,6 +41,7 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
 from .locking import lock_session_admission
+from .request_execution import REQUEST_EXECUTION_COLUMNS, request_execution_from_row
 
 
 _TASK_PROJECTION = """SELECT t.*, s.title AS session_title, q.id AS pending_queue_item_id, latest.status AS last_turn_status,
@@ -775,14 +777,16 @@ class _ScheduledTaskOperations:
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
             deadline_monotonic=deadline_monotonic,
         ) as c:
             row = c.execute(
-                """SELECT cmd.semantic_digest,cmd.command_kind,cmd.request_schema_version,q.*,tr.status AS execution_status FROM pulsara_v3.session_commands cmd
+                f"""SELECT cmd.semantic_digest,cmd.command_kind,cmd.request_schema_version,q.*,
+                {REQUEST_EXECUTION_COLUMNS} FROM pulsara_v3.session_commands cmd
                 JOIN pulsara_v3.sessions s ON s.id=cmd.session_id
                 JOIN pulsara_v3.prompt_queue_items q ON q.session_id=cmd.session_id AND q.id=cmd.target_queue_item_id
-                LEFT JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
-                LEFT JOIN pulsara_v3.turns tr ON tr.session_id=e.session_id AND tr.id=e.turn_id
+                LEFT JOIN pulsara_v3.transcript_entries qe ON qe.session_id=q.session_id AND qe.id=q.consumed_entry_id AND qe.entry_owner_kind='EXECUTED_TURN'
+                LEFT JOIN pulsara_v3.turns qt ON qt.session_id=qe.session_id AND qt.id=qe.turn_id
                 WHERE cmd.session_id=%s AND cmd.command_id=%s AND s.memory_domain_id=%s""",
                 (request["session_id"], request["client_command_id"], memory_domain_id),
             ).fetchone()
@@ -799,7 +803,7 @@ class _ScheduledTaskOperations:
                     "COMMAND_CONFLICT", "命令对应另一份立即运行请求。"
                 )
             self._validate_confirmed_manual_queue(c, row, request)
-            return row
+            return {**row, "request_execution": request_execution_from_row(row)}
 
     def _validate_confirmed_manual_queue(self, c, q, request):
         provenance = self._queue_scheduled_provenance(q)

@@ -533,6 +533,18 @@ describe('prompt delivery and preparation', () => {
     deliveryMode: 'new-turn' as const, permission: 'read-only' as const, displayAsMessage: true,
   };
 
+  it.each([true, false])('shows stopped execution while preserving consumed input placement (message: %s)', displayAsMessage => {
+    const view = render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [{
+      ...submission, displayAsMessage, status: 'consumed',
+      outcomeCode: 'HOST_TAKEOVER',
+      execution: { status: 'stopped', terminal_reason: 'HOST_TAKEOVER' },
+    }] })} />);
+    expect(screen.getByText('已接收 · 执行已中断')).toBeTruthy();
+    expect(screen.getByText('开始处理这条消息')).toBeTruthy();
+    expect(Boolean(view.container.querySelector('[data-pending-message]'))).toBe(displayAsMessage);
+    expect(screen.queryByText('准备开始…')).toBeNull();
+  });
+
   it('separates confirmed delivery from preparation, then replaces the placeholder with real activity', () => {
     const view = render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [{ ...submission, status: 'sending' }] })} />);
     expect(screen.getByText('正在发送…')).toBeTruthy();

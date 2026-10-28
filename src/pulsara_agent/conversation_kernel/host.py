@@ -85,6 +85,10 @@ from pulsara_agent.capability.user_skill_config import (
 from pulsara_agent.capability.workspace_mcp_trust import (
     workspace_mcp_server_approvals,
 )
+from pulsara_agent.conversation_kernel.request_execution import (
+    RequestExecution,
+    RequestExecutionStatus,
+)
 from pulsara_agent.conversation_kernel.contracts import (
     ConversationScopeKind,
     PromptDeliveryMode,
@@ -466,6 +470,7 @@ class KernelPromptDelivery:
     queue_status: str
     consumed_entry_id: str | None
     delivery_mode: str
+    execution: RequestExecution | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3223,6 +3228,8 @@ class KernelHostSession:
                 queue_status="PENDING",
                 consumed_entry_id=None,
                 delivery_mode=delivery_mode.value,
+                execution=(RequestExecution(RequestExecutionStatus.QUEUED)
+                           if delivery_mode is PromptDeliveryMode.NEW_TURN else None),
             ),
         )
 
@@ -6774,9 +6781,9 @@ class KernelHostSession:
                 queue_status=queue_status,
                 consumed_entry_id=(str(row.get("consumed_entry_id") or "") or None),
                 delivery_mode=str(row.get("queue_delivery_mode") or ""),
+                execution=row["request_execution"],
             )
             target = str(row.get("consumed_turn_id") or row["target_queue_item_id"])
-            status = str(row.get("consumed_turn_status") or "")
             if command_kind == "CANCEL_PROMPT" and queue_status == "CANCELLED":
                 return KernelCommandOutcome(
                     command_id,
@@ -6784,6 +6791,28 @@ class KernelHostSession:
                     target,
                     "PROMPT_CANCELLED",
                     "排队输入已取消。",
+                    prompt_delivery=prompt_delivery,
+                )
+            execution = prompt_delivery.execution
+            if execution is not None:
+                command_status, code, message = {
+                    RequestExecutionStatus.QUEUED: (
+                        "PENDING", "PROMPT_QUEUED", "Prompt is queued.",
+                    ),
+                    RequestExecutionStatus.RUNNING: (
+                        "PENDING", "TURN_RUNNING", "The turn is running.",
+                    ),
+                    RequestExecutionStatus.COMPLETED: (
+                        "SUCCEEDED", "TURN_COMPLETED", "Reply accepted.",
+                    ),
+                    RequestExecutionStatus.STOPPED: (
+                        "REJECTED", execution.terminal_reason,
+                        "已改为引导。" if execution.terminal_reason == "USER_REDIRECTED_TO_STEER"
+                        else "The request ended without completing.",
+                    ),
+                }[execution.status]
+                return KernelCommandOutcome(
+                    command_id, command_status, target, code, message,
                     prompt_delivery=prompt_delivery,
                 )
             if queue_status == "PENDING":
@@ -6808,15 +6837,16 @@ class KernelHostSession:
                     else "The queued prompt was not delivered.",
                     prompt_delivery=prompt_delivery,
                 )
-            if queue_status == "CONSUMED" and not status:
+            if queue_status == "CONSUMED":
                 return KernelCommandOutcome(
                     command_id,
-                    "PENDING",
+                    "SUCCEEDED",
                     target,
-                    "PROMPT_CONSUMED",
-                    "Prompt was accepted into a canonical turn.",
+                    "STEER_DELIVERED",
+                    "Steer was delivered to its target turn.",
                     prompt_delivery=prompt_delivery,
                 )
+            raise ValueError(f"invalid steer delivery status: {queue_status}")
         if status == "COMPLETED":
             return KernelCommandOutcome(
                 command_id,
@@ -6824,11 +6854,6 @@ class KernelHostSession:
                 target,
                 "TURN_COMPLETED",
                 "Reply accepted.",
-                prompt_delivery=(
-                    prompt_delivery
-                    if row.get("target_queue_item_id") is not None
-                    else None
-                ),
             )
         if status == "INTERRUPTED":
             return KernelCommandOutcome(
@@ -6837,11 +6862,6 @@ class KernelHostSession:
                 target,
                 str(row.get("terminal_reason") or "TURN_INTERRUPTED"),
                 "The turn was interrupted and will not be replayed.",
-                prompt_delivery=(
-                    prompt_delivery
-                    if row.get("target_queue_item_id") is not None
-                    else None
-                ),
             )
         return KernelCommandOutcome(
             command_id,
@@ -6849,9 +6869,6 @@ class KernelHostSession:
             target,
             "TURN_RUNNING",
             "The turn is running.",
-            prompt_delivery=(
-                prompt_delivery if row.get("target_queue_item_id") is not None else None
-            ),
         )
 
     async def attach_controller(self, attachment_id: str) -> bool:

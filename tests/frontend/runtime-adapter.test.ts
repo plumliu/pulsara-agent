@@ -506,6 +506,7 @@ describe('exact prompt projection', () => {
         command_id: 'command:typed', status: 'PENDING', public_code: 'PROMPT_QUEUED',
         prompt_delivery: {
           queue_item_id: 'queue:typed', queue_status: 'PENDING', delivery_mode: 'NEW_TURN',
+          execution: {status: 'REQUEST_EXECUTION_QUEUED'},
         },
       } },
     ];
@@ -1290,7 +1291,7 @@ describe('exact prompt projection', () => {
     const responses = [
       connectPayload([], pending),
       { error: { stable_code: 'CONTENT_QUEUE_NOT_PENDING', public_message: 'Queue item is no longer pending.' } },
-      {query_command:{found:true,outcome:{command_id:'command-race',status:'SUCCEEDED',prompt_delivery:{queue_item_id:'queue-race',queue_status:'CONSUMED',delivery_mode:'NEW_TURN',consumed_entry_id:'entry-race'}}}},
+      {query_command:{found:true,outcome:{command_id:'command-race',status:'SUCCEEDED',prompt_delivery:{queue_item_id:'queue-race',queue_status:'CONSUMED',delivery_mode:'NEW_TURN',consumed_entry_id:'entry-race',execution:{status:'REQUEST_EXECUTION_COMPLETED'}}}}},
       {session_id:'session-1',cut_sequence:'1',event_sequence_cut:'1',entries:[consumed]},
       contentChunk(promptBody(body)),
     ];

@@ -1017,7 +1017,8 @@ def test_run_once_reuses_running_turn_and_reopens_after_settlement(owner, final_
         request=request.action_value(), memory_domain_id='u_local', deadline_monotonic=monotonic() + 30,
     )
     assert ScheduledTaskService._run_result(confirmed, request.action_value()) == {
-        'queue_item_id': initial.queue_item_id, 'status': 'RUNNING', 'coalesced': True,
+        'queue_item_id': initial.queue_item_id,
+        'execution': {'status': 'running', 'terminal_reason': None}, 'coalesced': True,
     }
     assert read(owner, t['id'])['pending_queue_item_id'] is None
     assert read(owner, t['id'])['revision'] == current['revision']
@@ -1026,9 +1027,13 @@ def test_run_once_reuses_running_turn_and_reopens_after_settlement(owner, final_
         occurred_at=datetime.now(timezone.utc), actor_id='test', deadline_monotonic=monotonic() + 30,
     )
     # Retrying the old command still confirms the old input after completion.
-    assert repo.confirm_scheduled_action(
+    terminal = repo.confirm_scheduled_action(
         request=request.action_value(), memory_domain_id='u_local', deadline_monotonic=monotonic() + 30,
-    )['id'] == initial.queue_item_id
+    )
+    assert terminal['id'] == initial.queue_item_id
+    assert terminal['request_execution'].to_dict() == {
+        'status': 'stopped', 'terminal_reason': 'TEST_BOUNDARY',
+    }
     next_request = admission(read(owner, t['id']), True, _name("command"))
     assert repo.merge_scheduled_manual(
         session_id=t['session_id'], admission=next_request, memory_domain_id='u_local',

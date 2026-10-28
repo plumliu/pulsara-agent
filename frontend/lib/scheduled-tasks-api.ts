@@ -1,3 +1,4 @@
+import type { RequestExecution } from './request-execution';
 import type { PermissionMode } from './pulsara-types';
 export type ScheduleRule = { contract: 'scheduled-rule:v1' } & (
   | { kind: 'once'; run_at_utc: string }
@@ -18,13 +19,13 @@ export interface ScheduledRunRequest { client_command_id: string; request_at_utc
 export interface ScheduledPage { tasks: ScheduledTask[]; next_cursor: string | null }
 export interface ScheduledSession { id: string; title: string }
 export interface ScheduledSessionPage { sessions: ScheduledSession[]; next_cursor: string | null }
-export class ScheduledApiError extends Error { constructor(message: string, public status: number, public code?: string) { super(message); } }
+export class ScheduledApiError extends Error { constructor(message: string, public status: number, public code?: string, public retryable = false) { super(message); } }
 export class LocalScheduledTasksApi {
   private async request<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`/api/scheduled-tasks${path}`, { method, signal, credentials: 'same-origin', cache: 'no-store',
       ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
-    const value = await response.json() as T & { error?: { message?: string; code?: string } };
-    if (!response.ok) throw new ScheduledApiError(value.error?.message ?? '定时任务操作失败', response.status, value.error?.code);
+    const value = await response.json() as T & { error?: { message?: string; code?: string; retryable: boolean } };
+    if (!response.ok) throw new ScheduledApiError(value.error?.message ?? '定时任务操作失败', response.status, value.error?.code, value.error?.retryable);
     return value as T;
   }
   list(status = '', cursor?: string, signal?: AbortSignal, sessionId?: string) { const q = new URLSearchParams(); if (status) q.set('status', status); if (cursor) q.set('cursor', cursor); if (sessionId) q.set('session_id', sessionId); return this.request<ScheduledPage>(`?${q}`, 'GET', undefined, signal); }
@@ -34,7 +35,7 @@ export class LocalScheduledTasksApi {
   update(task: ScheduledTask, values: ScheduledValues) { return this.request<ScheduledTask>(`/${encodeURIComponent(task.id)}`, 'PATCH', { expected_revision: task.revision, values }); }
   action(task: ScheduledTask, action: 'pause' | 'resume' | 'delete') { return this.request<{task: ScheduledTask | null}>(`/${encodeURIComponent(task.id)}/${action}`, 'POST', { expected_revision: task.revision }); }
   switch(task: ScheduledTask, replacement: ScheduledReplacement) { return this.request<{paused: ScheduledTask; active: ScheduledTask}>(`/${encodeURIComponent(task.id)}/switch`, 'POST', { expected_revision: task.revision, replacement }); }
-  runNow(request: ScheduledRunRequest) { return this.request<{queue_item_id: string; status: string; coalesced: boolean}>(`/${encodeURIComponent(request.task_id)}/run-now`, 'POST', request); }
+  runNow(request: ScheduledRunRequest) { return this.request<{queue_item_id: string; execution: RequestExecution; coalesced: boolean}>(`/${encodeURIComponent(request.task_id)}/run-now`, 'POST', request); }
   preview(schedule: ScheduleRule, timezone: string, signal?: AbortSignal) { return this.request<{next_run_at: string; local_time_fold: 0 | 1 | null}>('/preview', 'POST', { schedule, timezone }, signal); }
   localOnce(run_at_local: string, timezone: string, signal?: AbortSignal) { return this.request<{schedule: ScheduleRule}>('/local-once', 'POST', { run_at_local, timezone }, signal); }
 }

@@ -16,19 +16,31 @@ function setup() {
  vi.spyOn(api,'get').mockResolvedValue(task);
  vi.spyOn(api,'update').mockResolvedValue(task);
  vi.spyOn(api,'action').mockResolvedValue({task:null});
- vi.spyOn(api,'runNow').mockResolvedValue({queue_item_id:'queue:a',status:'PENDING',coalesced:false});
+ vi.spyOn(api,'runNow').mockResolvedValue({queue_item_id:'queue:a',execution:{status:'queued',terminal_reason:null},coalesced:false});
  return api;
 }
 const notify = vi.fn();
 function show(api:LocalScheduledTasksApi,onOpenSession=vi.fn(),onCreateSession=vi.fn(async()=> 'session:new')) { return render(<ScheduledTasksView onNotify={notify} modelConfigurations={[model]} onCreateSession={onCreateSession} api={api} ready sessions={[{id:'session:a',title:'普通会话'} as SessionSummary]} onOpenSession={onOpenSession} onOpenSettings={vi.fn()} />); }
-it('retains the complete run action after unknown ACK and task revision refresh',async()=>{
- const api=setup();vi.mocked(api.runNow).mockRejectedValueOnce(new Error('network lost'));
+it.each([
+ new Error('network lost'),
+ new ScheduledApiError('request confirmation failed',409,'LOCAL_RUNTIME_ERROR',true),
+])('retains the complete run action after unknown ACK and task revision refresh (%s)',async error=>{
+ const api=setup();vi.mocked(api.runNow).mockRejectedValueOnce(error);
  show(api);fireEvent.click(await screen.findByRole('button',{name:'运行一次'}));
- await waitFor(()=>expect(notify).toHaveBeenCalledWith('提交结果尚未确认','network lost','warning'));const original=vi.mocked(api.runNow).mock.calls[0][0];
+ await waitFor(()=>expect(notify).toHaveBeenCalledWith('提交结果尚未确认',error.message,'warning'));const original=vi.mocked(api.runNow).mock.calls[0][0];
  vi.mocked(api.list).mockResolvedValue({tasks:[{...task,revision:2,prompt:'新提示词'}],next_cursor:null});
  fireEvent.click(screen.getByRole('button',{name:'刷新定时任务'}));await screen.findByText('新提示词');
  fireEvent.click(screen.getByRole('button',{name:'运行一次'}));await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(2));
  expect(vi.mocked(api.runNow).mock.calls[1][0]).toEqual(original);expect(original.expected_revision).toBe(1);
+});
+it('preserves a retryable server query error through the scheduled HTTP adapter',async()=>{
+ vi.spyOn(globalThis,'fetch').mockResolvedValueOnce(new Response(JSON.stringify({error:{
+  code:'LOCAL_RUNTIME_ERROR',message:'request confirmation failed',retryable:true,
+ }}),{status:409,headers:{'Content-Type':'application/json'}}));
+ const api=new LocalScheduledTasksApi();
+ await expect(api.runNow({task_id:task.id,session_id:task.session_id,expected_revision:1,
+  client_command_id:'command:original',request_at_utc:'2026-10-28T00:00:00Z',
+ })).rejects.toMatchObject({status:409,code:'LOCAL_RUNTIME_ERROR',retryable:true});
 });
 it('rejects definite conflicting run and uses a new identity after reload',async()=>{
  const api=setup();vi.mocked(api.runNow).mockRejectedValueOnce(new ScheduledApiError('任务已修改',409));
@@ -236,13 +248,13 @@ it.each([
 });
 
 it('prevents rapid repeated submission while the request is unresolved',async()=>{
- const api=setup();let resolve!: (value:{queue_item_id:string;status:string;coalesced:boolean})=>void;
+ const api=setup();let resolve!: (value:{queue_item_id:string;execution:{status:'running';terminal_reason:null};coalesced:boolean})=>void;
  vi.mocked(api.runNow).mockImplementation(()=>new Promise(done=>{resolve=done;}));
  show(api);const run=await screen.findByRole('button',{name:'运行一次'});
  fireEvent.click(run);fireEvent.click(run);fireEvent.click(run);
  expect(api.runNow).toHaveBeenCalledTimes(1);
  vi.mocked(api.list).mockResolvedValue({tasks:[{...task,last_turn_status:'RUNNING'}],next_cursor:null});
- resolve({queue_item_id:'queue:a',status:'RUNNING',coalesced:false});
+ resolve({queue_item_id:'queue:a',execution:{status:'running',terminal_reason:null},coalesced:false});
  expect((await screen.findByRole('button',{name:'运行中'})).hasAttribute('disabled')).toBe(true);
  await waitFor(()=>expect(notify).toHaveBeenCalledWith('任务正在运行','可在会话中查看','success'));
  await waitFor(()=>expect(screen.queryByRole('status')).toBeNull());

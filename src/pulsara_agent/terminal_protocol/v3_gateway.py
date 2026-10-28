@@ -114,7 +114,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 5
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:f36432518db108798c9be3919f5fefadcb6f77f74e4258c7c12a29613a929a04"
+    "sha256:ae44ce6eb0ec8cee09c6cbf5241bfd0c6a58cb166574e66989043e575f3a45d1"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -2006,6 +2006,17 @@ def _outcome_to_wire(request_id: str, outcome: object) -> wire.CommandOutcome:
             consumed_entry_id=outcome.prompt_delivery.consumed_entry_id or "",
             delivery_mode=outcome.prompt_delivery.delivery_mode,
         ))
+        execution = outcome.prompt_delivery.execution
+        if execution is not None:
+            result.prompt_delivery.execution.CopyFrom(wire.RequestExecution(
+                status={
+                    "queued": wire.REQUEST_EXECUTION_QUEUED,
+                    "running": wire.REQUEST_EXECUTION_RUNNING,
+                    "completed": wire.REQUEST_EXECUTION_COMPLETED,
+                    "stopped": wire.REQUEST_EXECUTION_STOPPED,
+                }[execution.status],
+                terminal_reason=execution.terminal_reason or "",
+            ))
     if outcome.user_control is not None:
         result.user_control.CopyFrom(_user_control_outcome_to_wire(outcome.user_control))
     return result

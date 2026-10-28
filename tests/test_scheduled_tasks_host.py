@@ -262,7 +262,7 @@ def test_busy_fifo_coalescing_pause_and_source(
             confirmed = await service.run_now(req)
             assert (
                 confirmed["queue_item_id"] == accepted["queue_item_id"]
-                and confirmed["status"] == "CONSUMED"
+                and confirmed["execution"] == {"status": "completed", "terminal_reason": None}
             )
         finally:
             port.release.set()
