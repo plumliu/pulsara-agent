@@ -1,6 +1,6 @@
 # Memory 工具目标统一实施规格
 
-日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](output/target-hardcut-implementation-20261028/memory/REPORT.zh.md)；整体结果见[汇总](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](../output/target-hardcut-implementation-20261028/memory/REPORT.zh.md)；整体结果见[汇总](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
 
 ## 1. 决策与范围
 
@@ -12,7 +12,7 @@
 
 ### SUPERSEDES
 
-本规格实施时，只替代[归档 Memory/session 工具清晰化规格](archived_docs/PULSARA_MEMORY_SESSION_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md)中四个 memory 工具的裸 ID 请求、对应可操作结果身份及描述；其信息来源、分类、范围、advisory 和写入语义保留。session 工具及历史召回的 SESSION/SESSION_ENTRY targets 由独立 session 规格负责。
+本规格实施时，只替代[归档 Memory/session 工具清晰化规格](PULSARA_MEMORY_SESSION_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md)中四个 memory 工具的裸 ID 请求、对应可操作结果身份及描述；其信息来源、分类、范围、advisory 和写入语义保留。session 工具及历史召回的 SESSION/SESSION_ENTRY targets 由独立 session 规格负责。
 
 只在新 cold epoch 或明确采用的 compaction successor 安装新工具定义。运行中 epoch 的 SYSTEM/tools byte-identical、messages append-only。历史已提交请求/结果不回写、不添加双读 alias。新请求不接受旧字段。它不是新旧参数自动协商，也不增加 provider-input 重建边界。
 
@@ -163,7 +163,7 @@ memory_search 保留 lexical admission 先于可选远程 embedding/rerank、稀
 
 ## 7. 英文 function.description 候选
 
-完整值同时保存于 [descriptions.json](output/tool-target-hardcut-20261028/memory/descriptions.json)。描述只解释新调用与有效产品语义，不放实验历史或实现术语。
+完整值同时保存于 [descriptions.json](../output/tool-target-hardcut-20261028/memory/descriptions.json)。描述只解释新调用与有效产品语义，不放实验历史或实现术语。
 
 `memory_search`：
 
@@ -221,11 +221,11 @@ SUPERSEDES: source is the supported replacement, including a corrected statement
 
 证据：
 
-- [候选生成与检查脚本](output/tool-target-hardcut-20261028/memory/design_schema.py)
-- [当前 canonical](output/tool-target-hardcut-20261028/memory/before.canonical.json)、[候选 canonical](output/tool-target-hardcut-20261028/memory/after.canonical.json)
-- [当前完整 wire](output/tool-target-hardcut-20261028/memory/before.responses.json)、[候选完整 wire](output/tool-target-hardcut-20261028/memory/after.responses.json)
-- [正例](output/tool-target-hardcut-20261028/memory/examples.json)、[形状反例](output/tool-target-hardcut-20261028/memory/negative_examples.json)、[原生语义检查例](output/tool-target-hardcut-20261028/memory/semantic_only_examples.json)
-- [测量结果](output/tool-target-hardcut-20261028/memory/measurements.json)
+- [候选生成与检查脚本](../output/tool-target-hardcut-20261028/memory/design_schema.py)
+- [当前 canonical](../output/tool-target-hardcut-20261028/memory/before.canonical.json)、[候选 canonical](../output/tool-target-hardcut-20261028/memory/after.canonical.json)
+- [当前完整 wire](../output/tool-target-hardcut-20261028/memory/before.responses.json)、[候选完整 wire](../output/tool-target-hardcut-20261028/memory/after.responses.json)
+- [正例](../output/tool-target-hardcut-20261028/memory/examples.json)、[形状反例](../output/tool-target-hardcut-20261028/memory/negative_examples.json)、[原生语义检查例](../output/tool-target-hardcut-20261028/memory/semantic_only_examples.json)
+- [测量结果](../output/tool-target-hardcut-20261028/memory/measurements.json)
 
 ## 9. 实施验证与剩余不确定性
 
@@ -246,4 +246,4 @@ SUPERSEDES: source is the supported replacement, including a corrected statement
 - runner 中保存结果直接用作 basis、坏 citation 结算后继续、opt-out steer；permanent deletion/fork 的记忆独立性：**6 passed**。
 - 本组生产 owner 与受影响行为测试的 Ruff 检查通过。一次性 JSON 序列化后对照确认四份完整 wire 与 ROOT 获批候选逐值相等；该检查未加入冻结测试。
 
-实现报告与复核记录在 [记忆组实施报告](output/target-hardcut-implementation-20261028/memory/REPORT.zh.md)。当前请求/结果合同没有待选结构分叉；保留 exposure metadata 已与 ROOT 对齐。模型认知收益和完整目录的长期调用成功率未作测量；此次 provider 小样本没有覆盖记忆工具。
+实现报告与复核记录在 [记忆组实施报告](../output/target-hardcut-implementation-20261028/memory/REPORT.zh.md)。当前请求/结果合同没有待选结构分叉；保留 exposure metadata 已与 ROOT 对齐。模型认知收益和完整目录的长期调用成功率未作测量；此次 provider 小样本没有覆盖记忆工具。

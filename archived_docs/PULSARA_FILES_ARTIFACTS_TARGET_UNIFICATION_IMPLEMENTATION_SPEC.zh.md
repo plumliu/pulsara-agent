@@ -1,6 +1,6 @@
 # 文件、Artifact 与展示工具目标统一实施规格
 
-日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](output/target-hardcut-implementation-20261028/files/REPORT.zh.md)；整体结果见[汇总](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](../output/target-hardcut-implementation-20261028/files/REPORT.zh.md)；整体结果见[汇总](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
 
 ## 1. 推荐与范围
 
@@ -16,10 +16,10 @@
 
 本规格仅替代以下文档的模型公共参数、对象引用结果和相应使用示例；原生文件/图片/展示/导出功能、权限、预算与副作用语义仍以本规格所追当前owner为准：
 
-- [本地IO与终端工具清晰化规格](archived_docs/PULSARA_LOCAL_IO_TERMINAL_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 的本组九工具相关公开形状；terminal本身由终端target规格负责。
-- [Artifact导出规格](archived_docs/PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md) 的artifact_id/path公开交接。
-- [图片引用重读规格](archived_docs/PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 与[本地图片工具规格](archived_docs/PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md) 的view_image请求及模型引用label。
-- [文件展示计划](archived_docs/PULSARA_OPEN_IN_PULSARA_FILE_IMPLEMENTATION_PLAN.zh.md) 的非task公开展示目标；type:task分支不在替代范围。
+- [本地IO与终端工具清晰化规格](PULSARA_LOCAL_IO_TERMINAL_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 的本组九工具相关公开形状；terminal本身由终端target规格负责。
+- [Artifact导出规格](PULSARA_ARTIFACT_EXPORT_IMPLEMENTATION_SPEC.zh.md) 的artifact_id/path公开交接。
+- [图片引用重读规格](PULSARA_IMAGE_REFERENCE_REREAD_IMPLEMENTATION_SPEC.zh.md) 与[本地图片工具规格](PULSARA_LOCAL_IMAGE_TOOL_IMPLEMENTATION_SPEC.zh.md) 的view_image请求及模型引用label。
+- [文件展示计划](PULSARA_OPEN_IN_PULSARA_FILE_IMPLEMENTATION_PLAN.zh.md) 的非task公开展示目标；type:task分支不在替代范围。
 
 [Capability统一规格](PULSARA_CAPABILITY_TARGET_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 不由本组原地修改；其MCP artifact指引和Skill文件读取例子由总规格明确联动，其他管理/查询合同保留。
 
@@ -82,7 +82,7 @@ read_file offset=1、limit=2000，limit 上限2000；search offset=0、limit=50�
 
 ## 4. 全分支前后调用与行为
 
-以下 `R` 代表从实际 read_file 复制的完整 revision，`A`、`I` 为实际产出 ID；示例不声称这些占位标识可执行。完整最小正例见 [examples.json](output/tool-target-hardcut-20261028/files/examples.json)。
+以下 `R` 代表从实际 read_file 复制的完整 revision，`A`、`I` 为实际产出 ID；示例不声称这些占位标识可执行。完整最小正例见 [examples.json](../output/tool-target-hardcut-20261028/files/examples.json)。
 
 | 工具/分支 | 旧调用 → 新调用 | 必须保留 |
 |---|---|---|
@@ -194,7 +194,7 @@ capability的 `{kind:SKILL,skill_path}` 表示能力对象，不是PATH；保持
 
 ## 7. 离线成本与认知取舍
 
-已用仓库 `.venv`、生产descriptor、现行lowerer和 `PulsaraHeuristicTokenEstimatorV3` 离线生成 [canonical](output/tool-target-hardcut-20261028/files/after.canonical.json) 与 [完整Responses定义](output/tool-target-hardcut-20261028/files/after.responses.json)。[复算脚本](output/tool-target-hardcut-20261028/files/design_schema.py)、[机器计量](output/tool-target-hardcut-20261028/files/measurement.json) 和正反例均保存；无生产执行/真实provider调用。
+已用仓库 `.venv`、生产descriptor、现行lowerer和 `PulsaraHeuristicTokenEstimatorV3` 离线生成 [canonical](../output/tool-target-hardcut-20261028/files/after.canonical.json) 与 [完整Responses定义](../output/tool-target-hardcut-20261028/files/after.responses.json)。[复算脚本](../output/tool-target-hardcut-20261028/files/design_schema.py)、[机器计量](../output/tool-target-hardcut-20261028/files/measurement.json) 和正反例均保存；无生产执行/真实provider调用。
 
 | 工具 | 原Responses tools数组 | 只改结构 | 结构+候选正文 | 最终差值 |
 |---|---:|---:|---:|---:|
@@ -238,7 +238,7 @@ capability的 `{kind:SKILL,skill_path}` 表示能力对象，不是PATH；保持
 
 ## 9. 精简英文正文候选
 
-完整逐工具文本与schema一致，见 [descriptions.json](output/tool-target-hardcut-20261028/files/descriptions.json)；不能只在parameters.description说明分支。以下列出关键签名便于审阅，细节保留在附件：
+完整逐工具文本与schema一致，见 [descriptions.json](../output/tool-target-hardcut-20261028/files/descriptions.json)；不能只在parameters.description说明分支。以下列出关键签名便于审阅，细节保留在附件：
 
 ```text
 read_file: PATH target; optional offset and limit. Returns content_revision for edit_file.

@@ -1,6 +1,6 @@
 # Terminal 工具目标统一实施调研规格
 
-日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](output/target-hardcut-implementation-20261028/terminal/REPORT.zh.md)；整体结果见[汇总](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](../output/target-hardcut-implementation-20261028/terminal/REPORT.zh.md)；整体结果见[汇总](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
 
 ## 1. 决策与边界
 
@@ -18,9 +18,9 @@
 
 本规格仅替代以下文档中的终端公共扁平身份请求、相应模型结果和调用指引：
 
-- [本地文件、呈现与终端工具清晰化规格](archived_docs/PULSARA_LOCAL_IO_TERMINAL_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 的terminal三工具及展示PROCESS身份部分。
-- [终端认知减法规格](archived_docs/PULSARA_TERMINAL_MODEL_CALL_COGNITIVE_SUBTRACTION_SPEC.zh.md) 中process_id/monitor_id作为模型调用入口的表述；每次独立shell、原动作和运行语义保留。
-- [Terminal公共API拆分规格](archived_docs/PULSARA_TERMINAL_PUBLIC_TOOL_API_SPLIT_HARD_CUT_IMPLEMENTATION.zh.md) 中仍适用于当前实现的身份传递部分；不恢复该历史文档已淘汰的log等动作。
+- [本地文件、呈现与终端工具清晰化规格](PULSARA_LOCAL_IO_TERMINAL_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 的terminal三工具及展示PROCESS身份部分。
+- [终端认知减法规格](PULSARA_TERMINAL_MODEL_CALL_COGNITIVE_SUBTRACTION_SPEC.zh.md) 中process_id/monitor_id作为模型调用入口的表述；每次独立shell、原动作和运行语义保留。
+- [Terminal公共API拆分规格](PULSARA_TERMINAL_PUBLIC_TOOL_API_SPLIT_HARD_CUT_IMPLEMENTATION.zh.md) 中仍适用于当前实现的身份传递部分；不恢复该历史文档已淘汰的log等动作。
 
 其余行为以当前实现为准，不据历史方案恢复持久shell、notification reducer或执行恢复。本次已读根AGENTS.md、共同BRIEF、capability target规格、能力/定时清晰化历史规格、190次实验报告及本地工具清晰化规格。
 

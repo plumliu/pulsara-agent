@@ -1,6 +1,6 @@
 # 会话内容查询 target 统一实施调研规格
 
-日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](output/target-hardcut-implementation-20261028/sessions/REPORT.zh.md)；整体结果见[汇总](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](../output/target-hardcut-implementation-20261028/sessions/REPORT.zh.md)；整体结果见[汇总](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
 
 ## 1. 决策与范围
 
@@ -10,7 +10,7 @@
 
 ### SUPERSEDES
 
-本规格仅替代[会话查询设计](archived_docs/PULSARA_UNIFIED_SESSION_CONTENT_QUERY_DESIGN.zh.md)、[会话工具语义补充](archived_docs/PULSARA_SESSION_CONTENT_TOOL_SEMANTICS_ADDENDUM.zh.md)和[本地历史召回规格](archived_docs/PULSARA_LOCAL_HISTORY_RECALL_PG_SEARCH_IMPLEMENTATION_DISCUSSION.zh.md)中**公开身份字段及对应调用示例**；检索、摘录、原文读取、压缩范围与原生存储语义以现有生产实现为准并保持。内部 DTO、数据库列、索引文档和 cursor 私有字段不必改名。已存工具消息不重写，不保留旧公开请求别名或新旧双读双写。
+本规格仅替代[会话查询设计](PULSARA_UNIFIED_SESSION_CONTENT_QUERY_DESIGN.zh.md)、[会话工具语义补充](PULSARA_SESSION_CONTENT_TOOL_SEMANTICS_ADDENDUM.zh.md)和[本地历史召回规格](PULSARA_LOCAL_HISTORY_RECALL_PG_SEARCH_IMPLEMENTATION_DISCUSSION.zh.md)中**公开身份字段及对应调用示例**；检索、摘录、原文读取、压缩范围与原生存储语义以现有生产实现为准并保持。内部 DTO、数据库列、索引文档和 cursor 私有字段不必改名。已存工具消息不重写，不保留旧公开请求别名或新旧双读双写。
 
 只有新 cold epoch 或明确采用的 compaction successor 安装新定义；已安装 SYSTEM/tools 字节不变、messages 只追加。不能因 target 新格式而让 reload、检索或 UI 刷新重建输入根。
 
@@ -175,13 +175,13 @@ item.target 支持继续查该会话；hit.target 支持精确展开命中。这
 
 启发式计量独立舍入，单行加总不代替整数组。不是 provider 实收 usage，不是完整 SYSTEM+tools，不含结果/自动召回实际文本的动态增量。统一 target 增加 schema 包装与必需类型，不能宣传节省 tokens；收益假设是减少跨工具拆字段和 session/entry 误配，尚未真实测量。
 
-附件： [脚本](output/tool-target-hardcut-20261028/sessions/design_schema.py)、[当前 canonical](output/tool-target-hardcut-20261028/sessions/before.canonical.json)、[候选 canonical](output/tool-target-hardcut-20261028/sessions/after.canonical.json)、[当前完整 wire](output/tool-target-hardcut-20261028/sessions/before.responses.json)、[候选完整 wire](output/tool-target-hardcut-20261028/sessions/after.responses.json)、[正反例](output/tool-target-hardcut-20261028/sessions/examples.json)、[计量](output/tool-target-hardcut-20261028/sessions/measurements.json)。无 SHA/fingerprint 附件。
+附件： [脚本](../output/tool-target-hardcut-20261028/sessions/design_schema.py)、[当前 canonical](../output/tool-target-hardcut-20261028/sessions/before.canonical.json)、[候选 canonical](../output/tool-target-hardcut-20261028/sessions/after.canonical.json)、[当前完整 wire](../output/tool-target-hardcut-20261028/sessions/before.responses.json)、[候选完整 wire](../output/tool-target-hardcut-20261028/sessions/after.responses.json)、[正反例](../output/tool-target-hardcut-20261028/sessions/examples.json)、[计量](../output/tool-target-hardcut-20261028/sessions/measurements.json)。无 SHA/fingerprint 附件。
 
 继续采用当前 lowerer + strict:false，本地精确 parser 为执行权威。根首屏/续页 union 会展平，read target 的内联 union 由当前 lowerer 处理；不增加 request 包装、不改 lowerer、不以 wire 接受代替授权。既有 190 请求实验只支持此路线的已知边界，不证明本次 SESSION/SESSION_ENTRY 候选已被真实接口接受。
 
 ## 9. 英文 function.description 候选
 
-完整机器同值见 [descriptions.json](output/tool-target-hardcut-20261028/sessions/descriptions.json)。字段 schema 保留 include_tools、query、方向与页预算的必要说明。
+完整机器同值见 [descriptions.json](../output/tool-target-hardcut-20261028/sessions/descriptions.json)。字段 schema 保留 include_tools、query、方向与页预算的必要说明。
 
 `search_sessions`：
 

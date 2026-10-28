@@ -1,6 +1,6 @@
 # 工具目标统一：整体实施方案
 
-日期：2026-10-28。状态：生产 hard cut 已实施，六组生产链路与消费者已同步；8 个 subagent 工具保持原定义。实施验证见[汇总报告](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+日期：2026-10-28。状态：生产 hard cut 已实施，六组生产链路与消费者已同步；8 个 subagent 工具保持原定义。实施验证见[汇总报告](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
 
 ## 1. 目的与范围
 
@@ -86,7 +86,7 @@ ROOT 已核对 `capability/builtin_catalog.py` 的四个 workflow descriptor、`
 
 ## 5. Schema 与模型说明
 
-沿 [已实施的工具清晰化规格](archived_docs/PULSARA_CAPABILITY_SCHEDULING_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 和 [190 次真实请求实验](output/tool-schema-compatibility-20261026/REPORT.zh.md) 的结论：
+沿 [已实施的工具清晰化规格](PULSARA_CAPABILITY_SCHEDULING_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 和 [190 次真实请求实验](../output/tool-schema-compatibility-20261026/REPORT.zh.md) 的结论：
 
 - 保留精确 canonical 分支、本地 parser 和现有 OpenAI lowerer；两种协议继续显式 `strict:false`。
 - target 使用内联、闭合的对象形状；不引入 `$defs/$ref`、provider 特判或根 request 包装。
@@ -106,10 +106,10 @@ ROOT 从实施前生产 descriptor 枚举 **39 个工具**，明确排除 8 个 
 
 使用当前 `PulsaraHeuristicTokenEstimatorV3`，先通过生产 lowerer，再计量完整 Responses tools 数组。实施前全目录为 **15,958 tokens**，排除 subagent 后为 **12,944 tokens**。不含 SYSTEM/messages/MCP 动态直接工具，不是 provider usage。
 
-- [目录及分组基线](output/tool-target-hardcut-20261028/root/inventory.json)
-- [基线复算脚本](output/tool-target-hardcut-20261028/root/inventory.py)
-- [生产目录 wire 定义](output/tool-target-hardcut-20261028/root/baseline.responses.json)
-- [分组共同调研背景](output/tool-target-hardcut-20261028/BRIEF.zh.md)
+- [目录及分组基线](../output/tool-target-hardcut-20261028/root/inventory.json)
+- [基线复算脚本](../output/tool-target-hardcut-20261028/root/inventory.py)
+- [生产目录 wire 定义](../output/tool-target-hardcut-20261028/root/baseline.responses.json)
+- [分组共同调研背景](../output/tool-target-hardcut-20261028/BRIEF.zh.md)
 
 各组提供自己的候选定义与计量；整体结果以候选合并后的整串计量为准，不用分别舍入的单项差值代替。
 
@@ -132,9 +132,9 @@ ROOT 从实施前生产 descriptor 枚举 **39 个工具**，明确排除 8 个 
 
 采用统一对象的方案，同时保留本文列出的无 target 入口与角色字段。最明显的收益在跨工具路径：PROCESS→monitor／展示、artifact→读取／导出、会话搜索命中→指定消息读取、capability查询→管理。memory单 ID 与普通文件单路径包装的局部收益较小，但纳入同一复制习惯有整体价值；这是一项明确的设计取舍，尚无新模型实验可证明净认知成本或总调用费用下降。
 
-- [整合后的全部定义](output/tool-target-hardcut-20261028/root/after.responses.json)
-- [整合计量](output/tool-target-hardcut-20261028/root/aggregate.measurements.json)
-- [整合复算脚本](output/tool-target-hardcut-20261028/root/aggregate.py)
+- [整合后的全部定义](../output/tool-target-hardcut-20261028/root/after.responses.json)
+- [整合计量](../output/tool-target-hardcut-20261028/root/aggregate.measurements.json)
+- [整合复算脚本](../output/tool-target-hardcut-20261028/root/aggregate.py)
 
 ## 8. 跨组衔接的最终合同
 
@@ -169,10 +169,10 @@ If the saved-output guidance supplies an ARTIFACT target, copy it into artifact_
 
 六组公开参数、结果、parser、权限取址、runtime observation、压缩消费者、SYSTEM／Skill 示例与 UI 已同步。生产不依赖 output 中的候选文件。没有旧参数 fallback、alias、双读或新增数据库结构；安装前缀继续沿原 cold epoch／compaction successor 机制。
 
-[真实 provider 实验](output/target-schema-2x2-20261028/REPORT.zh.md)使用5工具、7场景。初轮28请求中27个正常返回，全部通过两层schema；5个ID前缀误读在明确完整ID的8次补测中全部正确。一次传输失败保留原始证据。这是有限样本，未测全部工具或长期成功率。
+[真实 provider 实验](../output/target-schema-2x2-20261028/REPORT.zh.md)使用5工具、7场景。初轮28请求中27个正常返回，全部通过两层schema；5个ID前缀误读在明确完整ID的8次补测中全部正确。一次传输失败保留原始证据。这是有限样本，未测全部工具或长期成功率。
 
-实施后全目录 **17,495 tokens**，范围内31工具 **14,481 tokens**，均较实施前增加 **1,537**。较已审候选增加21：终端Pydantic自然输出kind的type:string；调度复用SESSION形状中的简短ID说明。结构与允许值未改变；总量独立舍入。最终定义及计量见[生产导出](output/target-hardcut-implementation-20261028/root/implemented.responses.json)、[计量](output/target-hardcut-implementation-20261028/root/measurements.json)。
+实施后全目录 **17,495 tokens**，范围内31工具 **14,481 tokens**，均较实施前增加 **1,537**。较已审候选增加21：终端Pydantic自然输出kind的type:string；调度复用SESSION形状中的简短ID说明。结构与允许值未改变；总量独立舍入。最终定义及计量见[生产导出](../output/target-hardcut-implementation-20261028/root/implemented.responses.json)、[计量](../output/target-hardcut-implementation-20261028/root/measurements.json)。
 
 39 = 8个排除工具 + 5个范围内不变工具 + 3个仅说明调整工具 + 23个参数结构调整工具。8个subagent定义与实施前逐值相等，task/profile/历史继承及monitor可见性不改。
 
-验证保留真实执行、参数拒绝、权限、事务、分页、预算、prefix和UI行为；不冻结新schema全文、说明措辞或token数。完整日志与已执行范围见[实施汇总](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+验证保留真实执行、参数拒绝、权限、事务、分页、预算、prefix和UI行为；不冻结新schema全文、说明措辞或token数。完整日志与已执行范围见[实施汇总](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。

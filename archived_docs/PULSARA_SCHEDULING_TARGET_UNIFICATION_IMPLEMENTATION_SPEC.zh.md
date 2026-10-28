@@ -1,6 +1,6 @@
 # 定时任务目标统一实施调研规格
 
-日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](output/target-hardcut-implementation-20261028/scheduling/REPORT.zh.md)；整体结果见[汇总](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](../output/target-hardcut-implementation-20261028/scheduling/REPORT.zh.md)；整体结果见[汇总](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
 
 ## 1. 决策、范围与非范围
 
@@ -17,7 +17,7 @@ replacement 的 `kind=existing/create` 是现有操作分支标签，保持小�
 
 ### SUPERSEDES
 
-本规格只替代 [此前清晰化规格](archived_docs/PULSARA_CAPABILITY_SCHEDULING_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 的 scheduled 模型身份字段、switch 参数名称及相应结果交接。其清晰化依据、时间语义、调度执行和无参数 reload 合并均保持。与 [capability 目标规格](PULSARA_CAPABILITY_TARGET_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 共用 target 习惯和 provider 路线，不共用执行器或管理目标注册表。
+本规格只替代 [此前清晰化规格](PULSARA_CAPABILITY_SCHEDULING_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 的 scheduled 模型身份字段、switch 参数名称及相应结果交接。其清晰化依据、时间语义、调度执行和无参数 reload 合并均保持。与 [capability 目标规格](PULSARA_CAPABILITY_TARGET_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 共用 target 习惯和 provider 路线，不共用执行器或管理目标注册表。
 
 不添加 cron、后台持续运行、模型 run-now、新日历规则、新计划状态、全用户模型列表、新建会话工具、耐久任务/回执/恢复图或总量上限。UI-only run-once、原生 relational rows、queue provenance 和已有事务/模型选择/权限 owners 保留。subagent 整条链路不在范围内。
 
@@ -56,7 +56,7 @@ replacement 的 `kind=existing/create` 是现有操作分支标签，保持小�
 
 SCHEDULE 无 session_id/revision，因 task_id 在现有存储中独立定位计划，真实归属由 repository 读出；传一份 caller 声称的 session 并不能替代归属验证。`expected_revision` 必须是真正 int、>=1；bool 不可混用。ID 沿 `identity.is_valid_id` 校验，不引入新的长度/总量限制，不 trim 或重写 ID。
 
-下表 S、D 是源/目的 SCHEDULE 对象，P 是 SESSION 对象，V 是完整 values；这是对照缩写，不是实际可发送 JSON。完整可提交形状在 [examples.json](output/tool-target-hardcut-20261028/scheduling/examples.json)。
+下表 S、D 是源/目的 SCHEDULE 对象，P 是 SESSION 对象，V 是完整 values；这是对照缩写，不是实际可发送 JSON。完整可提交形状在 [examples.json](../output/tool-target-hardcut-20261028/scheduling/examples.json)。
 
 | 动作/分支 | 当前请求 | 候选请求 | 保持 |
 |---|---|---|---|
@@ -179,7 +179,7 @@ once计划可能已在入队时退休；此target标识来源计划，不保证�
 
 保留当前lowerer、strict:false、内联闭合嵌套target/switch/rule union；没有$ref、request外层、provider分支或新的schema框架。canonical八根分支经lowerer形成superset，function.description保留动作字段行。本地parser必须精确判定，wire合法不是执行授权。
 
-证据目录：[scheduling](output/tool-target-hardcut-20261028/scheduling/)。[生成脚本](output/tool-target-hardcut-20261028/scheduling/design_schema.py)只读取生产descriptor、用真实lowerer生成候选，V3估算，JSON Schema检查；[canonical](output/tool-target-hardcut-20261028/scheduling/after.canonical.json)、[完整Responses定义](output/tool-target-hardcut-20261028/scheduling/after.responses.json)、[英文正文](output/tool-target-hardcut-20261028/scheduling/description.txt)、[计量](output/tool-target-hardcut-20261028/scheduling/measurements.json)可复查。
+证据目录：[scheduling](../output/tool-target-hardcut-20261028/scheduling)。[生成脚本](../output/tool-target-hardcut-20261028/scheduling/design_schema.py)只读取生产descriptor、用真实lowerer生成候选，V3估算，JSON Schema检查；[canonical](../output/tool-target-hardcut-20261028/scheduling/after.canonical.json)、[完整Responses定义](../output/tool-target-hardcut-20261028/scheduling/after.responses.json)、[英文正文](../output/tool-target-hardcut-20261028/scheduling/description.txt)、[计量](../output/tool-target-hardcut-20261028/scheduling/measurements.json)可复查。
 
 `description.txt` 是本规格**完整、精确的英文 function.description 候选正文**，包含八动作签名、switch两分支、session角色与现有时间/权限/队列语义；实施时在builtin_catalog安装该正文，不另拼一份与附件不一致的短说明。它是设计附件，不是生产运行时读取依赖或文案快照测试。
 

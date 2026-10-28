@@ -190,14 +190,14 @@ prompt_queue_items.id
 ## 9. SUPERSEDES 与调研证据
 
 - 本规格统一 NEW_TURN 的公开执行读取合同；不替代 queue 交付、命令操作、ROOT steer 转换或内部 turn 状态职责。
-- 替代 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) §4.1 的八态公开枚举：未来 WORK 统一四态，等待和结束的细分原因不再作为独立公开状态。本轮不因此实施其余协作重构。
+- 替代 [Agent／Work 设计](../PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) §4.1 的八态公开枚举：未来 WORK 统一四态，等待和结束的细分原因不再作为独立公开状态。本轮不因此实施其余协作重构。
 - [调度 Target 规格](PULSARA_SCHEDULING_TARGET_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 的调度行为与 queue provenance 保持；其中涉及单次执行结果的公开状态表达以本规格为准，不替代任务启停／聚合合同。
 - 本次不改变已有模型重试、Stop Hook、接管和精确事务确认的行为，不新增恢复链路。
 
 静态调查报告（代码行号以调查时工作树为准）：
 
-- [请求事实与写入 owner](output/unified-request-status-review/owner/REVIEW.zh.md)：接纳、消费、取消、转 steer、终态、约束及一致性读取。
-- [消费入口](output/unified-request-status-review/consumers/report.md)：Host／协议／桌面／前端／scheduled 的区别与硬切列表。
-- [Hard-cut 复核](output/unified-request-status-review/hardcut/terra_queue_status_findings.zh.md)：重试、Stop Hook、竞态、baseline 与最小验证路径。
+- [请求事实与写入 owner](../output/unified-request-status-review/owner/REVIEW.zh.md)：接纳、消费、取消、转 steer、终态、约束及一致性读取。
+- [消费入口](../output/unified-request-status-review/consumers/report.md)：Host／协议／桌面／前端／scheduled 的区别与硬切列表。
+- [Hard-cut 复核](../output/unified-request-status-review/hardcut/terra_queue_status_findings.zh.md)：重试、Stop Hook、竞态、baseline 与最小验证路径。
 
-实施与验证结果见[交付记录](output/unified-request-status-implementation/root/IMPLEMENTATION.zh.md)，代码审阅见[Astra 复核](output/unified-request-status-implementation/critic/REVIEW.zh.md)。
+实施与验证结果见[交付记录](../output/unified-request-status-implementation/root/IMPLEMENTATION.zh.md)，代码审阅见[Astra 复核](../output/unified-request-status-implementation/critic/REVIEW.zh.md)。

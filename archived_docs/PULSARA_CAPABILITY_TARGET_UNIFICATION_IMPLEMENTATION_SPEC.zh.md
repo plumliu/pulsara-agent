@@ -1,6 +1,6 @@
 # Capability 管理目标统一实施规格
 
-日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](output/target-hardcut-implementation-20261028/capability/REPORT.zh.md)；整体结果见[汇总](output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
+日期：2026-10-28。状态：生产 hard cut 已实施，公开请求、结果及消费者采用本规格。验证与范围见[实施报告](../output/target-hardcut-implementation-20261028/capability/REPORT.zh.md)；整体结果见[汇总](../output/target-hardcut-implementation-20261028/root/REPORT.zh.md)。
 
 ## 1. 产品决策与范围
 
@@ -20,15 +20,15 @@ MCP 的 META 工具调用、资源读取（含模板）和 prompt 获取也采�
 
 - 能力来源查询规格中安装配置与运行时共用 target.kind=MCP_SERVER 的合同：安装配置采用 MCP_CONNECTION，运行时保留 MCP_SERVER；目录类别过滤不变。
 
-- [能力与定时任务工具清晰化规格](archived_docs/PULSARA_CAPABILITY_SCHEDULING_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 中 manage_capability 的扁平身份入参、统一顶层 scope、相应正文与字段说明；保留其他工具、原生行为和 adapter 路线。
-- [能力来源查询规格](archived_docs/PULSARA_CAPABILITY_SOURCE_QUERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) 中管理结果使用 identity 作为后续目标来源的叙述。既有查询 target、parent、调用方范围和运行时关联合同保留。
+- [能力与定时任务工具清晰化规格](PULSARA_CAPABILITY_SCHEDULING_TOOL_CLARITY_IMPLEMENTATION_SPEC.zh.md) 中 manage_capability 的扁平身份入参、统一顶层 scope、相应正文与字段说明；保留其他工具、原生行为和 adapter 路线。
+- [能力来源查询规格](PULSARA_CAPABILITY_SOURCE_QUERY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) 中管理结果使用 identity 作为后续目标来源的叙述。既有查询 target、parent、调用方范围和运行时关联合同保留。
 - 能力与定时任务工具清晰化规格中的 read_mcp_resource/get_mcp_prompt 扁平请求、use_new_mcp_tool 顶层 tool_ref，以及对应 inspect META 返回路径和调用示例，由本规格第 11 节替代。原生 SDK 操作、引用绑定、DIRECT/META 路由、授权、结果和生命周期保留。
 
 这是一次新请求/结果合同的 hard cut：不接受旧管理调用别名，不双写 scope/identity 与 target。已提交的历史工具消息不是待迁移的请求，不重写。已安装 epoch 的 SYSTEM/tools 保持原值、messages 只追加；新定义仅在既有 cold epoch 或明确采用的 compaction successor 边界安装。
 
 ## 2. 实验依据与 schema 写法
 
-依据 [190 次 Responses 实验报告](output/tool-schema-compatibility-20261026/REPORT.zh.md)、[压缩讨论](output/tool-schema-compatibility-20261026/COMPRESSION_DISCUSSION.zh.md) 和已实施的工具清晰化规格：
+依据 [190 次 Responses 实验报告](../output/tool-schema-compatibility-20261026/REPORT.zh.md)、[压缩讨论](../output/tool-schema-compatibility-20261026/COMPRESSION_DISCUSSION.zh.md) 和已实施的工具清晰化规格：
 
 1. 两个真实目标是 DashScope qwen3.8-flash、DeepSeek deepseek-flash，均为 Responses、strict:false。不能用 OpenAI 文档替代第三方接口的实际表现。
 2. 原始生产根 union 在 Qwen 失败；展平可用，但观察到跨 action 字段混用。继续使用现有 lowerer，不把精确根 union 直接发送给 provider。
@@ -41,12 +41,12 @@ MCP 的 META 工具调用、资源读取（含模板）和 prompt 获取也采�
 
 冻结附件：
 
-- [精确 canonical schema](output/capability-target-unification-20261028/root/after.canonical.json)
-- [通过当前生产 lowerer 的 wire schema](output/capability-target-unification-20261028/root/after.wire.json)
-- [全部 20 分支的最小调用示例](output/capability-target-unification-20261028/root/examples.json)
-- [可复算生成脚本](output/capability-target-unification-20261028/root/design_schema.py)
+- [精确 canonical schema](../output/capability-target-unification-20261028/root/after.canonical.json)
+- [通过当前生产 lowerer 的 wire schema](../output/capability-target-unification-20261028/root/after.wire.json)
+- [全部 20 分支的最小调用示例](../output/capability-target-unification-20261028/root/examples.json)
+- [可复算生成脚本](../output/capability-target-unification-20261028/root/design_schema.py)
 
-查询 target/parent 的六个正例及旧安装名称拒绝检查见 [查询示例](output/capability-target-unification-20261028/root/query.examples.json)。
+查询 target/parent 的六个正例及旧安装名称拒绝检查见 [查询示例](../output/capability-target-unification-20261028/root/query.examples.json)。
 
 这些是本次设计交付物，不是生产导入依赖或冻结文本断言测试。实施后由生产定义生成 schema；若实施中需要改变合同，应先同步规格。
 
@@ -229,7 +229,7 @@ inspect 仍只读 metadata；Skill 正文、MCP resource/prompt、DIRECT/META �
 
 统一 target 在此候选中增加常驻输入，不能宣传成节省 token。减少的是调用时从查询结果拆字段、补作用域、区分同名身份的工作；target 自身仍必须表达不同对象的必要身份，因此其嵌套结构有成本。canonical 较小也不代表 wire 较小。
 
-本方案选择保留这笔 +302 的明确成本，以换取跨查询/管理可复制的目标。它没有以缩写、模糊 union 或删掉条件换取表面压缩。list 正文约 98→108（+10）；list/inspect/manage 三工具合计 Responses tools 数组 **2809→3125（+316）**。这仍不是整个 builtin 目录。完整数字见[测量结果](output/capability-target-unification-20261028/root/measurements.json)。
+本方案选择保留这笔 +302 的明确成本，以换取跨查询/管理可复制的目标。它没有以缩写、模糊 union 或删掉条件换取表面压缩。list 正文约 98→108（+10）；list/inspect/manage 三工具合计 Responses tools 数组 **2809→3125（+316）**。这仍不是整个 builtin 目录。完整数字见[测量结果](../output/capability-target-unification-20261028/root/measurements.json)。
 
 ## 9. 验证与完成标准
 
@@ -422,12 +422,12 @@ inspect 正文的调用路径调整另约 +2。六工具整体（list/inspect/ma
 
 冻结附件：
 
-- [MCP 精确 canonical schema](output/capability-target-unification-20261028/root/mcp.canonical.json)
-- [三个 MCP 工具最终 wire 定义](output/capability-target-unification-20261028/root/mcp.after.responses.json)
-- [六工具完整候选](output/capability-target-unification-20261028/root/six.after.responses.json)
-- [MCP 调用示例](output/capability-target-unification-20261028/root/mcp.examples.json)
-- [测量与离线检查结果](output/capability-target-unification-20261028/root/mcp.measurements.json)
-- [复算脚本](output/capability-target-unification-20261028/root/design_mcp_extension.py)
+- [MCP 精确 canonical schema](../output/capability-target-unification-20261028/root/mcp.canonical.json)
+- [三个 MCP 工具最终 wire 定义](../output/capability-target-unification-20261028/root/mcp.after.responses.json)
+- [六工具完整候选](../output/capability-target-unification-20261028/root/six.after.responses.json)
+- [MCP 调用示例](../output/capability-target-unification-20261028/root/mcp.examples.json)
+- [测量与离线检查结果](../output/capability-target-unification-20261028/root/mcp.measurements.json)
+- [复算脚本](../output/capability-target-unification-20261028/root/design_mcp_extension.py)
 
 本次离线检查 6 个正例同时通过 canonical 和当前 lowerer 的 wire；17 个旧格式、错目标、漏字段、冲突 URI 和错误 arguments 类型反例被 canonical 拒绝。没有新增 provider 请求或生产执行测试。模板匹配、ref 可调用性等属于实现时的行为验证，不以形状检查代替。
 
@@ -444,7 +444,7 @@ inspect 正文的调用路径调整另约 +2。六工具整体（list/inspect/ma
 
 下列报告记录分组审阅依据；当前目标命名、候选定义及计量以本规格和重新生成的附件为准。
 
-- [Astra 逐动作与消费者审阅](output/capability-target-unification-20261028/astra/REVIEW.zh.md)
-- [Astra 最终 critic：可冻结](output/capability-target-unification-20261028/astra/FINAL_CRITIC.zh.md)
-- [Astra MCP 执行链路审阅](output/capability-target-unification-20261028/astra/MCP_EXTENSION_REVIEW.zh.md)
-- [Astra MCP 扩展最终 critic：可冻结](output/capability-target-unification-20261028/astra/MCP_EXTENSION_FINAL_CRITIC.zh.md)
+- [Astra 逐动作与消费者审阅](../output/capability-target-unification-20261028/astra/REVIEW.zh.md)
+- [Astra 最终 critic：可冻结](../output/capability-target-unification-20261028/astra/FINAL_CRITIC.zh.md)
+- [Astra MCP 执行链路审阅](../output/capability-target-unification-20261028/astra/MCP_EXTENSION_REVIEW.zh.md)
+- [Astra MCP 扩展最终 critic：可冻结](../output/capability-target-unification-20261028/astra/MCP_EXTENSION_FINAL_CRITIC.zh.md)

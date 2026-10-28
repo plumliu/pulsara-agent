@@ -308,7 +308,7 @@ profile 先沿用现有五种工作方法，具体文本另行审阅。每份 Wo
 | `completed` | 对应 turn 正常完成，final 从其 entry 读取 |
 | `stopped` | 请求启动前被取消／拒绝，或对应 turn 中断；保留真实 `terminal_reason` |
 
-`completed` 和 `stopped` 为终态。只有 stopped 带终态原因，其他状态的 `terminal_reason` 为 null。继续工作接纳新请求，不改变旧请求终态。共同读取合同见[统一请求执行四态规格](PULSARA_REQUEST_EXECUTION_STATUS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。队列交付和内部 turn 状态继续各自承担权威事实；公开四态不单独存储。
+`completed` 和 `stopped` 为终态。只有 stopped 带终态原因，其他状态的 `terminal_reason` 为 null。继续工作接纳新请求，不改变旧请求终态。共同读取合同见[统一请求执行四态规格](archived_docs/PULSARA_REQUEST_EXECUTION_STATUS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。队列交付和内部 turn 状态继续各自承担权威事实；公开四态不单独存储。
 
 派活成功是接纳成功，不是工作成功。查询和等待正常返回失败 Work 的状态，不因 Work 失败而把这次查询变成工具异常；工具参数、调用权限或执行失败则走共同 ToolError 合同。ROOT 可以继续独立工作，也可以等待。
 
@@ -858,7 +858,6 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 
 | 来源 | 本文负责的新语义 |
 |---|---|
-| `PULSARA_TASK_HISTORY_APPEND_IMPLEMENTATION_SPEC.zh.md` | 执行者可持续复用，多份 Work 追加到其有效历史；身份不再由一次旧 task 的 ID 同时承担。保留历史不改写、profile 消息化方向；内置记忆仅 ROOT，monitor 注册者为 AGENT、投递与生命周期绑定当前 WORK，完成统一使用普通 final。 |
 | `archived_docs/ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md` 及现有 bundled subagent skill | 本文的六个共享操作、AGENT／WORK 身份、普通 final 完成、原生消息和 ROOT 统一协调。 |
 | `experiment/quickjs-code-mode` 分支的 Code Mode 规格 | 本文的原生／JS 暴露矩阵、等待合同及正式模型输出接口；`console.log` 承担不可丢弃的正式输出，不采用原实验的 best-effort 诊断日志语义。 |
 
