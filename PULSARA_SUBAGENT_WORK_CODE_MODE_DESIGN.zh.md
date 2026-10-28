@@ -2,6 +2,8 @@
 
 日期：2026-10-28。状态：冻结候选；产品语义、接口与实施边界已整理，生产尚未实施。
 
+本轮提示词、profile 文案、Skill 与前端暂缓范围，以及 Code Mode 工具 schema 首版要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+
 本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施基线。示例表示目标接口，不表示生产已经支持。
 
 ## 1. 核心语义
@@ -23,7 +25,7 @@ ID 遵循 [统一身份规格](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_I
 
 同 Agent 的后项只要求前项结束；成功要求仅来自显式 depends_on。前项失败或取消后，未显式依赖其成功的下一项仍可启动。
 
-每个 Subagent 是一份 session，归属由其 `root_session_id` 指向 ROOT；该字段为 NULL 的 session 就是 ROOT。ROOT／SUBAGENT 的 kind 由归属派生，不单独存储。Subagent 的 `agent_id` 直接使用其完整 session ID，Work 是其中一次已接纳的请求和执行。复用 Agent 时，直接读取该 session 的有效摘要与尾部，然后追加下一份请求，复用 ROOT 的 reader、compiler、压缩与 UI 历史读取链。不是为每份 Work 建一份历史再把前一份搬过来。
+每个 Subagent 是一份 session，归属由其 `root_session_id` 指向 ROOT；该字段为 NULL 的 session 就是 ROOT。ROOT／SUBAGENT 的 kind 由归属派生，不单独存储。Subagent 的 `agent_id` 直接使用其完整 session ID，Work 是其中一次已接纳的请求和执行。复用 Agent 时，直接读取该 session 的有效摘要与尾部，然后追加下一份请求，复用 ROOT 的 reader、compiler、压缩与 UI 历史读取链。协作接口不提供 Agent／Work 历史的 fork：继续已有上下文就复用原 Agent；新建 Agent 则建立独立 session，不从另一 Agent 或某份 Work 复制对话历史。
 
 已有内容原样保留，包括旧请求、消息、工具结果和已采用的压缩摘要；不根据新 Work 重写旧 snapshot、ROOT 消息或 handling。profile 作为独立 user message 放在本次 instruction 前，不拼入通用 SYSTEM，也不作为开启 entry。ROOT 派活的 instruction 是本次 turn 的开启 entry；各份前置 final 分别作为后续 user entry 追加，明确选择的材料同样由接收方持有，不合并改写 instruction。模型沿 context binding 读取有效摘要与尾部；UI 沿同一 Agent scope 分页展示已接纳的 canonical 历史，可以查看压缩前记录。两者共用事实与既有投影，UI 的历史浏览不把旧全文重新塞回模型输入。
 
@@ -33,7 +35,7 @@ Subagent 仅在 bypass-permissions 下使用，不提供独立的权限模式选
 
 turn 结束只结算本轮执行与资源，Agent 的有效历史和已安装 scope 按 ROOT 的连续对话生命周期保留，不随一份 Work 结束而销毁。
 
-新建 Agent 的 `context:last_n` 取发起调用当时的已接受 ROOT 上下文；JS 使用源 exec 的固定截止位置，不读取随后到来的用户消息冒充原始背景。选定内容进入接收方自己的输入，不依赖源 session 持续存在，也不长期借用旧 provider view。
+新建 Agent 的 `context:last_n` 取发起调用当时的已接受 ROOT 上下文作为初始背景；JS 使用源 exec 的固定截止位置，不读取随后到来的用户消息冒充原始背景。它与 `materials` 都是内容传递，不建立历史分支或继承关系。选定内容进入接收方自己的输入，不依赖源 session 持续存在，也不长期借用旧 provider view。
 
 Subagent 的普通 final 经共同完成链路接纳后，本次 turn 完成；WORK 沿请求关联读取这份 final。完成不是对结论正确性的认证。执行失败、取消、中断读取实际终态与原因。无需结果提交工具。
 
@@ -216,7 +218,7 @@ Code mode 仅供 ROOT 的 bypass-permissions 调用使用，Subagent 没有 JS �
 |---|---|---|
 | `exec` | `code`／`path` 恰一；可选 `yield_time_ms` | 启动一次 JS 执行 |
 | `wait_exec` | `cell_id`；可选 `yield_time_ms` | 继续等待原脚本并取得新输出 |
-| `terminate_exec` | `cell_id` | 停止脚本后续执行 |
+| `stop_exec` | `cell_id` | 停止脚本后续执行 |
 
 这三个工具不通过 `tools.*` 嵌套调用。终止脚本不等于取消已接纳的 Work；需要取消工作时调用 `stop_agent`。
 
@@ -258,7 +260,7 @@ monitor 记录注册者 AGENT，投递目标与订阅生命周期绑定注册时
 - 通知在注册 Work 的正常输入准备点追加；模型调用和已冻结输入不被临时改写。压缩交接保留当前 Work 的监控状态。
 - 注册 monitor 不阻止 final。Work 真正完成、失败、取消或中断后关闭订阅；既有完成 Hook 要求继续时，仍按活动 Work 处理。
 - 关闭订阅不停止被监控进程。未接纳通知不再投递，已接纳通知保留在历史；已在确认中的投递沿原有结算处理，不转投下一份 Work。
-- 同一 Agent 开始下一份 Work，只继承有效历史，不接管上一份 Work 的活跃订阅；需要时重新注册。
+- 同一 Agent 开始下一份 Work，继续使用本 session 的有效历史，不接管上一份 Work 的活跃订阅；需要时重新注册。
 - Subagent 的 monitor 不自动创建新 Work。ROOT 原有活动轮投递与空闲时开启新轮的行为保持。
 
 例子：同一 Agent 在第一份 Work 注册进程监控并接收进展；本轮 final 后订阅结束，进程可以继续运行。它在下一份 Work 中能看到已经进入历史的进展，但需要新的订阅才能接收后续通知。
@@ -824,7 +826,7 @@ ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `i
 | 后续工作尚未接纳 | 只补派缺少的工作 |
 | Agent 已卸载、session 仍存在 | 派活时沿 §1.4 按需加载；旧 Work 不复活 |
 
-若旧 cell 仍存活，ROOT 先通过既有 cell 索引与 `wait_exec` 核实其状态和输出。保留原安排就继续观察；要替换安排时先 `terminate_exec` 停止后续派发，再查询已接纳的 Work。脚本终止不取消这些 Work，所需停止仍由 `stop_agent` 完成。宿主崩溃后旧 VM 不恢复，执行与排队事实由共同 Host 接管链路结算。
+若旧 cell 仍存活，ROOT 先通过既有 cell 索引与 `wait_exec` 核实其状态和输出。保留原安排就继续观察；要替换安排时先 `stop_exec` 停止后续派发，再查询已接纳的 Work。脚本终止不取消这些 Work，所需停止仍由 `stop_agent` 完成。宿主崩溃后旧 VM 不恢复，执行与排队事实由共同 Host 接管链路结算。
 
 复杂 workflow 的继续方式如下：
 
@@ -842,7 +844,7 @@ ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `i
 | 位置 | 内容 |
 |---|---|
 | 原生工具定义 | 本工具参数、target、结果、派活／消息／等待／停止的必要语义 |
-| code mode 环境说明 | exec／wait_exec／terminate_exec、工具代理、输出、持续等待与脚本生命周期 |
+| code mode 环境说明 | exec／wait_exec／stop_exec、工具代理、输出、持续等待与脚本生命周期 |
 | 通用 SYSTEM | 简短指出：简单委派使用原生工具；多人协作或多阶段编排按需读取 bundled subagent skill |
 | `pulsara-subagent` bundled skill | 连续复用、结果材料、`tools.run_agent.batch` 的延迟参数与局部引用、`tools.wait_agent.works` 的工作集合等待、多人协作、JS workflow、ROOT 判断节点与完整示例 |
 

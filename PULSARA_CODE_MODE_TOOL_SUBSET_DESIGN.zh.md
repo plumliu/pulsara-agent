@@ -2,6 +2,8 @@
 
 日期：2026-10-28。状态：冻结候选；生产尚未实施。
 
+本轮提示词、profile 文案、Skill 与前端暂缓范围，以及 Code Mode 工具 schema 首版要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+
 本文负责 JS 接入、工具范围、结果、资源与生命周期。协作对象、工具业务语义、Subagent 能力范围与恢复方式以 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 为准；本文定义它们的 JS 接入，不另设业务合同。两篇共同构成实施基线，工具业务实现只有一套。
 
 ## 1. 产品范围与所有权
@@ -63,7 +65,7 @@ console.log({ agent: a.agent, work: a.work });
 | 工具 | 定位 |
 |---|---|
 | `enter_plan`、`ask_plan_question`、`exit_plan` | runner 接管对话阶段与用户交互 |
-| `exec`、`wait_exec`、`terminate_exec` | 从脚本外控制 cell，仅 ROOT＋bypass |
+| `exec`、`wait_exec`、`stop_exec` | 从脚本外控制 cell，仅 ROOT＋bypass |
 | `view_image` | 通过后续 user message 给模型看图 |
 | `open_in_pulsara` | 为用户打开文件、网页或面板 |
 | `todo` | 模型直接维护当前进度 |
@@ -90,7 +92,7 @@ console.log({ agent: a.agent, work: a.work });
 |---|---|---|
 | `exec` | `code`／`path` 恰一；可选 `yield_time_ms` | 接纳 cell，观察新输出与状态 |
 | `wait_exec` | `cell_id`；可选 `yield_time_ms` | 读尚未交付的输出，等待变化 |
-| `terminate_exec` | `cell_id` | 停止后续 JS／工具提交，返回实际状态 |
+| `stop_exec` | `cell_id` | 停止后续 JS／工具提交，返回实际状态 |
 
 `yield_time_ms` 默认 1,000，范围 0–30,000，单位毫秒；0 立即查询。这是一次观察的调度粒度，不是脚本、工具、Work 或会话寿命。接纳结果等宿主开销不承诺精确截止；重复 wait 没有总次数限制。
 
@@ -112,7 +114,7 @@ Promise 拒绝使用 SDK onUnhandledRejection 追踪，在完整微任务排空�
 
 state 为 `queued`、`running`、`completed`、`failed`、`terminated`。queued 表示等待 VM 容量、源码尚未执行。has_more 只表示已有输出待读；pending_calls 表示尚待结算的内部调用。terminated 证明脚本停止，不证明已派发作用撤销。接纳前失败没有 live cell，按普通工具错误返回。
 
-VM 不再执行后即可释放；待读输出与在途结算由 Host 接管。终态、结算完成且输出消费完毕后释放进程内记录；旧 Host／已释放句柄返回明确 unavailable，不恢复执行。同 cell 只有一个输出消费 owner，同时读取返回 busy，但不妨碍 terminate。外层结果 canonical 接纳确认后才推进读取位置；不确定接纳沿现有精确确认，不重跑脚本或提前丢页。
+VM 不再执行后即可释放；待读输出与在途结算由 Host 接管。终态、结算完成且输出消费完毕后释放进程内记录；旧 Host／已释放句柄返回明确 unavailable，不恢复执行。同 cell 只有一个输出消费 owner，同时读取返回 busy，但不妨碍 stop_exec。外层结果 canonical 接纳确认后才推进读取位置；不确定接纳沿现有精确确认，不重跑脚本或提前丢页。
 
 ## 4. 计算、等待与资源
 
@@ -124,7 +126,7 @@ SDK 提供 interruptHandler，没有自动扣除异步等待的 CPU 预算。Pul
 
 计量是 VM 同步占用的单调时间，含桥接／同步宿主回调，不是精确 CPU 计费。已测 while、无限微任务与重入可中断；编译、JSON.parse 或同步宿主阻塞未必及时调用 interrupt。因此 VM 位于独立 Worker，sidecar 对同一活动段设置更宽的外部 watchdog，能终止卡住的 Worker；异步等待期间不运行这个 timer。
 
-Worker 进入段前公布活动序号与开始状态，离开后清除；过时 timer 不能杀下一段。只需进程内共享状态槽，不需要持久心跳／租约。段返回时也检查经过时间，避免未触发 callback 的长内建操作被误报成功。terminate 从外部控制，不排队到死循环之后。
+Worker 进入段前公布活动序号与开始状态，离开后清除；过时 timer 不能杀下一段。只需进程内共享状态槽，不需要持久心跳／租约。段返回时也检查经过时间，避免未触发 callback 的长内建操作被误报成功。stop_exec 从外部控制，不排队到死循环之后。
 
 ### 4.2 初始物理配置
 
@@ -265,7 +267,7 @@ cell 已 failed／terminated，而在途结果尚未成功 resolve/reject 给 JS
 | 压缩、普通新消息／steer、ROOT final | 持续运行，新消息由 ROOT 处理 | 保留原执行 |
 | 新 turn、权限变化、进入 Plan | 旧 cell 仍沿源 exec 快照 | 后台工作不被改成新 turn 权限 |
 | 用户 Stop 当前 ROOT turn | 终止该 turn 创建的 cell；仅被该轮 wait 的旧 cell 不受影响 | 在途作用按 owner 取消／结算，已派 Work 不自动取消 |
-| terminate_exec／用户精确停止 cell | 停后续 JS，取消观察与未派发提交 | 不等于 stop_agent 或杀已转交终端 owner 的进程 |
+| stop_exec／用户精确停止 cell | 停后续 JS，取消观察与未派发提交 | 不等于 stop_agent 或杀已转交终端 owner 的进程 |
 | JS 异常、OOM、计算超界、Worker 故障 | failed，不自动重新求值 | 已接纳作用真实结算 |
 | HostSession／工作区关闭 | 停接纳、终止全部所属 cell，再释放资源 | 在途调用按共同 owner 取消／结算；活动 turn 中断，未启动请求沿共同队列保留 |
 | 宿主崩溃 | VM 丢失，旧句柄不可继续 | 共同 Host 接管如实结算中断；不重放已运行 turn／工具，未启动请求按队列语义处理 |
@@ -298,7 +300,7 @@ console.log({ research, review });
 console.log(await tools.wait_agent.works({ targets: [research.work, review.work] }));
 ```
 
-exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按依赖执行；Promise 满足后第二条日志自然产生。ROOT 后来 wait_exec 取回它，不会再派活。若先 terminate，已经接纳的 Work 仍独立运行，可用原生 inspect／wait／stop 管理。
+exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按依赖执行；Promise 满足后第二条日志自然产生。ROOT 后来 wait_exec 取回它，不会再派活。若先 stop_exec，已经接纳的 Work 仍独立运行，可用原生 inspect／wait／stop 管理。
 
 单 Agent、初始队友引用以及调查→审查→修订→实现→原 critic 代码审查的完整例子见配套文档。
 
@@ -338,7 +340,7 @@ exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按�
 4. JS inspect→META 不经模型可调用；纯压缩不坏 ref，真实 server／schema 变化仍约束调用。
 5. 循环、微任务、编译卡住、OOM、输出满能结束；长外部等待和多段短计算不被总寿命限制杀掉。
 6. 多页／大单条输出、terminal gap、artifact 不可用、unsafe 数字与失败不静默丢失或假成功。
-7. Stop、steer、Plan、terminate、Host close、进程死亡按表工作；未 await 的已提交操作正确结算。
+7. Stop、steer、Plan、stop_exec、Host close、进程死亡按表工作；未 await 的已提交操作正确结算。
 8. 配套 Agent 的 batch／history／message／wait／monitor 验收；WORK ID 从队列到 turn 保持不变，启动／取消只结算一个实际阶段，final 读原 entry；已接纳请求不依赖 cell 存活。
 
 只测可观察行为，不冻结自然语言或整份 schema。实现后才用已保存 provider 配置验收两种 API 的 prefix、调用与结果，不把文档例子当已通过证据。
