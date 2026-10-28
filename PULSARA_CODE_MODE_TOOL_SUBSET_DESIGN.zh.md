@@ -2,7 +2,7 @@
 
 日期：2026-10-28。状态：冻结候选；生产尚未实施。
 
-本文负责 JS 接入、工具范围、结果、资源与生命周期。[Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 负责协作对象、六个操作、batch、等待与 workflow 示例。两篇共同构成实施基线，工具业务实现只有一套。
+本文负责 JS 接入、工具范围、结果、资源与生命周期。协作对象、工具业务语义、Subagent 能力范围与恢复方式以 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 为准；本文定义它们的 JS 接入，不另设业务合同。两篇共同构成实施基线，工具业务实现只有一套。
 
 ## 1. 产品范围与所有权
 
@@ -29,7 +29,7 @@ Code mode 让 ROOT 用 JavaScript 组合已有工具、处理结果和编排工�
 
 固定使用 `quickjs-wasi@3.6.2`。Node 是宿主实现，不向 guest 开放 Node 模块、文件系统、网络、进程、任意 npm/import 或定时器。guest 有标准 ECMAScript、Promise、`tools` 和 `console.log`。源码是普通 JavaScript，不引入 TypeScript 编译链或独立 workflow DSL。
 
-JS 只增加程序执行和结果桥接。派活仍进入 ROOT 推广的共同请求队列；`work_id` 就是该请求 ID，状态与 final 从请求关联的 turn 读取。cell 不另存工作状态、结果或调度队列；脚本结束不改变已接纳请求的生命周期。
+JS 只增加程序执行和结果桥接。派活进入接收 session 的共同请求队列；`work_id` 就是该请求 ID，状态从请求队列及其关联 turn 读取，final 从 turn 对应的 entry 读取。未启动请求没有 turn。cell 不另存工作状态、结果或调度队列；脚本结束不改变已接纳请求的生命周期。
 
 ## 2. 工具范围与一致性
 
@@ -179,7 +179,7 @@ cell 仍进程内；不新增持久 cell 调度或重启队列。现有 event／
 
 ### 5.2 共同执行与并发
 
-每次调用：最终参数校验→PreTool→共同权限／可用性→attempt 接纳→物理执行→真实结果与必要副作用结算→PostTool→交付 JS。外层 exec 与内层业务各有真实 Hook 身份；内层自身 Hook 不重复跑。Hook 上下文走正常 ROOT 输入点，不扩大权限。
+每次调用：最终参数校验→PreTool→共同权限／可用性→attempt 接纳→物理执行→真实结果与必要副作用结算→PostTool→交付 JS。外层 exec 与内层业务各有真实 Hook 身份；内层自身 Hook 不重复跑。ROOT cell 的 Hook 上下文走正常 ROOT 输入点，不扩大权限；用户配置的 ROOT／Subagent 适用范围与真实输入来源遵循配套设计 §1.5。
 
 bypass 不吞掉 Hook 拒绝、策略故障或真实不可用。当前策略异常可能退为 REQUIRE_CONFIRMATION；CODE 来源遇到这种无法获得授权的情况，返回明确的未派发 ToolError，ROOT 可通过原生入口处理，不把后台 cell 接到新的用户确认窗口。原生既有确认行为保持；远端 MCP 自身的 input-required／失败按实际业务结果交付。
 
@@ -241,7 +241,7 @@ terminal／terminal_process 已有有限 tail 和独立完整范围 artifact，�
 
 只有实际可读归档才给 target；retention gap、不可用 disposition／reason 保留。COMPLETE 指所选范围完整，不表示命令启动以来全部输出。
 
-工具失败 reject ToolError，含 code、message、可用公共失败 result 与 artifact 入口；Promise.all／allSettled 遵循标准语义。查询 failed Work 是查询成功。业务已执行后才发生传输资源错误，要保留真实效果与结果入口，不误报未执行。
+工具失败 reject ToolError，含 code、message、可用公共失败 result 与 artifact 入口；Promise.all／allSettled 遵循标准语义。查询 `stopped` Work 本身是成功的查询，不因目标工作停止而 reject。业务已执行后才发生传输资源错误，要保留真实效果与结果入口，不误报未执行。
 
 参数跨 bridge 是严格 JSON：拒绝 undefined、非有限数、BigInt、函数、Symbol、循环或非 JSON 对象，不借 stringify 静默丢字段。JSON 整数超 JS 安全整数范围明确报错，结果侧提供原始文本／已有 artifact，不暗中舍入或改字符串。文本中的数字仍原样。
 
@@ -310,7 +310,7 @@ exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按�
 |---|---|
 | catalogue／surface | ROOT＋bypass 子集、原生保留、同源 SDK 代理 |
 | tool_contracts／execution／repository／clean-v0 | 最小调用来源；共用 decision／attempt／TOOL_RESULT entry 与逐调用结算，不另建 JS 结果或执行状态 |
-| 共同请求／turn／协作入口 | WORK 直接引用 request；原生与 JS 派活共用 ROOT 队列、turn 与 final；按 Agent 分流、补依赖与 batch 原子接纳 |
+| 共同请求／turn／协作入口 | WORK 直接引用已接纳请求；原生与 JS 派活共用请求队列、turn 与 final 链路，按目标 session 调度；依赖与 batch 原子接纳遵循配套设计 |
 | ToolOutput／artifact／projection | typed 值、终端 artifact 入口、完整输出页，不以 preview 冒充实际值 |
 | MCP ref／runtime | 双消费者、当前真实 binding、完整 inspect 激活 |
 | runner／compaction／Host／Hook | 持续 cell、实际 Hook 来源、状态索引、准确 stop／close／reopen |

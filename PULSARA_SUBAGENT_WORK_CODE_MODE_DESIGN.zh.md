@@ -60,6 +60,8 @@ ROOT 与 Subagent 使用同一套 session 请求接纳、排队、turn 执行及
 
 查询、等待、依赖推进、完成通知和 UI 都读取这组事实；运行中的观察使用进程内通知，通知本身不成为第二份工作状态。ROOT 原有即时请求与 steer 使用共同引擎，steer 仍追加到已有 turn，不因此变成新的 Work。
 
+停止 ROOT 当前 turn 不取消独立排队的 NEW_TURN，后者按共同调度继续；Subagent 的单份 WORK 停止与整个 AGENT 停止范围见 §4.5。
+
 ROOT 输入队列既有的待输入限制保持其原适用范围，不把所有 Agent 的请求计入 ROOT 的待输入配额。委派使用本规格的单次接纳边界、分页读取和物理执行容量，容量不足排队。
 
 Host 关闭或接管沿共同队列／turn 语义：已运行 turn 如实中断，未启动的新轮请求保留；重新打开后按依赖和实际可用性判断首次启动。已中断 turn 不自动重跑，失去 VM 的脚本也不恢复。这是既有请求队列的持久性，不增加执行恢复机制。
@@ -91,6 +93,12 @@ session 表增加可空的 `root_session_id`，作为指向 session 主键的外
 
 主侧边栏查询 `root_session_id IS NULL`；ROOT 的 `list_agents` 与协作侧栏查询 `root_session_id = 当前 ROOT 的完整 session ID`。Subagent session 存于数据库，通过协作详情查看和管理。该归属用于成员枚举与协作目标范围判断，不限制既定会话检索范围。会话的用户层管理操作不因此成为 Subagent 的工具。
 
+Subagent session 不运行自动标题生成或后续输入建议。显示名称由 ROOT 在新建时通过原生 `run_agent`、`tools.run_agent` 或 `tools.run_agent.batch` 的 `name` 参数填写；复用时沿用已有名称。
+
+不为 Subagent 增设用户侧的工作区选择、手动压缩、上下文用量预览、会话分叉或定时任务入口，也不向其暴露 `scheduled_tasks`。自动压缩和协作详情中的历史、状态展示沿共同引擎处理。用户可以单独停止某份 Work，复用 §4.5 的 WORK 取消与结算链路。
+
+Subagent 不提供 `open_in_pulsara`，其 SYSTEM 不注入面向用户的可视化发布说明。它可以按任务生成图片、HTML 或图表，将文件路径和必要说明交给 ROOT 组织展示。
+
 两种 session 复用现有多会话加载、请求处理、历史读取、压缩及关闭／删除链路。已有 Core 共享服务和每个 HostSession 自己的执行资源保持各自职责，不为 Subagent 另造一套对话引擎或共享服务框架。
 
 ROOT 使用主动会话检索工具和隐式历史召回时，ROOT／SUBAGENT session 的行为一致：采用相同的现有可访问范围、检索、排序和内容读取规则，不因 kind 排除 Subagent，也不把其历史限制为 final。侧边栏过滤不影响检索。当前不为检索工具增加 kind 参数。
@@ -116,6 +124,16 @@ Subagent 不提供 `search_sessions`、`search_session_content`、`read_session_
 
 查看、等待、停止仍按调用目标定位现存的请求／turn；它们不使目标永久保留。来源删除后，旧目标查询可以返回不存在或不可用，已经交付的正文继续保留在接收方历史中。
 
+### 1.3.1 成功依赖与级联停止
+
+`depends_on` 要求所有前置 Work 均为 `completed`。任一必需前置为 `stopped`，尚未启动的后继请求即以“前置工作未成功”为原因结束为 `stopped`，不创建空 turn；该终态继续传给依赖它的后继。接纳时已有前置终态和接纳后前置结束使用同一规则。
+
+例如 `A → B → C`：A 停止后，等待 A 的 B 停止，等待 B 的 C 也停止。其他独立分支继续执行，已经完成的工作、已交付材料和已发生的修改保持原状。一个前置停止不要求取消其他前置。
+
+级联由共同请求／调度 owner 根据已接纳的等待条件和真实终态推进，不依赖 ROOT 在线或 JS cell 存活；Host 重新接管时也沿同一规则处理待处理请求。查询后继时给出依赖未成功的原因及直接导致停止的前置 WORK 引用，不逐层复制错误正文，不另存 workflow 执行状态。
+
+ROOT 后续向原 Agent 派出 A₂，不改变旧 A、B、C 的终态，也不把旧依赖自动改绑到 A₂。需要继续的后继由 ROOT 重新派活并明确依赖；Agent 的身份和有效历史保持连续。
+
 ### 1.4 两段退役与 A／B 的等待、删除
 
 两段退役暂定为：连续闲置满 **1 小时**卸载 Subagent 的常驻运行资源、保留 session 历史；连续闲置满 **3 天**删除该 session，复用现有会话删除及内容回收链路。两个期限都从同一次进入闲置状态起算，不从卸载时重新计算删除期限；它们不是工作执行时长上限。
@@ -137,6 +155,12 @@ A 因失败或停止结束时，沿共同执行链路结算并解除 B 的等待
 
 ROOT 与 Subagent 共用能力发现、`list_capabilities`／`inspect_capability` 查询、刷新、启停、执行检查及 runtime observation 链路。Skill、Hook 与安装来源查询采用共同规则，不另设 Subagent 专用查询禁令。读取目录不授予管理权限，原生工具仍按本文的调用方范围暴露。
 
+文件查找、文本读取与修改、终端执行及进程交互、todo、Skill 发现与使用，以及 `view_image`、`artifact_read`／`artifact_export` 均复用 ROOT 的工具语义和现有执行链路。ROOT 可在 instruction 中提供图片引用或路径，由 Subagent 按需查看。terminal monitor 的投递与生命周期按 §3.4 绑定当前 Work。
+
+扩展、连接和授权配置由用户能力页或 ROOT 的能力管理工具操作。Subagent 不暴露这些管理工具及 `reload_capabilities`；共同刷新、启停链路负责把配置变化反映到各受影响 session，不要求 Subagent 自己修改配置。
+
+Hook 共用 ROOT 的发现、匹配、执行、输出处理与上下文追加链路。用户在配置阶段授权其适用于 ROOT、Subagent 或两者，不逐次询问；Hook 输入如实提供会话身份与输入来源。适用范围由配置决定，不为特定插件增加引擎分支或自动改写插件行为。
+
 MCP 的“为子代理也提供”开关只决定该 MCP 是否进入 Subagent 的能力范围，覆盖其工具、资源、资源模板和 prompt；其余启停、连接、发现及执行规则与 ROOT 一致。目录可展示当前状态，看到条目不等于当前可执行。
 
 手动配置与插件附带的 MCP 使用同一项 `scope_policy` 配置及同一个“为子代理也提供”开关：`ROOT_ONLY` 仅向 ROOT 提供，`ROOT_AND_SUBAGENTS` 同时向两者提供。安装插件时，向用户展示各 MCP 的这项设置并允许审阅、调整；安装后沿共同 MCP 配置入口管理。来源是插件不自动决定向 Subagent 提供，适配器读取用户配置，不硬编码另一套提供范围。
@@ -149,6 +173,8 @@ MCP 的“为子代理也提供”开关只决定该 MCP 是否进入 Subagent �
 | 同一 epoch 已安装过工具 schema | 保持原 schema 字节不变，通过当前路由和观察反映可用性，不改写已安装前缀 |
 
 相关变化由每个受影响 session 的共同通知与输入准备链路处理，在其下一次正常准备输入时追加 runtime observation。一个 session 消费通知不应使其他受影响 session 漏掉变化；通知不单独唤醒闲置 Agent 或创建新 Work，也不引入持久通知、回执或新的 epoch 边界。冷 epoch 与已采用的压缩 successor 继续按共同规则确定工具集合。
+
+初始工具集合内的 MCP 工具使用 native 调用；用户在能力页或 ROOT 通过管理工具带来的同 epoch 新能力，沿 `inspect_capability` 与 META 调用链路渐进披露。两种路径共用当前可用性检查和 append-only runtime observation。即便某 MCP 工具已经作为 native schema 安装，后续禁用或关闭对子代理提供时，也只追加不可用说明并由执行端拒绝新调用，不修改既有 SYSTEM、provider tools 或历史消息。实施范围包含开关变化对 Subagent 的渐进披露，以及插件 MCP 同一提供范围配置的安装审阅与后续管理。
 
 ## 2. 两种入口，共用一套操作
 
@@ -249,7 +275,7 @@ monitor 记录注册者 AGENT，投递目标与订阅生命周期绑定注册时
 |---|---|
 | `instruction` | 必填文本，本次工作请求；需要看图时在文本中提供图片引用或路径 |
 | `target` | 可选 AGENT，指向已有 Subagent；省略时创建新 Subagent，提供时复用；不接受 `agent_id:"ROOT"` |
-| `name` | 仅新建时可选的显示名称 |
+| `name` | 仅新建时可选的显示名称，由 ROOT 填写；不调用自动标题生成 |
 | `profile` | 可选身份／工作方法预设，作为独立 user 消息放在 instruction 前；新建默认通用方法，复用默认沿用原方法 |
 | `context` | 仅新建时可选：`{"mode":"none"}` 或 `{"mode":"last_n","turns":1}`；turns 沿用 1–3，省略为 none |
 | `materials` | 可选 WORK target 数组，接纳时读取已结束工作的 final 或公开失败材料，作为本请求自己的输入保存 |
@@ -367,7 +393,7 @@ batch 成功返回表示整批请求已经接纳，不表示 final 已产生。�
 
 - `list_agents({cursor?, max_items?})`：返回 agent target、显示名称、当前工作与排队概览、`next_cursor`。不默认输出全部历史。
 - `inspect_agent({target: AGENT, cursor?, max_items?})`：查看指定 Subagent，以及分页的工作请求、状态和结果概览；本委派查询入口不接受 `agent_id:"ROOT"`。
-- `inspect_agent({target: WORK})`：查看一次工作及其实际结果。返回所属 agent、instruction、status，以及完成时的 final 或失败时的诊断。
+- `inspect_agent({target: WORK})`：查看一次工作及其实际结果。返回所属 agent、instruction、status、terminal_reason，以及完成时的 final 或停止时的诊断；依赖未成功时说明直接前置 WORK，见 §1.3.1。
 
 排队管理只提供上述查看及 `stop_agent(WORK)` 取消，不提供将已接纳 Work 转为当前 turn 的 steer。新的补充通过 send_agent_message 独立发送，不隐含修改、消费或取消已有排队请求。
 
@@ -415,7 +441,7 @@ queued 表示进入当前 turn 的共同待输入链路；正文在既有输入�
 
 调用者依据 delivery 判断是否发送成功；未接纳时不能假定问题已经送达并等待这条消息的回复。需要接收方开始新工作时，由 ROOT 通过 run_agent 派活。
 
-普通 final 与消息接纳由共同 turn／输入 owner 裁决：消息先进入当前 turn 的待收队列则在原 turn 处理后再判断完成；终态先成立则返回未接纳。已接纳的用户消息留在原历史，尚未接纳的消息不转投下一份请求。完成交付使用真实 final 正文，作为接收方的用户输入；作为后继工作材料时通过其已接纳请求交付，并分别追加在 instruction 后，不借助 send_agent_message 唤醒空闲 Agent。接收方输入是已交付内容，不是另一份 Work 结果状态或报告表。
+普通 final 与消息接纳由共同 turn／输入 owner 裁决：正常完成时，消息先进入当前 turn 的待收队列则在原 turn 处理后再判断完成；终态先成立则返回未接纳。停止 turn 时，尚未消费的 steer 按共同链路拒绝，已经进入历史的内容保留，均不转投下一份请求。完成交付使用真实 final 正文，作为接收方的用户输入；作为后继工作材料时通过其已接纳请求交付，并分别追加在 instruction 后，不借助 send_agent_message 唤醒空闲 Agent。接收方输入是已交付内容，不是另一份 Work 结果状态或报告表。
 
 接纳时确定接收方的当前请求／turn，消息不转投接收者的下一份 Work。发送者标识仅作归因；发送方结束或 session 被删除都不撤销已交付正文，不需要跨 session 外键。重复发送是新的消息，不按正文去重；不新增送达／阅读回执。
 
@@ -783,6 +809,33 @@ console.log(await tools.stop_agent({ target: delivery.implementation.agent }));
 ```
 
 脚本的明确条件也可以触发停止；条件必须表达实际产品判断，不能把“任意一个成员结束”自动等同于“其他成员都不需要”。
+
+### 7.4 中断后继续协作
+
+ROOT 主要围绕 Agent 会话查询与派活，需要精确查看、等待或停止某次工作时使用 WORK。继续协作复用 `list_agents`、`inspect_agent`、`run_agent`／batch 和等待工具，不增加恢复工具或状态。ROOT 与 Subagent 共用模型配置和本机网络，故障可能同时影响多个请求；恢复不以 ROOT 在故障期间持续在线为前提。用户重新向 ROOT 发消息后，通过共同对话链路继续。
+
+ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `inspect_agent(AGENT)` 查看相关工作列表、用 `inspect_agent(WORK)` 读取确切状态、原因与结果。已经接纳但尚未执行，与根本没有接纳是两种情况；提交结果不确定时沿既有确认链路核实，不直接重派。
+
+| 查到的事实 | 下一步 |
+|---|---|
+| queued／running，含现有临时重试 | 保留原请求，按需等待；不因 ROOT 曾中断而重复派活 |
+| completed | 使用已有 final 和成果，不重复执行 |
+| stopped，仍需完成目标 | 向同一 Agent 提交新 Work，结合有效历史和实际工作区继续；已有修改不回滚，旧工具调用不机械重放 |
+| 后续工作尚未接纳 | 只补派缺少的工作 |
+| Agent 已卸载、session 仍存在 | 派活时沿 §1.4 按需加载；旧 Work 不复活 |
+
+若旧 cell 仍存活，ROOT 先通过既有 cell 索引与 `wait_exec` 核实其状态和输出。保留原安排就继续观察；要替换安排时先 `terminate_exec` 停止后续派发，再查询已接纳的 Work。脚本终止不取消这些 Work，所需停止仍由 `stop_agent` 完成。宿主崩溃后旧 VM 不恢复，执行与排队事实由共同 Host 接管链路结算。
+
+复杂 workflow 的继续方式如下：
+
+| 中断位置与查询结果 | ROOT 的后续安排 |
+|---|---|
+| 第一批 schema 调查完成，runtime 调查停止，critic 因依赖未成功停止 | 复用 runtime Agent 派出新调查；复用 critic 派出新审查，依赖新调查，并以 materials 提供已有 schema 结果 |
+| 第二批 revision 完成，implementation 修改了部分文件后停止，review 级联停止 | 向原实现者派新 Work，先核对当前改动和执行结果，再完成剩余方案；向原 critic 派新审查，依赖新实现，并提供已有定稿 |
+| ROOT 中断，但 implementation 仍 running、review 仍 queued | 等待这两份原 Work；若它们已经完成，直接读取结果 |
+| 已完成实现，但后续审查从未接纳 | 只派审查，提供已有方案和实现结果 |
+
+新脚本只表达剩余安排，引用已有 Agent、仍有效的 Work 和已完成成果，不重建已完成阶段，不恢复旧 JS 的变量、Promise 或执行位置。等待条件属于共同待处理请求，脚本丢失不会抹掉已接纳工作；新 Work 也不会自动替代旧依赖目标。
 
 ## 8. 提示词与 bundled skill 分工
 
