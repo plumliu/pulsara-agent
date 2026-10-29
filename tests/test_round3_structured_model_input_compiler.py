@@ -2999,7 +2999,7 @@ class _SensitiveCapability(_Capability):
                 ResolvedSkillCatalogEntry(
                     name="demo",
                     description="Demo capability",
-                    location="private/path/SKILL.md",
+                    skill_path="private/path/SKILL.md",
                     origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
                 ),
             ),
@@ -3069,7 +3069,7 @@ class _LargeCatalogCapability(_Capability):
             ResolvedSkillCatalogEntry(
                 name=f"catalog-{index:02d}",
                 description="descriptive context " * 30,
-                location=f".agents/skills/catalog-{index:02d}/SKILL.md",
+                skill_path=f".agents/skills/catalog-{index:02d}/SKILL.md",
                 origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
             )
             for index in range(40)
@@ -4492,7 +4492,7 @@ def test_round5b_compaction_inherits_exact_installed_active_skill_body(
             "skills": (
                 {
                     "name": "alpha",
-                    "location": ".agents/skills/alpha/SKILL.md",
+                    "skill_path": ".agents/skills/alpha/SKILL.md",
                     "reason": "explicit_user_mention",
                     "body": "old exact body",
                 },

@@ -338,7 +338,6 @@ def test_round9_1_owner_snapshot_freezes_effective_head_until_next_scan(
     try:
         owner_a = composer.freeze_owner_snapshot(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         frozen_a = composer.freeze_projection_input(owner_a)
         skill.write_text(_document("alpha", body="# Version B\n"), encoding="utf-8")
@@ -351,7 +350,6 @@ def test_round9_1_owner_snapshot_freezes_effective_head_until_next_scan(
         assert composer.freeze_projection_input(owner_a) == frozen_a
         owner_b = composer.freeze_owner_snapshot(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         alpha_b = next(
             item for item in owner_b.inspection.winners if item.name == "alpha"
@@ -380,7 +378,6 @@ def test_round9_1_workspace_skill_switch_applies_on_the_next_owner_snapshot(
     try:
         enabled = composer.freeze_owner_snapshot(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         assert isinstance(enabled.inspection, CompleteEffectiveSkillCatalogInspection)
         assert "alpha" in {item.name for item in enabled.inspection.winners}
@@ -392,7 +389,6 @@ def test_round9_1_workspace_skill_switch_applies_on_the_next_owner_snapshot(
         )
         disabled = composer.freeze_owner_snapshot(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         assert isinstance(disabled.inspection, CompleteEffectiveSkillCatalogInspection)
         assert "alpha" not in {item.name for item in disabled.inspection.winners}
@@ -439,13 +435,13 @@ def test_round9_1_pulsara_home_catalog_location_is_ordinary_readable(
     )
     result = producer.observe(_policy(producer, workspace))
     home_skill = next(item for item in result.candidates if item.name == "home-skill")
-    assert home_skill.location == "${PULSARA_HOME}/skills/home-skill/SKILL.md"
+    assert home_skill.skill_path == "${PULSARA_HOME}/skills/home-skill/SKILL.md"
 
     read = ReadFileTool(workspace).execute(
         ToolCall(
             id="read-home-skill",
             name="read_file",
-            arguments={"target": {"kind": "PATH", "path": home_skill.location}},
+            arguments={"target": {"kind": "PATH", "path": home_skill.skill_path}},
         )
     )
     assert read.status is ToolResultState.SUCCESS

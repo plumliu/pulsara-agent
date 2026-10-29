@@ -66,7 +66,7 @@ class PluginSkillDefinitionProducer:
                     enrich_skill_document(
                         candidate.parsed,
                         path=candidate.document_path,
-                        location=str(candidate.document_path.parent),
+                        skill_path=str(candidate.document_path),
                         origin=origin,
                         diagnostic_codes=tuple(
                             item.code for item in candidate.diagnostics

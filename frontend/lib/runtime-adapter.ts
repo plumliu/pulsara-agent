@@ -4154,7 +4154,7 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
         id: String(item.id ?? ''),
         name: String(item.name ?? ''),
         description: String(item.description ?? ''),
-        location: String(item.location ?? ''),
+        skillPath: String(item.skill_path ?? ''),
         path: String(item.path ?? ''),
         source: (
           item.source === 'workspace'
@@ -4290,7 +4290,7 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
         name: String(item.name ?? ''),
         removalIdentity: projectSkillRemovalIdentity(item.removal_identity),
         description: String(item.description ?? ''),
-        location: String(item.location ?? ''),
+        skillPath: String(item.skill_path ?? ''),
         path: String(item.path ?? ''),
         enabled: item.enabled !== false,
         root: item.root === 'agents' ? 'agents' : 'pulsara',

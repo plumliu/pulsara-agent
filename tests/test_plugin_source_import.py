@@ -293,20 +293,62 @@ def test_public_input_and_classification_required_before_conversion(tmp_path):
         )
 
 
+def test_external_validation_reports_original_skill_files_after_cleanup(tmp_path):
+    from pulsara_agent.plugins.management import PluginManagementService
+
+    source = fixture(tmp_path, {"skills": ["custom/alpha", "elsewhere/beta"]})
+    for relative, name in (("custom/alpha", "alpha"), ("elsewhere/beta", "beta")):
+        path = source / relative / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\nname: {name}\ndescription: Read {name}\n---\nBody {name}.\n")
+    service = PluginManagementService(credential_boundary=ProcessCredentialBoundary())
+    result = service.validate_local_plugin_source(
+        ValidateLocalPluginSourceRequest(source, monotonic() + 20, source_format="codex")
+    )
+    assert result.disposition.value == "VALID"
+    paths = {item.name: Path(item.skill_path) for item in result.summary.skills.skills}
+    assert paths == {
+        "alpha": source / "custom/alpha/SKILL.md",
+        "beta": source / "elsewhere/beta/SKILL.md",
+    }
+    assert "Body alpha." in paths["alpha"].read_text()
+    assert "Body beta." in paths["beta"].read_text()
+
+
 def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp_path):
     import asyncio
-    from tests.test_capability_management_preparation import preparation
+
+    from pulsara_agent.capability.management_form import AcceptedCapabilityFormSubmission
+    from pulsara_agent.capability.render import render_catalog_prompt
+    from pulsara_agent.capability.resolver import _catalog_entry
+    from pulsara_agent.capability.source_query import parse_query
+    from pulsara_agent.cli import _plugin_summary_payload
+    from pulsara_agent.conversation_kernel.capability_management_execution import (
+        CapabilityManagementCall,
+    )
+    from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
+    from pulsara_agent.model_input.contracts import ModelInputScopeKind
     from pulsara_agent.plugins.contracts import (
         InstallLocalPluginRequest,
         InspectLocalPluginsRequest,
         PluginScopeKind,
     )
+    from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
+    from pulsara_agent.plugins.view import EnabledPluginViewOwner
+    from pulsara_agent.ports.tool_execution import ToolCall, ToolResultState
+    from pulsara_agent.primitives.context import thaw_json
+    from pulsara_agent.tools.builtins.filesystem import ReadFileTool
+    from tests.test_capability_management_preparation import preparation
 
     source = fixture(
         tmp_path,
         {"mcpServers": {"docs": {"type": "http", "url": "https://example.org/mcp"}}},
     )
     original = (source / ".codex-plugin/plugin.json").read_bytes()
+    skill = source / "skills/example/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    document = "---\nname: example\ndescription: Read the fixture\n---\nFixture body.\n"
+    skill.write_text(document)
 
     async def run():
         service = preparation(tmp_path)
@@ -317,11 +359,21 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
             connections=service.mcp,
         )
         assert result.disposition.value == "INSTALLED", result
+        installed_path = result.package_root / "skills/example/SKILL.md"
+        assert result.summary.skills.skills[0].skill_path == str(installed_path)
+        assert installed_path.read_text() == document
+        summary = _plugin_summary_payload(result.summary)["skills"]["definitions"][0]
+        assert summary == {
+            "name": "example",
+            "description": "Read the fixture",
+            "skill_path": str(installed_path),
+        }
         inspection = service.plugins.inspect_local_plugins(
             InspectLocalPluginsRequest(monotonic() + 20)
         )
         assert len(inspection.instances) == 1
         installed = inspection.instances[0]
+        assert installed.summary.skills.skills[0].skill_path == str(installed_path)
         assert not installed.enabled
         assert (
             installed.summary.mcp.mcp_servers[0].endpoint == "https://example.org/mcp"
@@ -331,6 +383,58 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
             == "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
         )
         assert (source / ".codex-plugin/plugin.json").read_bytes() == original
+
+        async def query(arguments, *, inspect=False):
+            return await CapabilitySourceQuery(
+                service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT
+            ).execute(parse_query(arguments, inspect=inspect), inspect=inspect)
+
+        listed = await query({"kind": "SKILL", "source_kind": "PLUGIN"})
+        row = next(item for item in listed["items"] if item["name"] == "example")
+        assert row["target"] == {"kind": "SKILL", "skill_path": str(installed_path)}
+        detail = await query({"target": row["target"]}, inspect=True)
+        assert detail["skill_path"] == str(installed_path)
+        assert detail["skill_root"] == str(installed_path.parent)
+        enable = CapabilityManagementCall(
+            service,
+            await service.prepare({
+                "action": "SET_PLUGIN_ENABLED",
+                "enabled": True,
+                "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"},
+            }),
+        )
+        form = enable.form("review")
+        shown = thaw_json(form.public_projection)["plugin"]["skills"][0]
+        assert shown == summary
+        enable.accept(
+            AcceptedCapabilityFormSubmission(
+                await form.prepare_submission({"enable_review_accepted": True})
+            )
+        )
+        assert (await enable.execute())["status"] == "APPLIED"
+        view = EnabledPluginViewOwner(
+            store=service.plugins._store(),
+            credential_boundary=service.plugins._credential_boundary,
+        ).observe(
+            workspace_root=service.workspace_root,
+            deadline_monotonic=monotonic() + 20,
+            cancellation=NeverCancelPluginOperation(),
+        )
+        try:
+            candidate = PluginSkillDefinitionProducer().observe(view).candidates[0]
+            row = json.loads(render_catalog_prompt((_catalog_entry(candidate),)))["skills"][0]
+            assert row["skill_path"] == str(installed_path)
+            read = ReadFileTool(service.workspace_root).execute(
+                ToolCall(
+                    "read-plugin",
+                    "read_file",
+                    {"target": {"kind": "PATH", "path": row["skill_path"]}},
+                )
+            )
+            assert read.status is ToolResultState.SUCCESS
+            assert "Fixture body." in read.output
+        finally:
+            view.close()
         await service.mcp.aclose()
 
     asyncio.run(run())

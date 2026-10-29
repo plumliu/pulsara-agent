@@ -803,7 +803,6 @@ def _parse_skills(
             invalid.extend(diagnostics)
             continue
         parsed = parsed_result.parsed
-        location = document_relative.parent.as_posix()
         candidates.append(
             ParsedPluginSkillCandidate(
                 document_relative.parent,
@@ -812,7 +811,9 @@ def _parse_skills(
                 diagnostics,
             )
         )
-        summaries.append(PluginSkillSummary(parsed.name, parsed.description, location))
+        summaries.append(
+            PluginSkillSummary(parsed.name, parsed.description, str(document_path))
+        )
     ordered_candidates = tuple(sorted(candidates, key=lambda item: item.parsed.name))
     ordered_invalid = tuple(
         sorted(invalid, key=lambda item: (str(item.path or ""), item.code.value))

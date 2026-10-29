@@ -257,7 +257,7 @@ class SkillManifest:
     metadata: tuple[tuple[str, str], ...]
     path: Path
     base_dir: Path
-    location: str
+    skill_path: str
     body: str
     raw_document_digest: str
     manifest_semantic_fingerprint: str
@@ -277,7 +277,7 @@ class SkillManifest:
             self.origin.skill_name != self.name
         ):
             raise ValueError("bundled Skill origin/name join conflicts")
-        if not self.name or not self.description or not self.location:
+        if not self.name or not self.description or not self.skill_path:
             raise ValueError("Skill manifest identity is incomplete")
         if self.metadata != tuple(sorted(self.metadata)) or len(
             {key for key, _value in self.metadata}
@@ -449,7 +449,7 @@ SkillCatalogUnavailableCause: TypeAlias = (
 class ResolvedSkillCatalogEntry:
     name: str
     description: str
-    location: str
+    skill_path: str
     origin: SkillDefinitionOrigin
 
     def __post_init__(self) -> None:
@@ -457,7 +457,7 @@ class ResolvedSkillCatalogEntry:
             self.origin, (LooseSkillOrigin, PluginSkillOrigin, BundledSkillOrigin)
         ):
             raise TypeError("Skill catalog origin is not closed")
-        if not self.name or not self.description or not self.location:
+        if not self.name or not self.description or not self.skill_path:
             raise ValueError("Skill catalog entry is incomplete")
 
     @property
@@ -474,7 +474,7 @@ class ActiveSkillInjection:
     name: str
     path: Path
     base_dir: Path
-    location: str
+    skill_path: str
     body: str
     reason: ActiveSkillReason
     origin: SkillDefinitionOrigin

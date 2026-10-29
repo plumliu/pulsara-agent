@@ -34,7 +34,7 @@ async def query(
     scope=ModelInputScopeKind.ROOT,
 ):
     values = parse_query(
-        arguments, inspect=inspect, subagent=scope is ModelInputScopeKind.SUBAGENT_TASK
+        arguments, inspect=inspect, subagent=scope is ModelInputScopeKind.SUBAGENT
     )
     return await CapabilitySourceQuery(
         service, runtime=runtime, plan=plan, scope=scope
@@ -115,10 +115,10 @@ def test_query_catalog_hard_cut_and_local_availability():
         ),
     ],
 )
-def test_child_does_not_query_installation_sources(arguments, inspect):
-    with pytest.raises(CapabilityQueryError) as error:
-        parse_query(arguments, inspect=inspect, subagent=True)
-    assert error.value.code == "ROOT_ONLY"
+def test_subagent_query_inputs_follow_root_rules(arguments, inspect):
+    assert parse_query(arguments, inspect=inspect, subagent=True) == parse_query(
+        arguments, inspect=inspect, subagent=False
+    )
 
 
 def test_offset_pages_are_complete_without_cursor_state():
@@ -149,9 +149,8 @@ def test_offset_pages_are_complete_without_cursor_state():
     )
 
 
-def test_no_mcp_port_lists_local_and_bundled_without_full_configuration(
-    tmp_path, monkeypatch
-):
+@pytest.mark.parametrize("scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT])
+def test_no_mcp_port_lists_local_and_bundled_without_full_configuration(tmp_path, scope):
     async def run():
         service = preparation(tmp_path)
         source = skill_source(tmp_path)
@@ -162,7 +161,7 @@ def test_no_mcp_port_lists_local_and_bundled_without_full_configuration(
             source_path=str(source),
         )
         path = installed["target"]["skill_path"]
-        listed = await query(service, {"kind": "SKILL"})
+        listed = await query(service, {"kind": "SKILL"}, scope=scope)
         item = next(
             item for item in listed["items"] if item["target"]["skill_path"] == path
         )
@@ -175,7 +174,7 @@ def test_no_mcp_port_lists_local_and_bundled_without_full_configuration(
             "status",
         }
         assert item["source"] == {"kind": "LOCAL", "scope": "WORKSPACE"}
-        detail = await query(service, {"target": item["target"]}, inspect=True)
+        detail = await query(service, {"target": item["target"]}, inspect=True, scope=scope)
         assert detail["skill_path"] == path and detail["skill_root"] == str(
             Path(path).parent
         )
@@ -407,8 +406,9 @@ def test_exact_corrupt_target_keeps_real_target_diagnostic(tmp_path):
     asyncio.run(run())
 
 
-def test_subagent_runtime_detail_never_reads_host_config_or_source(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT])
+def test_runtime_detail_without_source_service_does_not_read_configuration(
+    monkeypatch, scope
 ):
     import pulsara_agent.conversation_kernel.capability_query as owner
 
@@ -423,7 +423,7 @@ def test_subagent_runtime_detail_never_reads_host_config_or_source(
     monkeypatch.setattr(
         owner,
         "runtime_rows",
-        lambda *args: (
+        lambda *args, **kwargs: (
             [minimal_row("MCP_SERVER", "Docs", target, None, "已连接。")],
             {("MCP_SERVER", "docs"): detail},
             [],
@@ -439,7 +439,7 @@ def test_subagent_runtime_detail_never_reads_host_config_or_source(
             None,
             {"target": target},
             inspect=True,
-            scope=ModelInputScopeKind.SUBAGENT_TASK,
+            scope=scope,
         )
     )
     assert result["source"] is None
@@ -575,7 +575,7 @@ def test_credential_scrub_happens_before_page_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(
         owner,
         "runtime_rows",
-        lambda *args: (
+        lambda *args, **kwargs: (
             rows,
             {
                 ("MCP_SERVER", item["target"]["runtime_server_id"]): {
@@ -606,8 +606,9 @@ def test_credential_scrub_happens_before_page_budget(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("scope", ["USER", "WORKSPACE"])
+@pytest.mark.parametrize("caller_scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT])
 def test_returned_plugin_skill_target_roundtrips_despite_unrelated_broken_package(
-    tmp_path, scope
+    tmp_path, scope, caller_scope
 ):
     async def run():
         from pulsara_agent.plugins.contracts import (
@@ -650,9 +651,12 @@ def test_returned_plugin_skill_target_roundtrips_despite_unrelated_broken_packag
         rows = await query(
             service,
             {"parent": {"kind": "PLUGIN", "scope": scope, "plugin_id": "healthy"}},
+            scope=caller_scope,
         )
         (row,) = rows["items"]
-        detail = await query(service, {"target": row["target"]}, inspect=True)
+        detail = await query(
+            service, {"target": row["target"]}, inspect=True, scope=caller_scope
+        )
         assert detail["name"] == "healthy-note" and detail["source"] == row["source"]
         assert (
             detail["selected"] is False
@@ -886,7 +890,7 @@ def test_large_hook_details_use_existing_output_artifact_owner(tmp_path):
             tool_name="inspect_capability",
             arguments=arguments,
             invocation_context=SimpleNamespace(
-                surface_borrow=SimpleNamespace(prepared=prepared)
+                surface_borrow=SimpleNamespace(prepared=prepared, code_cell_id=None)
             ),
         )
         assert result.state == "SUCCESS" and len(result.content) > 40000
@@ -1115,7 +1119,7 @@ def test_runtime_inspect_without_catalog_retains_unknown_and_diagnostic(target):
                 None,
                 {"target": target},
                 inspect=True,
-                scope=ModelInputScopeKind.SUBAGENT_TASK,
+                scope=ModelInputScopeKind.SUBAGENT,
             )
         )
     assert error.value.code == "SOURCE_OBSERVATION_UNAVAILABLE"
@@ -1139,14 +1143,14 @@ def test_remote_metadata_miss_only_proves_absence_in_complete_visible_catalog(
     details = (
         {("MCP_SERVER", "docs"): {"catalog_discovered": discovered}} if visible else {}
     )
-    monkeypatch.setattr(owner, "runtime_rows", lambda *args: ([], details, []))
+    monkeypatch.setattr(owner, "runtime_rows", lambda *args, **kwargs: ([], details, []))
     with pytest.raises(CapabilityQueryError) as error:
         asyncio.run(
             query(
                 None,
                 {"target": target},
                 inspect=True,
-                scope=ModelInputScopeKind.SUBAGENT_TASK,
+                scope=ModelInputScopeKind.SUBAGENT,
             )
         )
     assert error.value.code == expected

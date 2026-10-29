@@ -1324,8 +1324,8 @@ def _validate_inherited_active_skill_body(body: str) -> None:
     names: list[str] = []
     for row in rows:
         if not isinstance(row, dict) or set(row) not in (
-            {"name", "location", "body"},
-            {"name", "location", "body", "reason"},
+            {"name", "skill_path", "body"},
+            {"name", "skill_path", "body", "reason"},
         ):
             raise ValueError("installed ACTIVE_SKILL item shape is invalid")
         if not all(isinstance(row[key], str) for key in row):

@@ -456,7 +456,7 @@ def _catalog_entry(skill: SkillManifest) -> ResolvedSkillCatalogEntry:
     return ResolvedSkillCatalogEntry(
         name=skill.name,
         description=skill.description,
-        location=skill.location,
+        skill_path=skill.skill_path,
         origin=skill.origin,
     )
 
@@ -493,7 +493,7 @@ def _active_injections(
                 name=skill.name,
                 path=skill.path,
                 base_dir=skill.base_dir,
-                location=skill.location,
+                skill_path=skill.skill_path,
                 body=skill.body,
                 reason=(
                     ActiveSkillReason.HOST_COMMAND

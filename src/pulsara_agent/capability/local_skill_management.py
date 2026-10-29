@@ -486,7 +486,7 @@ class LocalSkillManagementService:
                 {
                     "name": item.name,
                     "description": item.description,
-                    "location": item.location,
+                    "skill_path": item.skill_path,
                     "path": str(item.path),
                     "root": "agents"
                     if item.origin.root_kind

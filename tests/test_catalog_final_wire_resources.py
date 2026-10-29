@@ -56,6 +56,7 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ModelInputCompileFailureKind,
+    ModelInputScopeKind,
     ProviderToolCall,
     StructuredModelInputCompileError,
 )
@@ -102,7 +103,6 @@ def _dispatch_read(request):
         scope=ProviderInputContinuityScope(
             identity.session_id,
             identity.conversation_scope_kind,
-            identity.scope_subagent_task_id,
         ),
         context_binding_revision_id=identity.context_binding_revision_id,
         provider_input_through_sequence=identity.provider_input_through_sequence,
@@ -127,7 +127,7 @@ def _skill_source(count=230):
             ResolvedSkillCatalogEntry(
                 name=f"skill-{index}",
                 description="x" * 1_000,
-                location=f"/test/skills/{index}/SKILL.md",
+                skill_path=f"/test/skills/{index}/SKILL.md",
                 origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
             )
             for index in range(count)
@@ -261,7 +261,7 @@ def _prepare_case(
         sources=_sources(source, *extra_sources),
     )
     scope = ProviderInputContinuityScope(
-        'session:336wrfwkamrr3up6kjtsgvgcte', snapshot.identity.conversation_scope_kind, None
+        'session:336wrfwkamrr3up6kjtsgvgcte', snapshot.identity.conversation_scope_kind
     )
     planning = owner.freeze_planning_input(
         scope=scope,
@@ -536,6 +536,7 @@ def test_pending_root_hook_binds_the_measured_catalog_winner():
         return expected
 
     runner = object.__new__(ConversationKernelRunner)
+    runner._session_scope_kind = ModelInputScopeKind.ROOT
     runner._session_start_boundary = SimpleNamespace(has_pending=False)
     runner._provider_dispatch = SimpleNamespace(
         prepare_hook_context_sibling=prepare_hook,

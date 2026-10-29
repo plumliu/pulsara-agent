@@ -5496,6 +5496,180 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
     )
 
 
+def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
+    stage2_migrated_postgres_database,
+    tmp_path: Path,
+) -> None:
+    from pulsara_agent.conversation_kernel.context_sources import (
+        KernelContextSourceCollector,
+    )
+    from pulsara_agent.model_input.continuity import decode_runtime_observation
+    from tests.test_round3_structured_model_input_compiler import _Capability
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, workspace_id = _name("session"), _name("workspace")
+    lease = _acquire_bound_host_writer(
+        repository,
+        session_id=session_id,
+        workspace_id=workspace_id,
+        writer_owner_id=_name("host"),
+        lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    workflow_id = _name("plan")
+    repository.enter_plan_by_user(
+        lease.guard,
+        command_id=_name("command"),
+        workflow_id=workflow_id,
+        entry_reason="inspect before making changes",
+        resume_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        occurred_at=datetime.now(timezone.utc),
+        actor_id="user:test",
+        deadline_monotonic=monotonic() + 30,
+    )
+    (tmp_path / "input.txt").write_text("read-only input", encoding="utf-8")
+    first_response = _text_stream(
+        "accepted planning context " + "a" * 920_000,
+        block="text:large-before-read",
+    ) + _named_tool_stream(
+        tool_name="read_file",
+        tool_call_id="call:plan-read",
+        arguments={"target": {"kind": "PATH", "path": "input.txt"}},
+    )
+    attempted_write = _named_tool_stream(
+        tool_name="write_file",
+        tool_call_id="call:plan-write",
+        arguments={
+            "target": {"kind": "PATH", "path": "must-not-exist.txt"},
+            "content": "must not be written",
+        },
+    )
+    model = _LimitedCompactionScriptedModel(
+        [first_response, attempted_write, _text_stream("write was denied")],
+        "Earlier planning context; no mode or permission claims.",
+        total_context_tokens=360_000,
+        max_input_tokens=330_000,
+    )
+    owner = HostCompactionRuntimeOwner(
+        policy=ResolvedCompactionPolicy(
+            auto_trigger_ratio=0.75,
+            post_compaction_target_ratio=0.60,
+            minimum_reclaim_tokens=1,
+            maximum_retained_tail_utf8_bytes=1,
+        )
+    )
+    live_bus = LiveAgentEventBus()
+    tools = DirectKernelToolPort(
+        workspace_root=tmp_path,
+        host_owner_id=_name("host"),
+        authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
+        session_id=session_id,
+        live_bus=live_bus,
+    )
+    seal_test_direct_tool_port(tools)
+    collector = KernelContextSourceCollector(
+        workspace_kind="project",
+        workspace_root=tmp_path,
+        capability_composer=_Capability(),
+        base_system_prompt="BASE",
+        display_timezone=timezone.utc,
+    )
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository,
+        writer_lease=lease,
+        model=model,
+        tools=tools,
+        live_bus=live_bus,
+        context_source_collector=collector,
+        compaction_owner=owner,
+        workspace_id=workspace_id,
+    )
+    outcomes = []
+    execute = runner.compaction.execute_active
+
+    async def record_compaction(**kwargs):
+        result = await execute(**kwargs)
+        outcomes.append((kwargs["trigger"], result.outcome))
+        return result
+
+    runner.compaction.execute_active = record_compaction
+
+    async def exercise():
+        try:
+            return await runner.run_turn(
+                frozen_test_prompt("p" * 40_000),
+                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+            )
+        finally:
+            await owner.aclose()
+            await tools.aclose()
+            live_bus.close()
+
+    result = asyncio.run(exercise())
+    assert result.final_text == "write was denied"
+    assert len(outcomes) == 1, outcomes
+    assert outcomes[0][0] is CompactionTrigger.MID_TURN_FOLLOWUP
+    assert outcomes[0][1].disposition is CompactionDisposition.COMPACTED, outcomes
+    assert outcomes[0][1].target_turn_id == result.turn_id
+    assert len(model.summary_transport.contexts) == 1
+    assert len(model.requests) == 3
+    successor = model.requests[1]
+    assert all(request.turn_id == result.turn_id for request in model.requests)
+    assert (
+        _context_snapshot_payload(successor)["continuation"]["mode"]
+        == "RESUME_ACTIVE_TURN"
+    )
+    observations = {}
+    for message in successor.compiled_input.messages:
+        try:
+            observation = decode_runtime_observation(message)
+        except ValueError:
+            continue
+        observations[observation.source_kind.value] = observation
+    workflow = observations["PLAN_WORKFLOW"]
+    assert workflow.presence.value == "VALUE"
+    assert (
+        "Planning is active. Investigate and reason without making changes."
+        in workflow.body
+    )
+    permission = observations["RUN_PERMISSION"]
+    assert permission.presence.value == "VALUE"
+    assert (
+        "Read-only mode: File writes, terminal commands and changes to processes are denied."
+        in permission.body
+    )
+    assert "Planning applies read-only permissions." in permission.body
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 30
+    ) as connection:
+        workflow_row = connection.execute(
+            "SELECT status FROM pulsara_v3.plan_workflows WHERE session_id=%s AND id=%s",
+            (session_id, workflow_id),
+        ).fetchone()
+        write_row = connection.execute(
+            "SELECT result_state, result_origin_kind FROM pulsara_v3.tool_results "
+            "WHERE session_id=%s AND tool_call_id=%s",
+            (session_id, "call:plan-write"),
+        ).fetchone()
+        read_row = connection.execute(
+            "SELECT result_state FROM pulsara_v3.tool_results "
+            "WHERE session_id=%s AND tool_call_id=%s",
+            (session_id, "call:plan-read"),
+        ).fetchone()
+        write_attempts = connection.execute(
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts a "
+            "JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id "
+            "WHERE a.session_id=%s AND i.tool_call_id=%s",
+            (session_id, "call:plan-write"),
+        ).fetchone()
+    assert workflow_row == ("ACTIVE",)
+    assert read_row == ("SUCCESS",)
+    assert write_row == ("PERMISSION_DENIED", "POLICY_NO_ATTEMPT")
+    assert write_attempts == (0,)
+    assert not (tmp_path / "must-not-exist.txt").exists()
+
 def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization(
     stage2_migrated_postgres_database,
 ) -> None:

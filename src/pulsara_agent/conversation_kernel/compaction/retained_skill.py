@@ -56,7 +56,7 @@ MAX_RETAINED_SKILL_CONTEXT_TOKENS = 40_000
 @dataclass(frozen=True, slots=True)
 class FrozenRetainedSkillContextItem:
     name: str
-    catalog_location: str
+    skill_path: str
     body: str = field(repr=False)
     delivery_sequence: int
     evidence_source_entry_fingerprint: str | None = field(default=None, repr=False)
@@ -64,7 +64,7 @@ class FrozenRetainedSkillContextItem:
     def __post_init__(self) -> None:
         if (
             not self.name
-            or not self.catalog_location
+            or not self.skill_path
             or self.delivery_sequence < 0
             or (
                 self.evidence_source_entry_fingerprint is not None
@@ -96,7 +96,7 @@ class FrozenRetainedSkillContextSelection:
                 "items": tuple(
                     (
                         item.name,
-                        item.catalog_location,
+                        item.skill_path,
                         item.body,
                         item.delivery_sequence,
                         item.evidence_source_entry_fingerprint,
@@ -204,7 +204,7 @@ def freeze_retained_skill_context(
         catalog_row = _historical_catalog_row(
             predecessor_epoch,
             before_message_ordinal=request_ordinal,
-            location=path,
+            skill_path=path,
         )
         if catalog_row is None:
             continue
@@ -217,7 +217,7 @@ def freeze_retained_skill_context(
             continue
         retained = FrozenRetainedSkillContextItem(
             name=catalog_row["name"],
-            catalog_location=catalog_row["location"],
+            skill_path=catalog_row["skill_path"],
             body=delivered,
             delivery_sequence=item.source_entry_sequence,
             evidence_source_entry_fingerprint=(
@@ -347,7 +347,7 @@ def _historical_catalog_row(
     predecessor: FrozenProviderInputEpochView,
     *,
     before_message_ordinal: int,
-    location: str,
+    skill_path: str,
 ) -> dict[str, str] | None:
     observations: list[tuple[int, ProviderRuntimeObservation]] = []
     for message, placement in zip(
@@ -370,7 +370,7 @@ def _historical_catalog_row(
     rows = _decode_catalog_rows(latest.body)
     if rows is None:
         return None
-    matches = tuple(item for item in rows if item["location"] == location)
+    matches = tuple(item for item in rows if item["skill_path"] == skill_path)
     return matches[0] if len(matches) == 1 else None
 
 
@@ -389,13 +389,13 @@ def _decode_catalog_rows(body: str) -> tuple[dict[str, str], ...] | None:
         if not isinstance(row, dict) or set(row) != {
             "name",
             "description",
-            "location",
+            "skill_path",
         }:
             return None
         if not all(isinstance(row[key], str) and row[key] for key in row):
             return None
         rows.append(row)
-    keys = tuple((item["name"], item["location"]) for item in rows)
+    keys = tuple((item["name"], item["skill_path"]) for item in rows)
     if len(keys) != len(set(keys)) or len({item[0] for item in keys}) != len(keys):
         return None
     return tuple(rows)
@@ -447,7 +447,7 @@ def _exact_historical_read(
     if not (
         payload.get("status") == "ok"
         and target.get("path")
-        == _project_historical_public_path(catalog_row["location"], root_policy)
+        == _project_historical_public_path(catalog_row["skill_path"], root_policy)
         and payload.get("offset") == 1
         and isinstance(payload.get("limit"), int)
         and isinstance(total_lines, int)
@@ -476,10 +476,10 @@ def _exact_historical_read(
     parsed = parse_skill_document(delivered_document.encode("utf-8"))
     if parsed.parsed is None:
         return None
-    location_parts = catalog_row["location"].replace("\\", "/").split("/")
-    if len(location_parts) < 2 or location_parts[-1] != "SKILL.md":
+    skill_path_parts = catalog_row["skill_path"].replace("\\", "/").split("/")
+    if len(skill_path_parts) < 2 or skill_path_parts[-1] != "SKILL.md":
         return None
-    placement = validate_skill_candidate_placement(parsed.parsed, location_parts[-2])
+    placement = validate_skill_candidate_placement(parsed.parsed, skill_path_parts[-2])
     if not placement.valid or (
         parsed.parsed.name != catalog_row["name"]
         or parsed.parsed.description != catalog_row["description"]
@@ -488,25 +488,25 @@ def _exact_historical_read(
     return parsed.parsed.body
 
 
-def _project_historical_public_path(location: str, root_policy) -> str:
-    if location.startswith(".pulsara/skills/") or location.startswith(
+def _project_historical_public_path(skill_path: str, root_policy) -> str:
+    if skill_path.startswith(".pulsara/skills/") or skill_path.startswith(
         ".agents/skills/"
     ):
-        return location
+        return skill_path
     by_kind = {item.root_kind: item for item in root_policy.roots}
-    if location.startswith("${PULSARA_HOME}/skills/"):
+    if skill_path.startswith("${PULSARA_HOME}/skills/"):
         root = by_kind.get(LocalSkillRootKind.USER_PULSARA)
         if root is None:
             return ""
-        suffix = location.removeprefix("${PULSARA_HOME}/skills/")
+        suffix = skill_path.removeprefix("${PULSARA_HOME}/skills/")
         return str(root.path / suffix)
-    if location.startswith("~/.agents/skills/"):
+    if skill_path.startswith("~/.agents/skills/"):
         root = by_kind.get(LocalSkillRootKind.USER_AGENTS)
         if root is None:
             return ""
-        suffix = location.removeprefix("~/.agents/skills/")
+        suffix = skill_path.removeprefix("~/.agents/skills/")
         return str(root.path / suffix)
-    return location if location.startswith("/") else ""
+    return skill_path if skill_path.startswith("/") else ""
 
 
 def _installed_retained_items(
@@ -552,26 +552,26 @@ def _installed_retained_items(
         for row in rows:
             if not isinstance(row, dict) or set(row) != {
                 "name",
-                "catalog_location",
+                "skill_path",
                 "body",
             }:
                 return ()
             name = row["name"]
-            location = row["catalog_location"]
+            skill_path = row["skill_path"]
             body = row["body"]
-            if not all(isinstance(value, str) and value for value in (name, location)):
+            if not all(isinstance(value, str) and value for value in (name, skill_path)):
                 return ()
             if not isinstance(body, str):
                 return ()
             result.append(
                 FrozenRetainedSkillContextItem(
                     name=name,
-                    catalog_location=location,
+                    skill_path=skill_path,
                     body=body,
                     delivery_sequence=0,
                 )
             )
-        keys = tuple((item.name, item.catalog_location) for item in result)
+        keys = tuple((item.name, item.skill_path) for item in result)
         if len(keys) != len(set(keys)) or len({item[0] for item in keys}) != len(keys):
             return ()
         return tuple(result)
@@ -612,7 +612,7 @@ def _render(items: tuple[FrozenRetainedSkillContextItem, ...]) -> str:
             "skills": tuple(
                 {
                     "name": item.name,
-                    "catalog_location": item.catalog_location,
+                    "skill_path": item.skill_path,
                     "body": item.body,
                 }
                 for item in items
@@ -640,7 +640,7 @@ def _selection(
                 "items": tuple(
                     (
                         item.name,
-                        item.catalog_location,
+                        item.skill_path,
                         item.body,
                         item.delivery_sequence,
                         item.evidence_source_entry_fingerprint,

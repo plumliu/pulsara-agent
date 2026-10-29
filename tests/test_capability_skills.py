@@ -147,7 +147,7 @@ Read the diff before commenting.
     definitions = _discover(_producer(tmp_path / "user"), tmp_path)
     skill = definitions.candidates[0]
     assert skill.path == skill_file
-    assert skill.location == ".agents/skills/review-pr/SKILL.md"
+    assert skill.skill_path == ".agents/skills/review-pr/SKILL.md"
     assert (skill.license, skill.compatibility) == (
         "Apache-2.0",
         "Pulsara-compatible",
@@ -231,7 +231,7 @@ def test_local_skill_provider_discovers_user_skill_root(tmp_path: Path) -> None:
     skill = definitions.candidates[0]
     assert skill.source is SkillSource.USER
     assert skill.path == skill_file
-    assert skill.location == "~/.agents/skills/user-skill/SKILL.md"
+    assert skill.skill_path == "~/.agents/skills/user-skill/SKILL.md"
 
 
 def test_local_skill_provider_discovers_workspace_product_home_skills(
@@ -245,7 +245,7 @@ def test_local_skill_provider_discovers_workspace_product_home_skills(
     skill = _discover(_producer(tmp_path / "user"), tmp_path).candidates[0]
     assert skill.source is SkillSource.WORKSPACE
     assert skill.path == skill_file
-    assert skill.location == ".pulsara/skills/product-skill/SKILL.md"
+    assert skill.skill_path == ".pulsara/skills/product-skill/SKILL.md"
 
 
 def test_local_skill_provider_discovers_user_product_home_skills(
@@ -367,7 +367,7 @@ def test_local_skill_provider_uses_pulsara_home_for_user_product_skills(
         tmp_path / "workspace",
     )
     assert definitions.candidates[0].path == skill_file
-    assert definitions.candidates[0].location == (
+    assert definitions.candidates[0].skill_path == (
         "${PULSARA_HOME}/skills/home-skill/SKILL.md"
     )
 
@@ -507,7 +507,7 @@ def _entry(name: str, description: str | None = None) -> ResolvedSkillCatalogEnt
     return ResolvedSkillCatalogEntry(
         name=name,
         description=description or f"Description for {name}",
-        location=f".agents/skills/{name}/SKILL.md",
+        skill_path=f".agents/skills/{name}/SKILL.md",
         origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),
     )
 
@@ -519,9 +519,31 @@ def test_render_catalog_escapes_metadata_and_uses_relative_location() -> None:
         {
             "name": "review-pr",
             "description": description,
-            "location": ".agents/skills/review-pr/SKILL.md",
+            "skill_path": ".agents/skills/review-pr/SKILL.md",
         }
     ]
+
+
+def test_catalog_paths_read_loose_and_bundled_skill_documents(tmp_path: Path) -> None:
+    from pulsara_agent.ports.tool_execution import ToolCall, ToolResultState
+    from pulsara_agent.tools.builtins.filesystem import ReadFileTool
+
+    _write_skill(tmp_path, "review-pr", _document("review-pr", "Review changes."))
+    output = _resolve_skill_projection(
+        _producer(tmp_path / "user"), tmp_path, user_input=""
+    )
+    rows = {row["name"]: row for row in json.loads(output.catalog_prompt)["skills"]}
+    bundled_name = next(iter(EXPECTED_BUNDLED_SKILL_NAMES))
+    for name in ("review-pr", bundled_name):
+        path = rows[name]["skill_path"]
+        assert path.endswith(f"/{name}/SKILL.md")
+        result = ReadFileTool(tmp_path).execute(
+            ToolCall(
+                f"read-{name}", "read_file", {"target": {"kind": "PATH", "path": path}}
+            )
+        )
+        assert result.status is ToolResultState.SUCCESS
+        assert f"name: {name}" in result.output
 
 
 def test_render_catalog_includes_cli_hints_as_guidance_not_permissions() -> None:
@@ -563,7 +585,7 @@ def _injection(tmp_path: Path, *, body: str = "# Body") -> ActiveSkillInjection:
         name="review-pr",
         path=tmp_path / ".agents/skills/review-pr/SKILL.md",
         base_dir=tmp_path / ".agents/skills/review-pr",
-        location=".agents/skills/review-pr/SKILL.md",
+        skill_path=".agents/skills/review-pr/SKILL.md",
         body=body,
         reason=ActiveSkillReason.EXPLICIT_USER_MENTION,
         origin=LooseSkillOrigin(LocalSkillRootKind.WORKSPACE_AGENTS),

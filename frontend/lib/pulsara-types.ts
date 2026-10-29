@@ -91,7 +91,7 @@ export interface SkillCapability {
   id: string;
   name: string;
   description: string;
-  location: string;
+  skillPath: string;
   path: string;
   source: 'workspace' | 'user' | 'plugin' | 'bundled';
   editable: boolean;
@@ -150,7 +150,7 @@ export interface UserSkillCapability {
   removalIdentity?: Record<'root_device' | 'root_inode' | 'directory_device' | 'directory_inode', string>;
   name: string;
   description: string;
-  location: string;
+  skillPath: string;
   path: string;
   enabled: boolean;
   root: 'agents' | 'pulsara';

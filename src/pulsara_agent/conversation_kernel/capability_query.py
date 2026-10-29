@@ -27,6 +27,7 @@ from pulsara_agent.mcp_config import (
     StdioTransportConfig,
     ExactAbsoluteMcpCwd,
 )
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.plugins.contracts import (
     InspectLocalPluginsRequest,
     PluginInspectionAbort,
@@ -186,7 +187,7 @@ class CapabilitySourceQuery:
         scope, plugin_id = item.identity.scope.value, item.identity.plugin_id
         disabled = "来源已禁用；" if not item.enabled else ""
         for skill in item.summary.skills.skills:
-            path = item.package_root / skill.location / "SKILL.md"
+            path = Path(skill.skill_path)
             target = {"kind": "SKILL", "skill_path": str(path)}
             selected = (
                 (skill.name in item.effective_skill_names) if composition else None
@@ -1035,7 +1036,7 @@ class CapabilitySourceQuery:
                 rows = [item for item in rows if row_scope(item) == arguments["scope"]]
             if (
                 kind in CHILD_KINDS
-                or not root
+                or self.scope is not ModelInputScopeKind.ROOT
                 or (target and "runtime_server_id" in target)
             ):
                 self.diagnostics.extend(runtime_diagnostics)

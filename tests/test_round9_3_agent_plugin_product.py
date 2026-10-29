@@ -21,8 +21,8 @@ from pulsara_agent.hooks.contracts import (
     HookTrustDisposition,
 )
 from pulsara_agent.hooks.source import LocalHookSourceProvider
+from pulsara_agent.mcp_config import McpScopePolicy
 from pulsara_agent.plugins.contracts import (
-    ExternalProcessAcceptance,
     GcLocalPluginPackagesRequest,
     InspectLocalPluginsRequest,
     InstallLocalPluginRequest,
@@ -35,7 +35,6 @@ from pulsara_agent.plugins.contracts import (
     PluginScopeKind,
     PluginValidationDisposition,
     RemoveLocalPluginRequest,
-    SetLocalPluginEnabledRequest,
     ValidateLocalPluginSourceRequest,
 )
 from pulsara_agent.plugins.hook_adapter import compose_hook_definition_view
@@ -48,6 +47,7 @@ from pulsara_agent.plugins.package_store import ManagedPluginStore
 from pulsara_agent.plugins.skill_producer import PluginSkillDefinitionProducer
 from pulsara_agent.plugins.view import EnabledPluginViewOwner
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
+from tests.support.plugin_review import enable_reviewed_plugin
 
 
 def _package(root: Path, *, marker: str = "one") -> Path:
@@ -175,17 +175,7 @@ def test_round9_3_six_operations_close_local_lifecycle(tmp_path: Path) -> None:
     assert inspected.disposition is PluginInspectionDisposition.COMPLETE
     assert inspected.instances[0].enabled is False
     inspected.close()
-    enabled = service.set_local_plugin_enabled(
-        SetLocalPluginEnabledRequest(
-            PluginScopeKind.USER,
-            "fixture-plugin",
-            True,
-            installed.package_install_id,
-            deadline,
-            external_process_acceptance=ExternalProcessAcceptance.ACCEPTED,
-            connection_review=(),
-        )
-    )
+    enabled = enable_reviewed_plugin(service, installed, deadline)
     assert enabled.disposition is PluginEnablementDisposition.ENABLED
     enabled_inspection = service.inspect_local_plugins(
         InspectLocalPluginsRequest(deadline, workspace_root=tmp_path)
@@ -224,19 +214,15 @@ def test_round9_3_one_view_feeds_skill_mcp_and_hook_native_owners(
     boundary, service, store = _owners(tmp_path)
     deadline = monotonic() + 30
     installed = _install(
-        service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline)
-    )
-    enabled = service.set_local_plugin_enabled(
-        SetLocalPluginEnabledRequest(
+        service,
+        InstallLocalPluginRequest(
+            source,
             PluginScopeKind.USER,
-            "fixture-plugin",
-            True,
-            installed.package_install_id,
             deadline,
-            external_process_acceptance=ExternalProcessAcceptance.ACCEPTED,
-            connection_review=(),
-        )
+            mcp_scope_policies=(("local:server", McpScopePolicy.ROOT_AND_SUBAGENTS),),
+        ),
     )
+    enabled = enable_reviewed_plugin(service, installed, deadline)
     assert enabled.disposition is PluginEnablementDisposition.ENABLED
     view = EnabledPluginViewOwner(store=store, credential_boundary=boundary).observe(
         workspace_root=tmp_path,

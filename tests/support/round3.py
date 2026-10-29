@@ -1216,10 +1216,14 @@ def seal_test_direct_tool_port(
 ) -> None:
     """Complete the production composition boundary for a standalone test port."""
 
+    class _EmptySubagentPort:
+        tool_names = ()
+
+        async def freeze_compaction_handoff(self):
+            return ()
+
     port.bind_interaction_port(interaction if interaction is not None else object())  # type: ignore[arg-type]
-    port.bind_subagent_port(  # type: ignore[arg-type]
-        type("_EmptySubagentPort", (), {"tool_names": ()})()
-    )
+    port.bind_subagent_port(_EmptySubagentPort())  # type: ignore[arg-type]
     port.bind_memory_port(  # type: ignore[arg-type]
         type("_EmptyMemoryPort", (), {"tool_names": ()})()
     )

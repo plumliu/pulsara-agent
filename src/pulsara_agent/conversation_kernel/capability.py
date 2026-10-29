@@ -263,14 +263,14 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
         {
             "name": skill.name,
             "description": skill.description,
-            "location": skill.location,
+            "skill_path": skill.skill_path,
         },
     )
     activation = context_fingerprint(
         "local-skill-activation-semantic:v2-agent-skills",
         {
             "name": skill.name,
-            "location": skill.location,
+            "skill_path": skill.skill_path,
             "source": skill.source.value,
             "body_digest": "sha256:" + sha256(skill.body.encode("utf-8")).hexdigest(),
         },
@@ -285,7 +285,7 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
         identity=identity,
         public_name=skill.name,
         description=skill.description,
-        location=skill.location,
+        skill_path=skill.skill_path,
         origin=skill.origin,
         catalog_semantic_fingerprint=catalog,
         activation_semantic_fingerprint=activation,

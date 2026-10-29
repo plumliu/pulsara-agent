@@ -2289,7 +2289,7 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
     evidence = "sha256:" + "a" * 64
     item_values = {
         "name": "inspect",
-        "catalog_location": "/workspace/.agents/skills/inspect/SKILL.md",
+        "skill_path": "/workspace/.agents/skills/inspect/SKILL.md",
         "body": "Use the ordinary read path.",
         "delivery_sequence": 42,
         "evidence_source_entry_fingerprint": evidence,
@@ -2302,7 +2302,7 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
             "skills": (
                 {
                     "name": item.name,
-                    "catalog_location": item.catalog_location,
+                    "skill_path": item.skill_path,
                     "body": item.body,
                 },
             )
@@ -2320,7 +2320,7 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
                 "items": (
                     (
                         item.name,
-                        item.catalog_location,
+                        item.skill_path,
                         item.body,
                         item.delivery_sequence,
                         item.evidence_source_entry_fingerprint,
@@ -2415,7 +2415,7 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
                 {
                     "name": "inspect",
                     "description": "Inspect safely.",
-                    "location": "/package/bundled_skills/inspect/SKILL.md",
+                    "skill_path": "/package/bundled_skills/inspect/SKILL.md",
                 },
             )
         }
@@ -2458,19 +2458,19 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
         _historical_catalog_row(
             predecessor,
             before_message_ordinal=3,
-            location=location,
+            skill_path=location,
         )
         is None
     )
     row = _historical_catalog_row(
         predecessor,
         before_message_ordinal=2,
-        location=location,
+        skill_path=location,
     )
     assert row == {
         "name": "inspect",
         "description": "Inspect safely.",
-        "location": location,
+        "skill_path": location,
     }
 
     document = "---\nname: inspect\ndescription: Inspect safely.\n---\nRetained body"
@@ -2535,7 +2535,7 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
         content=(LLMTextPart(actual.output),),
         tool_result_body_text=actual.output,
     )
-    actual_row = {**row, "location": str(skill_path)}
+    actual_row = {**row, "skill_path": str(skill_path)}
     assert (
         _exact_historical_read(
             actual_item, catalog_row=actual_row, root_policy=SimpleNamespace(roots=())
@@ -2564,7 +2564,7 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
             "skills": (
                 {
                     "name": "inspect",
-                    "catalog_location": ("/package/bundled_skills/inspect/SKILL.md"),
+                    "skill_path": ("/package/bundled_skills/inspect/SKILL.md"),
                     "body": "Retained body",
                 },
             )

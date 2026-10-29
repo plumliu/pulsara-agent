@@ -525,7 +525,7 @@ class FrozenSkillCapabilityFact:
     identity: CapabilityIdentity
     public_name: str
     description: str
-    location: str
+    skill_path: str
     origin: "SkillDefinitionOrigin"
     catalog_semantic_fingerprint: str
     activation_semantic_fingerprint: str

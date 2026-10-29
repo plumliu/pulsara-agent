@@ -639,8 +639,8 @@ class LooseSkillDefinitionProducer:
                             )
                         )
                         continue
-                    location = skill_location(skill_file, root=binding)
-                    if len(location.encode("utf-8")) > MAX_SKILL_LOCATION_BYTES:
+                    skill_path = public_skill_path(skill_file, root=binding)
+                    if len(skill_path.encode("utf-8")) > MAX_SKILL_LOCATION_BYTES:
                         issues.append(
                             InvalidSkillCandidateIssue(
                                 path=skill_file,
@@ -660,7 +660,7 @@ class LooseSkillDefinitionProducer:
                         enrich_skill_document(
                             parsed.parsed,
                             path=skill_file,
-                            location=location,
+                            skill_path=skill_path,
                             origin=LooseSkillOrigin(binding.root_kind),
                             diagnostic_codes=tuple(item.code for item in diagnostics),
                         )
@@ -957,13 +957,13 @@ def enrich_skill_document(
     parsed: ParsedSkillDocument,
     *,
     path: Path,
-    location: str,
+    skill_path: str,
     origin: SkillDefinitionOrigin,
     diagnostic_codes: tuple[SkillDiagnosticCode, ...] = (),
 ) -> SkillManifest:
     if path.name != SKILL_FILE_NAME or path.parent.name != parsed.name:
         raise ValueError("Skill placement conflicts with parsed document")
-    if len(location.encode("utf-8")) > MAX_SKILL_LOCATION_BYTES:
+    if len(skill_path.encode("utf-8")) > MAX_SKILL_LOCATION_BYTES:
         raise ValueError("Skill placement location is overbound")
     return SkillManifest(
         name=parsed.name,
@@ -973,7 +973,7 @@ def enrich_skill_document(
         metadata=parsed.metadata,
         path=path,
         base_dir=path.parent,
-        location=location,
+        skill_path=skill_path,
         body=parsed.body,
         raw_document_digest=parsed.raw_document_digest,
         manifest_semantic_fingerprint=parsed.manifest_semantic_fingerprint,
@@ -1193,7 +1193,7 @@ def check_skill_deadline(
         raise TimeoutError("Skill observation owner deadline expired")
 
 
-def skill_location(path: Path, *, root: PreparedSkillRootBinding) -> str:
+def public_skill_path(path: Path, *, root: PreparedSkillRootBinding) -> str:
     if path.name != SKILL_FILE_NAME or path.parent.parent != root.path:
         raise ValueError("Skill candidate does not match its frozen lexical root")
     return f"{root.location_prefix}/{path.relative_to(root.path).as_posix()}"

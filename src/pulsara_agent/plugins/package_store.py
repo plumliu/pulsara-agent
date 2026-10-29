@@ -526,6 +526,25 @@ class ManagedPluginStore:
         preserve_published_root = False
         try:
             _check_abort(deadline_monotonic, cancellation)
+            # The accepted source may be a temporary import. Freeze the final
+            # package paths before publication so a successful cut never needs
+            # another fallible observation merely to report its Skill paths.
+            installed_summary = replace(
+                observation.summary,
+                skills=replace(
+                    observation.summary.skills,
+                    skills=tuple(
+                        replace(
+                            item,
+                            skill_path=str(
+                                package_root
+                                / Path(item.skill_path).relative_to(observation.source_path)
+                            ),
+                        )
+                        for item in observation.summary.skills.skills
+                    ),
+                ),
+            )
             os.mkdir(stage_name, 0o700, dir_fd=package_parent_fd)
             stage_fd = os.open(
                 stage_name, DIRECTORY_NOFOLLOW_FLAGS, dir_fd=package_parent_fd
@@ -683,7 +702,7 @@ class ManagedPluginStore:
                             state,
                             package_root,
                             layout.data_root,
-                            observation.summary,
+                            installed_summary,
                             replacing,
                         )
                     else:
@@ -713,7 +732,7 @@ class ManagedPluginStore:
                 state,
                 package_root,
                 layout.data_root,
-                observation.summary,
+                installed_summary,
                 replacing,
             )
             raise _StoreSettlementReady(prior, preserve_root=True)

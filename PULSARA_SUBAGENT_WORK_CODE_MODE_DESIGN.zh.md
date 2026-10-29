@@ -845,7 +845,7 @@ ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `i
 |---|---|
 | 原生工具定义 | 本工具参数、target、结果、派活／消息／等待／停止的必要语义 |
 | code mode 环境说明 | exec／wait_exec／stop_exec、工具代理、输出、持续等待与脚本生命周期 |
-| 通用 SYSTEM | 文案另行审阅；工具使用与编排教学由按需 Skill 承担 |
+| SYSTEM | ROOT 与 Subagent 各自为完整文本；ROOT 简述原生／JS 共用对象及 Skill 入口，Subagent 只保留通用执行与交付规则；角色职责由 profile 提供，工具组合教学由 Skill 承担 |
 | `pulsara-code-mode` bundled Skill | 主文档展示普通工具与 Agent 交叉使用；`tool-calling` 参考目录介绍工具组合与结果，`agent-orchestration` 参考目录介绍复用、batch 队友引用、依赖、等待、多人协作与多阶段示例；正式输出只教 `console.log` |
 
 Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要知道实验过程、历史接口或内部协议名称。这里不新增独立的群组 skill 或 workflow 语言。
@@ -891,4 +891,4 @@ Agent 使用 session 身份及 `root_session_id` 归属；委派来源、profile
 
 能力验收覆盖 §1.5 的四种变化：手动配置与插件 MCP 使用同一提供范围设置；每个受影响的活动 session 收到相应观察；禁用后阻止新调用，同 epoch 已安装 schema 保持不变；能力查询不扩大原生管理工具权限。
 
-前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。Skill 教学见 §8，SYSTEM、profile 正文和新的前端表面仍按暂缓范围处理。
+前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。SYSTEM 简短入口与 Skill 教学见 §8，其余 SYSTEM 整体修订、profile 正文和新的前端表面仍按暂缓范围处理。

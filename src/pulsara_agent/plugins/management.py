@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
@@ -250,10 +251,49 @@ class PluginManagementService:
                 (_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),),
             )
         try:
+            summary = observation.summary
+            if observation.source_import is not None:
+                source = observation.source_import
+                _, _, skill_directories = source.component_plan()
+                paths = {
+                    str(observation.source_path / "skills" / directory.name / "SKILL.md"):
+                    str(source.source / directory / "SKILL.md")
+                    for directory in skill_directories
+                }
+                summary = replace(
+                    summary,
+                    skills=replace(
+                        summary.skills,
+                        skills=tuple(
+                            replace(item, skill_path=paths[item.skill_path])
+                            for item in summary.skills.skills
+                        ),
+                    ),
+                )
             return ValidPluginValidationOutcome(
                 _safe_path(request.source_path, scrub_set),
-                _safe_summary(observation.summary, scrub_set),
+                _safe_summary(summary, scrub_set),
                 _safe_diagnostics(observation.diagnostics, scrub_set),
+            )
+        except PluginPackageCancelled:
+            return AbortedPluginValidationOutcome(
+                _safe_path(request.source_path, scrub_set),
+                PluginValidationDisposition.CANCELLED,
+            )
+        except PluginPackageTimedOut:
+            return AbortedPluginValidationOutcome(
+                _safe_path(request.source_path, scrub_set),
+                PluginValidationDisposition.TIMED_OUT,
+            )
+        except PluginPackageRaced:
+            return UnavailablePluginValidationOutcome(
+                _safe_path(request.source_path, scrub_set),
+                (_diagnostic(PluginDiagnosticCode.SOURCE_RACED),),
+            )
+        except (KeyError, MemoryError, OSError, ValueError):
+            return UnavailablePluginValidationOutcome(
+                _safe_path(request.source_path, scrub_set),
+                (_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),),
             )
         finally:
             observation.close()
@@ -984,7 +1024,7 @@ def _safe_summary(
                 PluginSkillSummary(
                     _safe_text(item.name, scrub_set),
                     _safe_text(item.description, scrub_set),
-                    _safe_text(item.location, scrub_set),
+                    _safe_text(item.skill_path, scrub_set),
                 )
                 for item in summary.skills.skills
             ),

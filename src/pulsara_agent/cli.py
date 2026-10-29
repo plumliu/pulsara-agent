@@ -569,7 +569,7 @@ def _skill_inspection_payload(inspection, *, doctor: bool) -> dict[str, object]:
             {
                 "name": item.name,
                 "description": item.description,
-                "location": item.location,
+                "skill_path": item.skill_path,
                 "source": item.source.value,
                 "origin_label": item.origin_label,
             }
@@ -672,7 +672,7 @@ def _skill_inspection_text(payload: dict[str, object], *, doctor: bool) -> str:
         if isinstance(item, dict):
             lines.append(
                 f"- {item['name']}: {item['description']} "
-                f"({item['location']}; {item['origin_label']})"
+                f"({item['skill_path']}; {item['origin_label']})"
             )
     for cause in payload.get("unavailable_causes", []):
         if isinstance(cause, dict):
@@ -1153,7 +1153,7 @@ def _plugin_summary_payload(summary) -> dict[str, object]:
                 {
                     "name": item.name,
                     "description": item.description,
-                    "location": item.location,
+                    "skill_path": item.skill_path,
                 }
                 for item in summary.skills.skills
             ],

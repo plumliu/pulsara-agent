@@ -37,7 +37,7 @@ def render_catalog_prompt(
     """Render the one exact full routing representation.
 
     Usage rules live in BASE_SYSTEM.  This body contains only complete
-    name/description/location rows and is never summarized or prefix-truncated.
+    name/description/skill_path rows and is never summarized or prefix-truncated.
     """
 
     if not entries:
@@ -51,7 +51,7 @@ def render_catalog_prompt(
                 {
                     "name": item.name,
                     "description": item.description,
-                    "location": item.location,
+                    "skill_path": item.skill_path,
                 }
                 for item in ordered
             )
@@ -88,7 +88,7 @@ def render_active_skill_prompt(
             "skills": tuple(
                 {
                     "name": item.name,
-                    "location": item.location,
+                    "skill_path": item.skill_path,
                     **({"reason": item.reason.value}
                        if item.reason is ActiveSkillReason.EXPLICIT_USER_MENTION else {}),
                     "body": item.body,

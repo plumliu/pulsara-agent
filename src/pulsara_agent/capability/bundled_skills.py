@@ -300,7 +300,7 @@ class BundledSkillDefinitionProducer:
                     enrich_skill_document(
                         parsed.parsed,
                         path=skill_path,
-                        location=str(skill_path),
+                        skill_path=str(skill_path),
                         origin=BundledSkillOrigin(f"bundled_skills/{name}"),
                         diagnostic_codes=tuple(item.code for item in diagnostics),
                     )

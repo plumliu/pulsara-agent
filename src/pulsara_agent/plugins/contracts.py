@@ -282,7 +282,7 @@ class PluginManifest:
 class PluginSkillSummary:
     name: str
     description: str
-    location: str
+    skill_path: str
 
 
 class PluginMcpTransportSummaryKind(StrEnum):

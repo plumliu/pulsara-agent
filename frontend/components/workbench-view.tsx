@@ -336,7 +336,7 @@ function traceSkill(trace: ToolTrace, skills: SkillCapability[]): SkillCapabilit
   return skills.find((skill) => (
     skill.enabled
     && skill.effective
-    && [skill.path, skill.location]
+    && [skill.path, skill.skillPath]
       .filter(Boolean)
       .map(normalizedSkillDocumentPath)
       .includes(normalized)
@@ -1767,7 +1767,7 @@ function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
     () => store.summary(sessionId).text, () => store.summary(sessionId).text);
   return <div className="skill-menu__list">{skills.map(skill => {
     const selected = skill.configured || splitSkillReferences(text).some(reference => typeof reference !== 'string' && reference.name === skill.name);
-    return <button key={`${skill.name}:${skill.location}`} className={selected ? 'is-selected' : ''}
+    return <button key={`${skill.name}:${skill.skillPath}`} className={selected ? 'is-selected' : ''}
       onClick={() => onSelect(skill.name)} disabled={skill.configured || disabled}>
       <span><strong>/{skill.name}</strong><small>{skill.description}</small></span>{selected && <Check size={13} />}
     </button>;

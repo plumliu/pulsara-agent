@@ -33,7 +33,6 @@ from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.hooks.contracts import FrozenHookDefinitionView, HookSourceKind
 from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.plugins.contracts import (
-    ExternalProcessAcceptance,
     GcLocalPluginPackagesRequest,
     InspectLocalPluginsRequest,
     InstallLocalPluginRequest,
@@ -47,7 +46,6 @@ from pulsara_agent.plugins.contracts import (
     PluginScopeKind,
     PluginValidationDisposition,
     RemoveLocalPluginRequest,
-    SetLocalPluginEnabledRequest,
     ValidateLocalPluginSourceRequest,
     plugin_diagnostic_severity,
 )
@@ -65,6 +63,7 @@ from pulsara_agent.process_credential_boundary import (
     admit_process_credential_http_operation,
 )
 from pulsara_agent.llm.adapters.openai.client import admit_provider_request
+from tests.support.plugin_review import enable_reviewed_plugin
 
 
 PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -181,17 +180,8 @@ def _owners(tmp_path: Path, *, credential: str = ""):
 
 
 def _enable(service, installed, plugin_id: str, deadline: float) -> None:
-    result = service.set_local_plugin_enabled(
-        SetLocalPluginEnabledRequest(
-            PluginScopeKind.USER,
-            plugin_id,
-            True,
-            installed.package_install_id,
-            deadline,
-            external_process_acceptance=ExternalProcessAcceptance.ACCEPTED,
-            connection_review=(),
-        )
-    )
+    assert installed.identity.plugin_id == plugin_id
+    result = enable_reviewed_plugin(service, installed, deadline)
     assert result.disposition.value == "ENABLED"
 
 
