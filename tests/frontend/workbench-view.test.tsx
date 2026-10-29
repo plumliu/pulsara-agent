@@ -905,7 +905,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
         resultSummary: 'raw body', resultEntryId: 'result',
         artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' },
       }, {
-        id: 'terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令', subtitle: 'pwd',
+        id: 'terminal', kind: 'terminal', toolName: 'exec_process', title: '运行命令', subtitle: 'pwd',
         status: 'completed', command: 'pwd', resultText: 'raw stdout', resultSummary: 'raw stdout',
       }, {
         id: 'read', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: 'file',
@@ -917,7 +917,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     const titles = [...view.container.querySelectorAll('.trace-summary-title strong')].map(node => node.textContent);
     expect(titles).toEqual(['修改文件', '运行命令', '读取文件']);
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：edit_file' }));
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：terminal' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：exec_process' }));
     expect(screen.getByLabelText('文件差异').textContent).toBe('-old\n+new');
     expect(view.container.querySelector('.terminal-command')?.textContent).toContain('pwd');
     expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('raw stdout');
@@ -958,7 +958,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
 
   it('streams terminal output in an expanded card and unwraps only the final terminal envelope', () => {
     const terminalTrace = (resultText: string, status: 'running' | 'completed', resultState?: string) => ({
-      id: 'terminal-stream', kind: 'terminal' as const, toolName: 'terminal', title: '运行命令',
+      id: 'terminal-stream', kind: 'terminal' as const, toolName: 'exec_process', title: '运行命令',
       subtitle: 'printf', status, command: 'printf output', resultText, resultState,
     });
     const viewProps = (trace: ReturnType<typeof terminalTrace>) => props({
@@ -975,7 +975,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     );
 
     const view = render(display(terminalTrace('first', 'running')));
-    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：terminal' }));
+    fireEvent.click(screen.getByRole('button', { name: '展开工具详情：exec_process' }));
     expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('first');
     expect(screen.getByLabelText('命令仍在执行')).toBeTruthy();
 

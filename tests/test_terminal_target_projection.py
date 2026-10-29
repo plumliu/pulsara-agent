@@ -18,8 +18,8 @@ from pulsara_agent.model_input.lowering import (
     lower_retained_request_content,
 )
 from pulsara_agent.ports.terminal import (
-    parse_terminal_monitor_input,
-    parse_terminal_process_input,
+    parse_manage_monitor_input,
+    parse_manage_process_input,
 )
 from pulsara_agent.ports.terminal_observation import (
     TerminalDeliveryCoverage,
@@ -87,10 +87,10 @@ def test_notification_normal_and_retained_paths_share_copyable_targets(
     assert normal is not None
     assert normal.content == lower_retained_request_content(retained)
     projected = json.loads(normal.content[0].text)["pulsara_terminal_observation"]
-    process = parse_terminal_process_input(
+    process = parse_manage_process_input(
         {"action": "poll", "target": projected["process_target"]}
     )
-    monitor = parse_terminal_monitor_input(
+    monitor = parse_manage_monitor_input(
         {"action": "cancel", "target": projected["target"]}
     )
     assert process.target.process_id == fact.process_id
@@ -125,13 +125,13 @@ def test_human_stop_feedback_projects_targets_without_changing_native_control():
         "pulsara_user_control_feedback"
     ]
     assert (
-        parse_terminal_process_input(
+        parse_manage_process_input(
             {"action": "poll", "target": public["target"]}
         ).target.process_id
         == fact.process_id
     )
     assert (
-        parse_terminal_monitor_input(
+        parse_manage_monitor_input(
             {"action": "cancel", "target": public["monitor_result"]["target"]}
         ).target.monitor_id
         == fact.monitor.monitor_id

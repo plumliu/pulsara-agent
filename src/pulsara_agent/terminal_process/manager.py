@@ -965,6 +965,13 @@ class ProcessRegistry:
             group_alive,
         )
 
+    def get_process_info(
+        self, process_id: str, *, owner_host_session_id: str
+    ) -> TerminalProcessInfo:
+        """Observe owned metadata through the same read-only path as inventory."""
+
+        return _info(self._owned(process_id, owner_host_session_id))
+
     def list_processes(
         self,
         *,
@@ -1369,6 +1376,13 @@ class TerminalManager:
 
     def list_processes(self, **kwargs):
         return self.process_registry.list_processes(**kwargs)
+
+    def get_process_info(
+        self, process_id: str, *, owner_host_session_id: str
+    ) -> TerminalProcessInfo:
+        return self.process_registry.get_process_info(
+            process_id, owner_host_session_id=owner_host_session_id
+        )
 
     def freeze_compaction_handoff(self, *, owner_host_session_id: str):
         return self.process_registry.freeze_compaction_handoff(

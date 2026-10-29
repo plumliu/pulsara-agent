@@ -295,7 +295,7 @@ def test_capability_and_boolean_confirmation_share_one_fifo_slot():
                 turn_id='turn:gurc7dtswjz5gkjsi3arjyt744',
                 assistant_entry_id='entry:vvq6ea7vlkiyqqg2ygzssu7k6e',
                 tool_call_id="call:ordinary",
-                tool_name="terminal",
+                tool_name="exec_process",
                 permission_snapshot=permission,
             )
         )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 from functools import lru_cache
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -11,34 +10,32 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from pulsara_agent.identity import require_id
 
-from pulsara_agent.primitives.context import (
-    FrozenJsonObjectFact,
-    context_fingerprint,
-    freeze_json,
-    thaw_json,
-)
-
 
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
 MIN_TERMINAL_OUTPUT_CHARS = 512
 DEFAULT_WAIT_TIMEOUT_SECONDS = 30
 
-TERMINAL_TOOL_DESCRIPTION = (
+EXEC_PROCESS_TOOL_DESCRIPTION = (
     "Run one local shell command. Each call starts a new shell, so its directory and "
     "environment changes stay within that call. A running command returns a PROCESS "
-    "target for terminal_process to inspect or interact with it. In the ROOT "
-    "conversation, terminal_monitor can resume work on completion or configured "
-    "progress. Response size and initial wait settings do not limit the command's "
-    "lifetime. Use artifact_read for omitted output or artifact_export for extensive "
-    "processing."
+    "target for query_processes metadata or manage_process output and interaction. "
+    "manage_monitor can resume work on completion or configured progress. Response "
+    "size and initial wait settings do not limit the command's lifetime. Use "
+    "read_artifact for omitted output or export_artifact for extensive processing."
 )
 
-TERMINAL_PROCESS_TOOL_DESCRIPTION = (
-    "Control commands started by terminal. Copy a PROCESS target from terminal or the "
-    "process list; reuse it across actions. Set action to the operation below. Fields "
-    "listed for an action are required unless marked optional; use only that action's "
-    "fields.\n"
-    "list: optional include_running, include_finished.\n"
+QUERY_PROCESSES_TOOL_DESCRIPTION = (
+    "Query managed process metadata without returning logs or consuming output. To "
+    "list processes, omit target; optional fields: include_running, include_finished. "
+    "To inspect one process's command and current metadata, pass only its PROCESS "
+    "target, without list filters. For output, use manage_process with poll or wait. "
+    "Omit unused fields; target does not accept null."
+)
+
+MANAGE_PROCESS_TOOL_DESCRIPTION = (
+    "Control commands started by exec_process. Copy a PROCESS target from process "
+    "results; reuse it across actions. Fields listed for an action are required "
+    "unless marked optional; use only that action's fields.\n"
     "poll: target (PROCESS); optional since_cursor, max_output_chars.\n"
     "wait: target (PROCESS); optional since_cursor, timeout_seconds, max_output_chars.\n"
     "write: target (PROCESS), data; optional yield_time_ms.\n"
@@ -46,28 +43,36 @@ TERMINAL_PROCESS_TOOL_DESCRIPTION = (
     "close_stdin: target (PROCESS).\n"
     "kill: target (PROCESS).\n"
     "poll reads now; wait waits up to timeout_seconds. write sends data unchanged; "
-    "submit adds one newline to data supplied without its final newline. close_stdin "
-    "closes input; kill stops the command and its children and waits for exit. Omitted "
-    "optional fields use their defaults; only since_cursor accepts null. status and "
-    "exit_code describe process completion; output or echo alone does not establish "
-    "completion. Use terminal_monitor in the ROOT conversation for later updates, "
-    "artifact_read for omitted logs, and artifact_export for extensive retrieval."
+    "submit unconditionally adds one LF to data. close_stdin closes input; kill stops "
+    "the command and its children and waits for exit. Omitted optional fields use "
+    "their defaults; only since_cursor accepts null. status and exit_code describe "
+    "process completion; output or echo alone does not establish completion. Use "
+    "manage_monitor for later updates, read_artifact for omitted logs, and "
+    "export_artifact for extensive retrieval."
 )
 
-TERMINAL_MONITOR_TOOL_DESCRIPTION = (
-    "ROOT only. Resume the conversation when a running command completes or meets "
-    "configured progress conditions. Set action as follows; fields are required unless "
-    "marked optional, and each action uses only its listed fields.\n"
+QUERY_MONITORS_TOOL_DESCRIPTION = (
+    "Query visible monitor registrations. Use no arguments to list registrations. "
+    "To inspect one registration's state and effective monitoring policy, pass only "
+    "its MONITOR target. Neither branch accepts pagination fields. This query does "
+    "not register, cancel, or refresh a monitor. Omit target for the list; do not "
+    "pass null."
+)
+
+MANAGE_MONITOR_TOOL_DESCRIPTION = (
+    "Resume work when a running command completes or meets configured progress "
+    "conditions. ROOT manages Host-wide registrations; a Subagent manages only its "
+    "current Work's registrations. Fields are required unless marked optional; use "
+    "only the selected action's fields.\n"
     "register: target (PROCESS); optional conditions, delivery, lifetime.\n"
-    "list: no other fields.\n"
     "cancel: target (MONITOR).\n"
-    "Copy a PROCESS target from terminal/process results and a MONITOR target from "
-    "register/list. register returns immediately; the current turn may end while "
-    "monitoring continues. Omitting conditions requests completion only; configured "
-    "progress updates also resume the conversation. list shows active monitors, not "
-    "process completion. cancel stops updates while the command continues. Monitoring "
-    "also ends on expiry or when its terminal environment closes. Use terminal_process "
-    "poll for current output or status, and kill to stop a command."
+    "Copy a PROCESS target from process results and a MONITOR target from "
+    "registration or query results. register returns immediately; the current turn "
+    "may end while monitoring continues. Omitting conditions requests completion "
+    "only; configured progress updates also resume work. cancel stops updates while "
+    "the command continues. Monitoring also ends on expiry or when its terminal "
+    "environment closes. Use manage_process poll for current output or status, "
+    "and kill to stop a command."
 )
 
 
@@ -111,8 +116,7 @@ class TerminalInput(_StrictInput):
 _TERMINAL_ADAPTER = TypeAdapter(TerminalInput)
 
 
-class TerminalProcessListInput(_StrictInput):
-    action: Literal["list"]
+class QueryProcessesListInput(_StrictInput):
     include_running: bool = Field(
         default=True,
     )
@@ -144,6 +148,14 @@ class TerminalMonitorTarget(_StrictInput):
 
 class _ProcessInput(_StrictInput):
     target: TerminalProcessTarget
+
+
+class QueryProcessInput(_ProcessInput):
+    pass
+
+
+QueryProcessesInput: TypeAlias = QueryProcessesListInput | QueryProcessInput
+_QUERY_PROCESSES_ADAPTER = TypeAdapter(QueryProcessesInput)
 
 
 class TerminalProcessPollInput(_ProcessInput):
@@ -219,9 +231,8 @@ class TerminalProcessKillInput(_ProcessInput):
     action: Literal["kill"]
 
 
-TerminalProcessInput: TypeAlias = Annotated[
-    TerminalProcessListInput
-    | TerminalProcessPollInput
+ManageProcessInput: TypeAlias = Annotated[
+    TerminalProcessPollInput
     | TerminalProcessWaitInput
     | TerminalProcessWriteInput
     | TerminalProcessSubmitInput
@@ -230,7 +241,7 @@ TerminalProcessInput: TypeAlias = Annotated[
     Field(discriminator="action"),
 ]
 
-_TERMINAL_PROCESS_ADAPTER = TypeAdapter(TerminalProcessInput)
+_MANAGE_PROCESS_ADAPTER = TypeAdapter(ManageProcessInput)
 
 
 class TerminalMonitorOutputCondition(_StrictInput):
@@ -301,8 +312,16 @@ class TerminalMonitorRegisterInput(_StrictInput):
     )
 
 
-class TerminalMonitorListInput(_StrictInput):
-    action: Literal["list"]
+class QueryMonitorsListInput(_StrictInput):
+    pass
+
+
+class QueryMonitorInput(_StrictInput):
+    target: TerminalMonitorTarget
+
+
+QueryMonitorsInput: TypeAlias = QueryMonitorsListInput | QueryMonitorInput
+_QUERY_MONITORS_ADAPTER = TypeAdapter(QueryMonitorsInput)
 
 
 class TerminalMonitorCancelInput(_StrictInput):
@@ -310,67 +329,57 @@ class TerminalMonitorCancelInput(_StrictInput):
     target: TerminalMonitorTarget
 
 
-TerminalMonitorInput: TypeAlias = Annotated[
+ManageMonitorInput: TypeAlias = Annotated[
     TerminalMonitorRegisterInput
-    | TerminalMonitorListInput
     | TerminalMonitorCancelInput,
     Field(discriminator="action"),
 ]
 
-_TERMINAL_MONITOR_ADAPTER = TypeAdapter(TerminalMonitorInput)
+_MANAGE_MONITOR_ADAPTER = TypeAdapter(ManageMonitorInput)
 
 
-@dataclass(frozen=True, slots=True)
-class BuiltinToolInputContractBinding:
-    tool_name: Literal["terminal_process"]
-    input_adapter: TypeAdapter[Any]
-    frozen_input_schema: FrozenJsonObjectFact
-    input_schema_fingerprint: str
-
-    def schema_copy(self) -> dict[str, Any]:
-        return deepcopy(thaw_json(self.frozen_input_schema))
-
-
-def parse_terminal_process_input(arguments: object) -> TerminalProcessInput:
-    return _TERMINAL_PROCESS_ADAPTER.validate_python(arguments, strict=True)
-
-
-def parse_terminal_input(arguments: object) -> TerminalInput:
+def parse_exec_process_input(arguments: object) -> TerminalInput:
     return _TERMINAL_ADAPTER.validate_python(arguments, strict=True)
 
 
-def parse_terminal_monitor_input(arguments: object) -> TerminalMonitorInput:
-    return _TERMINAL_MONITOR_ADAPTER.validate_python(arguments, strict=True)
+def parse_query_processes_input(arguments: object) -> QueryProcessesInput:
+    return _QUERY_PROCESSES_ADAPTER.validate_python(arguments, strict=True)
+
+
+def parse_manage_process_input(arguments: object) -> ManageProcessInput:
+    return _MANAGE_PROCESS_ADAPTER.validate_python(arguments, strict=True)
+
+
+def parse_query_monitors_input(arguments: object) -> QueryMonitorsInput:
+    return _QUERY_MONITORS_ADAPTER.validate_python(arguments, strict=True)
+
+
+def parse_manage_monitor_input(arguments: object) -> ManageMonitorInput:
+    return _MANAGE_MONITOR_ADAPTER.validate_python(arguments, strict=True)
 
 
 @lru_cache(maxsize=1)
-def builtin_tool_input_contract_binding() -> BuiltinToolInputContractBinding:
-    schema = _inline_schema_references(_TERMINAL_PROCESS_ADAPTER.json_schema())
-    frozen = freeze_json(schema)
-    if not isinstance(frozen, FrozenJsonObjectFact):
-        raise AssertionError("terminal process schema must freeze as an object")
-    return BuiltinToolInputContractBinding(
-        tool_name="terminal_process",
-        input_adapter=_TERMINAL_PROCESS_ADAPTER,
-        frozen_input_schema=frozen,
-        input_schema_fingerprint=context_fingerprint(
-            "builtin-tool-input-schema:v1", ["terminal_process", schema]
-        ),
-    )
-
-
-def terminal_process_input_schema() -> dict[str, Any]:
-    return builtin_tool_input_contract_binding().schema_copy()
-
-
-@lru_cache(maxsize=1)
-def terminal_input_schema() -> dict[str, Any]:
+def exec_process_input_schema() -> dict[str, Any]:
     return _inline_schema_references(_TERMINAL_ADAPTER.json_schema())
 
 
 @lru_cache(maxsize=1)
-def terminal_monitor_input_schema() -> dict[str, Any]:
-    return _inline_schema_references(_TERMINAL_MONITOR_ADAPTER.json_schema())
+def query_processes_input_schema() -> dict[str, Any]:
+    return _inline_schema_references(_QUERY_PROCESSES_ADAPTER.json_schema())
+
+
+def manage_process_input_schema() -> dict[str, Any]:
+    return _inline_schema_references(_MANAGE_PROCESS_ADAPTER.json_schema())
+
+
+@lru_cache(maxsize=1)
+def query_monitors_input_schema() -> dict[str, Any]:
+    return _inline_schema_references(_QUERY_MONITORS_ADAPTER.json_schema())
+
+
+@lru_cache(maxsize=1)
+def manage_monitor_input_schema() -> dict[str, Any]:
+    return _inline_schema_references(_MANAGE_MONITOR_ADAPTER.json_schema())
 
 
 def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
@@ -439,16 +448,28 @@ def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_MAX_OUTPUT_CHARS",
-    "TERMINAL_PROCESS_TOOL_DESCRIPTION",
-    "TERMINAL_MONITOR_TOOL_DESCRIPTION",
-    "TERMINAL_TOOL_DESCRIPTION",
+    "EXEC_PROCESS_TOOL_DESCRIPTION",
+    "QUERY_PROCESSES_TOOL_DESCRIPTION",
+    "MANAGE_PROCESS_TOOL_DESCRIPTION",
+    "QUERY_MONITORS_TOOL_DESCRIPTION",
+    "MANAGE_MONITOR_TOOL_DESCRIPTION",
     "TerminalInput",
-    "TerminalProcessInput",
-    "TerminalMonitorInput",
-    "parse_terminal_input",
-    "parse_terminal_monitor_input",
-    "parse_terminal_process_input",
-    "terminal_input_schema",
-    "terminal_process_input_schema",
-    "terminal_monitor_input_schema",
+    "ManageProcessInput",
+    "ManageMonitorInput",
+    "QueryProcessesInput",
+    "QueryMonitorsInput",
+    "QueryProcessesListInput",
+    "QueryProcessInput",
+    "QueryMonitorsListInput",
+    "QueryMonitorInput",
+    "parse_exec_process_input",
+    "parse_query_processes_input",
+    "parse_manage_process_input",
+    "parse_query_monitors_input",
+    "parse_manage_monitor_input",
+    "exec_process_input_schema",
+    "query_processes_input_schema",
+    "manage_process_input_schema",
+    "query_monitors_input_schema",
+    "manage_monitor_input_schema",
 ]

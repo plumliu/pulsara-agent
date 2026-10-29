@@ -309,7 +309,7 @@ function collectMessageTraces(messages: Message[]): ToolTrace[] {
 function buildMcpToolRefIndex(messages: Message[]): ReadonlyMap<string, McpToolIdentity> {
   const result = new Map<string, McpToolIdentity>();
   for (const trace of collectMessageTraces(messages)) {
-    if (trace.toolName !== 'inspect_capability') continue;
+    if (trace.toolName !== 'query_capabilities') continue;
     const descriptor = parseJsonObject(trace.resultText);
     const toolRef = stringValue(objectField(objectField(descriptor, 'invocation'), 'target')?.tool_ref);
     const target = objectField(descriptor, 'target');
@@ -348,12 +348,12 @@ function mcpTraceDetail(
   toolRefs: ReadonlyMap<string, McpToolIdentity>,
 ): McpTraceDetail | undefined {
   const name = trace.toolName;
-  if (!name || !['list_capabilities', 'inspect_capability', 'use_new_mcp_tool'].includes(name)) {
+  if (!name || !['query_capabilities', 'use_new_mcp_tool'].includes(name)) {
     return undefined;
   }
   const args = parseJsonObject(trace.argumentsJson);
   const result = parseJsonObject(trace.resultText);
-  if (name === 'list_capabilities') {
+  if (name === 'query_capabilities' && !Object.hasOwn(args ?? {}, 'target')) {
     if (!Array.isArray(result?.items) || typeof result?.total_count !== 'number') return undefined;
     const items = objectArrayField(result, 'items');
     const total = numberValue(result?.total_count);
@@ -364,7 +364,7 @@ function mcpTraceDetail(
       suppressGenericSuccess: true,
     };
   }
-  if (name === 'inspect_capability') {
+  if (name === 'query_capabilities') {
     const target = objectField(result, 'target') ?? objectField(args, 'target');
     if (!stringValue(target?.kind).startsWith('MCP_')) return undefined;
     const serverId = stringValue(target?.server_id) || stringValue(target?.runtime_server_id);
@@ -481,12 +481,12 @@ function TraceCard({
   const showTargets = useContext(PresentationContext);
   const presentation = trace.toolName === 'open_in_pulsara' && trace.status === 'completed' && trace.artifact?.sourceCoverage === 'COMPLETE' && trace.artifact?.displayKind === 'COMPLETE'
     ? parsePresentationResult(trace.resultText ?? '') : undefined;
-  const terminalOutput = trace.toolName === 'terminal'
+  const terminalOutput = trace.toolName === 'exec_process'
     ? terminalOutputText(trace.resultText, trace.status === 'running')
     : undefined;
   const hasTerminalOutput = terminalOutput !== undefined;
   const terminalYieldedToBackground = Boolean(
-    trace.toolName === 'terminal'
+    trace.toolName === 'exec_process'
     && trace.status === 'completed'
     && parsedResult?.status === 'running'
     && parsedResult.yielded_to_background === true,
@@ -620,7 +620,7 @@ function TraceCard({
             )}
             {diffText
               ? <pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre>
-              : showRawResult && trace.toolName !== 'terminal' && trace.resultSummary
+              : showRawResult && trace.toolName !== 'exec_process' && trace.resultSummary
                 && <div className="tool-result-summary">{trace.resultSummary}</div>}
             {hasRawResult && (
               <section className="tool-result-raw" aria-label="工具原始结果">

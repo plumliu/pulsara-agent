@@ -445,7 +445,7 @@ def _coverage_warning(candidate: ToolOutputArtifactCandidate) -> str:
         return ""
     return (
         "\n\n[SOURCE COVERAGE: retained snapshot only; earlier output is unavailable.\n"
-        "artifact_read offsets are relative to the retained artifact body, not "
+        "read_artifact offsets are relative to the retained artifact body, not "
         "the original process stream.]"
     )
 

@@ -530,7 +530,7 @@ def test_process_loss_takeover_does_not_replay_running_work_or_settled_tools_and
                     JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
                         AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
                     JOIN pulsara_v3.tool_results r ON r.session_id=i.session_id AND r.invocation_id=i.id
-                    WHERE i.session_id=%s AND b.tool_name='terminal'""",
+                    WHERE i.session_id=%s AND b.tool_name='exec_process'""",
                     (identities['agent_id'],)).fetchone()['count']
                 assert attempts==1
         finally:
@@ -558,10 +558,10 @@ def test_live_exec_keeps_bypass_snapshot_after_root_read_only_turn_and_prefix_st
             index=self.counts.get(request.turn_id,0)
             self.counts[request.turn_id]=index+1
             if request.turn_id==self.first_turn and index==0:
-                code='await tools.terminal({command:"while [ ! -f release-old-cell ]; do sleep 0.01; done",yield_time_ms:30000});'
+                code='await tools.exec_process({command:"while [ ! -f release-old-cell ]; do sleep 0.01; done",yield_time_ms:30000});'
                 code+='console.log(await tools.write_file('+json.dumps({'target':{'kind':'PATH','path':'source-write.txt'},'content':'FROM_SOURCE_BYPASS'})+'));'
                 code+='return "OLD_CELL_BYPASS_FROZEN";'
-                events=_tool_call('exec',random_id('call'),{'code':code,'yield_time_ms':0})
+                events=_tool_call('exec_cell',random_id('call'),{'code':code,'yield_time_ms':0})
             else:
                 events=_text('ROOT_TURN_FINISHED')
             for event in events:

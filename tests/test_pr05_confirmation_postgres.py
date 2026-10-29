@@ -91,7 +91,7 @@ def pg_owner(database):
             AssistantToolCallBlock(
                 block_id=derive_id("block", "test-fixture", identity),
                 tool_call_id=call_id,
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "true"}),
             ),
         ),
@@ -118,7 +118,7 @@ def pg_owner(database):
             turn_id=turn_id,
             assistant_entry_id=entry_id,
             tool_call_id=call_id,
-            tool_name="terminal",
+            tool_name="exec_process",
             permission_snapshot=permission,
         ),
     )

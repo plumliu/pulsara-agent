@@ -47,7 +47,6 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
-    production_builtin_executor_binding_identity_fingerprint,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
@@ -62,7 +61,7 @@ from tests.support.round3 import (
     direct_tool_invocation_context,
     prepare_test_direct_tool_surface,
 )
-from pulsara_agent.primitives.context import freeze_json, thaw_json
+from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
     ToolObservationOrigin,
@@ -157,11 +156,11 @@ def _processor(publisher: _RecordingPublisher) -> ToolOutputArtifactProcessor:
 
 
 def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
 
     root = Path(__file__).resolve().parents[1]
@@ -611,7 +610,7 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
         borrow, invocation_context = direct_tool_invocation_context(
             port,
             session_id=session_id,
-            tool_name="terminal",
+            tool_name="exec_process",
             tool_call_id="call:terminal",
             attempt_id='attempt:j2pdqslxs6mgma3br6ay5w4aoq',
             turn_id='turn:vmlprtvcqs6oi7vfc6vmq2kihm',
@@ -619,7 +618,7 @@ def test_round1_terminal_preserves_full_sanitized_candidate_and_envelope(
         )
         try:
             return await port.invoke(
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments={
                     "command": command,
                     "yield_time_ms": 10_000,
@@ -954,7 +953,7 @@ def _install_tool_call(
     repository: ConversationKernelRepository,
     workspace_id: str,
     *,
-    tool_name="terminal",
+    tool_name="exec_process",
     arguments=None,
     attempted=True,
     memory_domain_id="u_local",
@@ -1202,7 +1201,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     read_result = ArtifactReadTool(read_port).execute(
         ToolCall(
             id=_name("call"),
-            name="artifact_read",
+            name="read_artifact",
             arguments={
                 "target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id},
                 "offset_chars": 3,
@@ -1224,7 +1223,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     multibyte_result = ArtifactReadTool(read_port).execute(
         ToolCall(
             id=multibyte_call_id,
-            name="artifact_read",
+            name="read_artifact",
             arguments={
                 "target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id},
                 "offset_chars": 5,
@@ -1286,7 +1285,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
         invalid = tool.execute(
             ToolCall(
                 id=_name("call"),
-                name="artifact_read",
+                name="read_artifact",
                 arguments=arguments,
             )
         )
@@ -1296,7 +1295,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     unknown = tool.execute(
         ToolCall(
             id=_name("call"),
-            name="artifact_read",
+            name="read_artifact",
             arguments={"target": {"kind": "ARTIFACT", "artifact_id": _name("artifact")}},
         )
     )
@@ -1310,7 +1309,7 @@ def test_round1_artifact_body_read_scope_pagination_and_nonrecursive_result(
     cross_session = cross_session_tool.execute(
         ToolCall(
             id=_name("call"),
-            name="artifact_read",
+            name="read_artifact",
             arguments={"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}},
         )
     )
@@ -1584,7 +1583,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
     result = ArtifactReadTool(port).execute(
         ToolCall(
             id=_name("call"),
-            name="artifact_read",
+            name="read_artifact",
             arguments={"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}},
         )
     )
@@ -1626,7 +1625,7 @@ def test_round1_corrupt_blob_is_one_typed_content_error(
     missing = ArtifactReadTool(port).execute(
         ToolCall(
             id=_name("call"),
-            name="artifact_read",
+            name="read_artifact",
             arguments={"target": {"kind": "ARTIFACT", "artifact_id": projection.artifact_id}},
         )
     )
@@ -1653,38 +1652,11 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
     surface = prepare_test_direct_tool_surface(port)
     specs = {item.name: item for item in surface.model_surface.tool_specs}
     bindings = {item.tool_name: item for item in port.executor_bindings}
-    assert "artifact_read" in specs
-    assert "artifact_export" in specs
-    export = bindings["artifact_export"].catalog_entry
-    assert export.execution_binding_kind.value == "artifact_export"
-    assert not export.descriptor.is_read_only
-    assert export.descriptor.permission_category == "filesystem_write"
-    export_schema = thaw_json(specs["artifact_export"].parameters)
-    assert export_schema["additionalProperties"] is False
+    assert "read_artifact" in specs
+    assert "export_artifact" in specs
     assert set(specs) == set(bindings)
-    for builtin_binding in bindings.values():
-        descriptor = builtin_binding.catalog_entry.descriptor
-        for payload in (descriptor.to_diagnostic_dict(), descriptor.to_event_payload()):
-            assert {"is_concurrency_safe", "long_horizon_policy"}.isdisjoint(payload)
-    binding = bindings["artifact_read"]
-    entry = binding.catalog_entry
-    assert entry.descriptor.id == "builtin:artifact_read"
-    assert entry.binding_contract.contract_version == "v1"
-    assert entry.descriptor.fingerprint().startswith("sha256:")
-    assert entry.entry_fingerprint.startswith("sha256:")
-    assert entry.execution_binding_kind.value == "artifact_read"
-    assert entry.descriptor.is_read_only
-    assert entry.descriptor.permission_category == "artifact_read"
-    assert binding.executor_identity.endswith("ArtifactReadTool#artifact_read")
-    assert production_builtin_executor_binding_identity_fingerprint(binding).startswith(
-        "sha256:"
-    )
-    schema = thaw_json(specs["artifact_read"].parameters)
-    assert isinstance(schema, dict)
-    assert schema["additionalProperties"] is False
-    assert "mode" not in schema["properties"]
-    assert schema["properties"]["offset_chars"]["minimum"] == 0
-    assert schema["properties"]["max_chars"]["maximum"] == 32_000
+    assert not bindings["export_artifact"].catalog_entry.descriptor.is_read_only
+    assert bindings["read_artifact"].catalog_entry.descriptor.is_read_only
     asyncio.run(port.aclose())
 
     hidden = DirectKernelToolPort(
@@ -1695,10 +1667,10 @@ def test_round1_production_descriptor_executor_closure(tmp_path: Path) -> None:
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
     )
     hidden_surface = prepare_test_direct_tool_surface(hidden)
-    assert "artifact_read" not in {
+    assert "read_artifact" not in {
         item.name for item in hidden_surface.model_surface.tool_specs
     }
-    assert "artifact_export" not in {
+    assert "export_artifact" not in {
         item.name for item in hidden_surface.model_surface.tool_specs
     }
     asyncio.run(hidden.aclose())

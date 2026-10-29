@@ -418,10 +418,10 @@ def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(
 
 def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> None:
     assert classify_tool_result_delivery(
-        tool_name="artifact_read", result_state="SUCCESS"
+        tool_name="read_artifact", result_state="SUCCESS"
     ) == full_required_tool_result_delivery(ToolResultFullDeliveryReason.ARTIFACT_PAGE)
     assert (
-        classify_tool_result_delivery(tool_name="artifact_read", result_state="ERROR")
+        classify_tool_result_delivery(tool_name="read_artifact", result_state="ERROR")
         == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     )
     assert (
@@ -430,7 +430,7 @@ def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> No
         )
         == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     )
-    for tool_name in ("list_capabilities",):
+    for tool_name in ("query_capabilities",):
         assert classify_tool_result_delivery(
             tool_name=tool_name,
             result_state="SUCCESS",
@@ -439,7 +439,7 @@ def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> No
         )
 
     assert classify_tool_result_delivery(
-        tool_name="inspect_capability",
+        tool_name="query_capabilities",
         result_state="SUCCESS",
         public_arguments={
             "target": {"kind": "MCP_TOOL", "server_id": "s", "tool_name": "t"}
@@ -450,7 +450,7 @@ def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> No
 
     assert (
         classify_tool_result_delivery(
-            tool_name="inspect_capability",
+            tool_name="query_capabilities",
             result_state="SUCCESS",
             public_arguments={
                 "target": {
@@ -511,11 +511,11 @@ def test_tool_result_wire_has_no_citation_handle_or_legacy_null_slot() -> None:
 
 
 def test_round7_1_architecture_and_oracle_guards() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
     production = ROOT / "src/pulsara_agent"
     definitions: list[tuple[Path, int]] = []

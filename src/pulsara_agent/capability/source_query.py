@@ -94,7 +94,7 @@ def target_schema(*, parent=False):
     return {"oneOf": shapes}
 
 
-def list_input_schema():
+def _list_input_schema():
     return _object(
         {
             "kind": {"type": "string", "enum": list(KINDS)},
@@ -109,8 +109,12 @@ def list_input_schema():
     )
 
 
-def inspect_input_schema():
+def _inspect_input_schema():
     return _object({"target": target_schema()})
+
+
+def query_input_schema():
+    return {"oneOf": [_list_input_schema(), _inspect_input_schema()]}
 
 
 class CapabilityQueryError(ValueError):
@@ -120,8 +124,8 @@ class CapabilityQueryError(ValueError):
         self.diagnostics = tuple(diagnostics)
 
 
-def parse_query(arguments: Mapping[str, object], *, inspect=False, subagent=False):
-    schema = inspect_input_schema() if inspect else list_input_schema()
+def parse_query(arguments: Mapping[str, object], *, subagent=False):
+    schema = query_input_schema()
     if not isinstance(arguments, Mapping) or not Draft202012Validator(schema).is_valid(
         dict(arguments)
     ):
@@ -130,6 +134,7 @@ def parse_query(arguments: Mapping[str, object], *, inspect=False, subagent=Fals
             "Use the closed query fields and copy an exact target; PLUGIN is a source, not a list kind.",
         )
     values = dict(arguments)
+    inspect = "target" in values
     target = values.get("target" if inspect else "parent")
     if (
         target

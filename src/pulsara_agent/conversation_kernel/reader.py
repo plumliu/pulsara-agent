@@ -8,6 +8,7 @@ authorize a retry.
 
 from __future__ import annotations
 from pulsara_agent.identity import require_id
+from pulsara_agent.conversation_kernel.contracts import CanonicalContent
 from pulsara_agent.scheduling.contracts import ScheduledProvenance
 
 from pulsara_agent.conversation_kernel.interruption import (
@@ -2207,6 +2208,20 @@ def _plan_handoff_compile_facts(
 
 class CanonicalProviderInputReader(CanonicalProviderInputReader):
     """Complete the bounded physical hydration methods after pure fact helpers."""
+
+    def read_code_mode_source(self, content: CanonicalContent, *, workspace_id: str,
+                              deadline_monotonic: float, connection=None) -> str:
+        """Hydrate one frozen source with the existing inline/blob integrity checks."""
+        from pulsara_agent.conversation_kernel.contracts import InlineContent
+        row = {
+            "inline_content": content.canonical_bytes if isinstance(content, InlineContent) else None,
+            "blob_id": None if isinstance(content, InlineContent) else content.blob_id,
+            "content_digest": content.digest, "content_size": content.size,
+            "content_media_type": content.media_type, "content_codec": content.codec,
+            "workspace_id": workspace_id,
+        }
+        return self._read_content(row, deadline_monotonic=deadline_monotonic,
+                                  connection=connection).decode(content.codec)
 
     def build_prospective_root_dispatch_sibling_from_snapshot(
         self,

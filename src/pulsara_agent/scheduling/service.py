@@ -11,7 +11,7 @@ import logging
 
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.session_text import display_title
-from pulsara_agent.scheduling.requests import schedule_target, validate_action
+from pulsara_agent.scheduling.requests import schedule_target, validate_action, validate_query
 from pulsara_agent.conversation_kernel.host import (
     PromptBlockedByHook,
     KernelHostCoreClosing,
@@ -191,17 +191,26 @@ class ScheduledTaskService:
         self.wake()
         return {"paused": self._payload(paused), "active": self._payload(active)}
 
-    async def invoke(self, arguments, *, default_session_id, permission_mode):
-        value = dict(arguments)
-        # Tool-only default: service/HTTP list(None) still means all sessions.
-        # Never discard null on a branch where session is forbidden.
-        if (
-            value.get("action") in ("list", "create")
-            and value.get("session") is None
-        ):
-            value["session"] = {"kind": "SESSION", "session_id": default_session_id}
-        value = dict(validate_action(value))
+    async def invoke_query(self, arguments, *, default_session_id, permission_mode):
+        value = dict(validate_query(dict(arguments)))
+        if "target" in value:
+            return model_task_payload(await self.get(value["target"]["task_id"]))
+        # Model-only scope default; service/HTTP list(None) remains user-level.
+        session = value.pop("session", None)
+        value["session_id"] = (
+            default_session_id if session is None else session["session_id"]
+        )
+        page = await self.list(**value)
+        return {
+            "tasks": [model_task_payload(task) for task in page["tasks"]],
+            "next_cursor": page["next_cursor"],
+        }
+
+    async def invoke_manage(self, arguments, *, default_session_id, permission_mode):
+        value = dict(validate_action(dict(arguments)))
         action = value.pop("action")
+        if action == "create" and value.get("session") is None:
+            value["session"] = {"kind": "SESSION", "session_id": default_session_id}
         if action in {"create", "update", "switch"}:
             values = value.get("values")
             if action == "switch":
@@ -226,12 +235,7 @@ class ScheduledTaskService:
             value["session_id"] = value.pop("session")["session_id"]
         if "target" in value:
             value["task_id"] = value.pop("target")["task_id"]
-        if action == "list":
-            page = await self.list(**value)
-            return {"tasks": [model_task_payload(task) for task in page["tasks"]], "next_cursor": page["next_cursor"]}
-        if action == "get":
-            result = await self.get(**value)
-        elif action == "create":
+        if action == "create":
             result = await self.create(**value)
         elif action == "switch":
             result = await self.switch(**value)

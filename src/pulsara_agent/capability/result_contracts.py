@@ -286,9 +286,9 @@ def terminal_process_result_render_contract() -> CapabilityResultRenderContractF
 
 
 def result_render_contract_for_tool(name: str) -> CapabilityResultRenderContractFact:
-    if name == "terminal":
+    if name == "exec_process":
         return terminal_result_render_contract()
-    if name == "terminal_process":
+    if name == "manage_process":
         return terminal_process_result_render_contract()
     return generic_result_render_contract()
 

@@ -415,7 +415,8 @@ class ToolBatchExecutor:
         bind = getattr(tools, "bind_code_mode_executor", None)
         if bind is not None:
             bind(invoke=self.invoke_code_mode, freeze_source=self.freeze_code_mode_source,
-                 archive_output=self.archive_code_mode_output)
+                 archive_output=self.archive_code_mode_output,
+                 read_source=self.read_code_mode_source)
 
     def steer(self, turn_id: str) -> None:
         for active_turn_id, event in tuple(self._active_calls.values()):
@@ -425,7 +426,7 @@ class ToolBatchExecutor:
     def freeze_code_mode_context(self, **values) -> CodeModeExecutionSnapshot:
         epoch = self._continuity.current_view(values["continuity_scope"])
         if epoch is None:
-            raise RuntimeError("exec admission requires its actual provider context")
+            raise RuntimeError("exec_cell admission requires its actual provider context")
         request = values.pop("request")
         facts = values.pop("canonical_facts")
         target = request.prepared_call.call.target.fact
@@ -442,6 +443,14 @@ class ToolBatchExecutor:
         await self._io.run(self._repository.freeze_code_mode_source,
             self._writer_lease.guard, attempt_id=attempt_id, content=content,
             deadline_monotonic=self._canonical_deadline())
+
+    async def read_code_mode_source(self, *, session_id: str, attempt_id: str) -> str | None:
+        return await self._io.run(
+            self._repository.read_code_mode_source,
+            session_id=session_id,
+            attempt_id=attempt_id,
+            deadline_monotonic=self._canonical_deadline(),
+        )
 
     async def archive_code_mode_output(self, *, context, record):
         from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
@@ -1642,8 +1651,8 @@ class ToolBatchExecutor:
                         block_kind=LiveBlockKind.TOOL_RESULT,
                         **live_attribution,
                     )
-                    terminal_streaming = call.tool_name == "terminal" or (
-                        call.tool_name == "terminal_process"
+                    terminal_streaming = call.tool_name == "exec_process" or (
+                        call.tool_name == "manage_process"
                         and invocation_arguments.get("action") == "wait"
                     )
                     live_sink = (
@@ -1708,7 +1717,7 @@ class ToolBatchExecutor:
                             agent_invocation_snapshot=agent_invocation_snapshot,
                             continuity_scope=continuity_scope, prepared_surface=surface_borrow.prepared,
                             hook_scope=hook_scope,
-                        ) if call.tool_name == "exec" else None,
+                        ) if call.tool_name == "exec_cell" else None,
                         capability_call=authorization.capability_call,
                         steer_event=steer_event,
                         memory_context=request.memory_context,
@@ -2270,7 +2279,7 @@ class ToolBatchExecutor:
                 prepared_output.artifact_unavailability_reason
             )
             result_text = canonical_preview.canonical_bytes.decode("utf-8")
-            if (tool_name in {"terminal", "terminal_process"}
+            if (tool_name in {"exec_process", "manage_process"}
                 and result.public_format is ToolOutputSourceFormatHint.JSON
                 and result.output_artifact_candidate is not None
                 and result.output_artifact_candidate.source_format_hint is ToolOutputSourceFormatHint.JSON):
@@ -2647,14 +2656,14 @@ def _tool_effect_class(
 ) -> str:
     if result_effect_class is not None:
         return result_effect_class
-    if tool_name == "terminal_process":
+    if tool_name == "manage_process":
         action = arguments.get("action")
-        if action in {"list", "poll", "wait"}:
+        if action in {"poll", "wait"}:
             return "TERMINAL_OBSERVATION"
         if action in {"write", "submit", "close_stdin", "kill"}:
             return "TERMINAL_EFFECT"
-        raise RuntimeError("terminal_process action escaped its closed catalog")
-    if tool_name == "terminal":
+        raise RuntimeError("manage_process action escaped its closed catalog")
+    if tool_name == "exec_process":
         return "TERMINAL_EFFECT"
     if tool_name == "run_agent.batch":
         tool_name = "run_agent"

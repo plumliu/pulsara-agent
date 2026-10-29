@@ -1412,7 +1412,7 @@ describe('PulsaraApp', () => {
       messages: [{
         id: 'assistant-terminal', role: 'assistant', time: '18:11', body: '', status: 'completed',
         traces: [{
-          id: 'trace-terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令',
+          id: 'trace-terminal', kind: 'terminal', toolName: 'exec_process', title: '运行命令',
           subtitle: '已完成', status: 'completed', command: 'printf "visible command"',
           resultText: 'visible command', meta: '操作完成',
         }],
@@ -1423,11 +1423,11 @@ describe('PulsaraApp', () => {
 
     const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
-    expect(screen.queryByText('terminal')).toBeNull();
+    expect(screen.queryByText('exec_process')).toBeNull();
     expect(screen.getByText('运行命令')).toBeTruthy();
     expect(container.querySelector('.terminal-command')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /terminal/ }));
+    fireEvent.click(screen.getByRole('button', { name: /exec_process/ }));
 
     expect(container.querySelector('.terminal-command')?.textContent).toContain('printf "visible command"');
   });
@@ -1632,7 +1632,7 @@ describe('PulsaraApp', () => {
       adapter.connectionValue = {
         ...projection(''), messages: [{
           id: 'assistant-query', role: 'assistant', time: '18:11', body: '', status: 'completed',
-          traces: [{ id: 'query', kind: 'mcp', toolName: 'list_capabilities', title: '查看能力',
+          traces: [{ id: 'query', kind: 'mcp', toolName: 'query_capabilities', title: '查看能力',
             subtitle: '查看能力', status: resultText === undefined ? 'running' : 'failed',
             argumentsJson: '{}', resultText, meta: '' }],
         }], isRunning: false, activeTurnId: undefined,
@@ -1659,7 +1659,7 @@ describe('PulsaraApp', () => {
           argumentsJson: JSON.stringify({ target: {kind: 'PATH', path: '/opt/pulsara/bundled_skills/pdf/SKILL.md'} }),
           resultText: JSON.stringify({ target: {kind: 'PATH', path: '/opt/pulsara/bundled_skills/pdf/SKILL.md'}, total_lines: 42 }),
         }, {
-          id: 'trace-list', kind: 'mcp', toolName: 'list_capabilities', title: '查看能力',
+          id: 'trace-list', kind: 'mcp', toolName: 'query_capabilities', title: '查看能力',
           subtitle: '已完成', status: 'completed', meta: '操作完成', argumentsJson: '{}',
           resultText: JSON.stringify({
             total_count: 2, completeness: 'COMPLETE',
@@ -1668,7 +1668,7 @@ describe('PulsaraApp', () => {
             }],
           }) + '\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as artifact_id=artifact:test.]',
         }, {
-          id: 'trace-inspect', kind: 'mcp', toolName: 'inspect_capability', title: '查看能力详情',
+          id: 'trace-inspect', kind: 'mcp', toolName: 'query_capabilities', title: '查看能力详情',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
           argumentsJson: JSON.stringify({ target: { kind: 'MCP_TOOL', server_id: 'firecrawl', tool_name: 'mcp__firecrawl__firecrawl_search' } }),
           resultText: JSON.stringify({
@@ -1697,14 +1697,14 @@ describe('PulsaraApp', () => {
     expect(await screen.findByText('使用 pdf 技能')).toBeTruthy();
     expect(screen.queryByText('reload_plugins')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: /list_capabilities/ }));
+    fireEvent.click(screen.getAllByRole('button', { name: /query_capabilities/ })[0]);
     expect(screen.getByText('观察到 2 项能力')).toBeTruthy();
     const listDetails = container.querySelectorAll('.mcp-trace-details')[0] as HTMLElement;
     expect(within(listDetails).getByText('firecrawl')).toBeTruthy();
     expect(within(listDetails).getByText('local-docs')).toBeTruthy();
     expect(within(listDetails).getByText('连接已就绪。')).toBeTruthy();
 
-    fireEvent.click(screen.getByRole('button', { name: /inspect_capability/ }));
+    fireEvent.click(screen.getAllByRole('button', { name: /query_capabilities/ })[1]);
     const inspectDetails = container.querySelectorAll('.mcp-trace-details')[1] as HTMLElement;
     expect(within(inspectDetails).getByText('所选能力')).toBeTruthy();
     expect(within(inspectDetails).getByText('mcp__firecrawl__firecrawl_search')).toBeTruthy();
@@ -2057,7 +2057,7 @@ describe('PulsaraApp', () => {
         id: 'assistant-terminal', role: 'assistant', assistantKind: 'tool-request', turnId: 'turn-rails', historyGroupId: 'group-rails', historyWindowId: 'page-rails',
         time: '18:12', body: '', status: 'completed',
         traces: [{
-          id: 'trace-terminal', kind: 'terminal', toolName: 'terminal', title: '运行命令',
+          id: 'trace-terminal', kind: 'terminal', toolName: 'exec_process', title: '运行命令',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
         }],
       }, {
@@ -2065,7 +2065,7 @@ describe('PulsaraApp', () => {
         time: '18:13', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-boundary', kind: 'full', body: '我需要先分析结果。' }],
         traces: [{
-          id: 'trace-after-reasoning', kind: 'terminal', toolName: 'terminal', title: '运行命令',
+          id: 'trace-after-reasoning', kind: 'terminal', toolName: 'exec_process', title: '运行命令',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
         }],
       }],

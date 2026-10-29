@@ -4701,13 +4701,13 @@ function summarizeToolResult(toolName: string | undefined, content: string): str
       const field = value[key];
       if (typeof field === 'string' && field) return field;
     }
-    if (toolName === 'terminal' || toolName === 'terminal_process') {
+    if (toolName === 'exec_process' || toolName === 'manage_process') {
       const nestedProcess = asRecord(value.process);
       const process = Object.keys(nestedProcess).length ? nestedProcess : value;
       const status = String(process.status ?? '').toLowerCase();
       const exitCode = typeof process.exit_code === 'number' ? process.exit_code : undefined;
       if (status === 'running') {
-        return toolName === 'terminal' ? '命令仍在后台运行。' : '命令仍在运行。';
+        return toolName === 'exec_process' ? '命令仍在后台运行。' : '命令仍在运行。';
       }
       if (status === 'blocked') return '命令未获准执行。';
       if (status === 'killed') return '命令已停止。';
@@ -4839,13 +4839,24 @@ function reasoningKind(value: string): ReasoningBlock['kind'] {
 function toolDisplayName(name: string, argumentsJson?: string): string {
   const normalized = name.toLowerCase();
   if (normalized === 'reload_capabilities') return '刷新能力';
-  if (normalized === 'list_capabilities') return '查看能力';
-  if (normalized === 'inspect_capability') return '查看能力详情';
+  if (normalized === 'query_capabilities') {
+    try {
+      return Object.hasOwn(JSON.parse(argumentsJson ?? '{}'), 'target') ? '查看能力详情' : '查看能力';
+    } catch { return '查看能力'; }
+  }
   if (normalized === 'use_new_mcp_tool') return '调用 MCP 工具';
   if (normalized.includes('wait_agent')) return '等待任务';
   if (normalized.includes('send_agent_message')) return '发送任务消息';
   if (normalized.includes('stop_agent')) return '停止任务';
-  if (normalized.includes('list_agents')) return '查看任务';
+  if (normalized === 'query_agents') return '查看任务';
+  if (normalized === 'exec_cell') return '运行脚本';
+  if (normalized === 'query_cells') return '查看脚本';
+  if (normalized === 'manage_cell') return '管理脚本';
+  if (normalized === 'query_processes') return '查看命令';
+  if (normalized === 'manage_process') return '管理命令';
+  if (normalized === 'query_monitors') return '查看进展通知';
+  if (normalized === 'query_schedules') return '查看定时计划';
+  if (normalized === 'manage_schedule') return '管理定时计划';
   if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
   if (normalized.includes('exit_plan')) {
@@ -4857,13 +4868,13 @@ function toolDisplayName(name: string, argumentsJson?: string): string {
     }
     return '结束规划';
   }
-  if (normalized.includes('artifact_read')) return '读取保留内容';
+  if (normalized.includes('read_artifact')) return '读取保留内容';
   if (normalized.includes('write_file')) return '写入文件';
   if (normalized.includes('read_file')) return '读取文件';
   if (normalized.includes('apply_patch') || normalized.includes('edit')) return '更新文件';
   if (normalized.includes('search') || normalized.includes('grep')) return '搜索内容';
   if (normalized.includes('list')) return '浏览文件';
-  if (normalized.includes('terminal_monitor')) return '等待命令';
+  if (normalized.includes('manage_monitor')) return '等待命令';
   if (normalized.includes('terminal') || normalized.includes('shell') || normalized.includes('exec')) return '运行命令';
   if (normalized.includes('browser')) return '操作浏览器';
   return '使用工具';
@@ -4874,10 +4885,10 @@ function toolArgumentSummary(name: string, content: string): string {
     const value = JSON.parse(content) as Record<string, unknown>;
     const normalized = name.toLowerCase();
     if (normalized === 'reload_capabilities') return '重新载入 Skill、MCP 与 Hook';
-    if (normalized === 'list_capabilities') {
+    if (normalized === 'query_capabilities' && !Object.hasOwn(value, 'target')) {
       return typeof value.kind === 'string' ? `查看 ${value.kind} 能力` : '读取能力及来源';
     }
-    if (normalized === 'inspect_capability') {
+    if (normalized === 'query_capabilities') {
       const target = value.target && typeof value.target === 'object' ? value.target as Record<string, unknown> : {};
       return [target.plugin_id, target.runtime_server_id ?? target.server_id, target.tool_name ?? target.name].filter((item) => typeof item === 'string').join(' · ') || '查看所选能力的详情';
     }
@@ -4886,7 +4897,10 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized.includes('wait_agent')) return '等待指定任务出现新进展';
     if (normalized.includes('send_agent_message')) return '向任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定任务';
-    if (normalized.includes('list_agents')) return '读取当前任务状态';
+    if (normalized === 'query_agents') return '读取当前任务状态';
+    if (normalized === 'exec_cell') return typeof value.path === 'string' ? value.path : '执行 JavaScript 脚本';
+    if (normalized === 'query_cells') return Object.hasOwn(value, 'target') ? '读取脚本状态与源码' : '读取脚本列表';
+    if (normalized === 'manage_cell') return value.action === 'stop' ? '停止脚本' : '等待脚本输出';
     if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');
     if (name.toLowerCase().includes('exit_plan')) return value.plan == null || (typeof value.plan === 'string' && !value.plan.trim()) ? '继续处理任务' : String(value.summary ?? '等待你确认方案');
@@ -4901,6 +4915,7 @@ function toolArgumentSummary(name: string, content: string): string {
 
 function terminalCommand(name: string, content: string): string | undefined {
   const normalized = name.toLowerCase();
+  if (normalized === 'exec_cell' || normalized === 'query_cells' || normalized === 'manage_cell') return undefined;
   if (
     !normalized.includes('terminal')
     && !normalized.includes('shell')
@@ -5259,6 +5274,8 @@ function formatRelativeTime(value: string): string {
 
 function toolKind(name: string): ToolTrace['kind'] {
   const lower = name.toLowerCase();
+  if (['exec_cell', 'query_cells', 'manage_cell'].includes(lower)) return 'artifact';
+  if (['exec_process', 'query_processes', 'manage_process'].includes(lower)) return 'terminal';
   if (lower.includes('terminal') || lower.includes('exec')) return 'terminal';
   if (lower.includes('read')) return 'read';
   if (lower.includes('edit') || lower.includes('write')) return 'edit';

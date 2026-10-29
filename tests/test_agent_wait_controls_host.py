@@ -65,7 +65,7 @@ class WaitControlModel(_DetachedDraftModel):
                         + ']}); console.log("UNREACHABLE_AFTER_STOP");'
                     )
                     events = _tool_call(
-                        "exec", random_id("call"), {"code": code, "yield_time_ms": 0}
+                        "exec_cell", random_id("call"), {"code": code, "yield_time_ms": 0}
                     )
                 elif step == 0:
                     events = _tool_call(

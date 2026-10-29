@@ -167,7 +167,7 @@ async def run():
                 )
                 reply = await session.run_turn(
                     PromptContent.text(
-                        "Read the runtime previous-turn outcome. Explain briefly why the preceding turn stopped without resuming that task. Independently call terminal once with command pwd, yield_time_ms 1000, max_output_chars 1000, then include NOTICE_OK in your answer."
+                        "Read the runtime previous-turn outcome. Explain briefly why the preceding turn stopped without resuming that task. Independently call exec_process once with command pwd, yield_time_ms 1000, max_output_chars 1000, then include NOTICE_OK in your answer."
                     )
                 )
                 after = await asyncio.to_thread(

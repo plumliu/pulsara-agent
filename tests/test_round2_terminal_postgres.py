@@ -357,7 +357,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id, conversation_scope_kind,
+                    id, session_id, workspace_id,
                     model_call_binding, status, initial_entry_id,
                     terminal_reason, terminal_at,
                     permission_snapshot_id, requested_permission_mode,
@@ -368,7 +368,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                     permission_inherited_from_turn_id, permission_contract_id,
                     permission_contract_fingerprint,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'ROOT', %s, 'INTERRUPTED', %s,
+                ) VALUES (%s, %s, %s, %s, 'INTERRUPTED', %s,
                           'TEST_INVALID', clock_timestamp(),
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -402,10 +402,10 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id, conversation_scope_kind,
+                    id, session_id, workspace_id,
                     model_call_binding, status, initial_entry_id,
                     terminal_reason, terminal_at
-                ) VALUES (%s, %s, %s, 'ROOT', %s, 'INTERRUPTED', NULL,
+                ) VALUES (%s, %s, %s, %s, 'INTERRUPTED', NULL,
                           'TEST_INVALID', clock_timestamp())
                 """,
                 (
@@ -435,7 +435,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id, conversation_scope_kind,
+                    id, session_id, workspace_id,
                     model_call_binding, status, initial_entry_id,
                     terminal_reason, terminal_at,
                     permission_snapshot_id, requested_permission_mode,
@@ -446,7 +446,7 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                     permission_inherited_from_turn_id, permission_contract_id,
                     permission_contract_fingerprint,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'ROOT', %s, 'INTERRUPTED', %s,
+                ) VALUES (%s, %s, %s, %s, 'INTERRUPTED', %s,
                           'TEST_INVALID', clock_timestamp(),
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
@@ -478,10 +478,10 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 """
                 INSERT INTO pulsara_v3.transcript_entries (
                     entry_owner_kind, id, origin_entry_id, session_id, workspace_id, turn_id, entry_sequence,
-                    entry_kind, conversation_scope_kind, inline_content,
+                    entry_kind, inline_content,
                     content_digest, content_size, content_media_type,
                     content_codec
-                ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, 'USER_STEER', 'ROOT',
+                ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, 'USER_STEER',
                           %s, %s, %s, %s, %s)
                 """,
                 (
@@ -499,102 +499,6 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
                 ),
             )
 
-    task_id = _name("task")
-    cross_scope_turn = _name("turn")
-    cross_scope_entry = _name("entry")
-    cross_scope_content = InlineContent.from_bytes(b"wrong scope")
-    with pytest.raises(psycopg.errors.CheckViolation):
-        with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
-            sequence = connection.execute(
-                """
-                SELECT COALESCE(max(entry_sequence), 0) + 1
-                FROM pulsara_v3.transcript_entries WHERE session_id = %s
-                """,
-                (session_id,),
-            ).fetchone()[0]
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.subagent_tasks (
-                    id, session_id, workspace_id, parent_turn_id, objective,
-                    profile_kind, context_mode, model_call_binding, model_target_fact,
-                    status, execution_writer_generation, terminal_reason,
-                    terminal_at
-                ) VALUES (%s, %s, %s, %s, 'test', 'general_worker', 'NONE', %s, %s,
-                          'INTERRUPTED', %s,
-                          'TEST_INVALID', clock_timestamp())
-                """,
-                (
-                    task_id,
-                    session_id,
-                    workspace_id,
-                    target.turn_id,
-                    Jsonb({}),
-                    Jsonb({}),
-                    lease.guard.writer_generation,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id, conversation_scope_kind,
-                    scope_subagent_task_id, status, initial_entry_id,
-                    terminal_reason, terminal_at,
-                    permission_snapshot_id, requested_permission_mode,
-                    effective_permission_mode, permission_admission_source,
-                    permission_overlay, permission_plan_context_ordinal,
-                    permission_plan_workflow_id,
-                    permission_plan_revision_at_admission,
-                    permission_inherited_from_turn_id, permission_contract_id,
-                    permission_contract_fingerprint,
-                    permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'SUBAGENT_TASK', %s, 'INTERRUPTED', %s,
-                          'TEST_INVALID', clock_timestamp(),
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    cross_scope_turn,
-                    session_id,
-                    workspace_id,
-                    task_id,
-                    cross_scope_entry,
-                    invalid_permission.snapshot_id,
-                    invalid_permission.requested_mode.value,
-                    invalid_permission.effective_mode.value,
-                    invalid_permission.admission_source.value,
-                    invalid_permission.overlay.value,
-                    invalid_permission.plan_context_ordinal_at_admission,
-                    invalid_permission.plan_workflow_id,
-                    invalid_permission.plan_workflow_revision_at_admission,
-                    invalid_permission.inherited_from_turn_id,
-                    invalid_permission.permission_contract_id,
-                    invalid_permission.permission_contract_fingerprint,
-                    invalid_permission.snapshot_fingerprint,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.transcript_entries (
-                    entry_owner_kind, id, origin_entry_id, session_id, workspace_id, turn_id, entry_sequence,
-                    entry_kind, conversation_scope_kind, inline_content,
-                    content_digest, content_size, content_media_type,
-                    content_codec
-                ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, 'USER_MESSAGE', 'ROOT',
-                          %s, %s, %s, %s, %s)
-                """,
-                (
-                    cross_scope_entry,
-                    cross_scope_entry,
-                    session_id,
-                    workspace_id,
-                    cross_scope_turn,
-                    sequence,
-                    cross_scope_content.canonical_bytes,
-                    cross_scope_content.digest,
-                    cross_scope_content.size,
-                    cross_scope_content.media_type,
-                    cross_scope_content.codec,
-                ),
-            )
 
 
 def test_round2_active_observation_requires_terminal_tool_requests_and_current_writer(
@@ -639,7 +543,7 @@ def test_round2_active_observation_requires_terminal_tool_requests_and_current_w
             AssistantToolCallBlock(
                 block_id=_name("block"),
                 tool_call_id=_name("call"),
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "sleep 30"}),
             ),
         ),

@@ -102,7 +102,7 @@ async def run(output: Path, cases: str = "sources") -> bool:
                     )
                     report["cases"].append(row)
                     trace = row["tool_trace"]
-                    queries = [t for t in trace if t["tool_name"] == "list_capabilities"
+                    queries = [t for t in trace if t["tool_name"] == "query_capabilities"
                                and t.get("arguments", {}).get("kind") == "SKILL"]
                     guessed_reads = [p for p in _read_calls(trace) if name in p]
                     row["skill_queries"] = queries

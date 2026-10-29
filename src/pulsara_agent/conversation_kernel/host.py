@@ -5806,7 +5806,7 @@ class KernelHostSession:
         request = attempt.request
         try:
             actual = await self._code_mode.stop(request.target.target_id)
-            cell = CodeModeControlResult(str(actual["cell_id"]), str(actual["state"]),
+            cell = CodeModeControlResult(str(actual["target"]["cell_id"]), str(actual["state"]),
                                          int(actual["pending_calls"]))
             outcome = KernelCommandOutcome(request.command_id, "SUCCEEDED", cell.cell_id,
                 "CODE_MODE_CELL_STOPPED", "The script stopped; accepted work keeps its own lifecycle.",

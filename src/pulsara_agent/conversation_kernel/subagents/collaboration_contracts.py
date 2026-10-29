@@ -9,13 +9,14 @@ from dataclasses import dataclass
 import math
 from typing import Mapping
 
+from jsonschema import Draft202012Validator
+
 from pulsara_agent.identity import ID_PAYLOAD_PATTERN, random_id, require_id
 
 AGENT_TOOLS = frozenset(
     {
         "run_agent",
-        "list_agents",
-        "inspect_agent",
+        "query_agents",
         "send_agent_message",
         "wait_agent",
         "stop_agent",
@@ -71,6 +72,29 @@ def target_schema(kind: str, *, allow_root: bool = False) -> dict:
         "properties": {"kind": {"const": kind}, key: identity},
         "required": ["kind", key],
         "additionalProperties": False,
+    }
+
+
+def query_agents_input_schema() -> dict:
+    page = {
+        "cursor": {"type": "string", "minLength": 1, "maxLength": 512},
+        # The existing collaboration per-page boundary, not a membership cap.
+        "max_items": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
+    }
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": fields,
+                "required": required,
+                "additionalProperties": False,
+            }
+            for fields, required in (
+                (page, []),
+                ({"target": target_schema("AGENT"), **page}, ["target"]),
+                ({"target": target_schema("WORK")}, ["target"]),
+            )
+        ]
     }
 
 
@@ -154,16 +178,12 @@ def validate_collaboration_parameters(
     if name == "run_agent.batch":
         parse_batch_members(arguments)
         return
-    if name == "list_agents":
-        a = closed(arguments, {"cursor", "max_items"})
-    elif name == "inspect_agent":
-        a = closed(arguments, {"target", "cursor", "max_items"}, {"target"})
-        kind = a["target"].get("kind") if isinstance(a["target"], Mapping) else None
-        if kind not in {"AGENT", "WORK"}:
-            raise ValueError("expected AGENT or WORK target")
-        target_id(a["target"], kind)
-        if kind == "WORK" and set(a) != {"target"}:
-            raise ValueError("WORK inspection does not accept pagination")
+    if name == "query_agents":
+        a = closed(arguments, {"target", "cursor", "max_items"})
+        if not Draft202012Validator(query_agents_input_schema()).is_valid(dict(a)):
+            raise ValueError("use one query_agents branch; WORK accepts only target")
+        if "target" in a:
+            target_id(a["target"], a["target"]["kind"])
     elif name == "stop_agent":
         a = closed(arguments, {"target"}, {"target"})
         kind = a["target"].get("kind") if isinstance(a["target"], Mapping) else None

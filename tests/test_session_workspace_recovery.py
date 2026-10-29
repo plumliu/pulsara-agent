@@ -356,7 +356,7 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_appends_at_ordinary_bar
                 self.started.set()
                 await self.release.wait()
                 payloads = _tool_call(
-                    "terminal",
+                    "exec_process",
                     "call:never-launch",
                     {
                         "command": "touch SHOULD_NOT_EXIST",
@@ -482,7 +482,7 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                     self.root_ready.set()
                     await self.release.wait()
                     payloads = _tool_call(
-                        "terminal",
+                        "exec_process",
                         "call:root-terminal",
                         {"command": "touch ROOT_NOT_STARTED", "yield_time_ms": 0},
                     )
@@ -491,7 +491,7 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                 self.child_ready.set()
                 await self.release.wait()
                 payloads = _tool_call(
-                    "terminal",
+                    "exec_process",
                     "call:child-terminal",
                     {"command": "touch CHILD_NOT_STARTED", "yield_time_ms": 0},
                 )

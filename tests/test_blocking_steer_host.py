@@ -225,7 +225,7 @@ if __name__ == "__main__":
             elif meta and not self.inspected:
                 self.inspected = True
                 assert 'mcp__fixture__write_mark' not in {spec.name for spec in request.compiled_input.tools}
-                events = _tool_call('inspect_capability', 'call:inspect-effect', {
+                events = _tool_call('query_capabilities', 'call:inspect-effect', {
                     'target':{'kind':'MCP_TOOL','server_id':'fixture','tool_name':'mcp__fixture__write_mark'},
                 })
             elif not self.called:

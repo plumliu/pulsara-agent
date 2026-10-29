@@ -78,7 +78,7 @@ def test_search_titles_users_final_commentary_and_long_blob_without_duplicates(
             AssistantToolCallBlock(
                 identity("block"),
                 identity("call"),
-                "terminal",
+                "exec_process",
                 freeze_json({"command": "excluded-tool-argument"}),
             ),
         ),

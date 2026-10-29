@@ -1173,7 +1173,7 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
             AssistantToolCallBlock(
                 block_id=_name("block"),
                 tool_call_id=call_id,
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "true"}),
             ),
         ),
@@ -1305,7 +1305,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             AssistantToolCallBlock(
                 block_id=_name("block"),
                 tool_call_id=tool_call_id,
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "true"}),
             ),
         ),
@@ -1334,7 +1334,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             if decision == "DENY"
             else None
         ),
-        redacted_subject="tool:terminal",
+        redacted_subject="tool:exec_process",
         actor_id='attachment:hmfv6qyb4msxxwadjyltzzsdse',
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
@@ -1358,7 +1358,7 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             if decision == "DENY"
             else None
         ),
-        redacted_subject="tool:terminal",
+        redacted_subject="tool:exec_process",
         actor_id='attachment:hmfv6qyb4msxxwadjyltzzsdse',
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,

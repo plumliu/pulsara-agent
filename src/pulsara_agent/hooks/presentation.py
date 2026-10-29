@@ -77,7 +77,7 @@ def add_matching_tool_review(
     from pulsara_agent.hooks.matcher import definition_matches
 
     labels = {
-        "terminal": "运行终端命令",
+        "exec_process": "运行终端命令",
         "read_file": "读取文件",
         "edit_file": "编辑文件",
         "write_file": "写入文件",

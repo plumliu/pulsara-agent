@@ -31,10 +31,11 @@ from tests.test_direct_advisory_memory import _open_direct_memory_session
 
 
 DIRECT = {
+    "sessions",
+    "tool_invocations",
     "history_search_documents",
     "scheduled_tasks",
     "context_snapshots",
-    "subagent_tasks",
     "turns",
     "session_commands",
     "imported_history_groups",
@@ -56,8 +57,6 @@ INDIRECT = {
     "turn_context_binding_revisions": ("turns", "turn_id"),
     "tool_execution_attempts": ("assistant_message_blocks", "tool_call_id"),
     "imported_tool_call_closures": ("assistant_message_blocks", "tool_call_id"),
-    "subagent_task_dependencies": ("subagent_tasks", "task_id"),
-    "subagent_task_children": ("subagent_tasks", "task_id"),
 }
 
 
@@ -191,7 +190,7 @@ def test_condition_retry_checks_new_lifecycle(repo, monkeypatch):
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     fks = rows(
         repo,
         """SELECT c.conrelid::regclass::text AS child,
@@ -215,6 +214,16 @@ def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
             child in INDIRECT
             and parent == INDIRECT[child][0]
             and INDIRECT[child][1] in f["columns"]
+        ) or (
+            child == "tool_execution_attempts"
+            and parent == "tool_invocations"
+            and "invocation_id" in f["columns"]
+        ) or (
+            child == "tool_invocations"
+            and (
+                (parent == "turns" and "turn_id" in f["columns"])
+                or (parent == "assistant_message_blocks" and "tool_call_id" in f["columns"])
+            )
         )
         if ownership:
             assert f["action"] == "c", f

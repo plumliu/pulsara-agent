@@ -33,7 +33,7 @@ def _interrupted_attempt(repository, lease):
         parent_content=InlineContent.from_bytes(b"tool manifest"),
         blocks=(AssistantToolCallBlock(
             block_id=random_id("block"), tool_call_id=call_id,
-            tool_name="terminal", arguments=freeze_json({"command": "true"}),
+            tool_name="exec_process", arguments=freeze_json({"command": "true"}),
         ),),
         occurred_at=datetime.now(timezone.utc), actor_id="model:test",
         deadline_monotonic=monotonic() + 30,

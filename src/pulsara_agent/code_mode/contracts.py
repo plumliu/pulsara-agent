@@ -6,6 +6,51 @@ import asyncio
 from typing import Awaitable, Callable, Literal, Mapping
 
 from pulsara_agent.primitives.tool_observation import MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+from pulsara_agent.identity import ID_PAYLOAD_PATTERN
+
+from .targets import cell_target, cell_target_schema
+
+
+def _object_schema(properties: dict[str, object], required: list[str]) -> dict[str, object]:
+    return {"type": "object", "properties": properties, "required": required,
+            "additionalProperties": False}
+
+
+def _yield_schema() -> dict[str, object]:
+    return {"type": "integer", "minimum": 0, "maximum": 30_000, "default": 1_000}
+
+
+def exec_cell_parameters_schema() -> dict[str, object]:
+    return {"oneOf": [
+        _object_schema({field: {"type": "string", **({"minLength": 1} if field == "path" else {})},
+                        "yield_time_ms": _yield_schema()}, [field])
+        for field in ("code", "path")
+    ]}
+
+
+def query_cells_parameters_schema() -> dict[str, object]:
+    return {"oneOf": [
+        _object_schema({
+            "cursor": {"type": "string", "pattern": "^cell:" + ID_PAYLOAD_PATTERN + "$"},
+            "max_items": {"type": "integer", "minimum": 1, "default": 50},
+        }, []),
+        _object_schema({
+            "target": cell_target_schema(),
+            "offset_chars": {"type": "integer", "minimum": 0, "default": 0},
+            "max_chars": {"type": "integer", "minimum": 1, "maximum": 32_000,
+                          "default": 20_000},
+        }, ["target"]),
+    ]}
+
+
+def manage_cell_parameters_schema() -> dict[str, object]:
+    return {"oneOf": [
+        _object_schema({"action": {"type": "string", "const": "wait"},
+                        "target": cell_target_schema(), "yield_time_ms": _yield_schema()},
+                       ["action", "target"]),
+        _object_schema({"action": {"type": "string", "const": "stop"},
+                        "target": cell_target_schema()}, ["action", "target"]),
+    ]}
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,9 +138,30 @@ class CodeModeObservation:
 
     def public_value(self) -> dict[str, object]:
         result: dict[str, object] = {
-            "cell_id": self.cell_id, "state": self.state,
+            "target": cell_target(self.cell_id), "state": self.state,
             "output": list(self.output), "has_more": self.has_more,
             "pending_calls": self.pending_calls,
+        }
+        if self.error is not None:
+            result["error"] = dict(self.error)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class CodeModeCellSnapshot:
+    """One live observation, without reserving output or retaining a Cell."""
+
+    cell_id: str
+    state: CellState
+    has_unread_output: bool
+    pending_calls: int
+    error: Mapping[str, object] | None
+    source_exec_attempt_id: str
+
+    def public_value(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "target": cell_target(self.cell_id), "state": self.state,
+            "has_unread_output": self.has_unread_output, "pending_calls": self.pending_calls,
         }
         if self.error is not None:
             result["error"] = dict(self.error)

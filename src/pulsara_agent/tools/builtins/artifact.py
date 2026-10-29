@@ -43,7 +43,7 @@ class _ArtifactPageLogicalBoundError(ValueError):
 @dataclass(slots=True)
 class ArtifactReadTool:
     artifact_read_port: ToolArtifactReadPort
-    name: str = "artifact_read"
+    name: str = "read_artifact"
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         request = _request(call.arguments)
@@ -126,7 +126,7 @@ class ArtifactReadTool:
         )
         if len(output.encode("utf-8")) > CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES:
             raise AssertionError(
-                "artifact_read response exceeded the inline hard bound"
+                "read_artifact response exceeded the inline hard bound"
             )
         return ToolExecutionResult(
             call_id=call.id,
@@ -142,7 +142,7 @@ class ArtifactReadTool:
 @dataclass(slots=True)
 class ArtifactExportTool(WorkspaceTool):
     artifact_read_port: ToolArtifactReadPort = field(kw_only=True)
-    name: str = "artifact_export"
+    name: str = "export_artifact"
 
     def execute(
         self, call: ToolCall, *, write_scope: WritePathScope = WritePathScope.WORKSPACE
@@ -307,10 +307,10 @@ def _request(
     if not isinstance(arguments, dict):
         # FrozenToolJsonDict is a dict subclass; keep the check deliberately
         # closed so arbitrary Mapping implementations cannot smuggle values.
-        return "artifact_read arguments must be an object"
+        return "read_artifact arguments must be an object"
     allowed_keys = {"target", "offset_chars", "max_chars"}
     if not set(arguments).issubset(allowed_keys):
-        return "artifact_read arguments contain unknown properties"
+        return "read_artifact arguments contain unknown properties"
     artifact_id = _artifact_target_id(arguments)
     if not isinstance(artifact_id, str) or not artifact_id:
         return "target must be an ARTIFACT object with a non-empty artifact_id"

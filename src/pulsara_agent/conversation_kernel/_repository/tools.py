@@ -72,7 +72,7 @@ class _ToolOperations:
             return result
 
     def freeze_code_mode_source(self, guard, *, attempt_id, content, deadline_monotonic):
-        """Freeze the actual post-Hook source once on its real exec attempt."""
+        """Freeze the actual post-Hook source once on its real exec_cell attempt."""
         from pulsara_agent.conversation_kernel.contracts import InlineContent
         with self._writer_transaction(guard, deadline_monotonic=deadline_monotonic) as connection:
             row = connection.execute(
@@ -83,8 +83,8 @@ class _ToolOperations:
                    WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
                    FOR UPDATE OF a""", (guard.session_id, attempt_id),
             ).fetchone()
-            if row is None or row['tool_name'] != 'exec':
-                raise ConversationKernelConflict("source must belong to an actual exec attempt")
+            if row is None or row['tool_name'] != 'exec_cell':
+                raise ConversationKernelConflict("source must belong to an actual exec_cell attempt")
             values = (content.canonical_bytes if isinstance(content, InlineContent) else None,
                       None if isinstance(content, InlineContent) else content.blob_id,
                       content.digest, content.size, content.media_type, content.codec)
@@ -92,7 +92,7 @@ class _ToolOperations:
                      'code_source_content_size','code_source_content_media_type','code_source_content_codec')
             if row['code_source_content_digest'] is not None:
                 if tuple(row[name] for name in names) != values:
-                    raise ConversationKernelConflict("exec source was already frozen differently")
+                    raise ConversationKernelConflict("exec_cell source was already frozen differently")
                 return
             connection.execute(
                 """UPDATE pulsara_v3.tool_execution_attempts SET
@@ -100,6 +100,35 @@ class _ToolOperations:
                    code_source_content_size=%s, code_source_content_media_type=%s, code_source_content_codec=%s
                    WHERE session_id=%s AND id=%s""", (*values,guard.session_id,attempt_id),
             )
+
+    def read_code_mode_source(self, *, session_id: str, attempt_id: str,
+                              deadline_monotonic: float) -> str | None:
+        """Read only a live owner's frozen source association, through canonical I/O."""
+        from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
+        with self._provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
+            row = connection.execute(
+                """SELECT a.code_source_inline_content AS inline_content,
+                          a.code_source_blob_id AS blob_id,
+                          a.code_source_content_digest AS content_digest,
+                          a.code_source_content_size AS content_size,
+                          a.code_source_content_media_type AS content_media_type,
+                          a.code_source_content_codec AS content_codec, s.workspace_id
+                   FROM pulsara_v3.tool_execution_attempts a
+                   JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
+                   JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
+                    AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+                   JOIN pulsara_v3.sessions s ON s.id=a.session_id
+                   WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
+                    AND b.tool_name='exec_cell' AND b.block_kind='TOOL_CALL'""",
+                (session_id, attempt_id),
+            ).fetchone()
+            if row is None or row["content_digest"] is None:
+                return None
+            content = self._content_from_row(row)
+            return CanonicalProviderInputReader(self._provider).read_code_mode_source(
+                content, workspace_id=str(row["workspace_id"]), connection=connection,
+                deadline_monotonic=deadline_monotonic)
 
     def _accept_invocation_source(
         self, connection, guard, *, assistant_entry_id, tool_call_id,
@@ -123,7 +152,7 @@ class _ToolOperations:
                     AND b.tool_call_id=i.tool_call_id AND b.block_kind='TOOL_CALL'
                    JOIN pulsara_v3.turns t ON t.session_id=i.session_id AND t.id=i.turn_id
                    WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
-                     AND b.tool_name='exec' AND t.id=%s
+                     AND b.tool_name='exec_cell' AND t.id=%s
                    FOR UPDATE OF t""",
                 (guard.session_id, source.source_exec_attempt_id, source.turn_id),
             ).fetchone()

@@ -31,7 +31,7 @@ class ProcessModel(AgentModel):
         count = self.calls.get(request.turn_id, 0)
         self.calls[request.turn_id] = count+1
         if count == 0:
-            for event in _tool_call('terminal', random_id('call'), {'command':'printf x >> effect-count.txt'}):
+            for event in _tool_call('exec_process', random_id('call'), {'command':'printf x >> effect-count.txt'}):
                 yield event
         else:
             self.first_child_started.set()

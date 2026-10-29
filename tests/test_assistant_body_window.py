@@ -71,12 +71,12 @@ def _requests(repository, lease, commands, *, replay=False):
                 ), assistant_entry_id=entry_id,
                 target=build_test_provider_replay_target(model_id="model", transport_binding_id="test-wire"),
                 public_projection_fingerprint=provider_assistant_public_projection_fingerprint(
-                    text=None, tool_calls=(LLMToolCall(call_id, "terminal", arguments),),
+                    text=None, tool_calls=(LLMToolCall(call_id, "exec_process", arguments),),
                 ),
                 ordered_items=(freeze_json({
                     "role": "assistant", "content": None, "reasoning_content": "candidate reasoning",
                     "tool_calls": [{"id": call_id, "type": "function",
-                                    "function": {"name": "terminal", "arguments": arguments}}],
+                                    "function": {"name": "exec_process", "arguments": arguments}}],
                 }),),
             )
         repository.commit_assistant_message(
@@ -84,7 +84,7 @@ def _requests(repository, lease, commands, *, replay=False):
             parent_content=InlineContent.from_bytes(b"tool manifest"),
             blocks=(AssistantToolCallBlock(
                 block_id=random_id("block"), tool_call_id=call_id,
-                tool_name="terminal", arguments=freeze_json({"command": command}),
+                tool_name="exec_process", arguments=freeze_json({"command": command}),
             ),),
             provider_replay=replay_body,
             occurred_at=datetime.now(timezone.utc), actor_id="model:test",

@@ -93,7 +93,7 @@ def test_remember_is_main_only_in_frozen_and_model_surfaces(tmp_path):
             session_id='session:2wae56asyel532v3i7tvactdee', live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
-        port.bind_memory_port(SimpleNamespace(tool_names=frozenset({"remember", "memory_get"})))
+        port.bind_memory_port(SimpleNamespace(tool_names=frozenset({"remember", "get_memory"})))
         try:
             for scope, task, expected in (
                 (ModelInputScopeKind.ROOT, None, True),

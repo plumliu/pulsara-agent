@@ -56,6 +56,7 @@ class ToolResultDeliveryRequirement(StrEnum):
 
 class ToolResultFullDeliveryReason(StrEnum):
     CODE_MODE_OUTPUT_PAGE = "CODE_MODE_OUTPUT_PAGE"
+    CELL_QUERY_PAGE = "CELL_QUERY_PAGE"
     ARTIFACT_PAGE = "ARTIFACT_PAGE"
     ARTIFACT_EXPORT_LOCATION = "ARTIFACT_EXPORT_LOCATION"
     MCP_DIRECTORY_PAGE = "MCP_DIRECTORY_PAGE"
@@ -115,29 +116,34 @@ def classify_tool_result_delivery(
 
     if result_state != "SUCCESS":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    if tool_name in {"exec", "wait_exec", "stop_exec"}:
+    if tool_name == "exec_cell" or (
+        tool_name == "manage_cell"
+        and (public_arguments or {}).get("action") in {"wait", "stop"}
+    ):
         return full_required_tool_result_delivery(ToolResultFullDeliveryReason.CODE_MODE_OUTPUT_PAGE)
     if tool_name == "view_image":
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.IMAGE_ATTACHMENT
         )
-    if tool_name == "list_capabilities":
+    if tool_name == "query_cells":
+        return full_required_tool_result_delivery(ToolResultFullDeliveryReason.CELL_QUERY_PAGE)
+    if tool_name == "query_capabilities" and "target" not in (public_arguments or {}):
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
         )
     if (
-        tool_name == "inspect_capability"
+        tool_name == "query_capabilities"
         and isinstance((public_arguments or {}).get("target"), Mapping)
         and public_arguments["target"].get("kind") == "MCP_TOOL"
     ):
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
         )
-    if tool_name == "artifact_export":
+    if tool_name == "export_artifact":
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION
         )
-    if tool_name != "artifact_read":
+    if tool_name != "read_artifact":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     return full_required_tool_result_delivery(
         ToolResultFullDeliveryReason.ARTIFACT_PAGE

@@ -170,7 +170,6 @@ def _visualization_metadata_replay_input():
         scope=ProviderInputContinuityScope(
             session_id=session_id,
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         ),
         context_binding_revision_id=revision_id,
         provider_input_through_sequence=2,
@@ -180,7 +179,6 @@ def _visualization_metadata_replay_input():
         canonical_input_identity=SimpleNamespace(
             session_id=session_id,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             context_binding_revision_id=revision_id,
             provider_input_through_sequence=2,
         ),
@@ -664,8 +662,8 @@ def test_round5a2_has_no_vendor_or_remote_state_branch_and_oracle_is_exact() -> 
             for token in ("checkpoint", "receipt", "repair")
             for name in authority_names
         ), path
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29

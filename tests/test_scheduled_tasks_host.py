@@ -561,13 +561,13 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                     self.started.set()
                     await self.release.wait()
                     yield ToolCallStartPayload(
-                        "pause:self", "pause:self", "scheduled_tasks"
+                        "pause:self", "pause:self", "manage_schedule"
                     )
                     yield ToolCallDeltaPayload("pause:self", "pause:self", args)
                     yield ToolCallEndPayload(
                         "pause:self",
                         "pause:self",
-                        "scheduled_tasks",
+                        "manage_schedule",
                         args,
                         len(args.encode()),
                         live_digest(args),
@@ -591,7 +591,7 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
             summary_calls.append(call.semantic.semantic_input)
             return RawCompactionSummaryResponse(
                 "Prior scheduled reports checked the workspace.",
-                (LLMToolCall(id="summary:forbidden", name="terminal", arguments="{}"),)
+                (LLMToolCall(id="summary:forbidden", name="exec_process", arguments="{}"),)
                 if len(summary_calls) == 1
                 else (),
             )

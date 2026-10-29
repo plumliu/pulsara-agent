@@ -95,7 +95,7 @@ if TYPE_CHECKING:
         MemoryEmbeddingMaintainer,
     )
 
-MEMORY_READ_TOOL_NAMES = frozenset({"memory_search", "memory_get"})
+MEMORY_READ_TOOL_NAMES = frozenset({"search_memory", "get_memory"})
 MEMORY_WRITE_TOOL_NAMES = frozenset({"remember", "mark_memory_relation"})
 MEMORY_TOOL_NAMES = MEMORY_READ_TOOL_NAMES | MEMORY_WRITE_TOOL_NAMES
 MAXIMUM_MEMORY_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024
@@ -263,9 +263,9 @@ class KernelMemoryToolPort:
                 return await self._remember(arguments, invocation_context)
             if tool_name == "mark_memory_relation":
                 return self._mark_memory_relation(arguments, invocation_context)
-            if tool_name == "memory_search":
+            if tool_name == "search_memory":
                 return await self._search(arguments)
-            if tool_name == "memory_get":
+            if tool_name == "get_memory":
                 return await self._get(arguments)
         except (TypeError, ValueError) as exc:
             # invoke runs after a canonical attempt has been admitted. A bad
@@ -582,7 +582,7 @@ class KernelMemoryToolPort:
 
     async def _get(self, arguments: Mapping[str, object]) -> KernelToolResult:
         if set(arguments) != {"target"}:
-            raise ValueError("memory_get requires target")
+            raise ValueError("get_memory requires target")
         memory_id = parse_memory_target(arguments.get("target"))
         item = await self._io.run(
             self._query.get,
@@ -1162,7 +1162,7 @@ class KernelMemoryToolPort:
             if references:
                 if ref_items:
                     payload["memory_refs"] = list(ref_items)
-                    payload["read_memory_with"] = "memory_get"
+                    payload["read_memory_with"] = "get_memory"
                 omitted_history = history
                 if len(presentation) > len(ref_items):
                     payload["selected_memories_omitted"] = len(presentation) - len(ref_items)

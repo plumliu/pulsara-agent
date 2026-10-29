@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
     _DirectTerminalProcessTool,
+    _DirectTerminalQueryTool,
     _DirectTerminalTool,
 )
 from pulsara_agent.conversation_kernel.io import (
@@ -35,8 +36,8 @@ from pulsara_agent.terminal_process.monitor import TerminalMonitorPolicy
 from tests.support.round3 import prepare_test_direct_tool_surface
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.terminal import (
-    parse_terminal_input,
-    parse_terminal_process_input,
+    parse_exec_process_input,
+    parse_manage_process_input,
 )
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.primitives.permission import PermissionMode
@@ -58,7 +59,7 @@ def terminal(tmp_path):
 
 def start(manager, command, **kwargs):
     return _DirectTerminalTool(manager, 'host:45aj6sixiaarr5ta455q3trmwi').execute(
-        ToolCall("call:start", "terminal", {"command": command, **kwargs}),
+        ToolCall("call:start", "exec_process", {"command": command, **kwargs}),
         origin=TerminalProcessOrigin('turn:gc7de6qlnst5d77yis7utsj2xu', "ROOT"),
         decision_attempt_id=derive_id("decision", "test-fixture", f"decision:{monotonic()}"),
         decision_deadline_monotonic=monotonic() + 5,
@@ -70,7 +71,7 @@ def follow(manager, action, process_id, **kwargs):
     return _DirectTerminalProcessTool(manager, 'host:45aj6sixiaarr5ta455q3trmwi').execute(
         ToolCall(
             "call:follow",
-            "terminal_process",
+            "manage_process",
             {
                 "action": action,
                 "target": {"kind": "PROCESS", "process_id": process_id},
@@ -86,19 +87,19 @@ def program(source):
 
 def test_removed_inputs_are_rejected_and_windows_have_only_per_call_bounds():
     with pytest.raises(ValidationError):
-        parse_terminal_input({"command": "true", "terminal_session_id": "default"})
+        parse_exec_process_input({"command": "true", "terminal_session_id": "default"})
     with pytest.raises(ValidationError):
-        parse_terminal_process_input({"action": "log", "target": {"kind": "PROCESS", "process_id": "proc_old"}})
+        parse_manage_process_input({"action": "log", "target": {"kind": "PROCESS", "process_id": "proc_old"}})
     for action in ("write", "submit"):
         assert (
-            parse_terminal_process_input(
+            parse_manage_process_input(
                 {"action": action, "target": {"kind": "PROCESS", "process_id": "p"}, "data": "x"}
             ).yield_time_ms
             == 1000
         )
         for value in (-1, 30001):
             with pytest.raises(ValidationError):
-                parse_terminal_process_input(
+                parse_manage_process_input(
                     {
                         "action": action,
                         "target": {"kind": "PROCESS", "process_id": "p"},
@@ -323,7 +324,7 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
                     ),
                     descriptor_fingerprint="old-terminal-cwd-contract",
                 )
-                if spec.name == "terminal"
+                if spec.name == "exec_process"
                 else spec
                 for spec in plan.direct_tool_surface.tool_specs
             )
@@ -388,7 +389,7 @@ def test_process_target_is_reused_for_observation_input_and_termination(terminal
 
     def invoke(action, **arguments):
         result = controller.execute(ToolCall(
-            "call:copy-target", "terminal_process",
+            "call:copy-target", "manage_process",
             {"action": action, "target": target, **arguments},
         ))
         payload = json.loads(result.output)
@@ -397,8 +398,8 @@ def test_process_target_is_reused_for_observation_input_and_termination(terminal
         return payload
 
     assert invoke("poll")["status"] == "running"
-    inventory = json.loads(controller.execute(ToolCall(
-        "call:inventory", "terminal_process", {"action": "list"},
+    inventory = json.loads(_DirectTerminalQueryTool(terminal, 'host:45aj6sixiaarr5ta455q3trmwi').execute(ToolCall(
+        "call:inventory", "query_processes", {},
     )).output)
     assert inventory["processes"][0]["target"] == target
     invoke("write", data="alpha", yield_time_ms=0)
@@ -414,9 +415,9 @@ def test_process_target_is_reused_for_observation_input_and_termination(terminal
 def test_flat_process_identity_and_wrong_target_are_rejected(action):
     extra = {"data": ""} if action in {"write", "submit"} else {}
     with pytest.raises(ValidationError):
-        parse_terminal_process_input({"action": action, "process_id": "p", **extra})
+        parse_manage_process_input({"action": action, "process_id": "p", **extra})
     with pytest.raises(ValidationError):
-        parse_terminal_process_input({
+        parse_manage_process_input({
             "action": action,
             "target": {"kind": "MONITOR", "monitor_id": "m"},
             **extra,

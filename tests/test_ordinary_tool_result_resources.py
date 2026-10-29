@@ -221,7 +221,7 @@ def test_minimum_upper_bounds_real_omitted_normal_and_late_metadata(api, origin)
 
 def _results(body, *, provenance=(), full=False, plan=False):
     args = freeze_json({"target": {"kind": "PATH", "path": "example.txt"}})
-    tool_name = "artifact_read" if full else "read_file"
+    tool_name = "read_artifact" if full else "read_file"
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
         'entry:yym6qf3l4xz6437gradtmhjrke',
@@ -275,7 +275,7 @@ def test_actual_wire_feedback_degrades_only_uninstalled_ordinary_results(
         cold=cold,
         budget=11000 if provenance else 8000,
         tool_items=items,
-        tool_names=("read_file", "artifact_read"),
+        tool_names=("read_file", "read_artifact"),
     )
     original = candidate.append_result.compiled_input
     assert (
@@ -336,7 +336,7 @@ def test_final_wire_feedback_excludes_full_and_plan_results(api, full, plan):
         cold=True,
         budget=8000,
         tool_items=items,
-        tool_names=("read_file", "artifact_read"),
+        tool_names=("read_file", "read_artifact"),
     )
     decision = _measure(coordinator, candidate)
     assert (
@@ -389,7 +389,7 @@ def _runner_quote(monkeypatch, calls, api):
         canonical_facts=SimpleNamespace(
             canonical_input=canonical, plan_workflow_fact=None
         ),
-        root_completion_followup_items=0,
+        pending_root_dynamic_followup=False,
     )
     return runner, quote, seen
 
@@ -420,10 +420,10 @@ def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, a
 @pytest.mark.parametrize(
     "name,args",
     (
-        ("artifact_read", {}),
-        ("artifact_export", {}),
-        ("list_capabilities", {}),
-        ("inspect_capability", {"target": {"kind": "MCP_TOOL"}}),
+        ("read_artifact", {}),
+        ("export_artifact", {}),
+        ("query_capabilities", {}),
+        ("query_capabilities", {"target": {"kind": "MCP_TOOL"}}),
         ("ask_plan_question", {}),
     ),
 )
@@ -476,7 +476,7 @@ def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
     calls = sum(
         (
             _named_tool_stream(
-                tool_name="terminal",
+                tool_name="exec_process",
                 tool_call_id=f"call:{i}",
                 arguments={"command": "true"},
             )
@@ -516,7 +516,7 @@ def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
                 CompletedToolCallBlock(
                     derive_id("block", "test-fixture", f"block:{i}"),
                     f"call:{i}",
-                    "terminal",
+                    "exec_process",
                     freeze_json({"command": "true"}),
                 )
             )[3]
@@ -569,7 +569,7 @@ def test_wire_floor_scan_deadline_releases_measurement_and_runs_off_loop(monkeyp
         cold=True,
         budget=8000,
         tool_items=_results("\\" * 8000),
-        tool_names=("read_file", "artifact_read"),
+        tool_names=("read_file", "read_artifact"),
     )
     lowered = []
     real_lower = module.lower_canonical_item
@@ -701,7 +701,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
                 ),
                 plan_workflow_fact=None,
             ),
-            root_completion_followup_items=0,
+            pending_root_dynamic_followup=False,
         )
         allowances = quote.image_call_allowances
         assert len(allowances) == 2

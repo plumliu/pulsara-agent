@@ -89,7 +89,7 @@ def request(owner, ordinal=1, hooks=None):
             turn_id=derive_id("turn", "test-fixture", f"turn:{ordinal}"),
             assistant_entry_id=derive_id("entry", "test-fixture", f"entry:{ordinal}"),
             tool_call_id=f"call:{ordinal}",
-            tool_name="terminal",
+            tool_name="exec_process",
             permission_snapshot=build_run_permission_snapshot(
                 snapshot_id='permission:lsf3jcj5tfegppf2erwmuymj4e',
                 requested_mode=PermissionMode.ASK_PERMISSIONS,

@@ -73,7 +73,7 @@ async def seed_unknown_local_append(session, workspace: Path) -> dict[str, str]:
         guard, cut=cut, entry_id=entry_id,
         parent_content=InlineContent.from_bytes(b""),
         blocks=(AssistantToolCallBlock(
-            derive_id("block", "test-fixture", f"block:prompt-unknown:{suffix}"), call_id, "terminal",
+            derive_id("block", "test-fixture", f"block:prompt-unknown:{suffix}"), call_id, "exec_process",
             freeze_json({"command": command}),
         ),),
         occurred_at=datetime.now(timezone.utc), actor_id="prompt-cognitive-fixture",

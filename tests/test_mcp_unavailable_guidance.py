@@ -71,7 +71,7 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                     plan=retained_plan,
                     builtin=port.sealed_builtin_capability_snapshot(
                         conversation_scope_kind=production.ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        effective_permission_mode=production.PermissionMode.BYPASS_PERMISSIONS,
                     ),
                 )
                 borrow = port.borrow_tool_surface(current)
@@ -112,7 +112,7 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                 assert "not dispatched" in message
                 if change == "schema":
                     assert "direct tool entry has been replaced" in message
-                    assert "inspect_capability" in message and "use_new_mcp_tool" in message
+                    assert "query_capabilities" in message and "use_new_mcp_tool" in message
                     assert "input_schema" in message and "invocation.mode" in message
                     assert "invocation.target" in message
                     assert "cold context" not in message
@@ -120,7 +120,7 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                     assert "server connection is currently unavailable" not in message
                 else:
                     assert "tool is not currently available" in message
-                    assert "inspect_capability" in message
+                    assert "query_capabilities" in message
                     assert "new cold context" not in message
                 inspect_target = json.JSONDecoder().raw_decode(message.split("target=", 1)[1])[0]
                 assert inspect_target == {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name}
@@ -147,8 +147,8 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                         plan=retained_plan,
                         builtin=port.sealed_builtin_capability_snapshot(
                             conversation_scope_kind=production.ModelInputScopeKind.ROOT,
-                            scope_subagent_task_id=None,
-                        ),
+                        effective_permission_mode=production.PermissionMode.BYPASS_PERMISSIONS,
+                            ),
                     )
                     restored_borrow = port.borrow_tool_surface(restored)
                     borrows.append(restored_borrow)

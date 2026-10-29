@@ -116,7 +116,7 @@ async def run(args, report, saved):
                 await turn(
                     "memory_roundtrip",
                     PromptContent.text(
-                        "For this disposable test project, remember the factual fixture 'The reference validation canary is ORCHID-731.' in CURRENT_PROJECT, then use memory_get with the exact returned MEMORY target and report the retrieved statement."
+                        "For this disposable test project, remember the factual fixture 'The reference validation canary is ORCHID-731.' in CURRENT_PROJECT, then use get_memory with the exact returned MEMORY target and report the retrieved statement."
                     ),
                 )
                 tools = common.tool_calls(
@@ -126,14 +126,14 @@ async def run(args, report, saved):
                 ids = [
                     json.loads(t["arguments"])["target"]["memory_id"]
                     for t in tools
-                    if t["tool_name"] == "memory_get"
+                    if t["tool_name"] == "get_memory"
                 ]
                 assert ids and all(is_valid_id(value, "memory") for value in ids)
                 report["checks"]["memory_roundtrip"] = True
                 await turn(
                     "artifact_roundtrip",
                     PromptContent.text(
-                        "Use terminal to run python3 -c \"print('0123456789' * 16000); print('ARTIFACT_CANARY_529')\". The full stdout exceeds the inline preview. Use artifact_read with the returned artifact_id to read the saved output; do not fabricate an ID. Report the artifact ID and the canary at the end."
+                        "Use exec_process to run python3 -c \"print('0123456789' * 16000); print('ARTIFACT_CANARY_529')\". The full stdout exceeds the inline preview. Use read_artifact with the returned artifact_id to read the saved output; do not fabricate an ID. Report the artifact ID and the canary at the end."
                     ),
                 )
                 tools = common.tool_calls(
@@ -142,7 +142,7 @@ async def run(args, report, saved):
                 ids = [
                     json.loads(t["arguments"])["artifact_id"]
                     for t in tools
-                    if t["tool_name"] == "artifact_read"
+                    if t["tool_name"] == "read_artifact"
                 ]
                 assert ids and all(is_valid_id(value, "artifact") for value in ids)
                 report["checks"]["artifact_roundtrip"] = True

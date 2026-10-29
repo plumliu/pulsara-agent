@@ -73,7 +73,7 @@ def _reference_call(ordinal: int) -> CompletedToolCallBlock:
 class _NonmatchingHookView:
     def selected_definitions(self, _event_type):
         definition = SimpleNamespace(
-            matcher=FrozenHookMatcherFact("terminal", False)
+            matcher=FrozenHookMatcherFact("exec_process", False)
         )
         return ((0, definition),)
 

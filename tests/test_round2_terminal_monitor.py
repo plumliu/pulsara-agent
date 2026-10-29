@@ -98,7 +98,7 @@ def test_round2_terminal_streams_before_physical_completion_for_pipe_and_pty(
             invoke_direct_tool(
                 port,
                 session_id=session_id,
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments={
                     "command": (
                         f'{sys.executable} -u -c "import time; '
@@ -148,7 +148,7 @@ def test_round2_tool_close_terminates_process_before_draining_terminal_thread(
             invoke_direct_tool(
                 port,
                 session_id='session:pr52nocqxglhwexlvqa2agq3bi',
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments={
                     "command": (
                         f'{sys.executable} -u -c "import time; '
@@ -196,7 +196,7 @@ def test_round2_foreground_and_yielded_cd_leave_workspace_default(
             result = await invoke_direct_tool(
                 port,
                 session_id='session:yb3rgzdbtfst4jirqaeox4wo6a',
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments={"command": command, "yield_time_ms": yield_time_ms},
                 tool_call_id=_name("call"),
                 attempt_id=_name("attempt"),
@@ -212,7 +212,7 @@ def test_round2_foreground_and_yielded_cd_leave_workspace_default(
         await invoke_direct_tool(
             port,
             session_id='session:yb3rgzdbtfst4jirqaeox4wo6a',
-            tool_name="terminal_process",
+            tool_name="manage_process",
             arguments={
                 "action": "wait",
                 "target": {"kind": "PROCESS", "process_id": yielded["target"]["process_id"]},
@@ -602,7 +602,7 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
         started = await invoke_direct_tool(
             port,
             session_id=session_id,
-            tool_name="terminal",
+            tool_name="exec_process",
             arguments={"command": "sleep 30", "yield_time_ms": 0},
             tool_call_id="call:start-monitor-tool",
             attempt_id='attempt:g4r6guogbojouzzzss6dh5ipxm',
@@ -630,7 +630,7 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
             port,
             session_id=session_id,
             workspace_id='workspace:n6yg6xfimeb4eiul4gaa43wgmu',
-            tool_name="terminal_monitor",
+            tool_name="manage_monitor",
             tool_call_id="call:different",
             attempt_id='attempt:a4vormydvcekppxzkllhhenat4',
             turn_id='turn:pbibxkwjanwckkd7eyjqxpwfhq',
@@ -639,7 +639,7 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
         with pytest.raises(RuntimeError, match="exact-join"):
             try:
                 await port.invoke(
-                    tool_name="terminal_monitor",
+                    tool_name="manage_monitor",
                     arguments={"action": "register", "target": process_target},
                     tool_call_id="call:mismatch",
                     attempt_id='attempt:fk2b4bgdvgqqfszf3rakbgz6tm',
@@ -657,11 +657,11 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
             session_id=child_session, live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(), shared_terminal_owner=port)
         child_surface = prepare_test_direct_tool_surface(child_port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
-        assert "terminal_monitor" in {spec.name for spec in child_surface.model_surface.tool_specs}
+        assert "manage_monitor" in {spec.name for spec in child_surface.model_surface.tool_specs}
 
         async def invoke_child(label, arguments):
             return await invoke_direct_tool(child_port, session_id=child_session,
-                tool_name="terminal_monitor", arguments=arguments, tool_call_id=f"call:child-{label}",
+                tool_name="query_monitors" if label == "list" else "manage_monitor", arguments=arguments, tool_call_id=f"call:child-{label}",
                 attempt_id=random_id("attempt"), turn_id=child_turn, assistant_entry_id=random_id("entry"),
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
 
@@ -671,7 +671,7 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
             ProcessLocalEffectSettlementDisposition.COMMITTED)
         child_body = json.loads(child_registered.content)
         assert port.terminal_monitor_coordinator.registration_scope(child_body["target"]["monitor_id"]) == (child_session, child_session, child_turn)
-        assert len(json.loads((await invoke_child("list", {"action": "list"})).content)["monitors"]) == 1
+        assert len(json.loads((await invoke_child("list", {})).content)["monitors"]) == 1
         child_cancelled = await invoke_child("cancel", {"action": "cancel", "target": child_body["target"]})
         assert json.loads(child_cancelled.content)["status"] == "CANCELLED"
         await child_port.aclose(timeout_seconds=3)
@@ -679,7 +679,7 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
 
         registered = await invoke_root(
             "ROOT",
-            "terminal_monitor",
+            "manage_monitor",
             {"action": "register", "target": process_target},
         )
         registration_result = json.loads(registered.content)
@@ -698,7 +698,7 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
 
         duplicate = await invoke_root(
             "duplicate",
-            "terminal_monitor",
+            "manage_monitor",
             {"action": "register", "target": process_target},
         )
         assert json.loads(duplicate.content) == {
@@ -707,33 +707,33 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
         }
         unknown = await invoke_root(
             "missing",
-            "terminal_monitor",
+            "manage_monitor",
             {"action": "register", "target": {"kind": "PROCESS", "process_id": 'process:vxwpzdmzto7uhw6jrpqmtojroy'}},
         )
         assert json.loads(unknown.content) == {
             "reason": "PROCESS_NOT_FOUND",
             "status": "REJECTED",
         }
-        inventory = await invoke_root("list", "terminal_monitor", {"action": "list"})
+        inventory = await invoke_root("list", "query_monitors", {})
         monitors = json.loads(inventory.content)["monitors"]
         assert len(monitors) == 1 and monitors[0]["state"] == "ACTIVE"
         assert monitors[0]["target"] == registration_result["target"]
         assert monitors[0]["process_target"] == process_target
         cancelled = await invoke_root(
             "cancel",
-            "terminal_monitor",
+            "manage_monitor",
             {"action": "cancel", "target": monitors[0]["target"]},
         )
         assert json.loads(cancelled.content)["cancellation_outcome"] == "cancelled"
         assert json.loads(cancelled.content)["target"] == registration_result["target"]
         cancelled_again = await invoke_root(
-            "cancel-again", "terminal_monitor",
+            "cancel-again", "manage_monitor",
             {"action": "cancel", "target": registration_result["target"]},
         )
         assert json.loads(cancelled_again.content)["cancellation_outcome"] == "already_terminal"
         assert json.loads(cancelled_again.content)["status"] == "REJECTED"
         processes = await invoke_root(
-            "list-processes", "terminal_process", {"action": "list"}
+            "list-processes", "query_processes", {}
         )
         process = json.loads(processes.content)["processes"][0]
         assert process["status"] == "running"
@@ -751,12 +751,12 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
         }
         await invoke_root(
             "kill-process",
-            "terminal_process",
+            "manage_process",
             {"action": "kill", "target": {"kind": "PROCESS", "process_id": process_id}},
         )
         terminal = await invoke_root(
             "terminal-process",
-            "terminal_monitor",
+            "manage_monitor",
             {"action": "register", "target": process_target},
         )
         assert json.loads(terminal.content) == {
@@ -789,7 +789,7 @@ def test_round2_malformed_monitor_input_uses_common_invalid_arguments_contract(
             decision = await authorize_direct_tool(
                 port,
                 session_id=session_id,
-                tool_name="terminal_monitor",
+                tool_name="manage_monitor",
                 arguments=arguments,
                 tool_call_id=_name("call"),
                 turn_id=_name("turn"),
@@ -823,7 +823,7 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
             port,
             session_id='session:p4dfhpwhrtwwusdq4xpm5xludi',
             workspace_id='workspace:nwvy5eoruiyt7xwudvbidfgonu',
-            tool_name="terminal",
+            tool_name="exec_process",
             arguments={"command": "sleep 0.15", "yield_time_ms": 0},
             tool_call_id="call:child-origin",
             attempt_id='attempt:bvznwpxsjqpdc7yav4lgfvvbkq',

@@ -120,7 +120,7 @@ def _canonical_code_calls(database, *, code_result_body=b'private-code-physical-
     exec_entry, exec_call, exec_attempt = (random_id(k) for k in ('entry','call','attempt'))
     repository.commit_assistant_message(lease.guard, cut=cut, entry_id=exec_entry,
         parent_content=InlineContent.from_bytes(b'program request'), blocks=(AssistantToolCallBlock(
-            block_id=random_id('block'), tool_call_id=exec_call, tool_name='exec', arguments=freeze_json({'code':'return 1;'})),),
+            block_id=random_id('block'), tool_call_id=exec_call, tool_name='exec_cell', arguments=freeze_json({'code':'return 1;'})),),
         occurred_at=datetime.now(timezone.utc), actor_id='model:test', deadline_monotonic=deadline)
     permission = _assistant_permission_fingerprint(repository, lease.guard, exec_entry, deadline)
     repository.accept_tool_attempt(lease.guard, attempt_id=exec_attempt, assistant_entry_id=exec_entry,
@@ -219,7 +219,7 @@ def test_real_host_code_calls_parallel_then_continue_after_source_turn_final(tmp
     code = '''
 const order = [];
 await Promise.all([
-  tools.terminal({command:"sleep 0.3; printf slow", yield_time_ms:1000}).then(x => order.push("slow")),
+  tools.exec_process({command:"sleep 0.3; printf slow", yield_time_ms:1000}).then(x => order.push("slow")),
   tools.read_file({target:{kind:"PATH",path:"source.txt"}}).then(x => order.push("fast"))
 ]);
 const read = await tools.read_file({target:{kind:"PATH",path:"source.txt"}});
@@ -238,21 +238,21 @@ return {finished:true};
             body = str(decode_tool_result_observation(text_part_values(message.content)[0])['body'])
             assert 'after-source-final' not in body
         if index == 1:
-            payloads = _tool_call('exec', random_id('call'), {'code':code,'yield_time_ms':0})
+            payloads = _tool_call('exec_cell', random_id('call'), {'code':code,'yield_time_ms':0})
         elif index == 2:
             body = str(decode_tool_result_observation(text_part_values(tool_messages[-1].content)[0])['body'])
             observation = json.loads(body)
-            cell_id = observation['cell_id']
+            cell_id = observation['target']['cell_id']
             bodies.append(observation)
             payloads = _text('first-final','FIRST_SOURCE_FINAL')
         elif index == 3:
-            payloads = _tool_call('wait_exec', random_id('call'), {'cell_id':cell_id,'yield_time_ms':1000})
+            payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
         else:
             body = str(decode_tool_result_observation(text_part_values(tool_messages[-1].content)[0])['body'])
             observation = json.loads(body)
             bodies.append(observation)
             if observation['state'] in ('running','queued') or observation['has_more']:
-                payloads = _tool_call('wait_exec', random_id('call'), {'cell_id':cell_id,'yield_time_ms':1000})
+                payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
             else:
                 payloads = _text('second-final','SECOND_FINAL')
         for payload in payloads:
@@ -298,24 +298,24 @@ def test_real_host_stop_settles_effect_and_large_output_pages_keep_artifact(mode
     bodies = []
     cell_id = None
     stopped = False
-    code = ('await tools.terminal({command:"printf started > launched; sleep 0.3; printf late-result",yield_time_ms:1000}); console.log("unreachable");'
+    code = ('await tools.exec_process({command:"printf started > launched; sleep 0.3; printf late-result",yield_time_ms:1000}); console.log("unreachable");'
             if mode == 'stop' else 'console.log("x".repeat(50000)); console.log("tail-record");')
     if mode == 'unicode':
         code = 'console.log("\\ud800"); return "\\ud800";'
     if mode == 'terminal_artifact':
         command = "head -c 50000 /dev/zero | tr '\\0' x"
-        code = 'const result = await tools.terminal(' + json.dumps({'command':command,'yield_time_ms':1000,'max_output_chars':512}) + '); console.log({artifact:result.output_artifact});'
+        code = 'const result = await tools.exec_process(' + json.dumps({'command':command,'yield_time_ms':1000,'max_output_chars':512}) + '); console.log({artifact:result.output_artifact});'
 
     async def stream(request):
         nonlocal cell_id, stopped
         index = len(model.requests)
         if index == 1:
-            payloads = _tool_call('exec', random_id('call'), {'code':code,'yield_time_ms':0 if mode == 'stop' else 1000})
+            payloads = _tool_call('exec_cell', random_id('call'), {'code':code,'yield_time_ms':0 if mode == 'stop' else 1000})
         else:
             message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
             body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
             bodies.append(body)
-            cell_id = body['cell_id']
+            cell_id = body['target']['cell_id']
             if mode == 'stop' and not stopped:
                 deadline = monotonic() + 5
                 while not (tmp_path / 'launched').exists():
@@ -323,9 +323,9 @@ def test_real_host_stop_settles_effect_and_large_output_pages_keep_artifact(mode
                         raise AssertionError('physical terminal effect did not begin')
                     await asyncio.sleep(0.01)
                 stopped = True
-                payloads = _tool_call('stop_exec', random_id('call'), {'cell_id':cell_id})
+                payloads = _tool_call('manage_cell', random_id('call'), {'action':'stop','target':{'kind':'CELL','cell_id':cell_id}})
             elif body.get('has_more') or body.get('pending_calls') or body['state'] in ('running','queued'):
-                payloads = _tool_call('wait_exec', random_id('call'), {'cell_id':cell_id,'yield_time_ms':1000})
+                payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
             else:
                 payloads = _text('final','OBSERVED')
         for payload in payloads:
@@ -357,12 +357,12 @@ def test_real_host_stop_settles_effect_and_large_output_pages_keep_artifact(mode
                 artifact = json.loads(record['text'])['artifact']
                 assert artifact['disposition'] == 'AVAILABLE'
                 assert artifact['source_coverage'] == 'COMPLETE'
-                port = session._tools._tools['artifact_read'].artifact_read_port
+                port = session._tools._tools['read_artifact'].artifact_read_port
                 content = await asyncio.to_thread(port.read_body, artifact['target']['artifact_id'])
                 assert content.content == b'x' * 50000
             else:
                 archived = next(record['output_artifact'] for record in records if 'output_artifact' in record)
-                port = session._tools._tools['artifact_read'].artifact_read_port
+                port = session._tools._tools['read_artifact'].artifact_read_port
                 content = await asyncio.to_thread(port.read_body, archived['target']['artifact_id'])
                 assert json.loads(content.content) == {'kind':'log','text':'x'*50000}
                 assert records[-1] == {'kind':'log','text':'tail-record'}
@@ -461,13 +461,13 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
         if index == 1:
             payloads = ()
             for label, duration in (('A',0.4),('B',0.05)):
-                code = 'await tools.terminal(' + json.dumps({'command':f'sleep {duration}; printf {label} >> order.txt','yield_time_ms':1000}) + '); return ' + json.dumps(label) + ';'
-                payloads += _tool_call('exec', random_id('call'), {'code':code,'yield_time_ms':0})
+                code = 'await tools.exec_process(' + json.dumps({'command':f'sleep {duration}; printf {label} >> order.txt','yield_time_ms':1000}) + '); return ' + json.dumps(label) + ';'
+                payloads += _tool_call('exec_cell', random_id('call'), {'code':code,'yield_time_ms':0})
         elif index == 2:
             assert len(messages) == 2
             for message in messages:
                 observed = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
-                cells.append(observed['cell_id'])
+                cells.append(observed['target']['cell_id'])
                 observations.append(observed)
             payloads = _tool_call('read_file', random_id('call'), {'target':{'kind':'PATH','path':'source.txt'}})
         else:
@@ -481,7 +481,7 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
                     remaining.pop(0)
             if remaining:
                 cell = cells[1] if remaining[0] == 'B' else cells[0]
-                payloads = _tool_call('wait_exec', random_id('call'), {'cell_id':cell,'yield_time_ms':1000})
+                payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell},'yield_time_ms':1000})
             else:
                 payloads = _text('done','BOTH_CELLS_SETTLED')
         for payload in payloads:
@@ -556,14 +556,14 @@ def test_batch_hooks_reject_changed_identity_and_keep_accepted_work_after_post_f
             root_calls += 1
             if root_calls == 1:
                 code = 'try { const admitted=await tools.run_agent.batch({first:{instruction:"first work"},second:{instruction:"second work"}});console.log(admitted); } catch(error) { console.log({rejected:error.code}); }'
-                payloads = _tool_call('exec',random_id('call'),{'code':code,'yield_time_ms':1000})
+                payloads = _tool_call('exec_cell',random_id('call'),{'code':code,'yield_time_ms':1000})
             else:
                 message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
                 page = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
                 pages.append(page)
-                cell_id = page['cell_id']
+                cell_id = page['target']['cell_id']
                 if page['state'] in ('running','queued') or page.get('pending_calls') or page['has_more']:
-                    payloads = _tool_call('wait_exec',random_id('call'),{'cell_id':cell_id,'yield_time_ms':1000})
+                    payloads = _tool_call('manage_cell',random_id('call'),{'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
                 else:
                     payloads = _text('root-final','BATCH_ACCEPTED')
         for payload in payloads:
@@ -613,12 +613,12 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
     from pulsara_agent.conversation_kernel.memory.contracts import FrozenModelCallMemoryContext
     from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
     from tests.support.round3 import prepare_test_direct_tool_surface
-    operations = {'exec','wait_exec','stop_exec','run_agent','list_agents','inspect_agent','send_agent_message','wait_agent','stop_agent'}
+    operations = {'exec_cell','query_cells','manage_cell','run_agent','query_agents','send_agent_message','wait_agent','stop_agent'}
     mode = PermissionMode(permission_mode)
     async def scenario():
         port = DirectKernelToolPort(workspace_root=tmp_path,host_owner_id='mode-host',session_id=random_id('session'),
             live_bus=LiveAgentEventBus(),authorization_policy=DefaultToolDispatchAuthorizationPolicy())
-        port.bind_subagent_port(SimpleNamespace(tool_names=frozenset(operations-{'exec','wait_exec','stop_exec'}),
+        port.bind_subagent_port(SimpleNamespace(tool_names=frozenset(operations-{'exec_cell','query_cells','manage_cell'}),
             validate_arguments=lambda **_:None))
         port.bind_code_mode_port(object())
         try:
@@ -628,7 +628,7 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
             assert names.intersection(operations) == (operations if mode is PermissionMode.BYPASS_PERMISSIONS else set())
             if mode is not PermissionMode.BYPASS_PERMISSIONS:
                 # A retained epoch may still carry these exact schemas. The
-                # new turn's execution permission rejects all nine operations.
+                # new turn's execution permission rejects every operation.
                 retained = prepare_test_direct_tool_surface(port,conversation_scope_kind=ModelInputScopeKind.ROOT,
                     effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
                 prefix = tuple(item.canonical_bytes for item in retained.model_surface.tool_specs)
@@ -636,8 +636,8 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
                 permission = build_run_permission_snapshot(snapshot_id=random_id('permission'),requested_mode=mode,
                     effective_mode=mode,admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
                 agent = {'kind':'AGENT','agent_id':random_id('session')}
-                arguments = {'exec':{'code':'return 1;'},'wait_exec':{'cell_id':'existing-cell'},'stop_exec':{'cell_id':'existing-cell'},
-                    'run_agent':{'instruction':'work'},'list_agents':{},'inspect_agent':{'target':agent},
+                arguments = {'exec_cell':{'code':'return 1;'},'manage_cell':{'action':'wait','target':{'kind':'CELL','cell_id':'cell:'+'a'*26}},'query_cells':{},
+                    'run_agent':{'instruction':'work'},'query_agents':{'target':agent},
                     'send_agent_message':{'target':agent,'message':'hello'},'wait_agent':{'targets':[agent]},'stop_agent':{'target':agent}}
                 try:
                     for name in operations:

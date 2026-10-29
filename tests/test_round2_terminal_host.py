@@ -103,7 +103,7 @@ class _TerminalMonitorDogfoodModel:
         call_index = len(self.requests)
         if call_index == 1:
             payloads = _tool_call(
-                "terminal",
+                "exec_process",
                 "call:round2-terminal",
                 {
                     "command": self.command,
@@ -126,7 +126,7 @@ class _TerminalMonitorDogfoodModel:
                     break
             assert process_id is not None
             payloads = _tool_call(
-                "terminal_monitor",
+                "manage_monitor",
                 "call:round2-monitor",
                 {"action": "register", "target": {"kind": "PROCESS", "process_id": process_id}},
             )

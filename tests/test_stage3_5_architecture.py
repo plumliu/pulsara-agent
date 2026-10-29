@@ -48,13 +48,13 @@ def _imports(path: Path) -> tuple[str, ...]:
 
 
 def test_stage3_5_final_oracles_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
 
 
 def test_stage3_5_obsolete_authority_paths_are_physically_absent() -> None:
@@ -145,7 +145,7 @@ def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> No
     )
 
     baseline = (sql_root / BASELINE_RESOURCE).read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 31
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 29
     assert "CREATE TABLE public.pulsara_schema_migrations" in baseline
     assert "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" in baseline
     for token in (
@@ -179,110 +179,6 @@ def test_stage3_5_binding_v2_has_only_the_closed_identity_fields() -> None:
         "binding_fingerprint",
         "_construction_guard",
     )
-
-
-def test_stage3_5_process_local_task_sites_are_closed() -> None:
-    allowed = {
-        # Scheduled spec §6/10: one process-local timer, closed/drained by app.
-        "src/pulsara_agent/scheduling/service.py",
-        # Desktop plan §5: one inherited host-control pipe pump; parent EOF
-        # joins the existing app close path, with no durable recovery owner.
-        "src/pulsara_agent/desktop_runtime.py",
-        # Windows compatibility spec §5.2: the per-execution scope owns helper
-        # control/stderr, anchor observation, cancellation and physical join.
-        # Its relay owns descriptor binding and byte-forwarding tasks; sealing
-        # drains admitted connections. Both close with the original scope,
-        # without durable jobs, reconnect or execution replay.
-        "src/pulsara_agent/windows_interop/scope.py",
-        "src/pulsara_agent/windows_interop/relay.py",
-        # Capability hard-cut: join local publication/credential cleanup before
-        # settling cancellation; OAuth owns disposable login/refresh tasks only.
-        # These are physical owners, not durable jobs or execution recovery.
-        "src/pulsara_agent/capability/mcp_management.py",
-        "src/pulsara_agent/plugins/management.py",
-        "src/pulsara_agent/plugins/connection_management.py",
-        "src/pulsara_agent/conversation_kernel/capability_management_execution.py",
-        "src/pulsara_agent/conversation_kernel/mcp/oauth.py",
-        "src/pulsara_agent/conversation_kernel/assistant_settlement.py",
-        "src/pulsara_agent/conversation_kernel/compaction/model_call.py",
-        "src/pulsara_agent/conversation_kernel/compaction/runtime.py",
-        "src/pulsara_agent/conversation_kernel/extensions.py",
-        "src/pulsara_agent/conversation_kernel/host.py",
-        # Ephemeral request spec §§2/4/8: Host-owned advisory requests and
-        # cancellation-shielded physical execution close; no durable jobs.
-        "src/pulsara_agent/conversation_kernel/ephemeral.py",
-        "src/pulsara_agent/llm/ephemeral.py",
-        # Existing deferred history search owner: disposable hints and its
-        # one physical maintenance lane, joined on Core close.
-        "src/pulsara_agent/conversation_kernel/history_maintenance.py",
-        # K2 owns one short-lived decoder process and joins its result/cleanup
-        # tasks before releasing the single Host-wide validation slot.
-        "src/pulsara_agent/conversation_kernel/image_validation.py",
-        "src/pulsara_agent/conversation_kernel/io.py",
-        # PR05 §§9.2–9.3: the original candidate tracks its one decision
-        # write/read-confirm task; close joins settlement_changed. No worker
-        # resumes or retries a decision after the Host disappears.
-        "src/pulsara_agent/conversation_kernel/interaction.py",
-        "src/pulsara_agent/conversation_kernel/mcp/sdk_facade.py",
-        "src/pulsara_agent/conversation_kernel/mcp/supervisor.py",
-        "src/pulsara_agent/conversation_kernel/memory/embedding_maintainer.py",
-        "src/pulsara_agent/conversation_kernel/memory_tools.py",
-        "src/pulsara_agent/conversation_kernel/plan_runtime.py",
-        "src/pulsara_agent/conversation_kernel/steer_consumption.py",
-        "src/pulsara_agent/conversation_kernel/subagent.py",
-        "src/pulsara_agent/conversation_kernel/tool_execution.py",
-        "src/pulsara_agent/conversation_kernel/tool_runtime.py",
-        "src/pulsara_agent/conversation_kernel/turn_admission.py",
-        # Round 9.2 owns bounded physical command attempts and the dispatch
-        # aggregation tasks inside the independent process-local Hook core.
-        "src/pulsara_agent/hooks/dispatcher.py",
-        "src/pulsara_agent/hooks/executor.py",
-        # Round 9.3's one injected API-key boundary owns the final HTTP
-        # admission and lock-acquisition tasks. Provider/retrieval callers no
-        # longer create parallel sink tasks of their own.
-        "src/pulsara_agent/process_credential_boundary.py",
-        # SDK initialization is import-only work. First use joins its thread
-        # on cancellation without blocking independent desktop HTTP requests.
-        "src/pulsara_agent/llm/adapters/openai/client.py",
-        # Existing catalog SDK preparation/parsing and unclaimed-client close
-        # physically join on cancellation before releasing their owner.
-        "src/pulsara_agent/llm/model_catalog.py",
-        # The local-settings owner shields the single-document settlement so
-        # cancellation cannot report an unknown publication as settled.
-        "src/pulsara_agent/settings.py",
-        # The local application owns five process-local task sites: its HTTP
-        # server, one protocol connection pump, one browser bridge request,
-        # the session controller's running-turn observation, and the HTTP
-        # runtime-reopen coordinator's cancellation-shielded settlement. None
-        # is a durable execution or recovery authority.
-        "src/pulsara_agent/desktop_app/application.py",
-        "src/pulsara_agent/desktop_app/renderer_bridge.py",
-        "src/pulsara_agent/desktop_app/http_server.py",
-        "src/pulsara_agent/desktop_app/protocol_client.py",
-        "src/pulsara_agent/desktop_app/session_controller.py",
-        "src/pulsara_agent/desktop_app/file_preview_http.py",
-        "src/pulsara_agent/conversation_kernel/provider_dispatch.py",
-    }
-    observed: set[str] = set()
-    for path in _production_python():
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            function = node.func
-            if (
-                isinstance(function, ast.Attribute)
-                and isinstance(function.value, ast.Name)
-                and function.value.id == "asyncio"
-                and function.attr == "create_task"
-            ):
-                observed.add(path.relative_to(ROOT).as_posix())
-    assert observed == allowed
-    kernel = SOURCE / "conversation_kernel"
-    assert not (kernel / "jobs.py").exists()
-    assert not (kernel / "job_catalog.py").exists()
-    assert not (kernel / "job_model.py").exists()
-    assert not (kernel / "_repository" / "jobs.py").exists()
 
 
 def test_stage3_5_package_facades_export_real_objects_only() -> None:

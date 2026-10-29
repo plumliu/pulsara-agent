@@ -306,7 +306,7 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                         name, args = native, {"value": "obsolete"}
                     elif index == 2:
                         name, args = (
-                            "inspect_capability",
+                            "query_capabilities",
                             {
                                 "target": {
                                     "kind": "MCP_TOOL",
@@ -329,7 +329,7 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                         )
                     elif index == 2:
                         name, args = (
-                            "inspect_capability",
+                            "query_capabilities",
                             {
                                 "target": {
                                     "kind": "MCP_TOOL",
@@ -346,7 +346,7 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                 elif stage == 4:
                     if index == 1:
                         name, args = (
-                            "inspect_capability",
+                            "query_capabilities",
                             {
                                 "target": {
                                     "kind": "MCP_TOOL",

@@ -498,7 +498,7 @@ def _read_root_tool_rows(
 
 
 async def _run_graph(session) -> dict[str, object]:
-    prompt = """Use create_agent_tasks exactly once to create this six-task graph. After dispatching it, continue useful independent work by reading pyproject.toml and identifying the project version. Do not call list_agents or poll task status. Use wait_agent only if the current response is genuinely blocked on delegated work. A targeted settle=all wait remains suspended through partial and unrelated completions, and returns only when every exact target is terminal, an exact-turn steer arrives, or the timeout expires. It is valid for background tasks to outlive this foreground response.
+    prompt = """Use create_agent_tasks exactly once to create this six-task graph. After dispatching it, continue useful independent work by reading pyproject.toml and identifying the project version. Do not call query_agents or poll task status. Use wait_agent only if the current response is genuinely blocked on delegated work. A targeted settle=all wait remains suspended through partial and unrelated completions, and returns only when every exact target is terminal, an exact-turn steer arrives, or the timeout expires. It is valid for background tasks to outlive this foreground response.
 
 Chain:
 - key a, default context (omit context): call report_agent_result alone with summary A_EXPLICIT_OK.
@@ -692,7 +692,7 @@ async def _run_last_n_and_message(session, workspace: Path) -> dict[str, object]
         f"while [ ! -f {shlex.quote(os.fspath(release_path))} ]; "
         "do sleep 0.1; done; echo WORKER_BOUNDARY_DONE"
     )
-    initial_prompt = f"""Create exactly one worker with spawn_agent and task_name context_worker. Use context mode last_n with turns=1. Its objective must tell it to inspect PARENT_CONTEXT, then call terminal once with command {hold_command!r}, wait for that tool result, incorporate any inter-agent message delivered after the tool group, and finally call report_agent_result alone with a summary listing every distinct ROOT marker and mailbox instruction it actually observed. Do not copy marker values into the objective. Return immediately after spawn; do not wait for the worker."""
+    initial_prompt = f"""Create exactly one worker with spawn_agent and task_name context_worker. Use context mode last_n with turns=1. Its objective must tell it to inspect PARENT_CONTEXT, then call exec_process once with command {hold_command!r}, wait for that tool result, incorporate any inter-agent message delivered after the tool group, and finally call report_agent_result alone with a summary listing every distinct ROOT marker and mailbox instruction it actually observed. Do not copy marker values into the objective. Return immediately after spawn; do not wait for the worker."""
     run = asyncio.create_task(
         session.run_turn(
             PromptContent.text(initial_prompt),
@@ -798,7 +798,7 @@ async def _run_wait_input_matrix(session, workspace: Path) -> dict[str, object]:
         f"while [ ! -f {shlex.quote(os.fspath(release_path))} ]; "
         "do sleep 0.1; done; echo WAIT_INPUT_CHILD_DONE"
     )
-    prompt = f"""Create exactly one general_worker task with task_key wait_input_child. Its objective must call terminal once with command {hold_command!r}; after the command completes it must call report_agent_result alone with summary WAIT_INPUT_CHILD_DONE. After create_agent_tasks succeeds, call wait_agent exactly once for its exact task ID with settle=all and timeout_seconds=120. If that wait is interrupted by an exact steer, acknowledge the exact steer marker and finish this ROOT without calling wait again. Do not return before create_agent_tasks and wait_agent have both been called."""
+    prompt = f"""Create exactly one general_worker task with task_key wait_input_child. Its objective must call exec_process once with command {hold_command!r}; after the command completes it must call report_agent_result alone with summary WAIT_INPUT_CHILD_DONE. After create_agent_tasks succeeds, call wait_agent exactly once for its exact task ID with settle=all and timeout_seconds=120. If that wait is interrupted by an exact steer, acknowledge the exact steer marker and finish this ROOT without calling wait again. Do not return before create_agent_tasks and wait_agent have both been called."""
     root_run = asyncio.create_task(
         session.run_turn(
             PromptContent.text(prompt),
@@ -915,7 +915,7 @@ async def _run_untargeted_completion_wait(
         "do sleep 0.1; done; echo UNTARGETED_BLOCKER_DONE"
     )
     spawn_result = await session.run_turn(
-        PromptContent.text(f"""Use create_agent_tasks exactly once to create five independent general_worker tasks in this exact order. Task untargeted_waker must call terminal once with command {waker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_WAKER_DONE. Tasks untargeted_blocker1, untargeted_blocker2, untargeted_blocker3, and untargeted_blocker4 must each call terminal once with command {blocker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_BLOCKER_DONE. Return immediately after creation. Do not call wait_agent or list_agents."""),
+        PromptContent.text(f"""Use create_agent_tasks exactly once to create five independent general_worker tasks in this exact order. Task untargeted_waker must call exec_process once with command {waker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_WAKER_DONE. Tasks untargeted_blocker1, untargeted_blocker2, untargeted_blocker3, and untargeted_blocker4 must each call exec_process once with command {blocker_command!r}, wait for that command to finish, then call report_agent_result alone with summary UNTARGETED_BLOCKER_DONE. Return immediately after creation. Do not call wait_agent or query_agents."""),
         command_id='command:toihwis77b6n6zez2aq4ekglaq',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
     )
@@ -948,7 +948,7 @@ async def _run_untargeted_completion_wait(
         session.run_turn(
             PromptContent.text("Call wait_agent exactly once with no task_ids and timeout_seconds=120. "
             "After it returns, use only the completion message delivered after the "
-            "tool closes and quote the exact child summary. Do not call list_agents."),
+            "tool closes and quote the exact child summary. Do not call query_agents."),
             command_id='command:cerc2n654u4z6gi3uva4q4a76q',
             requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
@@ -1042,7 +1042,7 @@ async def _run_capacity_mcp_compaction(session, workspace: Path) -> dict[str, ob
     )
     prompt = f"""Use create_agent_tasks exactly once to create five independent tasks in the order shown, then return immediately without list or wait.
 
-For cap0, cap1, cap2, and cap3, use general_worker, default context, and this objective: call terminal once with command {hold_command!r}; after the terminal result call report_agent_result alone with summary CAPACITY_HOLD_OK.
+For cap0, cap1, cap2, and cap3, use general_worker, default context, and this objective: call exec_process once with command {hold_command!r}; after the terminal result call report_agent_result alone with summary CAPACITY_HOLD_OK.
 
 For the fifth task use key mcp_queued, general_worker, default context, and this objective: when you physically start, call native tool mcp__child__direct_echo exactly once with text PRESTART_MCP_MARKER; after its result call report_agent_result alone with a self-contained summary containing the exact remote result.
 

@@ -117,9 +117,11 @@ Important tool aliases and public names are:
 
 | Pulsara tool | Matcher candidates | Public `tool_name` |
 |---|---|---|
-| `terminal` | `terminal`, `Bash` | `terminal` |
-| `terminal_process` | `terminal_process` | `terminal_process` |
-| `terminal_monitor` | `terminal_monitor` | `terminal_monitor` |
+| `exec_process` | `exec_process`, `Bash` | `exec_process` |
+| `query_processes` | `query_processes` | `query_processes` |
+| `manage_process` | `manage_process` | `manage_process` |
+| `query_monitors` | `query_monitors` | `query_monitors` |
+| `manage_monitor` | `manage_monitor` | `manage_monitor` |
 | `edit_file` | `edit_file`, `apply_patch`, `Edit` | `edit_file` |
 | `write_file` | `write_file`, `apply_patch`, `Write` | `write_file` |
 | `read_file` | `read_file`, `Read` | `read_file` |
@@ -129,7 +131,7 @@ Important tool aliases and public names are:
 
 Other builtins use their exact Pulsara descriptor name. `edit_file` and
 `write_file` keep their real Pulsara input schemas; they do not acquire a fake
-Codex `command` argument. `terminal_process` and `terminal_monitor` are independent
+Codex `command` argument. `manage_process` and `manage_monitor` are independent
 tool calls, not transparent `write_stdin` continuations of `Bash`. A Hook that
 depends on those vendor transport semantics is not convertible.
 
@@ -155,10 +157,10 @@ model: string
 For every event, `cwd` and the hook command's working directory are the current
 workspace root. A prior terminal command's `cd` does not change either value.
 For terminal tool events, inspect `tool_input.workdir` for that command's explicit
-working directory; its omission also means the workspace root. For `terminal_process`
-object actions and `terminal_monitor` register/cancel, the selected object is in
+working directory; its omission also means the workspace root. For `manage_process`
+object actions and `manage_monitor` register/cancel, the selected object is in
 `tool_input.target`: `PROCESS` carries `process_id`, and `MONITOR` carries
-`monitor_id`. List actions have no target. Hooks receive these public objects
+`monitor_id`. Collection queries omit target; exact queries carry only target. Hooks receive these public objects
 unchanged.
 
 Event-specific fields are:
@@ -175,7 +177,7 @@ Event-specific fields are:
 | `Stop` | `turn_id`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
 
 `permission_mode` is one of `default`, `acceptEdits`, `plan`, `dontAsk`, or
-`bypassPermissions`. Scripts receive Pulsara tool names and parameters; aliases never translate stdin or script-internal comparisons. File operations identify their file in `tool_input.target.path`; terminal process and monitor actions use `tool_input.target` for the selected PROCESS or MONITOR. The `terminal` startup command and workdir remain top-level parameters. There is no pulsara_tool_name field. Configuration conversion does not prove arbitrary vendor scripts work.
+`bypassPermissions`. Scripts receive Pulsara tool names and parameters; aliases never translate stdin or script-internal comparisons. File operations identify their file in `tool_input.target.path`; terminal process and monitor actions use `tool_input.target` for the selected PROCESS or MONITOR. The `exec_process` startup command and workdir remain top-level parameters. There is no pulsara_tool_name field. Configuration conversion does not prove arbitrary vendor scripts work.
 
 `transcript_path` and `agent_transcript_path` are deliberately null. Hook stdin
 does not contain Plugin identity, install paths, private replay, raw artifacts, or

@@ -1004,14 +1004,14 @@ describe('exact prompt projection', () => {
               live_revision: '1', event_type: 'TOOL_CALL_START', draft_identity: 'draft-1',
               turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'tool-1',
               payload: { tool_call_start: {
-                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'terminal',
+                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'exec_process',
               } },
             },
             {
               live_revision: '2', event_type: 'TOOL_CALL_END', draft_identity: 'draft-1',
               turn_id: 'turn-1', scope_kind: 'ROOT', block_id: 'tool-1',
               payload: { tool_call_end: {
-                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'terminal',
+                block_identity: 'tool-1', tool_call_id: 'call-1', tool_name: 'exec_process',
                 arguments_json: JSON.stringify({ command: 'sleep 30' }),
               } },
             },
@@ -1030,7 +1030,7 @@ describe('exact prompt projection', () => {
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
 
     expect(connection.current().messages[0].traces?.[0]).toMatchObject({
-      toolName: 'terminal', title: '运行命令', subtitle: '等待执行结果', command: 'sleep 30',
+      toolName: 'exec_process', title: '运行命令', subtitle: '等待执行结果', command: 'sleep 30',
     });
   });
 
@@ -1408,7 +1408,7 @@ describe('exact prompt projection', () => {
             entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
             blocks: [{
               block_id: 'block-mcp-list', block_kind: 'TOOL_CALL',
-              tool_call_id: 'call-mcp-list', tool_name: 'list_capabilities',
+              tool_call_id: 'call-mcp-list', tool_name: 'query_capabilities',
               tool_arguments_preview: btoa(argumentsJson),
             }],
           }, {
@@ -1429,7 +1429,7 @@ describe('exact prompt projection', () => {
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
     expect(connection.current().messages[0]?.traces?.[0]).toMatchObject({
-      toolName: 'list_capabilities',
+      toolName: 'query_capabilities',
       title: '查看能力',
       argumentsJson,
       resultText,
@@ -2276,13 +2276,13 @@ describe('source text fidelity hard cut', () => {
     expect(json).not.toHaveProperty('output');
   });
 
-  it('does not project terminal_process pending-exit placeholders as real exit codes', async () => {
+  it('does not project manage_process pending-exit placeholders as real exit codes', async () => {
     const entries = [{
       entry_id: 'process-request', turn_id: 'turn-process', entry_sequence: '1',
       entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
       blocks: [{
         block_id: 'process-block', block_kind: 'TOOL_CALL', tool_call_id: 'process-call',
-        tool_name: 'terminal_process',
+        tool_name: 'manage_process',
         tool_arguments_preview: btoa(JSON.stringify({ action: 'poll', process_id: 'process-a' })),
       }],
     }, {

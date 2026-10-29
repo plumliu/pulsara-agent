@@ -72,7 +72,7 @@ def test_observer_writes_report_chat_control_ownership_before_dispatch(tmp_path,
     ("kind", "target_field", "target_id", "record_name", "missing_target_code"),
     [
         ("STOP_ACTIVE_TURN", "target_turn_id", "turn:74y74rvr2pht5lydgxvy57nxgq", "stop_requests", "STOP_REQUEST_INVALID"),
-        ("STOP_CODE_MODE_CELL", "target_cell_id", "cell_00000000000000000000000000000001", "cell_stop_requests", "CELL_CONTROL_REQUEST_INVALID"),
+        ("STOP_CODE_MODE_CELL", "target_cell_id", "cell:aaaaaaaaaaaaaaaaaaaaaaaaae", "cell_stop_requests", "CELL_CONTROL_REQUEST_INVALID"),
         ("TERMINATE_BACKGROUND_PROCESS", "target_process_id", "process:ntcpufb7iult4c2nzqn4ksxvc4", "terminate_requests", "PROCESS_CONTROL_REQUEST_INVALID"),
     ],
 )

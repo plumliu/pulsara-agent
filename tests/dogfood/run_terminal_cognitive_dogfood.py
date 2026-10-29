@@ -74,14 +74,14 @@ async def run(args, report):
             python = shlex.quote(sys.executable)
             repl = f"{python} -u {shlex.quote(str(workspace / 'repl.py'))}"
             prompts = {
-                "directories": "Use terminal to read marker.txt in alpha, then beta, then alpha again, as three separate commands. Then run one command that changes to beta and exports COGNITIVE_FLAG=inside and prints both pwd and that variable. In a final separate terminal call without workdir or terminal session selection, print pwd and the value of COGNITIVE_FLAG. Report observed directories and whether the export persisted.",
+                "directories": "Use exec_process to read marker.txt in alpha, then beta, then alpha again, as three separate commands. Then run one command that changes to beta and exports COGNITIVE_FLAG=inside and prints both pwd and that variable. In a final separate terminal call without workdir or terminal session selection, print pwd and the value of COGNITIVE_FLAG. Report observed directories and whether the export persisted.",
                 "interaction": f"Start {repl!r} with yield_time_ms=100. Send hello without a newline using write, then submit world to finish the line. Obtain ANSWER:helloworld, then submit quit. Use the advertised defaults for write/submit, except use yield_time_ms=0 for write if that option exists. Report the exact answer and which calls were needed to observe it.",
                 "pty": f"Start {repl!r} with tty=true and yield_time_ms=100. Submit delayed and obtain ANSWER:delayed, not merely the echoed input. Then submit quit. Use the advertised submit defaults. Report the answer.",
                 "long": 'Start the exact command "sleep 1.2; printf LONG_DONE" with yield_time_ms=0. Follow the returned process until it finishes and report its output and exit code.',
-                "truncation": f"Run {python} -c \"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\" with max_output_chars=512. Recover the exact MIDDLE marker from the omitted output using artifact_read; do not rerun the command.",
-                "monitor_race": 'Run "printf RACE_DONE" with yield_time_ms=0. Attempt to register a completion monitor for that exact process. If already finished, read its final state via terminal_process. Report the outcome without restarting it.',
+                "truncation": f"Run {python} -c \"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\" with max_output_chars=512. Recover the exact MIDDLE marker from the omitted output using read_artifact; do not rerun the command.",
+                "monitor_race": 'Run "printf RACE_DONE" with yield_time_ms=0. Attempt to register a completion monitor for that exact process. If already finished, read its final state via manage_process. Report the outcome without restarting it.',
                 "monitor": 'Start "sleep 2; printf MONITOR_DONE" with yield_time_ms=0 and register its completion monitor. End this turn after registration. When resumed by its completion, report MONITOR_DONE.',
-                "capacity": 'Start eight separate "sleep 120" terminal commands with yield_time_ms=0. Then attempt one additional "printf SHOULD_NOT_START" command. Report whether it was admitted and the exact failure reason if blocked. Use terminal_process.list, then kill the eight sleep processes you started, using their exact IDs. Do not start replacements.',
+                "capacity": 'Start eight separate "sleep 120" terminal commands with yield_time_ms=0. Then attempt one additional "printf SHOULD_NOT_START" command. Report whether it was admitted and the exact failure reason if blocked. Use query_processes, then kill the eight sleep processes you started, using their exact IDs. Do not start replacements.',
                 "submit_then_wait": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=0, then call wait with timeout_seconds=1. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
                 "submit_window": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=1000. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
                 "monitor_wake": 'Start "sleep 30; printf MONITOR_WAKE_DONE" with yield_time_ms=0. Register its completion monitor, then finish the turn immediately. When the monitor resumes the conversation, report the completion output and do not start another command. If registration says PROCESS_ALREADY_TERMINAL, poll that exact process and report the final output.',
@@ -96,7 +96,7 @@ async def run(args, report):
                         workspace_root=workspace,
                         trust_workspace_mcp_config=False,
                     ),
-                    system_prompt="Carry out the requested terminal experiment exactly. Use only terminal, terminal_process, terminal_monitor and artifact_read. Keep final answers brief. Never inspect credentials or environment values other than COGNITIVE_FLAG.",
+                    system_prompt="Carry out the requested terminal experiment exactly. Use only exec_process, query_processes, manage_process, query_monitors, manage_monitor and read_artifact. Keep final answers brief. Never inspect credentials or environment values other than COGNITIVE_FLAG.",
                 )
                 await session.update_model_call_binding(_binding(runtime, connection))
                 print("Provider owner ready", flush=True)
@@ -127,12 +127,12 @@ async def run(args, report):
                             starts = [
                                 item
                                 for item in initial_trace
-                                if item["tool_name"] == "terminal"
+                                if item["tool_name"] == "exec_process"
                             ]
                             monitors = [
                                 item
                                 for item in initial_trace
-                                if item["tool_name"] == "terminal_monitor"
+                                if item["tool_name"] == "manage_monitor"
                             ]
                             if (
                                 len(starts) != 1

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from pulsara_agent.scheduling.requests import action_schema
-from pulsara_agent.capability.source_query import list_input_schema, inspect_input_schema
+from pulsara_agent.scheduling.requests import manage_schedule_schema, query_schedules_schema
+from pulsara_agent.capability.source_query import query_input_schema
 from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES, session_query_input_schema
 
 from dataclasses import asdict, dataclass
@@ -40,12 +40,21 @@ from pulsara_agent.primitives.todo import (
     MAXIMUM_TODO_TEXT_UTF8_BYTES,
 )
 from pulsara_agent.ports.terminal import (
-    TERMINAL_MONITOR_TOOL_DESCRIPTION,
-    TERMINAL_PROCESS_TOOL_DESCRIPTION,
-    TERMINAL_TOOL_DESCRIPTION,
-    terminal_monitor_input_schema,
-    terminal_input_schema,
-    terminal_process_input_schema,
+    EXEC_PROCESS_TOOL_DESCRIPTION,
+    MANAGE_MONITOR_TOOL_DESCRIPTION,
+    MANAGE_PROCESS_TOOL_DESCRIPTION,
+    QUERY_MONITORS_TOOL_DESCRIPTION,
+    QUERY_PROCESSES_TOOL_DESCRIPTION,
+    exec_process_input_schema,
+    manage_monitor_input_schema,
+    manage_process_input_schema,
+    query_monitors_input_schema,
+    query_processes_input_schema,
+)
+from pulsara_agent.code_mode.contracts import (
+    exec_cell_parameters_schema,
+    manage_cell_parameters_schema,
+    query_cells_parameters_schema,
 )
 
 
@@ -75,14 +84,11 @@ _VERIFICATION_STATUSES = [
 
 
 _ACTION_PERMISSION_OVERRIDE_SPECS: dict[str, tuple[tuple[str, str, str, bool], ...]] = {
-    "terminal_process": tuple(
+    "manage_process": tuple(
         ("action", action, "terminal_process_observe", True)
-        for action in ("list", "poll", "wait")
+        for action in ("poll", "wait")
     ),
-    "scheduled_tasks": tuple(("action", action, "scheduled_task_read", True) for action in ("list", "get")),
-    "terminal_monitor": (
-        ("action", "list", "terminal_process_observe", True),
-    ),
+    "manage_cell": (("action", "wait", "subagent_runtime", True),),
 }
 
 
@@ -286,7 +292,7 @@ _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
 )
 
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
-    PROFILES, target_schema,
+    PROFILES, query_agents_input_schema, target_schema,
 )
 
 
@@ -320,12 +326,6 @@ def _wait_agent_schema() -> dict[str, Any]:
         "settle": {"type": "string", "enum": ["all", "first"], "default": "all"},
         "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 300, "default": 30},
     }, required=["targets"])
-
-
-def _exec_schema() -> dict[str, Any]:
-    observation = {"type": "integer", "minimum": 0, "maximum": 30000, "default": 1000}
-    return {"oneOf": [object_schema(properties={source: {"type": "string", **({"minLength": 1} if source == "path" else {})},
-        "yield_time_ms": observation}, required=[source]) for source in ("code", "path")]}
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
@@ -368,9 +368,9 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                 {'additionalProperties': False,
                                                  'properties': {'process_id': {'description': 'process_id '
                                                                                               'from '
-                                                                                              'terminal '
+                                                                                              'exec_process '
                                                                                               'or '
-                                                                                              'terminal_process.',
+                                                                                              'manage_process.',
                                                                                'minLength': 1,
                                                                                'type': 'string'},
                                                                 'kind': {'type': 'string',
@@ -380,7 +380,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                 {'additionalProperties': False,
                                                  'properties': {'runtime_server_id': {'description': 'runtime_server_id '
                                                                                                      'from '
-                                                                                                     'inspect_capability.',
+                                                                                                     'query_capabilities.',
                                                                                       'minLength': 1,
                                                                                       'type': 'string'},
                                                                 'kind': {'type': 'string',
@@ -402,28 +402,20 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
  'required': ['targets'],
  'type': 'object'}, is_read_only=True, permission_category="filesystem_read",
     ),
-    "list_capabilities": _descriptor(
-        name="list_capabilities",
+    "query_capabilities": _descriptor(
+        name="query_capabilities",
         description=(
-            "Find Skills, Hooks, MCP servers, tools, resources, templates and prompts. Use {} for an overview, or filter the list. Copy an item's target into inspect_capability or a supported manage_capability action; use source.target as parent to find a Plugin's components. Continue with next_offset and the same filters. Results describe the observed catalog and its completeness. SUBAGENT callers can query only their assigned MCP runtime."
+            "Query capabilities. Omit target for an overview or listing; optional fields: kind, scope, source_kind, parent, offset, limit. parent selects whose children to list; kind filters the catalog category. To inspect an object itself, pass only its complete target, without list filters or pagination. target.kind identifies the object type. Omit unused fields; target does not accept null. Read Skill bodies with read_file using a PATH target built from skill_path. "
+            "Continue lists with next_offset and the same filters. Results describe the observed catalog and its completeness. SUBAGENT callers can query only their assigned MCP runtime. For MCP tools, follow invocation.mode: DIRECT uses the listed named tool; META uses the returned input_schema and invocation.target with use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE gives the current obstacle. Use read_mcp_resource for resource content and get_mcp_prompt for rendered prompts."
         ),
-        input_schema=list_input_schema(),
-        is_read_only=True,
-        permission_category="mcp_read",
-    ),
-    "inspect_capability": _descriptor(
-        name="inspect_capability",
-        description=(
-            'Inspect a known capability target; list_capabilities supplies copyable targets. Read Skill bodies with read_file using a PATH target built from skill_path. For MCP tools, follow invocation.mode: DIRECT uses the listed named tool; META uses the returned input_schema and invocation.target with use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE gives the current obstacle. This reads metadata. Use read_mcp_resource for resource content and get_mcp_prompt for rendered prompts.'
-        ),
-        input_schema=inspect_input_schema(),
+        input_schema=query_input_schema(),
         is_read_only=True,
         permission_category="mcp_read",
     ),
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            "Install and manage capabilities requested by the user. ROOT agent only; available in every permission mode.\nSet action and send only its listed fields; fields are required unless marked optional. Copy targets from list/inspect or a management result; a known exact target can be used directly. For ADD_LOCAL_MCP, construct a LOCAL MCP_CONNECTION target with the destination scope and new server_id. Installation targets use source-local IDs, not runtime_server_id; runtime and MCP tool/resource/prompt targets are for inspection, not management.\nINSTALL_LOOSE_SKILL: scope, source_path; optional name, description. Install an independent Skill into a new destination.\nSET_LOOSE_SKILL_ENABLED: target (SKILL), enabled. Toggle an eligible independent Skill.\nREMOVE_LOOSE_SKILL: target (SKILL). Remove an eligible independent Skill directory.\nTRUST_HOOK_SOURCE: target (HOOK_SOURCE). Review and trust current Hook definitions.\nREVOKE_HOOK_TRUST: target (HOOK_SOURCE). Remove trust, keeping definitions.\nSET_HOOK_SOURCE_ENABLED: target (HOOK_SOURCE), enabled. Toggle the Hook source.\nADD_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config. Add an independent connection.\nUPDATE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config, expected_identity. Replace an independent connection's settings.\nREMOVE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional expected_identity. Remove the entry and dedicated local credentials, keeping the server program.\nINSTALL_PLUGIN: scope, source_path; optional replace, source_format. Install the whole Plugin disabled; enable separately.\nSET_PLUGIN_ENABLED: target (PLUGIN), enabled; optional expected_package_install_id. Toggle the whole Plugin, with component review on enable.\nREMOVE_PLUGIN: target (PLUGIN); optional expected_package_install_id. Remove the Plugin and dedicated credentials, preserving its data and original source.\nCONFIGURE_PLUGIN_MCP_CONNECTION: target (PLUGIN MCP_CONNECTION); optional overlay, expected_overlay, expected_package_install_id. Configure a Plugin connection.\nAUTHORIZE_MCP: target (LOCAL or PLUGIN MCP_CONNECTION). Authorize an already configured OAuth connection.\nCLEAR_MCP_AUTHORIZATION: target (LOCAL or PLUGIN MCP_CONNECTION). Clear local OAuth grants, keeping configuration and remote tokens.\nFor both OAuth actions, optional expected_identity applies only to LOCAL targets; optional expected_package_install_id applies only to PLUGIN targets. For MCP_CONNECTION and HOOK_SOURCE targets, LOCAL/PLUGIN selects source_kind.\nUse inspect_capability for eligibility. Plugin Skills are managed through their source Plugin; bundled Skills are read-only. Hook trust, Hook enablement and Plugin enablement are separate settings. Edit loose Skill content with file tools or terminal; pulsara-skill-creator describes authoring.\nThe runtime collects required review and confirmation; READ_ONLY mutations use a user-submitted form. Users enter credentials privately in the editor. Wait for the result: status reports the mutation, current the resulting state, and adoption its availability for future use. A completed mutation needs no routine reload or replay."
+            "Install and manage capabilities requested by the user. ROOT agent only; available in every permission mode.\nSet action and send only its listed fields; fields are required unless marked optional. Copy targets from list/inspect or a management result; a known exact target can be used directly. For ADD_LOCAL_MCP, construct a LOCAL MCP_CONNECTION target with the destination scope and new server_id. Installation targets use source-local IDs, not runtime_server_id; runtime and MCP tool/resource/prompt targets are for inspection, not management.\nINSTALL_LOOSE_SKILL: scope, source_path; optional name, description. Install an independent Skill into a new destination.\nSET_LOOSE_SKILL_ENABLED: target (SKILL), enabled. Toggle an eligible independent Skill.\nREMOVE_LOOSE_SKILL: target (SKILL). Remove an eligible independent Skill directory.\nTRUST_HOOK_SOURCE: target (HOOK_SOURCE). Review and trust current Hook definitions.\nREVOKE_HOOK_TRUST: target (HOOK_SOURCE). Remove trust, keeping definitions.\nSET_HOOK_SOURCE_ENABLED: target (HOOK_SOURCE), enabled. Toggle the Hook source.\nADD_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config. Add an independent connection.\nUPDATE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config, expected_identity. Replace an independent connection's settings.\nREMOVE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional expected_identity. Remove the entry and dedicated local credentials, keeping the server program.\nINSTALL_PLUGIN: scope, source_path; optional replace, source_format. Install the whole Plugin disabled; enable separately.\nSET_PLUGIN_ENABLED: target (PLUGIN), enabled; optional expected_package_install_id. Toggle the whole Plugin, with component review on enable.\nREMOVE_PLUGIN: target (PLUGIN); optional expected_package_install_id. Remove the Plugin and dedicated credentials, preserving its data and original source.\nCONFIGURE_PLUGIN_MCP_CONNECTION: target (PLUGIN MCP_CONNECTION); optional overlay, expected_overlay, expected_package_install_id. Configure a Plugin connection.\nAUTHORIZE_MCP: target (LOCAL or PLUGIN MCP_CONNECTION). Authorize an already configured OAuth connection.\nCLEAR_MCP_AUTHORIZATION: target (LOCAL or PLUGIN MCP_CONNECTION). Clear local OAuth grants, keeping configuration and remote tokens.\nFor both OAuth actions, optional expected_identity applies only to LOCAL targets; optional expected_package_install_id applies only to PLUGIN targets. For MCP_CONNECTION and HOOK_SOURCE targets, LOCAL/PLUGIN selects source_kind.\nUse query_capabilities for eligibility. Plugin Skills are managed through their source Plugin; bundled Skills are read-only. Hook trust, Hook enablement and Plugin enablement are separate settings. Edit loose Skill content with file tools or terminal; pulsara-skill-creator describes authoring.\nThe runtime collects required review and confirmation; READ_ONLY mutations use a user-submitted form. Users enter credentials privately in the editor. Wait for the result: status reports the mutation, current the resulting state, and adoption its availability for future use. A completed mutation needs no routine reload or replay."
         ),
         input_schema=capability_management_input_schema(),
         is_read_only=False,
@@ -444,13 +436,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         permission_category="plugin_control",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
-    "artifact_read": _descriptor(
-        name="artifact_read",
+    "read_artifact": _descriptor(
+        name="read_artifact",
         description=(
             ('Read a page of saved tool output using its ARTIFACT target. Returns text and returned_chars. Continue with next_offset_chars '
  'while has_more is true; pages may be shorter than max_chars. Offsets address the saved body; '
  'source_coverage says whether it covers the original observation or only its retained portion. '
- 'Use artifact_export for extensive retrieval or processing.')
+ 'Use export_artifact for extensive retrieval or processing.')
         ),
         input_schema={'additionalProperties': False,
  'properties': {'max_chars': {'default': 20000, 'maximum': 32000, 'minimum': 1, 'type': 'integer'},
@@ -475,10 +467,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         permission_category="artifact_read",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
-    "artifact_export": _descriptor(
-        name="artifact_export",
+    "export_artifact": _descriptor(
+        name="export_artifact",
         description=(
-            ('Export an ARTIFACT target to a new UTF-8 file at path. A prior artifact_read is unnecessary. '
+            ('Export an ARTIFACT target to a new UTF-8 file at path. A prior read_artifact is unnecessary. '
  'Export preserves the saved body, including plain terminal output; source_coverage reports '
  'original or retained coverage. Parent directories are created and existing paths left unchanged. '
  'The exported file remains independently of the conversation.')
@@ -534,7 +526,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_mcp_resource": _descriptor(
         name="read_mcp_resource",
         description=(
-            'Read an MCP resource. Copy its target from list/inspect. MCP_RESOURCE: target only, with the concrete URI in target.uri. MCP_RESOURCE_TEMPLATE: target and uri; supply a concrete URI matching target.uri_template. Results are external reference content. If the saved-output guidance supplies an ARTIFACT target, copy it into artifact_read to page the saved result. Another remote read fetches fresh content, not the next page.'
+            'Read an MCP resource. Copy its target from list/inspect. MCP_RESOURCE: target only, with the concrete URI in target.uri. MCP_RESOURCE_TEMPLATE: target and uri; supply a concrete URI matching target.uri_template. Results are external reference content. If the saved-output guidance supplies an ARTIFACT target, copy it into read_artifact to page the saved result. Another remote read fetches fresh content, not the next page.'
         ),
         input_schema={'type': 'object',
  'oneOf': [{'type': 'object',
@@ -848,34 +840,47 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         permission_category="filesystem_write",
         is_destructive=True,
     ),
-    "terminal": _descriptor(
-        name="terminal",
-        description=TERMINAL_TOOL_DESCRIPTION,
-        input_schema=terminal_input_schema(),
+    "exec_process": _descriptor(
+        name="exec_process",
+        description=EXEC_PROCESS_TOOL_DESCRIPTION,
+        input_schema=exec_process_input_schema(),
         is_read_only=False,
         permission_category="terminal",
         artifact_mode=ToolArtifactMode.LARGE_OUTPUT,
         is_open_world=True,
     ),
-    "terminal_process": _descriptor(
-        name="terminal_process",
-        description=TERMINAL_PROCESS_TOOL_DESCRIPTION,
-        input_schema=terminal_process_input_schema(),
+    "query_processes": _descriptor(
+        name="query_processes",
+        description=QUERY_PROCESSES_TOOL_DESCRIPTION,
+        input_schema=query_processes_input_schema(),
+        is_read_only=True,
+        permission_category="terminal_process_observe",
+        artifact_mode=ToolArtifactMode.LARGE_OUTPUT,
+    ),
+    "manage_process": _descriptor(
+        name="manage_process",
+        description=MANAGE_PROCESS_TOOL_DESCRIPTION,
+        input_schema=manage_process_input_schema(),
         is_read_only=False,
         permission_category="terminal",
         artifact_mode=ToolArtifactMode.LARGE_OUTPUT,
         is_destructive=True,
         is_open_world=True,
     ),
-    "terminal_monitor": _descriptor(
-        name="terminal_monitor",
-        description=TERMINAL_MONITOR_TOOL_DESCRIPTION,
-        input_schema=terminal_monitor_input_schema(),
+    "query_monitors": _descriptor(
+        name="query_monitors",
+        description=QUERY_MONITORS_TOOL_DESCRIPTION,
+        input_schema=query_monitors_input_schema(),
+        is_read_only=True,
+        permission_category="terminal_process_observe",
+    ),
+    "manage_monitor": _descriptor(
+        name="manage_monitor",
+        description=MANAGE_MONITOR_TOOL_DESCRIPTION,
+        input_schema=manage_monitor_input_schema(),
         is_read_only=False,
         permission_category="terminal",
-        artifact_mode=ToolArtifactMode.DEFAULT,
         is_destructive=True,
-        is_open_world=False,
     ),
     "search_sessions": _descriptor(
         name="search_sessions",
@@ -923,25 +928,32 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         permission_category="session_read",
         artifact_mode=ToolArtifactMode.NEVER,
     ),
-    "scheduled_tasks": _descriptor(
-        name="scheduled_tasks",
+    "query_schedules": _descriptor(
+        name="query_schedules",
+        description=(
+            "Query schedules. To list schedules, omit target; optional fields: cursor, status, session. Omit status for all statuses, or use ACTIVE or PAUSED; status does not accept null. Omit session or use null for the current session, or pass a SESSION target to select the list's session scope. Continue with next_cursor and the same filters. To inspect one schedule, pass only its SCHEDULE target, without cursor, status, or session. target does not accept null."
+        ),
+        input_schema=query_schedules_schema(),
+        is_read_only=True,
+        permission_category="scheduled_task_read",
+    ),
+    "manage_schedule": _descriptor(
+        name="manage_schedule",
         description=(
             'Manage saved schedules from the ROOT conversation. Set action and send only its listed fields; fields are required unless marked optional. Copy SCHEDULE targets from results or use a known exact target. session takes a SESSION target; omission/null means this session.\n'
-            'list: optional session, status, cursor.\n'
-            'get: target.\n'
             'create: values; optional session, status.\n'
             'update: target, expected_revision, values.\n'
             'pause: target, expected_revision.\n'
             'resume: target, expected_revision.\n'
             'delete: target, expected_revision.\n'
             'switch: target, expected_revision, replacement. target is the source ACTIVE schedule. replacement is {kind:"existing",target,expected_revision} for a PAUSED schedule, or {kind:"create",values} for a new schedule in the same session.\n'
-            "Use list/get for current values and revision; reread on revision conflict. session filters a list or selects a new schedule's parent, never changes an existing schedule's owner. Continue lists with next_cursor and the same filters.\n"
+            "Use query_schedules for current values and revision; reread on revision conflict. session selects a new schedule's parent, never changes an existing schedule's owner.\n"
             'values is the complete configuration; preserve unrequested fields on update. Choose a short name if unspecified. prompt contains self-contained future instructions and output expectations; timing and permissions have separate fields. Supply an IANA timezone; use Asia/Shanghai for new tasks unless requested otherwise. For create, use current permissions or a requested narrower preset. Saving configuration requires current permissions to cover permission_mode; preserve saved permissions unless a change is requested.\n'
             'Each session supports one ACTIVE plan and any number of PAUSED plans. create with omitted/null status saves PAUSED; use ACTIVE to start automatic scheduling. An authorized replacement uses switch atomically; adding a task alone does not request replacement. Separate automatic plans need separate sessions.\n'
             'Calendar rules use local HH:mm and YYYY-MM-DD start_date; weekdays are Monday=1 through Sunday=7. once and interval timestamps are whole-second UTC; new or changed once times must be in the future. Intervals keep their fixed anchor. Missing month days and nonexistent DST times are skipped; repeated DST times fire once. Explain saved times in ordinary language.\n'
             "Edits preserve queued instructions. pause/delete/switch cancel the affected source plan's pending inputs and leave running replies alone; delete keeps the chat. Stopping a reply leaves its schedule active. Resume uses the next future recurrence without catch-up; an overdue untriggered once plan becomes due."
         ),
-        input_schema=action_schema(),
+        input_schema=manage_schedule_schema(),
         provider_kind=BuiltinToolDomainKind.BUILTIN,
         is_read_only=False,
         permission_category="scheduled_task_write",
@@ -1001,25 +1013,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
-    "list_agents": _descriptor(
-        name="list_agents",
-        description="List this ROOT's subagents with current and queued work. Continue with next_cursor.",
-        input_schema=object_schema(properties={
-            "cursor": {"type": "string", "minLength": 1},
-            "max_items": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
-        }, required=[]),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=True, permission_category="subagent_runtime",
-    ),
-    "inspect_agent": _descriptor(
-        name="inspect_agent",
-        description="Inspect an AGENT's paginated work or one exact WORK's state and result. WORK results belong to that request, including stopped diagnostics.",
-        input_schema={"oneOf": [
-            object_schema(properties={"target": target_schema("AGENT"),
-                "cursor": {"type": "string", "minLength": 1},
-                "max_items": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}}, required=["target"]),
-            object_schema(properties={"target": target_schema("WORK")}, required=["target"]),
-        ]},
+    "query_agents": _descriptor(
+        name="query_agents",
+        description=(
+            "Query agents and their delegated work. To list agents, omit target; optional fields: cursor, max_items. To list one agent's work, pass its AGENT target; optional fields: cursor, max_items. To inspect one work item, pass only its WORK target, without pagination fields. Continue a page in the same branch and, for an agent's work, with the same AGENT target. Omit unused fields; target does not accept null. WORK results belong to that request, including stopped diagnostics."
+        ),
+        input_schema=query_agents_input_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
     ),
@@ -1045,25 +1044,24 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
-    "exec": _descriptor(
-        name="exec",
-        description="Start an independent JavaScript script from code or a workspace path and return observed output and state. Top-level await is supported. Observation timeout does not stop the script. ROOT with bypass permissions only.",
-        input_schema=_exec_schema(),
+    "exec_cell": _descriptor(
+        name="exec_cell",
+        description="Start an independent JavaScript script and return observed output and state. Pass exactly one of code or path; optional yield_time_ms. Use only the selected branch's fields; omit unused fields. Top-level await is supported. Observation timeout does not stop the script. ROOT with bypass permissions only.",
+        input_schema=exec_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
-    "wait_exec": _descriptor(
-        name="wait_exec",
-        description="Read subsequent output and state from the same live script. This does not execute its code again; observation timeout leaves it running.",
-        input_schema=object_schema(properties={"cell_id": {"type": "string", "minLength": 1},
-            "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 1000}}, required=["cell_id"]),
+    "query_cells": _descriptor(
+        name="query_cells",
+        description="Query cells still held by the current Host without consuming execution output. To list cells, omit target; optional fields: cursor, max_items. To inspect one cell's state and frozen source, pass its CELL target; optional fields: offset_chars, max_chars. List cursors and source offsets are separate: do not mix their fields. Continue source pages with the same CELL target. Use manage_cell with wait for execution output. Omit unused fields; target does not accept null.",
+        input_schema=query_cells_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
     ),
-    "stop_exec": _descriptor(
-        name="stop_exec",
-        description="Stop further JavaScript execution and tool submissions in a cell. Already accepted Work is not automatically cancelled; use stop_agent for that work.",
-        input_schema=object_schema(properties={"cell_id": {"type": "string", "minLength": 1}}, required=["cell_id"]),
+    "manage_cell": _descriptor(
+        name="manage_cell",
+        description="Control one cell. Set action and use only its listed fields: wait: target (CELL); optional yield_time_ms. stop: target (CELL) only. Omit unused fields; target does not accept null. wait reads subsequent output and state without executing code again; observation timeout leaves it running. stop stops further JavaScript execution and tool submissions. Already accepted Work is not automatically cancelled; use stop_agent for that work. ROOT with bypass permissions only.",
+        input_schema=manage_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
@@ -1196,11 +1194,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_read_only=False,
         permission_category="plan_workflow",
     ),
-    "memory_search": _descriptor(
-        name="memory_search",
+    "search_memory": _descriptor(
+        name="search_memory",
         description=(
             "Find saved user or project information by meaning or keywords across "
-            "readable memory contexts. Use memory_get when you already have a MEMORY "
+            "readable memory contexts. Use get_memory when you already have a MEMORY "
             "target; copy a result's target to read it. retrieval_summary reports search completeness, filter expansion, "
             "ranking and relation-check availability; filter_match identifies relaxed "
             "matches, and relation_warnings identifies active contradictions."
@@ -1210,12 +1208,12 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_read_only=True,
         permission_category="memory_read",
     ),
-    "memory_get": _descriptor(
-        name="memory_get",
+    "get_memory": _descriptor(
+        name="get_memory",
         description=(
             "Read a saved memory by target, including its statement, kind, context, "
             "recorded time, lifecycle, direct relations and any user-edit note. Copy a "
-            "MEMORY target from memory_search or another memory result; a known exact "
+            "MEMORY target from search_memory or another memory result; a known exact "
             "target can be used directly."
         ),
         input_schema=_MEMORY_GET_PARAMETERS,
@@ -1357,6 +1355,8 @@ class BuiltinToolCatalogEntry:
         "subagent_parent",
         "subagent_shared",
         "code_mode",
+        "scheduled_tasks",
+        "plugin_control",
         "local_state",
         "mcp",
     ]
@@ -1374,21 +1374,20 @@ _FILESYSTEM = frozenset(
     }
 )
 _MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
-_MEMORY_QUERY = frozenset({"memory_get"})
+_MEMORY_QUERY = frozenset({"get_memory"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
-_SUBAGENT_PARENT = frozenset({"run_agent", "list_agents", "inspect_agent", "stop_agent"})
+_SUBAGENT_PARENT = frozenset({"run_agent", "query_agents", "stop_agent"})
 _SUBAGENT_SHARED = frozenset({"send_agent_message", "wait_agent"})
-_CODE_MODE = frozenset({"exec", "wait_exec", "stop_exec"})
+_CODE_MODE = frozenset({"exec_cell", "query_cells", "manage_cell"})
 _TERMINAL_PROCESS_ACTIONS = (
     "close_stdin",
     "kill",
-    "list",
     "poll",
     "submit",
     "wait",
     "write",
 )
-_TERMINAL_MONITOR_ACTIONS = ("cancel", "list", "register")
+_TERMINAL_MONITOR_ACTIONS = ("cancel", "register")
 
 
 def builtin_tool_catalog() -> tuple[BuiltinToolCatalogEntry, ...]:
@@ -1541,10 +1540,10 @@ def _catalog_shape(name: str):
         return (BuiltinToolBindingKind.SESSION_QUERY,
                 BuiltinToolAvailabilityKind.REQUIRES_SESSION_QUERY_PORT,
                 (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "session_query")
-    if name in {"artifact_read", "artifact_export"}:
+    if name in {"read_artifact", "export_artifact"}:
         return (
             BuiltinToolBindingKind.ARTIFACT_READ
-            if name == "artifact_read" else BuiltinToolBindingKind.ARTIFACT_EXPORT,
+            if name == "read_artifact" else BuiltinToolBindingKind.ARTIFACT_EXPORT,
             BuiltinToolAvailabilityKind.REQUIRES_ARTIFACT_READ_PORT,
             both,
             "artifact",
@@ -1556,7 +1555,7 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "plugin_control",
         )
-    if name in {"list_capabilities", "inspect_capability"}:
+    if name == "query_capabilities":
         return (BuiltinToolBindingKind.MCP_CATALOG, BuiltinToolAvailabilityKind.ALWAYS, both, "mcp")
     if name in {
         "get_mcp_prompt",
@@ -1579,28 +1578,28 @@ def _catalog_shape(name: str):
             both,
             "filesystem",
         )
-    if name == "terminal":
+    if name == "exec_process":
         return (
             BuiltinToolBindingKind.TERMINAL_COMMAND,
             BuiltinToolAvailabilityKind.REQUIRES_TERMINAL_PORTS,
             both,
             "terminal",
         )
-    if name == "terminal_process":
+    if name in {"query_processes", "manage_process"}:
         return (
             BuiltinToolBindingKind.TERMINAL_PROCESS,
             BuiltinToolAvailabilityKind.REQUIRES_TERMINAL_PORTS,
             both,
             "terminal",
         )
-    if name == "terminal_monitor":
+    if name in {"query_monitors", "manage_monitor"}:
         return (
             BuiltinToolBindingKind.TERMINAL_MONITOR,
             BuiltinToolAvailabilityKind.REQUIRES_TERMINAL_PORTS,
             both,
             "terminal",
         )
-    if name == "scheduled_tasks":
+    if name in {"query_schedules", "manage_schedule"}:
         return (BuiltinToolBindingKind.SCHEDULED_TASK_CONTROL,
                 BuiltinToolAvailabilityKind.REQUIRES_SCHEDULED_TASK_PORT,
                 (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "scheduled_tasks")
@@ -1618,7 +1617,7 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "plan",
         )
-    if name == "memory_search":
+    if name == "search_memory":
         return (
             BuiltinToolBindingKind.MEMORY_RECALL,
             BuiltinToolAvailabilityKind.REQUIRES_MEMORY_RECALL_PORT,
@@ -1681,6 +1680,10 @@ def _permission_contract(
         terminal_kind = BuiltinTerminalPermissionRuleKind.ALL_ACTIONS
         access_actions: tuple[str, ...] = ()
         scheduling_actions: tuple[str, ...] = ()
+    elif name in {"query_processes", "query_monitors"}:
+        terminal_kind = BuiltinTerminalPermissionRuleKind.ALL_ACTIONS
+        access_actions = ()
+        scheduling_actions = ()
     elif binding_kind is BuiltinToolBindingKind.TERMINAL_PROCESS:
         terminal_kind = BuiltinTerminalPermissionRuleKind.CLOSED_ACTION_SET
         access_actions = _TERMINAL_PROCESS_ACTIONS
@@ -1705,15 +1708,19 @@ def _permission_contract(
 
 
 def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
-    if name in {"terminal", "terminal_monitor", "terminal_process"}:
+    if name in {"exec_process", "manage_monitor", "manage_process"}:
         severity = "terminal"
-    elif name in {"edit_file", "write_file", "artifact_export"}:
+    elif name in {"edit_file", "write_file", "export_artifact"}:
         severity = "bounded_write"
     elif name in SESSION_QUERY_TOOL_NAMES or name in {
-        "artifact_read",
+        "read_artifact",
         "open_in_pulsara",
-        "list_capabilities",
-        "inspect_capability",
+        "query_capabilities",
+        "query_agents",
+        "query_processes",
+        "query_monitors",
+        "query_schedules",
+        "query_cells",
         "get_mcp_prompt",
         "read_file",
         "view_image",

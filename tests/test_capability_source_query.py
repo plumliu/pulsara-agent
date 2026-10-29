@@ -11,8 +11,7 @@ from jsonschema import Draft202012Validator
 
 from pulsara_agent.capability.source_query import (
     CapabilityQueryError,
-    list_input_schema,
-    inspect_input_schema,
+    query_input_schema,
     parse_query,
     render_page,
     minimal_row,
@@ -28,17 +27,16 @@ async def query(
     service,
     arguments,
     *,
-    inspect=False,
     runtime=None,
     plan=None,
     scope=ModelInputScopeKind.ROOT,
 ):
     values = parse_query(
-        arguments, inspect=inspect, subagent=scope is ModelInputScopeKind.SUBAGENT
+        arguments, subagent=scope is ModelInputScopeKind.SUBAGENT
     )
     return await CapabilitySourceQuery(
         service, runtime=runtime, plan=plan, scope=scope
-    ).execute(values, inspect=inspect)
+    ).execute(values)
 
 
 @pytest.mark.parametrize(
@@ -79,11 +77,11 @@ def test_query_inputs_are_closed(arguments):
 )
 def test_inspect_targets_are_closed(target):
     with pytest.raises(CapabilityQueryError):
-        parse_query({"target": target}, inspect=True)
+        parse_query({"target": target})
 
 
 def test_query_catalog_hard_cut_and_local_availability():
-    for name in ("list_capabilities", "inspect_capability"):
+    for name in ("query_capabilities",):
         entry = builtin_tool_catalog_entry(name)
         assert entry.availability_requirement.kind.value == "always"
         assert entry.descriptor.is_read_only
@@ -96,28 +94,23 @@ def test_query_catalog_hard_cut_and_local_availability():
     ):
         with pytest.raises(KeyError):
             builtin_tool_catalog_entry(name)
-    for schema in (list_input_schema(), inspect_input_schema()):
+    for schema in (query_input_schema(),):
         Draft202012Validator.check_schema(schema)
 
 
 @pytest.mark.parametrize(
-    "arguments,inspect",
+    "arguments",
     [
-        ({"scope": "USER"}, False),
-        ({"source_kind": "PLUGIN"}, False),
-        ({"kind": "SKILL"}, False),
-        ({"target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "known"}}, True),
-        (
-            {
-                "target": {'kind': "MCP_CONNECTION", 'scope': "USER", 'source_kind': "LOCAL", 'server_id': "a"}
-            },
-            True,
-        ),
+        {"scope": "USER"},
+        {"source_kind": "PLUGIN"},
+        {"kind": "SKILL"},
+        {"target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "known"}},
+        {"target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": "a"}},
     ],
 )
-def test_subagent_query_inputs_follow_root_rules(arguments, inspect):
-    assert parse_query(arguments, inspect=inspect, subagent=True) == parse_query(
-        arguments, inspect=inspect, subagent=False
+def test_subagent_query_inputs_follow_root_rules(arguments):
+    assert parse_query(arguments, subagent=True) == parse_query(
+        arguments, subagent=False
     )
 
 
@@ -174,7 +167,7 @@ def test_no_mcp_port_lists_local_and_bundled_without_full_configuration(tmp_path
             "status",
         }
         assert item["source"] == {"kind": "LOCAL", "scope": "WORKSPACE"}
-        detail = await query(service, {"target": item["target"]}, inspect=True, scope=scope)
+        detail = await query(service, {"target": item["target"]}, scope=scope)
         assert detail["skill_path"] == path and detail["skill_root"] == str(
             Path(path).parent
         )
@@ -200,7 +193,7 @@ def test_exact_plugin_isolated_from_unrelated_corrupt_state(tmp_path, monkeypatc
         layout.state_parent.mkdir(parents=True, exist_ok=True)
         layout.state_path.write_text("broken JSON")
         target = {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"}
-        result = await query(service, {"target": target}, inspect=True)
+        result = await query(service, {"target": target})
         assert set(result) == {
             "target",
             "version",
@@ -259,7 +252,7 @@ def test_mcp_paths_and_advanced_configuration_are_not_list_payload(tmp_path):
         listing = await query(service, {"kind": "MCP_SERVER", "source_kind": "LOCAL"})
         row = listing["items"][0]
         assert "config_path" not in row and "scope" not in row["source"]
-        details = await query(service, {"target": row["target"]}, inspect=True)
+        details = await query(service, {"target": row["target"]})
         assert details["config_path"] == result["current"]["config_path"]
         assert details["connection"] == {
             "type": "streamable_http",
@@ -313,12 +306,10 @@ def test_current_project_selection_applies_to_user_rows(tmp_path):
         user_detail = await query(
             service,
             {"target": items[user["target"]["skill_path"]]["target"]},
-            inspect=True,
         )
         project_detail = await query(
             service,
             {"target": items[project["target"]["skill_path"]]["target"]},
-            inspect=True,
         )
         assert user_detail["selected"] is False
         assert project_detail["selected"] is True
@@ -359,7 +350,7 @@ def test_empty_and_rejected_plugin_components_do_not_form_plugin_list_rows(
         )
         assert outcome.disposition.value == "INSTALLED"
         target = {"kind": "PLUGIN", "scope": "USER", "plugin_id": "empty"}
-        detail = await query(service, {"target": target}, inspect=True)
+        detail = await query(service, {"target": target})
         assert detail["version"] is None
         assert detail["components"]["skills"]["count"] == 0
         assert bool(detail["diagnostics"]) is invalid
@@ -393,8 +384,7 @@ def test_exact_corrupt_target_keeps_real_target_diagnostic(tmp_path):
             await query(
                 service,
                 {"target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "bad"}},
-                inspect=True,
-            )
+                )
         assert error.value.code == "PLUGIN_UNAVAILABLE"
         assert error.value.diagnostics
         assert any(
@@ -438,7 +428,6 @@ def test_runtime_detail_without_source_service_does_not_read_configuration(
         query(
             None,
             {"target": target},
-            inspect=True,
             scope=scope,
         )
     )
@@ -655,7 +644,7 @@ def test_returned_plugin_skill_target_roundtrips_despite_unrelated_broken_packag
         )
         (row,) = rows["items"]
         detail = await query(
-            service, {"target": row["target"]}, inspect=True, scope=caller_scope
+            service, {"target": row["target"]}, scope=caller_scope
         )
         assert detail["name"] == "healthy-note" and detail["source"] == row["source"]
         assert (
@@ -713,7 +702,7 @@ def test_plugin_connection_detail_uses_input_defaults_and_saved_overlay(tmp_path
         )
         assert installed.disposition.value == "REPLACED"
         target = {'kind': "MCP_CONNECTION", 'scope': "USER", 'source_kind': "PLUGIN", 'plugin_id': "example", 'server_id': "docs"}
-        detail = await query(service, {"target": target}, inspect=True)
+        detail = await query(service, {"target": target})
         assert detail["connection"]["endpoint"] == "https://default.example/mcp"
         from pulsara_agent.plugins.mcp_connection import (
             PluginMcpConnectionOverlay,
@@ -729,7 +718,7 @@ def test_plugin_connection_detail_uses_input_defaults_and_saved_overlay(tmp_path
             ), target={"kind":'MCP_CONNECTION', 'scope':"USER", 'source_kind':'PLUGIN', 'plugin_id':"example", 'server_id':"docs"},
         )
         assert configured["status"] == "APPLIED"
-        detail = await query(service, {"target": target}, inspect=True)
+        detail = await query(service, {"target": target})
         assert (
             detail["connection"]["endpoint"] == "https://configured.example/mcp"
             and detail["adopted"] is None
@@ -783,7 +772,7 @@ def test_local_query_never_materializes_credentials_or_runtime_config(
                 service, {'kind': "MCP_SERVER", 'scope': "USER", 'source_kind': "LOCAL"}
             )
         )["items"]
-        detail = await query(service, {"target": row["target"]}, inspect=True)
+        detail = await query(service, {"target": row["target"]})
         assert (
             detail["connection"]["endpoint"] == "https://docs.example/mcp"
             and detail["adopted"] is None
@@ -824,7 +813,6 @@ def test_exact_invalid_plugin_hook_retains_error_without_a_default_list_row(tmp_
                     "plugin_id": "example",
                 }
             },
-            inspect=True,
         )
         assert detail["definitions"] == []
         assert any(
@@ -887,7 +875,7 @@ def test_large_hook_details_use_existing_output_artifact_owner(tmp_path):
             }
         }
         result = await port._query_capabilities_result(
-            tool_name="inspect_capability",
+            tool_name="query_capabilities",
             arguments=arguments,
             invocation_context=SimpleNamespace(
                 surface_borrow=SimpleNamespace(prepared=prepared, code_cell_id=None)
@@ -897,7 +885,7 @@ def test_large_hook_details_use_existing_output_artifact_owner(tmp_path):
         assert len(json.loads(result.content)["definitions"]) == 8
         assert (
             classify_tool_result_delivery(
-                tool_name="inspect_capability",
+                tool_name="query_capabilities",
                 result_state=result.state,
                 public_arguments=arguments,
             )
@@ -970,8 +958,7 @@ def test_large_hook_query_artifact_roundtrips_through_canonical_postgres_owner(
                         "plugin_id": "example",
                     }
                 },
-                inspect=True,
-            )
+                )
         finally:
             await service.mcp.aclose()
 
@@ -1060,7 +1047,7 @@ def test_exact_plugin_child_unavailable_preserves_real_source_failure(tmp_path, 
         if kind == "MCP_CONNECTION":
             target["server_id"] = "docs"
         with pytest.raises(CapabilityQueryError) as error:
-            await query(service, {"target": target}, inspect=True)
+            await query(service, {"target": target})
         assert (
             error.value.code == "SOURCE_OBSERVATION_UNAVAILABLE"
             and error.value.diagnostics
@@ -1082,7 +1069,7 @@ def test_local_mcp_unavailable_is_not_absent_but_complete_missing_target_is_abse
         target = {'kind': "MCP_CONNECTION", 'scope': "USER", 'source_kind': "LOCAL", 'server_id': "docs"}
         service.mcp.user_config_path.write_text("servers: [invalid]")
         with pytest.raises(CapabilityQueryError) as error:
-            await query(service, {"target": target}, inspect=True)
+            await query(service, {"target": target})
         assert error.value.code == "SOURCE_OBSERVATION_UNAVAILABLE"
         assert error.value.diagnostics[0]["code"] == "MCP_CONFIG_UNAVAILABLE"
         service.mcp.user_config_path.write_text("servers: {}")
@@ -1098,7 +1085,7 @@ def test_local_mcp_unavailable_is_not_absent_but_complete_missing_target_is_abse
         broken.state_parent.mkdir(parents=True, exist_ok=True)
         broken.state_path.write_text("broken JSON")
         with pytest.raises(CapabilityQueryError) as error:
-            await query(service, {"target": target}, inspect=True)
+            await query(service, {"target": target})
         assert error.value.code == "CAPABILITY_NOT_FOUND"
         await service.mcp.aclose()
 
@@ -1118,8 +1105,7 @@ def test_runtime_inspect_without_catalog_retains_unknown_and_diagnostic(target):
             query(
                 None,
                 {"target": target},
-                inspect=True,
-                scope=ModelInputScopeKind.SUBAGENT,
+                    scope=ModelInputScopeKind.SUBAGENT,
             )
         )
     assert error.value.code == "SOURCE_OBSERVATION_UNAVAILABLE"
@@ -1149,8 +1135,7 @@ def test_remote_metadata_miss_only_proves_absence_in_complete_visible_catalog(
             query(
                 None,
                 {"target": target},
-                inspect=True,
-                scope=ModelInputScopeKind.SUBAGENT,
+                    scope=ModelInputScopeKind.SUBAGENT,
             )
         )
     assert error.value.code == expected

@@ -2054,7 +2054,7 @@ def test_round3_active_skill_and_tool_schema_are_preserved_before_wire_admission
         is ContextRenderMode.FULL
     )
     schema_request = _prepared_request(
-        _snapshot(), _sources(), budget=4, tool_names=("artifact_read",)
+        _snapshot(), _sources(), budget=4, tool_names=("read_artifact",)
     )
     schema_candidate = compiler.compile(schema_request)
     assert not hasattr(schema_candidate, "final_estimate")
@@ -2066,7 +2066,7 @@ def test_round3_active_skill_and_tool_schema_are_preserved_before_wire_admission
 def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
     mutable_arguments = {"nested": {"value": 1}}
     frozen = freeze_json(mutable_arguments)
-    call = ProviderToolCall("call:1", "terminal", frozen)  # type: ignore[arg-type]
+    call = ProviderToolCall("call:1", "exec_process", frozen)  # type: ignore[arg-type]
     tool_only = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
         "entry:jfasfwsw2puygc3hrueckpvgba",
@@ -2125,7 +2125,7 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
     )
     assert "UTF-8 bytes of tool output" in join_text_content(compact.message.content)
     assert "[… omitted " in join_text_content(compact.message.content)
-    assert "artifact_read" not in join_text_content(compact.message.content)
+    assert "read_artifact" not in join_text_content(compact.message.content)
 
     with_read = lower_canonical_item(
         item,
@@ -2140,7 +2140,7 @@ def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> 
         for variant in with_read.tool_result_variants
         if variant.mode is ToolResultProviderRenderMode.COMPACT
     )
-    assert "artifact_read" in join_text_content(with_read_compact.message.content)
+    assert "read_artifact" in join_text_content(with_read_compact.message.content)
     assert item.tool_result_context.artifact_id in join_text_content(
         with_read_compact.message.content
     )
@@ -2411,7 +2411,7 @@ def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
     assert "The artifact starts at the retained snapshot" in reference_body
     assert "earlier lost output cannot be recovered" in reference_body
     assert (
-        "artifact_read offsets are relative to this retained snapshot" in reference_body
+        "read_artifact offsets are relative to this retained snapshot" in reference_body
     )
     assert metadata.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
     assert "artifact:owfm52gghreqtsu77glacz5fze" in reference_body
@@ -2451,7 +2451,7 @@ def test_round3_wire_floor_degrades_prior_turn_result_before_current_turn() -> N
         snapshot,
         _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",))),
         budget=4,
-        tool_names=("artifact_read",),
+        tool_names=("read_artifact",),
     )
     compiler = StructuredModelInputCompiler()
     full = compiler.compile(request)
@@ -2519,7 +2519,7 @@ def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> No
 
     call = ProviderToolCall(
         "call:large",
-        "terminal",
+        "exec_process",
         freeze_json({"command": "x" * 256}),
     )
     tool_request = FrozenProviderInputItem(
@@ -2700,7 +2700,7 @@ def test_round3_tool_schema_canonical_bytes_exact_boundary() -> None:
     request = _prepared_request(
         _snapshot(),
         _sources(),
-        tool_names=("artifact_read", "terminal"),
+        tool_names=("read_artifact", "exec_process"),
     )
     canonical_bytes = sum(
         len(tool.canonical_bytes)
@@ -2906,7 +2906,7 @@ def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work()
         _snapshot(*items),
         _sources(),
         budget=128,
-        tool_names=("artifact_read",),
+        tool_names=("read_artifact",),
     )
     counting = _CountingEstimator(request.compile_binding.estimator)
     request = replace(
@@ -3136,7 +3136,7 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
         clock=clock,
     )
     surface = (
-        StructuredToolPort(object(), tool_names=("terminal",))
+        StructuredToolPort(object(), tool_names=("exec_process",))
         .snapshot_tool_surface(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
         )
@@ -3638,21 +3638,21 @@ def test_round3_tool_surface_includes_member_monitor_and_schema_is_frozen(
         port,
         conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
     )
-    assert "terminal_monitor" in {tool.name for tool in root.model_surface.tool_specs}
-    assert "terminal_monitor" in {tool.name for tool in child.model_surface.tool_specs}
+    assert "manage_monitor" in {tool.name for tool in root.model_surface.tool_specs}
+    assert "manage_monitor" in {tool.name for tool in child.model_surface.tool_specs}
     assert not hasattr(port._terminal, "_sessions")  # noqa: SLF001
     assert port.snapshot_workspace_root() == tmp_path.resolve()
     assert not hasattr(port._terminal, "_sessions")  # noqa: SLF001
     terminal = next(
-        tool for tool in root.model_surface.tool_specs if tool.name == "terminal"
+        tool for tool in root.model_surface.tool_specs if tool.name == "exec_process"
     )
     with pytest.raises((AttributeError, TypeError)):
         terminal.parameters["type"] = "array"  # type: ignore[index]
     borrow = port.borrow_tool_surface(root)
-    old_binding = borrow.binding_fingerprint("terminal")
+    old_binding = borrow.binding_fingerprint("exec_process")
     with pytest.raises(RuntimeError, match="sealed"):
         port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"spawn_agent"})))
-    assert borrow.binding_fingerprint("terminal") == old_binding
+    assert borrow.binding_fingerprint("exec_process") == old_binding
     borrow.close()
     asyncio.run(port.aclose(timeout_seconds=2))
 
@@ -3661,9 +3661,9 @@ def test_round3_tool_call_argument_owners_are_strictly_frozen() -> None:
     assert get_type_hints(CompletedToolCallBlock)["arguments"] is FrozenJsonObjectFact
     assert get_type_hints(AssistantToolCallBlock)["arguments"] is FrozenJsonObjectFact
     with pytest.raises(TypeError, match="recursively frozen"):
-        CompletedToolCallBlock("block", "call", "terminal", {})  # type: ignore[arg-type]
+        CompletedToolCallBlock("block", "call", "exec_process", {})  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="recursively frozen"):
-        AssistantToolCallBlock("block", "call", "terminal", {})  # type: ignore[arg-type]
+        AssistantToolCallBlock("block", "call", "exec_process", {})  # type: ignore[arg-type]
 
 
 def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
@@ -3680,7 +3680,7 @@ def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
         _prepared_request(
             _snapshot(*items),
             _sources(_candidate(ContextSourceKind.BASE_SYSTEM, (secret,))),
-            tool_names=("artifact_read",),
+            tool_names=("read_artifact",),
         )
     )
     assert ContextPublicDiagnosticCode.DECISION_SAMPLE_TRUNCATED in (
@@ -3742,7 +3742,7 @@ def test_round3_diagnostic_projector_is_the_bounded_public_owner() -> None:
                 )
             ),
             _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("private-system",))),
-            tool_names=("artifact_read",),
+            tool_names=("read_artifact",),
         )
     )
     projection = project_model_input_compile_observation(

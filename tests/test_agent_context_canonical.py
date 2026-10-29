@@ -298,12 +298,11 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
     import pulsara_agent.conversation_kernel.host as kernel_host
 
     operations = {
-        "exec",
-        "wait_exec",
-        "stop_exec",
+        "exec_cell",
+        "query_cells",
+        "manage_cell",
         "run_agent",
-        "list_agents",
-        "inspect_agent",
+        "query_agents",
         "send_agent_message",
         "wait_agent",
         "stop_agent",
@@ -313,7 +312,7 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
     async def stream(request):
         index = len(model.requests)
         if index == 2:
-            values = _tool_call("exec", random_id("call"), {"code": "return 1;"})
+            values = _tool_call("exec_cell", random_id("call"), {"code": "return 1;"})
         else:
             values = _text(f"final-{index}", f"FINAL-{index}")
         for value in values:

@@ -112,7 +112,7 @@ def _package(root: Path, *, marker: str = "one") -> Path:
                     ],
                     "PreToolUse": [
                         {
-                            "matcher": "terminal",
+                            "matcher": "exec_process",
                             "hooks": [
                                 {
                                     "type": "command",

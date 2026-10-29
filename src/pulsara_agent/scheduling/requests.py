@@ -1,13 +1,13 @@
-"""Closed model-management actions; UI run-once has its own request owner."""
+"""Closed schedule query/management inputs; UI run-once has its own owner."""
 
 from __future__ import annotations
+from jsonschema import Draft202012Validator
+
 from pulsara_agent.identity import is_valid_id
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
 from pulsara_agent.ports.session_content import session_target_schema
 
 _FIELDS = {
-    "list": (set(), {"cursor", "status", "session"}),
-    "get": ({"target"}, set()),
     "create": ({"values"}, {"session", "status"}),
     "update": ({"target", "expected_revision", "values"}, set()),
     "pause": ({"target", "expected_revision"}, set()),
@@ -56,12 +56,10 @@ def validate_action(value):
     keys = set(value) - {"action"}
     if not required <= keys or keys - required - optional:
         raise ScheduledTaskError("INVALID_REQUEST", "任务操作字段无效。")
-    if "target" in keys:
+    if "target" in value:
         _validate_target(value["target"], "SCHEDULE", "task_id", "schedule")
-    if "session" in keys:
+    if "session" in value and value["session"] is not None:
         _validate_target(value["session"], "SESSION", "session_id", "session")
-    if "cursor" in keys and not is_valid_id(value["cursor"], "schedule"):
-        raise ScheduledTaskError("INVALID_ID", "任务身份字段无效。")
     if "expected_revision" in value and (
         type(value["expected_revision"]) is not int or value["expected_revision"] < 1
     ):
@@ -71,8 +69,7 @@ def validate_action(value):
     if value["action"] == "switch":
         replacement = value["replacement"]
         if not isinstance(replacement, dict) or replacement.get("kind") not in (
-            "existing",
-            "create",
+            "existing", "create"
         ):
             raise ScheduledTaskError("INVALID_REQUEST", "切换目标无效。")
         if replacement["kind"] == "existing":
@@ -89,10 +86,14 @@ def validate_action(value):
                 raise ScheduledTaskError("INVALID_REQUEST", "请选择另一个计划。")
         elif set(replacement) != {"kind", "values"}:
             raise ScheduledTaskError("INVALID_REQUEST", "切换目标字段无效。")
+    # Preserve domain error classification before enforcing the shared complete
+    # structure. The schema remains authoritative for every executable branch.
+    if not Draft202012Validator(manage_schedule_schema()).is_valid(value):
+        raise ScheduledTaskError("INVALID_REQUEST", "任务操作字段无效。")
     return value
 
 
-def action_schema():
+def _properties():
     properties = {
         "target": schedule_target_schema(),
         "session": {
@@ -201,27 +202,74 @@ def action_schema():
             },
         ]
     }
+    return properties
+
+
+def manage_schedule_schema():
+    properties = _properties()
     return {
-        "type": "object",
         "oneOf": [
             {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["action", *sorted(required)],
                 "properties": {
-                    key: (
-                        {"const": action}
-                        if key == "action"
-                        else {
-                            "type": "string",
-                            "enum": ["ACTIVE", "PAUSED"],
-                        }
-                        if key == "status" and action == "list"
-                        else properties[key]
-                    )
+                    key: {"const": action} if key == "action" else properties[key]
                     for key in ["action", *sorted(required | optional)]
                 },
             }
             for action, (required, optional) in _FIELDS.items()
         ],
     }
+
+
+def query_schedules_schema():
+    properties = _properties()
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [],
+                "properties": {
+                    "cursor": properties["cursor"],
+                    "status": {"type": "string", "enum": ["ACTIVE", "PAUSED"]},
+                    "session": properties["session"],
+                },
+            },
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["target"],
+                "properties": {"target": properties["target"]},
+            },
+        ]
+    }
+
+
+def validate_query(value):
+    if not isinstance(value, dict):
+        raise ScheduledTaskError("INVALID_REQUEST", "任务查询字段无效。")
+    schema = query_schedules_schema()
+    branch = schema["oneOf"][1 if "target" in value else 0]
+    if set(value) - branch["properties"].keys():
+        raise ScheduledTaskError("INVALID_REQUEST", "任务查询字段无效。")
+    if "target" in value:
+        _validate_target(value["target"], "SCHEDULE", "task_id", "schedule")
+    if value.get("session") is not None:
+        _validate_target(value["session"], "SESSION", "session_id", "session")
+    if "cursor" in value and not is_valid_id(value["cursor"], "schedule"):
+        raise ScheduledTaskError("INVALID_ID", "任务身份字段无效。")
+    # HTTP list previously received this classification from the repository.
+    # Null remains a structural query error, distinct from create's null default.
+    if (
+        "target" not in value
+        and value.get("status") is not None
+        and not Draft202012Validator(
+            schema["oneOf"][0]["properties"]["status"]
+        ).is_valid(value["status"])
+    ):
+        raise ScheduledTaskError("INVALID_STATUS", "任务状态无效。")
+    if not Draft202012Validator(schema).is_valid(value):
+        raise ScheduledTaskError("INVALID_REQUEST", "任务查询字段无效。")
+    return value

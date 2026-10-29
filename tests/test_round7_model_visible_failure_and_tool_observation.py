@@ -175,7 +175,7 @@ def _previous_fact(
         "accepted_assistant_entry_count": accepted,
         "definitely_not_dispatched_tool_count": not_dispatched,
         "outcome_unknown_tool_count": unknown,
-        "bounded_tool_name_samples": ("terminal",) if not_dispatched or unknown else (),
+        "bounded_tool_name_samples": ("exec_process",) if not_dispatched or unknown else (),
         "user_input_preserved": True,
         "canonical_entries_preserved": True,
         "terminal_reason": "FOREGROUND_EXECUTION_INTERRUPTED",
@@ -511,10 +511,10 @@ def test_round7_late_result_changes_only_a_covering_cut(
         parent_content=InlineContent.from_bytes(b"two calls"),
         blocks=(
             AssistantToolCallBlock(
-                _id("block"), no_attempt_call, "artifact_read", freeze_json({})
+                _id("block"), no_attempt_call, "read_artifact", freeze_json({})
             ),
             AssistantToolCallBlock(
-                _id("block"), attempted_call, "terminal", freeze_json({})
+                _id("block"), attempted_call, "exec_process", freeze_json({})
             ),
         ),
         occurred_at=datetime.now(timezone.utc),

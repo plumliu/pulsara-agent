@@ -544,23 +544,24 @@ def test_round5_blob_gc_shutdown_cancellation_detaches_only_after_join() -> None
 
 def test_round5_terminal_process_actions_have_closed_effect_semantics() -> None:
     binding = _production_executor_binding(
-        "terminal_process", "round5:test-terminal-process-executor"
+        "manage_process", "round5:test-terminal-process-executor"
     )
-    assert binding.catalog_entry.name == "terminal_process"
+    assert binding.catalog_entry.name == "manage_process"
     assert production_builtin_executor_binding_identity_fingerprint(binding).startswith(
         "sha256:"
     )
-    for action in ("list", "poll", "wait"):
+    assert _physical_effect_class("query_processes", {}) == "read_only"
+    for action in ("poll", "wait"):
         assert (
-            _physical_effect_class("terminal_process", {"action": action})
+            _physical_effect_class("manage_process", {"action": action})
             == "TERMINAL_OBSERVATION"
         )
     for action in ("write", "submit", "close_stdin", "kill"):
         assert (
-            _physical_effect_class("terminal_process", {"action": action})
+            _physical_effect_class("manage_process", {"action": action})
             == "TERMINAL_EFFECT"
         )
-    assert _physical_effect_class("terminal", {}) == "TERMINAL_EFFECT"
+    assert _physical_effect_class("exec_process", {}) == "TERMINAL_EFFECT"
 
 
 def _exec_sleeping_terminal(
@@ -728,7 +729,7 @@ def test_round5_terminal_foreground_decision_can_be_aborted_by_exact_attempt(
 
 def test_round5_killed_terminal_result_is_an_interrupted_tool_result() -> None:
     result = _terminal_execution_result(
-        ToolCall("call:user-stop", "terminal"),
+        ToolCall("call:user-stop", "exec_process"),
         TerminalResult(
             status=TerminalStatus.KILLED,
             output="partial output",

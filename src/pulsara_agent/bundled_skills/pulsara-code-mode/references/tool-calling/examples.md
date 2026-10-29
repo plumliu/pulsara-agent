@@ -46,14 +46,14 @@ one tool observation. This example assumes the repository's Python environment
 and the named test file exist; use the project's actual check command.
 
 ```js
-let check = await tools.terminal({
+let check = await tools.exec_process({
   command: ".venv/bin/python -m pytest tests/test_parser.py -q",
   yield_time_ms: 1000
 });
 console.log(check);
 
 while (check.status === "running") {
-  check = await tools.terminal_process({
+  check = await tools.manage_process({
     action: "wait",
     target: check.target,
     timeout_seconds: 30,
@@ -63,30 +63,30 @@ while (check.status === "running") {
 }
 ```
 
-**How it works:** `terminal` starts the command once. Each subsequent call waits
+**How it works:** `exec_process` starts the command once. Each subsequent call waits
 on its actual process target and reads from its previous output cursor. The
 loop waits on a tool; it does not repeatedly execute the command or spin in JS.
 
 **Read the result:** Use the final status, `exit_code`, and output to assess the
-check. If `exec` yields while this loop is waiting, continue reading the script
-with `wait_exec`. No second terminal command is needed.
+check. If `exec_cell` yields while this loop is waiting, continue reading the script
+with `manage_cell` with `action:"wait"`. No second terminal command is needed.
 
 ## 3. Inspect a long log and keep its complete available archive
 
 **Situation:** The check above produced a long result with `output_artifact`.
 ROOT might want a readable excerpt and a file containing the available archive.
 This block can follow the previous code while `check` is still in scope. For a
-separate `exec`, copy the actual artifact target from the earlier output instead.
+separate `exec_cell`, copy the actual artifact target from the earlier output instead.
 
 ```js
 const artifact = check.output_artifact;
 if (artifact?.target) {
-  const page = await tools.artifact_read({
+  const page = await tools.read_artifact({
     target: artifact.target,
     max_chars: 4000
   });
   console.log(page);
-  console.log(await tools.artifact_export({
+  console.log(await tools.export_artifact({
     target: artifact.target,
     path: "output/parser-test-log.txt"
   }));

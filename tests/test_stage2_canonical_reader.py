@@ -477,7 +477,7 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
             AssistantToolCallBlock(
                 block_id=_id("block"),
                 tool_call_id=call_id,
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "true"}),
             ),
         ),
@@ -621,7 +621,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
             AssistantToolCallBlock(
                 block_id=_id("block"),
                 tool_call_id=_id("call"),
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "true"}),
             ),
         ),
@@ -683,7 +683,7 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
             AssistantToolCallBlock(
                 block_id=_id("block"),
                 tool_call_id=call_id,
-                tool_name="artifact_read",
+                tool_name="read_artifact",
                 arguments=freeze_json(
                     {
                         "target": {
@@ -1002,13 +1002,13 @@ def test_round3_reader_uses_ordered_semantic_blocks_not_parent_manifest(
             AssistantToolCallBlock(
                 block_id=_id("block"),
                 tool_call_id="call:first",
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "first"}),
             ),
             AssistantToolCallBlock(
                 block_id=_id("block"),
                 tool_call_id="call:second",
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments=freeze_json({"command": "second"}),
             ),
         )

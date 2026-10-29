@@ -1736,9 +1736,9 @@ BEGIN
             JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=source.session_id
               AND b.assistant_entry_id=source.assistant_entry_id AND b.tool_call_id=source.tool_call_id
             WHERE a.session_id=NEW.session_id AND a.id=NEW.source_exec_attempt_id
-              AND source.source_kind='MODEL_TOOL_CALL' AND source.turn_id=NEW.turn_id AND b.tool_name='exec'
+              AND source.source_kind='MODEL_TOOL_CALL' AND source.turn_id=NEW.turn_id AND b.tool_name='exec_cell'
         ) THEN
-            RAISE EXCEPTION 'code invocation requires its source exec attempt' USING ERRCODE='23514';
+            RAISE EXCEPTION 'code invocation requires its source exec_cell attempt' USING ERRCODE='23514';
         END IF;
         RETURN NEW;
     END IF;
@@ -2323,9 +2323,9 @@ BEGIN
         IF NEW.code_source_content_digest IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM pulsara_v3.tool_invocations i JOIN pulsara_v3.assistant_message_blocks b
               ON b.session_id=i.session_id AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
-            WHERE i.session_id=NEW.session_id AND i.id=NEW.invocation_id AND i.source_kind='MODEL_TOOL_CALL' AND b.tool_name='exec'
+            WHERE i.session_id=NEW.session_id AND i.id=NEW.invocation_id AND i.source_kind='MODEL_TOOL_CALL' AND b.tool_name='exec_cell'
         ) THEN
-            RAISE EXCEPTION 'frozen code source belongs to an exec attempt' USING ERRCODE='23514';
+            RAISE EXCEPTION 'frozen code source belongs to an exec_cell attempt' USING ERRCODE='23514';
         END IF;
         IF NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_invocations AS i
             JOIN pulsara_v3.turns AS t ON t.session_id=i.session_id AND t.id=i.turn_id

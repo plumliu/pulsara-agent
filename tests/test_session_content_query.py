@@ -168,7 +168,7 @@ def test_mixed_call_search_uses_sources_and_snippet_block_boundaries(
         )
     blocks.extend(
         (
-            call_block("terminal", {"command": "ordinary-arg"}),
+            call_block("exec_process", {"command": "ordinary-arg"}),
             call_block("read_file", {"path": "second-arg"}),
             AssistantDataBlock(
                 identity("block"), InlineContent.from_bytes(b"hidden-data")
@@ -177,7 +177,7 @@ def test_mixed_call_search_uses_sources_and_snippet_block_boundaries(
     )
     anchor = saved_calls(repo, target, tuple(blocks))
     args = {"target": {"kind": "SESSION", "session_id": target.guard.session_id}, "include_tools": True}
-    for keyword in ("terminal", "command", "ordinary-arg", "second-arg"):
+    for keyword in ("exec_process", "command", "ordinary-arg", "second-arg"):
         hits = query("search_session_content", query=keyword, **args)["items"]
         assert len(hits) == 1 and anchor in {m["target"]["entry_id"] for m in hits[0]["messages"]}
         assert keyword in "\n".join(m["text"] for m in hits[0]["messages"])
@@ -247,7 +247,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v4_hard_cut(repo, c
     anchor = saved_calls(
         repo,
         target,
-        (call_block("terminal", arguments), call_block("read_file", {"path": "last"})),
+        (call_block("exec_process", arguments), call_block("read_file", {"path": "last"})),
     )
     expected = (
         "Tool call: terminal\nArguments: "
@@ -289,7 +289,7 @@ def test_long_unicode_call_arguments_cursor_only_and_content_v4_hard_cut(repo, c
 
 @pytest.mark.parametrize(
     "tool_name",
-    ["terminal", "search_sessions", "search_session_content", "read_session_content"],
+    ["exec_process", "search_sessions", "search_session_content", "read_session_content"],
 )
 @pytest.mark.parametrize(
     "state", ["SUCCESS", "SYSTEM_ERROR", "PERMISSION_DENIED", "CANCELLED"]

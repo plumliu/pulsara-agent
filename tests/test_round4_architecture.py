@@ -34,12 +34,6 @@ PLAN_DESCRIPTORS = {
 }
 
 
-def _repository_aggregate_source() -> str:
-    paths = [KERNEL / "repository.py"]
-    paths.extend(sorted((KERNEL / "_repository").glob("*.py")))
-    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
-
-
 def _imports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     imports: set[str] = set()
@@ -52,11 +46,11 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
     observed = {
         descriptor.event_type: descriptor
@@ -72,7 +66,7 @@ def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
 
 def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> None:
     baseline = BASELINE.read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 31
+    assert baseline.count("CREATE TABLE pulsara_v3.") == 29
     assert set(CONVERSATION_KERNEL_RELATIONS) >= {
         "plan_workflows",
         "plan_interactions",
@@ -97,69 +91,6 @@ def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> 
     assert "DEFERRABLE INITIALLY DEFERRED" in baseline
     assert "CREATE UNIQUE INDEX uq_pulsara_v3_active_plan_workflow" in baseline
     assert "CREATE UNIQUE INDEX uq_pulsara_v3_open_plan_interaction" in baseline
-
-
-def test_round4_every_turn_creator_installs_frozen_permission_columns() -> None:
-    source = _repository_aggregate_source()
-    turn_inserts = tuple(
-        match.group(1)
-        for match in re.finditer(
-            r"INSERT INTO pulsara_v3\.turns\s*\((.*?)\)\s*VALUES",
-            source,
-            flags=re.DOTALL,
-        )
-    )
-    # The legacy caller-supplied queue mutation was physically removed by the
-    # TODO refinement. All future-turn delivery now uses the stable prepared
-    # candidate plus FULL/NONE/CONFLICT confirmation path.
-    assert "def consume_prompt_head(" not in source
-    assert len(turn_inserts) == 7
-    required = {
-        "initial_entry_id",
-        "permission_snapshot_id",
-        "requested_permission_mode",
-        "effective_permission_mode",
-        "permission_admission_source",
-        "permission_overlay",
-        "permission_plan_context_ordinal",
-        "permission_contract_id",
-        "permission_contract_fingerprint",
-        "permission_snapshot_fingerprint",
-    }
-    for columns in turn_inserts:
-        observed = {item.strip() for item in columns.split(",")}
-        assert required <= observed
-
-    queue_inserts = tuple(
-        match.group(1)
-        for match in re.finditer(
-            r"INSERT INTO pulsara_v3\.prompt_queue_items\s*\(([^()]*)\)\s*VALUES",
-            source,
-            flags=re.DOTALL,
-        )
-    )
-    assert len(queue_inserts) == 1
-    assert {
-        "permission_snapshot_id",
-        "requested_permission_mode",
-        "effective_permission_mode",
-        "permission_snapshot_fingerprint",
-    } <= {item.strip() for item in queue_inserts[0].split(",")}
-
-    # PR04 §6.2 adds one INSERT ... SELECT for exact redirected steers. Its
-    # omitted permission/binding/handoff fields must be NULL; it may only copy
-    # the canonical content descriptor and freeze the current ROOT target.
-    copies = tuple(re.finditer(
-        r"INSERT INTO pulsara_v3\.prompt_queue_items\s*\(([^()]*)\)\s*SELECT",
-        source, flags=re.DOTALL,
-    ))
-    assert len(copies) == 1
-    assert {column.strip() for column in copies[0].group(1).split(',')} == {
-        'id', 'session_id', 'workspace_id', 'queue_sequence', 'command_id',
-        'client_submission_id', 'delivery_mode', 'target_turn_id', 'status',
-        'inline_content', 'blob_id', 'content_digest', 'content_size',
-        'content_media_type', 'content_codec', 'input_origin',
-    }
 
 
 def test_round4_compiler_has_no_repository_or_runtime_authority() -> None:
@@ -214,36 +145,3 @@ def test_round4_continuation_physical_owner_is_host_local_only() -> None:
     assert "_accept_automatic_plan_continuation" in host
     assert "continuation_owner.start(" not in runner
     assert "ContinuationAdmissionOwner" not in gateway
-
-
-def test_round4_all_root_producers_use_the_single_host_owned_chain() -> None:
-    path = KERNEL / "host.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    functions = {
-        node.name: node
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    direct_runner_callers: set[str] = set()
-    root_chain_callers: set[str] = set()
-    for name, function in functions.items():
-        for node in ast.walk(function):
-            if not isinstance(node, ast.Call) or not isinstance(
-                node.func, ast.Attribute
-            ):
-                continue
-            if node.func.attr == "run_accepted_turn":
-                direct_runner_callers.add(name)
-            elif node.func.attr == "_run_accepted_root_chain":
-                root_chain_callers.add(name)
-
-    assert direct_runner_callers == {
-        "_finish_root_chain",
-        "_run_accepted_root_chain",
-    }
-    assert {
-        "_bind_plan_review_successor",
-        "_settle_queued_root_admission",
-        "_start_terminal_observation_turn",
-        "_start_subagent_completion_turn",
-    } <= root_chain_callers

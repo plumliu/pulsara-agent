@@ -1979,7 +1979,7 @@ def _render_mcp_catalog(
 
 
 _META_MCP_TOOL_USAGE = (
-    'For META, inspect_capability target={"kind":"MCP_TOOL",'
+    'For META, query_capabilities target={"kind":"MCP_TOOL",'
     '"server_id":"<server_id>","tool_name":"<listed name>"}; follow invocation.mode.'
 )
 

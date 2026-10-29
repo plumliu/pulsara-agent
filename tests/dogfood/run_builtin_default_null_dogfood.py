@@ -40,13 +40,16 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
 CHANGED_TOOLS = {
     "spawn_agent",
     "create_agent_tasks",
-    "scheduled_tasks",
+    "manage_schedule",
+    "query_schedules",
     "search_sessions",
     "search_session_content",
     "read_session_content",
     "wait_agent",
-    "terminal_process",
-    "terminal_monitor",
+    "manage_process",
+    "query_processes",
+    "manage_monitor",
+    "query_monitors",
 }
 
 
@@ -162,7 +165,7 @@ async def run(args, report, saved, save):
                     source,
                     "scheduled",
                     (
-                        "Exercise scheduled_tasks in this isolated test. First list with explicit session:null. "
+                        "Exercise query_schedules and manage_schedule in this isolated test. First query_schedules with explicit session:null. "
                         f"Create one new once task named Null contract fixture for UTC {future}, Asia/Shanghai, "
                         "read-only permissions, status:ACTIVE, prompt 'Reply SOURCE_TASK only.', also with session:null. "
                         "Then list this session with session:null and list the reference session "
@@ -174,8 +177,8 @@ async def run(args, report, saved, save):
                 lists = [
                     r
                     for r in scheduled
-                    if r["tool_name"] == "scheduled_tasks"
-                    and r["arguments"]["action"] == "list"
+                    if r["tool_name"] == "query_schedules"
+                    and "target" not in r["arguments"]
                 ]
                 assert any(
                     "session" in r["arguments"]
@@ -193,7 +196,7 @@ async def run(args, report, saved, save):
                 created = [
                     r
                     for r in scheduled
-                    if r["tool_name"] == "scheduled_tasks"
+                    if r["tool_name"] == "manage_schedule"
                     and r["arguments"]["action"] == "create"
                 ]
                 assert (
@@ -225,15 +228,15 @@ async def run(args, report, saved, save):
 
                 terminal = await turn(
                     source,
-                    "terminal",
+                    "exec_process",
                     (
-                        'Run exactly "sleep 60; printf NULL_CONTRACT_DONE" with terminal yield_time_ms=0. '
-                        "Use terminal_process.poll for that process. Register a terminal_monitor using default completion conditions; "
+                        'Run exactly "sleep 60; printf NULL_CONTRACT_DONE" with exec_process yield_time_ms=0. '
+                        "Use manage_process with action poll for that process. Register with manage_monitor using default completion conditions; "
                         "list monitors, then cancel the monitor you registered, and kill only this test process. "
                         "Do not wait for the sleep or create more processes. Use only each action's applicable fields."
                     ),
                 )
-                assert {"terminal_process", "terminal_monitor"} <= {
+                assert {"manage_process", "manage_monitor"} <= {
                     r["tool_name"] for r in terminal
                 }
 

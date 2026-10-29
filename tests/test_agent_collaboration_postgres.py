@@ -205,13 +205,13 @@ async def test_public_stop_cascades_queued_dependencies_and_preserves_history(
     )
     stopped = await call(api, context, "stop_agent", {"target": a["work"]})
     assert stopped["works"][0]["status"] == "stopped"
-    dependent = await call(api, context, "inspect_agent", {"target": b["work"]})
+    dependent = await call(api, context, "query_agents", {"target": b["work"]})
     assert dependent["status"] == "stopped"
     assert dependent["failed_dependency"] == a["work"]
-    assert (await call(api, context, "inspect_agent", {"target": independent["work"]}))[
+    assert (await call(api, context, "query_agents", {"target": independent["work"]}))[
         "status"
     ] == "queued"
-    rows = await call(api, context, "inspect_agent", {"target": b["agent"]})
+    rows = await call(api, context, "query_agents", {"target": b["agent"]})
     assert [work["target"] for work in rows["works"]] == [
         b["work"],
         independent["work"],

@@ -195,7 +195,7 @@ async def _start_background_process(
     authorization = await authorize_direct_tool(
         port,
         session_id=session_id,
-        tool_name="terminal",
+        tool_name="exec_process",
         arguments=arguments,
         tool_call_id=call_id,
         turn_id=turn_id,
@@ -205,7 +205,7 @@ async def _start_background_process(
     result = await invoke_direct_tool(
         port,
         session_id=session_id,
-        tool_name="terminal",
+        tool_name="exec_process",
         arguments=arguments,
         tool_call_id=call_id,
         attempt_id=_name("attempt"),
@@ -242,7 +242,7 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
         poll = await invoke_direct_tool(
             port,
             session_id=session_id,
-            tool_name="terminal_process",
+            tool_name="manage_process",
             arguments={"action": "poll", "target": {"kind": "PROCESS", "process_id": process_id}},
             tool_call_id=_name("call"),
             attempt_id=_name("attempt"),
@@ -317,7 +317,7 @@ def test_host_scoped_writes_and_terminal_cwd_follow_exact_permission_snapshot(
             terminal = await invoke_direct_tool(
                 port,
                 session_id=session_id,
-                tool_name="terminal",
+                tool_name="exec_process",
                 arguments={"command": "pwd", "workdir": str(outside)},
                 tool_call_id=_name("call"),
                 attempt_id=_name("attempt"),
@@ -366,7 +366,7 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
             await invoke_direct_tool(
                 new,
                 session_id=new_session_id,
-                tool_name="terminal_process",
+                tool_name="manage_process",
                 arguments={"action": "poll", "target": {"kind": "PROCESS", "process_id": process_id}},
                 tool_call_id=_name("call"),
                 attempt_id=_name("attempt"),

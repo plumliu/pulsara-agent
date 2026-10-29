@@ -1,4 +1,4 @@
-"""Six collaboration operations over the common session/request owners.
+"""Collaboration operations over the common session/request owners.
 
 This facade never executes a turn or stores Work state. Wait subscriptions only
 wake reads of canonical requests and the receiving turn's common input queue.
@@ -66,7 +66,7 @@ class CollaborationToolPort:
         )
 
         # This is one existing-size observation page, not a limit on retained
-        # Agents. Remaining identities stay available through list_agents.
+        # Agents. Remaining identities stay available through query_agents.
         if self.session_id == self.root_session_id:
             rows = await self._read(
                 self.repository.list_agent_sessions,
@@ -248,7 +248,7 @@ class CollaborationToolPort:
             members = parse_batch_members(arguments)
             rows, outcome = await self._run(tuple(r for _, r in members), context)
             result = {key: row for (key, _), row in zip(members, rows, strict=True)}
-        elif tool_name == "list_agents":
+        elif tool_name == "query_agents" and "target" not in arguments:
             limit = arguments.get("max_items", 50)
             rows = await self._read(
                 self.repository.list_agent_sessions,
@@ -264,7 +264,7 @@ class CollaborationToolPort:
                 if len(rows) > limit
                 else None,
             }
-        elif tool_name == "inspect_agent":
+        elif tool_name == "query_agents":
             target = arguments["target"]
             if target["kind"] == "WORK":
                 result = await self._work(target_id(target, "WORK"))

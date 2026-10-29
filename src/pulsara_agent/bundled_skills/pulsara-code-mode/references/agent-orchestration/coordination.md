@@ -11,7 +11,7 @@ a `work` target, and the current `status`. Acceptance is not completion.
 These identities belong to the agent and assignment, not to the tool entry point
 or script. An agent created natively can be reused in a batch; an agent started
 by a batch can receive a native message or follow-up assignment. Query the same
-state with native `inspect_agent` or `tools.inspect_agent`. Switching entry points
+state with native `query_agents` or `tools.query_agents`. Switching entry points
 does not start work by itself or reset the agent's conversation.
 
 - Omit `target` to create an agent. Optional `name` identifies its role. New agents
@@ -104,7 +104,7 @@ Subagents can use native messaging and waiting without Code Mode.
 | `tools.wait_agent.works({ targets: [...], settle: "all" })` | Exact WORK targets until all end; ordinary messages do not wake this wait. `all` is the default. |
 | `tools.wait_agent.works({ targets: [...], settle: "first" })` | Any selected Work ending. Read `pending_targets` for the rest. |
 
-WORK waits have no observation timeout; `exec` can yield while the wait continues.
+WORK waits have no observation timeout; `exec_cell` can yield while the wait continues.
 AGENT waits use the native timeout parameter. Waiting does not notify or start
 the target. Waiting for ROOT is useful when a reply has been arranged; an idle
 ROOT may have no work or reply to finish.
@@ -145,4 +145,4 @@ wait includes the last observed states and remaining targets as well.
 stops current and already queued work. Read actual outcomes; completed work stays
 completed, and the agent remains reusable. A stopped prerequisite propagates to
 its success-dependent work; independent work can continue. Stopping a script
-with `stop_exec` does not perform these agent stops.
+with `manage_cell` with `action:"stop"` does not perform these agent stops.

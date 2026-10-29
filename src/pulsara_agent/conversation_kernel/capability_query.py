@@ -14,6 +14,7 @@ from pulsara_agent.capability.source_query import (
     CHILD_KINDS,
     CapabilityQueryError,
     minimal_row,
+    parse_query,
     plugin_source,
     plugin_target,
     public_diagnostics,
@@ -808,7 +809,9 @@ class CapabilitySourceQuery:
             )
         return await self._scrub(detail)
 
-    async def execute(self, arguments, *, inspect=False):
+    async def execute(self, arguments):
+        arguments = parse_query(arguments)
+        inspect = "target" in arguments
         self.runtime_rows, self.runtime_details, runtime_diagnostics = runtime_rows(
             self.runtime, self.plan, self.scope, code_direct_specs=self.code_direct_specs
         )

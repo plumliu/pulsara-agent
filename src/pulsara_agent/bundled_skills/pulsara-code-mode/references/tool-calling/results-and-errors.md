@@ -43,16 +43,16 @@ or truncation. It is not necessarily the whole file, history, or process output.
 Use the tool's actual cursor, offset, or target to read further when needed.
 
 Terminal results can include `output_artifact` for a readable archive. Use its
-actual ARTIFACT target with `artifact_read`; check its disposition and coverage.
+actual ARTIFACT target with `read_artifact`; check its disposition and coverage.
 An artifact marked complete covers the reported selection, which may be less
 than the process's entire lifetime.
 
 Large individual log records are delivered through an artifact. An output page
-with `has_more: true` has further records to read through `wait_exec`. A script
+with `has_more: true` has further records to read through `manage_cell` with `action:"wait"`. A script
 can log summaries, full responses, or selected fields, depending on what ROOT
 needs. File or artifact locations also give access to the saved content.
 
-If a stopped or failed script still has pending calls, later `wait_exec` output
+If a stopped or failed script still has pending calls, later `manage_cell` with `action:"wait"` output
 can contain their real outcomes as `kind: "tool_result"` records. These describe
 already submitted operations; the script is not executing again. These outcomes
 can help clarify whether an interrupted operation took effect.

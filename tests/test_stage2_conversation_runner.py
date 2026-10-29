@@ -278,7 +278,7 @@ def _seed_artifact_result_with_memory_provenance(
             AssistantToolCallBlock(
                 block_id=_name("block"),
                 tool_call_id=tool_call_id,
-                tool_name="artifact_read",
+                tool_name="read_artifact",
                 arguments=freeze_json(
                     {"target": {"kind": "ARTIFACT", "artifact_id": _name("artifact")}}
                 ),
@@ -1467,12 +1467,12 @@ def _text_stream(text: str, *, block: str = "text:1") -> list[object]:
 def _tool_stream() -> list[object]:
     arguments = '{"command":"true"}'
     return [
-        ToolCallStartPayload("call:1", "call:1", "terminal"),
+        ToolCallStartPayload("call:1", "call:1", "exec_process"),
         ToolCallDeltaPayload("call:1", "call:1", arguments),
         ToolCallEndPayload(
             block_identity="call:1",
             tool_call_id="call:1",
-            tool_name="terminal",
+            tool_name="exec_process",
             arguments_json=arguments,
             utf8_bytes=len(arguments.encode("utf-8")),
             digest=live_digest(arguments),
@@ -1487,12 +1487,12 @@ def _many_tool_stream(count: int) -> list[object]:
         tool_call_id = f"call:output-resource:{ordinal}"
         result.extend(
             (
-                ToolCallStartPayload(tool_call_id, tool_call_id, "terminal"),
+                ToolCallStartPayload(tool_call_id, tool_call_id, "exec_process"),
                 ToolCallDeltaPayload(tool_call_id, tool_call_id, arguments),
                 ToolCallEndPayload(
                     block_identity=tool_call_id,
                     tool_call_id=tool_call_id,
-                    tool_name="terminal",
+                    tool_name="exec_process",
                     arguments_json=arguments,
                     utf8_bytes=len(arguments.encode("utf-8")),
                     digest=live_digest(arguments),
@@ -1526,12 +1526,12 @@ def _named_tool_stream(
 def _summary_tool_stream(tool_call_id: str) -> list[object]:
     arguments = '{"command":"never-dispatch"}'
     return [
-        ToolCallStartPayload(tool_call_id, tool_call_id, "terminal"),
+        ToolCallStartPayload(tool_call_id, tool_call_id, "exec_process"),
         ToolCallDeltaPayload(tool_call_id, tool_call_id, arguments),
         ToolCallEndPayload(
             block_identity=tool_call_id,
             tool_call_id=tool_call_id,
-            tool_name="terminal",
+            tool_name="exec_process",
             arguments_json=arguments,
             utf8_bytes=len(arguments.encode("utf-8")),
             digest=live_digest(arguments),
@@ -1588,7 +1588,7 @@ def _round5a1_chat_scripts() -> tuple[tuple[dict[str, object], ...], ...]:
                                     "id": "call:1",
                                     "type": "function",
                                     "function": {
-                                        "name": "terminal",
+                                        "name": "exec_process",
                                         "arguments": arguments,
                                     },
                                 }
@@ -1649,7 +1649,7 @@ def _round5a1_responses_scripts() -> tuple[tuple[dict[str, object], ...], ...]:
                             "id": "function:1",
                             "status": "completed",
                             "call_id": "call:1",
-                            "name": "terminal",
+                            "name": "exec_process",
                             "arguments": '{"command":"true"}',
                         },
                     ],
@@ -1770,7 +1770,7 @@ def test_capability_adoption_runs_before_each_unprepared_dispatch(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(tool, tool_names=("terminal",)),
+        tools=StructuredToolPort(tool, tool_names=("exec_process",)),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         before_provider_preparation=adopt,
@@ -1850,7 +1850,7 @@ def test_k3_user_control_feedback_is_measured_before_atomic_publication(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(tool, tool_names=("terminal",)),
+        tools=StructuredToolPort(tool, tool_names=("exec_process",)),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         before_provider_preparation=install_feedback_before_followup,
@@ -4691,7 +4691,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
         )
     )
     tools = _RecordingBorrowToolPort(
-        _AssertingTool(provider, session_id), tool_names=("terminal",)
+        _AssertingTool(provider, session_id), tool_names=("exec_process",)
     )
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -4893,7 +4893,7 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
     )
     tools = _RecordingBorrowToolPort(
         _AssertingTool(provider, session_id),
-        tool_names=("terminal",) if retained_group_count else (),
+        tool_names=("exec_process",) if retained_group_count else (),
     )
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -5207,7 +5207,7 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(physical_tool, tool_names=("terminal",)),
+        tools=StructuredToolPort(physical_tool, tool_names=("exec_process",)),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
@@ -5296,7 +5296,7 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(physical_tool, tool_names=("terminal",)),
+        tools=StructuredToolPort(physical_tool, tool_names=("exec_process",)),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
@@ -5454,7 +5454,7 @@ def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(tool, tool_names=("terminal",)),
+        tools=StructuredToolPort(tool, tool_names=("exec_process",)),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
@@ -7252,7 +7252,7 @@ def test_round8_accepted_user_steer_independently_adds_one_memory_write_hint(
         repository=repository,
         writer_lease=lease,
         model=model,
-        tools=StructuredToolPort(tool, tool_names=("remember", "terminal")),
+        tools=StructuredToolPort(tool, tool_names=("remember", "exec_process")),
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         memory_projection=_PolicyMemoryProjection(),
@@ -8494,7 +8494,7 @@ def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
     model = _ScriptedModel(
         [
             _named_tool_stream(
-                tool_name="terminal",
+                tool_name="exec_process",
                 tool_call_id="call:preflight",
                 arguments={
                     "command": f"touch {sentinel}",

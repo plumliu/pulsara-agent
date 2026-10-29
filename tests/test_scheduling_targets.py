@@ -14,7 +14,7 @@ from pulsara_agent.model_input.contracts import FrozenProviderInputItemKind, Str
 from pulsara_agent.model_input.lowering import lower_canonical_item, lower_retained_request_content
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.scheduling.contracts import ScheduledProvenance, ScheduledTaskError, ScheduledTriggerSource
-from pulsara_agent.scheduling.requests import schedule_target, validate_action
+from pulsara_agent.scheduling.requests import schedule_target, validate_query
 from pulsara_agent.scheduling.service import ScheduledTaskService
 
 
@@ -33,7 +33,8 @@ def row(task_id=SOURCE, **changes):
 
 
 def invoke(service, request, mode=PermissionMode.BYPASS_PERMISSIONS):
-    return service.invoke(request, default_session_id=SESSION, permission_mode=mode)
+    method = service.invoke_manage if "action" in request else service.invoke_query
+    return method(request, default_session_id=SESSION, permission_mode=mode)
 
 
 def test_list_target_can_be_copied_to_get_update_and_delete_without_id_mirrors():
@@ -43,12 +44,12 @@ def test_list_target_can_be_copied_to_get_update_and_delete_without_id_mirrors()
         service.list = AsyncMock(return_value={"tasks": [original], "next_cursor": SOURCE})
         service.get = AsyncMock(return_value=original)
         service.mutate = AsyncMock(return_value=row(revision=8))
-        page = await invoke(service, {"action": "list", "session": None})
+        page = await invoke(service, {"session": None})
         item = page["tasks"][0]
         assert "id" not in item and "session_id" not in item
         assert item["session"] == {"kind": "SESSION", "session_id": SESSION}
         assert page["next_cursor"] == SOURCE
-        found = await invoke(service, {"action": "get", "target": item["target"]})
+        found = await invoke(service, {"target": item["target"]})
         assert found == item
         edited = {**VALUES, "prompt": "Review and report the failing checks."}
         updated = await invoke(service, {"action": "update", "target": found["target"], "expected_revision": found["revision"], "values": edited})
@@ -135,7 +136,7 @@ def test_scheduled_header_carries_copyable_identity_in_normal_and_retained_reque
     assert lowered.fixed_message.content == retained
     header = retained[0].text
     target, _ = json.JSONDecoder().raw_decode(header[header.index('{'):])
-    validate_action({"action": "get", "target": target})
+    validate_query({"target": target})
     assert target == schedule_target(SOURCE)
     assert provenance.due_at_utc in header
     assert ("Automatic timer" in header) == (source is ScheduledTriggerSource.TIMER)

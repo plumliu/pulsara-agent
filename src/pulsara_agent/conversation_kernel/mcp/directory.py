@@ -92,7 +92,7 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
                 direct = frozen.get(tool.provider_tool_name) == tool.provider_spec()
                 rows.append(minimal_row("MCP_TOOL", tool.provider_tool_name,
                     {"kind": "MCP_TOOL", "server_id": server.server_id, "tool_name": tool.provider_tool_name},
-                    None, "可直接调用；参数见工具定义。" if direct else "先用 inspect_capability 查看参数，再用返回的 invocation.target 调用。", tool.description))
+                    None, "可直接调用；参数见工具定义。" if direct else "先用 query_capabilities 查看参数，再用返回的 invocation.target 调用。", tool.description))
         for route in routes:
             if route.target.server_id != server.server_id:
                 continue
@@ -112,7 +112,7 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
             if route.route is ToolCapabilityRouteKind.DIRECT:
                 status = "可直接调用；参数见工具定义。"
             elif route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY:
-                status = "先用 inspect_capability 查看参数，再用返回的 invocation.target 调用。"
+                status = "先用 query_capabilities 查看参数，再用返回的 invocation.target 调用。"
             else:
                 status = f"当前不可调用：{route.public_reason_code.value}。"
             rows.append(

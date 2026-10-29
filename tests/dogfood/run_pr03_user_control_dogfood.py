@@ -409,7 +409,7 @@ async def _run_background_controls(session) -> dict[str, object]:
         PromptContent.text("Run this controlled sequence exactly. First call terminal with command "
         f"{command_a!r}, yield_time_ms 50, max_output_chars 2000. Then call terminal "
         f"with command {command_b!r}, yield_time_ms 50, max_output_chars 2000. "
-        "Both must return running. Register terminal_monitor for only the second "
+        "Both must return running. Register manage_monitor for only the second "
         "process with action register and otherwise default settings. Do not poll or "
         "kill either process. Finish with one short sentence."),
         command_id='command:xah3sjy3vikjqvd2l33npxbe6u',
@@ -659,7 +659,7 @@ async def _run_task_controls(session, workspace: Path) -> dict[str, object]:
     }
     prompt = (
         "Call create_agent_tasks exactly once with this exact JSON argument, then "
-        "return immediately without list_agents or wait_agent: "
+        "return immediately without query_agents or wait_agent: "
         + json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
     )
     root_result = await session.run_turn(

@@ -125,15 +125,15 @@ async def run(destination: Path):
                 assert first["timezone"] == "Asia/Shanghai", first
                 assert first["status"] == "ACTIVE", first
                 first_actions = [
-                    t["arguments"]["action"]
+                    ("list" if "target" not in t["arguments"] else "get") if t["name"] == "query_schedules" else t["arguments"]["action"]
                     for t in evidence["tools"]
-                    if t["turn"] == 1 and t["name"] == "scheduled_tasks"
+                    if t["turn"] == 1 and t["name"] in {"query_schedules", "manage_schedule"}
                 ]
                 assert first_actions.index("list") < first_actions.index("create"), (
                     first_actions
                 )
                 assert any(
-                    t["turn"] == 1 and t["name"] == "scheduled_tasks"
+                    t["turn"] == 1 and t["name"] == "manage_schedule"
                     and t["arguments"]["action"] == "create"
                     and t["arguments"].get("status") == "ACTIVE"
                     for t in evidence["tools"]
@@ -158,9 +158,9 @@ async def run(destination: Path):
                 ):
                     assert updated[key] == first[key], (key, first, updated)
                 second_actions = [
-                    t["arguments"]["action"]
+                    ("list" if "target" not in t["arguments"] else "get") if t["name"] == "query_schedules" else t["arguments"]["action"]
                     for t in evidence["tools"]
-                    if t["turn"] == 2 and t["name"] == "scheduled_tasks"
+                    if t["turn"] == 2 and t["name"] in {"query_schedules", "manage_schedule"}
                 ]
                 assert second_actions.index("get") < second_actions.index("update"), (
                     second_actions
@@ -173,13 +173,13 @@ async def run(destination: Path):
                 assert final["tasks"] == page["tasks"], final
                 assert not any(
                     t["turn"] == 3
-                    and t["name"] == "scheduled_tasks"
+                    and t["name"] == "manage_schedule"
                     and t["arguments"]["action"] == "create"
                     for t in evidence["tools"]
                 )
                 assert "READY" in evidence["turns"][-1]["reply"]
                 assert any(
-                    t["turn"] == 3 and t["name"] == "terminal"
+                    t["turn"] == 3 and t["name"] == "exec_process"
                     for t in evidence["tools"]
                 )
 

@@ -6,6 +6,8 @@
 
 本文负责 JS 接入、工具范围、结果、资源与生命周期。协作对象、工具业务语义、Subagent 能力范围与恢复方式以 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 为准；本文定义它们的 JS 接入，不另设业务合同。两篇共同构成实施基线，工具业务实现只有一套。
 
+当前工具名、查询分支与 CELL 身份以 [工具查询、命名与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 为准。本文接口表与示例采用该合同；所链接的既往实验与实施记录保留其原验证范围，不作为新接口已验证的证据。
+
 ## 1. 产品范围与所有权
 
 Code mode 让 ROOT 用 JavaScript 组合已有工具、处理结果和编排工作。简单调用仍可直接使用原生工具。
@@ -16,9 +18,9 @@ Code mode 让 ROOT 用 JavaScript 组合已有工具、处理结果和编排工�
 | ROOT，其他模式 | 按原有规则提供 | 不提供 |
 | Subagent | 按其原生范围提供 | 不提供 |
 
-权限按 turn 固定。cell 从已接纳 exec 冻结 ROOT 身份、权限、模型配置、工作区和父上下文基准；后来设置变化、新 turn 或压缩不更换这些事实。新 exec 使用它自己所属 turn 的快照。实际工具可用性在每次调用时检查。
+权限按 turn 固定。cell 从已接纳 exec_cell 冻结 ROOT 身份、权限、模型配置、工作区和父上下文基准；后来设置变化、新 turn 或压缩不更换这些事实。新 exec_cell 使用它自己所属 turn 的快照。实际工具可用性在每次调用时检查。
 
-**脚本持续执行。exec／wait_exec 的超时只结束这次观察；wait_exec 不恢复或重新执行代码。压缩只整理模型上下文，不暂停 JS。**
+**脚本持续执行。exec_cell／manage_cell.wait 的超时只结束这次观察；manage_cell.wait 不恢复或重新执行代码。压缩只整理模型上下文，不暂停 JS。**
 
 | Owner | 责任 |
 |---|---|
@@ -40,14 +42,14 @@ JS 只增加程序执行和结果桥接。派活进入接收 session 的共同�
 | 类别 | 工具名（JS 加 `tools.`） |
 |---|---|
 | 文件 | `read_file`、`write_file`、`edit_file`、`find_files`、`search_content` |
-| 终端 | `terminal`、`terminal_process` |
-| Artifact | `artifact_read`、`artifact_export` |
+| 进程 | `exec_process`、`query_processes`、`manage_process` |
+| Artifact | `read_artifact`、`export_artifact` |
 | 会话内容 | `search_sessions`、`search_session_content`、`read_session_content` |
-| 能力查询 | `list_capabilities`、`inspect_capability` |
+| 能力查询 | `query_capabilities` |
 | MCP | `use_new_mcp_tool`、`read_mcp_resource`、`get_mcp_prompt`；cell 创建时可用的直接 MCP 工具 |
-| Agent | `run_agent`、`list_agents`、`inspect_agent`、`send_agent_message`、`wait_agent`、`stop_agent` |
+| Agent | `run_agent`、`query_agents`、`send_agent_message`、`wait_agent`、`stop_agent` |
 
-这是 17 个现有普通内置工具、6 个目标 Agent 工具，加动态 MCP 直接入口。Agent 已按配套文档 hard cut；当前接口及实际验收见 §10。
+这是 17 个现有普通内置工具、5 个 Agent 工具，加动态 MCP 直接入口。Agent 已按配套文档 hard cut；当前接口及实际验收见 §10。
 
 同名操作共用参数、target、默认值、校验、Hook、业务结果与执行 owner。原生把结果呈现给模型，JS 得到同一个公共业务值；不加通用 `.data` 封套：
 
@@ -65,14 +67,14 @@ console.log({ agent: a.agent, work: a.work });
 | 工具 | 定位 |
 |---|---|
 | `enter_plan`、`ask_plan_question`、`exit_plan` | runner 接管对话阶段与用户交互 |
-| `exec`、`wait_exec`、`stop_exec` | 从脚本外控制 cell，仅 ROOT＋bypass |
+| `exec_cell`、`query_cells`、`manage_cell` | 从脚本外控制 cell，仅 ROOT＋bypass |
 | `view_image` | 通过后续 user message 给模型看图 |
 | `open_in_pulsara` | 为用户打开文件、网页或面板 |
 | `todo` | 模型直接维护当前进度 |
-| `memory_search`、`memory_get`、`remember`、`mark_memory_relation` | 四项均仅供 ROOT |
+| `search_memory`、`get_memory`、`remember`、`mark_memory_relation` | 四项均仅供 ROOT |
 | `manage_capability`、`reload_capabilities` | ROOT 直接管理配置与刷新 |
-| `scheduled_tasks` | ROOT 直接管理未来工作 |
-| `terminal_monitor` | ROOT 或 Subagent 原生登记、查看、取消监控 |
+| `query_schedules`、`manage_schedule` | ROOT 直接管理未来工作 |
+| `query_monitors`、`manage_monitor` | ROOT 或 Subagent 原生查询与管理监控 |
 
 “仅原生”不扩大工具权限。Subagent 的 monitor 绑定注册时当前 WORK，细节见配套文档。Subagent 不获得 JS 或自动记忆召回；已有历史不因工具范围变化而改写。
 
@@ -90,21 +92,23 @@ console.log({ agent: a.agent, work: a.work });
 
 | 工具 | 参数 | 作用 |
 |---|---|---|
-| `exec` | `code`／`path` 恰一；可选 `yield_time_ms` | 接纳 cell，观察新输出与状态 |
-| `wait_exec` | `cell_id`；可选 `yield_time_ms` | 读尚未交付的输出，等待变化 |
-| `stop_exec` | `cell_id` | 停止后续 JS／工具提交，返回实际状态 |
+| `exec_cell` | `code`／`path` 恰一；可选 `yield_time_ms` | 接纳 cell，观察新输出与状态 |
+| `query_cells` | 无 target：可选 `cursor`、`max_items`；CELL target：可选 `offset_chars`、`max_chars` | 列存活 Cell，或读取状态与冻结源码；不消费执行输出 |
+| `manage_cell` | wait：`action:"wait"`、CELL target，可选 `yield_time_ms`；stop：`action:"stop"`、CELL target | 等待尚未交付输出，或停止后续 JS／工具提交 |
+
+Cell target 为 `{"kind":"CELL","cell_id":"cell:…"}`，沿统一身份 owner 生成完整 canonical ID，不另建身份映射。公共结果只携带 target，内部 IPC 与运行时索引继续使用 `cell_id` 字段。
 
 `yield_time_ms` 默认 1,000，范围 0–30,000，单位毫秒；0 立即查询。这是一次观察的调度粒度，不是脚本、工具、Work 或会话寿命。接纳结果等宿主开销不承诺精确截止；重复 wait 没有总次数限制。
 
-code／path 内容作为异步函数体，可顶层 await。path 由既有 Python 文件 owner 解析，读取一次后冻结源码；之后编辑文件不改变 live cell。必要的实际源码关联源 exec attempt 的 CanonicalContent，沿现有 inline／blob 与 retention 读取，不加代码 hash、重放记录。Hook 改写参数后重新校验、读取与冻结。
+code／path 内容作为异步函数体，可顶层 await。path 由既有 Python 文件 owner 解析，读取一次后冻结源码；之后编辑文件不改变 live cell。必要的实际源码关联源 exec_cell attempt 的 CanonicalContent，沿现有 inline／blob 与 retention 读取，不加代码 hash、重放记录。Hook 改写参数后重新校验、读取与冻结。
 
-每次 exec 有独立 VM，无共享全局变量或隐式 REPL，源码只求值一次。非 undefined 的 return 作为最后一条正式结果输出；undefined 不产生内容记录。正常完成还须结算已提交工具并排空后续微任务；不能因作者漏写 await 就丢掉已发操作。未捕获错误禁止新提交，在途已接纳调用照实际结算。
+每次 exec_cell 有独立 VM，无共享全局变量或隐式 REPL，源码只求值一次。非 undefined 的 return 作为最后一条正式结果输出；undefined 不产生内容记录。正常完成还须结算已提交工具并排空后续微任务；不能因作者漏写 await 就丢掉已发操作。未捕获错误禁止新提交，在途已接纳调用照实际结算。
 
 Promise 拒绝使用 SDK onUnhandledRejection 追踪，在完整微任务排空后仍无处理者才判 failed；同段随后加上的 catch 不误杀。root 拒绝单独处理；root 已 fulfilled 也不能掩盖未 await 工具的未处理失败。追踪只保留仍待判断的活 Promise，以公开 identity 比较并明确释放 dup handles，不建历史拒绝集合。
 
 ```json
 {
-  "cell_id": "cell_1",
+  "target": {"kind":"CELL","cell_id":"cell:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
   "state": "running",
   "output": [{"kind":"log","text":"Started the investigation."}],
   "has_more": false,
@@ -114,7 +118,7 @@ Promise 拒绝使用 SDK onUnhandledRejection 追踪，在完整微任务排空�
 
 state 为 `queued`、`running`、`completed`、`failed`、`terminated`。queued 表示等待 VM 容量、源码尚未执行。has_more 只表示已有输出待读；pending_calls 表示尚待结算的内部调用。terminated 证明脚本停止，不证明已派发作用撤销。接纳前失败没有 live cell，按普通工具错误返回。
 
-VM 不再执行后即可释放；待读输出与在途结算由 Host 接管。终态、结算完成且输出消费完毕后释放进程内记录；旧 Host／已释放句柄返回明确 unavailable，不恢复执行。同 cell 只有一个输出消费 owner，同时读取返回 busy，但不妨碍 stop_exec。外层结果 canonical 接纳确认后才推进读取位置；不确定接纳沿现有精确确认，不重跑脚本或提前丢页。
+VM 不再执行后即可释放；待读输出与在途结算由 Host 接管。终态、结算完成且输出消费完毕后释放进程内记录；旧 Host／已释放句柄返回明确 unavailable，不恢复执行。同 cell 只有一个输出消费 owner，同时读取返回 busy，但不妨碍 manage_cell.stop。外层结果 canonical 接纳确认后才推进读取位置；不确定接纳沿现有精确确认，不重跑脚本或提前丢页。
 
 ## 4. 计算、等待与资源
 
@@ -126,7 +130,7 @@ SDK 提供 interruptHandler，没有自动扣除异步等待的 CPU 预算。Pul
 
 计量是 VM 同步占用的单调时间，含桥接／同步宿主回调，不是精确 CPU 计费。已测 while、无限微任务与重入可中断；编译、JSON.parse 或同步宿主阻塞未必及时调用 interrupt。因此 VM 位于独立 Worker，sidecar 对同一活动段设置更宽的外部 watchdog，能终止卡住的 Worker；异步等待期间不运行这个 timer。
 
-Worker 进入段前公布活动序号与开始状态，离开后清除；过时 timer 不能杀下一段。只需进程内共享状态槽，不需要持久心跳／租约。段返回时也检查经过时间，避免未触发 callback 的长内建操作被误报成功。stop_exec 从外部控制，不排队到死循环之后。
+Worker 进入段前公布活动序号与开始状态，离开后清除；过时 timer 不能杀下一段。只需进程内共享状态槽，不需要持久心跳／租约。段返回时也检查经过时间，避免未触发 callback 的长内建操作被误报成功。manage_cell.stop 从外部控制，不排队到死循环之后。
 
 ### 4.2 初始物理配置
 
@@ -161,9 +165,9 @@ SDK handle 明确释放。3.6.2 单侧 newPromise resolver 留存已实测，采
 | 来源 | 唯一事实 | 接纳条件 |
 |---|---|---|
 | MODEL_TOOL_CALL | 指真实 assistant entry／tool call，名称与原参数从该块读 | 保持 RUNNING turn 与现有身份／权限条件 |
-| CODE_MODE_CALL | 源 exec attempt＋cell 内调用序号、工具名与原参数 | 当前 Host 的存活 cell owner 接纳，使用源 exec 快照 |
+| CODE_MODE_CALL | 源 exec_cell attempt＋cell 内调用序号、工具名与原参数 | 当前 Host 的存活 cell owner 接纳，使用源 exec_cell 快照 |
 
-MODEL 不复制原块中的名称和参数。CODE 唯一性为源 exec attempt＋子调用序号，在副作用前固定真实来源；来源行随第一次共同 decision／attempt／result 接纳事务建立，不留下需要另行修复的空调用对象。来源不保存运行状态、队列、结果正文、交付标志或恢复信息。当前 writer 与存活 cell owner 提供执行权，旧 ID、数据库中的 exec 或导入历史本身不授权执行。
+MODEL 不复制原块中的名称和参数。CODE 唯一性为源 exec_cell attempt＋子调用序号，在副作用前固定真实来源；来源行随第一次共同 decision／attempt／result 接纳事务建立，不留下需要另行修复的空调用对象。来源不保存运行状态、队列、结果正文、交付标志或恢复信息。当前 writer 与存活 cell owner 提供执行权，旧 ID、数据库中的 exec_cell 或导入历史本身不授权执行。
 
 参数、Hook 或权限拒绝也有真实调用与结果，但没有物理 attempt；因此不能仅给 attempt 加一个 CODE 字段，或伪造一次 attempt 来承载来源。这份来源关系解决归属，不承担另一套工具生命周期。
 
@@ -173,15 +177,15 @@ batch 只有一个真实 invocation。逐项 PreTool／PostTool 使用 run_agent
 
 两种来源的结果都写入现有 `tool_results` 和真实 `TOOL_RESULT` entry。正文、blob、artifact、coverage、状态、耗时、接受与精确确认使用同一套 owner；结果 entry 继续承载已有结果事件和保留关系。结果归于源调用的 turn，turn 已结束不阻止实际结算。JS 获得本次公共业务值不需要另建结果库、空 entry 分支或专用正文 resolver。
 
-调用来源决定投影：MODEL 结果进入真实模型 call/result 历史；CODE 结果交付 JS，UI 在父 exec 下展示，只有 console、return 和本文规定的未交付结果输出经 exec／wait 进入模型。共享 canonical 存储不等于把全部内部结果交给模型。
+调用来源决定投影：MODEL 结果进入真实模型 call/result 历史；CODE 结果交付 JS，UI 在父 exec_cell 下展示，只有 console、return 和本文规定的未交付结果输出经 exec_cell／wait 进入模型。共享 canonical 存储不等于把全部内部结果交给模型。
 
-provider reader、预算／headroom、原生结果配对与迟到观察、压缩来源、模型会话读取／搜索、历史召回及 fork 共用这条来源选择，先过滤再分页和报价。CODE 不能变成孤立 provider tool message、原生未完成调用或模型已读材料。UI、诊断、artifact／blob 保留和未结算调用检查仍包含真实 CODE 记录；UI 使用已有工具卡片与内容读取，只按来源关联到父 exec，不重复显示为对话气泡。
+provider reader、预算／headroom、原生结果配对与迟到观察、压缩来源、模型会话读取／搜索、历史召回及 fork 共用这条来源选择，先过滤再分页和报价。CODE 不能变成孤立 provider tool message、原生未完成调用或模型已读材料。UI、诊断、artifact／blob 保留和未结算调用检查仍包含真实 CODE 记录；UI 使用已有工具卡片与内容读取，只按来源关联到父 exec_cell，不重复显示为对话气泡。
 
 cell 仍进程内；不新增持久 cell 调度或重启队列。现有 event／subject／guard／job 类别保持，调用来源引用及约束 hard cut。Plan 只接受 MODEL 来源，统一归属不扩大其调用范围。
 
 ### 5.2 共同执行与并发
 
-每次调用：最终参数校验→PreTool→共同权限／可用性→attempt 接纳→物理执行→真实结果与必要副作用结算→PostTool→交付 JS。外层 exec 与内层业务各有真实 Hook 身份；内层自身 Hook 不重复跑。ROOT cell 的 Hook 上下文走正常 ROOT 输入点，不扩大权限；用户配置的 ROOT／Subagent 适用范围与真实输入来源遵循配套设计 §1.5。
+每次调用：最终参数校验→PreTool→共同权限／可用性→attempt 接纳→物理执行→真实结果与必要副作用结算→PostTool→交付 JS。外层 exec_cell 与内层业务各有真实 Hook 身份；内层自身 Hook 不重复跑。ROOT cell 的 Hook 上下文走正常 ROOT 输入点，不扩大权限；用户配置的 ROOT／Subagent 适用范围与真实输入来源遵循配套设计 §1.5。
 
 bypass 不吞掉 Hook 拒绝、策略故障或真实不可用。当前策略异常可能退为 REQUIRE_CONFIRMATION；CODE 来源遇到这种无法获得授权的情况，返回明确的未派发 ToolError，ROOT 可通过原生入口处理，不把后台 cell 接到新的用户确认窗口。原生既有确认行为保持；远端 MCP 自身的 input-required／失败按实际业务结果交付。
 
@@ -189,7 +193,7 @@ bypass 不吞掉 Hook 拒绝、策略故障或真实不可用。当前策略异�
 
 同 PROCESS 的 stdin／kill／close 要由 terminal owner 裁决；文件操作的观察、写入和相同资源竞争在共同文件 owner 处理。不能用覆盖整个 await 的 Host 大锁，也不另建“工具纯度”注册表。需要先后关系的脚本使用 await，Promise.all 不承诺相互依赖的写操作按数组顺序完成。
 
-当前 read_file／edit_file／write_file 确有 workspace 内的同路径锁；artifact_export 的 atomic no-clobber、terminal／外部程序写入不在这把锁内，不能把它说成跨进程文件事务。edit 继续保留 revision 与实际文件复核。
+当前 read_file／edit_file／write_file 确有 workspace 内的同路径锁；export_artifact 的 atomic no-clobber、terminal／外部程序写入不在这把锁内，不能把它说成跨进程文件事务。edit 继续保留 revision 与实际文件复核。
 
 文件观察复用现有 workspace 状态，支持原生 read→JS edit、JS read→原生 edit。当前 read_file 用原生 40,000-byte 完整展示界限决定可观察行；JS 改为以本次完整业务值实际交付为准，仍遵守原有读行／字符边界。交付成功、该工具 Promise continuation 运行前，文件 owner 在同路径锁内复验读取 revision，匹配才合并真实范围；迟到旧 revision 不覆盖更新观察。锁不跨 await，其他 JS 不需暂停。传输失败／只有预览不扩大观察；不伪造 provider 已读，不另建 cell 观察权限库。原生路径及 replace_file 既有 revision 规则保持。
 
@@ -227,7 +231,7 @@ cell 创建时冻结 JS 目录的名称和精确签名，包括当时直接 MCP�
 
 “完整”是工具本次约定范围内、未经模型展示预算剪裁的响应，不是完整文件／进程全历史。原有分页、truncated、cursor、gap 保持真实含义。
 
-terminal／terminal_process 已有有限 tail 和独立完整范围 artifact，后者目前只在模型 footer。共同公共响应增加可选 `output_artifact`，给真实 ARTIFACT target、disposition、source coverage；原生和 JS 一起用，不覆写原 output。示意：
+exec_process／manage_process 已有有限 tail 和独立完整范围 artifact，后者目前只在模型 footer。共同公共响应增加可选 `output_artifact`，给真实 ARTIFACT target、disposition、source coverage；原生和 JS 一起用，不覆写原 output。示意：
 
 ```json
 {
@@ -253,21 +257,21 @@ terminal／terminal_process 已有有限 tail 和独立完整范围 artifact，�
 
 console.log 同步接纳正式输出，不采样、不静默丢弃，也不代表模型已阅读。非 undefined return 用同一规则，在正常完成时排在所有日志后；cell 已失败不再发出成功 return 记录。未捕获异常保留 name／message／可用 stack，ToolError 另保留真实失败状态及结果入口，不能按普通 Error 的 JSON.stringify 得到空对象后冒充完整诊断。此前输出保留，行列取冻结源码与 SDK 实际信息，不能可靠给出的不猜。
 
-exec／wait 按序交付容纳得下的完整记录前缀，剩余用 has_more＋后续 wait 读取。单条过大走现有 artifact；失败明确报告。整页控制字段与已选记录经现有 FULL_REQUIRED／资源报价保持完整，不在接受后又降成截断预览。沿用现有 40,000-byte 模型工具结果边界及上下文预算，不另增 provider 上限。
+exec_cell／wait 按序交付容纳得下的完整记录前缀，剩余用 has_more＋后续 wait 读取。单条过大走现有 artifact；失败明确报告。整页控制字段与已选记录经现有 FULL_REQUIRED／资源报价保持完整，不在接受后又降成截断预览。沿用现有 40,000-byte 模型工具结果边界及上下文预算，不另增 provider 上限。
 
 各 cell 内有序，跨 cell 按各自读取，不虚构全局时间。内部结果不全灌模型，由 console／return 选择。工具自有 Hook、Agent 消息与完成投递保留自身通道，不被吞掉，也不新加阅读回执。
 
-cell 已 failed／terminated，而在途结果尚未成功 resolve/reject 给 JS 时，真实结算不能只令 pending_calls 减一：exec／wait 的正式输出追加 `kind:"tool_result"` 记录，给原子调用序号、tool_name、真实结果状态及公共结果／已有 artifact。按实际结算顺序从 accepted result 惰性读取，展示为 preview 时保留 coverage／读取入口，不复制新日志或制造 provider tool message。VM 已释放仍可 wait 这些结算；轻量记录在 pending_calls 清零且输出消费完成后释放。已经交给 JS、只是脚本未打印的普通结果不自动输出。这里判断的是实际 Promise 交付，不是模型或脚本阅读回执。
+cell 已 failed／terminated，而在途结果尚未成功 resolve/reject 给 JS 时，真实结算不能只令 pending_calls 减一：exec_cell／wait 的正式输出追加 `kind:"tool_result"` 记录，给原子调用序号、tool_name、真实结果状态及公共结果／已有 artifact。按实际结算顺序从 accepted result 惰性读取，展示为 preview 时保留 coverage／读取入口，不复制新日志或制造 provider tool message。VM 已释放仍可 wait 这些结算；轻量记录在 pending_calls 清零且输出消费完成后释放。已经交给 JS、只是脚本未打印的普通结果不自动输出。这里判断的是实际 Promise 交付，不是模型或脚本阅读回执。
 
 ## 8. 生命周期与控制
 
 | 触发 | cell | 已接纳工作／作用 |
 |---|---|---|
-| exec／wait 观察超时 | 持续运行 | 持续运行 |
+| exec_cell／wait 观察超时 | 持续运行 | 持续运行 |
 | 压缩、普通新消息／steer、ROOT final | 持续运行，新消息由 ROOT 处理 | 保留原执行 |
-| 新 turn、权限变化、进入 Plan | 旧 cell 仍沿源 exec 快照 | 后台工作不被改成新 turn 权限 |
+| 新 turn、权限变化、进入 Plan | 旧 cell 仍沿源 exec_cell 快照 | 后台工作不被改成新 turn 权限 |
 | 用户 Stop 当前 ROOT turn | 终止该 turn 创建的 cell；仅被该轮 wait 的旧 cell 不受影响 | 在途作用按 owner 取消／结算，已派 Work 不自动取消 |
-| stop_exec／用户精确停止 cell | 停后续 JS，取消观察与未派发提交 | 不等于 stop_agent 或杀已转交终端 owner 的进程 |
+| manage_cell.stop／用户精确停止 cell | 停后续 JS，取消观察与未派发提交 | 不等于 stop_agent 或杀已转交终端 owner 的进程 |
 | JS 异常、OOM、计算超界、Worker 故障 | failed，不自动重新求值 | 已接纳作用真实结算 |
 | HostSession／工作区关闭 | 停接纳、终止全部所属 cell，再释放资源 | 在途调用按共同 owner 取消／结算；活动 turn 中断，未启动请求沿共同队列保留 |
 | 宿主崩溃 | VM 丢失，旧句柄不可继续 | 共同 Host 接管如实结算中断；不重放已运行 turn／工具，未启动请求按队列语义处理 |
@@ -300,7 +304,7 @@ console.log({ research, review });
 console.log(await tools.wait_agent.works({ targets: [research.work, review.work] }));
 ```
 
-exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按依赖执行；Promise 满足后第二条日志自然产生。ROOT 后来 wait_exec 取回它，不会再派活。若先 stop_exec，已经接纳的 Work 仍独立运行，可用原生 inspect／wait／stop 管理。
+exec_cell 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按依赖执行；Promise 满足后第二条日志自然产生。ROOT 后来 manage_cell.wait 取回它，不会再派活。若先 manage_cell.stop，已经接纳的 Work 仍独立运行，可用原生 inspect／wait／stop 管理。
 
 单 Agent、初始队友引用以及调查→审查→修订→实现→原 critic 代码审查的完整例子见配套文档。
 
@@ -317,7 +321,7 @@ exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按�
 | MCP ref／runtime | 双消费者、当前真实 binding、完整 inspect 激活 |
 | runner／compaction／Host／Hook | 持续 cell、实际 Hook 来源、状态索引、准确 stop／close／reopen |
 | Node／QuickJS 打包 | 可复现 Node／WASM 依赖、隔离、计时、handle、有限 IPC；运行时不联网下载依赖 |
-| reader／history／fork／UI／用户控制 | 模型来源过滤在分页／预算前完成；UI 使用同一真实结果并归组到父 exec；状态、输出、精确停止复用既有 owner |
+| reader／history／fork／UI／用户控制 | 模型来源过滤在分页／预算前完成；UI 使用同一真实结果并归组到父 exec_cell；状态、输出、精确停止复用既有 owner |
 | SYSTEM／工具／bundled skill | 短环境合同＋原生 schema；复杂编排按需读取既有 skill，不写实验过程 |
 
 本轮实施与验证总览见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)，逐项行为、证据层级和未覆盖边界见 [验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)。
@@ -334,13 +338,13 @@ exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按�
 
 ### 10.3 实施验收
 
-1. 原生与 JS 使用同一结果 entry、artifact 和业务值；CODE 过滤在分页／报价前完成，模型读取、压缩、搜索与 fork 不混入内部结果，UI 可从父 exec 查看真实调用。
+1. 原生与 JS 使用同一结果 entry、artifact 和业务值；CODE 过滤在分页／报价前完成，模型读取、压缩、搜索与 fork 不混入内部结果，UI 可从父 exec_cell 查看真实调用。
 2. 原生批次／两个 cell／慢快调用并存，取消、Hook、结果归属不串线。
 3. cell 等真实 Work 时 ROOT 完成生产压缩，结束后下一条工具只执行一次；ROOT final 后也能继续。
 4. JS inspect→META 不经模型可调用；纯压缩不坏 ref，真实 server／schema 变化仍约束调用。
 5. 循环、微任务、编译卡住、OOM、输出满能结束；长外部等待和多段短计算不被总寿命限制杀掉。
 6. 多页／大单条输出、terminal gap、artifact 不可用、unsafe 数字与失败不静默丢失或假成功。
-7. Stop、steer、Plan、stop_exec、Host close、进程死亡按表工作；未 await 的已提交操作正确结算。
+7. Stop、steer、Plan、manage_cell.stop、Host close、进程死亡按表工作；未 await 的已提交操作正确结算。
 8. 配套 Agent 的 batch／history／message／wait／monitor 验收；WORK ID 从队列到 turn 保持不变，启动／取消只结算一个实际阶段，final 读原 entry；已接纳请求不依赖 cell 存活。
 
 只测可观察行为，不冻结自然语言或整份 schema。本轮已用保存 provider 配置验证两种 API 的实际 prefix、调用、结果与生产压缩；真实 SDK MCP 的同 cell／ref 跨压缩也已验证。完整输入、canonical 核对与覆盖层级见 [验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)，不把文档例子当通过证据。

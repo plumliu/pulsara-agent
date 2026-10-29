@@ -256,10 +256,10 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
             )
 
         service._read = read_repository
-        arguments = {"action": "list", "session": None, "status": "PAUSED"}
+        arguments = {"session": None, "status": "PAUSED"}
         ids = []
         while True:
-            page = await service.invoke(
+            page = await service.invoke_query(
                 arguments,
                 default_session_id=lease.guard.session_id,
                 permission_mode=DEFAULT_PERMISSION_MODE,
@@ -273,8 +273,8 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
             arguments = {**arguments, "cursor": page["next_cursor"]}
         assert ids == sorted(row["id"] for row in current)
         assert active["id"] not in ids and other["id"] not in ids
-        selected = await service.invoke(
-            {"action": "list", "session": {"kind": "SESSION", "session_id": other_lease.guard.session_id}},
+        selected = await service.invoke_query(
+            {"session": {"kind": "SESSION", "session_id": other_lease.guard.session_id}},
             default_session_id=lease.guard.session_id,
             permission_mode=DEFAULT_PERMISSION_MODE,
         )

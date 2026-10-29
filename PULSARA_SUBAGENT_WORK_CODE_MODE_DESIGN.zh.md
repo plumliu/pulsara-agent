@@ -6,6 +6,8 @@
 
 本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施合同；示例中的 ID 仍须替换为运行时真实返回值。
 
+当前工具名、查询分支与 CELL 身份以 [工具查询、命名与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 为准。本文接口表与示例采用该合同；所链接的既往实验与实施记录保留其原验证范围，不作为新接口已验证的证据。
+
 ## 1. 核心语义
 
 只有两个协作领域的一等对象：
@@ -29,13 +31,13 @@ ID 遵循 [统一身份规格](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_I
 
 已有内容原样保留，包括旧请求、消息、工具结果和已采用的压缩摘要；不根据新 Work 重写旧 snapshot、ROOT 消息或 handling。profile 作为独立 user message 放在本次 instruction 前，不拼入通用 SYSTEM，也不作为开启 entry。ROOT 派活的 instruction 是本次 turn 的开启 entry；各份前置 final 分别作为后续 user entry 追加，明确选择的材料同样由接收方持有，不合并改写 instruction。模型沿 context binding 读取有效摘要与尾部；UI 沿同一 Agent scope 分页展示已接纳的 canonical 历史，可以查看压缩前记录。两者共用事实与既有投影，UI 的历史浏览不把旧全文重新塞回模型输入。
 
-Subagent 仅在 bypass-permissions 下使用，不提供独立的权限模式选择或权限确认入口。共同请求接纳时直接继承并冻结发起者 ROOT 的模型连接、模型、reasoning 与 bypass 权限事实。原生派活取该次 ROOT 调用的快照；JS 派活取启动该 cell 的 exec 快照。排队期间设置变化不改变已接纳请求；新派活可取得新的快照。启动时由共同 turn admission 承接这些事实，协作层不增加权限或配置权威。公共接口不提供模型配置枚举工具、独立选模或 reasoning 覆盖参数。
+Subagent 仅在 bypass-permissions 下使用，不提供独立的权限模式选择或权限确认入口。共同请求接纳时直接继承并冻结发起者 ROOT 的模型连接、模型、reasoning 与 bypass 权限事实。原生派活取该次 ROOT 调用的快照；JS 派活取启动该 cell 的 exec_cell 快照。排队期间设置变化不改变已接纳请求；新派活可取得新的快照。启动时由共同 turn admission 承接这些事实，协作层不增加权限或配置权威。公共接口不提供模型配置枚举工具、独立选模或 reasoning 覆盖参数。
 
 新请求沿 ROOT 的共同接纳与 provider-input 安装链路进入同一个 Agent scope：目标配置相同时沿已安装 epoch 追加；真正切换模型配置时，复用已有模型切换接纳与测量、合法 cold 边界或已采用的压缩 successor。Work 开始、结束及 profile 变化本身不触发重建。已安装 epoch 内 SYSTEM／tools 字节不变，messages 只追加；压缩和模型切换均使用共同 reader、planner 与 coordinator。
 
 turn 结束只结算本轮执行与资源，Agent 的有效历史和已安装 scope 按 ROOT 的连续对话生命周期保留，不随一份 Work 结束而销毁。
 
-新建 Agent 的 `context:last_n` 取发起调用当时的已接受 ROOT 上下文作为初始背景；JS 使用源 exec 的固定截止位置，不读取随后到来的用户消息冒充原始背景。它与 `materials` 都是内容传递，不建立历史分支或继承关系。选定内容进入接收方自己的输入，不依赖源 session 持续存在，也不长期借用旧 provider view。
+新建 Agent 的 `context:last_n` 取发起调用当时的已接受 ROOT 上下文作为初始背景；JS 使用源 exec_cell 的固定截止位置，不读取随后到来的用户消息冒充原始背景。它与 `materials` 都是内容传递，不建立历史分支或继承关系。选定内容进入接收方自己的输入，不依赖源 session 持续存在，也不长期借用旧 provider view。
 
 Subagent 的普通 final 经共同完成链路接纳后，本次 turn 完成；WORK 沿请求关联读取这份 final。完成不是对结论正确性的认证。执行失败、取消、中断读取实际终态与原因。无需结果提交工具。
 
@@ -93,11 +95,11 @@ profile 与前置结果保留真实的非人类来源，不因使用 user role �
 
 session 表增加可空的 `root_session_id`，作为指向 session 主键的外键，并建立索引。NULL 表示 ROOT；非 NULL 表示 SUBAGENT，且必须指向一份 ROOT session。每个 Subagent 只属于一个 ROOT，并可在该 ROOT 下连续接活；不单建成员关联表，不单独存 kind。对外需要 kind 时，按这个字段派生。
 
-主侧边栏查询 `root_session_id IS NULL`；ROOT 的 `list_agents` 与协作侧栏查询 `root_session_id = 当前 ROOT 的完整 session ID`。Subagent session 存于数据库，通过协作详情查看和管理。该归属用于成员枚举与协作目标范围判断，不限制既定会话检索范围。会话的用户层管理操作不因此成为 Subagent 的工具。
+主侧边栏查询 `root_session_id IS NULL`；ROOT 的 `query_agents` 与协作侧栏查询 `root_session_id = 当前 ROOT 的完整 session ID`。Subagent session 存于数据库，通过协作详情查看和管理。该归属用于成员枚举与协作目标范围判断，不限制既定会话检索范围。会话的用户层管理操作不因此成为 Subagent 的工具。
 
 Subagent session 不运行自动标题生成或后续输入建议。显示名称由 ROOT 在新建时通过原生 `run_agent`、`tools.run_agent` 或 `tools.run_agent.batch` 的 `name` 参数填写；复用时沿用已有名称。
 
-不为 Subagent 增设用户侧的工作区选择、手动压缩、上下文用量预览、会话分叉或定时任务入口，也不向其暴露 `scheduled_tasks`。自动压缩和协作详情中的历史、状态展示沿共同引擎处理。用户可以单独停止某份 Work，复用 §4.5 的 WORK 取消与结算链路。
+不为 Subagent 增设用户侧的工作区选择、手动压缩、上下文用量预览、会话分叉或定时任务入口，也不向其暴露 `query_schedules`、`manage_schedule`。自动压缩和协作详情中的历史、状态展示沿共同引擎处理。用户可以单独停止某份 Work，复用 §4.5 的 WORK 取消与结算链路。
 
 Subagent 不提供 `open_in_pulsara`，其 SYSTEM 不注入面向用户的可视化发布说明。它可以按任务生成图片、HTML 或图表，将文件路径和必要说明交给 ROOT 组织展示。
 
@@ -155,9 +157,9 @@ A 因失败或停止结束时，沿共同执行链路结算并解除 B 的等待
 
 ### 1.5 共用能力链路与 MCP 提供范围
 
-ROOT 与 Subagent 共用能力发现、`list_capabilities`／`inspect_capability` 查询、刷新、启停、执行检查及 runtime observation 链路。Skill、Hook 与安装来源查询采用共同规则，不另设 Subagent 专用查询禁令。读取目录不授予管理权限，原生工具仍按本文的调用方范围暴露。
+ROOT 与 Subagent 共用能力发现、`query_capabilities` 查询、刷新、启停、执行检查及 runtime observation 链路。Skill、Hook 与安装来源查询采用共同规则，不另设 Subagent 专用查询禁令。读取目录不授予管理权限，原生工具仍按本文的调用方范围暴露。
 
-文件查找、文本读取与修改、终端执行及进程交互、todo、Skill 发现与使用，以及 `view_image`、`artifact_read`／`artifact_export` 均复用 ROOT 的工具语义和现有执行链路。ROOT 可在 instruction 中提供图片引用或路径，由 Subagent 按需查看。terminal monitor 的投递与生命周期按 §3.4 绑定当前 Work。
+文件查找、文本读取与修改、终端执行及进程交互、todo、Skill 发现与使用，以及 `view_image`、`read_artifact`／`export_artifact` 均复用 ROOT 的工具语义和现有执行链路。ROOT 可在 instruction 中提供图片引用或路径，由 Subagent 按需查看。terminal monitor 的投递与生命周期按 §3.4 绑定当前 Work。
 
 扩展、连接和授权配置由用户能力页或 ROOT 的能力管理工具操作。Subagent 不暴露这些管理工具及 `reload_capabilities`；共同刷新、启停链路负责把配置变化反映到各受影响 session，不要求 Subagent 自己修改配置。
 
@@ -176,7 +178,7 @@ MCP 的“为子代理也提供”开关只决定该 MCP 是否进入 Subagent �
 
 相关变化由每个受影响 session 的共同通知与输入准备链路处理，在其下一次正常准备输入时追加 runtime observation。一个 session 消费通知不应使其他受影响 session 漏掉变化；通知不单独唤醒闲置 Agent 或创建新 Work，也不引入持久通知、回执或新的 epoch 边界。冷 epoch 与已采用的压缩 successor 继续按共同规则确定工具集合。
 
-初始工具集合内的 MCP 工具使用 native 调用；用户在能力页或 ROOT 通过管理工具带来的同 epoch 新能力，沿 `inspect_capability` 与 META 调用链路渐进披露。两种路径共用当前可用性检查和 append-only runtime observation。即便某 MCP 工具已经作为 native schema 安装，后续禁用或关闭对子代理提供时，也只追加不可用说明并由执行端拒绝新调用，不修改既有 SYSTEM、provider tools 或历史消息。实施范围包含开关变化对 Subagent 的渐进披露，以及插件 MCP 同一提供范围配置的安装审阅与后续管理。
+初始工具集合内的 MCP 工具使用 native 调用；用户在能力页或 ROOT 通过管理工具带来的同 epoch 新能力，沿 `query_capabilities` 与 META 调用链路渐进披露。两种路径共用当前可用性检查和 append-only runtime observation。即便某 MCP 工具已经作为 native schema 安装，后续禁用或关闭对子代理提供时，也只追加不可用说明并由执行端拒绝新调用，不修改既有 SYSTEM、provider tools 或历史消息。实施范围包含开关变化对 Subagent 的渐进披露，以及插件 MCP 同一提供范围配置的安装审阅与后续管理。
 
 ## 2. 两种入口，共用一套操作
 
@@ -199,30 +201,29 @@ Code mode 仅供 ROOT 的 bypass-permissions 调用使用，Subagent 没有 JS �
 
 本表只列协作与 code mode 入口，不枚举文件、终端、MCP 等其他工具。
 
-### 3.1 原生与 JS 共有：六个协作工具
+### 3.1 原生与 JS 共有：五个协作工具
 
 | 工具 | 原生 | JS | 原生调用方（JS 均仅 ROOT＋bypass） | 作用 |
 |---|---|---|---|---|
 | `run_agent` | 是 | `tools.run_agent` | ROOT | 新建或复用 Subagent，提交一份 Work |
-| `list_agents` | 是 | `tools.list_agents` | ROOT | 分页列举当前会话的 Subagent，恢复可用引用 |
-| `inspect_agent` | 是 | `tools.inspect_agent` | ROOT | 按 AGENT／WORK target 查询具体信息、工作列表或结果 |
+| `query_agents` | 是 | `tools.query_agents` | ROOT | 无 target 时分页列 Subagent；AGENT target 分页列 Work；WORK target 只读具体状态和结果 |
 | `send_agent_message` | 是 | `tools.send_agent_message` | ROOT、Subagent | 向目标 Agent 的活动 turn 发送 steer；无活动 turn 时返回未接纳 |
 | `wait_agent` | 是 | `tools.wait_agent` | ROOT、Subagent | 只接受 AGENT，等指定 Agent 的消息或本次等待绑定的工作结果 |
 | `stop_agent` | 是 | `tools.stop_agent` | ROOT | WORK 停止一份工作；AGENT 停止当前工作并取消已排队工作，保留身份和历史 |
 
-`inspect_agent` 的名字用于协作查询，具体查询对象由 target.kind 决定。`stop_agent` 同样接受 AGENT／WORK，分别指定整个执行者当前已有的工作或其中一份工作；停止不删除执行者。
+`query_agents` 的名字用于协作查询，具体查询对象由 target.kind 决定。`stop_agent` 同样接受 AGENT／WORK，分别指定整个执行者当前已有的工作或其中一份工作；停止不删除执行者。
 
-### 3.2 只有原生入口：三个 code mode 生命周期工具
+### 3.2 只有原生入口：三个 code mode 入口
 
 | 工具 | 参数 | 作用 |
 |---|---|---|
-| `exec` | `code`／`path` 恰一；可选 `yield_time_ms` | 启动一次 JS 执行 |
-| `wait_exec` | `cell_id`；可选 `yield_time_ms` | 继续等待原脚本并取得新输出 |
-| `stop_exec` | `cell_id` | 停止脚本后续执行 |
+| `exec_cell` | `code`／`path` 恰一；可选 `yield_time_ms` | 启动一次 JS 执行 |
+| `query_cells` | 无 target：可选 `cursor`、`max_items`；CELL target：可选 `offset_chars`、`max_chars` | 分页列存活 Cell，或读取状态与冻结源码；不消费执行输出 |
+| `manage_cell` | `action:"wait"`、CELL target，可选 `yield_time_ms`；或 `action:"stop"`、CELL target | 等待后续输出或停止脚本后续执行 |
 
 这三个工具不通过 `tools.*` 嵌套调用。终止脚本不等于取消已接纳的 Work；需要取消工作时调用 `stop_agent`。
 
-`cell_id` 是脚本执行引用，不是第三种协作对象。exec／wait_exec 到观察时间后返回，原脚本持续执行；压缩不暂停它，wait_exec 不负责恢复它。每个 cell 独立持有自己的变量和 Promise。跨 cell 使用已经返回的 target 查询真实对象。
+Cell 使用 `{"kind":"CELL","cell_id":"cell:…"}` target，ID 是现有 canonical 编码的完整 `cell:` 值；不截短、转换大小写或生成别名。Cell 是脚本执行对象，Agent／Work 仍是协作领域的两个对象。exec_cell／manage_cell.wait 到观察时间后返回，原脚本持续执行；压缩不暂停它，manage_cell.wait 不负责恢复它。每个 cell 独立持有自己的变量和 Promise。跨 cell 使用已经返回的 target 查询真实对象。
 
 ### 3.3 只有 JS 环境入口：编排与输出
 
@@ -233,9 +234,9 @@ Code mode 仅供 ROOT 的 bypass-permissions 调用使用，Subagent 没有 JS �
 | `console.log(...values)` | 将脚本选择的文本或结构化结果作为正式输出返回给调用模型 | 不可丢弃的模型输出通道，不创建工作，不代表业务完成 |
 | `Promise.all`／`Promise.allSettled`、变量、条件、循环 | 标准 JS 组合能力 | 不新增工具 schema 或 workflow DSL |
 
-`console.log` 是正式输出，按顺序由 exec／wait_exec 交给 ROOT；不静默丢弃。序列化、结果分页、artifact 与资源失败由 Code Mode 接入合同规定，协作接口不另设输出通道。
+`console.log` 是正式输出，按顺序由 exec_cell／manage_cell.wait 交给 ROOT；不静默丢弃。序列化、结果分页、artifact 与资源失败由 Code Mode 接入合同规定，协作接口不另设输出通道。
 
-`tools.wait_agent.works` 直接订阅工作状态，不后台轮询原生工具。等待期间没有 JS 计算，也不占模型调用、Agent 执行名额或旧 provider surface。Work 结束后 Promise 正常完成，脚本立即执行下一行，不需要 ROOT 再调用 wait_exec。
+`tools.wait_agent.works` 直接订阅工作状态，不后台轮询原生工具。等待期间没有 JS 计算，也不占模型调用、Agent 执行名额或旧 provider surface。Work 结束后 Promise 正常完成，脚本立即执行下一行，不需要 ROOT 再调用 manage_cell.wait。
 
 ### 3.4 记忆、终端监控与完成方式
 
@@ -243,10 +244,10 @@ Code mode 仅供 ROOT 的 bypass-permissions 调用使用，Subagent 没有 JS �
 
 | 能力 | ROOT | Subagent | 两种入口 |
 |---|---|---|---|
-| `memory_search`、`memory_get` | 原生保留 | 不提供 | 不进入 JS |
+| `search_memory`、`get_memory` | 原生保留 | 不提供 | 不进入 JS |
 | `remember`、`mark_memory_relation` | 原生保留 | 不提供 | 不进入 JS |
 | `search_sessions`、`search_session_content`、`read_session_content` | 原生保留；两种 session 同等检索与读取 | 不提供 | JS 暴露沿配套 Code Mode 合同，调用方仅 ROOT |
-| `terminal_monitor` | 原生保留全局管理能力 | 原生注册、查看、取消当前 Work 的监控 | 不进入 JS |
+| `query_monitors`、`manage_monitor` | 原生保留全局查询与管理能力 | 原生查询、注册、取消当前 Work 的监控 | 不进入 JS |
 | 工作完成 | ROOT 接收并判断结果 | 普通 final 完成本次 Work | 不需要额外结果提交调用 |
 
 Subagent 不自动注入记忆、历史会话和响应偏好。ROOT 提供任务所需背景；已经进入 Agent 有效历史的记忆文字与工具结果照常保留，不因工具暴露变化改写历史。ROOT 的记忆能力与设置规则保持，历史检索覆盖两种 session，见 §1.2。
@@ -391,11 +392,11 @@ batch 成功返回表示整批请求已经接纳，不表示 final 已产生。�
 
 普通 run_agent 和 batch 都使用从 ROOT 推广的共同请求接纳 owner；普通调用是一项请求，batch 是同一事务中的多项请求。batch 不能仅实现成逐项调用 run_agent 的 Promise.all，也不向公共 schema 暴露预分配 ID 字段。不新增批次领域对象或独立 workflow scheduler。
 
-### 4.2 `list_agents` 与 `inspect_agent`
+### 4.2 `query_agents`
 
-- `list_agents({cursor?, max_items?})`：返回 agent target、显示名称、当前工作与排队概览、`next_cursor`。不默认输出全部历史。
-- `inspect_agent({target: AGENT, cursor?, max_items?})`：查看指定 Subagent，以及分页的工作请求、状态和结果概览；本委派查询入口不接受 `agent_id:"ROOT"`。
-- `inspect_agent({target: WORK})`：查看一次工作及其实际结果。返回所属 agent、instruction、status、terminal_reason，以及完成时的 final 或停止时的诊断；依赖未成功时说明直接前置 WORK，见 §1.3.1。
+- `query_agents({cursor?, max_items?})`：返回 agent target、显示名称、当前工作与排队概览、`next_cursor`。不默认输出全部历史。
+- `query_agents({target: AGENT, cursor?, max_items?})`：查看指定 Subagent，以及分页的工作请求、状态和结果概览；本委派查询入口不接受 `agent_id:"ROOT"`。
+- `query_agents({target: WORK})`：查看一次工作及其实际结果。返回所属 agent、instruction、status、terminal_reason，以及完成时的 final 或停止时的诊断；依赖未成功时说明直接前置 WORK，见 §1.3.1。
 
 排队管理只提供上述查看及 `stop_agent(WORK)` 取消，不提供将已接纳 Work 转为当前 turn 的 steer。新的补充通过 send_agent_message 独立发送，不隐含修改、消费或取消已有排队请求。
 
@@ -546,7 +547,7 @@ JS 的 AGENT 等待匹配消息后立即解决 Promise，脚本继续；消息�
 
 同一消息可唤醒多个已经登记的观察者；它们不互相消费消息。一旦匹配，结果就固定，不因稍后模型接纳消息或另一个等待返回而丢失。后续串行调用不重复命中同一消息，也不会因先收到 A 的高序号消息而跳过 B 尚未观察的低序号消息。
 
-两种 JS 等待都独立于 exec／wait_exec 的观察超时与 ROOT 压缩。明确终止 cell 时取消它的观察；目标 Work 不因此取消。新一次 AGENT 等待重新解析当前 Work，若需继续等原来的工作，将 bindings 中的 WORK 传给 `.works`。
+两种 JS 等待都独立于 exec_cell／manage_cell.wait 的观察超时与 ROOT 压缩。明确终止 cell 时取消它的观察；目标 Work 不因此取消。新一次 AGENT 等待重新解析当前 Work，若需继续等原来的工作，将 bindings 中的 WORK 传给 `.works`。
 
 ### 4.4.1 接纳、等待与并发的实施约束
 
@@ -641,7 +642,7 @@ ROOT 读完结果后调用 `run_agent`：
 
 ## 6. 多人协作：初始请求介绍队友，原生工具交流
 
-以下代码放入 `exec.code`；也可保存为普通 JS 文件后使用 `exec.path`。
+以下代码放入 `exec_cell.code`；也可保存为普通 JS 文件后使用 `exec_cell.path`。
 
 ```javascript
 const { a, b } = await tools.run_agent.batch({
@@ -814,9 +815,9 @@ console.log(await tools.stop_agent({ target: delivery.implementation.agent }));
 
 ### 7.4 中断后继续协作
 
-ROOT 主要围绕 Agent 会话查询与派活，需要精确查看、等待或停止某次工作时使用 WORK。继续协作复用 `list_agents`、`inspect_agent`、`run_agent`／batch 和等待工具，不增加恢复工具或状态。ROOT 与 Subagent 共用模型配置和本机网络，故障可能同时影响多个请求；恢复不以 ROOT 在故障期间持续在线为前提。用户重新向 ROOT 发消息后，通过共同对话链路继续。
+ROOT 主要围绕 Agent 会话查询与派活，需要精确查看、等待或停止某次工作时使用 WORK。继续协作复用 `query_agents`、`run_agent`／batch 和等待工具，不增加恢复工具或状态。ROOT 与 Subagent 共用模型配置和本机网络，故障可能同时影响多个请求；恢复不以 ROOT 在故障期间持续在线为前提。用户重新向 ROOT 发消息后，通过共同对话链路继续。
 
-ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `inspect_agent(AGENT)` 查看相关工作列表、用 `inspect_agent(WORK)` 读取确切状态、原因与结果。已经接纳但尚未执行，与根本没有接纳是两种情况；提交结果不确定时沿既有确认链路核实，不直接重派。
+ROOT 先用 `query_agents` 找到已有成员及当前／排队概览，再用 `query_agents(AGENT)` 查看相关工作列表、用 `query_agents(WORK)` 读取确切状态、原因与结果。已经接纳但尚未执行，与根本没有接纳是两种情况；提交结果不确定时沿既有确认链路核实，不直接重派。
 
 | 查到的事实 | 下一步 |
 |---|---|
@@ -826,7 +827,7 @@ ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `i
 | 后续工作尚未接纳 | 只补派缺少的工作 |
 | Agent 已卸载、session 仍存在 | 派活时沿 §1.4 按需加载；旧 Work 不复活 |
 
-若旧 cell 仍存活，ROOT 先通过既有 cell 索引与 `wait_exec` 核实其状态和输出。保留原安排就继续观察；要替换安排时先 `stop_exec` 停止后续派发，再查询已接纳的 Work。脚本终止不取消这些 Work，所需停止仍由 `stop_agent` 完成。宿主崩溃后旧 VM 不恢复，执行与排队事实由共同 Host 接管链路结算。
+若旧 cell 仍存活，ROOT 可用 `query_cells` 查当前库存或持有 target 的状态和源码，再通过 `manage_cell.wait` 读取输出。保留原安排就继续观察；要替换安排时先 `manage_cell.stop` 停止后续派发，再查询已接纳的 Work。脚本终止不取消这些 Work，所需停止仍由 `stop_agent` 完成。宿主崩溃后旧 VM 不恢复，执行与排队事实由共同 Host 接管链路结算。
 
 复杂 workflow 的继续方式如下：
 
@@ -844,7 +845,7 @@ ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `i
 | 位置 | 内容 |
 |---|---|
 | 原生工具定义 | 本工具参数、target、结果、派活／消息／等待／停止的必要语义 |
-| code mode 环境说明 | exec／wait_exec／stop_exec、工具代理、输出、持续等待与脚本生命周期 |
+| code mode 环境说明 | exec_cell／query_cells／manage_cell、工具代理、输出、持续等待与脚本生命周期 |
 | SYSTEM | ROOT 与 Subagent 各自为完整文本；ROOT 简述原生／JS 共用对象及 Skill 入口，Subagent 只保留通用执行与交付规则；角色职责由 profile 提供，工具组合教学由 Skill 承担 |
 | `pulsara-code-mode` bundled Skill | 主文档展示普通工具与 Agent 交叉使用；`tool-calling` 参考目录介绍工具组合与结果，`agent-orchestration` 参考目录介绍复用、batch 队友引用、依赖、等待、多人协作与多阶段示例；正式输出只教 `console.log` |
 
@@ -858,7 +859,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 
 | 来源 | 本文负责的新语义 |
 |---|---|
-| `archived_docs/ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md` 及现有 bundled subagent skill | 本文的六个共享操作、AGENT／WORK 身份、普通 final 完成、原生消息和 ROOT 统一协调。 |
+| `archived_docs/ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md` 及现有 bundled subagent skill | 本文的五个共享操作、AGENT／WORK 身份、普通 final 完成、原生消息和 ROOT 统一协调。 |
 | `experiment/quickjs-code-mode` 分支的 Code Mode 规格 | 本文的原生／JS 暴露矩阵、等待合同及正式模型输出接口；`console.log` 承担不可丢弃的正式输出，不采用原实验的 best-effort 诊断日志语义。 |
 
 记忆工具、monitor 和普通 final 的目标合同见 §3.4。旧文件保留为上下文，不作为新对象与接口的定义来源。
@@ -874,7 +875,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 | 等待／停止 | 共同请求／turn 读取、变化通知、队列取消与 ActiveTurnCancellationIntent | WORK 按 queue→entry→turn 处理；AGENT 停止当前工作并取消本次覆盖的排队工作，历史终态不变；与调度竞态共用 owner，返回实际结果 |
 | 消息 | ROOT steer／补充输入、待输入与完成裁决、Hook 上下文接纳 | ROOT／Subagent 均只向活动 turn 接纳 steer；无活动 turn 则工具结果明确返回未接纳，不暂存、不加载、不开启工作；发送与完成竞态由共同 owner 裁决 |
 | Monitor | ROOT monitor manager、通知接纳／结算、compaction 与 UI | 参数化真实接收 scope；成员订阅绑定当前 turn，终态关闭，进程仍独立 |
-| 工具／提示 | built-in catalogue、caller gating、bundled skill | 六个协作工具，记忆和三个会话检索工具仅 ROOT；Subagent 不隐式注入记忆、历史或响应偏好；monitor 原生可供成员 |
+| 工具／提示 | built-in catalogue、caller gating、bundled skill | 五个协作工具，记忆和三个会话检索工具仅 ROOT；Subagent 不隐式注入记忆、历史或响应偏好；monitor 原生可供成员 |
 | 展示／检索 | 侧边栏、会话检索工具及隐式历史召回 | 侧边栏仅 ROOT；检索两种 session 行为一致，不新增 kind 参数；历史检索开关仅控制隐式召回 |
 | 能力／MCP | 共同 capability 查询、planner、MCP supervisor、配置入口与 context sources | ROOT／Subagent 共用发现、查询、启停和执行规则；两种 MCP 来源共用提供范围开关，插件安装时供用户审阅；各受影响 session 正常输入时追加变化观察，保持 epoch 前缀 |
 | 退役／删除 | 现有 session 关闭、删除与内容回收 | 同次连续闲置满 1 小时卸载、满 3 天删除；运行或等待请求不计闲置；重新派活按需加载，不恢复旧执行；单独删除成员不影响其他会话已交付正文，删除 ROOT 一并关闭和删除所属成员 |

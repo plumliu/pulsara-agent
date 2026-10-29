@@ -296,7 +296,7 @@ class PolicyPermissionGate:
                     reason="terminal command blocked by hardline permission policy",
                     suggested_rules=[
                         {
-                            "tool": "terminal",
+                            "tool": "exec_process",
                             "reason": "hardline_terminal_command",
                             "command": command,
                         }
@@ -315,7 +315,7 @@ class PolicyPermissionGate:
                     reason="terminal process input blocked by hardline permission policy",
                     suggested_rules=[
                         {
-                            "tool": "terminal_process",
+                            "tool": "manage_process",
                             "reason": "hardline_terminal_process_input",
                         }
                     ],
@@ -417,7 +417,7 @@ class PolicyPermissionGate:
 
     def _filesystem_write_access(self, call: ToolCall) -> FilesystemWriteAccess:
         target = call.arguments.get("target")
-        raw_path = (call.arguments.get("path") if call.name == "artifact_export"
+        raw_path = (call.arguments.get("path") if call.name == "export_artifact"
                     else target.get("path") if isinstance(target, Mapping) and target.get("kind") == "PATH" else None)
         if not isinstance(raw_path, str) or not raw_path.strip():
             return FilesystemWriteAccess.DENY
@@ -467,7 +467,7 @@ class PolicyPermissionGate:
                     reason="terminal command requires user confirmation before execution",
                     suggested_rules=[
                         {
-                            "tool": "terminal",
+                            "tool": "exec_process",
                             "reason": reason,
                             "command": command,
                         }

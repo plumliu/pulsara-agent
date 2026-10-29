@@ -119,10 +119,10 @@ def test_returned_memory_target_is_reused_for_read_basis_and_relation(tmp_path):
             memory_context=memory.FrozenModelCallMemoryContext(),
         )
         try:
-            result = await port.invoke(tool_name="memory_get", arguments={"target": memory_target(fact_id)}, invocation_context=context)
+            result = await port.invoke(tool_name="get_memory", arguments={"target": memory_target(fact_id)}, invocation_context=context)
             target = json.loads(result.content)["target"]
             assert result.model_visible_memory_fact_ids == (fact_id,)
-            assert (await port.invoke(tool_name="memory_get", arguments={"target": target}, invocation_context=context)).content == result.content
+            assert (await port.invoke(tool_name="get_memory", arguments={"target": target}, invocation_context=context)).content == result.content
             written = await port.invoke(tool_name="remember", arguments={
                 "statement": "The meeting uses room A.", "context_target": "GLOBAL",
                 "kind": "DECISION", "based_on": [target],
@@ -141,7 +141,7 @@ def test_returned_memory_target_is_reused_for_read_basis_and_relation(tmp_path):
                 {"target": {**target, "context_target": "GLOBAL"}},
                 {"target": {**target, "kind": "SESSION"}},
             ):
-                rejected = await port.invoke(tool_name="memory_get", arguments=arguments, invocation_context=context)
+                rejected = await port.invoke(tool_name="get_memory", arguments=arguments, invocation_context=context)
                 assert rejected.state == "APPLICATION_ERROR"
                 assert rejected.memory_mutation is None
             assert reads == [fact_id, fact_id, fact_id]

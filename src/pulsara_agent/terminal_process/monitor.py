@@ -433,19 +433,69 @@ class TerminalMonitorCoordinator:
     def list_current(self, *, agent_id: str | None = None, work_turn_id: str | None = None) -> tuple[dict[str, object], ...]:
         with self._lock:
             return tuple(
-                {
-                    "monitor_id": item.monitor_id,
-                    "process_id": item.process_id,
-                    "state": item.state.value,
-                    "observation_ordinal": item.observation_ordinal,
-                    "pending": item.draft is not None or item.in_flight is not None,
-                }
+                self._current_payload(item)
                 for item in sorted(
                     self._registrations.values(), key=lambda value: value.monitor_id
                 )
                 if item.state is not TerminalMonitorState.CLOSED
                 and self._visible(item, agent_id=agent_id, work_turn_id=work_turn_id)
             )
+
+    @staticmethod
+    def _current_payload(item: _Registration) -> dict[str, object]:
+        return {
+            "monitor_id": item.monitor_id,
+            "process_id": item.process_id,
+            "state": item.state.value,
+            "observation_ordinal": item.observation_ordinal,
+            "pending": item.draft is not None or item.in_flight is not None,
+        }
+
+    def inspect_current(
+        self,
+        monitor_id: str,
+        *,
+        agent_id: str | None = None,
+        work_turn_id: str | None = None,
+    ) -> dict[str, object] | None:
+        """Read one visible registration without observing output or its lifetime."""
+
+        require_id(monitor_id, "monitor")
+        with self._lock:
+            item = self._registrations.get(monitor_id)
+            if (
+                item is None
+                or item.state is TerminalMonitorState.CLOSED
+                or not self._visible(
+                    item, agent_id=agent_id, work_turn_id=work_turn_id
+                )
+            ):
+                return None
+            policy = item.policy
+            return {
+                **self._current_payload(item),
+                "conditions": {
+                    "completion": True,
+                    "output": (
+                        None
+                        if policy.min_new_output_chars is None
+                        else {
+                            "min_new_output_chars": policy.min_new_output_chars,
+                            "quiet_period_ms": policy.quiet_period_ms,
+                        }
+                    ),
+                    "heartbeat_interval_seconds": policy.heartbeat_interval_seconds,
+                },
+                "delivery": {
+                    "max_output_chars": policy.max_output_chars,
+                    "minimum_progress_observation_interval_seconds": (
+                        policy.minimum_progress_interval_seconds
+                    ),
+                },
+                "lifetime": {
+                    "maximum_duration_seconds": policy.maximum_duration_seconds,
+                },
+            }
 
     def freeze_compaction_handoff(self, *, agent_id: str | None = None, work_turn_id: str | None = None) -> tuple[dict[str, object], ...]:
         """Freeze active/dormant public identities without observation bodies."""

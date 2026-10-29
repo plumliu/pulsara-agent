@@ -924,18 +924,18 @@ def _saved_tool_output_guidance(
     )
     if artifact_read_available and artifact_export_available:
         result += (
-            "use artifact_read for pages or artifact_export for extensive processing."
+            "use read_artifact for pages or export_artifact for extensive processing."
         )
     elif artifact_read_available:
-        result += "use artifact_read for pages."
+        result += "use read_artifact for pages."
     elif artifact_export_available:
-        result += "use artifact_export for extensive processing."
+        result += "use export_artifact for extensive processing."
     else:
         result += "The artifact is not available through the current tools."
     if metadata.artifact_disposition is ToolOutputArtifactDisposition.INCOMPLETE:
         result += " The artifact starts at the retained snapshot; earlier lost output cannot be recovered."
         if artifact_read_available:
-            result += " artifact_read offsets are relative to this retained snapshot."
+            result += " read_artifact offsets are relative to this retained snapshot."
     else:
         result += " The saved output is complete."
     return result

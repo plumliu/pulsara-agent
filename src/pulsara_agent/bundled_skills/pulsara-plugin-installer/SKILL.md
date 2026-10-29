@@ -73,7 +73,7 @@ atomic. If instance identity is unavailable, report that limit rather than editi
 managed state or guessing credential ownership. Diagnosis alone does not
 authorize removal or reinstallation.
 
-For this package's capabilities, copy its target into `list_capabilities.parent`;
+For this package's capabilities, copy its target into `query_capabilities.parent`;
 Plugin is a source, not a list kind. Complete package inventory stays in the GUI.
 Read mutation and adoption separately: `APPLIED` means the source change settled,
 not that all consumers adopted it or that a form appeared. First-party changes

@@ -48,13 +48,11 @@ def test_compaction_release_authorities_reject_another_adoption_candidate() -> N
     scope = ProviderInputContinuityScope(
         session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     adoption_scope = SimpleNamespace(
         session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     candidate_a = SimpleNamespace(
         scope=adoption_scope,
@@ -86,8 +84,7 @@ def test_compaction_release_authorities_reject_another_adoption_candidate() -> N
                 session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
                 turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-            ),
+                    ),
             confirmation=confirmation,
             candidate=candidate_b,
             cut=PreparedProviderInputCut('session:cbauiajfisf4gvpdotrq4qgxhq', 'turn:nzc36cttgo7xxki7bcjc7ops7a', "revision:old", 1),
@@ -108,8 +105,7 @@ def test_compaction_release_authorities_reject_another_adoption_candidate() -> N
                 session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
                 turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-            ),
+                    ),
             confirmation=confirmation,
             candidate=candidate_a,
             cut=PreparedProviderInputCut('session:cbauiajfisf4gvpdotrq4qgxhq', 'turn:nzc36cttgo7xxki7bcjc7ops7a', "revision:old", 2),
@@ -140,8 +136,8 @@ def test_round3_1_runtime_observation_codec_is_canonical_and_inert() -> None:
     assert (
         encode_runtime_observation(
             source_kind=decoded.source_kind,
-            trust_class=decoded.trust_class,
-            lifecycle=decoded.lifecycle,
+            trust_class=ContextTrustClass.AUTHORIZED_CAPABILITY_CONTEXT,
+            lifecycle=SourceObservationLifecycle.ACTIVATION,
             presence=decoded.presence,
             contract_version="pulsara.active-skill-observation.v1",
             body=decoded.body,
@@ -179,20 +175,17 @@ def test_round3_1_scope_and_frontier_are_closed() -> None:
     root = ProviderInputContinuityScope(
         session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     child = ProviderInputContinuityScope(
-        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
-        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id='task:itnsbirlmxzeu74pn7keq6zuzi',
+        session_id='session:itnsbirlmxzeu74pn7keq6zuzi',
+        scope_kind=ModelInputScopeKind.SUBAGENT,
     )
     assert root != child
 
     with pytest.raises(ValueError):
         ProviderInputContinuityScope(
-            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
+            session_id='',
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id='task:itnsbirlmxzeu74pn7keq6zuzi',
         )
     with pytest.raises(ValueError):
         ProcessLocalCanonicalFrontier(

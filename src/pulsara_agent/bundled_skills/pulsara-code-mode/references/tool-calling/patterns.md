@@ -17,17 +17,17 @@ The JS subset is:
 | Purpose | Tools |
 | --- | --- |
 | Files | `read_file`, `write_file`, `edit_file`, `find_files`, `search_content` |
-| Processes | `terminal`, `terminal_process` |
-| Artifacts | `artifact_read`, `artifact_export` |
+| Processes | `exec_process`, `query_processes`, `manage_process` |
+| Artifacts | `read_artifact`, `export_artifact` |
 | Conversation history | `search_sessions`, `search_session_content`, `read_session_content` |
-| Capability discovery | `list_capabilities`, `inspect_capability` |
+| Capability discovery | `query_capabilities` |
 | MCP | `use_new_mcp_tool`, `read_mcp_resource`, `get_mcp_prompt`, and direct MCP tools in the script's initial directory |
-| Agents | `run_agent`, `list_agents`, `inspect_agent`, `send_agent_message`, `wait_agent`, `stop_agent` |
+| Agents | `run_agent`, `query_agents`, `send_agent_message`, `wait_agent`, `stop_agent` |
 
 JS also has `tools.run_agent.batch(...)` and `tools.wait_agent.works(...)`, described
 in [Coordination](../agent-orchestration/coordination.md). Other native tools,
-including `view_image`, `terminal_monitor`, memory, Plan, capability management,
-and the `exec` controls, are called outside the script.
+including `view_image`, `query_monitors`, `manage_monitor`, memory, Plan, capability management,
+and the `exec_cell`, `query_cells`, and `manage_cell` controls, are called outside the script.
 
 ## Sequential and parallel calls
 
@@ -56,12 +56,12 @@ another call fails. `Promise.all` rejects on a failure; it does not cancel the o
 already submitted calls. See [Results and errors](results-and-errors.md).
 
 Tools may finish their own observation while the underlying activity continues.
-For example, `terminal` can produce a running process result. Follow its actual
-process target with `terminal_process` when completion or later output is needed.
+For example, `exec_process` can produce a running process result. Follow its actual
+process target with `manage_process` when completion or later output is needed.
 
 ## Discover an MCP operation
 
-For a listed MCP tool, call `tools.inspect_capability` with its exact target.
+For a listed MCP tool, call `tools.query_capabilities` with its exact target.
 Follow the response's `invocation.mode`: use the indicated direct tool or call
 `tools.use_new_mcp_tool` with the provided target and arguments. JS inspection
 can provide the callable reference directly; a preceding native inspection is

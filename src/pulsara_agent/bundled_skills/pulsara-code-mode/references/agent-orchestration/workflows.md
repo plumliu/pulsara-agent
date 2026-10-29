@@ -58,7 +58,7 @@ to assess findings and decide how to continue.
 
 ## Phase 2: revise, implement, and reuse the critic
 
-Each `exec` has fresh variables. Copy the actual `phase1` object printed above
+Each `exec_cell` has fresh variables. Copy the actual `phase1` object printed above
 into the next script; the example IDs below are illustrative and must be replaced
 with the tool-provided targets.
 
@@ -107,7 +107,7 @@ the review assessment is in its final, rather than encoded in that state.
 
 ## Continue after interruption
 
-`list_agents` and `inspect_agent` show current and recent work. These results
+`query_agents` shows current and recent work. These results
 can help ROOT reuse completed findings, follow running work, or assign new Work. Reusing an unloaded agent loads its existing
 conversation automatically; it does not rerun its previous assignment.
 
@@ -116,7 +116,7 @@ new Work targets; old terminal Works do not become running again. Previously
 completed effects stay in place. Inspect the current files or other tool results
 when the interrupted operation's effects are uncertain.
 
-Logging agent/work targets makes them available to later scripts. `wait_exec`
+Logging agent/work targets makes them available to later scripts. `manage_cell` with `action:"wait"`
 can reveal progress in a script that is still running. If its host has closed,
 the old script cannot be resumed; agent state remains queryable, and further work
 can be assigned through a new script or native tools.

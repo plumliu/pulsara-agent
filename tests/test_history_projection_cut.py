@@ -231,7 +231,7 @@ def test_required_failure_is_typed_optional_Q2_preserves_QA(
 def test_sparse_tools_only_and_wrong_session_cannot_supply_Q1(repo):
     lease = new_session(repo)
     request = saved_calls(repo, lease, (
-        call_block("terminal", {"command": "toolonlyneedle 中文🛠️"}),
+        call_block("exec_process", {"command": "toolonlyneedle 中文🛠️"}),
         call_block("search_session_content", {"query": "excludedquerytoolword"}),
     ))
     q1 = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]["id"]

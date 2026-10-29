@@ -277,7 +277,7 @@ def _causal_refs() -> tuple[object, ...]:
         SessionEndRef(object()),
         DirectPromptRef('command:3mkyvtvppfglbmqedm6zqizjvy', 'turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:jfasfwsw2puygc3hrueckpvgba', "revision:1"),
         QueuedPromptRef('command:3mkyvtvppfglbmqedm6zqizjvy', 'queue:yq3kjvg2mf5ew7orchg44qn4eu', 'turn:u7jrb7ntdvxsawfkehwcc4rhu4', 'entry:yym6qf3l4xz6437gradtmhjrke', "revision:2"),
-        PreToolRef('turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:5qidalqvkujk5ykzzzfpwie2qy', "call:1", "terminal"),
+        PreToolRef('turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:5qidalqvkujk5ykzzzfpwie2qy', "call:1", "exec_process"),
         PermissionRef('turn:nzc36cttgo7xxki7bcjc7ops7a', "call:1", object()),
         PostToolRef(
             'turn:nzc36cttgo7xxki7bcjc7ops7a', "call:1", 'result:7aagd37kva2jqg4uxj3eppdpdy', 'entry:zvmjajlmix3vyoeoy2zhz6xd2a', "SUCCESS", object()
@@ -643,8 +643,8 @@ def test_round9_2_parser_rejects_duplicate_keys_nonfinite_and_source_bounds(
 def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
     tmp_path: Path,
 ) -> None:
-    terminal = tool_matcher_subject("terminal")
-    terminal_process = tool_matcher_subject("terminal_process")
+    terminal = tool_matcher_subject("exec_process")
+    terminal_process = tool_matcher_subject("manage_process")
     edit = tool_matcher_subject("edit_file")
     write = tool_matcher_subject("write_file")
     agent = tool_matcher_subject("run_agent")
@@ -652,8 +652,8 @@ def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
         "use_new_mcp_tool", resolved_remote_identity="server.remote_tool"
     )
 
-    assert terminal.canonical_subject == "terminal" and "Bash" in terminal.candidates
-    assert terminal_process.canonical_subject == "terminal_process"
+    assert terminal.canonical_subject == "exec_process" and "Bash" in terminal.candidates
+    assert terminal_process.canonical_subject == "manage_process"
     assert "Bash" not in terminal_process.candidates
     assert edit.canonical_subject == "edit_file" and "Edit" in edit.candidates
     assert write.canonical_subject == "write_file" and "Write" in write.candidates
@@ -1093,7 +1093,7 @@ def _matcher_for_input(public_input):
         HookEventType.PERMISSION_REQUEST_EVENT,
         HookEventType.POST_TOOL_USE_EVENT,
     }:
-        return event_matcher_subject(event, tool=tool_matcher_subject("terminal"))
+        return event_matcher_subject(event, tool=tool_matcher_subject("exec_process"))
     return event_matcher_subject(event)
 
 
@@ -1389,7 +1389,7 @@ def test_round9_2_reload_publishes_future_view_and_old_attempt_keeps_reference(
                     causal,
                     monotonic() + 10,
                 ),
-                matcher_subject=tool_matcher_subject("terminal"),
+                matcher_subject=tool_matcher_subject("exec_process"),
             )
         )
         while not executor.calls:
@@ -1414,7 +1414,7 @@ def test_round9_2_reload_publishes_future_view_and_old_attempt_keeps_reference(
                 causal,
                 monotonic() + 10,
             ),
-            matcher_subject=tool_matcher_subject("terminal"),
+            matcher_subject=tool_matcher_subject("exec_process"),
         )
         assert [item.definition.command for item in executor.calls] == ["old", "new"]
         await dispatcher.fence_ordinary()
@@ -2145,7 +2145,7 @@ def test_hook_review_uses_production_matcher_native_remote_and_is_advisory(tmp_p
     definition = _definition(tmp_path, HookEventType.POST_TOOL_USE_EVENT, 'full command', matcher='^(Read|Grep|Glob|mcp__real__lookup)$')
     snapshot = _view(tmp_path, (definition,)).source_snapshots[0]
     value = hook_snapshot_public(snapshot, inspect=True)
-    subjects = tuple(tool_matcher_subject(name) for name in ['read_file', 'search_content', 'find_files', 'terminal']) + (tool_matcher_subject('use_new_mcp_tool', resolved_remote_identity='mcp__real__lookup'),)
+    subjects = tuple(tool_matcher_subject(name) for name in ['read_file', 'search_content', 'find_files', 'exec_process']) + (tool_matcher_subject('use_new_mcp_tool', resolved_remote_identity='mcp__real__lookup'),)
     before = normalized_definition_digest(snapshot.provenance, snapshot.definitions)
     add_matching_tool_review(value, snapshot, subjects=subjects, complete=False, workspace_root=tmp_path)
     assert value['definitions'][0]['matched_operations'] == ['读取文件', '搜索内容', '查找文件', 'mcp__real__lookup']

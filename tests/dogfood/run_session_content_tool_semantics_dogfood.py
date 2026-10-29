@@ -215,7 +215,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                 executed = [
                     o
                     for o in observations
-                    if o["tool"] == "terminal" and o["state"] == "SUCCESS"
+                    if o["tool"] == "exec_process" and o["state"] == "SUCCESS"
                 ]
                 assert executed and executed[0]["arguments"]["command"] == command
                 calls = rows(
@@ -288,7 +288,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                 assert any(
                     o["arguments"].get("query") == "OUTPUT-ORIGINAL-BLUE"
                     and any(
-                        i["role"] == "tool" and i["tool_name"] == "terminal"
+                        i["role"] == "tool" and i["tool_name"] == "exec_process"
                         for i in o["payload"].get("items", [])
                     )
                     for o in searches

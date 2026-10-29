@@ -126,7 +126,7 @@ without establishing a success dependency.
 
 **Situation:** The user initially asks only how a parser handles empty and
 whitespace-only input. One option is to delegate through native `run_agent`,
-read the findings, and answer the user. A short `exec` script could also do this.
+read the findings, and answer the user. A short `exec_cell` script could also do this.
 
 Native `run_agent` arguments:
 
@@ -174,8 +174,7 @@ console.log(await tools.wait_agent.works({ targets: [phase.implementation.work] 
 **How it works:** The reused investigator receives a new Work in its existing
 conversation. The assessor is new. Their assignments can run in parallel; the
 implementer starts after both succeed and receives both finals. Native and JS
-assignments all appear under the same agents when queried with `list_agents` or
-`inspect_agent`.
+assignments all appear under the same agents when queried with `query_agents`.
 
 **Read the result:** The implementation final can inform any further action.
 Introducing a script changed the orchestration,
@@ -195,7 +194,7 @@ Replace the illustrative target below with that actual target:
 }
 ```
 
-To inspect this exact assignment, use native `inspect_agent` with
+To inspect this exact assignment, use native `query_agents` with
 `phase.implementation.work`:
 
 ```json
@@ -204,12 +203,12 @@ To inspect this exact assignment, use native `inspect_agent` with
 }
 ```
 
-Use an AGENT target with `inspect_agent` to inspect that agent's work history
+Use an AGENT target with `query_agents` to inspect that agent's work history
 instead. These native calls observe or affect the same work the script is
-waiting for. No script restart or additional `exec` is needed.
+waiting for. No script restart or additional `exec_cell` is needed.
 
 **Read the result:** A message with `delivery: "queued"` was accepted for the
 active work; `inactive` or `not_started` means it was not delivered. If the agent
 has finished and the new requirement calls for more work, assign it a new Work
 through native `run_agent` or JS, using the same agent target. Continue observing
-the existing script with `wait_exec` when its output is needed.
+the existing script with `manage_cell` with `action:"wait"` when its output is needed.

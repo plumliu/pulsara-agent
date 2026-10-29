@@ -20,14 +20,14 @@ for downloading or editing the source, and the management tool for installation.
 Optional `name` and `description` normalize metadata without rewriting the source.
 
 Reuse the result's `target` for subsequent management. Details are
-queried with `inspect_capability`, using an observed path rather than this example:
+queried with `query_capabilities`, using an observed path rather than this example:
 
 ```json
 {"target":{"kind":"SKILL","skill_path":"/absolute/project/.pulsara/skills/example-skill/SKILL.md"}}
 ```
 
 `current.skill_root` is the installed directory; `current.skill_path` is its
-`SKILL.md`. List copies with `list_capabilities`, `kind:"SKILL"`; inspect selection,
+`SKILL.md`. List copies with `query_capabilities`, `kind:"SKILL"`; inspect selection,
 issues and management eligibility. Plugin components belong to their whole
 Plugin, and bundled Skills are read-only. Discovery does not imply removability;
 workspace `.agents` copies are not removal targets.

@@ -32,7 +32,7 @@ _MCP_STANDARD_TOOL_NAMES = frozenset(
     }
 )
 _TERMINAL_TOOL_NAMES = frozenset(
-    {"terminal", "terminal_process", "terminal_monitor"}
+    {"exec_process", "query_processes", "manage_process", "query_monitors", "manage_monitor"}
 )
 _PLAN_CONTROL_TOOL_NAMES = frozenset(
     {"enter_plan", "ask_plan_question", "exit_plan"}
@@ -236,10 +236,10 @@ class PreparedKernelToolSurface:
 
 CODE_MODE_SHARED_TOOL_NAMES = frozenset({
     "read_file", "write_file", "edit_file", "find_files", "search_content",
-    "terminal", "terminal_process", "artifact_read", "artifact_export",
+    "exec_process", "query_processes", "manage_process", "read_artifact", "export_artifact",
     "search_sessions", "search_session_content", "read_session_content",
-    "list_capabilities", "inspect_capability", "use_new_mcp_tool", "read_mcp_resource",
-    "get_mcp_prompt", "run_agent", "list_agents", "inspect_agent", "send_agent_message",
+    "query_capabilities", "use_new_mcp_tool", "read_mcp_resource",
+    "get_mcp_prompt", "run_agent", "query_agents", "send_agent_message",
     "wait_agent", "stop_agent",
 })
 

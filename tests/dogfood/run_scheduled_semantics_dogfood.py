@@ -210,12 +210,12 @@ async def run(destination: Path):
                 await run_once(paused)
                 single_tools = [t for t in evidence["tools"] if t["turn"] == 2]
                 assert any(
-                    t["name"] == "terminal"
+                    t["name"] == "exec_process"
                     and "echo hello" in json.dumps(t["arguments"])
                     for t in single_tools
                 ), single_tools
                 assert not any(
-                    t["name"] == "scheduled_tasks"
+                    t["name"] == "manage_schedule"
                     and t["arguments"].get("action") in {"delete", "resume", "update"}
                     for t in single_tools
                 ), single_tools
@@ -225,7 +225,7 @@ async def run(destination: Path):
                 )
                 await run_once(paused)
                 assert not any(
-                    t["turn"] in (3, 4) and t["name"] == "terminal"
+                    t["turn"] in (3, 4) and t["name"] == "exec_process"
                     for t in evidence["tools"]
                 ), evidence["tools"]
                 replacement = await scheduler.create(
@@ -265,8 +265,7 @@ async def run(destination: Path):
                 assert [r["id"] for r in await queue(scheduler, session.session_id)
                         if r["input_origin"] == "SCHEDULED_TASK"] == scheduled_before
                 immediate_tools = [t for t in evidence["tools"] if t["turn"] == len(evidence["turns"])]
-                assert all(t["arguments"].get("action") in {"list", "get"}
-                           for t in immediate_tools if t["name"] == "scheduled_tasks")
+                assert not any(t["name"] == "manage_schedule" for t in immediate_tools)
                 assert (await scheduler.get(task["id"]))["status"] == "ACTIVE"
                 assert (await scheduler.get(replacement["id"]))["status"] == "PAUSED"
                 await ask("把本会话的自动计划从‘每10分钟问好’换成‘每周文字检查’。")
@@ -275,7 +274,7 @@ async def run(destination: Path):
                 switches = [
                     t
                     for t in evidence["tools"]
-                    if t["name"] == "scheduled_tasks"
+                    if t["name"] == "manage_schedule"
                     and t["arguments"].get("action") == "switch"
                 ]
                 assert (
@@ -291,7 +290,7 @@ async def run(destination: Path):
                 switches = [
                     t
                     for t in evidence["tools"]
-                    if t["name"] == "scheduled_tasks"
+                    if t["name"] == "manage_schedule"
                     and t["arguments"].get("action") == "switch"
                 ]
                 assert switches[-1]["arguments"]["replacement"]["kind"] == "create", switches
@@ -300,7 +299,7 @@ async def run(destination: Path):
                 once_tools = [
                     t for t in evidence["tools"] if t["turn"] == len(evidence["turns"])
                 ]
-                assert not any(t["name"] == "scheduled_tasks" for t in once_tools), (
+                assert not any(t["name"] == "manage_schedule" for t in once_tools), (
                     once_tools
                 )
                 timer = await scheduler.create(
@@ -343,7 +342,7 @@ async def run(destination: Path):
                 )
                 assert not any(t["status"] == "ACTIVE" for t in final["tasks"])
                 assert not any(
-                    t["name"].startswith(("memory_search", "session_search"))
+                    t["name"].startswith(("search_memory", "session_search"))
                     for t in evidence["tools"]
                 )
 

@@ -92,7 +92,7 @@ def tool_matcher_subject(
     if resolved_remote_identity is not None:
         return FrozenHookMatcherSubject(resolved_remote_identity, ())
     aliases = {
-        "terminal": ("Bash",),
+        "exec_process": ("Bash",),
         "read_file": ("Read",),
         "edit_file": ("apply_patch", "Edit"),
         "write_file": ("apply_patch", "Write"),

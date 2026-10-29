@@ -27,7 +27,7 @@ from pulsara_agent.llm.model_target import (
     validate_reasoning_selection,
 )
 from pulsara_agent.ports.terminal import (
-    parse_terminal_monitor_input,
+    parse_manage_monitor_input,
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
@@ -86,7 +86,6 @@ def test_null_effort_is_an_exact_choice_not_an_omitted_selection():
 def scheduled_args(action):
     if action == "list":
         return {
-            "action": action,
             "status": "PAUSED",
             "cursor": "schedule:bcud6jffakbgubat6jskaqqhme",
         }
@@ -141,7 +140,7 @@ def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_ident
         setattr(service, action, target)
         arguments = {**scheduled_args(action), **session_field}
         original = deepcopy(arguments)
-        await service.invoke(
+        await (service.invoke_query if action == "list" else service.invoke_manage)(
             arguments,
             default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.BYPASS_PERMISSIONS,
@@ -167,8 +166,8 @@ def test_scheduled_service_none_keeps_its_unfiltered_meaning():
             "list_scheduled_tasks", cursor=None, status=None, session_id=None
         )
         service._read.reset_mock()
-        await service.invoke(
-            {"action": "list", "session": None},
+        await service.invoke_query(
+            {"session": None},
             default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.READ_ONLY,
         )
@@ -200,8 +199,8 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
         if action == "update":
             args["values"] = scheduled_args("create")["values"]
         with pytest.raises(ScheduledTaskError):
-            await service.invoke(
-                args,
+            await (service.invoke_query if action == "get" else service.invoke_manage)(
+                {key: value for key, value in args.items() if key != "action"} if action == "get" else args,
                 default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
                 permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
@@ -224,7 +223,7 @@ def test_scheduled_create_status_schema_and_dispatch(status_fields):
             }
         )
         arguments = {**scheduled_args("create"), **status_fields}
-        await service.invoke(
+        await service.invoke_manage(
             arguments,
             default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.BYPASS_PERMISSIONS,
@@ -257,13 +256,13 @@ def test_existing_empty_values_remain_operations():
     assert_shape("wait_agent", {"targets": []}, False)
     base = {"action": "register", "target": {"kind": "PROCESS", "process_id": "p"}}
     assert (
-        parse_terminal_monitor_input(
+        parse_manage_monitor_input(
             {**base, "conditions": {"output": None}}
         ).conditions.output
         is None
     )
     assert (
-        parse_terminal_monitor_input(
+        parse_manage_monitor_input(
             {**base, "conditions": {"output": {}}}
         ).conditions.output
         is not None
@@ -279,7 +278,7 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
         service = ScheduledTaskService(SimpleNamespace())
         service.run_now = AsyncMock()
         with pytest.raises(ScheduledTaskError) as error:
-            await service.invoke(
+            await service.invoke_manage(
                 {
                     "action": "run_now",
                     "task_id": "schedule:" + "a" * 26,
@@ -292,7 +291,7 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
             )
         assert error.value.code == "INVALID_ACTION"
         assert_shape(
-            "scheduled_tasks",
+            "manage_schedule",
             {
                 "action": "run_now",
                 "task_id": "schedule:" + "a" * 26,
@@ -306,7 +305,7 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
         service.get = AsyncMock(return_value={"permission_mode": "bypass-permissions"})
         service.switch = AsyncMock()
         with pytest.raises(ScheduledTaskError) as error:
-            await service.invoke(
+            await service.invoke_manage(
                 {
                     "action": "switch",
                     "target": {"kind": "SCHEDULE", "task_id": "schedule:" + "a" * 26},

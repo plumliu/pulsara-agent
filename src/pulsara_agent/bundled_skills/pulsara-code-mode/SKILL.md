@@ -9,23 +9,23 @@ description: Compose Pulsara tools and agents in JavaScript, including continuin
 
 For tools available in both forms, native calls and `tools.name(...)` execute the
 same operations on the same files, processes, artifacts, and agents. Either entry
-point can suit a single call; even a one-line `exec` is useful. JavaScript also
+point can suit a single call; even a one-line `exec_cell` is useful. JavaScript also
 provides variables, conditions, and loops for connecting calls. The two entry
 points can be mixed as the task develops.
 
 An agent created through native `run_agent` can join a later scripted workflow:
 pass its existing AGENT target to `tools.run_agent` or a batch member's `target`.
 Its conversation continues. Conversely, native `send_agent_message`,
-`inspect_agent`, or `run_agent` can act on an agent first assigned through JS. Its identity,
+`query_agents`, or `run_agent` can act on an agent first assigned through JS. Its identity,
 history, and Work targets do not change when you switch entry points.
 
-When a task grows, `list_agents` or `inspect_agent` can help identify existing
+When a task grows, `query_agents` can help identify existing
 agents whose knowledge is useful. They can work alongside new agents in a later
 assignment. See [cross-entry examples](references/agent-orchestration/examples.md#4-expand-native-research-into-a-scripted-workflow).
 
 ## Start with one script
 
-Pass JavaScript through `exec`'s `code`, or use `path` for an existing script file.
+Pass JavaScript through `exec_cell`'s `code`, or use `path` for an existing script file.
 Top-level `await` is supported. Call available tools as `tools.name(arguments)`,
 using the same parameters as their native tools. The resolved value is the tool's
 public JSON object or text, without an extra `.data` wrapper.
@@ -33,7 +33,7 @@ public JSON object or text, without an extra `.data` wrapper.
 `console.log(...)` exposes selected values to the ROOT model. Internal tool
 results stay inside the script unless you output them; agent messages and
 completion notifications still use their normal channels. Logs are formal
-output, delivered through `exec` or `wait_exec`, including while a script runs.
+output, delivered through `exec_cell` or `manage_cell` with `action:"wait"`, including while a script runs.
 
 For example, continue an earlier native investigation using newly read project
 context. Replace the illustrative target with the actual `agent` target from
@@ -59,19 +59,21 @@ the task instead calls for a new agent. Adapt paths and instructions to the task
 
 ## Follow the running script
 
-- Each `exec` starts an independent script with its own variables. Log identifiers
+- Each `exec_cell` starts an independent script with its own variables. Log identifiers
   or data you will need in a later script.
-- An observation timeout leaves the script running. Use `wait_exec` with its
-  `cell_id` for subsequent output; do not submit the same script again to continue it.
+- An observation timeout leaves the script running. Use native `manage_cell` with `action:"wait"` and its
+  complete CELL `target` for subsequent output; do not submit the same script again to continue it.
   `yield_time_ms` controls observation time, not execution lifetime.
+- Use native `query_cells` without a target to list retained cells, or with a CELL
+  target to read its state and frozen source. This does not consume execution output.
 - Read further pages when `has_more` is true. A terminal state with
   `pending_calls` still needs later observation for outstanding tool outcomes.
-- `stop_exec` stops further script execution and submissions. Accepted agent work
+- `manage_cell` with `action:"stop"` stops further script execution and submissions. Accepted agent work
   continues; use `stop_agent` when that work should stop too.
 
-If one output record is too large for a page, `exec` or `wait_exec` gives ROOT an
-`output_artifact.target`. Pass that exact target to native `artifact_read` or
-`artifact_export`. For JS processing, start a new `exec` and explicitly include
+If one output record is too large for a page, `exec_cell` or `manage_cell` with `action:"wait"` gives ROOT an
+`output_artifact.target`. Pass that exact target to native `read_artifact` or
+`export_artifact`. For JS processing, start a new `exec_cell` and explicitly include
 the target in its tool arguments; observation results are not injected into
 script variables. The artifact contains that output record as JSON, not the
 whole script's output.

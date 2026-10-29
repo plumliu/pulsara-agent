@@ -18,7 +18,7 @@ def identity_request():
         _sources(
             _candidate(ContextSourceKind.MEMORY_RECALL, ("记忆正文", "简版", "ref"))
         ),
-        tool_names=("scheduled_tasks", "spawn_agent"),
+        tool_names=("manage_schedule", "spawn_agent"),
     )
     binding = request.compile_binding
     call = binding.call_fact.model_copy(

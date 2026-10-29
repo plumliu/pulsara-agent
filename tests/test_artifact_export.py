@@ -95,7 +95,7 @@ class BodyPort:
 def call(path="output.txt", artifact_id='artifact:3uxyc2nlsokzkts3xmlji4zimy', **extra):
     return ToolCall(
         id="call:export",
-        name="artifact_export",
+        name="export_artifact",
         arguments={
             "target": {"kind": "ARTIFACT", "artifact_id": artifact_id},
             "path": str(path),
@@ -281,16 +281,15 @@ def test_export_cancel_after_publication_keeps_exact_single_outcome(
             invoke_direct_tool(
                 port,
                 session_id='session:yovkoffbw6sro643t4zfhazd24',
-                tool_name="artifact_export",
+                tool_name="export_artifact",
                 arguments={"target": {"kind": "ARTIFACT", "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy'}, "path": "output.txt"},
                 tool_call_id="call:export",
                 attempt_id='attempt:u3xrx7rpcwqzvgtl24sz2q7u7y',
                 turn_id='turn:kkdrrjecidt6ni3sgr7kc4p6ge',
                 assistant_entry_id='entry:5nuy4yboonqd6fi6ppzl54b42i',
-                conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK
+                conversation_scope_kind=ModelInputScopeKind.SUBAGENT
                 if child
                 else ModelInputScopeKind.ROOT,
-                scope_subagent_task_id='task:ytms6ry3rylwzvrx4mydmqoira' if child else None,
             )
         )
         try:
@@ -330,12 +329,12 @@ def test_export_available_to_root_and_child_with_same_scoped_owner(tmp_path):
         try:
             for scope, task in [
                 (ModelInputScopeKind.ROOT, None),
-                (ModelInputScopeKind.SUBAGENT_TASK, 'task:ytms6ry3rylwzvrx4mydmqoira'),
+                (ModelInputScopeKind.SUBAGENT, None),
             ]:
                 surface = prepare_test_direct_tool_surface(
-                    port, conversation_scope_kind=scope, scope_subagent_task_id=task
+                    port, conversation_scope_kind=scope
                 )
-                assert {"artifact_read", "artifact_export"}.issubset(
+                assert {"read_artifact", "export_artifact"}.issubset(
                     {s.name for s in surface.model_surface.tool_specs}
                 )
         finally:
@@ -476,7 +475,7 @@ def test_export_uses_existing_file_write_permissions(tmp_path, mode, outside):
     result = asyncio.run(
         DefaultToolDispatchAuthorizationPolicy().decide(
             ToolDispatchAuthorizationRequest(
-                "artifact_export",
+                "export_artifact",
                 "call:export",
                 {"target": {"kind": "ARTIFACT", "artifact_id": 'artifact:3uxyc2nlsokzkts3xmlji4zimy'}, "path": str(path)},
                 'turn:kkdrrjecidt6ni3sgr7kc4p6ge',
@@ -498,7 +497,7 @@ def test_export_uses_existing_file_write_permissions(tmp_path, mode, outside):
     )
     assert result.kind.value == expected
     assert (
-        builtin_tool_catalog_entry("artifact_export").recovery_contract.severity
+        builtin_tool_catalog_entry("export_artifact").recovery_contract.severity
         == "bounded_write"
     )
 
@@ -644,7 +643,7 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
         [
             _tool_stream(
                 1,
-                tool_name="artifact_export",
+                tool_name="export_artifact",
                 arguments='{"target":{"kind":"ARTIFACT","artifact_id":"artifact:3uxyc2nlsokzkts3xmlji4zimy"},"path":"result.txt"}',
             ),
             _tool_stream(2, tool_name="read_file", arguments='{"target":{"kind":"PATH","path":"result.txt"}}'),
@@ -664,7 +663,7 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
         if not terminal_available:
             # Model the unavailable capability before the first epoch installs
             # its surface; availability never mutates an installed prefix.
-            for name in ("terminal", "terminal_process", "terminal_monitor"):
+            for name in ("exec_process", "manage_process", "manage_monitor"):
                 port._tools.pop(name, None)
         seal_test_direct_tool_port(port)
         runner = ConversationKernelRunner(

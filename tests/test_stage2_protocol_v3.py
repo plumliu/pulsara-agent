@@ -463,7 +463,7 @@ def test_stage2_observer_cannot_mutate_but_can_detach() -> None:
         (
             wire.STOP_CODE_MODE_CELL,
             "target_cell_id",
-            "cell_1234567890abcdef",
+            "cell:aaaaaaaaaaaaaaaaaaaaaaaaae",
             "cell_stop_requests",
         ),
         (
@@ -836,7 +836,7 @@ def test_stage2_pending_interaction_is_same_host_ephemeral_and_stale_safe() -> N
                 turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:1",
-                tool_name="terminal",
+                tool_name="exec_process",
                 permission_snapshot=build_run_permission_snapshot(
                     snapshot_id='permission:53mvfpeaityebpvslz3hltgfuy',
                     requested_mode=PermissionMode.ASK_PERMISSIONS,

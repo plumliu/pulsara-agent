@@ -93,7 +93,6 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
     settlement = build_accepted_canonical_tool_result_settlement(
         session_id='session:5dyf7lfzp7z22pphjtostkgsjm',
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
         assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
         call_ordinal=0,
@@ -126,11 +125,11 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
 
 
 def test_round4_closed_oracle_and_permission_presets() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert set(PLAN_INTERACTION_CONTRACTS.values()) == {
         "ask_plan_question",
         "exit_plan",
@@ -244,7 +243,7 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
                 terminal_authorization = await authorize_direct_tool(
                     port,
                     session_id=session_id,
-                    tool_name="terminal",
+                    tool_name="exec_process",
                     arguments={"command": "pwd", "workdir": str(tmp_path)},
                     tool_call_id=f"call:{ordinal}:terminal",
                     turn_id=derive_id("turn", "test-fixture", f"turn:{ordinal}:terminal"),
@@ -561,12 +560,10 @@ def test_round4_root_plan_tools_are_absent_from_subagent_surface(tmp_path: Path)
             root = prepare_test_direct_tool_surface(
                 port,
                 conversation_scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-            )
+                    )
             child = prepare_test_direct_tool_surface(
                 port,
-                conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
+                conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
             )
             plan_names = {"enter_plan", "ask_plan_question", "exit_plan"}
             assert plan_names <= {item.name for item in root.model_surface.tool_specs}

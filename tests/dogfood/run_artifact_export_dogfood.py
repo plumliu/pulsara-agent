@@ -1,6 +1,6 @@
 """Real-provider comparison of paged artifact reads and optional local export.
 
-The baseline omits only artifact_export before a new Host tool surface is sealed.
+The baseline omits only export_artifact before a new Host tool surface is sealed.
 The snapshot fixture uses a smaller, existing terminal retention bound. Neither
 fixture mutates an installed provider prefix or the saved production settings.
 """
@@ -113,7 +113,7 @@ async def run(args, report):
 
             def baseline_init(port, *pos, **kw):
                 original_init(port, *pos, **kw)
-                port._tools.pop("artifact_export", None)
+                port._tools.pop("export_artifact", None)
 
             try:
                 for name in args.cases.split(","):

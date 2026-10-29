@@ -77,9 +77,11 @@ from pulsara_agent.mcp_config import McpServerConfig
 from pulsara_agent.ports.artifact import ToolArtifactReadPort, ToolResultDisplayKind
 from pulsara_agent.ports.terminal import (
     TerminalMonitorRegisterInput,
-    parse_terminal_input,
-    parse_terminal_monitor_input,
-    parse_terminal_process_input,
+    parse_exec_process_input,
+    parse_manage_monitor_input,
+    parse_manage_process_input,
+    parse_query_processes_input,
+    parse_query_monitors_input,
 )
 from pulsara_agent.ports.tool_execution import (
     Tool,
@@ -284,7 +286,6 @@ from .mcp.meta import (
 
 
 _TERMINAL_PROCESS_ACTION_EFFECTS = (
-    ("list", "TERMINAL_OBSERVATION"),
     ("poll", "TERMINAL_OBSERVATION"),
     ("wait", "TERMINAL_OBSERVATION"),
     ("write", "TERMINAL_EFFECT"),
@@ -311,11 +312,11 @@ def _builtin_physical_effect_contract(
 ) -> object:
     return (
         {"actions": _TERMINAL_PROCESS_ACTION_EFFECTS}
-        if entry.name == "terminal_process"
+        if entry.name == "manage_process"
         else {
             "default": (
                 "TERMINAL_EFFECT"
-                if entry.name == "terminal"
+                if entry.name == "exec_process"
                 else entry.recovery_contract.severity
             )
         }
@@ -482,7 +483,7 @@ class KernelCapabilityReloadPort(Protocol):
 class _DirectTerminalTool:
     manager: TerminalManager
     owner_host_session_id: str
-    name: str = "terminal"
+    name: str = "exec_process"
 
     def execute(
         self,
@@ -494,7 +495,7 @@ class _DirectTerminalTool:
         decision_deadline_monotonic: float,
         effective_permission_mode: PermissionMode,
     ) -> ToolExecutionResult:
-        request = parse_terminal_input(call.arguments)
+        request = parse_exec_process_input(call.arguments)
         result = self.manager.execute(
             TerminalRequest(
                 command=request.command,
@@ -527,7 +528,7 @@ class _DirectTerminalTool:
 class _DirectTerminalProcessTool:
     manager: TerminalManager
     owner_host_session_id: str
-    name: str = "terminal_process"
+    name: str = "manage_process"
 
     def execute(
         self,
@@ -535,25 +536,9 @@ class _DirectTerminalProcessTool:
         *,
         live_sink: KernelToolLiveSink | None = None,
     ) -> ToolExecutionResult:
-        request = parse_terminal_process_input(call.arguments)
+        request = parse_manage_process_input(call.arguments)
         action = request.action
         maximum = getattr(request, "max_output_chars", 32_000)
-        if action == "list":
-            processes = self.manager.list_processes(
-                owner_host_session_id=self.owner_host_session_id,
-                include_finished=request.include_finished,
-                include_running=request.include_running,
-            )
-            return _success(
-                call,
-                {
-                    "status": "success",
-                    "terminal_process_action": action,
-                    "processes": [
-                        _terminal_process_payload(item.to_payload()) for item in processes
-                    ],
-                },
-            )
         if action == "poll":
             result = self.manager.poll_process(
                 request.target.process_id,
@@ -612,13 +597,41 @@ class _DirectTerminalProcessTool:
 
 
 @dataclass(slots=True)
+class _DirectTerminalQueryTool:
+    manager: TerminalManager
+    owner_host_session_id: str
+    name: str = "query_processes"
+
+    def execute(self, call: ToolCall) -> ToolExecutionResult:
+        request = parse_query_processes_input(call.arguments)
+        if "target" in call.arguments:
+            process = self.manager.get_process_info(
+                request.target.process_id,
+                owner_host_session_id=self.owner_host_session_id,
+            )
+            return _success(call, {
+                "status": "success",
+                "process": _terminal_process_payload(process.to_payload()),
+            })
+        processes = self.manager.list_processes(
+            owner_host_session_id=self.owner_host_session_id,
+            include_finished=request.include_finished,
+            include_running=request.include_running,
+        )
+        return _success(call, {
+            "status": "success", "terminal_process_action": "list",
+            "processes": [_terminal_process_payload(item.to_payload()) for item in processes],
+        })
+
+
+@dataclass(slots=True)
 class _DirectTerminalMonitorTool:
     coordinator: TerminalMonitorCoordinator
-    name: str = "terminal_monitor"
+    name: str = "manage_monitor"
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         raise RuntimeError(
-            "terminal_monitor requires the closed kernel invocation context"
+            "Monitor tools require the closed kernel invocation context"
         )
 
 
@@ -766,14 +779,15 @@ class DirectKernelToolPort:
             TodoTool(),
             _DirectTerminalTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalProcessTool(self._terminal, self._terminal_owner_id),
+            _DirectTerminalQueryTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalMonitorTool(self._terminal_monitor),
+            _DirectTerminalMonitorTool(self._terminal_monitor, name="query_monitors"),
             _DirectPlanControlTool("enter_plan"),
             _DirectPlanControlTool("ask_plan_question"),
             _DirectPlanControlTool("exit_plan"),
             _DirectCapabilityControlTool("reload_capabilities"),
             _DirectCapabilityControlTool("manage_capability"),
-            _DirectMcpCatalogTool("list_capabilities"),
-            _DirectMcpCatalogTool("inspect_capability"),
+            _DirectMcpCatalogTool("query_capabilities"),
             _DirectMcpCatalogTool("use_new_mcp_tool"),
             _DirectMcpCatalogTool("read_mcp_resource"),
             _DirectMcpCatalogTool("get_mcp_prompt"),
@@ -793,7 +807,7 @@ class DirectKernelToolPort:
             from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
             tools = (*tools, *(_DirectCapabilityControlTool(name) for name in sorted(SESSION_QUERY_TOOL_NAMES)))
         if scheduled_tasks is not None:
-            tools = (*tools, _DirectCapabilityControlTool("scheduled_tasks"))
+            tools = (*tools, _DirectCapabilityControlTool("query_schedules"), _DirectCapabilityControlTool("manage_schedule"))
         self._tools = {tool.name: tool for tool in tools}
         self._authorization_policy = authorization_policy
         self._close_lock = Lock()
@@ -832,6 +846,7 @@ class DirectKernelToolPort:
         self._code_mode = None
         self._code_mode_invoke = None
         self._code_mode_freeze_source = None
+        self._code_mode_read_source = None
         self._code_mode_archive_output = None
         self._code_observation_settlements = {}
         self._memory: KernelMemoryToolPort | None = None
@@ -882,16 +897,17 @@ class DirectKernelToolPort:
             self._memory = port
             self._surface_generation += 1
 
-    def bind_code_mode_executor(self, *, invoke, freeze_source, archive_output) -> None:
+    def bind_code_mode_executor(self, *, invoke, freeze_source, archive_output, read_source) -> None:
         self._code_mode_invoke = invoke
         self._code_mode_freeze_source = freeze_source
         self._code_mode_archive_output = archive_output
+        self._code_mode_read_source = read_source
 
     def bind_code_mode_port(self, port) -> None:
         with self._surface_lock:
             self._require_builtin_composition_preparing_locked()
             self._code_mode = port
-            for name in ("exec", "wait_exec", "stop_exec"):
+            for name in ("exec_cell", "query_cells", "manage_cell"):
                 self._tools[name] = _DirectCapabilityControlTool(name)
             self._surface_generation += 1
 
@@ -975,8 +991,7 @@ class DirectKernelToolPort:
             bindings = self._sealed_builtin_bindings
             if conversation_scope_kind is ModelInputScopeKind.ROOT and effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
                 bindings = tuple(item for item in bindings if item.tool_name not in {
-                    "exec", "wait_exec", "stop_exec", "run_agent", "list_agents",
-                    "inspect_agent", "send_agent_message", "wait_agent", "stop_agent",
+                    "exec_cell", "query_cells", "manage_cell", "run_agent", "query_agents", "send_agent_message", "wait_agent", "stop_agent",
                 })
             if conversation_scope_kind is ModelInputScopeKind.SUBAGENT:
                 bindings = tuple(
@@ -985,11 +1000,11 @@ class DirectKernelToolPort:
                     if item.tool_name
                     not in {
                         "open_in_pulsara", "search_sessions", "search_session_content",
-                        "read_session_content", "scheduled_tasks", "memory_search", "memory_get",
+                        "read_session_content", "query_schedules", "manage_schedule", "search_memory", "get_memory",
                         "remember", "mark_memory_relation", "enter_plan", "ask_plan_question",
                         "exit_plan", "reload_capabilities", "manage_capability",
-                        "run_agent", "list_agents", "inspect_agent", "stop_agent",
-                        "exec", "wait_exec", "stop_exec",
+                        "run_agent", "query_agents", "stop_agent",
+                        "exec_cell", "query_cells", "manage_cell",
                     }
                 )
             source = capability_source_ref(
@@ -1323,7 +1338,7 @@ class DirectKernelToolPort:
                 return reject(
                     KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                     "mcp-meta:ref-unavailable",
-                    f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and invocation.target. Do not repeat earlier actions whose outcome is uncertain.",
+                    f"{exc}. This call was not dispatched. Inspect this tool again with query_capabilities and use its current parameters and invocation.target. Do not repeat earlier actions whose outcome is uncertain.",
                 )
             resolved_name = executor.semantic.provider_tool_name
             frozen_inner = freeze_json(dict(inner))
@@ -1921,19 +1936,37 @@ class DirectKernelToolPort:
             )
         if tool_name == "open_in_pulsara" and surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
             return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED, "open_in_pulsara_root_only", "open_in_pulsara requires ROOT scope")
-        if tool_name in {"view_image", "terminal_monitor"}:
+        if tool_name in {"view_image", "manage_monitor", "query_monitors", "exec_process", "manage_process", "query_processes", "exec_cell", "query_cells", "manage_cell"}:
             try:
                 if tool_name == "view_image":
                     parse_view_image_source(arguments)
+                elif tool_name == "manage_monitor":
+                    parse_manage_monitor_input(arguments)
+                elif tool_name == "query_monitors":
+                    parse_query_monitors_input(arguments)
+                elif tool_name == "exec_process":
+                    parse_exec_process_input(arguments)
+                elif tool_name == "manage_process":
+                    parse_manage_process_input(arguments)
+                elif tool_name == "query_processes":
+                    parse_query_processes_input(arguments)
                 else:
-                    parse_terminal_monitor_input(dict(arguments))
+                    from pulsara_agent.code_mode.targets import parse_cell_target
+                    from pulsara_agent.identity import require_id
+                    if "target" in arguments:
+                        parse_cell_target(arguments["target"])
+                    if "cursor" in arguments:
+                        require_id(arguments["cursor"], "cell")
+                    for field in ("yield_time_ms", "max_items", "offset_chars", "max_chars"):
+                        if field in arguments and type(arguments[field]) is not int:
+                            raise ValueError(f"{field} must be an integer")
             except ValueError as exc:
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                     f"descriptor:{entry.descriptor.id}",
                     f"invalid tool arguments: {exc}",
                 )
-        if tool_name in {"exec", "wait_exec", "stop_exec"}:
+        if tool_name in {"exec_cell", "query_cells", "manage_cell"}:
             if (surface_borrow.code_cell_id is not None
                 or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
                 or permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS):
@@ -1957,7 +1990,7 @@ class DirectKernelToolPort:
             )
         if subagent:
             access = surface_borrow.prepared.access
-            root_tools = {"run_agent", "list_agents", "inspect_agent", "stop_agent"}
+            root_tools = {"run_agent", "query_agents", "stop_agent"}
             if ((access.conversation_scope_kind is ModelInputScopeKind.ROOT
                  and permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS)
                 or (access.conversation_scope_kind is not ModelInputScopeKind.ROOT and tool_name in root_tools)):
@@ -2258,7 +2291,7 @@ class DirectKernelToolPort:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "mcp-meta:ref-unavailable",
-                f"{exc}. This call was not dispatched. Inspect this tool again with inspect_capability and use its current parameters and invocation.target. Do not repeat earlier actions whose outcome is uncertain.",
+                f"{exc}. This call was not dispatched. Inspect this tool again with query_capabilities and use its current parameters and invocation.target. Do not repeat earlier actions whose outcome is uncertain.",
             )
         schema = thaw_json(executor.semantic.input_schema)
         if not isinstance(schema, dict):
@@ -2742,11 +2775,10 @@ class DirectKernelToolPort:
         try:
             values = parse_query(
                 arguments,
-                inspect=tool_name == "inspect_capability",
                 subagent=scope is ModelInputScopeKind.SUBAGENT,
             )
             if (
-                tool_name == "inspect_capability"
+                "target" in values
                 and values["target"]["kind"] == "MCP_TOOL"
             ):
                 return self._inspect_mcp_tool_result(
@@ -2759,13 +2791,13 @@ class DirectKernelToolPort:
                 plan=borrow.prepared.capability_exposure_plan,
                 scope=scope,
                 code_direct_specs=borrow.tool_specs if borrow.code_cell_id is not None else None,
-            ).execute(values, inspect=tool_name == "inspect_capability")
+            ).execute(values)
             content = canonical_json_bytes(result)
             # Only MCP_TOOL schema inspection is FULL-required. Ordinary details
             # use the existing OUTPUT artifact and provider result projection.
             candidate = (
                 None
-                if tool_name == "list_capabilities"
+                if "target" not in values
                 else ToolOutputArtifactCandidate(
                     role="OUTPUT",
                     text=content.decode("utf-8"),
@@ -2987,11 +3019,67 @@ class DirectKernelToolPort:
             effect_class="read_only",
         )
 
+    async def _query_cells(self, arguments, context):
+        """Read a live Host fact and its canonical frozen source, never output."""
+        from pulsara_agent.code_mode.contracts import CodeModeError
+        from pulsara_agent.primitives.tool_result_projection import conservative_artifact_page_logical_utf8_bytes
+
+        envelope_bytes = conservative_artifact_page_logical_utf8_bytes(
+            tool_call_id=context.tool_call_id, body="", model_visible_memory_ids=())
+        maximum = MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES - envelope_bytes
+        if "target" not in arguments:
+            return self._code_mode.query_cells(
+                cursor=arguments.get("cursor"), max_items=arguments.get("max_items", 50),
+                maximum_page_bytes=maximum)
+        offset = arguments.get("offset_chars", 0)
+        max_chars = arguments.get("max_chars", 20000)
+        if type(offset) is not int or offset < 0:
+            raise CodeModeError("invalid_arguments", "offset_chars must be a nonnegative integer")
+        if type(max_chars) is not int or not 1 <= max_chars <= 32000:
+            raise CodeModeError("invalid_arguments", "max_chars must be an integer between 1 and 32000")
+        snapshot = self._code_mode.capture_cell(arguments["target"]["cell_id"])
+        cell = snapshot.public_value()
+        if self._code_mode_read_source is None:
+            raise RuntimeError("Cell source reader is not bound")
+        try:
+            source = await self._code_mode_read_source(
+                session_id=context.session_id, attempt_id=snapshot.source_exec_attempt_id)
+            if source is None:
+                raise LookupError("The frozen code_source is unavailable for this Cell's source attempt.")
+        except Exception as exc:
+            value = {"cell": cell, "source": {"status": "UNAVAILABLE", "reason": str(exc)}}
+            if len(encode_tool_public_json(value)) > maximum:
+                raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell source availability exceeds the result page budget") from exc
+            return value
+        available = source[offset:offset + max_chars]
+
+        def page(count):
+            end = offset + count
+            has_more = end < len(source)
+            return {"cell": cell, "source": {
+                "status": "AVAILABLE", "text": available[:count], "offset_chars": offset,
+                "returned_chars": count, "total_chars": len(source), "has_more": has_more,
+                "next_offset_chars": end if has_more else None,
+            }}
+
+        value = page(len(available))
+        if len(encode_tool_public_json(value)) <= maximum:
+            return value
+        low, high = 0, len(available)
+        while low < high:
+            count = (low + high + 1) // 2
+            if len(encode_tool_public_json(page(count))) <= maximum:
+                low = count
+            else:
+                high = count - 1
+        value = page(low)
+        if (available and low == 0) or len(encode_tool_public_json(value)) > maximum:
+            raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell source cannot fit a complete result page")
+        return value
+
     async def _invoke_code_mode_control(self, tool_name, arguments, context):
         from pulsara_agent.code_mode.contracts import CodeModeError
         from pulsara_agent.primitives.tool_result_projection import conservative_artifact_page_logical_utf8_bytes
-        if self._code_mode is None:
-            raise RuntimeError("Code Mode Host owner is not bound")
         archived = []
         async def archive(record):
             if archived:
@@ -3004,12 +3092,16 @@ class DirectKernelToolPort:
                 "source_coverage": prepared.source_coverage.value}}
         observation = None
         try:
-            if tool_name == "stop_exec":
-                value = await self._code_mode.stop(arguments["cell_id"])
+            if self._code_mode is None:
+                raise CodeModeError("unavailable", "Code Mode Host is unavailable")
+            if tool_name == "query_cells":
+                value = await self._query_cells(arguments, context)
+            elif tool_name == "manage_cell" and arguments["action"] == "stop":
+                value = await self._code_mode.stop(arguments["target"]["cell_id"])
             else:
-                if tool_name == "exec":
+                if tool_name == "exec_cell":
                     if self._code_mode_invoke is None or context.code_mode_snapshot is None:
-                        raise RuntimeError("exec lost its common execution snapshot")
+                        raise RuntimeError("exec_cell lost its common execution snapshot")
                     if "code" in arguments:
                         source = arguments["code"]
                     else:
@@ -3025,7 +3117,7 @@ class DirectKernelToolPort:
                         tool_catalog=catalog, invoke=self._code_mode_invoke,
                         on_cell_closed=self.release_code_cell_mcp_refs)
                 else:
-                    cell_id = arguments["cell_id"]
+                    cell_id = arguments["target"]["cell_id"]
                 observation = await self._code_mode.observe(cell_id,
                     yield_time_ms=arguments.get("yield_time_ms", 1000), archive_output=archive,
                     maximum_page_bytes=(MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
@@ -3107,7 +3199,7 @@ class DirectKernelToolPort:
         observation_origin = tool_observation_origin_for_binding(binding)
         from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
 
-        if tool_name in {"exec", "wait_exec", "stop_exec"}:
+        if tool_name in {"exec_cell", "query_cells", "manage_cell"}:
             return await self._invoke_code_mode_control(tool_name, arguments, invocation_context)
         if tool_name in SESSION_QUERY_TOOL_NAMES:
             from pulsara_agent.conversation_kernel.session_content import (
@@ -3226,13 +3318,15 @@ class DirectKernelToolPort:
                     )
                 ),
             )
-        if tool_name == "scheduled_tasks":
+        if tool_name in {"query_schedules", "manage_schedule"}:
             if self._scheduled_tasks is None or invocation_context.conversation_scope_kind != "ROOT":
                 raise RuntimeError("scheduled management lost its ROOT owner")
             async def manage():
                 from pulsara_agent.scheduling.contracts import ScheduledTaskError
                 try:
-                    value = await self._scheduled_tasks.invoke(arguments,
+                    method = (self._scheduled_tasks.invoke_query if tool_name == "query_schedules"
+                              else self._scheduled_tasks.invoke_manage)
+                    value = await method(arguments,
                         default_session_id=self._session_id,
                         permission_mode=invocation_context.effective_permission_mode)
                     return "SUCCESS", value
@@ -3246,7 +3340,7 @@ class DirectKernelToolPort:
             return KernelToolResult(state=state,
                 content=json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(),
                 caller_cancelled_while_running=cancelled,
-                effect_class="read_only" if arguments.get("action") in {"list", "get"} else "unknown_effect",
+                effect_class="read_only" if tool_name == "query_schedules" else "unknown_effect",
                 physical_observation=_freeze_physical_observation(invocation_started, observation_origin))
         if tool_name == "manage_capability":
             call = invocation_context.capability_call
@@ -3328,7 +3422,7 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
-        if tool_name in {"list_capabilities", "inspect_capability"}:
+        if tool_name == "query_capabilities":
             return replace(
                 await self._query_capabilities_result(
                     tool_name=tool_name,
@@ -3902,7 +3996,7 @@ class DirectKernelToolPort:
             ToolResultState.RUNNING: "SUCCESS",
         }[result.status]
         remote_identity: str | None = None
-        if tool_name in {"terminal", "terminal_process"}:
+        if tool_name in {"exec_process", "manage_process"}:
             if not isinstance(result.output, str):
                 raise TypeError("terminal Tool output must be text")
             try:
@@ -3963,10 +4057,16 @@ class DirectKernelToolPort:
         call: ToolCall,
         context: KernelToolInvocationContext,
     ) -> tuple[ToolExecutionResult, ProcessLocalEffectSettlementToken | None]:
-        request = parse_terminal_monitor_input(call.arguments)
         agent_id = context.session_id if context.conversation_scope_kind == "SUBAGENT" else None
         work_turn_id = context.turn_id if agent_id is not None else None
-        if request.action == "list":
+        if call.name == "query_monitors":
+            request = parse_query_monitors_input(call.arguments)
+            if "target" in call.arguments:
+                monitor = tool.coordinator.inspect_current(
+                    request.target.monitor_id, agent_id=agent_id, work_turn_id=work_turn_id)
+                if monitor is None:
+                    return _terminal_monitor_rejected(call, "MONITOR_UNAVAILABLE"), None
+                return _success(call, {"monitor": _terminal_monitor_payload(monitor)}), None
             return (
                 _success(
                     call,
@@ -3980,6 +4080,7 @@ class DirectKernelToolPort:
                 ),
                 None,
             )
+        request = parse_manage_monitor_input(call.arguments)
         if request.action == "cancel":
             outcome = tool.coordinator.cancel(request.target.monitor_id, agent_id=agent_id, work_turn_id=work_turn_id)
             return (
@@ -4520,13 +4621,13 @@ def _read_canonical_image_reference(
 
 
 def _physical_effect_class(tool_name: str, arguments: Mapping[str, object]) -> str:
-    if tool_name == "terminal_process":
+    if tool_name == "manage_process":
         action = arguments.get("action")
         for candidate, effect_class in _TERMINAL_PROCESS_ACTION_EFFECTS:
             if action == candidate:
                 return effect_class
-        raise RuntimeError("terminal_process action escaped its closed catalog")
-    if tool_name == "terminal":
+        raise RuntimeError("manage_process action escaped its closed catalog")
+    if tool_name == "exec_process":
         return "TERMINAL_EFFECT"
     return builtin_tool_catalog_entry(tool_name).recovery_contract.severity
 
@@ -4657,10 +4758,10 @@ def _validated_terminal_observation_supplement(
 
     if claimed is None:
         return None
-    if tool_name == "terminal" and isinstance(tool, _DirectTerminalTool):
+    if tool_name == "exec_process" and isinstance(tool, _DirectTerminalTool):
         return claimed
-    if tool_name == "terminal_process" and isinstance(tool, _DirectTerminalProcessTool):
-        action = parse_terminal_process_input(arguments).action
+    if tool_name == "manage_process" and isinstance(tool, _DirectTerminalProcessTool):
+        action = parse_manage_process_input(arguments).action
         if action in {"poll", "wait"}:
             return claimed
     return None
@@ -4779,7 +4880,7 @@ def _mcp_unavailable_reason(reason: str) -> str:
 def _mcp_unavailable_inspection_message(reason: str, server_id: str) -> str:
     target = json.dumps({"kind": "MCP_SERVER", "runtime_server_id": server_id}, ensure_ascii=False)
     return _mcp_unavailable_reason(reason) + (
-        f" If this blocks the task, check the server with inspect_capability target={target}."
+        f" If this blocks the task, check the server with query_capabilities target={target}."
     )
 
 
@@ -4789,12 +4890,12 @@ def _mcp_unavailable_direct_message(reason: str, target, provider_tool_name: str
     if reason == "NATIVE_CONTRACT_REQUIRES_META":
         return (
             "This direct tool entry has been replaced; this call was not dispatched. "
-            f"Use inspect_capability with target={inspect_target} and follow invocation.mode. "
+            f"Use query_capabilities with target={inspect_target} and follow invocation.mode. "
             "For META, use the returned input_schema and invocation.target with use_new_mcp_tool."
         )
     return (
         "This call was not dispatched. " + _mcp_unavailable_reason(reason)
-        + f" Use inspect_capability with target={inspect_target} for its current availability."
+        + f" Use query_capabilities with target={inspect_target} for its current availability."
     )
 
 

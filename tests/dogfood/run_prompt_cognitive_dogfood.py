@@ -68,7 +68,7 @@ MODEL_ID = "openai/gpt-6-luna"
 ORCHESTRATION_TOOLS = {
     "spawn_agent",
     "create_agent_tasks",
-    "list_agents",
+    "query_agents",
     "list_agent_models",
     "wait_agent",
     "send_agent_message",
@@ -396,7 +396,7 @@ async def _case_terminal_nonzero_poll(
     prompt = (
         'Start the exact command "sleep 0.4; printf BUSINESS_FAILED; exit 7" '
         "with yield_time_ms=0. Follow that exact process using the advertised "
-        "terminal_process status/result entry until it ends. Report the process "
+        "manage_process status/result entry until it ends. Report the process "
         "exit code and output; do not restart it."
     )
     row, session, _ = await _run_turn(
@@ -412,11 +412,11 @@ async def _case_terminal_nonzero_poll(
     assert isinstance(trace, list)
     row["poll_calls"] = [
         item for item in trace
-        if item["tool_name"] in {"terminal_process", "terminal_monitor"}
+        if item["tool_name"] in {"manage_process", "manage_monitor"}
     ]
     row["decision_passed"] = bool(
-        any(item["tool_name"] == "terminal" for item in trace)
-        and any(item["tool_name"] == "terminal_process" for item in trace)
+        any(item["tool_name"] == "exec_process" for item in trace)
+        and any(item["tool_name"] == "manage_process" for item in trace)
         and "7" in str(row.get("reply"))
         and "BUSINESS_FAILED" in str(row.get("reply"))
     )
@@ -678,7 +678,7 @@ async def _case_unknown_effect(
     safe_terminal_reads: list[dict[str, object]] = []
     terminal_mutation_or_unknown: list[dict[str, object]] = []
     for item in trace:
-        if item["tool_name"] != "terminal":
+        if item["tool_name"] != "exec_process":
             continue
         command = str(item.get("arguments", {}).get("command", ""))
         if _is_read_only_python_inspection(command, marker):
@@ -1051,7 +1051,7 @@ async def _case_explicit_plan_review(
         continuation_trace = continuation_trace[len(trace) :]
         focused_test_runs = [
             item for item in continuation_trace
-            if item["tool_name"] == "terminal"
+            if item["tool_name"] == "exec_process"
             and item.get("arguments", {}).get("command")
             == "python -m pytest -q tests/test_app.py"
         ]

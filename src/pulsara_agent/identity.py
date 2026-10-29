@@ -47,6 +47,7 @@ IdentityKind = Literal[
     "connection",
     "package",
     "process",
+    "cell",
     "stream",
     "monitor",
     "monitor-settlement",

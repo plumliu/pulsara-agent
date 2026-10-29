@@ -845,7 +845,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
             if request.model_call_index == 1:
                 events = _generic_tool_stream(
                     block_id="call:inspect",
-                    tool_name="inspect_capability",
+                    tool_name="query_capabilities",
                     arguments={"target": {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": inspect_tool_name}},
                 )
             elif request.model_call_index == 2:
@@ -2508,7 +2508,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
             if dynamic and request.model_call_index == 1:
                 events = _generic_tool_stream(
                     block_id="call:inspect",
-                    tool_name="inspect_capability",
+                    tool_name="query_capabilities",
                     arguments={"target": {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": "mcp__fixture__intersecting_unions"}},
                 )
             elif request.model_call_index == (2 if dynamic else 1):
@@ -3028,7 +3028,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
             from pulsara_agent.primitives.context import thaw_json
             target = {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": dynamic.name}
             inspected = await port._query_capabilities_result(
-                tool_name="inspect_capability", arguments={"target": target},
+                tool_name="query_capabilities", arguments={"target": target},
                 invocation_context=SimpleNamespace(surface_borrow=borrow),
             )
             assert inspected.state == "SUCCESS"
@@ -3039,13 +3039,13 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
             assert detail["invocation"] == {"mode": "DIRECT", "tool_name": dynamic.name}
             assert "tool_ref" not in detail
             rejected = await port._query_capabilities_result(
-                tool_name="inspect_capability", arguments={"target": {**target, "tool_name": "fixture_echo"}},
+                tool_name="query_capabilities", arguments={"target": {**target, "tool_name": "fixture_echo"}},
                 invocation_context=SimpleNamespace(surface_borrow=borrow),
             )
             assert rejected.state == "APPLICATION_ERROR"
             assert b"MCP_TOOL_NOT_FOUND" in rejected.content
             old_input = await port._query_capabilities_result(
-                tool_name="inspect_capability", arguments={"server_id": "fixture", "tool_name": dynamic.name},
+                tool_name="query_capabilities", arguments={"server_id": "fixture", "tool_name": dynamic.name},
                 invocation_context=SimpleNamespace(surface_borrow=borrow),
             )
             assert old_input.state == "APPLICATION_ERROR" and b"INVALID_ARGUMENTS" in old_input.content
@@ -4690,11 +4690,11 @@ def test_round6_wire_bounds_and_result_type_presence_fail_closed(
 
 
 def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

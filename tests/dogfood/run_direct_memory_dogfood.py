@@ -251,7 +251,7 @@ async def _run(*, model_id: str, wire_api: str) -> dict[str, object]:
                 await resumed.update_model_call_binding(_binding(runtime, connection))
                 result = await resumed.run_turn(
                     PromptContent.text(
-                        f'请用 memory_get 读取 target={{"kind":"MEMORY","memory_id":"{replacement_id}"}}，'
+                        f'请用 get_memory 读取 target={{"kind":"MEMORY","memory_id":"{replacement_id}"}}，'
                         "并简短告诉我保存的地点。"
                     ),
                     command_id=random_id("command"),

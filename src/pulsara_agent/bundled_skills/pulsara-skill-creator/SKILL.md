@@ -7,7 +7,7 @@ description: Create, review or edit portable Agent Skills, including customizing
 
 ## Choose the working directory
 
-For an installed Skill, use `list_capabilities` with `kind:"SKILL"` and inspect
+For an installed Skill, use `query_capabilities` with `kind:"SKILL"` and inspect
 its exact target. Read the returned `current.skill_path`; `current.skill_root`
 is the installed directory. Do not infer the target from terminal cwd.
 

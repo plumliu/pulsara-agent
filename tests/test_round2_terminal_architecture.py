@@ -28,10 +28,10 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 )
 from pulsara_agent.ports.terminal import (
     _inline_schema_references,
-    parse_terminal_input,
-    parse_terminal_monitor_input,
-    parse_terminal_process_input,
-    terminal_input_schema,
+    parse_exec_process_input,
+    parse_manage_monitor_input,
+    parse_manage_process_input,
+    exec_process_input_schema,
 )
 from pulsara_agent.ports.terminal_observation import (
     TerminalObservationInstallationAttempt,
@@ -115,15 +115,15 @@ def _fixed_live_producers() -> dict[str, set[Path]]:
 def test_round2_closed_oracles_and_no_durable_terminal_authority(
     tmp_path: Path,
 ) -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     terminal_names = {
-        "terminal",
-        "terminal_process",
-        "terminal_monitor",
+        "exec_process",
+        "manage_process",
+        "manage_monitor",
     }
     tool_owner = DirectKernelToolPort(
         workspace_root=tmp_path,
@@ -249,18 +249,18 @@ def test_round2_cursor_and_initial_entry_contract_are_not_dual_sources() -> None
 
 
 def test_round2_strict_three_tool_input_contracts_fail_closed() -> None:
-    assert "terminal_session_id" not in terminal_input_schema()["properties"]
-    assert parse_terminal_input({"command": "true"}).yield_time_ms == 10_000
+    assert "terminal_session_id" not in exec_process_input_schema()["properties"]
+    assert parse_exec_process_input({"command": "true"}).yield_time_ms == 10_000
     with pytest.raises(ValidationError):
-        parse_terminal_input({"command": "true", "yield_time_ms": "1"})
+        parse_exec_process_input({"command": "true", "yield_time_ms": "1"})
     with pytest.raises(ValidationError):
-        parse_terminal_input({"command": "true", "unexpected": True})
+        parse_exec_process_input({"command": "true", "unexpected": True})
     with pytest.raises(ValidationError):
-        parse_terminal_process_input(
+        parse_manage_process_input(
             {"action": "wait", "target": {"kind": "PROCESS", "process_id": "p"}, "timeout_seconds": "1"}
         )
     with pytest.raises(ValidationError):
-        parse_terminal_monitor_input(
+        parse_manage_monitor_input(
             {"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": "m"}, "extra": "open"}
         )
 

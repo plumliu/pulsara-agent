@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import json
 from threading import Lock
 from time import monotonic
@@ -12,7 +11,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from pulsara_agent.identity import derive_id, random_id
+from pulsara_agent.identity import random_id
 
 
 def test_terminal_manager_retries_unpublished_decision_without_settling_sibling(
@@ -236,83 +235,6 @@ def test_gateway_retains_revoked_attachment_until_old_stream_cleanup(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("collision_kind", ["entry", "event"])
-@pytest.mark.parametrize("same_recipient", [True, False])
-def test_mailbox_collision_rejects_only_new_candidate_and_preserves_fifo(
-    monkeypatch, collision_kind, same_recipient
-):
-    from pulsara_agent.conversation_kernel import subagent as module
-    from pulsara_agent.conversation_kernel.subagents import contracts
-    from pulsara_agent.conversation_kernel.repository_errors import (
-        ConversationKernelConflict,
-    )
-
-    async def scenario():
-        manager = object.__new__(module.KernelSubagentManager)
-        session, turn = random_id("session"), random_id("turn")
-        first, second = random_id("task"), random_id("task")
-        manager._guard, manager._closed = NS(session_id=session), False
-        manager._state_changed, manager._state_revision = asyncio.Condition(), 0
-        manager._completing = set()
-        manager._tasks = {
-            t: NS(status="ACTIVE", cancellation_intent=NS(turn_id=turn))
-            for t in (first, second)
-        }
-        manager._mailboxes, manager._mailbox_ordinals = {first: [], second: []}, {}
-        fixed = random_id(collision_kind)
-
-        def force(kind, role, *parts):
-            return fixed if kind == collision_kind else derive_id(kind, role, *parts)
-
-        monkeypatch.setattr(module, "derive_id", force)
-        monkeypatch.setattr(contracts, "derive_id", force)
-        context = NS(
-            session_id=session,
-            turn_id=turn,
-            attempt_id=random_id("attempt"),
-            tool_call_id="native-1",
-        )
-        request = {"task_id": first, "message": "keep this message"}
-        assert (await manager._send_message(request, context)).state == "SUCCESS"
-        original = manager._mailboxes[first][0]
-        # Same accepted attempt remains idempotent, without consuming an ordinal.
-        assert (await manager._send_message(request, context)).state == "SUCCESS"
-        ordinal_before = dict(manager._mailbox_ordinals)
-        revision_before = manager._state_revision
-        target = first if same_recipient else second
-        other = NS(
-            session_id=session,
-            turn_id=turn,
-            attempt_id=random_id("attempt"),
-            tool_call_id="native-2",
-        )
-        with pytest.raises(ConversationKernelConflict, match="IDENTITY_CONFLICT"):
-            await manager._send_message(
-                {"task_id": target, "message": "reject collision"}, other
-            )
-        assert manager._mailbox_ordinals == ordinal_before
-        assert manager._state_revision == revision_before
-        assert manager._mailboxes == {first: [original], second: []}
-        assert manager._tasks[first].status == "ACTIVE"
-        batch = contracts.build_inter_agent_mailbox_batch(
-            items=tuple(manager._mailboxes[first]),
-            actor_id="test",
-            occurred_at=datetime.now(timezone.utc),
-        )
-        assert batch.items == (original,)
-        # A later valid send still receives the next ordinal.
-        monkeypatch.setattr(module, "derive_id", derive_id)
-        monkeypatch.setattr(contracts, "derive_id", derive_id)
-        assert (
-            await manager._send_message(
-                {"task_id": first, "message": "next valid"}, other
-            )
-        ).state == "SUCCESS"
-        assert [item.ordinal for item in manager._mailboxes[first]] == [0, 1]
-
-    asyncio.run(scenario())
-
-
 @pytest.mark.parametrize(
     "endpoint,field,kind",
     [
@@ -403,11 +325,12 @@ def test_scheduled_http_mutation_rejects_invalid_id_before_service(action, bad):
 
     async def scenario():
         service = NS(mutate=Mock(), switch=Mock())
+        from tests.test_scheduling_targets import VALUES
         body = {"expected_revision": 1}
         if action == "update":
-            body["values"] = {}
+            body["values"] = VALUES
         if action == "switch":
-            body["replacement"] = {"kind": "create", "values": {}}
+            body["replacement"] = {"kind": "create", "values": VALUES}
         request = NS(
             match_info={"task_id": bad, "action": action},
             json=AsyncMock(return_value=body),
@@ -462,11 +385,11 @@ def test_scheduled_run_now_rejects_invalid_id_before_confirmation(field, bad):
     ],
 )
 def test_monitor_cancel_invalid_id_rejected_by_parser_and_owner(identity):
-    from pulsara_agent.ports.terminal import parse_terminal_monitor_input
+    from pulsara_agent.ports.terminal import parse_manage_monitor_input
     from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 
     with pytest.raises(ValueError, match="INVALID_ID"):
-        parse_terminal_monitor_input({"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": identity}})
+        parse_manage_monitor_input({"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": identity}})
     # Validation must precede even looking up the live collection.
     owner = object.__new__(TerminalMonitorCoordinator)
     with pytest.raises(ValueError, match="INVALID_ID"):

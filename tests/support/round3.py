@@ -881,7 +881,7 @@ class StructuredToolPort:
         self,
         delegate: object,
         *,
-        tool_names: tuple[str, ...] = ("terminal", "test_tool"),
+        tool_names: tuple[str, ...] = ("exec_process", "test_tool"),
     ) -> None:
         self.delegate = delegate
         self._authority = object()

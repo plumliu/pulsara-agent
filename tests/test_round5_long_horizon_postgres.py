@@ -990,7 +990,7 @@ def test_round5_cancelled_root_admission_joins_transient_confirmation_failures(
     ("effect_class", "tool_name", "arguments"),
     (
         ("read_only", "read_file", "{}"),
-        ("TERMINAL_OBSERVATION", "terminal_process", '{"action":"poll"}'),
+        ("TERMINAL_OBSERVATION", "manage_process", '{"action":"poll"}'),
         ("admission", "read_file", "{}"),
     ),
 )
@@ -1051,7 +1051,7 @@ def test_round5_observation_physical_exception_becomes_one_known_failure_result(
     (
         ("bounded_write", "write_file", "{}"),
         ("unknown_effect", "test_tool", "{}"),
-        ("TERMINAL_EFFECT", "terminal_process", '{"action":"write"}'),
+        ("TERMINAL_EFFECT", "manage_process", '{"action":"write"}'),
     ),
 )
 @pytest.mark.parametrize("caller_cancelled", (False, True))
@@ -1127,7 +1127,7 @@ def test_effectful_tool_failure_preserves_unknown_result_and_continues(
     "tool_name,arguments",
     (
         ("write_file", "{}"),
-        ("terminal_process", '{"action":"write"}'),
+        ("manage_process", '{"action":"write"}'),
     ),
 )
 def test_write_tool_io_error_is_model_visible(

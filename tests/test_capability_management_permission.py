@@ -112,7 +112,7 @@ def test_native_inspection_is_read_only_in_every_permission_mode(tmp_path, mode)
         assert effects.read_only
         result = await DefaultToolDispatchAuthorizationPolicy().decide(
             ToolDispatchAuthorizationRequest(
-                "list_capabilities",
+                "query_capabilities",
                 "call:read",
                 {},
                 'turn:3gulfent6hg3xt5pm4ijizkpta',

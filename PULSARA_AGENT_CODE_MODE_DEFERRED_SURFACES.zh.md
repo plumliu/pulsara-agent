@@ -4,6 +4,8 @@
 
 本文配合 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 和 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 使用。运行时业务语义继续以这两份设计为准；提示词、Skill 与前端的实施时机以本文为准。分工给实现 Subagent 时，应同时提供本文。
 
+当前工具名、查询分支与 CELL 身份以 [工具查询、命名与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 为准。本文接口表与示例采用该合同；所链接的既往实验与实施记录保留其原验证范围，不作为新接口已验证的证据。
+
 ## 1. 实现者的范围
 
 本轮推进共同对话引擎复用、Agent／Work、Code Mode 执行与必要工具接口。以下暂缓项不要在实现过程中自行定稿或落地，也不以旧实现的文案和界面直接代替新设计。
@@ -12,22 +14,24 @@
 |---|---|---|
 | ROOT／Subagent SYSTEM 提示词 | 两份完整文本独立定义；ROOT 提供原生／JS 共用对象与按需 Skill 入口；Subagent 仅保留工作区、权限、能力使用、运行时判读与交付规则，角色职责由 profile 提供 | 其余 ROOT 文案、与工具及 Skill 的分工、token 与理解成本 |
 | 预设 profile 提示词 | 暂缓五种预设的正文修订；profile 作为独立 user message、正常压缩等运行时语义仍按主设计实现 | 各预设是否必要、职责与具体措辞 |
-| 工具 schema 与说明文案的最终审阅 | 必要业务参数、校验和工具暴露按两份设计实现；模型可见说明的最终精简与优化暂缓 | 用实际 schema 初稿审阅准确性、信息量与使用负担 |
-| 三个 Code Mode 工具 schema | **由实现者完成第一版** `exec`、`wait_exec`、`stop_exec` 的可用 schema 和简洁说明 | 后续基于这版评审；满足要求即可采用，不要求必须再改一轮 |
+| 工具 schema 与说明文案的最终审阅 | 工具查询、命名与 Cell 身份统一规格所列 schema、紧凑分支签名和必要指引纳入实施；其他提示词优化仍暂缓 | 后续继续审阅其余信息量与使用负担 |
+| 三个 Code Mode 工具 schema | 实施 `exec_cell`、`query_cells`、`manage_cell` 的闭合分支与简洁说明 | 其余环境教学随实际使用优化 |
 | Bundled skill | `pulsara-code-mode` 统一提供普通工具组合与 Agent 编排教学；主文档展示交叉使用，两组参考目录按需读取 | 随实际使用优化表达与示例 |
 | 前端展示 | 暂不实施新的标签页、脚本页面、成员页面或依赖图，也不把暂定布局当作完成验收条件 | 信息架构、交互、布局、图形和详细状态展示 |
 
 暂缓文案不改变代码中的调用方、权限和工具可用性规则，也不取消 profile 输入位置等已经确定的业务语义。Skill 教学按下节实施；其余 ROOT 文案、profile 新文案和新的前端表面仍暂缓。
 
-## 2. 三个 Code Mode 工具的首版要求
+## 2. 三个 Code Mode 入口要求
 
 | 工具 | 已定参数 | 首版说明需要准确表达 |
 |---|---|---|
-| `exec` | `code`／`path` 恰一，可选 `yield_time_ms` | 启动独立脚本，返回本次观察到的输出和状态；观察超时不停止脚本 |
-| `wait_exec` | `cell_id`，可选 `yield_time_ms` | 取得同一脚本的后续输出与状态，不重新执行代码 |
-| `stop_exec` | `cell_id` | 停止后续 JS 执行与工具提交；已经派出的 Work 不自动取消 |
+| `exec_cell` | `code`／`path` 恰一，可选 `yield_time_ms` | 启动独立脚本，返回本次观察到的输出和状态；观察超时不停止脚本 |
+| `query_cells` | 无 target：可选 `cursor`、`max_items`；CELL target：可选 `offset_chars`、`max_chars` | 列存活 Cell，或查询状态和冻结源码，不消费输出；两分支字段不得混用 |
+| `manage_cell` | wait：`action:"wait"`、CELL target，可选 `yield_time_ms`；stop：`action:"stop"`、CELL target | 继续观察同一脚本，或停止后续 JS 与提交；不重新执行代码，已接纳 Work 不自动取消 |
 
 参数边界、默认值、结果格式、调用方范围和停止后的结算均沿 Code Mode 接入合同，不在 schema 中另立规则。首版可直接用于接入和验证，说明保持简洁，不嵌入实验过程或内部实现教程。此次工具命名不改变已定 cell 状态枚举。
+
+压缩后的运行时摘要 schema、内容布局、完整 ID 清单、条目数量、`omitted` 计数、32 KiB 预算及 TODO／Plan 整体文案清理继续暂缓；仅替换其中已删除的工具名引用。
 
 ## 3. Bundled skill
 

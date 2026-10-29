@@ -1,10 +1,10 @@
-"""HTTP uses the same closed request owner as the scheduled_tasks tool."""
+"""HTTP uses the shared closed schedule request owners."""
 
 from __future__ import annotations
 from aiohttp import web
 from pulsara_agent.identity import is_valid_id
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
-from pulsara_agent.scheduling.requests import schedule_target, validate_action
+from pulsara_agent.scheduling.requests import schedule_target, validate_action, validate_query
 
 
 class ScheduledTaskController:
@@ -38,7 +38,7 @@ class ScheduledTaskController:
         query = dict(request.query)
         if "session_id" in query:
             query["session"] = {"kind": "SESSION", "session_id": query.pop("session_id")}
-        validate_action({"action": "list", **query})
+        validate_query(query)
         return web.json_response(
             await self.service.list(
                 cursor=request.query.get("cursor"), status=request.query.get("status"),
@@ -56,7 +56,7 @@ class ScheduledTaskController:
         ))
 
     async def get(self, request):
-        validate_action({"action": "get", "target": schedule_target(request.match_info["task_id"])})
+        validate_query({"target": schedule_target(request.match_info["task_id"])})
         return web.json_response(await self.service.get(request.match_info["task_id"]))
 
     async def create(self, request):

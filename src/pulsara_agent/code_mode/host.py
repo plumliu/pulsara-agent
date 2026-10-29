@@ -12,13 +12,16 @@ import json
 import math
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
+from types import MappingProxyType
 
 from uuid import uuid4
+from pulsara_agent.identity import random_id, require_id
 
 from .contracts import (
     CellState, CodeModeError, CodeModeInvocation, CodeModeInvoke, CodeModeLimits,
-    CodeModeObservation, CodeModePrepareBatch, CodeModeToolResult,
+    CodeModeObservation, CodeModePrepareBatch, CodeModeToolResult, CodeModeCellSnapshot,
 )
+from .targets import cell_target
 
 _TERMINAL = frozenset({"completed", "failed", "terminated"})
 _SAFE_INTEGER = 9_007_199_254_740_991
@@ -289,7 +292,7 @@ class CodeModeHost:
         catalog_json = json.dumps(dict(tool_catalog), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         catalog = json.loads(catalog_json)
         await self._ensure_started()
-        cell_id = f"cell_{uuid4().hex}"
+        cell_id = random_id("cell")
         cell = _Cell(cell_id, turn_id, source_exec_attempt_id, snapshot, catalog, invoke,
                      prepare_batch, asyncio.get_running_loop().create_future(),
                      on_cell_closed=on_cell_closed)
@@ -471,10 +474,66 @@ class CodeModeHost:
             pass
 
     def _cell(self, cell_id: str) -> _Cell:
+        try:
+            require_id(cell_id, "cell")
+        except ValueError as error:
+            raise CodeModeError("invalid_arguments", str(error)) from error
         cell = self._cells.get(cell_id)
         if cell is None:
             raise CodeModeError("unavailable", "Code Mode cell is unavailable in this Host")
         return cell
+
+    def capture_cell(self, cell_id: str) -> CodeModeCellSnapshot:
+        """Capture source provenance and metadata without an output reservation."""
+        self._require_query_available()
+        cell = self._cell(cell_id)
+        return CodeModeCellSnapshot(cell.cell_id, cell.state, bool(cell.output),
+            cell.pending_calls, MappingProxyType(dict(cell.error)) if cell.error is not None else None,
+            cell.source_exec_attempt_id)
+
+    def _require_query_available(self) -> None:
+        if (self._closed or self._sidecar_failure is not None
+                or (self._process is not None and self._process.returncode is not None)):
+            raise CodeModeError("unavailable", "Code Mode Host is unavailable")
+
+    def query_cells(self, *, cursor: str | None = None, max_items: int = 50,
+                    maximum_page_bytes: int | None = None) -> dict[str, object]:
+        """Weakly consistent sorted inventory; cursors need not name a live Cell."""
+        self._require_query_available()
+        if cursor is not None:
+            try:
+                require_id(cursor, "cell")
+            except ValueError as error:
+                raise CodeModeError("invalid_arguments", "cursor must be a canonical Cell ID") from error
+        if type(max_items) is not int or max_items < 1:
+            raise CodeModeError("invalid_arguments", "max_items must be a positive integer")
+        page_bytes = self.limits.page_bytes if maximum_page_bytes is None else maximum_page_bytes
+        if type(page_bytes) is not int or not 0 < page_bytes <= self.limits.page_bytes:
+            raise CodeModeError("invalid_arguments", "Cell query page must fit the existing model result boundary")
+        # No history snapshot or continuation authority is retained. The tuple
+        # contains only this event-loop observation's small public fields.
+        rows = tuple({"target": cell_target(cell.cell_id), "state": cell.state,
+                      "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
+                     for cell in sorted(self._cells.values(), key=lambda item: item.cell_id)
+                     if cursor is None or cell.cell_id > cursor)
+        selected: list[dict[str, object]] = []
+        response: dict[str, object] = {"cells": selected, "has_more": False, "next_cursor": None}
+        for index, row in enumerate(rows):
+            if len(selected) >= max_items:
+                break
+            has_more = index + 1 < len(rows)
+            trial = {"cells": [*selected, row], "has_more": has_more,
+                     "next_cursor": row["target"]["cell_id"] if has_more else None}
+            if len(_json(trial).encode("utf-8")) > page_bytes:
+                if not selected:
+                    raise CodeModeError("output_resource_error", "A Cell inventory row exceeds the model result boundary")
+                break
+            selected.append(row)
+            response = {"cells": selected, "has_more": has_more,
+                        "next_cursor": row["target"]["cell_id"] if has_more else None}
+        if len(_json(response).encode("utf-8")) > page_bytes:
+            raise CodeModeError("output_resource_error", "Cell inventory envelope exceeds the model result boundary")
+        return response
 
     async def observe(self, cell_id: str, yield_time_ms: int = 1_000, *,
                       archive_output: ArchiveOutput | None = None,
@@ -512,15 +571,15 @@ class CodeModeHost:
                              "result_id": result.result_id, "result_entry_id": result.result_entry_id})
                     candidate = {"kind": "tool_result", "sequence": item.sequence,
                                  "tool_name": item.tool_name, "state": result.state, **body}
-                trial = self._public_page(cell, [*records, candidate], True)
-                if _bytes(trial) > page_bytes:
+                trial = self._public_page(cell, [*records, candidate], False)
+                if len(_json(trial).encode("utf-8")) > page_bytes:
                     if records:
                         break
                     if archive_output is None:
                         raise CodeModeError("output_resource_error", "Output record requires the existing artifact owner before it can fit a model result page")
                     candidate = dict(await archive_output(candidate))
                     archived = True
-                    if _bytes(self._public_page(cell, [candidate], True)) > page_bytes:
+                    if len(_json(self._public_page(cell, [candidate], False)).encode("utf-8")) > page_bytes:
                         raise CodeModeError("output_resource_error", "Archived output reference exceeds the model result boundary")
                 # The one-page observation is bounded by its pre-admitted control
                 # scratch. Keep original records/accepted-result readers until ACK;
@@ -531,6 +590,8 @@ class CodeModeHost:
                     break
             observation = CodeModeObservation(cell_id, cell.state, tuple(records),
                 selected < len(cell.output), cell.pending_calls, cell.error)
+            if len(_json(observation.public_value()).encode("utf-8")) > page_bytes:
+                raise CodeModeError("output_resource_error", "Cell output envelope exceeds the model result boundary")
             cell.observation = observation
             cell.observed_count = selected
             return observation
@@ -541,11 +602,8 @@ class CodeModeHost:
 
     @staticmethod
     def _public_page(cell: _Cell, records: list[Mapping[str, object]], has_more: bool) -> dict[str, object]:
-        result: dict[str, object] = {"cell_id": cell.cell_id, "state": cell.state,
-            "output": records, "has_more": has_more, "pending_calls": cell.pending_calls}
-        if cell.error is not None:
-            result["error"] = dict(cell.error)
-        return result
+        return CodeModeObservation(cell.cell_id, cell.state, tuple(records),
+            has_more, cell.pending_calls, cell.error).public_value()
 
     async def acknowledge(self, observation: CodeModeObservation) -> None:
         cell = self._cell(observation.cell_id)
@@ -585,7 +643,7 @@ class CodeModeHost:
             cell.cancelled.set()
             await self._safe_send({"type": "stop", "cell_id": cell.cell_id})
             await cell.terminal_event.wait()
-        return {"cell_id": cell.cell_id, "state": cell.state,
+        return {"target": cell_target(cell.cell_id), "state": cell.state,
                 "has_more": bool(cell.output), "pending_calls": cell.pending_calls}
 
     async def stop(self, cell_id: str) -> dict[str, object]:

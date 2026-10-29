@@ -783,7 +783,7 @@ class StructuredModelInputCompiler:
             for item in compiled.tool_result_decisions
         }
         artifact_read_available = any(
-            tool.name == "artifact_read"
+            tool.name == "read_artifact"
             for tool in request.compile_binding.tool_surface.tool_specs
         )
         for item in request.canonical_input.items:
@@ -799,7 +799,7 @@ class StructuredModelInputCompiler:
                 item,
                 artifact_read_available=artifact_read_available,
                 artifact_export_available=any(
-                    tool.name == "artifact_export"
+                    tool.name == "export_artifact"
                     for tool in request.compile_binding.tool_surface.tool_specs
                 ),
                 limits=self._limits,
@@ -892,7 +892,7 @@ class StructuredModelInputCompiler:
         self._validate_tool_surface(request)
         deadline.check()
         artifact_read_available = any(
-            tool.name == "artifact_read" for tool in surface.tool_specs
+            tool.name == "read_artifact" for tool in surface.tool_specs
         )
         canonical_items, materialized_plan_bytes = self._materialize_approved_plan(
             request
@@ -905,7 +905,7 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     artifact_export_available=any(
-                        tool.name == "artifact_export"
+                        tool.name == "export_artifact"
                         for tool in request.compile_binding.tool_surface.tool_specs
                     ),
                     limits=self._limits,
@@ -1338,7 +1338,7 @@ class StructuredModelInputCompiler:
         old_count = 0
         delta_items = all_materialized[old_count:]
         artifact_read_available = any(
-            tool.name == "artifact_read"
+            tool.name == "read_artifact"
             for tool in request.compile_binding.tool_surface.tool_specs
         )
         lowered_delta_values: list[LoweredCanonicalItem] = []
@@ -1349,7 +1349,7 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     artifact_export_available=any(
-                        tool.name == "artifact_export"
+                        tool.name == "export_artifact"
                         for tool in request.compile_binding.tool_surface.tool_specs
                     ),
                     limits=self._limits,
@@ -1707,7 +1707,7 @@ class StructuredModelInputCompiler:
         delta_items = request.canonical_input.items[old_count:]
         self._require_provider_safe_delta(delta_items)
         artifact_read_available = any(
-            tool.name == "artifact_read"
+            tool.name == "read_artifact"
             for tool in request.compile_binding.tool_surface.tool_specs
         )
         lowered_delta_values: list[LoweredCanonicalItem] = []
@@ -1718,7 +1718,7 @@ class StructuredModelInputCompiler:
                     item,
                     artifact_read_available=artifact_read_available,
                     artifact_export_available=any(
-                        tool.name == "artifact_export"
+                        tool.name == "export_artifact"
                         for tool in request.compile_binding.tool_surface.tool_specs
                     ),
                     limits=self._limits,

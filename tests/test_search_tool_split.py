@@ -184,7 +184,7 @@ def test_hook_review_observes_full_sealed_builtin_owner_composition(tmp_path):
     async def exercise():
         port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='review-host', session_id='session:zazc4gzsyde7brlnkyse2hjvpm', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.bind_subagent_port(SimpleNamespace(tool_names=('spawn_agent',)))
-        port.bind_memory_port(SimpleNamespace(tool_names=('memory_get', 'remember')))
+        port.bind_memory_port(SimpleNamespace(tool_names=('get_memory', 'remember')))
         try:
             prepare_test_direct_tool_surface(port)
             port._mcp_supervisor.inspect_discovery_catalog = lambda: SimpleNamespace(
@@ -192,7 +192,7 @@ def test_hook_review_observes_full_sealed_builtin_owner_composition(tmp_path):
                 catalog_snapshot=SimpleNamespace(servers=(SimpleNamespace(tool_surface_semantic_fingerprint=None),)))
             subjects, complete = port.observe_hook_review_tools()
             names = {subject.canonical_subject for subject in subjects}
-            assert {'spawn_agent', 'memory_get', 'remember', 'find_files', 'search_content', 'mcp__actual__read'} <= names
+            assert {'spawn_agent', 'get_memory', 'remember', 'find_files', 'search_content', 'mcp__actual__read'} <= names
             assert 'Agent' in next(subject.candidates for subject in subjects if subject.canonical_subject == 'spawn_agent')
             assert complete is False
         finally:
