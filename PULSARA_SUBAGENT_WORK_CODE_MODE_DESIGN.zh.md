@@ -2,7 +2,7 @@
 
 日期：2026-10-29。状态：本轮协作运行时已实施；实际验收与未覆盖边界见 §9，暂缓表面仍按配套范围执行。
 
-本轮提示词、profile 文案、Skill 与前端暂缓范围，以及 Code Mode 工具 schema 首版要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+提示词、profile 文案与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施合同；示例中的 ID 仍须替换为运行时真实返回值。
 
@@ -845,8 +845,8 @@ ROOT 先用 `list_agents` 找到已有成员及当前／排队概览，再用 `i
 |---|---|
 | 原生工具定义 | 本工具参数、target、结果、派活／消息／等待／停止的必要语义 |
 | code mode 环境说明 | exec／wait_exec／stop_exec、工具代理、输出、持续等待与脚本生命周期 |
-| 通用 SYSTEM | 简短指出：简单委派使用原生工具；多人协作或多阶段编排按需读取 bundled subagent skill |
-| `pulsara-subagent` bundled skill | 连续复用、结果材料、`tools.run_agent.batch` 的延迟参数与局部引用、`tools.wait_agent.works` 的工作集合等待、多人协作、JS workflow、ROOT 判断节点与完整示例 |
+| 通用 SYSTEM | 文案另行审阅；工具使用与编排教学由按需 Skill 承担 |
+| `pulsara-code-mode` bundled Skill | 主文档展示普通工具与 Agent 交叉使用；`tool-calling` 参考目录介绍工具组合与结果，`agent-orchestration` 参考目录介绍复用、batch 队友引用、依赖、等待、多人协作与多阶段示例；正式输出只教 `console.log` |
 
 Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要知道实验过程、历史接口或内部协议名称。这里不新增独立的群组 skill 或 workflow 语言。
 
@@ -891,4 +891,4 @@ Agent 使用 session 身份及 `root_session_id` 归属；委派来源、profile
 
 能力验收覆盖 §1.5 的四种变化：手动配置与插件 MCP 使用同一提供范围设置；每个受影响的活动 session 收到相应观察；禁用后阻止新调用，同 epoch 已安装 schema 保持不变；能力查询不扩大原生管理工具权限。
 
-前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界，提示词、profile 正文、Skill 教学和新的前端表面仍按暂缓范围处理。
+前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。Skill 教学见 §8，SYSTEM、profile 正文和新的前端表面仍按暂缓范围处理。

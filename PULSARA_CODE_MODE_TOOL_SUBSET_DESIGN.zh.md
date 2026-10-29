@@ -2,7 +2,7 @@
 
 日期：2026-10-29。状态：本轮运行时已实施；实际验收与边界见 §10，暂缓表面仍按配套范围执行。
 
-本轮提示词、profile 文案、Skill 与前端暂缓范围，以及 Code Mode 工具 schema 首版要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+提示词、profile 文案与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 JS 接入、工具范围、结果、资源与生命周期。协作对象、工具业务语义、Subagent 能力范围与恢复方式以 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 为准；本文定义它们的 JS 接入，不另设业务合同。两篇共同构成实施基线，工具业务实现只有一套。
 
@@ -56,7 +56,7 @@ const a = await tools.run_agent({ instruction: "Inspect the parser." });
 console.log({ agent: a.agent, work: a.work });
 ```
 
-工具定义维护一份。provider schema 与 JS 代理同源，严格本地校验保留；第三方 provider 对 JSON Schema 的实现程度不构成参数正确性保证。模型已经能看到的原生工具定义不再完整复制进 SYSTEM；环境说明只列范围、调用方式和 JS 扩展，复杂示例放 bundled subagent skill。
+工具定义维护一份。provider schema 与 JS 代理同源，严格本地校验保留；第三方 provider 对 JSON Schema 的实现程度不构成参数正确性保证。模型已经能看到的原生工具定义不再完整复制进 SYSTEM；环境说明只列范围、调用方式和 JS 扩展，普通工具组合与复杂编排示例放 `pulsara-code-mode` bundled Skill。
 
 不能作标识符的名称使用 `tools[toolName](args)`。这仍只访问该 cell 目录，不是绕过子集的通用入口。缓存函数只缓存名字／签名，不缓存权限、连接或执行 lease。
 

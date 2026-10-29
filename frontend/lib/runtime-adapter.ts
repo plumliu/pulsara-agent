@@ -4845,7 +4845,6 @@ function toolDisplayName(name: string, argumentsJson?: string): string {
   if (normalized.includes('wait_agent')) return '等待任务';
   if (normalized.includes('send_agent_message')) return '发送任务消息';
   if (normalized.includes('stop_agent')) return '停止任务';
-  if (normalized === 'list_agent_models') return '查看可用模型';
   if (normalized.includes('list_agents')) return '查看任务';
   if (normalized === 'todo') return '更新 TODO';
   if (normalized.includes('ask_plan_question')) return '提出规划问题';
@@ -4887,7 +4886,6 @@ function toolArgumentSummary(name: string, content: string): string {
     if (normalized.includes('wait_agent')) return '等待指定任务出现新进展';
     if (normalized.includes('send_agent_message')) return '向任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定任务';
-    if (normalized === 'list_agent_models') return '正在读取已保存的模型配置';
     if (normalized.includes('list_agents')) return '读取当前任务状态';
     if (normalized === 'todo') return '更新当前工作清单';
     if (name.toLowerCase().includes('ask_plan_question')) return String(value.question ?? '等待你的选择');

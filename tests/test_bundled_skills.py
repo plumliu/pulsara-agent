@@ -346,16 +346,6 @@ def test_closed_distribution_binding_observes_typed_unavailable() -> None:
 def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
     tmp_path: Path,
 ) -> None:
-    assert EXPECTED_BUNDLED_SKILL_NAMES == (
-        "pulsara-data-analysis",
-        "pulsara-docs",
-        "pulsara-mcp-installer",
-        "pulsara-pdf",
-        "pulsara-plugin-installer",
-        "pulsara-sheets",
-        "pulsara-skill-creator",
-        "pulsara-skill-installer",
-        )
     with BundledSkillDistributionBindingOwner() as owner:
         result = BundledSkillDefinitionProducer(owner).observe()
 

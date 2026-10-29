@@ -302,8 +302,14 @@ def _run_agent_schema() -> dict[str, Any]:
             object_schema(properties={"mode": {"const": "none"}}, required=["mode"]),
             object_schema(properties={"mode": {"const": "last_n"}, "turns": {"type": "integer", "minimum": 1, "maximum": 3}}, required=["mode", "turns"]),
         ]},
-        "materials": works,
-        "depends_on": works,
+        "materials": {
+            **works,
+            "description": "Copy ended Works' finals or stopped diagnostics as background.",
+        },
+        "depends_on": {
+            **works,
+            "description": "Start after these Works complete successfully and supply their finals as input.",
+        },
     }, required=["instruction"])
 
 
@@ -441,7 +447,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "artifact_read": _descriptor(
         name="artifact_read",
         description=(
-            ('Read a page of saved tool output using its ARTIFACT target. Continue with next_offset_chars '
+            ('Read a page of saved tool output using its ARTIFACT target. Returns text and returned_chars. Continue with next_offset_chars '
  'while has_more is true; pages may be shorter than max_chars. Offsets address the saved body; '
  'source_coverage says whether it covers the original observation or only its retained portion. '
  'Use artifact_export for extensive retrieval or processing.')
@@ -593,10 +599,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_file": _descriptor(
         name="read_file",
         description=(
-            ('Read a local UTF-8 file at a PATH target. Returns content_revision for edit_file. Lines use '
- 'N|text labels; only text is file content. Read the affected lines or adjacent gaps before line '
- 'edits. Whole-file replacement needs a current revision but not a full display. Continue '
- 'truncated reads with the returned offset hint.')
+            ('Read a local UTF-8 file at a PATH target. Returns content, truncated, and content_revision for edit_file. Content uses '
+ 'N|text line labels; only text is file content. Read the affected lines or adjacent gaps before line '
+ 'edits. Whole-file replacement needs a current revision but not a full display. When a successful '
+ 'read is truncated, the next offset is the returned offset + limit; _hint also gives it as text.')
         ),
         input_schema={'additionalProperties': False,
  'properties': {'limit': {'default': 2000, 'maximum': 2000, 'minimum': 1, 'type': 'integer'},
@@ -990,7 +996,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "run_agent": _descriptor(
         name="run_agent",
-        description="Submit work to a new or existing subagent and return its AGENT and WORK references immediately. Omit target to create an Agent; name and context apply only to creation. Reuse target to continue its history. materials copies completed work; depends_on waits for successful work and supplies its final. Ordinary final completes work.",
+        description="Submit work to a new or existing subagent and return its AGENT and WORK references immediately. Omit target to create an Agent; name and context apply only to creation. Reuse target to continue its history. Ordinary final completes work.",
         input_schema=_run_agent_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
