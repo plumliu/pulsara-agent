@@ -1,12 +1,14 @@
 # Pulsara：Subagent／Work 与双入口编排设计
 
-日期：2026-10-29。状态：本轮协作运行时已实施；实际验收与未覆盖边界见 §9，暂缓表面仍按配套范围执行。
+日期：2026-10-30。状态：本轮协作运行时已实施；实际验收与未覆盖边界见 §9，暂缓表面仍按配套范围执行。
 
 提示词、profile 文案与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施合同；示例中的 ID 仍须替换为运行时真实返回值。
 
 当前工具名、查询分支与 CELL 身份以 [工具查询、命名与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 为准。本文接口表与示例采用该合同；所链接的既往实验与实施记录保留其原验证范围，不作为新接口已验证的证据。
+
+运行时状态交接与资源退役以 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 为准。handoff 只主动展示物理存活 Process、当前范围未关闭 Monitor、需要继续执行或交付的 Cell，以及有当前／排队 Work 的 Agent；PMCA 状态视图受 3,200 个 V3 启发式 token 约束，完整 TODO 独立保留。未展示的保留对象仍由既有 query 按执行时权限读取；不改变两段退役、请求执行或 provider 前缀边界。
 
 ## 1. 核心语义
 
@@ -260,7 +262,7 @@ monitor 记录注册者 AGENT，投递目标与订阅生命周期绑定注册时
 - 进程来源与监控注册者是两回事。注册仍遵循原有进程可访问范围，不额外限制只能监控自己启动的进程。
 - 通知在注册 Work 的正常输入准备点追加；模型调用和已冻结输入不被临时改写。压缩交接保留当前 Work 的监控状态。
 - 注册 monitor 不阻止 final。Work 真正完成、失败、取消或中断后关闭订阅；既有完成 Hook 要求继续时，仍按活动 Work 处理。
-- 关闭订阅不停止被监控进程。未接纳通知不再投递，已接纳通知保留在历史；已在确认中的投递沿原有结算处理，不转投下一份 Work。
+- 关闭订阅不停止被监控进程。未接纳通知不再投递，已接纳通知保留在历史；已冻结的 immutable attempt 先沿原精确确认路径结算，不转投下一份 Work。UNKNOWN 保留原 attempt，结束该次投递尝试；注册 token、关闭处理与 in-flight 全部结算后由原 coordinator 删除 CLOSED 登记，不保留关闭历史。
 - 同一 Agent 开始下一份 Work，继续使用本 session 的有效历史，不接管上一份 Work 的活跃订阅；需要时重新注册。
 - Subagent 的 monitor 不自动创建新 Work。ROOT 原有活动轮投递与空闲时开启新轮的行为保持。
 

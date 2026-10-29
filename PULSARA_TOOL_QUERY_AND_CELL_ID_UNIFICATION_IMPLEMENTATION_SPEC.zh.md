@@ -29,7 +29,7 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 
 ### 0.2 明确不做
 
-- **压缩后运行时摘要的内容、布局、优先级、完整 ID 清单、`omitted` 计数语义、32 KiB 预算调整均为 deferred，见 §15。**
+- 压缩后的运行时状态交接与资源退役由 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 单独定义，见 §15；本文不增加该范围。
 - 不改变扫描与能力选择、Agent／Work 调度、进程执行、Monitor 投递、定时触发、记忆检索或 artifact 存储语义。
 - 不增加历史对象总量、工具调用总次数、运行总时长或重试次数上限。
 - 不新增 Cell 持久表、执行恢复、源码副本库、身份注册表、通用对象查询框架、cursor 注册表或新的指纹。
@@ -644,22 +644,11 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 
 本轮按开发 hard cut 部署，不支持同一进程中旧／新工具并行服务或热升级旧 Cell。新版运行时由正常启动路径建立新 Host／新 cold 输入；不能在旧 provider tool array 下偷偷把旧调用路由到新接口。已有 canonical 历史作为历史保留，结果读取不改写原工具名。
 
-## 15. Deferred：压缩后的运行时摘要
+## 15. 压缩后的运行时摘要边界
 
-以下内容**不作为本轮实施或验收完成条件，也不在本轮顺手定稿**：
+压缩 runtime handoff 的状态筛选、完整 target、PMCA 3,200-token 预算、独立完整 TODO、空 source、预算省略说明、普通环境 Cell 索引删除与 Monitor／Process 资源退役，统一由 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 定义。本文的查询、权限和 target 合同仍保持，query 不要求 handoff 完整列出所有对象，也不恢复已回收对象。
 
-| Deferred 项 | 当前边界 | 后续需要讨论 |
-|---|---|---|
-| 所有 Agent／Cell ID 是否必须内联 | 现有有界 handoff／来源页保持 | 全量还是摘要优先、如何利用 query 补查 |
-| 摘要中的脚本／命令／Monitor 条件 | 不把 query 详情自动复制到摘要 | 信息量、提示长度和准确内容的读取指引 |
-| `omitted` 含义及分页提示位置 | 当前算法不在本轮改造 | Agent 来源分页与 handoff 字节省略分开表达 |
-| 32 KiB cap 与策略配置不一致 | 不删除、不提高、不新增其他总量 cap | 实际输入预算与 MUST_KEEP 取舍 |
-| FULL／COMPACT 表示、条目优先级 | 不重排现有 handoff | 哪些对象先展示、两种表示是否应不同 |
-| TODO／Plan 段的整体文案清理 | 除本轮新工具名引用外，不顺带重写 | 此前讨论的分段、旧 Task 文案另行处理 |
-
-本轮唯一必要交叉：运行时原有 cell_id 字段自然使用 §13 的新 canonical 值；现有指引若直接引用已删除的工具名，必须改成新入口。**这不授权改变摘要 schema、内容选取、条目数量、计数或预算。**
-
-新 query 工具支持在正常模型回合按需查询，不依赖 deferred 摘要重设计才能工作。query 的发布也不意味着摘要已经完整列出所有对象。
+TODO／Plan 整体文案、工作流及新的前端表面继续按 [暂缓范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md) 处理；不因状态交接修改而顺带扩展。
 
 ## 16. 实施顺序与验收
 
@@ -670,7 +659,7 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 3. 在既有 owner 上实现窄查询能力：Process metadata、Monitor policy、Cell inventory／源码页；不先做泛型查询框架。
 4. 原生 query／manage／exec 入口及权限、投影一次性替换；同步 JS 目录、MCP 查询引用与 Hook 名称。
 5. 同步 SYSTEM、bundled Skills、当前设计及现有 UI 消费者；删除被替代的公共入口和兼容分支。
-6. 执行下列验收；若有具体失败再扩测，不修改 deferred 摘要以让测试通过。
+6. 执行下列验收；若有具体失败再扩测，摘要变更仍遵循其独立规格。
 
 ### 16.2 逐组测试矩阵
 

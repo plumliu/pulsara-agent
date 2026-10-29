@@ -72,7 +72,6 @@ from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.memory.contracts import MemoryUsePolicy
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    CompactionRuntimeHandoffBoundError,
     FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     freeze_compaction_runtime_handoff,
@@ -2104,14 +2103,10 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
             FrozenTerminalProcessHandoffFact(
                 process_id="process:nihhtj3io4t4xhypmulh24ebgm",
                 status="running",
-                command_preview="build",
-                cwd="/workspace",
             ),
             FrozenTerminalProcessHandoffFact(
                 process_id="process:nfei6gwtp3dcs62w3tvew5w34i",
                 status="running",
-                command_preview="test",
-                cwd="/workspace",
             ),
         ),
         terminal_monitors=(
@@ -2125,14 +2120,14 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
         todo=None,
         agent_work_index=(
             {
-                "agent_id": "session:itnsbirlmxzeu74pn7keq6zuzi",
-                "work_id": "queue:itnsbirlmxzeu74pn7keq6zuzi",
-                "status": "running",
+                "agent": {"kind": "AGENT", "agent_id": "session:itnsbirlmxzeu74pn7keq6zuzi"},
+                "current_work": {"kind": "WORK", "work_id": "queue:itnsbirlmxzeu74pn7keq6zuzi"},
+                "queued_count": 0,
             },
         ),
     )
     assert handoff is not None
-    payload = json.loads(handoff.full_text)
+    payload = json.loads(handoff.full_text.split("\n", 1)[0])
     assert [item["target"]["process_id"] for item in payload["terminal_processes"]] == [
         "process:nfei6gwtp3dcs62w3tvew5w34i",
         "process:nihhtj3io4t4xhypmulh24ebgm",
@@ -2141,21 +2136,22 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
     assert "result" not in handoff.full_text
 
 
-def test_round5b_runtime_handoff_never_drops_actionable_identity() -> None:
-    with pytest.raises(CompactionRuntimeHandoffBoundError):
-        freeze_compaction_runtime_handoff(
-            terminal_processes=(
-                FrozenTerminalProcessHandoffFact(
-                    process_id="process:72qov6ocdngiw5hv6gjo4g2o7i",
-                    status="running",
-                    command_preview="x" * 500,
-                    cwd="/" + "x" * 500,
-                ),
-            ),
-            terminal_monitors=(),
-            todo=None,
-            maximum_utf8_bytes=32,
-        )
+def test_round5b_runtime_handoff_reports_a_bounded_pmca_projection() -> None:
+    from pulsara_agent.conversation_kernel.compaction.runtime_handoff import HANDOFF_BUDGET_OMISSION
+
+    handoff = freeze_compaction_runtime_handoff(
+        terminal_processes=tuple(
+            FrozenTerminalProcessHandoffFact(process_id=f"process:{index:026d}", status="running")
+            for index in range(200)
+        ),
+        terminal_monitors=(),
+        todo=None,
+    )
+    assert handoff is not None
+    payload = json.loads(handoff.full_text.split("\n", 1)[0])
+    assert 0 < len(payload["terminal_processes"]) < 200
+    assert HANDOFF_BUDGET_OMISSION in handoff.full_text
+    assert "omitted" not in payload
 
 
 def test_round5b_global_lane_installs_only_one_scope_fence() -> None:

@@ -689,11 +689,15 @@ class ProviderSafePointCoordinator:
                 )
             attempt = coordinator.current_installation_attempt(monitor_id)
             if attempt is not None:
-                confirmed = self._repository.confirm_terminal_observation_winner(
-                    self._guard,
-                    candidate=attempt,
-                    deadline_monotonic=deadline_monotonic,
-                )
+                try:
+                    confirmed = self._repository.confirm_terminal_observation_winner(
+                        self._guard,
+                        candidate=attempt,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                except ConversationKernelConflict:
+                    coordinator.settle_installation(attempt, accepted=False)
+                    raise
                 if confirmed is not None:
                     coordinator.settle_installation(attempt, accepted=True)
                     return confirmed

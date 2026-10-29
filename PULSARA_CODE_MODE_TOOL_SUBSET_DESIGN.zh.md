@@ -1,12 +1,14 @@
 # Pulsara Code Mode：ROOT＋bypass、工具子集与执行合同
 
-日期：2026-10-29。状态：本轮运行时已实施；实际验收与边界见 §10，暂缓表面仍按配套范围执行。
+日期：2026-10-30。状态：本轮运行时已实施；实际验收与边界见 §10，暂缓表面仍按配套范围执行。
 
 提示词、profile 文案与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 JS 接入、工具范围、结果、资源与生命周期。协作对象、工具业务语义、Subagent 能力范围与恢复方式以 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 为准；本文定义它们的 JS 接入，不另设业务合同。两篇共同构成实施基线，工具业务实现只有一套。
 
 当前工具名、查询分支与 CELL 身份以 [工具查询、命名与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 为准。本文接口表与示例采用该合同；所链接的既往实验与实施记录保留其原验证范围，不作为新接口已验证的证据。
+
+运行时状态交接、普通环境字段与资源退役以 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 为准。状态观察只沿既有输入追加或显式采用的压缩 successor 提供，不重写已安装的 SYSTEM、tools 或消息前缀。
 
 ## 1. 产品范围与所有权
 
@@ -282,7 +284,7 @@ cell 已 failed／terminated，而在途结果尚未成功 resolve/reject 给 JS
 
 UI 提供 cell 状态、输出和精确停止，复用 conversation_kernel/user_control.py 的进程内精确目标控制 owner，不增加持久命令日志。当前新 turn 非 bypass 时，模型仍无 code mode，但用户能查看／停止旧 cell。Plan 约束本轮，不表示先前后台工作已停止；呈现真实状态，不另加确认流程。
 
-完成不自动创建 ROOT turn。正常输入准备的环境观察以 `cell_index` 提供简短存活／未读 cell 索引，以 `omitted_cell_index_entries` 表示未装入的索引项；压缩交接独立提供索引。两者不重复日志。Host 的空闲／archive／reopen 判断纳入运行及结算 cell，不能因 ROOT final 误关 owner。
+完成不自动创建 ROOT turn。普通环境观察只提供工作区、时区及 UTC offset 等环境事实，不自动列出 Cell。模型通过工具结果、按需 `query_cells` 及压缩 handoff 取得 Cell 状态。压缩 handoff 由 CodeModeHost 观察 queued／running、终态未确认、未读输出或内部 pending 非空的 Cell，以完整 CELL target 和必要公开状态承接已有工作；观察不消费或确认输出。用户 UI 继续经 `snapshot_cell_index()`、Host、gateway／proto 和桌面 bridge 查看并精确停止同一 Cell。Host 的空闲／archive／reopen 判断纳入运行及结算 Cell，不能因 ROOT final 误关 owner。
 
 没有总运行时长、总调用次数或历史量上限。根 Promise 未完成且 guest jobs、宿主请求都为空时，在这个没有 timer／外部事件的环境中已无进展来源，返回 stalled；真实长工具等待不满足此条件。执行只在进程内连续，不承诺跨重启恢复。
 
@@ -319,7 +321,7 @@ exec_cell 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍
 | 共同请求／turn／协作入口 | WORK 直接引用已接纳请求；原生与 JS 派活共用请求队列、turn 与 final 链路，按目标 session 调度；依赖与 batch 原子接纳遵循配套设计 |
 | ToolOutput／artifact／projection | typed 值、终端 artifact 入口、完整输出页，不以 preview 冒充实际值 |
 | MCP ref／runtime | 双消费者、当前真实 binding、完整 inspect 激活 |
-| runner／compaction／Host／Hook | 持续 cell、实际 Hook 来源、状态索引、准确 stop／close／reopen |
+| runner／compaction／Host／Hook | 持续 cell、实际 Hook 来源、handoff 状态观察与用户 Cell 索引、准确 stop／close／reopen |
 | Node／QuickJS 打包 | 可复现 Node／WASM 依赖、隔离、计时、handle、有限 IPC；运行时不联网下载依赖 |
 | reader／history／fork／UI／用户控制 | 模型来源过滤在分页／预算前完成；UI 使用同一真实结果并归组到父 exec_cell；状态、输出、精确停止复用既有 owner |
 | SYSTEM／工具／bundled skill | 短环境合同＋原生 schema；复杂编排按需读取既有 skill，不写实验过程 |

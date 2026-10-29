@@ -167,8 +167,9 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenCompactionRuntimeHandoff,
     FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
-    bounded_handoff_preview,
-    freeze_compaction_runtime_handoff,
+    CompactionRuntimeHandoffBuilder,
+    handoff_monitor_rows,
+    handoff_process_rows,
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
     BuiltinCompositionState,
@@ -411,7 +412,9 @@ class KernelSubagentToolPort(Protocol):
         invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult: ...
 
-    async def freeze_compaction_handoff(self) -> tuple[dict[str, object], ...]: ...
+    async def freeze_compaction_handoff(
+        self, *, cursor: str | None = None,
+    ) -> tuple[dict[str, object], ...]: ...
 
 
 class KernelMemoryToolPort(Protocol):
@@ -1405,26 +1408,21 @@ class DirectKernelToolPort:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        maximum_utf8_bytes: int,
+        session_id: str,
+        work_turn_id: str,
     ) -> FrozenCompactionRuntimeHandoff | None:
-        """Compose exact bounded views frozen by the existing live owners."""
-
-        root = self._terminal.workspace_root
+        """Freeze scoped owner facts; admit complete PMCA entries lazily."""
+        if session_id != self._session_id or not work_turn_id:
+            raise ValueError("runtime handoff scope differs from its tool owner")
+        is_root = conversation_scope_kind is ModelInputScopeKind.ROOT
         process_facts = tuple(
-            FrozenTerminalProcessHandoffFact(
-                process_id=item.process_id,
-                status="running",
-                command_preview=bounded_handoff_preview(item.command),
-                cwd=_workspace_relative_handoff_path(Path(item.cwd), root),
-            )
+            FrozenTerminalProcessHandoffFact(process_id=item.process_id, status="running")
             for item in self._terminal.freeze_compaction_handoff(
                 owner_host_session_id=self._terminal_owner_id
             )
-            if (
-                conversation_scope_kind is ModelInputScopeKind.ROOT
-                or item.origin.session_id == self._session_id
-            )
+            if is_root or item.origin.session_id == session_id
         )
+        monitor_scope = {} if is_root else {"agent_id": session_id, "work_turn_id": work_turn_id}
         monitor_facts = tuple(
             FrozenTerminalMonitorHandoffFact(
                 monitor_id=str(item["monitor_id"]),
@@ -1432,23 +1430,58 @@ class DirectKernelToolPort:
                 state=str(item["state"]),
                 pending_observation=bool(item["pending_observation"]),
             )
-            for item in self._terminal_monitor.freeze_compaction_handoff()
-            if conversation_scope_kind is ModelInputScopeKind.ROOT or item["session_id"] == self._session_id
+            for item in self._terminal_monitor.freeze_compaction_handoff(**monitor_scope)
         )
-        todo = self._todo_owner.freeze_compaction_handoff(
-            scope_kind=conversation_scope_kind,
+        todo = self._todo_owner.freeze_compaction_handoff(scope_kind=conversation_scope_kind)
+        code_cells = (
+            self._code_mode.freeze_compaction_handoff()
+            if is_root and self._code_mode is not None else ()
         )
-        agent_work_index = ()
-        if conversation_scope_kind is ModelInputScopeKind.ROOT and self._subagent is not None:
-            agent_work_index = await self._subagent.freeze_compaction_handoff()
-        return freeze_compaction_runtime_handoff(
-            terminal_processes=process_facts,
-            terminal_monitors=monitor_facts,
-            todo=todo,
-            agent_work_index=agent_work_index,
-            code_cells=tuple(self._code_mode.snapshot_cell_index()) if self._code_mode is not None else (),
-            maximum_utf8_bytes=maximum_utf8_bytes,
-        )
+        builder = CompactionRuntimeHandoffBuilder(todo=todo)
+        streams = {
+            "terminal_processes": iter(handoff_process_rows(process_facts)),
+            "terminal_monitors": iter(handoff_monitor_rows(monitor_facts)),
+            "code_cells": iter(code_cells),
+        }
+
+        async def agents():
+            if not is_root or self._subagent is None:
+                return
+            cursor = None
+            while True:
+                page = await self._subagent.freeze_compaction_handoff(cursor=cursor)
+                for row in page:
+                    yield row
+                if len(page) < 50:
+                    return
+                cursor = page[-1]["agent"]["agent_id"]
+
+        agent_rows = agents()
+        agents_done = False
+        # Process/Monitor/Cell/Agent is the specified display order. No next
+        # page is read until its next Agent entry is actually needed.
+        try:
+            while streams or not agents_done:
+                for key in ("terminal_processes", "terminal_monitors", "code_cells", "agents"):
+                    if key == "agents":
+                        if agents_done:
+                            continue
+                        item = await anext(agent_rows, None)
+                        if item is None:
+                            agents_done = True
+                            continue
+                    else:
+                        if key not in streams:
+                            continue
+                        item = next(streams[key], None)
+                        if item is None:
+                            del streams[key]
+                            continue
+                    if not builder.add(key, item):
+                        return builder.finish()
+            return builder.finish()
+        finally:
+            await agent_rows.aclose()
 
     def prepare_planned_tool_surface(
         self,
@@ -4090,6 +4123,7 @@ class DirectKernelToolPort:
                         "status": "CANCELLED" if outcome == "cancelled" else "REJECTED",
                         "target": request.target.model_dump(),
                         "cancellation_outcome": outcome,
+                        **({"message": _MONITOR_UNAVAILABLE_MESSAGE} if outcome == "not_found" else {}),
                     },
                 ),
                 None,
@@ -4783,6 +4817,13 @@ def _success(
     )
 
 
+_MONITOR_UNAVAILABLE_MESSAGE = (
+    "The monitor is unavailable in the current scope. It may have been "
+    "cancelled, expired, or reclaimed. Use query_monitors without a target "
+    "to list currently visible monitors."
+)
+
+
 def _terminal_monitor_rejected(call: ToolCall, reason: str) -> ToolExecutionResult:
     return ToolExecutionResult(
         call_id=call.id,
@@ -4790,23 +4831,15 @@ def _terminal_monitor_rejected(call: ToolCall, reason: str) -> ToolExecutionResu
         status=ToolResultState.ERROR,
         public_format=ToolOutputSourceFormatHint.JSON,
         output=json.dumps(
-            {"status": "REJECTED", "reason": reason},
+            {
+                "status": "REJECTED",
+                "reason": reason,
+                **({"message": _MONITOR_UNAVAILABLE_MESSAGE} if reason == "MONITOR_UNAVAILABLE" else {}),
+            },
             ensure_ascii=False,
             sort_keys=True,
         ),
     )
-
-
-def _workspace_relative_handoff_path(value: Path, root: Path) -> str:
-    """Project a Terminal cwd without exposing a path outside the workspace."""
-
-    resolved = value.expanduser().resolve()
-    if resolved == root:
-        return "."
-    try:
-        return resolved.relative_to(root).as_posix()
-    except ValueError:
-        return "<outside-workspace>"
 
 
 def _validate_builtin_call_schema(

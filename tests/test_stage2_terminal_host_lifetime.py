@@ -66,18 +66,23 @@ from pulsara_agent.ports.tool_execution import (
 from tests.support.round3 import authorize_direct_tool, invoke_direct_tool
 
 
-def test_capacity_raise_releases_host_lock_before_child_todo_activation() -> None:
-    from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
-    from pulsara_agent.conversation_kernel.todo_runtime import build_child_activation
+def test_capacity_raise_releases_host_lock_before_agent_requests_wake() -> None:
+    from pulsara_agent.conversation_kernel.subagent import AgentSessionRuntime
 
-    async def exercise():
+    async def exercise() -> None:
         host = object.__new__(KernelHostSession)
+        host.session_id = _name("session")
+        host.root_session_id = None
         host._writer_renewal_failure = None
         host._lock = asyncio.Lock()
         host._closing = host._closed = False
         host._deadlines = KernelExecutionDeadlineFactory()
         host._lease = SimpleNamespace(guard=object())
-        validated, activated = [], []
+        validated = []
+        loaded = asyncio.Event()
+        agent_id = _name("session")
+        row = dict(id=agent_id, root_session_id=host.session_id,
+                   has_pending_work=True, has_running_turn=False, head_ready=True)
 
         def validate(guard, **kwargs):
             assert host._lock.locked()
@@ -87,46 +92,49 @@ def test_capacity_raise_releases_host_lock_before_child_todo_activation() -> Non
             async def run(self, operation, *args, **kwargs):
                 return operation(*args, **kwargs)
 
+        class SchedulingCore:
+            _sessions = {}
+            _suspended_agent_roots = set()
+
+            async def _ensure_resources(self):
+                return SimpleNamespace(
+                    list_all_agent_sessions=lambda **kwargs: (row,),
+                    resolve_agent_dependencies=lambda **kwargs: None,
+                    read_agent_runtime_state=lambda **kwargs: row,
+                )
+
+            def _canonical_deadline(self):
+                return host._canonical_deadline()
+
+            def _live_agent_session(self, session_id):
+                return host if session_id == host.session_id else None
+
+            async def _load_agent_session(self, actual):
+                # The real scheduler's launch path must be able to reenter the
+                # Host after capacity validation has released the Host lock.
+                assert not host._lock.locked()
+                async with host._lock:
+                    assert actual == row
+                    loaded.set()
+
         host.repository = SimpleNamespace(validate_host_writer=validate)
         host._io = InlineIO()
-        host._tools = SimpleNamespace(
-            todo_owner=SimpleNamespace(activate_child_run=activated.append),
-            offer_todo_close=lambda value: None,
-        )
-        manager = object.__new__(KernelSubagentManager)
-        manager._lock = asyncio.Lock()
-        manager._state_changed = asyncio.Condition(manager._lock)
-        manager._state_revision = 0
-        manager._capacity_target = 1
-        manager._tasks = {}
-        manager._launch_permits = {}
-        manager._closed = False
-        manager._scheduler_task = None
-        manager._scheduler_reschedule = False
-        manager._guard = SimpleNamespace(session_id='session:h5s55h6wdwcq7jfbvl3txv32ge')
-        host._subagents = manager
-        prepared = build_child_activation(
-            session_id='session:h5s55h6wdwcq7jfbvl3txv32ge', subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
-            exact_turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', exact_initial_entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve',
-            exact_context_binding_revision_id="revision:child",
-        )
-
-        async def launch():
-            # This is the production finalizer called by child turn admission.
-            assert not host._lock.locked()
-            await host._finalize_todo_run_activation(
-                prepared, SimpleNamespace(turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve'),
-            )
-
-        manager._start_available_tasks_worker = launch
-        assert await asyncio.wait_for(host.set_subagent_capacity(2), 1) == (2, 0)
-        assert activated == [prepared]
-        assert validated == [host._lease.guard]
-        assert await asyncio.wait_for(host.subagent_capacity_state(), 1) == (2, 0)
-        assert await host.set_subagent_capacity(2) == (2, 0)
-        assert activated == [prepared]  # An unchanged target does not wake a launch.
+        runtime = AgentSessionRuntime(SchedulingCore())
+        host._agent_runtime = runtime
+        await runtime.set_capacity_target(1)
+        assert await runtime.try_acquire(_name("session"))
+        try:
+            assert await asyncio.wait_for(host.set_subagent_capacity(2), 1) == (2, 1)
+            await asyncio.wait_for(loaded.wait(), 1)
+            assert validated == [host._lease.guard]
+            assert await host.subagent_capacity_state() == (2, 2)
+            assert await host.set_subagent_capacity(2) == (2, 2)
+            assert validated == [host._lease.guard, host._lease.guard]
+        finally:
+            await runtime.aclose()
 
     asyncio.run(exercise())
+
 
 def _name(prefix: str) -> str:
     return random_id(prefix)
@@ -461,6 +469,8 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
 
         class BlockingSession:
             session_id = 'session:sq4icqul3fdtrhy5k5mhtdz5lq'
+            root_session_id = None
+            _lease = SimpleNamespace(guard=object())
 
             async def aclose(
                 self,
@@ -480,6 +490,8 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
         session = BlockingSession()
         core._sessions = {'host:fnw4mc7b3olk5l3w34pyvmunhu': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
+        core._suspended_agent_roots = set()  # type: ignore[attr-defined]
+        core._repository = SimpleNamespace(release_host_writer=lambda *args, **kwargs: None)
 
         first = asyncio.create_task(
             core.close_session('host:fnw4mc7b3olk5l3w34pyvmunhu')
@@ -524,6 +536,8 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
 
         class BlockingSession:
             session_id = 'session:tlvhlzyhaqgtzehsjkwyfvjuji'
+            root_session_id = None
+            _lease = SimpleNamespace(guard=object())
 
             async def aclose(
                 self,
@@ -543,6 +557,8 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
         session = BlockingSession()
         core._sessions = {'host:67ai47ry4ikif6v6w7ef4cpyl4': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
+        core._suspended_agent_roots = set()  # type: ignore[attr-defined]
+        core._repository = SimpleNamespace(release_host_writer=lambda *args, **kwargs: None)
 
         first = asyncio.create_task(
             core.close_session('host:67ai47ry4ikif6v6w7ef4cpyl4')
@@ -652,6 +668,7 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
     async def scenario() -> None:
         class FailingSession:
             session_id = 'session:sazovd3stvpuqithbe4s25br3u'
+            root_session_id = None
             physically_terminal = False
 
             async def aclose(
@@ -670,6 +687,8 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
         session = FailingSession()
         core._sessions = {'host:bam5ezzvqmifzdnm7w6o5l26iy': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
+        core._suspended_agent_roots = set()  # type: ignore[attr-defined]
+        core._repository = SimpleNamespace(release_host_writer=lambda *args, **kwargs: None)
 
         with pytest.raises(TimeoutError, match="physical owner"):
             await core.close_session('host:bam5ezzvqmifzdnm7w6o5l26iy')

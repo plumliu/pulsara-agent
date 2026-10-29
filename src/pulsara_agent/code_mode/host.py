@@ -663,6 +663,17 @@ class CodeModeHost:
                       "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
                      for cell in self._cells.values())
 
+    def freeze_compaction_handoff(self) -> tuple[dict[str, object], ...]:
+        """Observe pending work on the owner loop without consuming or retaining it."""
+        self._require_query_available()
+        return tuple(
+            {"target": cell_target(cell.cell_id), "state": cell.state,
+             "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
+            for cell in sorted(self._cells.values(), key=lambda item: item.cell_id)
+            if (cell.state not in _TERMINAL or not cell.terminal_delivered
+                or cell.output or cell.pending)
+        )
+
     def has_live_cells(self) -> bool:
         return any(cell.state not in _TERMINAL or cell.pending for cell in self._cells.values())
 

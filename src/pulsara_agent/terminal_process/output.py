@@ -12,13 +12,14 @@ from pulsara_agent.identity import random_id, require_id
 
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 import codecs
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
 from threading import Condition, RLock
 from time import monotonic
-from typing import Callable
+from typing import Callable, Iterator
 
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
@@ -393,6 +394,7 @@ class TerminalOutputOwner:
         self._subscribers: dict[str, OutputSubscriber] = {}
         self._observation_leases = 0
         self._inflight_reads = 0
+        self._reads_closed = False
         self._retained_bytes_changed = retained_bytes_changed
         self._lock = RLock()
         self._condition = Condition(self._lock)
@@ -421,6 +423,41 @@ class TerminalOutputOwner:
     def inflight_read_count(self) -> int:
         with self._lock:
             return self._inflight_reads
+
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        """Protect an admitted Registry operation with the existing read count.
+
+        Registry admission takes its lock before entering this scope. The scope
+        releases the output lock while the operation runs, so waits and physical
+        joins never block output delivery or the release of another reader.
+        """
+
+        with self._condition:
+            if self._reads_closed:
+                raise KeyError(self.process_id)
+            self._inflight_reads += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._inflight_reads -= 1
+                self._condition.notify_all()
+
+    def close_reads_if_idle(self) -> bool:
+        """Atomically stop future reads only after all existing users finish."""
+
+        with self._condition:
+            if self._inflight_reads or self._observation_leases:
+                return False
+            self._reads_closed = True
+            self._condition.notify_all()
+            return True
+
+    def wait_for_readers(self, timeout_seconds: float | None) -> None:
+        with self._condition:
+            if self._inflight_reads or self._observation_leases:
+                self._condition.wait(timeout_seconds)
 
     def append_raw(self, raw: bytes) -> bytes:
         with self._lock:
@@ -523,6 +560,8 @@ class TerminalOutputOwner:
         if not token:
             raise ValueError("terminal output subscription token is empty")
         with self._lock:
+            if self._reads_closed:
+                raise KeyError(self.process_id)
             if token in self._subscribers:
                 raise RuntimeError("terminal output subscription already exists")
             self._subscribers[token] = callback
@@ -554,6 +593,8 @@ class TerminalOutputOwner:
         self, *, maximum_chars: int, since_cursor: str | None = None
     ) -> TerminalOutputSnapshot:
         with self._lock:
+            if self._reads_closed:
+                raise KeyError(self.process_id)
             self._inflight_reads += 1
             try:
                 return self._snapshot_locked(
@@ -579,6 +620,8 @@ class TerminalOutputOwner:
         """
 
         with self._lock:
+            if self._reads_closed:
+                raise KeyError(self.process_id)
             self._inflight_reads += 1
             try:
                 snapshot = self._snapshot_locked(
@@ -608,6 +651,8 @@ class TerminalOutputOwner:
         if maximum_chars <= 0 or maximum_bytes <= 0:
             raise ValueError("terminal observation bounds must be positive")
         with self._lock:
+            if self._reads_closed:
+                raise KeyError(self.process_id)
             self._inflight_reads += 1
             try:
                 disposition, gap, raw = self._range_locked(since_cursor)

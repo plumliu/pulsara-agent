@@ -658,8 +658,10 @@ def test_round2_finished_process_reaches_joined_before_prunable_without_regressi
     )
     assert yielded is False
     assert state.physical_state is TerminalPhysicalState.PHYSICALLY_JOINED
+    for attempt_id in tuple(registry._decision_attempts):
+        registry.settle_foreground_decision(attempt_id)
     # A later physical join is idempotent and cannot move PRUNABLE backwards.
-    registry._prune_locked()  # noqa: SLF001
+    registry._prune()  # noqa: SLF001
     assert state.physical_state is TerminalPhysicalState.PRUNABLE
     registry.release_owner(owner, timeout_seconds=2)
 
@@ -852,17 +854,19 @@ def test_round2_observation_lease_and_join_failure_block_prune(
     )
     assert yielded is False
     token, _cursor = state.output.subscribe(lambda *_args: None)
-    registry._prune_locked()  # noqa: SLF001
+    for attempt_id in tuple(registry._decision_attempts):
+        registry.settle_foreground_decision(attempt_id)
+    registry._prune()  # noqa: SLF001
     assert state.process_id in registry._states  # noqa: SLF001
     state.output.unsubscribe(token)
     monkeypatch.setattr(
         terminal_manager_module, "_join_physical", lambda *_a, **_k: False
     )
-    registry._prune_locked()  # noqa: SLF001
+    registry._prune()  # noqa: SLF001
     assert state.process_id in registry._states  # noqa: SLF001
     assert state.physical_state is TerminalPhysicalState.PHYSICALLY_JOINED
     monkeypatch.undo()
-    registry._prune_locked()  # noqa: SLF001
+    registry._prune()  # noqa: SLF001
     assert state.process_id not in registry._states  # noqa: SLF001
     registry.release_owner(owner, timeout_seconds=2)
 

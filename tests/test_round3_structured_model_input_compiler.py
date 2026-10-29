@@ -403,7 +403,7 @@ def _collect_context_sources(
 
 _SOURCE_FACTS = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v9-async-subagent-completions",
+        "pulsara.base-system.prefix-continuity.v10-runtime-state-handoff",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -413,7 +413,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v4-cell-index",
+        "pulsara.runtime-environment.v5-facts-only",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -563,7 +563,7 @@ _SOURCE_FACTS = {
         ContextSourceLifecycle.TURN_APPEND,
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-        "pulsara.compaction-runtime-handoff.v2-complete-todo",
+        "pulsara.compaction-runtime-handoff.v3-active-pmca",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,

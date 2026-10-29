@@ -60,52 +60,31 @@ class CollaborationToolPort:
             return str(error)
         return None
 
-    async def freeze_compaction_handoff(self) -> tuple[dict[str, object], ...]:
-        from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-            bounded_handoff_preview,
+    async def freeze_compaction_handoff(
+        self, *, cursor: str | None = None
+    ) -> tuple[dict[str, object], ...]:
+        # Fifty is the existing per-read boundary. The renderer asks for another
+        # active page only while its observation budget still needs candidates.
+        if self.session_id != self.root_session_id:
+            return ()
+        rows = await self._read(
+            self.repository.list_active_agent_sessions,
+            root_session_id=self.root_session_id,
+            cursor=cursor,
+            limit=50,
+            deadline_monotonic=self.runtime.read_deadline(),
         )
-
-        # This is one existing-size observation page, not a limit on retained
-        # Agents. Remaining identities stay available through query_agents.
-        if self.session_id == self.root_session_id:
-            rows = await self._read(
-                self.repository.list_agent_sessions,
-                root_session_id=self.root_session_id,
-                cursor=None,
-                limit=50,
-                deadline_monotonic=self.runtime.read_deadline(),
-            )
-        else:
-            row = await self._read(
-                self.repository.read_agent_runtime_state,
-                session_id=self.session_id,
-                deadline_monotonic=self.runtime.read_deadline(),
-            )
-            rows = () if row is None else (row,)
-        index = []
-        for row in rows:
-            identity = row.get("agent_id", row.get("id"))
-            current = row.get("current_work_id")
-            index.append(
-                {
-                    "agent": agent_target(identity),
-                    "name": bounded_handoff_preview(
-                        str(row.get("name", row.get("title")) or "")
-                    ),
-                    "current_work": None if current is None else work_target(current),
-                    "queued_count": row.get("queued_count", 0),
-                }
-            )
-        if rows and self.session_id == self.root_session_id:
-            omitted = max(0, int(rows[0]["agent_total"]) - len(rows))
-            if omitted:
-                index.append(
-                    {
-                        "omitted_agents": omitted,
-                        "next_cursor": self._agent_cursor(rows[-1]),
-                    }
-                )
-        return tuple(index)
+        return tuple(
+            {
+                "agent": agent_target(row["agent_id"]),
+                "current_work": (
+                    None if row["current_work_id"] is None
+                    else work_target(row["current_work_id"])
+                ),
+                "queued_count": row["queued_count"],
+            }
+            for row in rows
+        )
 
     async def _facts(self, context, requests=()) -> dict:
         facts = self.admission_facts(context, requests)

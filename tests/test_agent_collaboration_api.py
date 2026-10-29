@@ -21,6 +21,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_api import (
     CollaborationToolPort,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 
 
 class ContractTests(unittest.TestCase):
@@ -167,7 +168,6 @@ class RepositoryOwner:
         self, *, root_session_id, cursor=None, limit=20, deadline_monotonic
     ):
         ids = sorted(self.agents)
-        total = len(ids)
         if cursor is not None:
             ids = [identity for identity in ids if identity > cursor]
         return tuple(
@@ -176,10 +176,21 @@ class RepositoryOwner:
                     session_id=identity, deadline_monotonic=deadline_monotonic
                 ),
                 cursor=identity,
-                agent_total=total,
             )
             for identity in ids[:limit]
         )
+
+    def list_active_agent_sessions(
+        self, *, root_session_id, cursor=None, limit=50, deadline_monotonic
+    ):
+        rows = self.list_agent_sessions(
+            root_session_id=root_session_id, cursor=cursor,
+            limit=len(self.agents) or 1, deadline_monotonic=deadline_monotonic,
+        )
+        return tuple(
+            row for row in rows
+            if row["current_work_id"] is not None or row["queued_count"] > 0
+        )[:limit]
 
     def admit_agent_requests(self, guard, *, requests, **kwargs):
         self.admissions.append(requests)
@@ -385,15 +396,37 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.repo.rows), 1)
         self.assertEqual(self.runtime.wakes, 1)
 
-    async def test_handoff_uses_a_bounded_page_and_reports_omitted_agents(self):
+    async def test_handoff_pages_only_active_agents_without_pseudo_agent_rows(self):
         for _ in range(51):
             self.add_work(status="queued")
         index = await self.api.freeze_compaction_handoff()
-        self.assertEqual(len(index), 51)
-        self.assertEqual(index[-1]["omitted_agents"], 1)
-        self.assertEqual(index[-1]["next_cursor"], index[-2]["agent"]["agent_id"])
-        self.assertTrue(all(item["queued_count"] == 1 for item in index[:-1]))
-        self.assertTrue(all("instruction" not in item for item in index))
+        self.assertEqual(len(index), 50)
+        remaining = await self.api.freeze_compaction_handoff(
+            cursor=index[-1]["agent"]["agent_id"]
+        )
+        self.assertEqual(len(remaining), 1)
+        self.assertTrue(all(item["queued_count"] == 1 for item in (*index, *remaining)))
+        self.assertTrue(all(
+            set(item) == {"agent", "current_work", "queued_count"}
+            for item in (*index, *remaining)
+        ))
+        self.assertEqual(
+            [item["agent"]["agent_id"] for item in (*index, *remaining)],
+            sorted(self.repo.agents),
+        )
+
+    async def test_handoff_read_failure_propagates_and_subagent_has_no_inventory(self):
+        failure = ConversationKernelConflict("active Agent read failed")
+
+        def fail(**kwargs):
+            raise failure
+
+        self.repo.list_active_agent_sessions = fail
+        with self.assertRaises(ConversationKernelConflict) as caught:
+            await self.api.freeze_compaction_handoff()
+        self.assertIs(caught.exception, failure)
+        self.api.session_id = random_id("session")
+        self.assertEqual(await self.api.freeze_compaction_handoff(), ())
 
     async def test_cancelled_physical_admission_preserves_the_accepted_result(self):
         import threading

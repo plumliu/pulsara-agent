@@ -103,7 +103,7 @@ class _SacrificeRank(IntEnum):
 
 _SOURCE_POLICY = {
     ContextSourceKind.BASE_SYSTEM: (
-        "pulsara.base-system.prefix-continuity.v9-async-subagent-completions",
+        "pulsara.base-system.prefix-continuity.v10-runtime-state-handoff",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -113,7 +113,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.EPOCH_ROOT,
     ),
     ContextSourceKind.RUNTIME_ENVIRONMENT: (
-        "pulsara.runtime-environment.v4-cell-index",
+        "pulsara.runtime-environment.v5-facts-only",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
@@ -263,7 +263,7 @@ _SOURCE_POLICY = {
         ContextSourceLifecycle.ONE_SHOT,
     ),
     ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-        "pulsara.compaction-runtime-handoff.v2-complete-todo",
+        "pulsara.compaction-runtime-handoff.v3-active-pmca",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
@@ -354,6 +354,27 @@ _SOURCE_ABSENCE_POLICY = {
         }
     ),
 }
+
+
+def estimate_runtime_handoff_pmca_tokens(body: str) -> int:
+    """Quote the real source encoder and both supported pure wire serializers."""
+    from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
+    from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
+    from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
+
+    message = encode_runtime_observation(
+        source_kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
+        trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
+        lifecycle=SourceObservationLifecycle.SNAPSHOT,
+        presence=SourceObservationPresence.VALUE,
+        contract_version=_SOURCE_POLICY[ContextSourceKind.COMPACTION_RUNTIME_HANDOFF][0],
+        body=body,
+    )
+    estimator = PulsaraHeuristicTokenEstimatorV3()
+    return max(
+        sum(estimator.estimate_wire_json_component(item) for item in serializer(message))
+        for serializer in (chat_semantic_wire_group, responses_semantic_wire_group)
+    )
 
 
 @dataclass(slots=True)

@@ -181,6 +181,9 @@ class _Registration:
     process_status: str = "running"
     exit_code: int | None = None
     output_generation: int = 0
+    # CLOSED takes effect before unsubscribe/live delivery.  A failed close
+    # must not become deletable merely because a token or attempt settles.
+    close_completed: bool = False
 
     def __post_init__(self) -> None:
         if self.progress_window is None:
@@ -413,12 +416,15 @@ class TerminalMonitorCoordinator:
             registration = (
                 None if monitor_id is None else self._registrations.get(monitor_id)
             )
-            if registration is None:
+            if retained is None:
                 return
             if retained is not prepared:
                 raise RuntimeError("terminal monitor settlement token conflicts")
-            self._tokens.pop(prepared.token_id, None)
+            if registration is None:
+                raise RuntimeError("terminal monitor settlement lost its registration")
+            self._tokens.pop(prepared.token_id)
             if registration.state is not TerminalMonitorState.DORMANT:
+                self._remove_closed_locked(registration)
                 return
             if committed:
                 registration.state = TerminalMonitorState.ACTIVE
@@ -586,7 +592,7 @@ class TerminalMonitorCoordinator:
     def close_work(self, turn_id: str) -> None:
         """End subscriptions at real Work settlement; the process is independent."""
         with self._lock:
-            for registration in self._registrations.values():
+            for registration in tuple(self._registrations.values()):
                 if registration.work_turn_id == turn_id:
                     self._close_locked(registration, TerminalMonitorCloseReason.WORK_TERMINAL)
 
@@ -594,7 +600,7 @@ class TerminalMonitorCoordinator:
         self, process_id: str, *, status: str, exit_code: int | None
     ) -> None:
         with self._lock:
-            for registration in self._registrations.values():
+            for registration in tuple(self._registrations.values()):
                 if (
                     registration.process_id != process_id
                     or registration.state is TerminalMonitorState.CLOSED
@@ -680,6 +686,7 @@ class TerminalMonitorCoordinator:
                 registration.observation_ordinal = attempt.content.observation_ordinal
                 registration.autonomy_count += 1
                 if registration.state is TerminalMonitorState.CLOSED:
+                    self._remove_closed_locked(registration)
                     return
                 if attempt.content.observation_kind in {
                     TerminalObservationKind.COMPLETION,
@@ -706,6 +713,7 @@ class TerminalMonitorCoordinator:
                 # cursor, so it cannot replace the rejected predecessor.  It
                 # stays queued until that exact predecessor is accepted.
                 if registration.state is TerminalMonitorState.CLOSED:
+                    self._remove_closed_locked(registration)
                     return
                 registration.draft = MutableObservationDraft(
                     monitor_id=registration.monitor_id,
@@ -756,10 +764,9 @@ class TerminalMonitorCoordinator:
         with self._lock:
             self._accepting = False
             for registration in tuple(self._registrations.values()):
-                if registration.state is not TerminalMonitorState.CLOSED:
-                    self._close_locked(
-                        registration, TerminalMonitorCloseReason.HOST_CLOSE
-                    )
+                self._close_locked(
+                    registration, TerminalMonitorCloseReason.HOST_CLOSE
+                )
             self._closed = True
             self._condition.notify_all()
         self._worker.join(timeout=timeout_seconds)
@@ -954,10 +961,26 @@ class TerminalMonitorCoordinator:
             )
         self._wake_scheduler()
 
+    def _remove_closed_locked(self, registration: _Registration) -> None:
+        """Retire only the exact closed owner after its existing settlements."""
+
+        if (
+            self._registrations.get(registration.monitor_id) is registration
+            and registration.state is TerminalMonitorState.CLOSED
+            and registration.close_completed
+            and registration.in_flight is None
+            and not any(
+                token.monitor_id == registration.monitor_id
+                for token in self._tokens.values()
+            )
+        ):
+            del self._registrations[registration.monitor_id]
+
     def _close_locked(
         self, registration: _Registration, reason: TerminalMonitorCloseReason
     ) -> None:
-        if registration.state is TerminalMonitorState.CLOSED:
+        if registration.close_completed:
+            self._remove_closed_locked(registration)
             return
         registration.state = TerminalMonitorState.CLOSED
         registration.draft = None
@@ -968,21 +991,22 @@ class TerminalMonitorCoordinator:
             owner_host_session_id=self._owner_epoch,
         )
         live_bus = self._live_buses.get(registration.recipient_session_id)
-        if live_bus is None:
-            return
-        live_bus.offer_nowait(
-            event_type=LiveEventType.TERMINAL_MONITOR_CLOSED,
-            session_id=registration.recipient_session_id,
-            turn_id=registration.origin_turn_id,
-            draft_identity=registration.monitor_id,
-            payload=TerminalMonitorClosedPayload(
-                registration.monitor_id, registration.process_id, reason.value
-            ),
-            channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
-            generation_id=registration.monitor_id,
-            block_id=registration.monitor_id,
-            block_kind=LiveBlockKind.OPERATIONAL,
-        )
+        if live_bus is not None:
+            live_bus.offer_nowait(
+                event_type=LiveEventType.TERMINAL_MONITOR_CLOSED,
+                session_id=registration.recipient_session_id,
+                turn_id=registration.origin_turn_id,
+                draft_identity=registration.monitor_id,
+                payload=TerminalMonitorClosedPayload(
+                    registration.monitor_id, registration.process_id, reason.value
+                ),
+                channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
+                generation_id=registration.monitor_id,
+                block_id=registration.monitor_id,
+                block_kind=LiveBlockKind.OPERATIONAL,
+            )
+        registration.close_completed = True
+        self._remove_closed_locked(registration)
 
     def _offer_opened(self, registration: _Registration) -> None:
         live_bus = self._live_buses.get(registration.recipient_session_id)

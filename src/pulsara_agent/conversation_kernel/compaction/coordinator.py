@@ -2061,8 +2061,7 @@ class CompactionCoordinator:
     async def _freeze_compaction_runtime_source(
         self,
         *,
-        scope_kind: ModelInputScopeKind,
-        maximum_utf8_bytes: int,
+        scope: CompactionScope,
         deadline: float,
     ) -> tuple[
         ContextSourceCandidate | ContextSourceAbsentFact,
@@ -2073,8 +2072,9 @@ class CompactionCoordinator:
             raise TimeoutError("compaction runtime handoff deadline expired")
         handoff = await asyncio.wait_for(
             self._tools.freeze_compaction_runtime_handoff(
-                conversation_scope_kind=scope_kind,
-                maximum_utf8_bytes=maximum_utf8_bytes,
+                conversation_scope_kind=scope.scope_kind,
+                session_id=scope.session_id,
+                work_turn_id=scope.turn_id,
             ),
             timeout=remaining,
         )
@@ -3062,8 +3062,7 @@ class CompactionCoordinator:
                 runtime_source,
                 _runtime_handoff,
             ) = await self._freeze_compaction_runtime_source(
-                scope_kind=expected_scope.scope_kind,
-                maximum_utf8_bytes=(owner.policy.maximum_runtime_handoff_utf8_bytes),
+                scope=expected_scope,
                 deadline=successor_deadline,
             )
             owner.advance_phase(
@@ -3845,10 +3844,7 @@ class CompactionCoordinator:
                         current_runtime_source,
                         _current_runtime_handoff,
                     ) = await self._freeze_compaction_runtime_source(
-                        scope_kind=expected_scope.scope_kind,
-                        maximum_utf8_bytes=(
-                            owner.policy.maximum_runtime_handoff_utf8_bytes
-                        ),
+                        scope=expected_scope,
                         deadline=base_deadline,
                     )
                     destination_epoch_target = (

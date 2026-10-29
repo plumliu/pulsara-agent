@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pulsara_agent.identity import random_id, require_id
 
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import os
@@ -13,7 +14,7 @@ import signal
 import subprocess
 from threading import Condition, Event, RLock, Thread, Timer, current_thread
 from time import monotonic, sleep
-from typing import Callable, IO
+from typing import Callable, IO, Iterator
 
 from pulsara_agent.windows_interop import create_scope
 from pulsara_agent.windows_interop.scope import WindowsInteropScope
@@ -161,6 +162,8 @@ class ProcessRegistry:
         self._closed = False
         self._lock = RLock()
         self._launch_condition = Condition(self._lock)
+        self._retirement_thread: Thread | None = None
+        self._retirement_stopping = False
 
     def activate_owner(self, owner: str) -> None:
         with self._lock:
@@ -183,15 +186,16 @@ class ProcessRegistry:
         output_subscriber: OutputSubscriber | None = None,
         decision_attempt_id: str | None = None,
         decision_deadline_monotonic: float | None = None,
+        initial_result_reader: Callable[[_ProcessState], None] | None = None,
     ) -> tuple[_ProcessState, bool]:
         decision_handle = TerminalForegroundDecisionAttemptHandle(
             attempt_id=decision_attempt_id or random_id("terminal-decision"),
             owner_host_session_id=owner_host_session_id,
         )
+        self._prune()
         with self._launch_condition:
             if self._closed or owner_host_session_id in self._released_owners:
                 raise RuntimeError("terminal process owner is closed")
-            self._prune_locked()
             if (
                 sum(_occupies_live_capacity(state) for state in self._states.values())
                 + sum(self._launching_by_owner.values())
@@ -289,6 +293,17 @@ class ProcessRegistry:
         )
         closed_during_launch = False
         decision_aborted = False
+        initial_read = ExitStack()
+        initial_read.enter_context(state.output.reading())
+        reading_initial_result = False
+
+        def finish_result(yielded: bool) -> tuple[_ProcessState, bool]:
+            nonlocal reading_initial_result
+            reading_initial_result = True
+            if initial_result_reader is not None:
+                initial_result_reader(state)
+            return state, yielded
+
         try:
             (
                 live_subscription,
@@ -305,6 +320,7 @@ class ProcessRegistry:
             )
             if launch_released:
                 launch_reserved = False
+            self._ensure_retirement()
             if closed_during_launch:
                 _terminate_process_group(state)
                 if not _join_physical(state, timeout=2.0):
@@ -326,7 +342,7 @@ class ProcessRegistry:
                     state.process_id,
                     background_adopted=False,
                 )
-                return state, False
+                return finish_result(False)
             if yield_time_ms > 0:
                 state.physical_completion.wait(yield_time_ms / 1000)
             if self._foreground_decision_abort_requested(decision_handle.attempt_id):
@@ -344,7 +360,7 @@ class ProcessRegistry:
                     state.process_id,
                     background_adopted=False,
                 )
-                return state, False
+                return finish_result(False)
             state.refresh()
             yielded = not state.physical_completion.is_set()
             self.finalize_yield_decision(state, yielded=yielded)
@@ -360,9 +376,19 @@ class ProcessRegistry:
                     raise ProcessPhysicalJoinError(
                         "terminal decision abort did not physically join"
                     )
-                return state, False
-            return state, yielded
+                return finish_result(False)
+            return finish_result(yielded)
         except BaseException as error:
+            initial_read.close()
+            if live_subscription is not None:
+                state.output.unsubscribe(live_subscription)
+                live_subscription = None
+            if reading_initial_result:
+                # Execution/adoption has already settled. A read-only result
+                # failure keeps that execution, just as the original caller's
+                # snapshot/finally boundary did; it only retires this decision.
+                self.settle_foreground_decision(decision_handle.attempt_id)
+                raise
             # No caller received this process identity, so it must not remain
             # as an invisible physical effect. Disallow adoption, terminate the
             # whole group, and prove reader/watcher/process exit before failing.
@@ -377,25 +403,33 @@ class ProcessRegistry:
                 # not a successful launch publication.
                 with self._launch_condition:
                     self._states[state.process_id] = state
+                    self._wake_retirement_locked()
                     attempt = self._decision_attempts.get(decision_handle.attempt_id)
                     if attempt is not None:
                         attempt.process_id = state.process_id
                         attempt.state = TerminalForegroundDecisionState.ABORT_REQUESTED
                         attempt.adoption_allowed = False
+                self._ensure_retirement()
                 raise ProcessPhysicalJoinError(
                     "failed terminal launch did not physically join"
                 ) from error
             with self._launch_condition:
-                if self._states.get(state.process_id) is state:
-                    self._states.pop(state.process_id, None)
+                if (
+                    self._states.get(state.process_id) is state
+                    and state.output.close_reads_if_idle()
+                ):
+                    self._states.pop(state.process_id)
                 self._settle_foreground_decision_locked(decision_handle.attempt_id)
             raise
         finally:
-            if live_subscription is not None:
-                state.output.unsubscribe(live_subscription)
-            if launch_reserved:
-                with self._launch_condition:
-                    self._release_launch_locked(owner_host_session_id)
+            try:
+                if live_subscription is not None:
+                    state.output.unsubscribe(live_subscription)
+                if launch_reserved:
+                    with self._launch_condition:
+                        self._release_launch_locked(owner_host_session_id)
+            finally:
+                initial_read.close()
 
     def settle_foreground_decision(self, attempt_id: str) -> None:
         with self._launch_condition:
@@ -496,9 +530,14 @@ class ProcessRegistry:
         attempt.state = TerminalForegroundDecisionState.SETTLED
         if not attempt.adoption_allowed and attempt.process_id is not None:
             state = self._states.get(attempt.process_id)
-            if state is None or state.physical_completion.is_set():
-                self._states.pop(attempt.process_id, None)
+            if (
+                state is not None
+                and state.physical_completion.is_set()
+                and state.output.close_reads_if_idle()
+            ):
+                self._states.pop(attempt.process_id)
         self._decision_attempts.pop(attempt_id, None)
+        self._wake_retirement_locked()
 
     def _spawn(
         self,
@@ -694,6 +733,7 @@ class ProcessRegistry:
                     )
                     current_decision.process_id = state.process_id
                     self._states[state.process_id] = state
+                    self._wake_retirement_locked()
             # A visible state is published only while the same lock excludes
             # release_owner().  If any start below raises, the caller removes
             # that exact publication before releasing the launch reservation.
@@ -758,6 +798,8 @@ class ProcessRegistry:
         # but before a best-effort external subscriber can
         # delay waiters or retain process capacity.
         state.physical_completion.set()
+        with self._launch_condition:
+            self._wake_retirement_locked()
         subscriber = self._completion_subscriber
         if subscriber is not None:
             should_offer = False
@@ -776,19 +818,34 @@ class ProcessRegistry:
                 except Exception:
                     pass
 
-    def _owned(self, process_id: str, owner: str) -> _ProcessState:
+    @contextmanager
+    def _owned(
+        self, process_id: str, owner: str, *, cleanup: bool = False
+    ) -> Iterator[_ProcessState]:
         require_id(process_id, "process")
+        # Lock order is Registry -> output; output callbacks run after releasing
+        # the output lock. Never hold either lock over a wait or physical join.
         with self._lock:
             state = self._states.get(process_id)
-        if state is None or state.owner_host_session_id != owner:
-            raise KeyError(process_id)
-        state.refresh()
-        return state
+            if (
+                state is None
+                or state.owner_host_session_id != owner
+                or (not cleanup and (self._closed or owner in self._released_owners))
+            ):
+                raise KeyError(process_id)
+            protection = state.output.reading()
+            protection.__enter__()
+        try:
+            state.refresh()
+            yield state
+        finally:
+            protection.__exit__(None, None, None)
 
     def output_owner(
         self, process_id: str, *, owner_host_session_id: str
     ) -> TerminalOutputOwner:
-        return self._owned(process_id, owner_host_session_id).output
+        with self._owned(process_id, owner_host_session_id) as state:
+            return state.output
 
     def snapshot_and_subscribe(
         self,
@@ -798,22 +855,23 @@ class ProcessRegistry:
         callback: OutputSubscriber,
         maximum_chars: int = 32_000,
     ) -> tuple[TerminalOutputSnapshot, str]:
-        state = self._owned(process_id, owner_host_session_id)
-        # OutputOwner serializes both operations with the same lock.  Subscribe
-        # first, then snapshot: callbacks may overlap the snapshot but their
-        # exact offsets make the overlap mechanically deduplicable.
-        token, _cursor = state.output.subscribe(callback)
-        try:
-            snapshot = state.output.snapshot(maximum_chars=maximum_chars)
-        except BaseException:
-            state.output.unsubscribe(token)
-            raise
-        return snapshot, token
+        with self._owned(process_id, owner_host_session_id) as state:
+            # OutputOwner serializes both operations with the same lock.  Subscribe
+            # first, then snapshot: callbacks may overlap the snapshot but their
+            # exact offsets make the overlap mechanically deduplicable.
+            token, _cursor = state.output.subscribe(callback)
+            try:
+                snapshot = state.output.snapshot(maximum_chars=maximum_chars)
+            except BaseException:
+                state.output.unsubscribe(token)
+                raise
+            return snapshot, token
 
     def unsubscribe_output(
         self, process_id: str, token: str, *, owner_host_session_id: str
     ) -> bool:
-        return self._owned(process_id, owner_host_session_id).output.unsubscribe(token)
+        with self._owned(process_id, owner_host_session_id, cleanup=True) as state:
+            return state.output.unsubscribe(token)
 
     def poll(
         self,
@@ -823,11 +881,8 @@ class ProcessRegistry:
         owner_host_session_id: str,
         since_cursor: str | None = None,
     ) -> TerminalResult:
-        return _snapshot(
-            self._owned(process_id, owner_host_session_id),
-            max_output_chars,
-            since_cursor=since_cursor,
-        )
+        with self._owned(process_id, owner_host_session_id) as state:
+            return _snapshot(state, max_output_chars, since_cursor=since_cursor)
 
     def wait(
         self,
@@ -839,17 +894,17 @@ class ProcessRegistry:
         since_cursor: str | None = None,
         output_subscriber: OutputSubscriber | None = None,
     ) -> TerminalResult:
-        state = self._owned(process_id, owner_host_session_id)
-        subscription: str | None = None
-        if output_subscriber is not None:
-            subscription, _ = state.output.subscribe(output_subscriber)
-        try:
-            state.physical_completion.wait(timeout_seconds)
-            state.refresh()
-            return _snapshot(state, max_output_chars, since_cursor=since_cursor)
-        finally:
-            if subscription is not None:
-                state.output.unsubscribe(subscription)
+        with self._owned(process_id, owner_host_session_id) as state:
+            subscription: str | None = None
+            if output_subscriber is not None:
+                subscription, _ = state.output.subscribe(output_subscriber)
+            try:
+                state.physical_completion.wait(timeout_seconds)
+                state.refresh()
+                return _snapshot(state, max_output_chars, since_cursor=since_cursor)
+            finally:
+                if subscription is not None:
+                    state.output.unsubscribe(subscription)
 
     def write(
         self,
@@ -861,50 +916,50 @@ class ProcessRegistry:
         max_output_chars: int,
         owner_host_session_id: str,
     ) -> TerminalResult:
-        state = self._owned(process_id, owner_host_session_id)
-        if (
-            state.process.poll() is not None
-            or state.stdin is None
-            or state.stdin_closed
-        ):
-            raise ProcessInputError("terminal process stdin is closed")
-        payload = (data + ("\n" if append_newline else "")).encode("utf-8")
-        try:
-            state.stdin.write(payload)
-            state.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError) as exc:
-            raise ProcessInputError("terminal process stdin write failed") from exc
-        # Reuse the same physical boundary as initial yield/wait. Output or PTY
-        # echo does not establish that an interactive response is complete.
-        state.physical_completion.wait(yield_time_ms / 1000)
-        return _snapshot(state, max_output_chars)
+        with self._owned(process_id, owner_host_session_id) as state:
+            if (
+                state.process.poll() is not None
+                or state.stdin is None
+                or state.stdin_closed
+            ):
+                raise ProcessInputError("terminal process stdin is closed")
+            payload = (data + ("\n" if append_newline else "")).encode("utf-8")
+            try:
+                state.stdin.write(payload)
+                state.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError) as exc:
+                raise ProcessInputError("terminal process stdin write failed") from exc
+            # Reuse the same physical boundary as initial yield/wait. Output or PTY
+            # echo does not establish that an interactive response is complete.
+            state.physical_completion.wait(yield_time_ms / 1000)
+            return _snapshot(state, max_output_chars)
 
     def close_stdin(
         self, process_id: str, *, max_output_chars: int, owner_host_session_id: str
     ) -> TerminalResult:
-        state = self._owned(process_id, owner_host_session_id)
-        with state.lock:
-            if not state.stdin_closed and state.stdin is not None:
-                try:
-                    if state.io_mode is TerminalIOMode.PTY:
-                        # A duplicated PTY master is not an EOF boundary while
-                        # the reader still owns the original master.  Send the
-                        # terminal driver's canonical EOT before retiring the
-                        # writable duplicate.
-                        state.stdin.write(b"\x04")
-                        state.stdin.flush()
-                    state.stdin.close()
-                except (BrokenPipeError, OSError, ValueError) as exc:
+        with self._owned(process_id, owner_host_session_id) as state:
+            with state.lock:
+                if not state.stdin_closed and state.stdin is not None:
                     try:
+                        if state.io_mode is TerminalIOMode.PTY:
+                            # A duplicated PTY master is not an EOF boundary while
+                            # the reader still owns the original master.  Send the
+                            # terminal driver's canonical EOT before retiring the
+                            # writable duplicate.
+                            state.stdin.write(b"\x04")
+                            state.stdin.flush()
                         state.stdin.close()
-                    except (OSError, ValueError):
-                        pass
+                    except (BrokenPipeError, OSError, ValueError) as exc:
+                        try:
+                            state.stdin.close()
+                        except (OSError, ValueError):
+                            pass
+                        state.stdin_closed = True
+                        raise ProcessInputError(
+                            "terminal process stdin close failed"
+                        ) from exc
                     state.stdin_closed = True
-                    raise ProcessInputError(
-                        "terminal process stdin close failed"
-                    ) from exc
-                state.stdin_closed = True
-        return _snapshot(state, max_output_chars)
+            return _snapshot(state, max_output_chars)
 
     def kill(
         self, process_id: str, *, max_output_chars: int, owner_host_session_id: str
@@ -929,48 +984,49 @@ class ProcessRegistry:
         owner_host_session_id: str,
         join_timeout_seconds: float = 2.0,
     ) -> TerminalTerminationResult:
-        state = self._owned(process_id, owner_host_session_id)
-        with state.lock:
-            already_terminal = (
-                state.final_status is not None and state.physical_completion.is_set()
-            )
-        if already_terminal:
+        with self._owned(process_id, owner_host_session_id) as state:
+            with state.lock:
+                already_terminal = (
+                    state.final_status is not None and state.physical_completion.is_set()
+                )
+            if already_terminal:
+                return TerminalTerminationResult(
+                    TerminalTerminationDisposition.ALREADY_TERMINAL,
+                    _snapshot(state, max_output_chars),
+                    state.physical_state.value,
+                    False,
+                )
+
+            accepted = _accept_termination_intent(state, TerminalStatus.KILLED)
+            termination_attempted = accepted or _process_is_live(state)
+            if termination_attempted:
+                _terminate_process_group(state)
+            joined = _join_physical(state, timeout=join_timeout_seconds)
+            group_alive = _process_is_live(state)
+            if joined and not termination_attempted:
+                # A naturally terminal process, or a process already owned by an
+                # earlier terminal settlement, received neither a new intent nor
+                # a signal attempt from this invocation.  Physical joining cannot
+                # be used as evidence that this request performed termination.
+                disposition = TerminalTerminationDisposition.ALREADY_TERMINAL
+            elif joined:
+                disposition = TerminalTerminationDisposition.TERMINATION_COMPLETED
+            else:
+                disposition = TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
             return TerminalTerminationResult(
-                TerminalTerminationDisposition.ALREADY_TERMINAL,
+                disposition,
                 _snapshot(state, max_output_chars),
                 state.physical_state.value,
-                False,
+                group_alive,
             )
-
-        accepted = _accept_termination_intent(state, TerminalStatus.KILLED)
-        termination_attempted = accepted or _process_is_live(state)
-        if termination_attempted:
-            _terminate_process_group(state)
-        joined = _join_physical(state, timeout=join_timeout_seconds)
-        group_alive = _process_is_live(state)
-        if joined and not termination_attempted:
-            # A naturally terminal process, or a process already owned by an
-            # earlier terminal settlement, received neither a new intent nor
-            # a signal attempt from this invocation.  Physical joining cannot
-            # be used as evidence that this request performed termination.
-            disposition = TerminalTerminationDisposition.ALREADY_TERMINAL
-        elif joined:
-            disposition = TerminalTerminationDisposition.TERMINATION_COMPLETED
-        else:
-            disposition = TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
-        return TerminalTerminationResult(
-            disposition,
-            _snapshot(state, max_output_chars),
-            state.physical_state.value,
-            group_alive,
-        )
 
     def get_process_info(
         self, process_id: str, *, owner_host_session_id: str
     ) -> TerminalProcessInfo:
         """Observe owned metadata through the same read-only path as inventory."""
 
-        return _info(self._owned(process_id, owner_host_session_id))
+        with self._owned(process_id, owner_host_session_id) as state:
+            return _info(state)
 
     def list_processes(
         self,
@@ -979,19 +1035,24 @@ class ProcessRegistry:
         include_finished: bool,
         include_running: bool,
     ) -> list[TerminalProcessInfo]:
-        with self._lock:
-            states = [
-                state
-                for state in self._states.values()
-                if state.owner_host_session_id == owner_host_session_id
-            ]
-        result: list[TerminalProcessInfo] = []
-        for state in states:
-            state.refresh()
-            running = _process_is_live(state)
-            if running and include_running or not running and include_finished:
-                result.append(_info(state))
-        return sorted(result, key=lambda item: item.started_at_monotonic)
+        with ExitStack() as reads:
+            with self._lock:
+                if self._closed or owner_host_session_id in self._released_owners:
+                    return []
+                states = tuple(
+                    state
+                    for state in self._states.values()
+                    if state.owner_host_session_id == owner_host_session_id
+                )
+                for state in states:
+                    reads.enter_context(state.output.reading())
+            result: list[TerminalProcessInfo] = []
+            for state in states:
+                state.refresh()
+                running = _process_is_live(state)
+                if running and include_running or not running and include_finished:
+                    result.append(_info(state))
+            return sorted(result, key=lambda item: item.started_at_monotonic)
 
     def list_background_processes(
         self, *, owner_host_session_id: str
@@ -1011,17 +1072,14 @@ class ProcessRegistry:
     ) -> tuple[TerminalProcessInfo, ...]:
         """Freeze running public process facts without reading retained output."""
 
-        with self._lock:
-            if self._closed or owner_host_session_id in self._released_owners:
-                return ()
-            frozen: list[TerminalProcessInfo] = []
-            for state in self._states.values():
-                if state.owner_host_session_id != owner_host_session_id:
-                    continue
-                state.refresh()
-                if _process_is_live(state):
-                    frozen.append(_info(state))
-            return tuple(sorted(frozen, key=lambda item: item.process_id))
+        return tuple(sorted(
+            self.list_processes(
+                owner_host_session_id=owner_host_session_id,
+                include_finished=False,
+                include_running=True,
+            ),
+            key=lambda item: item.process_id,
+        ))
 
     def log(
         self,
@@ -1031,25 +1089,25 @@ class ProcessRegistry:
         owner_host_session_id: str,
         since_cursor: str | None = None,
     ) -> TerminalProcessLog:
-        state = self._owned(process_id, owner_host_session_id)
-        snapshot, artifact_candidate = state.output.snapshot_with_artifact_candidate(
-            maximum_chars=max_output_chars,
-            since_cursor=since_cursor,
-        )
-        return TerminalProcessLog(
-            process=_info(state),
-            output=snapshot.text,
-            truncated=(
-                snapshot.gap_before_output or snapshot.truncated_by_response_bound
-            ),
-            output_artifact_candidate=artifact_candidate,
-            output_disposition=snapshot.disposition,
-            output_cursor=snapshot.output_cursor,
-            retained_from_cursor=snapshot.retained_from_cursor,
-            gap_before_output=snapshot.gap_before_output,
-            truncated_by_response_bound=snapshot.truncated_by_response_bound,
-            source_coverage=snapshot.source_coverage,
-        )
+        with self._owned(process_id, owner_host_session_id) as state:
+            snapshot, artifact_candidate = state.output.snapshot_with_artifact_candidate(
+                maximum_chars=max_output_chars,
+                since_cursor=since_cursor,
+            )
+            return TerminalProcessLog(
+                process=_info(state),
+                output=snapshot.text,
+                truncated=(
+                    snapshot.gap_before_output or snapshot.truncated_by_response_bound
+                ),
+                output_artifact_candidate=artifact_candidate,
+                output_disposition=snapshot.disposition,
+                output_cursor=snapshot.output_cursor,
+                retained_from_cursor=snapshot.retained_from_cursor,
+                gap_before_output=snapshot.gap_before_output,
+                truncated_by_response_bound=snapshot.truncated_by_response_bound,
+                source_coverage=snapshot.source_coverage,
+            )
 
     def observation_slice(
         self,
@@ -1060,12 +1118,12 @@ class ProcessRegistry:
         owner_host_session_id: str,
         since_cursor: str | None,
     ) -> TerminalOutputObservationSlice:
-        state = self._owned(process_id, owner_host_session_id)
-        return state.output.observation_slice(
-            maximum_chars=maximum_chars,
-            maximum_bytes=maximum_bytes,
-            since_cursor=since_cursor,
-        )
+        with self._owned(process_id, owner_host_session_id) as state:
+            return state.output.observation_slice(
+                maximum_chars=maximum_chars,
+                maximum_bytes=maximum_bytes,
+                since_cursor=since_cursor,
+            )
 
     def live_count(self, *, owner_host_session_id: str) -> int:
         with self._lock:
@@ -1089,6 +1147,7 @@ class ProcessRegistry:
         deadline = monotonic() + timeout_seconds
         with self._launch_condition:
             self._released_owners.add(owner)
+            self._launch_condition.notify_all()
             decision_ids = tuple(
                 attempt_id
                 for attempt_id, attempt in self._decision_attempts.items()
@@ -1096,32 +1155,35 @@ class ProcessRegistry:
             )
         for attempt_id in decision_ids:
             self._abort_foreground_decision(attempt_id)
-        with self._launch_condition:
-            while self._launching_by_owner.get(owner, 0):
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        "terminal owner launch reservation did not settle"
-                    )
-                self._launch_condition.wait(remaining)
-            states = [
-                state
-                for state in self._states.values()
-                if state.owner_host_session_id == owner
-            ]
-        self._join_uninstalled_scopes(owner, deadline=deadline)
-        for state in states:
-            _accept_termination_intent(state, TerminalStatus.KILLED)
-            _terminate_process_group(state)
-        results: list[TerminalResult] = []
-        for state in states:
-            remaining = deadline - monotonic()
-            if remaining <= 0 or not _join_physical(state, timeout=remaining):
-                raise TimeoutError("terminal owner physical close did not finish")
-            results.append(_snapshot(state, 32_000))
-        with self._lock:
+        with ExitStack() as reads:
+            with self._launch_condition:
+                while self._launching_by_owner.get(owner, 0):
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "terminal owner launch reservation did not settle"
+                        )
+                    self._launch_condition.wait(remaining)
+                states = [
+                    state
+                    for state in self._states.values()
+                    if state.owner_host_session_id == owner
+                ]
+                for state in states:
+                    reads.enter_context(state.output.reading())
+            self._join_uninstalled_scopes(owner, deadline=deadline)
             for state in states:
-                self._states.pop(state.process_id, None)
+                _accept_termination_intent(state, TerminalStatus.KILLED)
+                _terminate_process_group(state)
+            results: list[TerminalResult] = []
+            for state in states:
+                remaining = deadline - monotonic()
+                if remaining <= 0 or not _join_physical(state, timeout=remaining):
+                    raise TimeoutError("terminal owner physical close did not finish")
+                results.append(_snapshot(state, 32_000))
+        for state in states:
+            self._remove_released_state(state, deadline=deadline)
+        with self._launch_condition:
             for attempt_id in decision_ids:
                 attempt = self._decision_attempts.get(attempt_id)
                 if (
@@ -1134,6 +1196,7 @@ class ProcessRegistry:
                 # process, freeze the exact killed result, and only then settle
                 # the attempt.  Removing it here races _mark_*_result_ready()
                 # and turns a known terminal outcome into a generic error.
+        self._join_retirement(deadline=deadline)
         return results
 
     def release_owner_and_join(self, owner: str) -> list[TerminalResult]:
@@ -1141,6 +1204,7 @@ class ProcessRegistry:
 
         with self._launch_condition:
             self._released_owners.add(owner)
+            self._launch_condition.notify_all()
             decision_ids = tuple(
                 attempt_id
                 for attempt_id, attempt in self._decision_attempts.items()
@@ -1148,26 +1212,29 @@ class ProcessRegistry:
             )
         for attempt_id in decision_ids:
             self._abort_foreground_decision(attempt_id)
-        with self._launch_condition:
-            while self._launching_by_owner.get(owner, 0):
-                self._launch_condition.wait()
-            states = [
-                state
-                for state in self._states.values()
-                if state.owner_host_session_id == owner
-            ]
-        self._join_uninstalled_scopes(owner, deadline=None)
-        for state in states:
-            _accept_termination_intent(state, TerminalStatus.KILLED)
-            _terminate_process_group(state)
-        results: list[TerminalResult] = []
-        for state in states:
-            while not _join_physical(state, timeout=1.0):
-                _terminate_process_group(state)
-            results.append(_snapshot(state, 32_000))
-        with self._lock:
+        with ExitStack() as reads:
+            with self._launch_condition:
+                while self._launching_by_owner.get(owner, 0):
+                    self._launch_condition.wait()
+                states = [
+                    state
+                    for state in self._states.values()
+                    if state.owner_host_session_id == owner
+                ]
+                for state in states:
+                    reads.enter_context(state.output.reading())
+            self._join_uninstalled_scopes(owner, deadline=None)
             for state in states:
-                self._states.pop(state.process_id, None)
+                _accept_termination_intent(state, TerminalStatus.KILLED)
+                _terminate_process_group(state)
+            results: list[TerminalResult] = []
+            for state in states:
+                while not _join_physical(state, timeout=1.0):
+                    _terminate_process_group(state)
+                results.append(_snapshot(state, 32_000))
+        for state in states:
+            self._remove_released_state(state, deadline=None)
+        with self._launch_condition:
             for attempt_id in decision_ids:
                 attempt = self._decision_attempts.get(attempt_id)
                 if (
@@ -1175,6 +1242,7 @@ class ProcessRegistry:
                     and attempt.state is TerminalForegroundDecisionState.RESULT_READY
                 ):
                     self._settle_foreground_decision_locked(attempt_id)
+        self._join_retirement(deadline=None)
         return results
 
     def _join_uninstalled_scopes(self, owner: str, *, deadline: float | None) -> None:
@@ -1209,8 +1277,15 @@ class ProcessRegistry:
                 }
             )
             self._closed = True
-        for owner in owners:
-            self.release_owner(owner, timeout_seconds=5.0)
+            self._launch_condition.notify_all()
+        try:
+            for owner in owners:
+                try:
+                    self.release_owner(owner, timeout_seconds=5.0)
+                except TimeoutError:
+                    self.release_owner_and_join(owner)
+        finally:
+            self._join_retirement(deadline=None)
 
     def _expire(self, process_id: str) -> None:
         with self._lock:
@@ -1220,26 +1295,159 @@ class ProcessRegistry:
         _accept_termination_intent(state, TerminalStatus.TIMEOUT)
         _terminate_process_group(state)
 
-    def _prune_locked(self) -> None:
+    def _wake_retirement_locked(self) -> None:
+        self._launch_condition.notify_all()
+
+    def _ensure_retirement(self) -> None:
+        while True:
+            with self._launch_condition:
+                if self._closed or not (self._states or self._launching_by_owner):
+                    return
+                thread = self._retirement_thread
+                if thread is None:
+                    thread = Thread(
+                        target=self._retire_finished,
+                        name=f"terminal-retirement:{self._owner_identity}",
+                        daemon=False,
+                    )
+                    self._retirement_thread = thread
+                    self._retirement_stopping = False
+                    try:
+                        thread.start()
+                    except BaseException:
+                        self._retirement_thread = None
+                        raise
+                    return
+                if not self._retirement_stopping and thread.is_alive():
+                    self._launch_condition.notify_all()
+                    return
+            # Reap the exact retiring worker outside Registry locks before a
+            # replacement is created. Admission racing an empty-worker exit
+            # cannot strand new state or create two physical workers.
+            thread.join()
+            with self._launch_condition:
+                if self._retirement_thread is thread:
+                    self._retirement_thread = None
+                    self._retirement_stopping = False
+
+    def _retire_finished(self) -> None:
+        with self._launch_condition:
+            while (
+                not self._closed
+                and not self._retirement_stopping
+                and (self._states or self._launching_by_owner)
+            ):
+                deadlines = [
+                    state.ended_at + self.finished_ttl_seconds
+                    for state in self._states.values()
+                    if state.ended_at is not None
+                ]
+                delay = min(deadlines) - monotonic() if deadlines else None
+                if delay is None or delay > 0:
+                    self._launch_condition.wait(delay)
+                    continue
+                # Join outside Registry/output locks: watcher completion and
+                # admitted readers need both owners to make forward progress.
+                self._launch_condition.release()
+                try:
+                    self._prune()
+                finally:
+                    self._launch_condition.acquire()
+                if not self._closed and not self._retirement_stopping and any(
+                    state.ended_at is not None
+                    and state.ended_at + self.finished_ttl_seconds <= monotonic()
+                    for state in self._states.values()
+                ):
+                    # An output lease/read or incomplete physical join blocked
+                    # expiry. This is maintenance frequency, never a lifetime cap.
+                    self._launch_condition.wait(1.0)
+            self._retirement_stopping = True
+            self._launch_condition.notify_all()
+
+    def _prune(self) -> None:
         now = monotonic()
-        finished: list[tuple[float, str, _ProcessState]] = []
-        for process_id, state in self._states.items():
-            state.refresh()
-            if state.ended_at is not None:
-                finished.append((state.ended_at, process_id, state))
-        for ended, process_id, state in sorted(finished):
-            expired = now - ended > self.finished_ttl_seconds
-            if expired and _mark_prunable(state):
-                self._states.pop(process_id, None)
-        remaining = sorted(
-            (state.ended_at or now, process_id, state)
-            for process_id, state in self._states.items()
-            if not _process_is_live(state)
-        )
-        excess = max(0, len(remaining) - self.max_finished_processes)
+        with self._lock:
+            finished = sorted(
+                (state.ended_at, process_id, state)
+                for process_id, state in self._states.items()
+                if state.ended_at is not None
+            )
+        for ended, process_id, state in finished:
+            if now >= ended + self.finished_ttl_seconds:
+                self._try_prune(process_id, state)
+        with self._lock:
+            remaining = sorted(
+                (state.ended_at or now, process_id, state)
+                for process_id, state in self._states.items()
+                if not _process_is_live(state)
+            )
+            excess = max(0, len(remaining) - self.max_finished_processes)
+        # Preserve the original pressure policy: only the oldest excess slots
+        # are candidates; a blocked oldest slot does not widen that selection.
         for _ended, process_id, state in remaining[:excess]:
-            if _mark_prunable(state):
-                self._states.pop(process_id, None)
+            self._try_prune(process_id, state)
+
+    def _try_prune(self, process_id: str, state: _ProcessState) -> bool:
+        with self._lock:
+            if (
+                self._states.get(process_id) is not state
+                or state.owner_host_session_id in self._released_owners
+            ) or any(
+                attempt.process_id == process_id
+                for attempt in self._decision_attempts.values()
+            ):
+                return False
+        if _process_is_live(state) or not _join_physical(state, timeout=0.1):
+            return False
+        with self._launch_condition:
+            if (
+                self._states.get(process_id) is not state
+                or state.owner_host_session_id in self._released_owners
+            ) or any(
+                attempt.process_id == process_id
+                for attempt in self._decision_attempts.values()
+            ):
+                return False
+            if not _mark_prunable(state):
+                return False
+            self._states.pop(process_id)
+            self._launch_condition.notify_all()
+            return True
+
+    def _join_retirement(self, *, deadline: float | None) -> None:
+        with self._launch_condition:
+            self._launch_condition.notify_all()
+            thread = self._retirement_thread
+            # A shared Registry still needs its one worker for other owners.
+            if not self._closed and (self._states or self._launching_by_owner):
+                return
+            self._retirement_stopping = True
+            self._launch_condition.notify_all()
+        if thread is not None and thread is not current_thread():
+            timeout = None if deadline is None else max(0.0, deadline - monotonic())
+            thread.join(timeout)
+            if thread.is_alive():
+                raise TimeoutError("terminal retirement worker did not finish")
+            with self._launch_condition:
+                if self._retirement_thread is thread:
+                    self._retirement_thread = None
+                    self._retirement_stopping = False
+
+    def _remove_released_state(
+        self, state: _ProcessState, *, deadline: float | None
+    ) -> None:
+        while True:
+            with self._launch_condition:
+                if self._states.get(state.process_id) is not state:
+                    return
+                if state.output.close_reads_if_idle():
+                    self._states.pop(state.process_id)
+                    self._launch_condition.notify_all()
+                    return
+            remaining = None if deadline is None else deadline - monotonic()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("terminal owner output readers did not finish")
+            state.output.wait_for_readers(remaining)
 
     def _retained_bytes_changed(self, _owner: TerminalOutputOwner) -> None:
         with self._lock:
@@ -1275,7 +1483,7 @@ class ProcessRegistry:
             self._launching_by_owner.pop(owner, None)
         else:
             self._launching_by_owner[owner] = count - 1
-        self._launch_condition.notify_all()
+        self._wake_retirement_locked()
 
 
 @dataclass(slots=True)
@@ -1326,10 +1534,16 @@ class TerminalManager:
                 cwd=str(self.workspace_root),
                 error=f"terminal preflight failed ({type(exc).__name__}): {exc}",
             )
+        initial_result: TerminalResult | None = None
+
+        def read_initial_result(state: _ProcessState) -> None:
+            nonlocal initial_result
+            initial_result = _snapshot(state, request.max_output_chars)
+
         while True:
             attempt_id = decision_attempt_id or random_id("terminal-decision")
             try:
-                process, _yielded = self.process_registry.exec_with_yield(
+                self.process_registry.exec_with_yield(
                     command=request.command,
                     cwd=cwd,
                     yield_time_ms=request.yield_time_ms,
@@ -1342,6 +1556,7 @@ class TerminalManager:
                     origin=origin,
                     decision_attempt_id=attempt_id,
                     decision_deadline_monotonic=decision_deadline_monotonic,
+                    initial_result_reader=read_initial_result,
                 )
             except ProcessDecisionIdentityConflict:
                 # Only this unpublished local allocation may change. Admission
@@ -1367,8 +1582,10 @@ class TerminalManager:
             # Failed launches are settled (or retained for physical joining)
             # by the registry. Only a returned result transfers settlement here.
             try:
+                if initial_result is None:
+                    raise RuntimeError("terminal initial result was not frozen")
                 return replace(
-                    _snapshot(process, request.max_output_chars),
+                    initial_result,
                     shell_diagnostic=environment.diagnostic,
                 )
             finally:
@@ -1573,12 +1790,9 @@ def _join_physical(state: _ProcessState, *, timeout: float) -> bool:
 
 
 def _mark_prunable(state: _ProcessState) -> bool:
-    with state.lock:
-        if state.physical_state is TerminalPhysicalState.PRUNABLE:
-            return True
-    if not _join_physical(state, timeout=0.1):
-        return False
-    if state.output.observation_lease_count or state.output.inflight_read_count:
+    # Physical join has completed outside Registry locks. Registry holds its
+    # lock here; close_reads_if_idle atomically fences even old output handles.
+    if not state.output.close_reads_if_idle():
         return False
     with state.lock:
         state.physical_state = TerminalPhysicalState.PRUNABLE

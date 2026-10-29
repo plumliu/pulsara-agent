@@ -523,7 +523,7 @@ def test_round2_monitor_optional_output_heartbeat_expiry_and_cancel_do_not_kill(
     assert expiry_attempt is not None
     assert expiry_attempt.content.observation_kind.value == "EXPIRY"
     coordinator.settle_installation(expiry_attempt, accepted=True)
-    assert coordinator.cancel(expiry.monitor_id) == "already_terminal"
+    assert coordinator.cancel(expiry.monitor_id) == "not_found"
 
     assert coordinator.cancel(heartbeat.monitor_id) == "cancelled"
     assert heartbeat_process.process.poll() is None
@@ -730,7 +730,7 @@ def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
             "cancel-again", "manage_monitor",
             {"action": "cancel", "target": registration_result["target"]},
         )
-        assert json.loads(cancelled_again.content)["cancellation_outcome"] == "already_terminal"
+        assert json.loads(cancelled_again.content)["cancellation_outcome"] == "not_found"
         assert json.loads(cancelled_again.content)["status"] == "REJECTED"
         processes = await invoke_root(
             "list-processes", "query_processes", {}
@@ -920,7 +920,7 @@ def test_round2_monitor_dormant_capture_requires_commit_and_discard_is_terminal(
     discarded_process.output.append_raw(b"must-never-deliver ")
     coordinator.settle_registration(discarded, committed=False)
     coordinator._evaluate(discarded.monitor_id, monotonic() + 20)  # noqa: SLF001
-    assert coordinator.cancel(discarded.monitor_id) == "already_terminal"
+    assert coordinator.cancel(discarded.monitor_id) == "not_found"
     assert coordinator.pending_monitor_ids() == (committed.monitor_id,)
 
     coordinator.cancel(committed.monitor_id)
@@ -1166,7 +1166,7 @@ def test_round2_monitor_capacity_and_autonomy_are_finite_and_idle_observer_is_no
         )
         assert attempt is not None
         coordinator.settle_installation(attempt, accepted=True)
-    assert coordinator.cancel(chosen.monitor_id) == "already_terminal"
+    assert coordinator.cancel(chosen.monitor_id) == "not_found"
     assert monotonic() - started < 1
 
     coordinator.stop_admission_and_close(timeout_seconds=2)

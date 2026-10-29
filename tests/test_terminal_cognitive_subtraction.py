@@ -268,12 +268,8 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
         class EmptySubagents:
             tool_names = ()
 
-            async def freeze_compaction_handoff(self):
-                return (), (
-                    ("ACTIVE", 0),
-                    ("PENDING_START", 0),
-                    ("WAITING_DEPENDENCY", 0),
-                )
+            async def freeze_compaction_handoff(self, *, cursor=None):
+                return ()
 
         port.bind_subagent_port(EmptySubagents())
         captured = {}
@@ -349,9 +345,10 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
             )
             handoff = await port.freeze_compaction_runtime_handoff(
                 conversation_scope_kind=ModelInputScopeKind.ROOT,
-                maximum_utf8_bytes=8192,
+                session_id=port._session_id,
+                work_turn_id="turn:gc7de6qlnst5d77yis7utsj2xu",
             )
-            payload = json.loads(handoff.full_text)
+            payload = json.loads(handoff.full_text.split("\n", 1)[0])
             assert payload["terminal_processes"][0]["target"]["process_id"] == pid
             assert "terminal_session_id" not in handoff.full_text
             assert (

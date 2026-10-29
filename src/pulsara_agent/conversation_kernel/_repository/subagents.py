@@ -34,7 +34,7 @@ _WORK_SELECT = f"""SELECT q.*, {REQUEST_EXECUTION_COLUMNS}, qt.id AS turn_id,
     LEFT JOIN pulsara_v3.turns qt ON qt.session_id=qe.session_id AND qt.id=qe.turn_id
     WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION'"""
 
-_RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, count(*) OVER() AS agent_total, w.workspace_kind, w.workspace_root, w.workspace_label,
+_RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, w.workspace_kind, w.workspace_root, w.workspace_label,
     EXISTS(SELECT 1 FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN') AS has_pending_work,
     EXISTS(SELECT 1 FROM pulsara_v3.turns t WHERE t.session_id=s.id AND t.status='RUNNING') AS has_running_turn,
     (SELECT q.id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
@@ -602,6 +602,29 @@ class _SubagentOperations:
                 for x in connection.execute(
                     _RUNTIME_SELECT
                     + " WHERE s.root_session_id=%s AND (%s::text IS NULL OR s.id>%s) ORDER BY s.id LIMIT %s",
+                    (root_session_id, cursor, cursor, limit),
+                ).fetchall()
+            )
+
+    def list_active_agent_sessions(
+        self, *, root_session_id, cursor=None, limit=50, deadline_monotonic
+    ):
+        """Page handoff candidates after deriving and filtering canonical Work state."""
+        if limit < 1:
+            raise ValueError("page limit must be positive")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return tuple(
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM ("
+                    + _RUNTIME_SELECT
+                    + " WHERE s.root_session_id=%s) AS runtime"
+                    + " WHERE (current_work_id IS NOT NULL OR queued_count > 0)"
+                    + " AND (%s::text IS NULL OR agent_id>%s) ORDER BY agent_id LIMIT %s",
                     (root_session_id, cursor, cursor, limit),
                 ).fetchall()
             )

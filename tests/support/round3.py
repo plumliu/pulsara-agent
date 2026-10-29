@@ -6,7 +6,6 @@ from pulsara_agent.identity import derive_id
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from hashlib import sha256
 import json
 from pathlib import Path
 from typing import AsyncIterator, Callable
@@ -77,7 +76,6 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolInvocationContext,
-    KernelToolResult,
     PreparedPermissionRequest,
     PreparedResolvedToolInvocation,
 )
@@ -112,9 +110,6 @@ from pulsara_agent.model_input.contracts import (
     build_tool_observation_freshness_fact,
     context_binding_compile_fact_fingerprint,
     model_tool_surface_fingerprint,
-)
-from pulsara_agent.model_input.provider_replay import (
-    FrozenCanonicalProviderDispatchRead,
 )
 from pulsara_agent.model_input.continuity import FULL_HISTORY_CONTEXT_BASE_IDENTITY
 from pulsara_agent.model_input.continuity import (
@@ -545,7 +540,7 @@ class StaticContextSourceCollector:
         candidates: tuple[ContextSourceCandidate, ...] = (
             _candidate(
                 kind=ContextSourceKind.BASE_SYSTEM,
-                version="pulsara.base-system.prefix-continuity.v9-async-subagent-completions",
+                version="pulsara.base-system.prefix-continuity.v10-runtime-state-handoff",
                 channel=ContextChannel.SYSTEM,
                 trust=ContextTrustClass.ROOT_INSTRUCTION,
                 budget=ContextBudgetClass.MUST_KEEP,
@@ -555,7 +550,7 @@ class StaticContextSourceCollector:
             ),
             _candidate(
                 kind=ContextSourceKind.RUNTIME_ENVIRONMENT,
-                version="pulsara.runtime-environment.v4-cell-index",
+                version="pulsara.runtime-environment.v5-facts-only",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
                 budget=ContextBudgetClass.MUST_KEEP,

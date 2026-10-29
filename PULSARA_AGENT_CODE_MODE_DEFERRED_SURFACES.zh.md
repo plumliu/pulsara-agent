@@ -1,6 +1,6 @@
 # Pulsara Agent／Code Mode：暂缓事项与本轮实施范围
 
-日期：2026-10-29。状态：实施范围约定；暂缓内容待后续讨论。
+日期：2026-10-30。状态：实施范围约定；暂缓内容待后续讨论。
 
 本文配合 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 和 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 使用。运行时业务语义继续以这两份设计为准；提示词、Skill 与前端的实施时机以本文为准。分工给实现 Subagent 时，应同时提供本文。
 
@@ -31,7 +31,7 @@
 
 参数边界、默认值、结果格式、调用方范围和停止后的结算均沿 Code Mode 接入合同，不在 schema 中另立规则。首版可直接用于接入和验证，说明保持简洁，不嵌入实验过程或内部实现教程。此次工具命名不改变已定 cell 状态枚举。
 
-压缩后的运行时摘要 schema、内容布局、完整 ID 清单、条目数量、`omitted` 计数、32 KiB 预算及 TODO／Plan 整体文案清理继续暂缓；仅替换其中已删除的工具名引用。
+压缩后的运行时摘要按 [运行时摘要与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 实施：筛选活动／待结算对象，PMCA 计量视图上限 3,200 个 V3 tokens，完整 TODO 独立保留，预算省略仅提供条件查询指引。其余 TODO／Plan 整体文案清理继续暂缓。
 
 ## 3. Bundled skill
 

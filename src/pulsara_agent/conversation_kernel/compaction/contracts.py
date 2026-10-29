@@ -237,7 +237,6 @@ class ResolvedCompactionPolicy:
     maximum_retained_tail_utf8_bytes: int = 2 << 20
     maximum_recent_human_messages: int = 3
     maximum_recent_human_text_utf8_bytes: int = 65_536
-    maximum_runtime_handoff_utf8_bytes: int = 32_768
     planning_attempt_seconds: float = 120.0
     maximum_consecutive_auto_failures: int = 3
 
@@ -252,8 +251,6 @@ class ResolvedCompactionPolicy:
             raise ValueError("retained tool-group policy must be positive")
         if self.maximum_recent_human_messages < 1:
             raise ValueError("recent human-message policy must be positive")
-        if not 8 << 10 <= self.maximum_runtime_handoff_utf8_bytes <= 256 << 10:
-            raise ValueError("runtime-handoff byte bound is invalid")
         if self.maximum_retained_tail_utf8_bytes < 1:
             raise ValueError("retained-tail byte bound is invalid")
         if self.planning_attempt_seconds <= 0:

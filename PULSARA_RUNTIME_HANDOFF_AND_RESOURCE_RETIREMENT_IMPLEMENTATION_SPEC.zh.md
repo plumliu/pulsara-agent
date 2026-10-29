@@ -1,6 +1,6 @@
 # Pulsara：运行时摘要状态筛选与资源退役实施规格
 
-日期：2026-10-30。状态：**规格整理完成，待实施。** 核查基线为 `db78c840`。
+日期：2026-10-30。状态：**实施与本规格要求验收完成。** 实施基线为 `fc0d8d86`。实现、亲审修复、证据层级及验证边界见 [总交付报告](output/runtime-handoff-retirement-20261030/REPORT.zh.md)。
 
 本文明确 Monitor 安全删除及旧通知确认、Process 到期自动尝试回收、普通环境 Cell 索引移除，以及压缩 runtime handoff 的状态筛选。TODO 始终完整保留；3,200 个 V3 启发式 token 上限仅约束 PMCA 状态与相关说明，不约束 TODO。
 
@@ -43,7 +43,6 @@
 5. SYSTEM／provider tools 仅在 cold epoch 或明确采用的 compaction successor 安装新定义；已有 epoch 字节不变、messages 只追加，不新增重建边界。
 6. runtime handoff 是 runtime 生成的状态观察，不推断启动意图、重要性或下一步行动。模型生成的语义交接摘要继续独立负责其原有内容。
 7. 不新增 UI 页面，不重写 TODO／Plan 工作流，不统一所有环境来源。仅删除普通环境的 Cell 索引，保留其余环境信息、用户 UI Cell 控制和压缩 handoff 的 Cell target。
-8. 本文只授权后续实施范围；此次交付仅更新规格文档，不实施生产修改或启动实验。
 
 ## 1. 对象退役与摘要筛选的边界
 
@@ -424,16 +423,27 @@ SYSTEM 中删除关于 omitted task counts 的旧说法，改为准确的状态�
 
 ### 12.3 代表性 provider 验证
 
-沿用户既有实验偏好，用保存配置中的 DeepSeek `deepseek-flash`、reasoning effort `max`，通过两种 OpenAI API 协议各完成一个聚焦场景：读取压缩后的活动对象状态，使用既有 query 查当前仍保留的对象，并正确理解 Monitor 的 unavailable/not_found 提示。允许模型正常查询、纠错，不设零误调用门槛，也不重跑全部旧工具组合。
+沿用户既有实验偏好，用保存配置中的 DeepSeek `deepseek-flash`，主模型 reasoning effort `max`，通过两种 OpenAI API 协议各完成一个聚焦场景：读取压缩后的活动对象状态，使用既有 query 查当前仍保留的对象，并正确理解 Monitor 的 unavailable/not_found 提示。允许模型正常查询、纠错，不设零误调用门槛，也不重跑全部旧工具组合。
+
+独立 `context_compaction_summary` 沿现有 summary owner 的默认 `high`，不为本轮修改摘要路由；主模型的 `max` 与摘要调用分别记录。
 
 模型连接、凭据与 PostgreSQL 按 `LocalSettingsStore`／`require_pulsara_home()` 及现行生产注入 owner 读取；隔离时复用只读设置注入和已核实的本地可丢弃数据库，不修改保存设置，不导出秘密。真实提示、响应、参数、业务结果、原失败与修正轮保留，仅精确移除实际凭据。
 
 报告区分接口接受、模型参数、实际业务效果与 source 交付；没有采用 successor 不算验证压缩后输入。记录实际 usage 与前缀，不由摘要行数下降推断 token 改善。若必要配置或资源不足，明确未验证范围，不能标为全部通过。
 
-## 13. 完成条件
+## 13. 完成条件与验收结果
 
 Monitor／Process 可按各自合同独立完成和验收。Cell 不加新 cap、Agent 两段退役保留、状态筛选谓词与权限范围均已明确。
 
 PMCA 预算为 3,200 个 V3 启发式 tokens，含 PMCA 视图的封装和说明；TODO 与 counts 始终完整保留且不受该局部 cap 限制。PMCA 全空且无 TODO 时为空 source；实际存在的 handoff 承接压缩前工作，仅 PMCA 预算省略时补一句查询提示。
 
-Monitor 在 Work 结束后仍先确认旧 immutable attempt 再安全删除，UNKNOWN 不空转；普通模型环境 Cell 索引删除，压缩 CELL target 和用户 UI 查看／停止接口保留。上述合同连同权限、原前缀边界、Process 回收及完整输入预算全部完成并有实际验收证据后，才标记实施完成。
+Monitor 在 Work 结束后仍先确认旧 immutable attempt 再安全删除，UNKNOWN 不空转；普通模型环境 Cell 索引删除，压缩 CELL target 和用户 UI 查看／停止接口保留。上述合同连同权限、原前缀边界、Process 回收及完整输入预算均已完成要求验收，证据与范围见 [总交付报告](output/runtime-handoff-retirement-20261030/REPORT.zh.md)。
+
+验收结果：
+
+- [真实 Host 集成](output/runtime-handoff-retirement-20261030/INTEGRATION.zh.md)：ROOT 混合对象／合法大 TODO、仅 TODO、全空、Plan及 Subagent 当前真实 Work，双协议共10项通过；实际采用 successor并发送serializer source，完整输入／PMCA分别计量，原对象与前缀连续。
+- [真实 provider](output/runtime-handoff-retirement-20261030/provider/REPORT.zh.md)：主模型 max、独立 summary high，两协议33次HTTP200、27对同epoch精确前缀，PMCA各283；实际查询与连续执行通过，原harness和transport失败保留。
+- Monitor／Process／Agent／Cell owner、普通环境和受影响回归分别见总报告链接；ROOT亲审发现的读取／关闭竞态、callback误杀和本地新轮启动失败reservation泄漏均已在原owner边界修复并验证。没有新增schema表列或durable oracle类别。
+- 独占本地测试／实验数据库与fixture资源已清理，未知／remote PostgreSQL在创建前拒绝；统一33个修改Python文件ruff及全工作树diff检查通过。
+
+这些是本规格定义的完成证据，不扩张为全仓、所有provider或所有配置均已验证。

@@ -712,7 +712,8 @@ class ToolSurfacePlanningPort(Protocol):
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        maximum_utf8_bytes: int,
+        session_id: str,
+        work_turn_id: str,
     ) -> FrozenCompactionRuntimeHandoff | None: ...
 
 

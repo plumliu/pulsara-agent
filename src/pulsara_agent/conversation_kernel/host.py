@@ -268,6 +268,7 @@ from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT, DEFAULT_SUB
 from pulsara_agent.ports.terminal_observation import (
     ExistingTurnInstallation,
     NewTurnInstallation,
+    TerminalObservationInstallationAttempt,
 )
 from pulsara_agent.ports.user_control_feedback import (
     ProcessControlFeedbackContent,
@@ -885,7 +886,6 @@ class KernelHostSession:
             display_timezone=display_timezone,
             mcp_catalog=self._mcp_supervisor,
             hook_context_owner=self._hook_context,
-            cell_index_provider=self._code_mode.snapshot_cell_index,
         )
         self._runner = ConversationKernelRunner(
             repository=repository,
@@ -4640,18 +4640,68 @@ class KernelHostSession:
         while True:
             await self._monitor_wake.wait()
             self._monitor_wake.clear()
-            if self._closing:
-                await self._release_any_terminal_new_turn_reservation()
-                return
             delivered = 0
+            attempted_monitor_ids: set[str] = set()
+            redrive = False
             while delivered < STAGE2_LIMITS.pending_prompt_hard_items:
                 monitor_ids = tuple(
                     monitor_id for monitor_id in coordinator.pending_monitor_ids()
                     if (scope := coordinator.registration_scope(monitor_id)) is not None
                     and scope[0] == self.session_id
+                    and monitor_id not in attempted_monitor_ids
                 )
-                if not monitor_ids or self._closing:
+                if not monitor_ids:
                     break
+                monitor_id = monitor_ids[0]
+                attempted_monitor_ids.add(monitor_id)
+                registration_scope = coordinator.registration_scope(monitor_id)
+                if registration_scope is None:
+                    continue
+                work_turn_id = registration_scope[2]
+                attempt = coordinator.current_installation_attempt(monitor_id)
+                # A terminal Work cannot admit a new notification, but its
+                # immutable old attempt still owns an exact ACK confirmation.
+                # Closing the Work must never bypass that settlement.
+                if attempt is not None and (work_turn_id is not None or self._closing):
+                    try:
+                        confirmed = await self._io.run(
+                            self._runner._safe_point.prepare_terminal_observation_installation,
+                            coordinator=coordinator,
+                            monitor_id=monitor_id,
+                            target=attempt.target,
+                            workspace_id=self.workspace.workspace_key,
+                            actor_id=self.host_session_id,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except ConversationKernelConflict:
+                        # The safe point retired the conflicting exact attempt.
+                        if work_turn_id is not None and self.active_root_turn_id() != work_turn_id:
+                            coordinator.close_work(work_turn_id)
+                        redrive = True
+                        continue
+                    except Exception:
+                        # UNKNOWN retains the original owner.  Do not select
+                        # this ID again during this wake or block other IDs.
+                        redrive = True
+                        continue
+                    if isinstance(confirmed, TerminalObservationInstallationAttempt):
+                        # The existing exact read proved NONE.  Settle before
+                        # deciding whether the original Work can admit a draft.
+                        coordinator.settle_installation(confirmed, accepted=False)
+                    elif confirmed is not None:
+                        delivered += 1
+                    if work_turn_id is not None and self.active_root_turn_id() != work_turn_id:
+                        coordinator.close_work(work_turn_id)
+                        continue
+                    if self._closing or not isinstance(confirmed, TerminalObservationInstallationAttempt):
+                        continue
+                if self._closing:
+                    continue
+                if work_turn_id is not None and self.active_root_turn_id() != work_turn_id:
+                    coordinator.close_work(work_turn_id)
+                    continue
                 try:
                     prompt_head = await self._io.run(
                         self.repository.pending_prompt_head_mode,
@@ -4676,14 +4726,6 @@ class KernelHostSession:
                     await asyncio.sleep(0.05)
                     self._monitor_wake.set()
                     break
-                monitor_id = monitor_ids[0]
-                registration_scope = coordinator.registration_scope(monitor_id)
-                if registration_scope is None:
-                    continue
-                work_turn_id = registration_scope[2]
-                if work_turn_id is not None and self.active_root_turn_id() != work_turn_id:
-                    coordinator.close_work(work_turn_id)
-                    continue
                 observation_id = coordinator.pending_observation_id(monitor_id)
                 if observation_id is None:
                     continue
@@ -4828,9 +4870,8 @@ class KernelHostSession:
                         )
                     # The immutable attempt remains process-local and is
                     # exact-confirmed by the next pass before any re-write.
-                    await asyncio.sleep(0.1)
-                    self._monitor_wake.set()
-                    break
+                    redrive = True
+                    continue
                 if write_reservation is not None:
                     await self._release_compaction_write_reservation(write_reservation)
                 if accepted is None:
@@ -4857,6 +4898,9 @@ class KernelHostSession:
             if self._closing:
                 await self._release_any_terminal_new_turn_reservation()
                 return
+            if redrive:
+                await asyncio.sleep(0.1)
+                self._monitor_wake.set()
 
     async def _release_terminal_new_turn_reservation(self, observation_id: str) -> None:
         async with self._lock:
@@ -4883,33 +4927,46 @@ class KernelHostSession:
         *,
         prospective_root_dispatch: PreparedProspectiveRootDispatch | None,
     ) -> None:
-        async with self._lock:
-            self._retire_done_active_root_locked()
-            if (
-                self._terminal_new_turn_observation_id != observation_id
-                or not self._external_new_turn_accepting
-                or self._active_task is not None
-            ):
+        try:
+            async with self._lock:
+                self._retire_done_active_root_locked()
+                if (
+                    self._terminal_new_turn_observation_id != observation_id
+                    or not self._external_new_turn_accepting
+                    or self._active_task is not None
+                ):
+                    raise RuntimeError("terminal observation turn lost its local admission")
+                self._tools.todo_owner.bind_continuation_if_present(
+                    scope_kind=self._session_scope_kind,
+                    turn_id=turn_id,
+                )
+                self._install_active_root_task_locked(
+                    turn_id=turn_id,
+                    command_id=None,
+                    name=f"kernel-terminal-observation-turn:{turn_id}",
+                    run=lambda intent: self._run_accepted_root_chain(
+                        turn_id,
+                        intent,
+                        prospective_root_dispatch,
+                    ),
+                )
+                self._terminal_new_turn_observation_id = None
+                self._external_new_turn_accepting = False
+                self._external_new_turn_settled.set()
+        except BaseException:
+            # Publication may already be canonical FULL.  A failed local
+            # start releases only its process-local admission/resources;
+            # it does not rewrite or retry the accepted observation.
+            try:
                 if prospective_root_dispatch is not None:
                     prospective_root_dispatch.close()
-                raise RuntimeError("terminal observation turn lost its local admission")
-            self._tools.todo_owner.bind_continuation_if_present(
-                scope_kind=self._session_scope_kind,
-                turn_id=turn_id,
-            )
-            self._install_active_root_task_locked(
-                turn_id=turn_id,
-                command_id=None,
-                name=f"kernel-terminal-observation-turn:{turn_id}",
-                run=lambda intent: self._run_accepted_root_chain(
-                    turn_id,
-                    intent,
-                    prospective_root_dispatch,
-                ),
-            )
-            self._terminal_new_turn_observation_id = None
-            self._external_new_turn_accepting = False
-            self._external_new_turn_settled.set()
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Terminal observation dispatch cleanup failed"
+                )
+            finally:
+                await self._release_terminal_new_turn_reservation(observation_id)
+            raise
 
     async def _query_command_row(self, command_id: str):
         return await self._io.run(

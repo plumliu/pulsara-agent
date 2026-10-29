@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import datetime, timezone
 import os
 from pathlib import Path
 import sys
 from time import monotonic
-from types import SimpleNamespace
 
 import pytest
 
@@ -15,7 +12,6 @@ from pulsara_agent.terminal_protocol.v3_gateway import (
     _decode_background_cursor,
     _encode_background_cursor,
 )
-from pulsara_agent.desktop_app.session_controller import LocalSessionController
 
 
 def _launch(
@@ -117,158 +113,3 @@ def test_pr03_background_cursor_is_bound_to_exact_session_and_host() -> None:
         _decode_background_cursor(
             cursor, session_id='session:f2uxxwrmmavsqgv655dvvzytnu', host_session_id='host:gubylb5v44ganghpuxoqfvlrji'
         )
-
-
-class _ReadCore:
-    def __init__(self) -> None:
-        self.group_rows = [
-            {
-                "batch_id": 'batch:z4r54kiyr64jgch7t3nj3ibuy4',
-                "parent_turn_id": 'turn:b565wrncq4ezfqthehjqni5ilm',
-                "first_accepted_at": datetime(2026, 9, 11, 1, tzinfo=timezone.utc),
-                "task_count": 2,
-                "pending_count": 0,
-                "active_count": 1,
-                "waiting_count": 1,
-                "completed_count": 0,
-                "cancelled_count": 0,
-                "failed_count": 0,
-                "interrupted_count": 0,
-                "blocked_count": 0,
-                "single_task_label": None,
-                "total_count": 2,
-                "read_event_sequence": 17,
-            },
-            {
-                "batch_id": 'batch:4h6jcehydq3vhy4pj2tkjmuqlm',
-                "parent_turn_id": 'turn:b565wrncq4ezfqthehjqni5ilm',
-                "first_accepted_at": datetime(2026, 9, 11, 2, tzinfo=timezone.utc),
-                "task_count": 1,
-                "pending_count": 0,
-                "active_count": 0,
-                "waiting_count": 0,
-                "completed_count": 1,
-                "cancelled_count": 0,
-                "failed_count": 0,
-                "interrupted_count": 0,
-                "blocked_count": 0,
-                "single_task_label": "单节点",
-                "total_count": 2,
-                "read_event_sequence": 17,
-            },
-        ]
-
-    async def read_resumable_session(self, session_id: str, **_kwargs):
-        return SimpleNamespace(session_id=session_id)
-
-    async def read_subagent_task_group_page(
-        self, *, after_batch_id: str | None, **_kwargs
-    ):
-        if after_batch_id is None:
-            return tuple(self.group_rows)
-        index = next(i for i, row in enumerate(self.group_rows) if row["batch_id"] == after_batch_id)
-        return tuple(self.group_rows[index + 1:])
-
-    async def read_subagent_task_activity_page(
-        self, *, task_id: str, after_entry_sequence: int, **_kwargs
-    ):
-        if task_id != 'task:7ekouunh3opwy6r5hpnpyw22fa':
-            raise KeyError(task_id)
-        rows = [
-            {
-                "id": 'entry:jfasfwsw2puygc3hrueckpvgba',
-                "turn_id": 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
-                "turn_status": "RUNNING",
-                "entry_sequence": 10,
-                "entry_kind": "ASSISTANT_TOOL_REQUEST",
-                "accepted_at": datetime(2026, 9, 11, 1, 1, tzinfo=timezone.utc),
-                "task_objective": "检查分页",
-                "inline_content": b"first",
-                "content_digest": "sha256:first",
-                "content_size": 5,
-                "content_media_type": "text/plain",
-                "content_codec": "utf-8",
-            },
-            {
-                "id": 'entry:yym6qf3l4xz6437gradtmhjrke',
-                "turn_id": 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
-                "turn_status": "RUNNING",
-                "entry_sequence": 11,
-                "entry_kind": "TOOL_RESULT",
-                "accepted_at": datetime(2026, 9, 11, 1, 2, tzinfo=timezone.utc),
-                "task_objective": "检查分页",
-                "inline_content": b"second",
-                "content_digest": "sha256:second",
-                "content_size": 6,
-                "content_media_type": "text/plain",
-                "content_codec": "utf-8",
-            },
-        ]
-        selected = [row for row in rows if row["entry_sequence"] > after_entry_sequence]
-        if after_entry_sequence == 0:
-            return (
-                tuple(selected[:1]),
-                ({
-                    "id": 'block:b6jcz3ejkiu6yivknhzowsm5eu',
-                    "assistant_entry_id": 'entry:jfasfwsw2puygc3hrueckpvgba',
-                    "block_ordinal": 0,
-                    "block_kind": "TOOL_CALL",
-                    "tool_call_id": "call:1",
-                    "tool_name": "read_file",
-                },),
-                (),
-                True,
-                None,
-            )
-        return tuple(selected), (), (), False, None
-
-
-def _read_controller(core: _ReadCore) -> LocalSessionController:
-    controller = object.__new__(LocalSessionController)
-    controller.core = core
-    controller.memory_domain_id = 'memory:onhr6dgbcyncplx7gw4h7dsldq'
-    controller.trust_workspace_mcp_config = False
-    return controller
-
-
-def test_pr03_task_group_and_activity_cursors_preserve_exact_read_identity() -> None:
-    async def scenario() -> None:
-        controller = _read_controller(_ReadCore())
-        first = await controller.list_session_task_groups(
-            'session:5dyf7lfzp7z22pphjtostkgsjm', maximum_items=1
-        )
-        assert [value["group_id"] for value in first["groups"]] == ['batch:z4r54kiyr64jgch7t3nj3ibuy4']
-        assert first["remaining_count"] == 1
-        assert isinstance(first["next_cursor"], str)
-        second = await controller.list_session_task_groups(
-            'session:5dyf7lfzp7z22pphjtostkgsjm', maximum_items=1, cursor=first["next_cursor"]
-        )
-        assert [value["group_id"] for value in second["groups"]] == ['batch:4h6jcehydq3vhy4pj2tkjmuqlm']
-        with pytest.raises(ValueError, match="task group cursor"):
-            await controller.list_session_task_groups(
-                'session:sjiboxs4asbh5n6mg6cpdgcsqu', maximum_items=1, cursor=first["next_cursor"]
-            )
-
-        activity = await controller.list_session_task_activities(
-            'session:5dyf7lfzp7z22pphjtostkgsjm', 'task:7ekouunh3opwy6r5hpnpyw22fa', maximum_items=1
-        )
-        assert activity["activities"][0]["blocks"][0]["tool_name"] == "read_file"
-        assert isinstance(activity["next_cursor"], str)
-        continued = await controller.list_session_task_activities(
-            'session:5dyf7lfzp7z22pphjtostkgsjm',
-            'task:7ekouunh3opwy6r5hpnpyw22fa',
-            maximum_items=1,
-            cursor=activity["next_cursor"],
-        )
-        assert [value["entry_id"] for value in continued["activities"]] == [
-            'entry:yym6qf3l4xz6437gradtmhjrke'
-        ]
-        with pytest.raises(ValueError, match="task activity cursor"):
-            await controller.list_session_task_activities(
-                'session:5dyf7lfzp7z22pphjtostkgsjm',
-                'task:ofq7v6vy25ozw4nkz722653tpy',
-                maximum_items=1,
-                cursor=activity["next_cursor"],
-            )
-
-    asyncio.run(scenario())

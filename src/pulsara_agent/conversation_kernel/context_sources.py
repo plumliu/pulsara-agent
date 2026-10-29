@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES,
-)
-
 from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 
 from dataclasses import dataclass, field
@@ -236,7 +232,7 @@ class FrozenNonTriggerContextSources:
 _BINDINGS = (
     _SourceBinding(
         ContextSourceKind.BASE_SYSTEM,
-        "pulsara.base-system.prefix-continuity.v9-async-subagent-completions",
+        "pulsara.base-system.prefix-continuity.v10-runtime-state-handoff",
         ContextChannel.SYSTEM,
         ContextTrustClass.ROOT_INSTRUCTION,
         ContextBudgetClass.MUST_KEEP,
@@ -248,14 +244,14 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.RUNTIME_ENVIRONMENT,
-        "pulsara.runtime-environment.v4-cell-index",
+        "pulsara.runtime-environment.v5-facts-only",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
         10,
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        "pulsara.runtime-environment-collector.v3-cell-index",
+        "pulsara.runtime-environment-collector.v4-facts-only",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
@@ -436,14 +432,14 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-        "pulsara.compaction-runtime-handoff.v2-complete-todo",
+        "pulsara.compaction-runtime-handoff.v3-active-pmca",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
         75,
         15,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        "pulsara.compaction-runtime-handoff-collector.v2-complete-todo",
+        "pulsara.compaction-runtime-handoff-collector.v3-active-pmca",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
@@ -498,8 +494,6 @@ class KernelContextSourceCollector:
         clock: Callable[[], datetime] | None = None,
         registry: ContextSourceRegistry | None = None,
         hook_context_owner: HookContextOwner | None = None,
-        cell_index_provider: Callable[[], tuple[dict[str, object], ...]]
-        | None = None,
     ) -> None:
         if workspace_kind not in {"project", "transient"}:
             raise ValueError("context source workspace kind is invalid")
@@ -516,7 +510,6 @@ class KernelContextSourceCollector:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._registry = registry or ContextSourceRegistry()
         self._hook_context_owner = hook_context_owner
-        self._cell_index_provider = cell_index_provider
 
     @property
     def registry_fingerprint(self) -> str:
@@ -727,23 +720,12 @@ class KernelContextSourceCollector:
                 )
             )
         environment = self._environment_snapshot(temporal)
-        cell_index = (
-            ()
-            if self._cell_index_provider is None
-            else tuple(
-                cell
-                for cell in self._cell_index_provider()
-                if cell.get("state") in {"queued", "running"}
-                or cell.get("has_unread_output")
-                or cell.get("pending_calls", 0) > 0
-            )
-        )
         candidates.append(
             self._candidate(
                 ContextSourceKind.RUNTIME_ENVIRONMENT,
                 (
-                    _render_environment(environment, compact=False, cell_index=cell_index),
-                    _render_environment(environment, compact=True, cell_index=cell_index),
+                    _render_environment(environment, compact=False),
+                    _render_environment(environment, compact=True),
                 ),
             )
         )
@@ -1726,7 +1708,6 @@ def _render_environment(
     snapshot: RuntimeEnvironmentSnapshot,
     *,
     compact: bool,
-    cell_index: tuple[dict[str, object], ...] = (),
 ) -> str:
     values = {
         "workspace_kind": snapshot.workspace_kind,
@@ -1734,27 +1715,8 @@ def _render_environment(
         "timezone": snapshot.timezone_name,
         "utc_offset_minutes": snapshot.utc_offset_minutes,
     }
-    payload: dict[str, object] = dict(values)
-    if cell_index:
-        payload["cell_index"] = []
-        payload["omitted_cell_index_entries"] = len(cell_index)
-        # The existing handoff representation budget bounds this observation,
-        # never the number or lifetime of scripts owned by the Host.
-        for cell in sorted(
-            cell_index,
-            key=lambda x: (
-                x.get("state") not in {"queued", "running"},
-                str(x.get("cell_id")),
-            ),
-        ):
-            payload["cell_index"].append(cell)
-            payload["omitted_cell_index_entries"] -= 1
-            if len(canonical_json_bytes(payload)) > MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES:
-                payload["cell_index"].pop()
-                payload["omitted_cell_index_entries"] += 1
-                break
     return json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        values, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
 
 
