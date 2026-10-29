@@ -885,7 +885,7 @@ class KernelHostSession:
             display_timezone=display_timezone,
             mcp_catalog=self._mcp_supervisor,
             hook_context_owner=self._hook_context,
-            code_mode_index_provider=self._code_mode.index,
+            cell_index_provider=self._code_mode.snapshot_cell_index,
         )
         self._runner = ConversationKernelRunner(
             repository=repository,
@@ -5762,7 +5762,7 @@ class KernelHostSession:
             self._finish_control_attempt_locked(attempt, outcome)
 
     def code_mode_cells(self) -> tuple[dict[str, object], ...]:
-        return self._code_mode.index()
+        return self._code_mode.snapshot_cell_index()
 
     async def request_stop_code_mode_cell(
         self, *, command_id: str, admission_deadline_ms: int,
@@ -5781,7 +5781,7 @@ class KernelHostSession:
             rejection = self._validate_new_control_request_locked(request)
             if rejection is not None:
                 return rejection
-            current = next((cell for cell in self._code_mode.index()
+            current = next((cell for cell in self._code_mode.snapshot_cell_index()
                             if cell["cell_id"] == cell_id), None)
             if current is None:
                 return self._control_rejection(request, "CONTROL_TARGET_UNAVAILABLE",

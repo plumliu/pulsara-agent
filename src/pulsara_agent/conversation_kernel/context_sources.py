@@ -248,14 +248,14 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.RUNTIME_ENVIRONMENT,
-        "pulsara.runtime-environment.v3",
+        "pulsara.runtime-environment.v4-cell-index",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.TRUSTED_RUNTIME_FACT,
         ContextBudgetClass.MUST_KEEP,
         10,
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        "pulsara.runtime-environment-collector.v2",
+        "pulsara.runtime-environment-collector.v3-cell-index",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(
@@ -498,7 +498,7 @@ class KernelContextSourceCollector:
         clock: Callable[[], datetime] | None = None,
         registry: ContextSourceRegistry | None = None,
         hook_context_owner: HookContextOwner | None = None,
-        code_mode_index_provider: Callable[[], tuple[dict[str, object], ...]]
+        cell_index_provider: Callable[[], tuple[dict[str, object], ...]]
         | None = None,
     ) -> None:
         if workspace_kind not in {"project", "transient"}:
@@ -516,7 +516,7 @@ class KernelContextSourceCollector:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._registry = registry or ContextSourceRegistry()
         self._hook_context_owner = hook_context_owner
-        self._code_mode_index_provider = code_mode_index_provider
+        self._cell_index_provider = cell_index_provider
 
     @property
     def registry_fingerprint(self) -> str:
@@ -727,12 +727,12 @@ class KernelContextSourceCollector:
                 )
             )
         environment = self._environment_snapshot(temporal)
-        cells = (
+        cell_index = (
             ()
-            if self._code_mode_index_provider is None
+            if self._cell_index_provider is None
             else tuple(
                 cell
-                for cell in self._code_mode_index_provider()
+                for cell in self._cell_index_provider()
                 if cell.get("state") in {"queued", "running"}
                 or cell.get("has_unread_output")
                 or cell.get("pending_calls", 0) > 0
@@ -742,8 +742,8 @@ class KernelContextSourceCollector:
             self._candidate(
                 ContextSourceKind.RUNTIME_ENVIRONMENT,
                 (
-                    _render_environment(environment, compact=False, code_cells=cells),
-                    _render_environment(environment, compact=True, code_cells=cells),
+                    _render_environment(environment, compact=False, cell_index=cell_index),
+                    _render_environment(environment, compact=True, cell_index=cell_index),
                 ),
             )
         )
@@ -1726,7 +1726,7 @@ def _render_environment(
     snapshot: RuntimeEnvironmentSnapshot,
     *,
     compact: bool,
-    code_cells: tuple[dict[str, object], ...] = (),
+    cell_index: tuple[dict[str, object], ...] = (),
 ) -> str:
     values = {
         "workspace_kind": snapshot.workspace_kind,
@@ -1735,23 +1735,23 @@ def _render_environment(
         "utc_offset_minutes": snapshot.utc_offset_minutes,
     }
     payload: dict[str, object] = dict(values)
-    if code_cells:
-        payload["code_cells"] = []
-        payload["omitted_code_cells"] = len(code_cells)
+    if cell_index:
+        payload["cell_index"] = []
+        payload["omitted_cell_index_entries"] = len(cell_index)
         # The existing handoff representation budget bounds this observation,
         # never the number or lifetime of scripts owned by the Host.
         for cell in sorted(
-            code_cells,
+            cell_index,
             key=lambda x: (
                 x.get("state") not in {"queued", "running"},
                 str(x.get("cell_id")),
             ),
         ):
-            payload["code_cells"].append(cell)
-            payload["omitted_code_cells"] -= 1
+            payload["cell_index"].append(cell)
+            payload["omitted_cell_index_entries"] -= 1
             if len(canonical_json_bytes(payload)) > MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES:
-                payload["code_cells"].pop()
-                payload["omitted_code_cells"] += 1
+                payload["cell_index"].pop()
+                payload["omitted_cell_index_entries"] += 1
                 break
     return json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")

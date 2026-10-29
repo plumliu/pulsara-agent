@@ -1446,7 +1446,7 @@ class DirectKernelToolPort:
             terminal_monitors=monitor_facts,
             todo=todo,
             agent_work_index=agent_work_index,
-            code_cells=tuple(self._code_mode.index()) if self._code_mode is not None else (),
+            code_cells=tuple(self._code_mode.snapshot_cell_index()) if self._code_mode is not None else (),
             maximum_utf8_bytes=maximum_utf8_bytes,
         )
 

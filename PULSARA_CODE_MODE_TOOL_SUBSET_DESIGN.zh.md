@@ -282,7 +282,7 @@ cell 已 failed／terminated，而在途结果尚未成功 resolve/reject 给 JS
 
 UI 提供 cell 状态、输出和精确停止，复用 conversation_kernel/user_control.py 的进程内精确目标控制 owner，不增加持久命令日志。当前新 turn 非 bypass 时，模型仍无 code mode，但用户能查看／停止旧 cell。Plan 约束本轮，不表示先前后台工作已停止；呈现真实状态，不另加确认流程。
 
-完成不自动创建 ROOT turn。正常输入准备及压缩交接提供简短存活／未读 cell 索引（引用、状态、是否有待读输出），不重复日志。Host 的空闲／archive／reopen 判断纳入运行及结算 cell，不能因 ROOT final 误关 owner。
+完成不自动创建 ROOT turn。正常输入准备的环境观察以 `cell_index` 提供简短存活／未读 cell 索引，以 `omitted_cell_index_entries` 表示未装入的索引项；压缩交接独立提供索引。两者不重复日志。Host 的空闲／archive／reopen 判断纳入运行及结算 cell，不能因 ROOT final 误关 owner。
 
 没有总运行时长、总调用次数或历史量上限。根 Promise 未完成且 guest jobs、宿主请求都为空时，在这个没有 timer／外部事件的环境中已无进展来源，返回 stalled；真实长工具等待不满足此条件。执行只在进程内连续，不承诺跨重启恢复。
 

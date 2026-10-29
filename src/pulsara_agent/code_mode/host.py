@@ -656,7 +656,7 @@ class CodeModeHost:
             if cell.turn_id == turn_id:
                 await self._stop_cell(cell)
 
-    def index(self) -> tuple[dict[str, object], ...]:
+    def snapshot_cell_index(self) -> tuple[dict[str, object], ...]:
         if self._closed:
             return ()
         return tuple({"cell_id": cell.cell_id, "state": cell.state,

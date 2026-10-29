@@ -242,7 +242,7 @@ def test_terminal_cells_remain_in_context_until_late_settlement_output_is_consum
         base_system_prompt="BASE",
         display_timezone=timezone.utc,
         clock=lambda: datetime(2026, 10, 29, tzinfo=timezone.utc),
-        code_mode_index_provider=lambda: (dict(current),),
+        cell_index_provider=lambda: (dict(current),),
     )
     surface = _prepared_request(_snapshot(), _sources()).compile_binding.tool_surface
 
@@ -261,8 +261,71 @@ def test_terminal_cells_remain_in_context_until_late_settlement_output_is_consum
         )
         return [json.loads(x.text) for x in candidate.variants]
 
-    assert all(x["code_cells"] == [current] for x in environment())
+    first = environment()
+    assert all(x["cell_index"] == [current] for x in first)
+    assert all(x["omitted_cell_index_entries"] == 0 for x in first)
+    assert all("code_cells" not in x and "omitted_code_cells" not in x for x in first)
     current.update(state="failed", pending_calls=0, has_unread_output=True)
-    assert all(x["code_cells"] == [current] for x in environment())
+    assert all(x["cell_index"] == [current] for x in environment())
     current.update(has_unread_output=False)
-    assert all("code_cells" not in x for x in environment())
+    assert all("cell_index" not in x for x in environment())
+
+
+def test_cell_index_source_changes_are_appended_without_rebuilding_prefix():
+    import json
+
+    from pulsara_agent.model_input.continuity import decode_runtime_observation
+    from pulsara_agent.model_input.contracts import ContextSourceKind
+    from tests.test_round3_structured_model_input_compiler import _candidate
+
+    kind = ContextSourceKind.RUNTIME_ENVIRONMENT
+    previous_body = '{"code_cells":[]}'
+    current_body = '{"cell_index":[]}'
+    first_source = _candidate(kind, (previous_body, previous_body))
+    next_source = _candidate(kind, (current_body, current_body))
+    items = _group(derive_id("turn", "cell-index-prefix-test"))
+    snapshot = _snapshot_for(items, items[1])
+    compiler = StructuredModelInputCompiler()
+    owner = new_test_provider_input_continuity_owner()
+    _, first = _compile_and_install_append(
+        compiler=compiler, owner=owner,
+        request=_prepared_request(snapshot, _sources(first_source)),
+    )
+    next_items = _group(derive_id("turn", "cell-index-prefix-test-next"), 5)
+    _, second = _compile_and_install_append(
+        compiler=compiler, owner=owner,
+        request=_prepared_request(
+            _snapshot_for((*items, *next_items), next_items[1]), _sources(next_source)
+        ),
+    )
+    assert second.epoch_nonce == first.epoch_nonce
+    assert second.system_prompt == first.system_prompt
+    assert second.tools == first.tools
+    assert second.messages[:len(first.messages)] == first.messages
+    appended = [
+        decode_runtime_observation(message)
+        for message in second.messages[len(first.messages):]
+        if message.role is MessageRole.USER and message.content
+        and isinstance(message.content[0], LLMTextPart)
+        and "pulsara_runtime_observation" in message.content[0].text
+    ]
+    environment = next(item for item in appended if item.source_kind is kind)
+    assert json.loads(environment.body) == {"cell_index": []}
+
+
+def test_environment_cell_index_uses_new_key_for_budget_omissions(tmp_path):
+    import json
+
+    from pulsara_agent.conversation_kernel.context_sources import _render_environment
+    from pulsara_agent.model_input.contracts import RuntimeEnvironmentSnapshot
+
+    snapshot = RuntimeEnvironmentSnapshot("project", str(tmp_path), "UTC", 0)
+    cell_index = tuple(
+        {"cell_id": derive_id("cell", "cell-index-test", str(i)), "state": "running",
+         "has_unread_output": False, "pending_calls": 1}
+        for i in range(400)
+    )
+    value = json.loads(_render_environment(snapshot, compact=False, cell_index=cell_index))
+    assert value["omitted_cell_index_entries"] > 0
+    assert len(value["cell_index"]) + value["omitted_cell_index_entries"] == len(cell_index)
+    assert "code_cells" not in value and "omitted_code_cells" not in value

@@ -482,7 +482,7 @@ def test_real_host_hook_path_source_and_full_projection_failure_keep_original_ou
                                     ProcessLocalEffectSettlementDisposition.COMMITTED]
             assert source_path.read_text() == changed
             async with asyncio.timeout(5):
-                while session._code_mode.index():
+                while session._code_mode.snapshot_cell_index():
                     await asyncio.sleep(.001)
         finally:
             await core.shutdown()

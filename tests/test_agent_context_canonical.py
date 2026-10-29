@@ -366,7 +366,7 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
                     text_part_values(tool_messages[0].content)[0]
                 )
                 assert observation["result_state"] == "PERMISSION_DENIED"
-                assert session._code_mode.index() == ()
+                assert session._code_mode.snapshot_cell_index() == ()
         finally:
             await core.shutdown()
 

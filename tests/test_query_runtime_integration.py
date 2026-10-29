@@ -99,7 +99,7 @@ def test_cell_source_query_dispatch_pages_unicode_without_taking_output_owner():
                 await host.observe(cell_id, 0)
             await host.acknowledge(observation)
             async with asyncio.timeout(5):
-                while host.index():
+                while host.snapshot_cell_index():
                     await asyncio.sleep(.001)
             unavailable = await _dispatch(port, context, "query_cells", {"target": target})
             assert unavailable.state == "APPLICATION_ERROR"
@@ -198,3 +198,36 @@ def test_process_and_monitor_query_dispatch_reuses_live_owners(tmp_path):
         finally:
             await port.aclose()
     asyncio.run(run())
+
+
+def test_cell_index_rename_preserves_handoff_and_terminal_gateway(tmp_path):
+    import json
+
+    from pulsara_agent.conversation_kernel.host import KernelHostSession
+    from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer, wire
+
+    index = ({"cell_id": random_id("cell"), "state": "running",
+              "has_unread_output": False, "pending_calls": 1},)
+    cell_owner = SimpleNamespace(snapshot_cell_index=lambda: index)
+    session = SimpleNamespace(
+        _code_mode=cell_owner,
+        session_id=random_id("session"), host_session_id=random_id("session"),
+    )
+    session.code_mode_cells = lambda: KernelHostSession.code_mode_cells(session)
+    gateway = TerminalKernelProtocolServer(socket_path=tmp_path / "unused.sock", session_provider=lambda: None)
+    frame = gateway._code_mode_cells(SimpleNamespace(host_session=session), wire.CodeModeCellsRequest(request_id="test"))
+    assert frame.code_mode_cells.cells[0].cell_id == index[0]["cell_id"]
+    assert frame.code_mode_cells.cells[0].pending_calls == 1
+
+    port = object.__new__(DirectKernelToolPort)
+    port._terminal = SimpleNamespace(workspace_root=tmp_path, freeze_compaction_handoff=lambda **_: ())
+    port._terminal_monitor = SimpleNamespace(freeze_compaction_handoff=lambda: ())
+    port._todo_owner = SimpleNamespace(freeze_compaction_handoff=lambda **_: None)
+    port._terminal_owner_id = "owner"
+    port._session_id = session.session_id
+    port._subagent = None
+    port._code_mode = cell_owner
+    handoff = asyncio.run(port.freeze_compaction_runtime_handoff(
+        conversation_scope_kind=ModelInputScopeKind.ROOT, maximum_utf8_bytes=8192,
+    ))
+    assert json.loads(handoff.full_text)["code_cells"] == list(index)

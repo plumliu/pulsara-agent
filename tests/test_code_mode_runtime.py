@@ -35,7 +35,7 @@ async def _finish(host, cell, *, archive=None):
 async def _vm_terminal(host, cell):
     async with asyncio.timeout(15):
         while True:
-            item = next(item for item in host.index() if item['cell_id'] == cell)
+            item = next(item for item in host.snapshot_cell_index() if item['cell_id'] == cell)
             if item['state'] in {'completed','failed','terminated'}:
                 return
             await asyncio.sleep(.001)
@@ -495,7 +495,7 @@ def test_terminal_consumed_cells_release_host_slots_and_data():
                 assert output == [{'kind':'return','text':'ok'}]
                 await asyncio.sleep(0)
             await asyncio.sleep(.02)
-            assert host.index() == ()
+            assert host.snapshot_cell_index() == ()
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -573,7 +573,7 @@ def test_source_ipc_resource_rejection_does_not_create_or_leave_a_live_cell():
             # per-cell IPC allowance. Rejection must happen before live admission.
             with pytest.raises(CodeModeError, match='frame'):
                 await _start(host, '\x00' * 8000)
-            assert host.index() == ()
+            assert host.snapshot_cell_index() == ()
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -686,7 +686,7 @@ def test_host_close_cancels_waits_and_still_settles_an_existing_output_reservati
         await dispatched.wait()
         observation=await host.observe(cell,0)
         await host.aclose()
-        assert host.index()==()
+        assert host.snapshot_cell_index()==()
         await host.acknowledge(observation)
         with pytest.raises(CodeModeError,match='closed'):
             await host.observe(cell,0)
@@ -750,13 +750,13 @@ def test_host_aggregate_current_data_limit_rejects_before_admission_and_releases
                     await asyncio.sleep(.001)
             with pytest.raises(CodeModeError,match='boundary'):
                 await _start(host,'await tools.read_file({});',invoke)
-            assert len(host.index())==3
+            assert len(host.snapshot_cell_index())==3
             assert len(calls)==3
             await host.stop(cells[0])
             await _finish(host,cells[0])
             await asyncio.sleep(.01)
             accepted=await _start(host,'await tools.read_file({});',invoke)
-            assert any(item['cell_id']==accepted for item in host.index())
+            assert any(item['cell_id']==accepted for item in host.snapshot_cell_index())
         finally:
             await host.aclose()
     asyncio.run(run())

@@ -555,7 +555,7 @@ class StaticContextSourceCollector:
             ),
             _candidate(
                 kind=ContextSourceKind.RUNTIME_ENVIRONMENT,
-                version="pulsara.runtime-environment.v3",
+                version="pulsara.runtime-environment.v4-cell-index",
                 channel=ContextChannel.RUNTIME_OBSERVATION,
                 trust=ContextTrustClass.TRUSTED_RUNTIME_FACT,
                 budget=ContextBudgetClass.MUST_KEEP,
