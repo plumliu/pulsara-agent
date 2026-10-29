@@ -12,7 +12,6 @@ from pulsara_agent.conversation_kernel.annotations import validate_annotation_so
 
 from datetime import datetime
 from hashlib import sha256
-import json
 from typing import Mapping, Sequence
 
 from psycopg import Connection
@@ -101,11 +100,6 @@ from pulsara_agent.ports.user_control_feedback import (
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     freeze_json,
-    thaw_json,
-)
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    FrozenSubagentResultPublicFact,
-    SubagentResultSource,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import (
@@ -127,7 +121,6 @@ from .contracts import (
     TurnAdmissionConfirmation,
     TurnAdmissionConfirmationKind,
     _content_columns,
-    _stable_subagent_message_child_id,
     build_prepared_root_turn_admission,
 )
 
@@ -140,8 +133,7 @@ def _manual_compaction_turn_matches(
     row: Mapping[str, object], candidate: PreparedManualCompactionCommand
 ) -> bool:
     return (
-        str(row["conversation_scope_kind"]) == candidate.scope_kind.value
-        and row["scope_subagent_task_id"] == candidate.scope_subagent_task_id
+        str(row['session_id']) == candidate.session_id
     )
 
 
@@ -167,17 +159,15 @@ class _ConversationOperations:
                     NOT EXISTS (
                         SELECT 1 FROM pulsara_v3.transcript_entries earlier
                         WHERE earlier.session_id=e.session_id
-                          AND earlier.conversation_scope_kind='ROOT'
                           AND earlier.entry_kind IN ('USER_MESSAGE', 'USER_STEER')
-                          AND earlier.scheduled_input IS NULL
+                          AND earlier.input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER')
                           AND earlier.entry_sequence < e.entry_sequence
                     ) AS first_user_input
                    FROM pulsara_v3.turns t
                    JOIN pulsara_v3.transcript_entries e ON e.session_id=t.session_id
                         AND e.id=t.initial_entry_id
                    JOIN pulsara_v3.sessions s ON s.id=t.session_id
-                   WHERE t.session_id=%s AND t.id=%s
-                     AND t.conversation_scope_kind='ROOT'""",
+                   WHERE t.session_id=%s AND t.id=%s AND s.root_session_id IS NULL AND e.input_origin='HUMAN_MESSAGE'""",
                 (guard.session_id, turn_id),
             ).fetchone()
             if row is None or row['entry_kind'] != 'USER_MESSAGE' or row['scheduled_input'] is not None:
@@ -346,8 +336,6 @@ class _ConversationOperations:
                     session_id=guard.session_id,
                     turn_id=intent.turn_id,
                     initial_entry_sequence=latest_sequence + 1,
-                    scope_kind=ConversationScopeKind.ROOT,
-                    scope_subagent_task_id=None,
                 )
             )
             handoff = self._eligible_plan_handoff(
@@ -582,8 +570,6 @@ class _ConversationOperations:
                     session_id=guard.session_id,
                     turn_id=intent.turn_id,
                     initial_entry_sequence=prospective.exact_initial_entry_sequence,
-                    scope_kind=ConversationScopeKind.ROOT,
-                    scope_subagent_task_id=None,
                 )
             )
             if (
@@ -604,7 +590,7 @@ class _ConversationOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id, conversation_scope_kind,
+                    id, session_id, workspace_id,
                     model_call_binding, status, initial_entry_id,
                     current_context_binding_revision_id,
                     permission_snapshot_id, requested_permission_mode,
@@ -615,7 +601,7 @@ class _ConversationOperations:
                     permission_inherited_from_turn_id, permission_contract_id,
                     permission_contract_fingerprint,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
+                ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
                           %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
@@ -634,8 +620,6 @@ class _ConversationOperations:
                 turn_id=intent.turn_id,
                 revision_id=intent.context_binding_revision_id,
                 initial_entry_sequence=entry_sequence,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_subagent_task_id=None,
             )
             self._insert_entry(
                 connection,
@@ -645,9 +629,8 @@ class _ConversationOperations:
                 entry_id=intent.entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.USER_MESSAGE,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_task_id=None,
                 content=publication.body,
+                input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
                 source_plan_workflow_id=(
                     None if handoff is None else handoff.workflow_id
                 ),
@@ -786,8 +769,6 @@ class _ConversationOperations:
                 and str(command["semantic_digest"]) == candidate.semantic_digest
                 and str(command["target_kind"]) == "TURN"
                 and str(command["target_turn_id"]) == candidate.turn_id
-                and str(turn["conversation_scope_kind"]) == "ROOT"
-                and turn["scope_subagent_task_id"] is None
                 and str(turn["initial_entry_id"]) == candidate.entry_id
                 and model_call_binding_from_dict(turn["model_call_binding"])
                 == candidate.model_call_binding
@@ -800,13 +781,9 @@ class _ConversationOperations:
                     turn_id=candidate.turn_id,
                     revision_id=candidate.context_binding_revision_id,
                     initial_entry_sequence=int(entry["entry_sequence"]),
-                    scope_kind=ConversationScopeKind.ROOT,
-                    scope_subagent_task_id=None,
                 )
                 and str(entry["turn_id"]) == candidate.turn_id
                 and str(entry["entry_kind"]) == EntryKind.USER_MESSAGE.value
-                and str(entry["conversation_scope_kind"]) == "ROOT"
-                and entry["scope_subagent_task_id"] is None
                 and canonical_prompt_owner_is_exact(
                     connection,
                     row=entry,
@@ -908,13 +885,8 @@ class _ConversationOperations:
         guard: HostWriterGuard,
         *,
         scope_kind: ConversationScopeKind,
-        scope_subagent_task_id: str | None,
         deadline_monotonic: float,
     ) -> str | None:
-        if (scope_kind is ConversationScopeKind.ROOT) != (
-            scope_subagent_task_id is None
-        ):
-            raise ValueError("terminal compaction scope union is invalid")
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
@@ -926,13 +898,11 @@ class _ConversationOperations:
                 SELECT id
                 FROM pulsara_v3.turns
                 WHERE session_id = %s
-                  AND conversation_scope_kind = %s
-                  AND scope_subagent_task_id IS NOT DISTINCT FROM %s
                   AND status IN ('COMPLETED', 'INTERRUPTED')
                 ORDER BY accepted_at DESC, id DESC
                 LIMIT 1
                 """,
-                (guard.session_id, scope_kind.value, scope_subagent_task_id),
+                (guard.session_id,),
             ).fetchone()
             return None if row is None else str(row["id"])
 
@@ -988,8 +958,6 @@ class _ConversationOperations:
             row = connection.execute(
                 """
                 SELECT t.current_context_binding_revision_id,
-                       t.conversation_scope_kind,
-                       t.scope_subagent_task_id,
                        s.latest_entry_sequence,
                        EXISTS (
                            SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
@@ -1022,9 +990,6 @@ class _ConversationOperations:
                     ).fetchone() is not None
             if (
                 row is None
-                or str(row["conversation_scope_kind"])
-                != ConversationScopeKind.ROOT.value
-                or row["scope_subagent_task_id"] is not None
                 or str(row["current_context_binding_revision_id"])
                 != cut.context_binding_revision_id
                 or int(row["latest_entry_sequence"])
@@ -1145,7 +1110,7 @@ class _ConversationOperations:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.turns (
-                        id, session_id, workspace_id, conversation_scope_kind,
+                        id, session_id, workspace_id,
                         model_call_binding, status, initial_entry_id,
                         current_context_binding_revision_id,
                         permission_snapshot_id, requested_permission_mode,
@@ -1156,7 +1121,7 @@ class _ConversationOperations:
                         permission_inherited_from_turn_id, permission_contract_id,
                         permission_contract_fingerprint,
                         permission_snapshot_fingerprint
-                    ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
+                    ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
                               %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
@@ -1181,8 +1146,6 @@ class _ConversationOperations:
                     turn_id=turn_id,
                     revision_id=target.context_binding_revision_id,
                     initial_entry_sequence=entry_sequence,
-                    scope_kind=ConversationScopeKind.ROOT,
-                    scope_subagent_task_id=None,
                 )
             self._insert_entry(
                 connection,
@@ -1192,8 +1155,6 @@ class _ConversationOperations:
                 entry_id=entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TERMINAL_OBSERVATION,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_task_id=None,
                 content=content,
             )
             event = self._append_events(
@@ -1259,7 +1220,7 @@ class _ConversationOperations:
         running = connection.execute(
             """
             SELECT id FROM pulsara_v3.turns
-            WHERE session_id = %s AND conversation_scope_kind = 'ROOT'
+            WHERE session_id = %s
               AND status = 'RUNNING'
             LIMIT 1
             """,
@@ -1302,8 +1263,6 @@ class _ConversationOperations:
             session_id=guard.session_id,
             turn_id=target.turn_id,
             initial_entry_sequence=latest_sequence + 1,
-            scope_kind=ConversationScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         return PreparedRootProviderInputCandidate(
             session_id=guard.session_id,
@@ -1421,8 +1380,6 @@ class _ConversationOperations:
         if (
             workspace_id != candidate.workspace_id
             or str(turn["workspace_id"]) != workspace_id
-            or str(turn["conversation_scope_kind"])
-            != ConversationScopeKind.ROOT.value
         ):
             raise ConversationKernelConflict(
                 "terminal observation target is not a ROOT turn"
@@ -1507,9 +1464,6 @@ class _ConversationOperations:
                 str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != turn_id
                 or str(entry["entry_kind"]) != EntryKind.TERMINAL_OBSERVATION.value
-                or str(entry["conversation_scope_kind"])
-                != ConversationScopeKind.ROOT.value
-                or entry["scope_subagent_task_id"] is not None
                 or entry["context_binding_revision_id"] is not None
                 or entry["provider_input_through_sequence"] is not None
                 or self._content_from_row(entry) != content
@@ -1551,8 +1505,6 @@ class _ConversationOperations:
                         turn_id=target.turn_id,
                         revision_id=target.context_binding_revision_id,
                         initial_entry_sequence=int(entry["entry_sequence"]),
-                        scope_kind=ConversationScopeKind.ROOT,
-                        scope_subagent_task_id=None,
                     )
                 ):
                     raise ConversationKernelConflict(
@@ -1607,8 +1559,6 @@ class _ConversationOperations:
                 entry_id=candidate.entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.USER_CONTROL_FEEDBACK,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_task_id=None,
                 content=content,
             )
             event = self._append_events(
@@ -1701,8 +1651,6 @@ class _ConversationOperations:
         if (
             str(turn["workspace_id"]) != workspace_id
             or workspace_id != candidate.workspace_id
-            or str(turn["conversation_scope_kind"])
-            != ConversationScopeKind.ROOT.value
         ):
             raise ConversationKernelConflict(
                 "user control feedback target is not the bound ROOT"
@@ -1778,9 +1726,6 @@ class _ConversationOperations:
                 str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != candidate.target_root_turn_id
                 or str(entry["entry_kind"]) != EntryKind.USER_CONTROL_FEEDBACK.value
-                or str(entry["conversation_scope_kind"])
-                != ConversationScopeKind.ROOT.value
-                or entry["scope_subagent_task_id"] is not None
                 or entry["context_binding_revision_id"] is not None
                 or entry["provider_input_through_sequence"] is not None
                 or self._content_from_row(entry) != content
@@ -1821,7 +1766,7 @@ class _ConversationOperations:
                 (candidate.session_id, candidate.command_id),
             ).fetchone()
             turn = connection.execute(
-                "SELECT conversation_scope_kind, scope_subagent_task_id "
+                "SELECT session_id "
                 "FROM pulsara_v3.turns WHERE session_id = %s AND id = %s",
                 (candidate.session_id, candidate.target_turn_id),
             ).fetchone()
@@ -1856,7 +1801,7 @@ class _ConversationOperations:
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
             turn = connection.execute(
-                "SELECT conversation_scope_kind, scope_subagent_task_id "
+                "SELECT session_id "
                 "FROM pulsara_v3.turns WHERE session_id = %s AND id = %s FOR SHARE",
                 (guard.session_id, candidate.target_turn_id),
             ).fetchone()
@@ -2131,13 +2076,6 @@ class _ConversationOperations:
         predecessor = candidate.predecessor
         if (
             str(turn["workspace_id"]) != candidate.scope.workspace_id
-            or str(turn["conversation_scope_kind"]) != candidate.scope.scope_kind.value
-            or (
-                None
-                if turn["scope_subagent_task_id"] is None
-                else str(turn["scope_subagent_task_id"])
-            )
-            != candidate.scope.scope_subagent_task_id
             or str(turn["status"]) != candidate.expected_turn_status
             or str(turn["current_context_binding_revision_id"])
             != predecessor.binding_revision_id
@@ -2163,16 +2101,12 @@ class _ConversationOperations:
                   ON initial_entry.entry_owner_kind = 'EXECUTED_TURN' AND initial_entry.session_id = t.session_id
                  AND initial_entry.id = t.initial_entry_id
                 WHERE t.session_id = %s
-                  AND t.conversation_scope_kind = %s
-                  AND t.scope_subagent_task_id IS NOT DISTINCT FROM %s
                   AND t.status IN ('COMPLETED', 'INTERRUPTED')
                 ORDER BY initial_entry.entry_sequence DESC, t.id DESC
                 LIMIT 1
                 """,
                 (
                     candidate.scope.session_id,
-                    candidate.scope.scope_kind.value,
-                    candidate.scope.scope_subagent_task_id,
                 ),
             ).fetchone()
             if latest is None or str(latest["id"]) != candidate.scope.turn_id:
@@ -2184,15 +2118,11 @@ class _ConversationOperations:
             SELECT 1
             FROM pulsara_v3.transcript_entries
             WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s
-              AND conversation_scope_kind = %s
-              AND scope_subagent_task_id IS NOT DISTINCT FROM %s
               AND entry_sequence > %s
             LIMIT 1
             """,
             (
                 candidate.scope.session_id,
-                candidate.scope.scope_kind.value,
-                candidate.scope.scope_subagent_task_id,
                 preconditions.expected_safe_head,
             ),
         ).fetchone()
@@ -2213,8 +2143,6 @@ class _ConversationOperations:
               ON result_entry.entry_owner_kind = 'EXECUTED_TURN' AND result_entry.session_id = result.session_id
              AND result_entry.id = result.result_entry_id
             WHERE request.entry_owner_kind = 'EXECUTED_TURN' AND request.session_id = %s
-              AND request.conversation_scope_kind = %s
-              AND request.scope_subagent_task_id IS NOT DISTINCT FROM %s
               AND call.block_kind = 'TOOL_CALL'
               AND request.entry_sequence <= %s
               AND result_entry.entry_sequence > %s
@@ -2222,8 +2150,6 @@ class _ConversationOperations:
             """,
             (
                 candidate.scope.session_id,
-                candidate.scope.scope_kind.value,
-                candidate.scope.scope_subagent_task_id,
                 candidate.snapshot.source_through_sequence,
                 candidate.snapshot.source_through_sequence,
             ),
@@ -2434,7 +2360,6 @@ class _ConversationOperations:
         blocks: Sequence[AssistantBlock],
         visualizations: Sequence[FrozenVisualizationOccurrence] = (),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
-        subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool = False,
         occurred_at: datetime,
         actor_id: str,
@@ -2449,13 +2374,6 @@ class _ConversationOperations:
             raise ValueError("a tool-request message cannot complete its turn")
         if tool_request and visualizations:
             raise ValueError("a tool-request message cannot own visualizations")
-        if subagent_result is not None and (
-            not complete_turn
-            or tool_request
-            or subagent_result.source is not SubagentResultSource.INFERRED
-            or subagent_result.producer_entry_id != entry_id
-        ):
-            raise ValueError("inferred subagent result composite is invalid")
         if provider_replay is not None and (
             provider_replay.session_id != guard.session_id
             or provider_replay.assistant_entry_id != entry_id
@@ -2476,8 +2394,7 @@ class _ConversationOperations:
         ) as connection:
             turn = connection.execute(
                 """
-                SELECT workspace_id, conversation_scope_kind,
-                       scope_subagent_task_id, current_context_binding_revision_id
+                SELECT workspace_id, current_context_binding_revision_id
                 FROM pulsara_v3.turns
                 WHERE session_id = %s AND id = %s AND status = 'RUNNING'
                 FOR UPDATE
@@ -2501,8 +2418,6 @@ class _ConversationOperations:
                 entry_id=entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=entry_kind,
-                scope_kind=ConversationScopeKind(str(turn["conversation_scope_kind"])),
-                scope_task_id=turn["scope_subagent_task_id"],
                 content=parent_content,
                 context_binding_revision_id=cut.context_binding_revision_id,
                 provider_input_through_sequence=cut.provider_input_through_sequence,
@@ -2580,40 +2495,6 @@ class _ConversationOperations:
                         provider_replay.fragment_fingerprint,
                     ),
                 )
-            subagent_message: tuple[str, int, str] | None = None
-            if (
-                str(turn["conversation_scope_kind"])
-                == ConversationScopeKind.SUBAGENT_TASK.value
-            ):
-                task_id = str(turn["scope_subagent_task_id"])
-                message_ordinal = int(
-                    connection.execute(
-                        """
-                        SELECT count(*) AS total
-                        FROM pulsara_v3.subagent_task_children
-                        WHERE session_id = %s AND task_id = %s
-                          AND child_kind = 'MESSAGE'
-                        """,
-                        (guard.session_id, task_id),
-                    ).fetchone()["total"]
-                )
-                child_id = _stable_subagent_message_child_id(task_id, entry_id)
-                connection.execute(
-                    """
-                    INSERT INTO pulsara_v3.subagent_task_children (
-                        id, session_id, task_id, child_kind,
-                        child_ordinal, entry_id
-                    ) VALUES (%s, %s, %s, 'MESSAGE', %s, %s)
-                    """,
-                    (
-                        child_id,
-                        guard.session_id,
-                        task_id,
-                        message_ordinal,
-                        entry_id,
-                    ),
-                )
-                subagent_message = (child_id, message_ordinal, task_id)
             event_drafts = [
                 self._event(
                     event_type,
@@ -2628,98 +2509,6 @@ class _ConversationOperations:
                     },
                 )
             ]
-            if subagent_message is not None:
-                child_id, message_ordinal, task_id = subagent_message
-                event_drafts.append(
-                    self._event(
-                        CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED,
-                        SubjectSlot.SUBAGENT_MESSAGE,
-                        child_id,
-                        session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
-                        actor_kind="subagent",
-                        actor_id=task_id,
-                        payload={"child_ordinal": message_ordinal},
-                    )
-                )
-            if subagent_result is not None:
-                task_id = str(turn["scope_subagent_task_id"])
-                if (
-                    str(turn["conversation_scope_kind"])
-                    != ConversationScopeKind.SUBAGENT_TASK.value
-                    or subagent_result.task_id != task_id
-                ):
-                    raise ConversationKernelConflict(
-                        "inferred result belongs to another child scope"
-                    )
-                task = connection.execute(
-                    """SELECT status FROM pulsara_v3.subagent_tasks
-                       WHERE session_id = %s AND id = %s FOR UPDATE""",
-                    (guard.session_id, task_id),
-                ).fetchone()
-                if task is None or str(task["status"]) != "ACTIVE":
-                    raise ConversationKernelConflict(
-                        "inferred result task is no longer active"
-                    )
-                connection.execute(
-                    """INSERT INTO pulsara_v3.subagent_task_children (
-                           id, session_id, task_id, child_kind, child_ordinal,
-                           entry_id, result_source, summary, output_preview,
-                           diagnostics, result_fingerprint
-                       ) VALUES (
-                           %s, %s, %s, 'RESULT',
-                           (SELECT count(*) FROM pulsara_v3.subagent_task_children
-                             WHERE session_id = %s AND task_id = %s),
-                           %s, 'INFERRED', %s, %s, %s::jsonb, %s
-                       )""",
-                    (
-                        subagent_result.result_id,
-                        guard.session_id,
-                        task_id,
-                        guard.session_id,
-                        task_id,
-                        entry_id,
-                        subagent_result.summary,
-                        subagent_result.output_preview,
-                        json.dumps(thaw_json(subagent_result.diagnostics)),
-                        subagent_result.result_fingerprint,
-                    ),
-                )
-                updated = connection.execute(
-                    """UPDATE pulsara_v3.subagent_tasks
-                       SET status = 'COMPLETED', pending_reason = NULL,
-                           terminal_reason = NULL,
-                           terminal_public_detail = NULL,
-                           terminal_at = clock_timestamp()
-                       WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
-                       RETURNING id""",
-                    (guard.session_id, task_id),
-                ).fetchone()
-                if updated is None:
-                    raise ConversationKernelConflict(
-                        "inferred result lost its task terminal winner"
-                    )
-                event_drafts.extend(
-                    (
-                        self._event(
-                            CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
-                            SubjectSlot.SUBAGENT_RESULT,
-                            subagent_result.result_id,
-                            session_id=guard.session_id, occurrence_key="", occurred_at=occurred_at,
-                            actor_kind="subagent",
-                            actor_id=task_id,
-                            payload={"result_source": "INFERRED"},
-                        ),
-                        self._event(
-                            CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-                            SubjectSlot.SUBAGENT_TASK,
-                            task_id,
-                            session_id=guard.session_id, occurrence_key="status:" + 'COMPLETED', occurred_at=occurred_at,
-                            actor_kind="runtime",
-                            actor_id="foreground-runner",
-                            payload={"status": "COMPLETED", "reason": None},
-                        ),
-                    )
-                )
             pending_steer = bool(
                 connection.execute(
                     """
@@ -2784,7 +2573,6 @@ class _ConversationOperations:
         blocks: Sequence[AssistantBlock],
         visualizations: Sequence[FrozenVisualizationOccurrence] = (),
         provider_replay: PreparedDurableProviderAssistantReplay | None = None,
-        subagent_result: FrozenSubagentResultPublicFact | None = None,
         complete_turn: bool,
         occurred_at: datetime,
         actor_id: str,
@@ -2993,84 +2781,6 @@ class _ConversationOperations:
                     raise ConversationKernelConflict(
                         "failed assistant visualization has a blob"
                     )
-            if (
-                str(row["conversation_scope_kind"])
-                == ConversationScopeKind.SUBAGENT_TASK.value
-            ):
-                task_id = str(row["scope_subagent_task_id"])
-                child_id = _stable_subagent_message_child_id(task_id, entry_id)
-                child = connection.execute(
-                    """
-                    SELECT c.child_kind, c.child_ordinal, c.entry_id,
-                           a.event_type, a.actor_kind, a.actor_id, a.payload
-                    FROM pulsara_v3.subagent_task_children AS c
-                    JOIN pulsara_v3.agent_events AS a
-                      ON a.session_id = c.session_id
-                     AND a.subject_subagent_message_id = c.id
-                    WHERE c.session_id = %s AND c.id = %s
-                    """,
-                    (guard.session_id, child_id),
-                ).fetchall()
-                if (
-                    len(child) != 1
-                    or str(child[0]["child_kind"]) != "MESSAGE"
-                    or str(child[0]["entry_id"]) != entry_id
-                    or str(child[0]["event_type"])
-                    != CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED.value
-                    or str(child[0]["actor_kind"]) != "subagent"
-                    or str(child[0]["actor_id"]) != task_id
-                    or dict(child[0]["payload"])
-                    != {"child_ordinal": int(child[0]["child_ordinal"])}
-                ):
-                    raise ConversationKernelConflict(
-                        "subagent assistant winner lacks its exact message child"
-                    )
-            result_rows = connection.execute(
-                """SELECT result.*, task.status,
-                          result_event.event_type AS result_event_type,
-                          status_event.event_type AS status_event_type
-                   FROM pulsara_v3.subagent_task_children AS result
-                   JOIN pulsara_v3.subagent_tasks AS task
-                     ON task.session_id = result.session_id
-                    AND task.id = result.task_id
-                   LEFT JOIN pulsara_v3.agent_events AS result_event
-                     ON result_event.session_id = result.session_id
-                    AND result_event.subject_subagent_result_id = result.id
-                    AND result_event.event_type = 'SubagentResultAccepted'
-                   LEFT JOIN pulsara_v3.agent_events AS status_event
-                     ON status_event.session_id = task.session_id
-                    AND status_event.subject_subagent_task_id = task.id
-                    AND status_event.event_type = 'SubagentTaskStatusAccepted'
-                    AND status_event.payload->>'status' = 'COMPLETED'
-                   WHERE result.session_id = %s AND result.entry_id = %s
-                     AND result.child_kind = 'RESULT'""",
-                (guard.session_id, entry_id),
-            ).fetchall()
-            if subagent_result is None:
-                if result_rows:
-                    raise ConversationKernelConflict(
-                        "assistant winner owns an unexpected inferred result"
-                    )
-            elif (
-                len(result_rows) != 1
-                or str(result_rows[0]["id"]) != subagent_result.result_id
-                or str(result_rows[0]["task_id"]) != subagent_result.task_id
-                or str(result_rows[0]["result_source"]) != "INFERRED"
-                or str(result_rows[0]["summary"]) != subagent_result.summary
-                or result_rows[0]["data"] is not None
-                or result_rows[0]["output_preview"] != subagent_result.output_preview
-                or freeze_json(result_rows[0]["diagnostics"])
-                != subagent_result.diagnostics
-                or str(result_rows[0]["result_fingerprint"])
-                != subagent_result.result_fingerprint
-                or str(result_rows[0]["status"]) != "COMPLETED"
-                or str(result_rows[0]["result_event_type"]) != "SubagentResultAccepted"
-                or str(result_rows[0]["status_event_type"])
-                != "SubagentTaskStatusAccepted"
-            ):
-                raise ConversationKernelConflict(
-                    "inferred subagent result differs from stable candidate"
-                )
             terminal = connection.execute(
                 """
                 SELECT event_sequence FROM pulsara_v3.agent_events
@@ -3298,7 +3008,6 @@ class _ConversationOperations:
                        q.consumed_entry_id,
                        qe.turn_id AS consumed_turn_id,
                        te.turn_id AS target_entry_turn_id,
-                       te.source_subagent_task_id AS target_entry_source_subagent_task_id,
                        d.decision AS interaction_decision,
                        d.subject_kind AS interaction_subject_kind,
                        d.subject_tool_call_entry_id,

@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal, Protocol
+import json
+from typing import Literal, Protocol, Callable
 
 from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
 from pulsara_agent.message import ToolResultState
@@ -15,6 +16,15 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.tool_observation import TrustedToolObservationSupplement
+
+
+def encode_tool_public_json(value: object) -> bytes:
+    """Preserve ECMAScript string code units in a UTF-8 JSON carrier."""
+    text = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("ascii")
 
 
 class FrozenToolJsonDict(dict[str, object]):
@@ -74,6 +84,7 @@ class ToolCall:
     id: str
     name: str
     arguments: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
+    defer_file_observation: bool = False
 
     def __post_init__(self) -> None:
         if not self.id or not self.name:
@@ -96,7 +107,7 @@ class ToolOutputSourceCoverageReason(StrEnum):
 
 
 class ToolOutputSourceFormatHint(StrEnum):
-    """Process-local hint used only to render the model-facing preview."""
+    """Closed encoding tag selected explicitly by the result owner."""
 
     TEXT = "TEXT"
     JSON = "JSON"
@@ -156,8 +167,12 @@ class ToolExecutionResult:
     artifact_inline_result: bool = False
     trusted_observation: TrustedToolObservationSupplement | None = None
     model_visible_memory_fact_ids: tuple[str, ...] = ()
+    public_format: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.TEXT
+    delivery_succeeded: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.public_format, ToolOutputSourceFormatHint):
+            raise TypeError("public tool result format must be explicit TEXT or JSON")
         object.__setattr__(self, "metadata", freeze_tool_json_object(self.metadata))
         # Reject surrogate-bearing or otherwise non-UTF-8-encodable public
         # results at the process-local boundary.  Artifact publication must
@@ -201,7 +216,7 @@ class AsyncTool(Protocol):
 
 class ToolInvocationOwnerKind(StrEnum):
     HOST_MAIN_RUN = "host_main_run"
-    SUBAGENT_CHILD = "subagent_child"
+    SUBAGENT = "subagent"
 
 
 __all__ = [
@@ -216,5 +231,6 @@ __all__ = [
     "ToolOutputSourceCoverageReason",
     "ToolOutputSourceFormatHint",
     "freeze_tool_json_object",
+    "encode_tool_public_json",
     "thaw_tool_json_object",
 ]

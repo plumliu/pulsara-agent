@@ -51,7 +51,6 @@ from pulsara_agent.ports.live_agent_event import (
     InteractionOpenedPayload,
     InteractionReplacedPayload,
     ReasoningPresentationKind,
-    SubagentProgressPayload,
     TerminalMonitorClosedPayload,
     TerminalMonitorObservationPayload,
     TerminalMonitorOpenedPayload,
@@ -111,10 +110,10 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 from pulsara_agent.terminal_process.models import TerminalProcessInfo
 
 
-PROTOCOL_MAJOR = 5
+PROTOCOL_MAJOR = 6
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:ae44ce6eb0ec8cee09c6cbf5241bfd0c6a58cb166574e66989043e575f3a45d1"
+    "sha256:f5840ba2908905390a670223d3a4e8781ee478721964934ebffc1c293cc0d329"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -323,6 +322,8 @@ class TerminalKernelProtocolServer:
             return self._live_control_snapshot(state, request)
         if kind == "subagent_capacity":
             return await self._subagent_capacity(state, request)
+        if kind == "code_mode_cells":
+            return self._code_mode_cells(state, request)
         if kind == "resolve_interaction":
             return await self._resolve_interaction(state, request)
         if kind == "resolve_plan_interaction":
@@ -471,6 +472,16 @@ class TerminalKernelProtocolServer:
             if self._fits_frame(result)
             else _error(request.request_id, "HISTORY_RESOURCE_EXHAUSTED")
         )
+
+    def _code_mode_cells(self, state: _Connection, request: wire.CodeModeCellsRequest) -> wire.ServerFrame:
+        session = state.host_session
+        result = wire.ServerFrame(code_mode_cells=wire.CodeModeCellsResponse(
+            request_id=request.request_id,
+            session_id=session.session_id,
+            host_session_id=session.host_session_id,
+            cells=tuple(wire.CodeModeCellState(**item) for item in session.code_mode_cells()),
+        ))
+        return result if self._fits_frame(result) else _error(request.request_id, "CODE_MODE_CELLS_RESOURCE_EXHAUSTED")
 
     async def _subagent_capacity(
         self, state: _Connection, request: wire.SubagentCapacityRequest
@@ -698,23 +709,18 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "COMMAND_ID_INVALID")
         if request.client_submission_id not in ("", request.command_id):
             return _error(request.request_id, "COMMAND_SUBMISSION_ID_MISMATCH")
-        if request.command_kind not in (
-            wire.ACCEPT_SUBAGENT_COMPLETION,
-            wire.CANCEL_SUBAGENT_TASK,
-        ) and (
-            request.subagent_task_id
-        ):
-            return _error(request.request_id, "COMMAND_SOURCE_UNION_INVALID")
         if request.command_kind != wire.DETACH and (
             not self._has_controller_capability(state)
         ):
             return _error(request.request_id, "CONTROLLER_REQUIRED")
-        if request.command_kind != wire.DETACH:
+        if request.command_kind not in (wire.DETACH, wire.STOP_CODE_MODE_CELL):
             blocked = self._workspace_write_error(state, request.request_id)
             if blocked is not None:
                 return blocked
         if request.force and request.command_kind != wire.COMPACT_CONTEXT:
             return _error(request.request_id, "COMMAND_FORCE_FIELD_NOT_ALLOWED")
+        if request.command_kind != wire.STOP_CODE_MODE_CELL and request.target_cell_id:
+            return _error(request.request_id, "CELL_TARGET_FIELD_NOT_ALLOWED")
         queue_action = request.command_kind in (
             wire.CANCEL_QUEUED_PROMPT, wire.STEER_QUEUED_PROMPT,
         )
@@ -728,7 +734,6 @@ class TerminalKernelProtocolServer:
         requested_permission = _permission_from_wire(request.requested_permission_mode)
         permission_command = request.command_kind in (
             wire.SUBMIT_PROMPT,
-            wire.ACCEPT_SUBAGENT_COMPLETION,
             wire.ENTER_PLAN,
         )
         if (
@@ -747,7 +752,7 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "PLAN_COMMAND_FIELDS_NOT_ALLOWED")
         control_command = request.command_kind in (
             wire.STOP_ACTIVE_TURN,
-            wire.CANCEL_SUBAGENT_TASK,
+            wire.STOP_CODE_MODE_CELL,
             wire.TERMINATE_BACKGROUND_PROCESS,
         )
         if control_command:
@@ -812,7 +817,6 @@ class TerminalKernelProtocolServer:
         elif request.command_kind == wire.STOP_ACTIVE_TURN:
             if (
                 not request.target_turn_id
-                or request.subagent_task_id
                 or request.target_process_id
             ):
                 return _error(request.request_id, "STOP_REQUEST_INVALID")
@@ -823,24 +827,19 @@ class TerminalKernelProtocolServer:
                 expected_host_session_id=request.expected_host_session_id,
                 target_turn_id=request.target_turn_id,
             )
-        elif request.command_kind == wire.CANCEL_SUBAGENT_TASK:
-            if (
-                request.target_turn_id
-                or not request.subagent_task_id
-                or request.target_process_id
-            ):
-                return _error(request.request_id, "SUBAGENT_CANCEL_REQUEST_INVALID")
-            outcome = await state.host_session.request_cancel_subagent(
+        elif request.command_kind == wire.STOP_CODE_MODE_CELL:
+            if request.target_turn_id or request.target_process_id or not request.target_cell_id:
+                return _error(request.request_id, "CELL_CONTROL_REQUEST_INVALID")
+            outcome = await state.host_session.request_stop_code_mode_cell(
                 admission_deadline_ms=int(request.control_admission_deadline_ms),
                 command_id=request.command_id,
                 expected_session_id=request.expected_session_id,
                 expected_host_session_id=request.expected_host_session_id,
-                task_id=request.subagent_task_id,
+                cell_id=request.target_cell_id,
             )
         elif request.command_kind == wire.TERMINATE_BACKGROUND_PROCESS:
             if (
                 request.target_turn_id
-                or request.subagent_task_id
                 or not request.target_process_id
             ):
                 return _error(request.request_id, "PROCESS_CONTROL_REQUEST_INVALID")
@@ -850,23 +849,6 @@ class TerminalKernelProtocolServer:
                 expected_session_id=request.expected_session_id,
                 expected_host_session_id=request.expected_host_session_id,
                 process_id=request.target_process_id,
-            )
-        elif request.command_kind == wire.ACCEPT_SUBAGENT_COMPLETION:
-            new_root = not request.target_turn_id
-            if (
-                request.plan_reason
-                or request.HasField("prompt_content")
-                or not request.subagent_task_id
-                or (new_root and requested_permission is None)
-                or (not new_root and requested_permission is not None)
-            ):
-                return _error(request.request_id, "SUBAGENT_COMPLETION_REQUEST_INVALID")
-            outcome = await state.host_session.accept_subagent_completion(
-                command_id=request.command_id,
-                target_turn_id=request.target_turn_id or None,
-                requested_permission_mode=requested_permission,
-                task_id=request.subagent_task_id,
-                actor_id=state.attachment_id,
             )
         elif request.command_kind == wire.ENTER_PLAN:
             if (
@@ -914,7 +896,6 @@ class TerminalKernelProtocolServer:
             if (
                 request.plan_reason
                 or request.HasField("prompt_content")
-                or request.subagent_task_id
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
             ):
@@ -1598,8 +1579,7 @@ def _live_to_wire(owner_epoch: int, event: object) -> wire.LiveEventProjection:
         turn_id=event.turn_id,
         draft_identity=event.draft_identity,
         payload=_live_payload_to_wire(event.payload),
-        scope_kind=wire.ROOT if event.scope_kind == "ROOT" else wire.SUBAGENT_TASK,
-        scope_subagent_task_id=event.scope_subagent_task_id or "",
+        scope_kind=wire.ROOT if event.scope_kind == "ROOT" else wire.SUBAGENT,
         channel_kind=getattr(wire, f"LIVE_CHANNEL_{event.channel_kind.value}"),
         channel_tool_call_id=event.channel_tool_call_id or "",
         channel_attempt_id=event.channel_attempt_id or "",
@@ -1712,7 +1692,9 @@ def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
                 block_identity=payload.block_identity,
                 tool_call_id=payload.tool_call_id,
                 attempt_id=payload.attempt_id,
-                assistant_entry_id=payload.assistant_entry_id,
+                assistant_entry_id=payload.assistant_entry_id or "",
+                invocation_id=payload.invocation_id or "",
+                source_exec_attempt_id=payload.source_exec_attempt_id or "",
             )
         )
     if isinstance(payload, ToolResultDeltaPayload):
@@ -1793,16 +1775,6 @@ def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
                 reason=payload.reason,
             )
         )
-    if isinstance(payload, SubagentProgressPayload):
-        return wire.LiveEventPayload(
-            subagent_progress=wire.LiveSubagentProgressPayload(
-                task_id=payload.task_id,
-                status=payload.status,
-                public_summary=payload.public_summary,
-                summary_utf8_bytes=payload.summary_utf8_bytes,
-                summary_digest=payload.summary_digest,
-            )
-        )
     if isinstance(payload, TodoSnapshotUpdatedPayload):
         return wire.LiveEventPayload(
             todo_snapshot_updated=wire.LiveTodoSnapshotUpdatedPayload(
@@ -1859,9 +1831,8 @@ def _settlement_to_wire(
         committed_entry_id=settlement.committed_entry_id or "",
         reason_code=settlement.reason_code or "",
         scope_kind=(
-            wire.ROOT if settlement.scope_kind == "ROOT" else wire.SUBAGENT_TASK
+            wire.ROOT if settlement.scope_kind == "ROOT" else wire.SUBAGENT
         ),
-        scope_subagent_task_id=settlement.scope_subagent_task_id or "",
         channel_kind=getattr(wire, f"LIVE_CHANNEL_{settlement.channel_kind.value}"),
         channel_tool_call_id=settlement.channel_tool_call_id or "",
         channel_attempt_id=settlement.channel_attempt_id or "",
@@ -1908,9 +1879,8 @@ def _live_control_snapshot_to_wire(
                 scope_kind=(
                     wire.ROOT
                     if item.run_identity.scope_kind.value == "ROOT"
-                    else wire.SUBAGENT_TASK
+                    else wire.SUBAGENT
                 ),
-                scope_subagent_task_id=item.run_identity.subagent_task_id or "",
                 disposition="ACTIVE" if item.ordered_items else "CLEARED",
                 ordered_items=tuple(
                     wire.LiveTodoItemProjection(
@@ -2026,22 +1996,20 @@ def _control_request_from_wire(
     command_id: str, expected: wire.ExpectedUserControl
 ) -> UserControlRequest | None:
     operation = {
+        wire.USER_CONTROL_STOP_CODE_MODE_CELL: UserControlOperation.STOP_CODE_MODE_CELL,
         wire.USER_CONTROL_STOP_ACTIVE_TURN: UserControlOperation.STOP_ACTIVE_TURN,
-        wire.USER_CONTROL_CANCEL_SUBAGENT_TASK: (
-            UserControlOperation.CANCEL_SUBAGENT_TASK
-        ),
         wire.USER_CONTROL_TERMINATE_BACKGROUND_PROCESS: (
             UserControlOperation.TERMINATE_BACKGROUND_PROCESS
         ),
     }.get(expected.operation)
     kind = {
+        wire.USER_CONTROL_CODE_MODE_CELL: UserControlTargetKind.CODE_MODE_CELL,
         wire.USER_CONTROL_ROOT_TURN: UserControlTargetKind.ROOT_TURN,
-        wire.USER_CONTROL_SUBAGENT_TASK: UserControlTargetKind.SUBAGENT_TASK,
         wire.USER_CONTROL_BACKGROUND_PROCESS: UserControlTargetKind.BACKGROUND_PROCESS,
     }.get(expected.target.kind)
     expected_kind = {
+        UserControlOperation.STOP_CODE_MODE_CELL: UserControlTargetKind.CODE_MODE_CELL,
         UserControlOperation.STOP_ACTIVE_TURN: UserControlTargetKind.ROOT_TURN,
-        UserControlOperation.CANCEL_SUBAGENT_TASK: UserControlTargetKind.SUBAGENT_TASK,
         UserControlOperation.TERMINATE_BACKGROUND_PROCESS: (
             UserControlTargetKind.BACKGROUND_PROCESS
         ),
@@ -2068,8 +2036,8 @@ def _control_request_from_wire(
 def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
     result = wire.UserControlOutcome(
         operation={
+            "STOP_CODE_MODE_CELL": wire.USER_CONTROL_STOP_CODE_MODE_CELL,
             "STOP_ACTIVE_TURN": wire.USER_CONTROL_STOP_ACTIVE_TURN,
-            "CANCEL_SUBAGENT_TASK": wire.USER_CONTROL_CANCEL_SUBAGENT_TASK,
             "TERMINATE_BACKGROUND_PROCESS": (
                 wire.USER_CONTROL_TERMINATE_BACKGROUND_PROCESS
             ),
@@ -2078,8 +2046,8 @@ def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
         host_session_id=value.host_session_id,
         target=wire.UserControlTarget(
             kind={
+                "CODE_MODE_CELL": wire.USER_CONTROL_CODE_MODE_CELL,
                 "ROOT_TURN": wire.USER_CONTROL_ROOT_TURN,
-                "SUBAGENT_TASK": wire.USER_CONTROL_SUBAGENT_TASK,
                 "BACKGROUND_PROCESS": wire.USER_CONTROL_BACKGROUND_PROCESS,
             }[value.target.kind.value],
             target_id=value.target.target_id,
@@ -2097,14 +2065,10 @@ def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
                 status=value.root.status or "", reason=value.root.reason or ""
             )
         )
-    if value.subagent is not None:
-        result.subagent.CopyFrom(
-            wire.SubagentControlResult(
-                disposition=value.subagent.disposition,
-                status=value.subagent.status or "",
-                reason=value.subagent.reason or "",
-            )
-        )
+    if value.cell is not None:
+        result.cell.CopyFrom(wire.CodeModeControlResult(
+            cell_id=value.cell.cell_id, state=value.cell.state, pending_calls=value.cell.pending_calls,
+        ))
     if value.process is not None:
         process = wire.ProcessControlResult(
             disposition=value.process.disposition,
@@ -2170,7 +2134,6 @@ def _background_process_to_wire(value: TerminalProcessInfo) -> wire.BackgroundPr
         origin=wire.BackgroundProcessOrigin(
             turn_id=value.origin.turn_id,
             scope_kind=value.origin.conversation_scope_kind,
-            subagent_task_id=value.origin.scope_subagent_task_id or "",
         ),
     )
     if value.exit_code is not None:

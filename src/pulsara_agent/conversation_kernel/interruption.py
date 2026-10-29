@@ -81,7 +81,6 @@ def read_executed_notices(
     event_cut: int,
     entry_sequences: tuple[int, ...] | None = None,
     turn_id: str | None = None,
-    root_only: bool = True,
 ) -> tuple[TurnInterruptionNotice, ...]:
     # Mount only entries accepted BEFORE the original terminal occurrence. Late
     # results remain canonical entries without moving the ending fact.
@@ -104,7 +103,6 @@ def read_executed_notices(
         WHERE t.session_id=%s AND t.status='INTERRUPTED'
           AND ev.event_sequence<=%s AND t.terminal_reason NOT LIKE 'PLAN_FORCE_EXIT:%%'
           AND (%s::text IS NULL OR t.id=%s)
-          AND (NOT %s OR t.conversation_scope_kind='ROOT')
           AND (%s::bigint[] IS NULL OR t.id IN (
             SELECT owner.turn_id FROM pulsara_v3.transcript_entries owner
             WHERE owner.session_id=t.session_id AND owner.entry_sequence=ANY(%s::bigint[])
@@ -117,7 +115,6 @@ def read_executed_notices(
             event_cut,
             turn_id,
             turn_id,
-            root_only,
             None if entry_sequences is None else list(entry_sequences),
             None if entry_sequences is None else list(entry_sequences),
             None if entry_sequences is None else list(entry_sequences),
@@ -156,13 +153,12 @@ def read_imported_notices(
         """
         SELECT g.*, EXISTS(SELECT 1 FROM pulsara_v3.transcript_entries mount
           WHERE mount.session_id=g.session_id AND mount.imported_history_group_id=g.id
-            AND mount.conversation_scope_kind='ROOT'
             AND mount.entry_sequence=(g.interruption_outcome->>'display_after_entry_sequence')::bigint) AS mount_valid
         FROM pulsara_v3.imported_history_groups g
         WHERE g.session_id=%s AND g.interruption_outcome IS NOT NULL AND g.id IN (
           SELECT e.imported_history_group_id FROM pulsara_v3.transcript_entries e
           WHERE e.session_id=g.session_id AND e.entry_sequence=ANY(%s)
-            AND e.conversation_scope_kind='ROOT' AND e.entry_owner_kind='IMPORTED_HISTORY')
+            AND e.entry_owner_kind='IMPORTED_HISTORY')
         ORDER BY g.id
         """,
         (session_id, list(entry_sequences)),

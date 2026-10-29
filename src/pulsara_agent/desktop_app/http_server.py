@@ -561,25 +561,6 @@ class LocalHttpServer:
         )
         self._app.router.add_post("/api/sessions/{session_id}/path-candidates", self._workspace_path_candidates)
         self._app.router.add_get(
-            "/api/sessions/{session_id}/tasks", self._list_session_tasks
-        )
-        self._app.router.add_get(
-            "/api/sessions/{session_id}/task-groups",
-            self._list_session_task_groups,
-        )
-        self._app.router.add_get(
-            "/api/sessions/{session_id}/task-groups/{group_id}",
-            self._read_session_task_group,
-        )
-        self._app.router.add_get(
-            "/api/sessions/{session_id}/tasks/{task_id}",
-            self._read_session_task,
-        )
-        self._app.router.add_get(
-            "/api/sessions/{session_id}/tasks/{task_id}/activities",
-            self._list_session_task_activities,
-        )
-        self._app.router.add_get(
             "/api/sessions/{session_id}/capabilities",
             self._inspect_session_capabilities,
         )
@@ -678,6 +659,7 @@ class LocalHttpServer:
             "command",
             "query-command",
             "subagent-capacity",
+            "code-mode-cells",
             "live-control-snapshot",
             "resolve-interaction",
             "read-capability-form",
@@ -1568,85 +1550,10 @@ class LocalHttpServer:
     async def _list_sessions(self, _request: web.Request) -> web.Response:
         return web.json_response({"sessions": await self.sessions.list_sessions()})
 
-    async def _list_session_tasks(self, request: web.Request) -> web.Response:
-        raw_limit = request.query.get("limit", "50")
-        try:
-            maximum_items = int(raw_limit)
-        except ValueError as exc:
-            raise HttpPublicError(
-                "TASK_PAGE_INVALID",
-                "任务列表的分页参数不正确。",
-                status=400,
-            ) from exc
-        try:
-            payload = await self.sessions.list_session_tasks(
-                request.match_info["session_id"],
-                maximum_items=maximum_items,
-                cursor=request.query.get("cursor"),
-                batch_id=request.query.get("batch_id"),
-            )
-        except ValueError as exc:
-            raise HttpPublicError(
-                "TASK_PAGE_INVALID",
-                "任务列表的分页参数不正确。",
-                status=400,
-            ) from exc
-        return web.json_response(payload)
 
-    async def _list_session_task_groups(self, request: web.Request) -> web.Response:
-        raw_limit = request.query.get("limit", "50")
-        try:
-            maximum_items = int(raw_limit)
-            payload = await self.sessions.list_session_task_groups(
-                request.match_info["session_id"],
-                maximum_items=maximum_items,
-                cursor=request.query.get("cursor"),
-            )
-        except ValueError as exc:
-            detail = str(exc)
-            if detail.startswith("TASK_BATCH_DATA_INCOMPLETE:"):
-                raise HttpPublicError(
-                    "TASK_BATCH_DATA_INCOMPLETE",
-                    f"任务缺少批次身份：{detail.partition(':')[2]}",
-                    status=409,
-                ) from exc
-            raise HttpPublicError(
-                "TASK_GROUP_PAGE_INVALID",
-                "任务组的分页参数不正确。",
-                status=400,
-            ) from exc
-        return web.json_response(payload)
 
-    async def _read_session_task(self, request: web.Request) -> web.Response:
-        payload = await self.sessions.read_session_task(
-            request.match_info["session_id"],
-            request.match_info["task_id"],
-        )
-        return web.json_response(payload)
 
-    async def _read_session_task_group(self, request: web.Request) -> web.Response:
-        payload = await self.sessions.read_session_task_group(
-            request.match_info["session_id"],
-            request.match_info["group_id"],
-        )
-        return web.json_response(payload)
 
-    async def _list_session_task_activities(self, request: web.Request) -> web.Response:
-        raw_limit = request.query.get("limit", "50")
-        try:
-            payload = await self.sessions.list_session_task_activities(
-                request.match_info["session_id"],
-                request.match_info["task_id"],
-                maximum_items=int(raw_limit),
-                cursor=request.query.get("cursor"),
-            )
-        except ValueError as exc:
-            raise HttpPublicError(
-                "TASK_ACTIVITY_PAGE_INVALID",
-                "任务活动的分页参数不正确。",
-                status=400,
-            ) from exc
-        return web.json_response(payload)
 
     async def _inspect_session_capabilities(self, request: web.Request) -> web.Response:
         payload = await self.sessions.inspect_session_capabilities(
@@ -1975,6 +1882,7 @@ class LocalHttpServer:
             "source_format",
             "classifications",
             "public_values",
+            "mcp_scope_policies",
         }:
             raise ValueError("unexpected Plugin install field")
         source_path = body.get("source_path")
@@ -1985,6 +1893,7 @@ class LocalHttpServer:
             source_format=_optional_body_string(body, "source_format") or "native",
             classifications=_plugin_import_strings(body, "classifications"),
             public_values=_plugin_import_strings(body, "public_values"),
+            mcp_scope_policies=_plugin_import_strings(body, "mcp_scope_policies"),
         )
         return web.json_response(payload, status=201)
 
@@ -2752,6 +2661,7 @@ class LocalHttpServer:
                 "command": lambda: self.bridge.command(connection_id, body),
                 "query-command": lambda: self.bridge.query_command(connection_id, body),
                 "subagent-capacity": lambda: self.bridge.subagent_capacity(connection_id, body),
+                "code-mode-cells": lambda: self.bridge.code_mode_cells(connection_id, body),
                 "live-control-snapshot": lambda: self.bridge.live_control_snapshot(
                     connection_id
                 ),

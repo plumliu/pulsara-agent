@@ -422,8 +422,6 @@ class KernelToolCapabilityPlanner:
         if (
             direct_projection_set.conversation_scope_kind
             is not selection.conversation_scope_kind
-            or direct_projection_set.scope_subagent_task_id
-            != selection.scope_subagent_task_id
             or direct_projection_set.native_function_tool_wire_contract_fingerprint
             != selection.native_function_tool_wire_contract_fingerprint
             or direct_projection_set.tool_versions != selection.direct_tool_versions

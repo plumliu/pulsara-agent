@@ -16,14 +16,14 @@ CONTROL_RESULT_RETENTION_MS = 3_600_000
 
 
 class UserControlOperation(StrEnum):
+    STOP_CODE_MODE_CELL = "STOP_CODE_MODE_CELL"
     STOP_ACTIVE_TURN = "STOP_ACTIVE_TURN"
-    CANCEL_SUBAGENT_TASK = "CANCEL_SUBAGENT_TASK"
     TERMINATE_BACKGROUND_PROCESS = "TERMINATE_BACKGROUND_PROCESS"
 
 
 class UserControlTargetKind(StrEnum):
+    CODE_MODE_CELL = "CODE_MODE_CELL"
     ROOT_TURN = "ROOT_TURN"
-    SUBAGENT_TASK = "SUBAGENT_TASK"
     BACKGROUND_PROCESS = "BACKGROUND_PROCESS"
 
 
@@ -83,11 +83,13 @@ class RootControlResult:
     reason: str | None
 
 
+
+
 @dataclass(frozen=True, slots=True)
-class SubagentControlResult:
-    disposition: str
-    status: str | None
-    reason: str | None
+class CodeModeControlResult:
+    cell_id: str
+    state: str
+    pending_calls: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +138,7 @@ class UserControlOutcome:
     accepted: bool
     execution: UserControlExecution
     root: RootControlResult | None = None
-    subagent: SubagentControlResult | None = None
+    cell: CodeModeControlResult | None = None
     process: ProcessControlResult | None = None
     monitor: MonitorControlResult | None = None
     feedback: UserControlFeedbackState | None = None
@@ -146,6 +148,7 @@ __all__ = [
     "CONTROL_ADMISSION_WINDOW_MS",
     "CONTROL_RESULT_RETENTION_MS",
     "ControlQueryStatus",
+    "CodeModeControlResult",
     "FeedbackCanonicalStatus",
     "FeedbackInclusionStatus",
     "FeedbackOwnerAvailability",
@@ -153,7 +156,6 @@ __all__ = [
     "MonitorControlResult",
     "ProcessControlResult",
     "RootControlResult",
-    "SubagentControlResult",
     "UserControlExecution",
     "UserControlFeedbackState",
     "UserControlOperation",

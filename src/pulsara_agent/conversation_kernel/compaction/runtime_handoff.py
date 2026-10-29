@@ -8,7 +8,6 @@ subagent state and performs no I/O.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from pulsara_agent.conversation_kernel.todo_runtime import FrozenTodoSnapshot
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
@@ -17,7 +16,6 @@ from pulsara_agent.primitives.todo import MAXIMUM_TODO_ITEMS
 
 MAXIMUM_HANDOFF_TERMINAL_PROCESSES = 8
 MAXIMUM_HANDOFF_TERMINAL_MONITORS = 8
-MAXIMUM_HANDOFF_SUBAGENT_TASKS = 16
 MAXIMUM_HANDOFF_TEXT_UTF8_BYTES = 512
 MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES = 32_768
 
@@ -34,11 +32,7 @@ class FrozenTerminalProcessHandoffFact:
     cwd: str
 
     def __post_init__(self) -> None:
-        if (
-            not self.process_id
-            or self.status != "running"
-            or not self.cwd
-        ):
+        if not self.process_id or self.status != "running" or not self.cwd:
             raise ValueError("terminal process handoff fact is invalid")
         _require_text_bound(self.command_preview)
         _require_text_bound(self.cwd)
@@ -58,62 +52,6 @@ class FrozenTerminalMonitorHandoffFact:
             or self.state not in {"active", "dormant"}
         ):
             raise ValueError("terminal monitor handoff fact is invalid")
-
-
-@dataclass(frozen=True, slots=True)
-class FrozenRootSubagentTaskBoardHandoffFact:
-    task_id: str
-    task_key: str | None
-    label: str | None
-    status: str
-    objective_preview: str | None
-    dependency_total: int
-    dependency_remaining: int
-    pending_message_count: int
-    accepted_at: datetime
-
-    def __post_init__(self) -> None:
-        if (
-            not self.task_id
-            or self.status
-            not in {"ACTIVE", "PENDING_START", "WAITING_DEPENDENCY"}
-            or self.dependency_total < 0
-            or self.dependency_total > 16
-            or not 0 <= self.dependency_remaining <= self.dependency_total
-            or not 0 <= self.pending_message_count <= 16
-            or self.accepted_at.tzinfo is None
-        ):
-            raise ValueError("subagent task-board handoff fact is invalid")
-        for value in (self.task_key, self.label):
-            if value is not None and len(value.encode("utf-8")) > 64:
-                raise ValueError("subagent task-board display identity is too large")
-        if self.objective_preview is not None:
-            _require_text_bound(self.objective_preview)
-
-
-def freeze_subagent_task_board_fact(
-    *,
-    task_id: str,
-    task_key: str | None,
-    label: str | None,
-    objective_preview: str | None,
-    status: str,
-    dependency_total: int,
-    dependency_remaining: int,
-    pending_message_count: int,
-    accepted_at: datetime,
-) -> FrozenRootSubagentTaskBoardHandoffFact:
-    return FrozenRootSubagentTaskBoardHandoffFact(
-        task_id=task_id,
-        task_key=task_key,
-        label=label,
-        objective_preview=objective_preview,
-        status=status,
-        dependency_total=dependency_total,
-        dependency_remaining=dependency_remaining,
-        pending_message_count=pending_message_count,
-        accepted_at=accepted_at,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,12 +83,11 @@ def freeze_compaction_runtime_handoff(
     terminal_processes: tuple[FrozenTerminalProcessHandoffFact, ...],
     terminal_monitors: tuple[FrozenTerminalMonitorHandoffFact, ...],
     todo: FrozenTodoSnapshot | None,
-    subagent_tasks: tuple[FrozenRootSubagentTaskBoardHandoffFact, ...],
-    subagent_task_totals: tuple[tuple[str, int], ...] | None = None,
+    agent_work_index: tuple[dict[str, object], ...] = (),
+    code_cells: tuple[dict[str, object], ...] = (),
     maximum_utf8_bytes: int = MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES,
 ) -> FrozenCompactionRuntimeHandoff | None:
-    """Render one exact live-state snapshot, or ``None`` for a true clear."""
-
+    """Project physical owners into one bounded, disposable context observation."""
     if not 1 <= maximum_utf8_bytes <= MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES:
         raise ValueError("runtime handoff byte budget is invalid")
     if (
@@ -160,111 +97,20 @@ def freeze_compaction_runtime_handoff(
         raise CompactionRuntimeHandoffBoundError(
             "runtime owner exceeded its closed item capacity"
         )
-    processes = tuple(sorted(terminal_processes, key=lambda item: item.process_id))
-    monitors = tuple(sorted(terminal_monitors, key=lambda item: item.monitor_id))
-    status_order = {"ACTIVE": 0, "PENDING_START": 1, "WAITING_DEPENDENCY": 2}
-    ordered_tasks = tuple(
-        sorted(
-            subagent_tasks,
-            key=lambda item: (
-                status_order[item.status],
-                item.accepted_at,
-                item.task_id,
-            ),
-        )
-    )
-    totals = dict(
-        subagent_task_totals
-        or tuple(
-            (status, sum(item.status == status for item in ordered_tasks))
-            for status in ("ACTIVE", "PENDING_START", "WAITING_DEPENDENCY")
-        )
-    )
-    if (
-        set(totals) != {"ACTIVE", "PENDING_START", "WAITING_DEPENDENCY"}
-        or any(value < 0 for value in totals.values())
-        or any(
-            totals[status] < sum(item.status == status for item in ordered_tasks)
-            for status in totals
-        )
-    ):
-        raise ValueError("subagent task-board totals are invalid")
-    active_tasks = tuple(item for item in ordered_tasks if item.status == "ACTIVE")
-    if len(active_tasks) > 4:
-        raise CompactionRuntimeHandoffBoundError(
-            "runtime owner exceeded active subagent capacity"
-        )
-    visible_tasks = ordered_tasks[:MAXIMUM_HANDOFF_SUBAGENT_TASKS]
     todo_items = () if todo is None else todo.ordered_items
     if len(todo_items) > MAXIMUM_TODO_ITEMS:
         raise CompactionRuntimeHandoffBoundError(
             "TODO handoff exceeded its closed item capacity"
         )
-    if not processes and not monitors and todo is None and not ordered_tasks:
+    if (
+        not terminal_processes
+        and not terminal_monitors
+        and todo is None
+        and not agent_work_index
+        and not code_cells
+    ):
         return None
-
-    full_payload = _payload(
-        processes=processes,
-        monitors=monitors,
-        todo=todo,
-        subagent_tasks=visible_tasks,
-        subagent_task_totals=totals,
-    )
-    full_bytes = canonical_json_bytes(full_payload)
-    if len(full_bytes) <= maximum_utf8_bytes:
-        compact_bytes = full_bytes
-    else:
-        compact_bytes = b""
-        # The exact TODO snapshot and ACTIVE tasks are mandatory. Only trailing
-        # PENDING/WAITING subagent rows may be removed from COMPACT.
-        for task_count in range(len(visible_tasks), len(active_tasks) - 1, -1):
-            candidate = canonical_json_bytes(
-                _payload(
-                    processes=processes,
-                    monitors=monitors,
-                    todo=todo,
-                    subagent_tasks=visible_tasks[:task_count],
-                    subagent_task_totals=totals,
-                )
-            )
-            if len(candidate) <= maximum_utf8_bytes:
-                compact_bytes = candidate
-                break
-        if not compact_bytes:
-            raise CompactionRuntimeHandoffBoundError(
-                "runtime handoff fixed envelope exceeds its byte budget"
-            )
-        # FULL is a semantic variant and must itself remain within the sealed
-        # 32 KiB contract; oversized owner state cannot be silently renamed as
-        # FULL merely because a lossy COMPACT rendering happens to fit.
-        if len(full_bytes) > MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES:
-            raise CompactionRuntimeHandoffBoundError(
-                "runtime handoff FULL representation exceeds its byte budget"
-            )
-
-    full_text = full_bytes.decode("utf-8")
-    compact_text = compact_bytes.decode("utf-8")
-    fingerprint = context_fingerprint(
-        "pulsara.compaction-runtime-handoff-projection.v3-complete-todo",
-        {"full": full_text, "compact": compact_text},
-    )
-    return FrozenCompactionRuntimeHandoff(
-        full_text=full_text,
-        compact_text=compact_text,
-        source_fingerprint=fingerprint,
-    )
-
-
-def _payload(
-    *,
-    processes: tuple[FrozenTerminalProcessHandoffFact, ...],
-    monitors: tuple[FrozenTerminalMonitorHandoffFact, ...],
-    todo: FrozenTodoSnapshot | None,
-    subagent_tasks: tuple[FrozenRootSubagentTaskBoardHandoffFact, ...],
-    subagent_task_totals: dict[str, int],
-) -> dict[str, object]:
-    todo_items = () if todo is None else todo.ordered_items
-    return {
+    payload = {
         "terminal_processes": tuple(
             {
                 "target": {"kind": "PROCESS", "process_id": item.process_id},
@@ -272,7 +118,7 @@ def _payload(
                 "command_preview": item.command_preview,
                 "cwd": item.cwd,
             }
-            for item in processes
+            for item in sorted(terminal_processes, key=lambda x: x.process_id)
         ),
         "terminal_monitors": tuple(
             {
@@ -281,14 +127,10 @@ def _payload(
                 "state": item.state,
                 "pending_observation": item.pending_observation,
             }
-            for item in monitors
+            for item in sorted(terminal_monitors, key=lambda x: x.monitor_id)
         ),
         "todos": tuple(
-            {
-                "status": item.status.value,
-                "text": item.text,
-            }
-            for item in todo_items
+            {"status": item.status.value, "text": item.text} for item in todo_items
         ),
         "todo_counts": {
             "pending": 0 if todo is None else todo.pending_count,
@@ -296,35 +138,33 @@ def _payload(
             "completed": 0 if todo is None else todo.completed_count,
             "total": len(todo_items),
         },
-        "subagent_tasks": tuple(
-            {
-                "task_id": item.task_id,
-                "task_key": item.task_key,
-                "label": item.label,
-                "status": item.status,
-                "objective_preview": item.objective_preview,
-                "dependency_total": item.dependency_total,
-                "dependency_remaining": item.dependency_remaining,
-                "pending_message_count": item.pending_message_count,
-            }
-            for item in subagent_tasks
-        ),
-        "subagent_task_counts": {
-            status: {
-                "total": subagent_task_totals[status],
-                "omitted": subagent_task_totals[status]
-                - sum(item.status == status for item in subagent_tasks),
-            }
-            for status in ("ACTIVE", "PENDING_START", "WAITING_DEPENDENCY")
-        },
-        "omitted": {
-            "terminal_processes": 0,
-            "terminal_monitors": 0,
-            "todos": 0,
-            "subagent_tasks": sum(subagent_task_totals.values())
-            - len(subagent_tasks),
-        },
+        "agents": [],
+        "code_cells": [],
+        "omitted": {"agents": len(agent_work_index), "code_cells": len(code_cells)},
     }
+    if len(canonical_json_bytes(payload)) > maximum_utf8_bytes:
+        raise CompactionRuntimeHandoffBoundError(
+            "runtime handoff fixed envelope exceeds its byte budget"
+        )
+    # Index admission consumes only this observation's byte budget. It never
+    # limits logical Work/cell lifetime or the owner's pageable inventory.
+    for key, values in (("code_cells", code_cells), ("agents", agent_work_index)):
+        for item in values:
+            payload[key].append(item)
+            payload["omitted"][key] -= 1
+            if len(canonical_json_bytes(payload)) > maximum_utf8_bytes:
+                payload[key].pop()
+                payload["omitted"][key] += 1
+                break
+    text = canonical_json_bytes(payload).decode("utf-8")
+    return FrozenCompactionRuntimeHandoff(
+        text,
+        text,
+        context_fingerprint(
+            "pulsara.compaction-runtime-handoff-projection.v3-complete-todo",
+            {"full": text, "compact": text},
+        ),
+    )
 
 
 def bounded_handoff_preview(value: str) -> str:
@@ -349,11 +189,9 @@ def _require_text_bound(value: str) -> None:
 __all__ = [
     "CompactionRuntimeHandoffBoundError",
     "FrozenCompactionRuntimeHandoff",
-    "FrozenRootSubagentTaskBoardHandoffFact",
     "FrozenTerminalMonitorHandoffFact",
     "FrozenTerminalProcessHandoffFact",
     "MAXIMUM_RUNTIME_HANDOFF_UTF8_BYTES",
     "bounded_handoff_preview",
-    "freeze_subagent_task_board_fact",
     "freeze_compaction_runtime_handoff",
 ]

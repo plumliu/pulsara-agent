@@ -48,6 +48,7 @@ def hook_snapshot_public(snapshot, *, inspect: bool) -> dict[str, object]:
                 "async": item.asynchronous,
                 "statusMessage": item.status_message,
                 "additionalContextLimit": item.additional_context_limit,
+                "scope_policy": item.scope_policy.value,
             }
             for item in snapshot.definitions
         ]
@@ -82,7 +83,7 @@ def add_matching_tool_review(
         "write_file": "写入文件",
         "search_content": "搜索内容",
         "find_files": "查找文件",
-        "spawn_agent": "创建子任务",
+        "run_agent": "派发工作",
     }
     value["workspace_path"] = str(workspace_root)
     value["tool_inventory_complete"] = complete

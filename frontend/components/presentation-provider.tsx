@@ -4,19 +4,17 @@ import { browserTitle, type BrowserTabRecord } from '../lib/browser-tabs';
 import { presentationLabel, type PresentationTarget } from '../lib/presentation-targets';
 import { FilePresentationContext } from './file-browser';
 import { inspectorTab, useDesktopWorkspace, type PreparedWorkspaceTab, type WorkspaceTab } from './desktop-workspace';
-import type { AgentTask } from '../lib/pulsara-types';
 
 export const PresentationContext = createContext<((targets: PresentationTarget[]) => void) | undefined>(undefined);
 
 /** Disposable observation effects. No pending request survives its visible connection. */
-export function PresentationProvider({ connection, visible, isOpen, children, readTask, onCloseTaskGroup }: {
+export function PresentationProvider({ connection, visible, isOpen, children }: {
   connection?: RuntimeConnection; visible: boolean; isOpen: boolean; children: ReactNode;
-  readTask?: (taskId: string) => Promise<AgentTask>; onCloseTaskGroup?: (groupId: string) => void;
 }) {
   const workspace = useDesktopWorkspace();
   const prepareFile = useContext(FilePresentationContext);
-  const current = useRef({ workspace, prepareFile, readTask, onCloseTaskGroup });
-  useLayoutEffect(() => { current.current = { workspace, prepareFile, readTask, onCloseTaskGroup }; });
+  const current = useRef({ workspace, prepareFile });
+  useLayoutEffect(() => { current.current = { workspace, prepareFile }; });
   const pending = useRef(new Set<AbortController>());
   const latest = useRef('0');
   const cancel = useCallback(() => { for (const operation of pending.current) operation.abort(); pending.current.clear(); }, []);
@@ -28,7 +26,6 @@ export function PresentationProvider({ connection, visible, isOpen, children, re
     if (!owner || !targets.length || !valid()) return;
     const prepared: PreparedWorkspaceTab[] = [];
     const browsers = new Map<string, BrowserTabRecord>();
-    const taskViews = new Map<string, NonNullable<WorkspaceTab['view']>>();
     try {
       // Sequential file preparation preserves the existing per-operation read bound.
       for (const target of targets) {
@@ -42,27 +39,6 @@ export function PresentationProvider({ connection, visible, isOpen, children, re
           prepared.push({ release: () => {}, start: browser.start, adopt: () => {
             const record = browser.adopt();
             return { id: record.id, sessionId: record.sessionId, kind: 'browser', title: browserTitle(record), browser: record, onClose: () => owner.browserTabs.close(record.id) };
-          } });
-        } else if (target.type === 'task') {
-          let tab: WorkspaceTab;
-          try {
-            const task = await current.current.readTask?.(target.task_id);
-            if (!task?.batchId) throw new Error('这个任务的任务组暂时无法读取。');
-            tab = { ...inspectorTab(owner.sessionId, 'group', task.label, task.batchId),
-              onClose: () => current.current.onCloseTaskGroup?.(task.batchId!) };
-          } catch (error) {
-            const message = error instanceof Error ? error.message : '任务暂时无法读取。';
-            tab = { ...inspectorTab(owner.sessionId, 'task', target.task_id, target.task_id),
-              render: () => <div className="task-inventory-notice"><p role="alert">{message}</p></div> };
-          }
-          prepared.push({ release: () => {}, adopt: () => {
-            if (tab.kind === 'group') {
-              const existing = current.current.workspace?.tabs.find(item => item.id === tab.id);
-              tab.view = taskViews.get(tab.id) ?? existing?.view ?? { top: 0, left: 0 };
-              tab.view.taskId = target.task_id;
-              taskViews.set(tab.id, tab.view);
-            }
-            return tab;
           } });
         } else {
           const tab = target.type === 'panel'

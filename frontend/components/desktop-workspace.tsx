@@ -6,11 +6,11 @@ import type { CommandReceipt, UserControlCommandRef } from '../lib/runtime-adapt
 import { Blocks, Bot, ChevronLeft, ChevronRight, Globe, FileText, FolderKanban, ListChecks, PanelRightClose, Server, TerminalSquare, X } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 
-export type WorkspaceTabKind = 'browser' | 'file' | 'visualization' | 'tasks' | 'group' | 'task' | 'capabilities' | 'mcp' | 'background' | 'process';
+export type WorkspaceTabKind = 'browser' | 'file' | 'visualization' | 'capabilities' | 'mcp' | 'background' | 'process';
 export interface WorkspaceControl { forgetSession: (sessionId: string) => void; clear: () => void }
 export interface WorkspaceTab {
   browser?: BrowserTabRecord;
-  view?: { top: number; left: number; taskId?: string; reader?: { top: number; left: number }; graph?: { top: number; left: number; zoom?: number } };
+  view?: { top: number; left: number; reader?: { top: number; left: number }; graph?: { top: number; left: number; zoom?: number } };
   id: string;
   sessionId: string;
   title: string;
@@ -101,7 +101,7 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   const value = useMemo(() => ({ interact, interactionVersion, publish, sessionId, visible, browserTabs, backgroundControls, tabs: tabs.filter(tab => tab.sessionId === sessionId), activeId: active[sessionId], open, update, close, activate }), [interact, interactionVersion, publish, backgroundControls, browserTabs, visible, tabs, sessionId, active, open, update, close, activate]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
-const icons = { browser: Globe, file: FileText, visualization: FileText, tasks: ListChecks, group: FolderKanban, task: Bot, capabilities: Blocks, mcp: Server, background: TerminalSquare, process: TerminalSquare };
+const icons = { browser: Globe, file: FileText, visualization: FileText, capabilities: Blocks, mcp: Server, background: TerminalSquare, process: TerminalSquare };
 function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: WorkspaceTab[]; selectedId?: string; activate: (id: string) => void; close: (id: string) => void }) {
   const list = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ left: false, right: false });

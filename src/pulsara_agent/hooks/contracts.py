@@ -26,8 +26,6 @@ class HookEventType(StrEnum):
     POST_TOOL_USE_EVENT = "PostToolUseEvent"
     PRE_COMPACT_EVENT = "PreCompactEvent"
     POST_COMPACT_EVENT = "PostCompactEvent"
-    SUBAGENT_START_EVENT = "SubagentStartEvent"
-    SUBAGENT_STOP_EVENT = "SubagentStopEvent"
     STOP_EVENT = "StopEvent"
 
     @property
@@ -224,6 +222,12 @@ class FrozenHookMatcherFact:
     ignored_by_profile: bool = False
 
 
+class HookScopePolicy(StrEnum):
+    ROOT = "ROOT"
+    SUBAGENT = "SUBAGENT"
+    BOTH = "BOTH"
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenHookDefinition:
     provenance: FrozenHookSourceProvenance
@@ -239,6 +243,7 @@ class FrozenHookDefinition:
     asynchronous: bool
     status_message: str | None
     additional_context_limit: int
+    scope_policy: HookScopePolicy = HookScopePolicy.ROOT
 
     def selected_command(self, *, windows: bool) -> str:
         if windows and self.command_windows is not None:
@@ -276,7 +281,7 @@ class FrozenHookDefinitionView:
     source_snapshots: tuple[FrozenHookSourceSnapshot, ...]
 
     def selected_definitions(
-        self, event_type: HookEventType
+        self, event_type: HookEventType, scope_kind: HookScopeKind | None = None
     ) -> tuple[tuple[int, FrozenHookDefinition], ...]:
         selected: list[tuple[int, FrozenHookDefinition]] = []
         for source_ordinal, snapshot in enumerate(self.source_snapshots):
@@ -286,13 +291,16 @@ class FrozenHookDefinitionView:
                 (source_ordinal, definition)
                 for definition in snapshot.definitions
                 if definition.event_type is event_type
+                and (scope_kind is None or definition.scope_policy is HookScopePolicy.BOTH
+                     or (scope_kind is HookScopeKind.ROOT and definition.scope_policy is HookScopePolicy.ROOT)
+                     or (scope_kind is HookScopeKind.SUBAGENT and definition.scope_policy is HookScopePolicy.SUBAGENT))
             )
         return tuple(selected)
 
 
 class HookScopeKind(StrEnum):
     ROOT = "ROOT"
-    CHILD = "CHILD"
+    SUBAGENT = "SUBAGENT"
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,11 +310,11 @@ class HookDispatchScopeRef:
     host_session_owner: object = field(repr=False, compare=False)
     workspace_owner: object = field(repr=False, compare=False)
     kind: HookScopeKind
-    child_task_id: str | None = None
+    session_id: str
 
     def __post_init__(self) -> None:
-        if (self.kind is HookScopeKind.CHILD) != (self.child_task_id is not None):
-            raise ValueError("Hook child scope identity is inconsistent")
+        if not self.session_id:
+            raise ValueError("Hook session scope identity is missing")
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,7 +338,7 @@ class DirectPromptRef:
 
 @dataclass(frozen=True, slots=True)
 class QueuedPromptRef:
-    command_id: str
+    command_id: str | None
     queue_item_id: str
     turn_id: str
     entry_id: str
@@ -343,6 +351,8 @@ class PreToolRef:
     assistant_entry_id: str
     tool_call_id: str
     resolved_tool_identity: str
+    invocation_id: str | None = None
+    member_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +370,8 @@ class PostToolRef:
     result_entry_id: str
     result_state: str
     epoch_nonce: object = field(repr=False, compare=False)
+    invocation_id: str | None = None
+    member_key: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,18 +389,8 @@ class PostCompactRef:
     adopted_binding_revision_id: str
 
 
-@dataclass(frozen=True, slots=True)
-class SubagentStartRef:
-    task_start_event_id: str
-    task_id: str
-    child_turn_id: str
 
 
-@dataclass(frozen=True, slots=True)
-class SubagentStopRef:
-    task_id: str
-    completion_kind: str
-    completion_entry_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,13 +411,15 @@ type HookDispatchCausalRef = (
     | PostToolRef
     | PreCompactRef
     | PostCompactRef
-    | SubagentStartRef
-    | SubagentStopRef
     | StopRef
 )
 
 
 class HookPublicInput(Protocol):
+    session_id: str
+    session_kind: str
+    input_origin: str | None
+
     @property
     def event_type(self) -> HookEventType: ...
 
@@ -433,10 +437,19 @@ class _HookInputBase:
     session_id: str
     cwd: str
     model: str
+    input_origin: str | None = field(kw_only=True)
+    session_kind: str = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        if (self.session_kind not in {"ROOT", "SUBAGENT"}
+                or (self.input_origin is not None and (not isinstance(self.input_origin, str) or not self.input_origin))):
+            raise ValueError("Hook public identity and input origin must be explicit")
 
     def _common(self, event_type: HookEventType) -> dict[str, JsonValue]:
         return {
             "session_id": self.session_id,
+            "session_kind": self.session_kind,
+            "input_origin": self.input_origin,
             "transcript_path": None,
             "cwd": self.cwd,
             "hook_event_name": event_type.external_name,
@@ -567,44 +580,8 @@ class PostCompactInput(_HookInputBase):
         }
 
 
-@dataclass(frozen=True, slots=True)
-class SubagentStartInput(_HookInputBase):
-    turn_id: str
-    agent_id: str
-    agent_type: str
-    permission_mode: str
-    event_type = HookEventType.SUBAGENT_START_EVENT
-
-    def to_wire(self) -> dict[str, JsonValue]:
-        return self._common(self.event_type) | {
-            "turn_id": self.turn_id,
-            "agent_id": self.agent_id,
-            "agent_type": self.agent_type,
-            "permission_mode": self.permission_mode,
-        }
 
 
-@dataclass(frozen=True, slots=True)
-class SubagentStopInput(_HookInputBase):
-    turn_id: str
-    agent_id: str
-    agent_type: str
-    stop_hook_active: bool
-    last_assistant_message: str | None
-    permission_mode: str
-    agent_transcript_path: None = None
-    event_type = HookEventType.SUBAGENT_STOP_EVENT
-
-    def to_wire(self) -> dict[str, JsonValue]:
-        return self._common(self.event_type) | {
-            "turn_id": self.turn_id,
-            "agent_id": self.agent_id,
-            "agent_type": self.agent_type,
-            "agent_transcript_path": None,
-            "stop_hook_active": self.stop_hook_active,
-            "last_assistant_message": self.last_assistant_message,
-            "permission_mode": self.permission_mode,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,6 +612,11 @@ class HookDispatchEnvelope(Generic[TInput]):
     causal_ref: HookDispatchCausalRef = field(repr=False, compare=False)
     deadline_monotonic: float | None
     cancellation_signal: object | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (self.public_input.session_id != self.scope.session_id
+                or self.public_input.session_kind != self.scope.kind.value):
+            raise ValueError("Hook public identity does not match its actual session scope")
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,6 +657,7 @@ class ContextOutcome:
 
 @dataclass(frozen=True, slots=True)
 class GateOutcome:
+    updated_input: dict[str, JsonValue] | None = field(default=None, kw_only=True)
     decision: GateDecision = GateDecision.PROCEED
     reason: str | None = None
     context_entries: tuple[HookContextEntry, ...] = ()
@@ -714,8 +697,6 @@ EVENT_OUTCOME_FAMILY: Mapping[HookEventType, type[HookDispatchOutcome]] = {
     HookEventType.POST_TOOL_USE_EVENT: ContextOutcome,
     HookEventType.PRE_COMPACT_EVENT: GateOutcome,
     HookEventType.POST_COMPACT_EVENT: GateOutcome,
-    HookEventType.SUBAGENT_START_EVENT: ContextOutcome,
-    HookEventType.SUBAGENT_STOP_EVENT: ContinuationOutcome,
     HookEventType.STOP_EVENT: ContinuationOutcome,
 }
 
@@ -758,6 +739,7 @@ __all__ = [
     "HookEventType",
     "HookPublicInput",
     "HookScopeKind",
+    "HookScopePolicy",
     "HookSecretScrubber",
     "HookSourceIdentity",
     "HookSourceKind",
@@ -792,10 +774,6 @@ __all__ = [
     "SessionStartRef",
     "StopInput",
     "StopRef",
-    "SubagentStartInput",
-    "SubagentStartRef",
-    "SubagentStopInput",
-    "SubagentStopRef",
     "UserPromptSubmitInput",
     "external_permission_mode",
 ]

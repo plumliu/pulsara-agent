@@ -39,9 +39,15 @@ class _AssistantHistoryBatch:
         self.visualization_rows = {}
         self._text = {}
         self._visualizations = {}
-        assistants = [entry for entry in entries if entry["entry_kind"] in {
-            "ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST",
-        }]
+        assistants = [
+            entry
+            for entry in entries
+            if entry["entry_kind"]
+            in {
+                "ASSISTANT_MESSAGE",
+                "ASSISTANT_TOOL_REQUEST",
+            }
+        ]
         if not assistants:
             return
         ids = [entry["id"] for entry in assistants]
@@ -60,18 +66,28 @@ class _AssistantHistoryBatch:
         ).fetchall()
         for row in rows:
             self.blocks[row["assistant_entry_id"]].append(row)
-        self.finals = {row["final_entry_id"] for row in connection.execute(
-            """SELECT final_entry_id FROM pulsara_v3.turns
+        self.finals = {
+            row["final_entry_id"]
+            for row in connection.execute(
+                """SELECT final_entry_id FROM pulsara_v3.turns
                WHERE session_id=%s AND final_entry_id=ANY(%s::text[])
                UNION ALL SELECT final_entry_id FROM pulsara_v3.imported_history_groups
                WHERE session_id=%s AND final_entry_id=ANY(%s::text[])""",
-            (session_id, ids, session_id, ids),
-        ).fetchall()}
-        from pulsara_agent.conversation_kernel.visualization import load_visualization_rows
+                (session_id, ids, session_id, ids),
+            ).fetchall()
+        }
+        from pulsara_agent.conversation_kernel.visualization import (
+            load_visualization_rows,
+        )
 
         self.visualization_rows = load_visualization_rows(
-            connection, session_id,
-            [entry["id"] for entry in assistants if entry["entry_kind"] == "ASSISTANT_MESSAGE"],
+            connection,
+            session_id,
+            [
+                entry["id"]
+                for entry in assistants
+                if entry["entry_kind"] == "ASSISTANT_MESSAGE"
+            ],
         )
 
     def block_text(self, block):
@@ -85,15 +101,19 @@ class _AssistantHistoryBatch:
             else:
                 import json
 
-                text = block["tool_name"] + "\n" + json.dumps(
-                    block["tool_arguments"], ensure_ascii=False
+                text = (
+                    block["tool_name"]
+                    + "\n"
+                    + json.dumps(block["tool_arguments"], ensure_ascii=False)
                 )
             self._text[key] = text
         return self._text[key]
 
     def visualizations(self, entry_id):
         if entry_id not in self._visualizations:
-            from pulsara_agent.conversation_kernel.visualization import visualization_metadata_rows
+            from pulsara_agent.conversation_kernel.visualization import (
+                visualization_metadata_rows,
+            )
 
             self._visualizations[entry_id] = visualization_metadata_rows(
                 self.visualization_rows.get(entry_id, ())
@@ -102,7 +122,11 @@ class _AssistantHistoryBatch:
 
 
 def canonical_history_message(
-    connection, entry, *, include_tools=False, assistant_content=None,
+    connection,
+    entry,
+    *,
+    include_tools=False,
+    assistant_content=None,
 ):
     """Keep field coordinates and full annotations; quote never enters the index."""
     kind = entry["entry_kind"]
@@ -170,11 +194,13 @@ def canonical_history_message(
             if not include_tools:
                 return None
             fact = connection.execute(
-                "SELECT r.*,a.tool_name FROM pulsara_v3.tool_results r JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id AND a.assistant_entry_id=r.tool_call_entry_id AND a.tool_call_id=r.tool_call_id WHERE r.session_id=%s AND r.result_entry_id=%s",
+                "SELECT r.*,COALESCE(i.tool_name,a.tool_name) AS tool_name,i.source_kind FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.id=r.invocation_id LEFT JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id AND a.assistant_entry_id=r.tool_call_entry_id AND a.tool_call_id=r.tool_call_id AND a.block_kind='TOOL_CALL' WHERE r.session_id=%s AND r.result_entry_id=%s",
                 (entry["session_id"], entry["id"]),
             ).fetchone()
             if fact is None:
                 raise RuntimeError("saved tool result canonical edge is missing")
+            if fact["source_kind"] != "MODEL_TOOL_CALL":
+                return None
             if fact["tool_name"] in {
                 "search_sessions",
                 "search_session_content",
@@ -246,7 +272,10 @@ def canonical_history_message(
         else:
             if assistant_content is None:
                 assistant_content = _AssistantHistoryBatch(
-                    connection, entry["session_id"], (entry,), include_tools=include_tools,
+                    connection,
+                    entry["session_id"],
+                    (entry,),
+                    include_tools=include_tools,
                 )
             elif assistant_content.connection is not connection:
                 raise RuntimeError("history source batch belongs to another connection")
@@ -281,12 +310,22 @@ def canonical_history_message(
             if not shown:
                 return None
             role, annotated = "assistant", False
-            label = "助手回答" if entry["id"] in assistant_content.finals else "助手进展"
-    from pulsara_agent.conversation_kernel.session_text import visualization_history_text
+            label = (
+                "助手回答" if entry["id"] in assistant_content.finals else "助手进展"
+            )
+    from pulsara_agent.conversation_kernel.session_text import (
+        visualization_history_text,
+    )
+
     descriptions = visualization_history_text(
-        connection, entry, image_references=None,
-        visualizations=(assistant_content.visualizations(entry["id"])
-                        if entry["entry_kind"] == "ASSISTANT_MESSAGE" else None),
+        connection,
+        entry,
+        image_references=None,
+        visualizations=(
+            assistant_content.visualizations(entry["id"])
+            if entry["entry_kind"] == "ASSISTANT_MESSAGE"
+            else None
+        ),
     )
     if descriptions:
         if body_ranges is None:
@@ -413,31 +452,37 @@ def _build_history_group(
         or q1["id"] is None
         or q1["scheduled_input"] is not None
         or q1["entry_kind"] != "USER_MESSAGE"
-        or q1["conversation_scope_kind"] != "ROOT"
+        or q1.get("input_origin") not in {None, "HUMAN_MESSAGE", "AGENT_INSTRUCTION"}
     ):
         return success({})
     # This is the raw first successor, not the first content-qualified one.
     # Scheduled/broken Q2 must not be skipped in favour of a later question.
     q2 = connection.execute(
         """SELECT * FROM pulsara_v3.transcript_entries
-           WHERE session_id=%s AND conversation_scope_kind='ROOT'
-             AND entry_kind='USER_MESSAGE' AND entry_sequence>%s
+           WHERE session_id=%s
+             AND entry_kind='USER_MESSAGE' AND input_origin IN ('HUMAN_MESSAGE','AGENT_INSTRUCTION') AND entry_sequence>%s
              AND entry_sequence<=%s ORDER BY entry_sequence LIMIT 1""",
         (session_id, q1["entry_sequence"], covered_entry_sequence),
     ).fetchone()
     rows = connection.execute(
         """SELECT * FROM pulsara_v3.transcript_entries
-           WHERE session_id=%s AND conversation_scope_kind='ROOT'
+           WHERE session_id=%s
              AND entry_sequence>=%s AND entry_sequence<=%s
              AND COALESCE(turn_id,imported_history_group_id)=COALESCE(%s,%s)
            ORDER BY entry_sequence""",
         (
-            session_id, q1["entry_sequence"], covered_entry_sequence,
-            q1["turn_id"], q1["imported_history_group_id"],
+            session_id,
+            q1["entry_sequence"],
+            covered_entry_sequence,
+            q1["turn_id"],
+            q1["imported_history_group_id"],
         ),
     ).fetchall()
     assistant_content = _AssistantHistoryBatch(
-        connection, session_id, rows, include_tools=any(tool_modes),
+        connection,
+        session_id,
+        rows,
+        include_tools=any(tool_modes),
     )
     messages_by_tools = {tools: [] for tools in tool_modes}
     for entry in rows:
@@ -449,13 +494,19 @@ def _build_history_group(
         for tools in modes:
             try:
                 message = canonical_history_message(
-                    connection, entry, include_tools=tools,
+                    connection,
+                    entry,
+                    include_tools=tools,
                     assistant_content=assistant_content,
                 )
             except RuntimeError as error:
                 return HistoryBuildFailure(
-                    session_id, q1_id, covered_entry_sequence,
-                    "Q1" if entry["id"] == q1_id else "A", entry["id"], error,
+                    session_id,
+                    q1_id,
+                    covered_entry_sequence,
+                    "Q1" if entry["id"] == q1_id else "A",
+                    entry["id"],
+                    error,
                 )
             if message is None:
                 continue
@@ -485,9 +536,7 @@ def _build_history_group(
     for tools, messages in messages_by_tools.items():
         if not any(message["region"] == "A" for message in messages):
             continue
-        documents[("QA", tools)] = _assemble_history_document(
-            deepcopy(messages), q2_id
-        )
+        documents[("QA", tools)] = _assemble_history_document(deepcopy(messages), q2_id)
         if q2_message is not None:
             documents[("QAQ", tools)] = _assemble_history_document(
                 deepcopy(messages) + [deepcopy(q2_message)], q2_id
@@ -504,21 +553,32 @@ def build_history_group(
     Database/IO/cancellation errors propagate to their transaction owner.
     """
     return _build_history_group(
-        connection, session_id, q1_id,
-        covered_entry_sequence=covered_entry_sequence, tool_modes=(False, True),
+        connection,
+        session_id,
+        q1_id,
+        covered_entry_sequence=covered_entry_sequence,
+        tool_modes=(False, True),
     )
 
 
 def build_history_document(
-    connection, session_id, q1_id, *, covered_entry_sequence: int,
-    include_tools=False, variant="QAQ",
+    connection,
+    session_id,
+    q1_id,
+    *,
+    covered_entry_sequence: int,
+    include_tools=False,
+    variant="QAQ",
 ):
     """Restore only the requested mode at the candidate's own canonical cut."""
     if variant not in {"QA", "QAQ"}:
         raise ValueError("history document variant is invalid")
     result = _build_history_group(
-        connection, session_id, q1_id,
-        covered_entry_sequence=covered_entry_sequence, tool_modes=(include_tools,),
+        connection,
+        session_id,
+        q1_id,
+        covered_entry_sequence=covered_entry_sequence,
+        tool_modes=(include_tools,),
     )
     if isinstance(result, HistoryBuildFailure):
         return None

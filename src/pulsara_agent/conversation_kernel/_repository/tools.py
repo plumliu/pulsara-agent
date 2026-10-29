@@ -7,7 +7,7 @@ from datetime import datetime
 import json
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
-from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, ConversationScopeKind, EntryKind, HostWriterGuard, InlineContent, canonical_digest
+from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, EntryKind, HostWriterGuard, InlineContent, canonical_digest
 from pulsara_agent.conversation_kernel.prompt_storage import (
     canonical_prompt_owner_is_exact,
     insert_canonical_prompt_refs,
@@ -37,12 +37,146 @@ from .matching import (
 )
 
 class _ToolOperations:
+    def read_accepted_tool_result_observation(self, *, session_id, result_id, deadline_monotonic):
+        """Read one accepted result for a live cell's undelivered observation."""
+        with self._provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
+            row = connection.execute(
+                """SELECT e.*, r.id AS result_id, r.result_state,
+                          r.output_display_kind, r.output_source_coverage,
+                          r.output_source_coverage_reason, r.output_artifact_disposition,
+                          r.output_artifact_id, r.output_artifact_unavailability_reason
+                   FROM pulsara_v3.tool_results r
+                   JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id
+                    AND e.id=r.result_entry_id AND e.entry_owner_kind='EXECUTED_TURN'
+                   WHERE r.session_id=%s AND r.id=%s""", (session_id, result_id),
+            ).fetchone()
+            if row is None:
+                raise LookupError("accepted tool result is unavailable")
+            content = self._content_from_row(row)
+            if not isinstance(content, InlineContent):
+                raise ConversationKernelConflict("accepted Code Mode result preview is not inline")
+            result = {"result_id": row["result_id"], "result_entry_id": row["id"],
+                "state": row["result_state"], "result": content.canonical_bytes.decode("utf-8"),
+                "display_kind": row["output_display_kind"], "source_coverage": row["output_source_coverage"]}
+            if row["output_source_coverage_reason"] is not None:
+                result["source_coverage_reason"] = row["output_source_coverage_reason"]
+            if row["output_artifact_disposition"] != 'NOT_REQUIRED':
+                artifact = {"disposition": row["output_artifact_disposition"],
+                            "source_coverage": row["output_source_coverage"]}
+                if row["output_artifact_id"] is not None:
+                    artifact["target"] = {"kind": "ARTIFACT", "artifact_id": row["output_artifact_id"]}
+                if row["output_artifact_unavailability_reason"] is not None:
+                    artifact["reason"] = row["output_artifact_unavailability_reason"]
+                result["output_artifact"] = artifact
+            return result
+
+    def freeze_code_mode_source(self, guard, *, attempt_id, content, deadline_monotonic):
+        """Freeze the actual post-Hook source once on its real exec attempt."""
+        from pulsara_agent.conversation_kernel.contracts import InlineContent
+        with self._writer_transaction(guard, deadline_monotonic=deadline_monotonic) as connection:
+            row = connection.execute(
+                """SELECT a.*, b.tool_name FROM pulsara_v3.tool_execution_attempts a
+                   JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
+                   JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id
+                    AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+                   WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
+                   FOR UPDATE OF a""", (guard.session_id, attempt_id),
+            ).fetchone()
+            if row is None or row['tool_name'] != 'exec':
+                raise ConversationKernelConflict("source must belong to an actual exec attempt")
+            values = (content.canonical_bytes if isinstance(content, InlineContent) else None,
+                      None if isinstance(content, InlineContent) else content.blob_id,
+                      content.digest, content.size, content.media_type, content.codec)
+            names = ('code_source_inline_content','code_source_blob_id','code_source_content_digest',
+                     'code_source_content_size','code_source_content_media_type','code_source_content_codec')
+            if row['code_source_content_digest'] is not None:
+                if tuple(row[name] for name in names) != values:
+                    raise ConversationKernelConflict("exec source was already frozen differently")
+                return
+            connection.execute(
+                """UPDATE pulsara_v3.tool_execution_attempts SET
+                   code_source_inline_content=%s, code_source_blob_id=%s, code_source_content_digest=%s,
+                   code_source_content_size=%s, code_source_content_media_type=%s, code_source_content_codec=%s
+                   WHERE session_id=%s AND id=%s""", (*values,guard.session_id,attempt_id),
+            )
+
+    def _accept_invocation_source(
+        self, connection, guard, *, assistant_entry_id, tool_call_id,
+        turn_id=None, source=None, require_running=True,
+    ):
+        """Install provenance in the first decision/attempt/result transaction."""
+        from pulsara_agent.conversation_kernel.tool_invocations import (
+            ToolInvocationSource, ToolInvocationSourceKind, current_tool_invocation,
+        )
+        source = source or current_tool_invocation.get()
+        code = source is not None and source.kind is ToolInvocationSourceKind.CODE_MODE_CALL
+        if code:
+            subject = connection.execute(
+                """SELECT t.id AS turn_id, t.workspace_id,
+                          t.permission_snapshot_fingerprint
+                   FROM pulsara_v3.tool_execution_attempts a
+                   JOIN pulsara_v3.tool_invocations i
+                     ON i.session_id=a.session_id AND i.id=a.invocation_id
+                   JOIN pulsara_v3.assistant_message_blocks b
+                     ON b.session_id=i.session_id AND b.assistant_entry_id=i.assistant_entry_id
+                    AND b.tool_call_id=i.tool_call_id AND b.block_kind='TOOL_CALL'
+                   JOIN pulsara_v3.turns t ON t.session_id=i.session_id AND t.id=i.turn_id
+                   WHERE a.session_id=%s AND a.id=%s AND i.source_kind='MODEL_TOOL_CALL'
+                     AND b.tool_name='exec' AND t.id=%s
+                   FOR UPDATE OF t""",
+                (guard.session_id, source.source_exec_attempt_id, source.turn_id),
+            ).fetchone()
+        else:
+            subject = connection.execute(
+                """SELECT t.id AS turn_id, t.workspace_id,
+                          t.permission_snapshot_fingerprint
+                   FROM pulsara_v3.assistant_message_blocks b
+                   JOIN pulsara_v3.transcript_entries e
+                     ON e.entry_owner_kind='EXECUTED_TURN' AND e.session_id=b.session_id
+                    AND e.id=b.assistant_entry_id
+                   JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id
+                   WHERE b.session_id=%s AND b.assistant_entry_id=%s
+                     AND b.tool_call_id=%s AND b.block_kind='TOOL_CALL'
+                     AND (%s=false OR t.status='RUNNING')
+                   FOR UPDATE OF t""",
+                (guard.session_id, assistant_entry_id, tool_call_id, require_running),
+            ).fetchone()
+            if subject is not None:
+                source = ToolInvocationSource.model(guard.session_id,
+                    str(subject['turn_id']), assistant_entry_id, tool_call_id)
+        if subject is None or source is None or (turn_id is not None and source.turn_id != turn_id):
+            raise ConversationKernelConflict("tool invocation has no actual source")
+        connection.execute(
+            """INSERT INTO pulsara_v3.tool_invocations
+                 (id,session_id,turn_id,source_kind,assistant_entry_id,tool_call_id,
+                  source_exec_attempt_id,call_sequence,tool_name,original_arguments)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+               ON CONFLICT (id) DO NOTHING""",
+            (source.invocation_id, guard.session_id, source.turn_id, source.kind.value,
+             source.assistant_entry_id, source.tool_call_id, source.source_exec_attempt_id,
+             source.call_sequence, source.tool_name,
+             None if source.original_arguments is None else json.dumps(thaw_json(source.original_arguments), ensure_ascii=False)),
+        )
+        installed = connection.execute(
+            "SELECT * FROM pulsara_v3.tool_invocations WHERE id=%s AND session_id=%s",
+            (source.invocation_id, guard.session_id),
+        ).fetchone()
+        expected = dict(turn_id=source.turn_id, source_kind=source.kind.value,
+                        assistant_entry_id=source.assistant_entry_id, tool_call_id=source.tool_call_id,
+                        source_exec_attempt_id=source.source_exec_attempt_id, call_sequence=source.call_sequence,
+                        tool_name=source.tool_name,
+                        original_arguments=None if source.original_arguments is None else thaw_json(source.original_arguments))
+        if installed is None or any(installed[key] != value for key,value in expected.items()):
+            raise ConversationKernelConflict("tool invocation source identity conflict")
+        return source, subject
+
     def accept_tool_capability_decision(
         self,
         guard: HostWriterGuard,
         *,
         decision_id: str,
-        assistant_entry_id: str,
+        assistant_entry_id: str | None,
         tool_call_id: str,
         decision: str,
         authorization_reference: str,
@@ -94,28 +228,10 @@ class _ToolOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            subject = connection.execute(
-                """
-                SELECT e.turn_id, e.workspace_id, e.conversation_scope_kind,
-                       e.scope_subagent_task_id,
-                       t.permission_snapshot_fingerprint
-                FROM pulsara_v3.assistant_message_blocks AS b
-                JOIN pulsara_v3.transcript_entries AS e
-                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
-                 AND e.id = b.assistant_entry_id
-                JOIN pulsara_v3.turns AS t
-                  ON t.session_id = e.session_id AND t.id = e.turn_id
-                WHERE b.session_id = %s AND b.assistant_entry_id = %s
-                  AND b.tool_call_id = %s AND b.block_kind = 'TOOL_CALL'
-                  AND t.status = 'RUNNING'
-                FOR UPDATE OF t
-                """,
-                (guard.session_id, assistant_entry_id, tool_call_id),
-            ).fetchone()
-            if subject is None:
-                raise ConversationKernelConflict(
-                    "capability tool-call subject is not active"
-                )
+            invocation_source, subject = self._accept_invocation_source(
+                connection, guard, assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+            )
             if (
                 str(subject["permission_snapshot_fingerprint"])
                 != permission_snapshot_fingerprint
@@ -127,17 +243,18 @@ class _ToolOperations:
                 """
                 INSERT INTO pulsara_v3.interaction_decisions (
                     id, session_id, command_id, subject_kind,
-                    subject_tool_call_entry_id, subject_tool_call_id,
+                    subject_tool_call_entry_id, subject_tool_call_id, subject_invocation_id,
                     decision, actor_kind, actor_id, redacted_subject,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, NULL, 'TOOL_CALL', %s, %s, %s,
+                ) VALUES (%s, %s, NULL, 'TOOL_CALL', %s, %s, %s, %s,
                           'machine', %s, %s, %s)
                 """,
                 (
                     decision_id,
                     guard.session_id,
                     assistant_entry_id,
-                    tool_call_id,
+                    tool_call_id if assistant_entry_id is not None else None,
+                    invocation_source.invocation_id,
                     decision,
                     actor_id,
                     redacted_subject,
@@ -160,15 +277,16 @@ class _ToolOperations:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_execution_attempts (
-                        id, session_id, assistant_entry_id, tool_call_id,
+                        id, session_id, invocation_id, assistant_entry_id, tool_call_id,
                         authorization_kind, authorization_reference,
                         permission_snapshot_fingerprint, actor_kind, actor_id
-                    ) VALUES (%s, %s, %s, %s, 'machine', %s,
+                    ) VALUES (%s, %s, %s, %s, %s, 'machine', %s,
                               %s, 'runtime', 'foreground-tool-executor')
                     """,
                     (
                         attempt_id,
                         guard.session_id,
+                        invocation_source.invocation_id,
                         assistant_entry_id,
                         tool_call_id,
                         authorization_reference,
@@ -204,24 +322,21 @@ class _ToolOperations:
                     entry_id=result_entry_id,
                     entry_sequence=result_entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
-                    scope_kind=ConversationScopeKind(
-                        str(subject["conversation_scope_kind"])
-                    ),
-                    scope_task_id=subject["scope_subagent_task_id"],
+
                     content=denial_content,
                 )
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
                         result_record_kind, id, session_id, workspace_id,
-                        tool_call_entry_id, tool_call_id,
+                        tool_call_entry_id, tool_call_id, invocation_id,
                         attempt_id, result_origin_kind,
                         permission_snapshot_fingerprint,
                         result_entry_id, result_state,
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds
-                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL,
+                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
                               'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
                     """,
@@ -231,6 +346,7 @@ class _ToolOperations:
                         subject["workspace_id"],
                         assistant_entry_id,
                         tool_call_id,
+                        invocation_source.invocation_id,
                         permission_snapshot_fingerprint,
                         result_entry_id,
                         occurred_at,
@@ -274,7 +390,7 @@ class _ToolOperations:
         guard: HostWriterGuard,
         *,
         attempt_id: str,
-        assistant_entry_id: str,
+        assistant_entry_id: str | None,
         tool_call_id: str,
         authorization_kind: str,
         authorization_reference: str,
@@ -289,24 +405,10 @@ class _ToolOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            subject = connection.execute(
-                """
-                SELECT t.workspace_id, t.permission_snapshot_fingerprint
-                FROM pulsara_v3.assistant_message_blocks AS b
-                JOIN pulsara_v3.transcript_entries AS e
-                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
-                 AND e.id = b.assistant_entry_id
-                JOIN pulsara_v3.turns AS t
-                  ON t.session_id = e.session_id AND t.id = e.turn_id
-                WHERE b.session_id = %s AND b.assistant_entry_id = %s
-                  AND b.tool_call_id = %s AND b.block_kind = 'TOOL_CALL'
-                  AND t.status = 'RUNNING'
-                FOR UPDATE OF t
-                """,
-                (guard.session_id, assistant_entry_id, tool_call_id),
-            ).fetchone()
-            if subject is None:
-                raise ConversationKernelConflict("tool attempt subject is not active")
+            invocation_source, subject = self._accept_invocation_source(
+                connection, guard, assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+            )
             if (
                 str(subject["permission_snapshot_fingerprint"])
                 != permission_snapshot_fingerprint
@@ -318,16 +420,17 @@ class _ToolOperations:
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_execution_attempts (
-                    id, session_id, assistant_entry_id, tool_call_id,
+                    id, session_id, invocation_id, assistant_entry_id, tool_call_id,
                     authorization_kind, authorization_reference,
                     permission_snapshot_fingerprint,
                     actor_kind, actor_id, remote_idempotency_key,
                     retry_of_attempt_id
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     attempt_id,
                     guard.session_id,
+                    invocation_source.invocation_id,
                     assistant_entry_id,
                     tool_call_id,
                     authorization_kind,
@@ -491,7 +594,7 @@ class _ToolOperations:
         ) as connection:
             turn = connection.execute(
                 """
-                SELECT workspace_id, conversation_scope_kind, scope_subagent_task_id,
+                SELECT workspace_id,
                        permission_snapshot_fingerprint
                 FROM pulsara_v3.turns
                 WHERE session_id = %s AND id = %s
@@ -501,6 +604,11 @@ class _ToolOperations:
             ).fetchone()
             if turn is None or str(turn["workspace_id"]) != candidate.workspace_id:
                 raise ConversationKernelConflict("tool result turn is absent")
+            invocation_source, _ = self._accept_invocation_source(
+                connection, guard, assistant_entry_id=candidate.assistant_entry_id,
+                tool_call_id=candidate.tool_call_id, turn_id=candidate.turn_id,
+                source=candidate.invocation_source, require_running=False,
+            )
             if candidate.artifact_blob_descriptor is not None:
                 self._require_exact_tool_artifact_blob(
                     connection,
@@ -547,15 +655,13 @@ class _ToolOperations:
                 entry_id=candidate.result_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TOOL_RESULT,
-                scope_kind=ConversationScopeKind(str(turn["conversation_scope_kind"])),
-                scope_task_id=turn["scope_subagent_task_id"],
                 content=canonical_entry_content,
             )
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
                     result_record_kind, id, session_id, workspace_id,
-                    tool_call_entry_id, tool_call_id, attempt_id,
+                    tool_call_entry_id, tool_call_id, invocation_id, attempt_id,
                     result_origin_kind, result_entry_id, result_state,
                     permission_snapshot_fingerprint,
                     output_artifact_disposition, output_artifact_id,
@@ -567,7 +673,7 @@ class _ToolOperations:
                     observation_origin_kind,
                     tool_reported_duration_microseconds
                 ) VALUES (
-                    'EXECUTED', %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    'EXECUTED', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s
                 )
@@ -578,6 +684,7 @@ class _ToolOperations:
                     candidate.workspace_id,
                     candidate.assistant_entry_id,
                     candidate.tool_call_id,
+                    invocation_source.invocation_id,
                     candidate.attempt_id,
                     (
                         "PHYSICAL_ATTEMPT"
@@ -739,7 +846,8 @@ class _ToolOperations:
                     and observed_content != candidate.canonical_preview_content
                 )
                 or str(result["workspace_id"]) != candidate.workspace_id
-                or str(result["tool_call_entry_id"]) != candidate.assistant_entry_id
+                or (candidate.invocation_source is not None and result["invocation_id"] != candidate.invocation_source.invocation_id)
+                or result["tool_call_entry_id"] != candidate.assistant_entry_id
                 or str(result["tool_call_id"]) != candidate.tool_call_id
                 or result["attempt_id"] != candidate.attempt_id
                 or str(result["result_entry_id"]) != candidate.result_entry_id
@@ -1007,28 +1115,10 @@ class _ToolOperations:
             )
             if existing is not None:
                 return existing
-            subject = connection.execute(
-                """
-                SELECT e.turn_id, e.workspace_id, e.conversation_scope_kind,
-                       e.scope_subagent_task_id,
-                       t.permission_snapshot_fingerprint
-                FROM pulsara_v3.assistant_message_blocks AS b
-                JOIN pulsara_v3.transcript_entries AS e
-                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = b.session_id
-                 AND e.id = b.assistant_entry_id
-                JOIN pulsara_v3.turns AS t
-                  ON t.session_id = e.session_id AND t.id = e.turn_id
-                WHERE b.session_id = %s AND b.assistant_entry_id = %s
-                  AND b.tool_call_id = %s AND b.block_kind = 'TOOL_CALL'
-                  AND t.status = 'RUNNING'
-                FOR UPDATE OF t
-                """,
-                (guard.session_id, assistant_entry_id, tool_call_id),
-            ).fetchone()
-            if subject is None:
-                raise ConversationKernelConflict(
-                    "interaction tool-call subject is not active"
-                )
+            invocation_source, subject = self._accept_invocation_source(
+                connection, guard, assistant_entry_id=assistant_entry_id,
+                tool_call_id=tool_call_id,
+            )
             if (
                 str(subject["permission_snapshot_fingerprint"])
                 != permission_snapshot_fingerprint
@@ -1064,10 +1154,10 @@ class _ToolOperations:
                 """
                 INSERT INTO pulsara_v3.interaction_decisions (
                     id, session_id, command_id, subject_kind,
-                    subject_tool_call_entry_id, subject_tool_call_id,
+                    subject_tool_call_entry_id, subject_tool_call_id, subject_invocation_id,
                     decision, actor_kind, actor_id, redacted_subject,
                     permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'TOOL_CALL', %s, %s, %s,
+                ) VALUES (%s, %s, %s, 'TOOL_CALL', %s, %s, %s, %s,
                           'human', %s, %s, %s)
                 """,
                 (
@@ -1075,7 +1165,8 @@ class _ToolOperations:
                     guard.session_id,
                     command_id,
                     assistant_entry_id,
-                    tool_call_id,
+                    tool_call_id if assistant_entry_id is not None else None,
+                    invocation_source.invocation_id,
                     decision,
                     actor_id,
                     redacted_subject,
@@ -1110,15 +1201,16 @@ class _ToolOperations:
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_execution_attempts (
-                        id, session_id, assistant_entry_id, tool_call_id,
+                        id, session_id, invocation_id, assistant_entry_id, tool_call_id,
                         authorization_kind, authorization_reference,
                         permission_snapshot_fingerprint, actor_kind, actor_id
-                    ) VALUES (%s, %s, %s, %s, 'human', %s,
+                    ) VALUES (%s, %s, %s, %s, %s, 'human', %s,
                               %s, 'runtime', 'foreground-tool-executor')
                     """,
                     (
                         attempt_id,
                         guard.session_id,
+                        invocation_source.invocation_id,
                         assistant_entry_id,
                         tool_call_id,
                         f"interaction-decision:{decision_id}",
@@ -1154,24 +1246,21 @@ class _ToolOperations:
                     entry_id=result_entry_id,
                     entry_sequence=result_entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
-                    scope_kind=ConversationScopeKind(
-                        str(subject["conversation_scope_kind"])
-                    ),
-                    scope_task_id=subject["scope_subagent_task_id"],
+
                     content=denial_content,
                 )
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
                         result_record_kind, id, session_id, workspace_id,
-                        tool_call_entry_id, tool_call_id,
+                        tool_call_entry_id, tool_call_id, invocation_id,
                         attempt_id, result_origin_kind,
                         permission_snapshot_fingerprint,
                         result_entry_id, result_state,
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds
-                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL,
+                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
                               'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
                     """,
@@ -1181,6 +1270,7 @@ class _ToolOperations:
                         subject["workspace_id"],
                         assistant_entry_id,
                         tool_call_id,
+                        invocation_source.invocation_id,
                         permission_snapshot_fingerprint,
                         result_entry_id,
                         occurred_at,

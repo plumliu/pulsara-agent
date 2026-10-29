@@ -30,7 +30,7 @@ it('automatically previews the single format, fills public parameters, and insta
   fireEvent.change(screen.getByLabelText('URL'), {target: {value: 'https://example.org/mcp'}});
   fireEvent.click(screen.getByText('安装'));
   await waitFor(() => expect(close).toHaveBeenCalledOnce());
-  expect(install).toHaveBeenCalledWith('/source', {source_format: 'cursor', classifications: {}, public_values: {URL: 'https://example.org/mcp'}});
+  expect(install).toHaveBeenCalledWith('/source', {source_format: 'cursor', classifications: {}, public_values: {URL: 'https://example.org/mcp'}, mcp_scope_policies: {search: 'ROOT_ONLY'}});
 });
 
 it('invalidates a preview when the source changes', async () => {
@@ -84,7 +84,7 @@ it('requires selection for multiple distributions and clears parameters when swi
   fireEvent.click(screen.getByRole('radio', {name: 'Codex'}));
   expect(screen.queryByLabelText('URL')).toBeNull();
   fireEvent.click(screen.getByText('安装'));
-  await waitFor(() => expect(install).toHaveBeenCalledWith('/source', {source_format: 'codex', classifications: {}, public_values: {}}));
+  await waitFor(() => expect(install).toHaveBeenCalledWith('/source', {source_format: 'codex', classifications: {}, public_values: {}, mcp_scope_policies: {}}));
 });
 
 it('requires preview for native packages too and retains a failed install', async () => {
@@ -97,7 +97,7 @@ it('requires preview for native packages too and retains a failed install', asyn
   await screen.findByText('技能：research');
   fireEvent.click(screen.getByText('安装'));
   await screen.findByRole('alert');
-  expect(install).toHaveBeenCalledWith('/source', {source_format: 'native', classifications: {}, public_values: {}});
+  expect(install).toHaveBeenCalledWith('/source', {source_format: 'native', classifications: {}, public_values: {}, mcp_scope_policies: {}});
   expect(close).not.toHaveBeenCalled();
 });
 
@@ -111,4 +111,18 @@ it('shows an invalid sibling without selecting or hiding it', async () => {
   expect((screen.getByRole('radio', {name: 'Claude'}) as HTMLInputElement).disabled).toBe(true);
   expect((screen.getByRole('radio', {name: 'Cursor'}) as HTMLInputElement).checked).toBe(false);
   expect((screen.getByText('安装') as HTMLButtonElement).disabled).toBe(true);
+});
+
+
+it('reviews each MCP scope before installation and submits the selected policy', async () => {
+  const inspect = vi.fn(async () => discovery()), install = vi.fn(async () => true);
+  render(<PluginImporter onPreview={inspect} onInstall={install} onClose={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText('本地目录'), {target: {value: '/source'}});
+  fireEvent.click(screen.getByText('读取预览'));
+  const scope = await screen.findByRole('checkbox', {name: 'search 为子代理也提供'});
+  expect((scope as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(scope);
+  fireEvent.change(screen.getByLabelText('URL'), {target: {value: 'https://example.org/mcp'}});
+  fireEvent.click(screen.getByText('安装'));
+  await waitFor(() => expect(install).toHaveBeenCalledWith('/source', expect.objectContaining({mcp_scope_policies: {search: 'ROOT_AND_SUBAGENTS'}})));
 });

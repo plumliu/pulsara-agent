@@ -25,7 +25,6 @@ REQUEST_EXECUTION_COLUMNS = """
     qe.turn_id AS execution_entry_turn_id,
     qt.id AS execution_turn_id,
     qt.initial_entry_id AS execution_initial_entry_id,
-    qt.conversation_scope_kind AS execution_scope_kind,
     qt.status AS execution_turn_status,
     qt.terminal_reason AS execution_turn_reason
 """
@@ -47,7 +46,6 @@ def request_execution_from_row(row: Mapping[str, object]) -> RequestExecution | 
             or row["execution_turn_id"] is None
             or row["execution_entry_turn_id"] != row["execution_turn_id"]
             or row["execution_initial_entry_id"] != consumed
-            or row["execution_scope_kind"] != "ROOT"
         ):
             raise ConversationKernelConflict("consumed request does not identify its exact initial turn entry")
     try:

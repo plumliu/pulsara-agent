@@ -1,3117 +1,922 @@
-"""Task-scoped subagent conversation operations."""
+"""Session-owned delegation using the common request queue and turn facts."""
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id, is_valid_id
+from datetime import datetime, timezone
 
-
-
-from pulsara_agent.conversation_kernel.interruption import interruption_payload
-
-from datetime import datetime
-import json
-from typing import Mapping
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
-from pulsara_agent.conversation_kernel.contracts import (
-    CanonicalContent,
-    CommittedEventDraft,
-    CommittedEventSubject,
-    ConversationScopeKind,
-    EntryKind,
-    HostWriterGuard,
-    InlineContent,
+
+from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
+from pulsara_agent.conversation_kernel.prompt_storage import (
+    materialize_canonical_prompt,
 )
-from pulsara_agent.primitives.run_permission import (
-    FrozenRunPermissionSnapshot,
-    RunPermissionAdmissionSource,
+from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+    PreparedAgentRequest,
+    validate_agent_request_graph,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
+from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
+from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
-from .contracts import (
-    AcceptedEntry,
-    ConversationKernelConflict,
-    PreparedSubagentTurnAdmission,
-    NoToolResultSideBranch,
-    TurnAdmissionConfirmation,
-    TurnAdmissionConfirmationKind,
-    _canonical_content_matches_utf8_text,
-    build_prepared_subagent_turn_admission,
-)
-
-from .matching import (
-    _event_row_matches_draft,
-)
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    ExplicitSubagentResultConfirmation,
-    ExplicitSubagentResultConfirmationKind,
-    FrozenSubagentResultPublicFact,
-    PreparedExplicitSubagentResultSettlement,
-    PreparedInterAgentMailboxBatch,
-    PreparedSubagentTaskBatchAdmission,
-    PreparedSubagentTaskStart,
-    PreparedSubagentTaskTerminalSettlement,
-    SubagentBatchConfirmation,
-    SubagentBatchConfirmationKind,
-    SubagentTaskTerminalConfirmationKind,
-    SubagentTaskStatus,
-    SubagentTerminalReason,
-    bounded_terminal_public_detail,
-    build_default_terminal_public_detail,
-    build_dependency_result_context,
-    derive_subagent_batch_initial_dispositions,
-)
-from pulsara_agent.primitives.context import freeze_json, thaw_json
-from pulsara_agent.llm.model_connections import (
-    ModelCallBinding,
-    model_call_binding_from_dict,
-    model_call_binding_to_dict,
-)
-from pulsara_agent.conversation_kernel.subagents.model_target import (
-    FrozenSubagentModelTarget,
-)
-from pulsara_agent.conversation_kernel.subagents.history import (
-    validate_worker_history_source,
-)
-from pulsara_agent.primitives.context import canonical_json_bytes
+from .contracts import ConversationKernelConflict, _content_columns
+from .locking import lock_session_admission
+from .request_execution import REQUEST_EXECUTION_COLUMNS, request_execution_from_row
 
 
-def _explicit_result_arguments_match(
-    arguments: object, candidate: FrozenSubagentResultPublicFact
-) -> bool:
-    if not isinstance(arguments, Mapping):
-        return False
-    if set(arguments) - {"summary", "data", "output_preview", "diagnostics"}:
-        return False
-    try:
-        return (
-            arguments.get("summary") == candidate.summary
-            and ("data" in arguments) == (candidate.data is not None)
-            and ("data" not in arguments or freeze_json(arguments["data"]) == candidate.data)
-            and arguments.get("output_preview") == candidate.output_preview
-            and freeze_json(arguments.get("diagnostics", []))
-            == candidate.diagnostics
-        )
-    except (TypeError, ValueError):
-        return False
+_WORK_SELECT = f"""SELECT q.*, {REQUEST_EXECUTION_COLUMNS}, qt.id AS turn_id,
+    qt.final_entry_id, qt.terminal_public_detail, qt.terminal_at AS turn_terminal_at
+    FROM pulsara_v3.prompt_queue_items q
+    JOIN pulsara_v3.sessions s ON s.id=q.session_id
+    LEFT JOIN pulsara_v3.transcript_entries qe ON qe.session_id=q.session_id AND qe.id=q.consumed_entry_id
+    LEFT JOIN pulsara_v3.turns qt ON qt.session_id=qe.session_id AND qt.id=qe.turn_id
+    WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION'"""
 
-
-def _subagent_context_arguments_match(
-    value: object,
-    *,
-    mode: str,
-    last_n_turns: int | None,
-    history_task_id: str | None,
-) -> bool:
-    if not isinstance(value, Mapping) or set(value) - {"mode", "turns", "task_id"}:
-        return False
-    raw_mode = value.get("mode", "none")
-    if raw_mode == "none":
-        return (
-            value.get("turns") is None
-            and value.get("task_id") is None
-            and mode == "NONE"
-            and last_n_turns is None
-        )
-    if raw_mode == "worker_history":
-        return (
-            value.get("turns") is None
-            and value.get("task_id") == history_task_id
-            and mode == "WORKER_HISTORY"
-            and last_n_turns is None
-        )
-    turns = value.get("turns")
-    return (
-        raw_mode == "last_n"
-        and isinstance(turns, int)
-        and not isinstance(turns, bool)
-        and 1 <= turns <= 3
-        and mode == "LAST_N"
-        and history_task_id is None
-        and last_n_turns == turns
-    )
-
-
-def _subagent_batch_arguments_match(
-    arguments: object,
-    *,
-    tool_name: str,
-    candidate: PreparedSubagentTaskBatchAdmission,
-    parent_binding: ModelCallBinding,
-) -> bool:
-    """Exact-join one public spawn/batch call to its sealed task candidate."""
-
-    if not isinstance(arguments, Mapping):
-        return False
-    if tool_name == "spawn_agent":
-        if set(arguments) - {"task", "task_name", "profile", "context", "model", "material_task_ids"}:
-            return False
-        if len(candidate.ordered_tasks) != 1:
-            return False
-        item = candidate.ordered_tasks[0]
-        task_name = arguments.get("task_name")
-        return (
-            arguments.get("task") == item.objective
-            and task_name == item.task_key
-            and task_name == item.label
-            and item.display_role is None
-            and str(arguments.get("profile", "general_worker"))
-            == item.profile.value
-            and _subagent_context_arguments_match(
-                arguments.get("context", {"mode": "none"}),
-                mode=item.context.mode.value,
-                last_n_turns=item.context.last_n_turns,
-                history_task_id=item.context.history_task_id,
-            )
-            and not item.dependency_task_ids
-            and _subagent_model_arguments_match(arguments.get("model"), item.model_call_binding, parent_binding)
-            and arguments.get("material_task_ids", []) == list(item.material_source_task_ids)
-        )
-    if tool_name != "create_agent_tasks" or set(arguments) != {"tasks"}:
-        return False
-    raw_tasks = arguments.get("tasks")
-    if not isinstance(raw_tasks, list) or len(raw_tasks) != len(
-        candidate.ordered_tasks
-    ):
-        return False
-    key_to_id = {
-        item.task_key: item.task_id
-        for item in candidate.ordered_tasks
-        if item.task_key is not None
-    }
-    allowed = {
-        "task",
-        "task_key",
-        "label",
-        "profile",
-        "display_role",
-        "context",
-        "depends_on",
-        "model",
-        "material_task_ids",
-    }
-    for raw, item in zip(raw_tasks, candidate.ordered_tasks, strict=True):
-        if not isinstance(raw, Mapping) or set(raw) - allowed:
-            return False
-        dependencies = raw.get("depends_on", [])
-        if not isinstance(dependencies, list):
-            return False
-        resolved: list[str] = []
-        for token in dependencies:
-            if not isinstance(token, str) or not token:
-                return False
-            if token in key_to_id:
-                dependency_id = key_to_id[token]
-            elif is_valid_id(token, "task"):
-                dependency_id = token
-            else:
-                return False
-            resolved.append(dependency_id)
-        if not (
-            raw.get("task") == item.objective
-            and raw.get("task_key") == item.task_key
-            and raw.get("label") == item.label
-            and raw.get("display_role") == item.display_role
-            and str(raw.get("profile", "general_worker")) == item.profile.value
-            and _subagent_context_arguments_match(
-                raw.get("context", {"mode": "none"}),
-                mode=item.context.mode.value,
-                last_n_turns=item.context.last_n_turns,
-                history_task_id=item.context.history_task_id,
-            )
-            and tuple(resolved) == item.dependency_task_ids
-            and _subagent_model_arguments_match(raw.get("model"), item.model_call_binding, parent_binding)
-            and raw.get("material_task_ids", []) == list(item.material_source_task_ids)
-        ):
-            return False
-    return True
-
-
-def _subagent_model_arguments_match(
-    value: object, accepted: ModelCallBinding, parent: ModelCallBinding
-) -> bool:
-    if value is None:
-        return accepted == parent
-    if not isinstance(value, Mapping) or set(value) - {"connection_id", "reasoning"}:
-        return False
-    if value.get("connection_id") != accepted.connection_id.value:
-        return False
-    if "reasoning" not in value:
-        return True
-    try:
-        from pulsara_agent.llm.model_connections import reasoning_selection_from_dict
-        return reasoning_selection_from_dict(value["reasoning"]) == accepted.reasoning
-    except (TypeError, ValueError):
-        return False
-
-
-def _subagent_batch_subject_matches(
-    parent: Mapping[str, object] | None,
-    attempt: Mapping[str, object] | None,
-    candidate: PreparedSubagentTaskBatchAdmission,
-) -> bool:
-    if parent is None or attempt is None:
-        return False
-    parent_binding = model_call_binding_from_dict(parent.get("model_call_binding"))
-    if parent_binding is None:
-        return False
-    tool_name = str(attempt["tool_name"])
-    return (
-        str(parent["workspace_id"]) == candidate.workspace_id
-        and str(parent["conversation_scope_kind"]) == "ROOT"
-        and str(parent["effective_permission_mode"]) == "bypass-permissions"
-        and str(parent["permission_snapshot_fingerprint"])
-        == candidate.permission_snapshot_fingerprint
-        and str(attempt["turn_id"]) == candidate.parent_turn_id
-        and str(attempt["conversation_scope_kind"]) == "ROOT"
-        and attempt["scope_subagent_task_id"] is None
-        and str(attempt["permission_snapshot_fingerprint"])
-        == candidate.permission_snapshot_fingerprint
-        and tool_name in {"spawn_agent", "create_agent_tasks"}
-        and _subagent_batch_arguments_match(
-            attempt["tool_arguments"],
-            tool_name=tool_name,
-            candidate=candidate,
-            parent_binding=parent_binding,
-        )
-    )
+_RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, count(*) OVER() AS agent_total, w.workspace_kind, w.workspace_root, w.workspace_label,
+    EXISTS(SELECT 1 FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN') AS has_pending_work,
+    EXISTS(SELECT 1 FROM pulsara_v3.turns t WHERE t.session_id=s.id AND t.status='RUNNING') AS has_running_turn,
+    (SELECT q.id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
+       JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id WHERE q.session_id=s.id AND t.status='RUNNING' LIMIT 1) AS current_work_id,
+    (SELECT count(*) FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN') AS queued_count,
+    (SELECT q.id FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.input_origin='AGENT_INSTRUCTION' ORDER BY q.queue_sequence DESC LIMIT 1) AS latest_work_id,
+    coalesce((SELECT q.waiting_on='[]'::jsonb FROM pulsara_v3.prompt_queue_items q
+        WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN'
+        ORDER BY q.queue_sequence LIMIT 1),false) AS head_ready
+    FROM pulsara_v3.sessions s JOIN pulsara_v3.workspaces w ON w.id=s.workspace_id AND w.memory_domain_id=s.memory_domain_id"""
 
 
 class _SubagentOperations:
-    def prepare_subagent_launch_permission(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedSubagentTaskStart,
-        deadline_monotonic: float,
-    ) -> FrozenRunPermissionSnapshot:
-        """Freeze the exact parent permission fact after task-start FULL."""
-
-        if (
-            candidate.session_id != guard.session_id
-            or candidate.writer_generation != guard.writer_generation
-        ):
-            raise ValueError("subagent launch guard mismatch")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            self._require_writer(connection, guard, lock=False)
-            task = connection.execute(
-                "SELECT * FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
-                (candidate.session_id, candidate.task_id),
-            ).fetchone()
-            event = connection.execute(
-                "SELECT * FROM pulsara_v3.agent_events "
-                "WHERE session_id=%s AND event_id=%s",
-                (candidate.session_id, candidate.event_id),
-            ).fetchone()
-            expected_event = self._subagent_task_start_event(candidate)
-            if (
-                task is None
-                or event is None
-                or not (
-                    str(task["workspace_id"]) == candidate.workspace_id
-                    and str(task["parent_turn_id"]) == candidate.parent_turn_id
-                    and str(task["objective"]) == candidate.objective
-                    and str(task["profile_kind"]) == candidate.profile.value
-                    and str(task["context_mode"]) == candidate.parent_context.mode.value
-                    and task["context_last_n_turns"]
-                    == candidate.parent_context.last_n_turns
-                    and int(task["execution_writer_generation"])
-                    == candidate.writer_generation
-                    and str(task["status"]) == "ACTIVE"
-                    and task["pending_reason"] is None
-                    and task["terminal_reason"] is None
-                    and task["dependency_context_body"]
-                    == (
-                        None
-                        if candidate.dependency_context is None
-                        else candidate.dependency_context.rendered_body
-                    )
-                    and task["terminal_material_body"]
-                    == candidate.terminal_material_body
-                    and _event_row_matches_draft(event, expected_event)
-                )
-            ):
-                raise ConversationKernelConflict(
-                    "subagent launch no longer exact-joins task-start FULL"
-                )
-            parent = connection.execute(
-                "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND id=%s",
-                (candidate.session_id, candidate.parent_turn_id),
-            ).fetchone()
-            if parent is None:
-                raise ConversationKernelConflict(
-                    "subagent launch parent turn is absent"
-                )
-            return self._permission_from_row(parent)
-
     @staticmethod
-    def _subagent_batch_task_event(
-        candidate: PreparedSubagentTaskBatchAdmission,
-        task_id: str,
-        status: str,
-    ) -> CommittedEventDraft:
-        return CommittedEventDraft(
-            event_id=derive_id("event", "accepted", candidate.session_id, CommittedEventType.SUBAGENT_TASK_ACCEPTED.name, SubjectSlot.SUBAGENT_TASK.name, task_id, ""),
-            event_type=CommittedEventType.SUBAGENT_TASK_ACCEPTED,
-            subject=CommittedEventSubject(SubjectSlot.SUBAGENT_TASK, task_id),
-            actor_kind="runtime",
-            actor_id=candidate.actor_id,
-            sensitivity_class="PUBLIC",
-            projection_profile="DEFAULT",
-            occurred_at=candidate.occurred_at,
-            payload={"status": status, "batch_id": candidate.batch_id},
+    def _agent_profile_text(profile):
+        # The existing profile prose is shared verbatim; its editorial revision is deferred.
+        from pulsara_agent.conversation_kernel.context_sources import (
+            subagent_profile_text,
         )
 
-    @staticmethod
-    def _subagent_task_start_event(
-        candidate: PreparedSubagentTaskStart,
-    ) -> CommittedEventDraft:
-        return CommittedEventDraft(
-            event_id=candidate.event_id,
-            event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-            subject=CommittedEventSubject(
-                SubjectSlot.SUBAGENT_TASK, candidate.task_id
-            ),
-            actor_kind="runtime",
-            actor_id=candidate.actor_id,
-            sensitivity_class="PUBLIC",
-            projection_profile="DEFAULT",
-            occurred_at=candidate.occurred_at,
-            payload={"status": "ACTIVE", "reason": None},
-        )
+        return subagent_profile_text(profile)
 
-    @staticmethod
-    def _subagent_task_terminal_event(
-        candidate: PreparedSubagentTaskTerminalSettlement,
-    ) -> CommittedEventDraft:
-        return CommittedEventDraft(
-            event_id=candidate.event_id,
-            event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-            subject=CommittedEventSubject(
-                SubjectSlot.SUBAGENT_TASK, candidate.task_id
-            ),
-            actor_kind="runtime",
-            actor_id=candidate.actor_id,
-            sensitivity_class="PUBLIC",
-            projection_profile="DEFAULT",
-            occurred_at=candidate.occurred_at,
-            payload={"status": candidate.status.value, "reason": candidate.reason},
-        )
+    def _agent_work_in_connection(self, connection, *, root_session_id, work_id):
+        row = connection.execute(
+            _WORK_SELECT + " AND q.id=%s", (root_session_id, work_id)
+        ).fetchone()
+        if row is None:
+            return None
+        return self._agent_work_value(connection, row)
 
-    def accept_subagent_task_batch(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedSubagentTaskBatchAdmission,
-        deadline_monotonic: float,
-    ) -> tuple[str, ...]:
-        """Atomically accept one immutable ROOT-owned task DAG batch."""
-
-        if (
-            candidate.session_id != guard.session_id
-            or candidate.writer_generation != guard.writer_generation
-        ):
-            raise ValueError("subagent batch guard identity mismatch")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            parent = connection.execute(
-                """SELECT workspace_id, conversation_scope_kind, model_call_binding,
-                          effective_permission_mode,
-                          permission_snapshot_fingerprint
-                   FROM pulsara_v3.turns
-                   WHERE session_id = %s AND id = %s FOR UPDATE""",
-                (guard.session_id, candidate.parent_turn_id),
-            ).fetchone()
-            attempt = connection.execute(
-                """SELECT attempt.id, attempt.assistant_entry_id,
-                          attempt.tool_call_id,
-                          attempt.permission_snapshot_fingerprint,
-                          block.tool_name, block.tool_arguments, entry.turn_id,
-                          entry.conversation_scope_kind,
-                          entry.scope_subagent_task_id
-                   FROM pulsara_v3.tool_execution_attempts AS attempt
-                   JOIN pulsara_v3.assistant_message_blocks AS block
-                     ON block.session_id = attempt.session_id
-                    AND block.assistant_entry_id = attempt.assistant_entry_id
-                    AND block.tool_call_id = attempt.tool_call_id
-                    AND block.block_kind = 'TOOL_CALL'
-                   JOIN pulsara_v3.transcript_entries AS entry
-                     ON entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = block.session_id
-                    AND entry.id = block.assistant_entry_id
-                   WHERE attempt.session_id = %s AND attempt.id = %s""",
-                (guard.session_id, candidate.source_tool_attempt_id),
-            ).fetchone()
-            if not _subagent_batch_subject_matches(parent, attempt, candidate):
-                raise ConversationKernelConflict(
-                    "subagent batch does not exact-join its ROOT tool attempt"
-                )
-            batch_ids = {item.task_id for item in candidate.ordered_tasks}
-            external_ids = tuple(
-                dict.fromkeys(
-                    dependency_id
-                    for item in candidate.ordered_tasks
-                    for dependency_id in item.dependency_task_ids
-                    if dependency_id not in batch_ids
-                )
+    def _agent_work_value(self, connection, row):
+        execution = request_execution_from_row(row)
+        if execution is None:
+            raise ConversationKernelConflict(
+                "delegated work does not identify a NEW_TURN request"
             )
-            external: dict[str, Mapping[str, object]] = {}
-            if external_ids:
-                rows = connection.execute(
-                    """SELECT t.id, t.workspace_id, t.status,
-                              result.id AS result_id
-                       FROM pulsara_v3.subagent_tasks AS t
-                       LEFT JOIN pulsara_v3.subagent_task_children AS result
-                         ON result.session_id = t.session_id
-                        AND result.task_id = t.id
-                        AND result.child_kind = 'RESULT'
-                       WHERE t.session_id = %s AND t.id = ANY(%s)
-                       FOR SHARE OF t""",
-                    (guard.session_id, list(external_ids)),
-                ).fetchall()
-                external = {str(row["id"]): row for row in rows}
-                if set(external) != set(external_ids):
-                    raise ConversationKernelConflict(
-                        "subagent dependency is unknown or foreign"
-                    )
-                if any(
-                    str(row["workspace_id"]) != candidate.workspace_id
-                    for row in external.values()
-                ):
-                    raise ConversationKernelConflict(
-                        "subagent dependency crosses workspace"
-                    )
-            try:
-                resolved_status = dict(
-                    derive_subagent_batch_initial_dispositions(
-                        ordered_tasks=tuple(
-                            (item.task_id, item.dependency_task_ids)
-                            for item in candidate.ordered_tasks
-                        ),
-                        external_states={
-                            task_id: (
-                                SubagentTaskStatus(str(row["status"])),
-                                row["result_id"] is not None,
-                            )
-                            for task_id, row in external.items()
-                        },
-                    )
-                )
-            except (TypeError, ValueError) as exc:
-                raise ConversationKernelConflict(
-                    "subagent dependency frontier is invalid"
-                ) from exc
-            events: list[CommittedEventDraft] = []
-            for item in candidate.ordered_tasks:
-                disposition = resolved_status[item.task_id]
-                if (
-                    disposition.status is not item.initial_status
-                    or disposition.pending_reason != item.pending_reason
-                    or disposition.terminal_reason != item.terminal_reason
-                ):
-                    raise ConversationKernelConflict(
-                        "subagent dependency status changed before admission"
-                    )
-                material_refs: list[dict[str, object]] = []
-                for source_id in item.material_source_task_ids:
-                    source = connection.execute(
-                        """SELECT t.id, t.status, t.terminal_public_detail,
-                                  result.id AS result_id
-                           FROM pulsara_v3.subagent_tasks AS t
-                           LEFT JOIN pulsara_v3.subagent_task_children AS result
-                             ON result.session_id=t.session_id AND result.task_id=t.id
-                            AND result.child_kind='RESULT'
-                           WHERE t.session_id=%s AND t.id=%s FOR SHARE OF t""",
-                        (guard.session_id, source_id),
-                    ).fetchone()
-                    if (
-                        source is None
-                        or not SubagentTaskStatus(str(source["status"])).terminal
-                    ):
-                        raise ConversationKernelConflict(
-                            "terminal material source is unavailable"
-                        )
-                    if (
-                        str(source["status"]) == "COMPLETED"
-                        and source["result_id"] is None
-                    ):
-                        raise ConversationKernelConflict(
-                            "terminal result material is absent"
-                        )
-                    material_refs.append(
-                        {
-                            "task_id": source_id,
-                            "status": source["status"],
-                            "result_id": source["result_id"],
-                        }
-                    )
-                history_cut = None
-                history_revision_id = None
-                if item.context.history_task_id is not None:
-                    source = connection.execute(
-                        """SELECT t.status, t.parent_context_body, t.dependency_context_body,
-                                  child.id AS child_turn_id,
-                                  child.current_context_binding_revision_id AS history_revision_id,
-                                  (SELECT max(e.entry_sequence) FROM pulsara_v3.transcript_entries AS e
-                                   WHERE e.session_id=t.session_id AND e.scope_subagent_task_id=t.id) AS cut
-                           FROM pulsara_v3.subagent_tasks AS t
-                           LEFT JOIN pulsara_v3.turns AS child
-                             ON child.session_id=t.session_id AND child.scope_subagent_task_id=t.id
-                           WHERE t.session_id=%s AND t.id=%s FOR SHARE OF t""",
-                        (guard.session_id, item.context.history_task_id),
-                    ).fetchone()
-                    if (
-                        source is None
-                        or not SubagentTaskStatus(str(source["status"])).terminal
-                        or source["child_turn_id"] is None
-                        or source["cut"] is None
-                        or source["history_revision_id"] is None
-                    ):
-                        raise ConversationKernelConflict(
-                            "worker history source is unavailable"
-                        )
-                    history_cut = int(source["cut"])
-                    history_revision_id = str(source["history_revision_id"])
-                    validate_worker_history_source(
-                        connection,
-                        session_id=guard.session_id,
-                        source_task_id=item.context.history_task_id,
-                        through_sequence=history_cut,
-                        binding_revision_id=history_revision_id,
-                    )
-                connection.execute(
-                    """INSERT INTO pulsara_v3.subagent_tasks (
-                           id, session_id, workspace_id, parent_turn_id,
-                           batch_id, task_key, label, profile_kind, display_role,
-                           context_mode, context_last_n_turns, objective, status,
-                           pending_reason, terminal_reason, terminal_public_detail,
-                           execution_writer_generation, terminal_at,
-                           model_call_binding, model_target_fact,
-                           material_refs, history_source_task_id, history_cut_sequence,
-                           history_context_binding_revision_id,
-                           parent_context_body
-                       ) VALUES (
-                           %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           %s, %s, %s, %s, %s, %s, %s, %s,
-                           CASE WHEN %s THEN clock_timestamp() ELSE NULL END,
-                           %s, %s, %s, %s, %s, %s, %s
-                       )""",
-                    (
-                        item.task_id,
-                        guard.session_id,
-                        candidate.workspace_id,
-                        candidate.parent_turn_id,
-                        candidate.batch_id,
-                        item.task_key,
-                        item.label,
-                        item.profile.value,
-                        item.display_role,
-                        item.context.mode.value,
-                        item.context.last_n_turns,
-                        item.objective,
-                        item.initial_status.value,
-                        item.pending_reason,
-                        item.terminal_reason,
-                        (
-                            None
-                            if item.terminal_reason is None
-                            else build_default_terminal_public_detail(
-                                item.terminal_reason
-                            )
-                        ),
-                        guard.writer_generation,
-                        item.initial_status.terminal,
-                        Jsonb(model_call_binding_to_dict(item.model_call_binding)),
-                        Jsonb(item.model_target_fact.model_dump(mode="json")),
-                        Jsonb(material_refs),
-                        item.context.history_task_id,
-                        history_cut,
-                        history_revision_id,
-                        item.context.rendered_body,
-                    ),
-                )
-                events.append(
-                    self._subagent_batch_task_event(
-                        candidate, item.task_id, item.initial_status.value
-                    )
-                )
-                for ordinal, dependency_id in enumerate(item.dependency_task_ids):
-                    connection.execute(
-                        """INSERT INTO pulsara_v3.subagent_task_dependencies (
-                               session_id, task_id, dependency_task_id,
-                               dependency_ordinal
-                           ) VALUES (%s, %s, %s, %s)""",
-                        (guard.session_id, item.task_id, dependency_id, ordinal),
-                    )
-            self._append_events(
-                connection,
-                guard,
-                workspace_id=candidate.workspace_id,
-                drafts=tuple(events),
-            )
-            return tuple(item.task_id for item in candidate.ordered_tasks)
-
-    def read_subagent_task_model_target(
-        self,
-        guard: HostWriterGuard,
-        *,
-        task_id: str,
-        deadline_monotonic: float,
-    ) -> tuple[ModelCallBinding, FrozenSubagentModelTarget]:
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            self._require_writer(connection, guard, lock=False)
-            row = connection.execute(
-                """SELECT model_call_binding, model_target_fact
-                   FROM pulsara_v3.subagent_tasks
-                   WHERE session_id=%s AND id=%s""",
-                (guard.session_id, task_id),
-            ).fetchone()
-            if row is None:
-                raise ConversationKernelConflict("subagent model target is absent")
-            binding = model_call_binding_from_dict(row["model_call_binding"])
-            if binding is None:
-                raise ConversationKernelConflict("subagent model binding is absent")
-            return binding, FrozenSubagentModelTarget.model_validate(row["model_target_fact"])
-
-    def read_subagent_start_sources(
-        self, *, session_id: str, task_id: str, deadline_monotonic: float
-    ) -> str | None:
-        """Read terminal materials; canonical history retains its accepted references."""
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            task = connection.execute(
-                """SELECT material_refs, history_source_task_id, history_cut_sequence,
-                          history_context_binding_revision_id
-                   FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s""",
-                (session_id, task_id),
-            ).fetchone()
-            if task is None:
-                raise ConversationKernelConflict("subagent start sources are absent")
-            refs = task["material_refs"]
-            if not isinstance(refs, list) or len(refs) > 16:
-                raise ConversationKernelConflict(
-                    "terminal material reference shape is invalid"
-                )
-            success_dependencies = {
-                str(row["dependency_task_id"])
-                for row in connection.execute(
-                    """SELECT dependency_task_id FROM pulsara_v3.subagent_task_dependencies
-                       WHERE session_id=%s AND task_id=%s""",
-                    (session_id, task_id),
-                ).fetchall()
-            }
-            material: list[dict[str, object]] = []
-            for ref in refs:
-                if not isinstance(ref, dict) or set(ref) != {
-                    "task_id",
-                    "status",
-                    "result_id",
-                }:
-                    raise ConversationKernelConflict(
-                        "terminal material reference is not closed"
-                    )
-                source = connection.execute(
-                    """SELECT t.status, t.terminal_reason, t.terminal_public_detail,
-                              result.id AS result_id, result.summary, result.data,
-                              result.output_preview
-                       FROM pulsara_v3.subagent_tasks AS t
-                       LEFT JOIN pulsara_v3.subagent_task_children AS result
-                         ON result.session_id=t.session_id AND result.task_id=t.id
-                        AND result.child_kind='RESULT'
-                       WHERE t.session_id=%s AND t.id=%s""",
-                    (session_id, ref["task_id"]),
-                ).fetchone()
-                if (
-                    source is None
-                    or not SubagentTaskStatus(str(source["status"])).terminal
-                    or source["status"] != ref["status"]
-                    or source["result_id"] != ref["result_id"]
-                ):
-                    raise ConversationKernelConflict(
-                        "terminal material source drifted or is unavailable"
-                    )
-                if str(ref["task_id"]) in success_dependencies:
-                    continue
-                material.append(
-                    {
-                        "task_id": ref["task_id"],
-                        "status": source["status"],
-                        "result_id": source["result_id"],
-                        "summary": source["summary"],
-                        "data": source["data"],
-                        "output_preview": source["output_preview"],
-                        "failure_reason": source["terminal_reason"],
-                        "failure_detail": source["terminal_public_detail"],
-                        "side_effects": "UNCERTAIN_WHEN_FAILED_OR_CANCELLED"
-                        if source["status"] != "COMPLETED"
-                        else None,
-                    }
-                )
-            material_body = (
-                None
-                if not material
-                else canonical_json_bytes(
-                    {
-                        "pulsara_terminal_material": {
-                            "content_semantics": "ADVISORY_COLLABORATION_DATA",
-                            "sources": material,
-                        }
-                    }
-                ).decode("utf-8")
-            )
-            if task["history_source_task_id"] is not None:
-                validate_worker_history_source(
-                    connection,
-                    session_id=session_id,
-                    source_task_id=str(task["history_source_task_id"]),
-                    through_sequence=int(task["history_cut_sequence"]),
-                    binding_revision_id=str(
-                        task["history_context_binding_revision_id"]
-                    ),
-                )
-            return material_body
-
-    def confirm_subagent_task_batch(
-        self,
-        *,
-        candidate: PreparedSubagentTaskBatchAdmission,
-        deadline_monotonic: float,
-    ) -> SubagentBatchConfirmation:
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            parent = connection.execute(
-                """SELECT workspace_id, conversation_scope_kind, model_call_binding,
-                          effective_permission_mode,
-                          permission_snapshot_fingerprint
-                   FROM pulsara_v3.turns
-                   WHERE session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.parent_turn_id),
-            ).fetchone()
-            attempt = connection.execute(
-                """SELECT attempt.id, attempt.assistant_entry_id,
-                          attempt.tool_call_id,
-                          attempt.permission_snapshot_fingerprint,
-                          block.tool_name, block.tool_arguments, entry.turn_id,
-                          entry.conversation_scope_kind,
-                          entry.scope_subagent_task_id
-                   FROM pulsara_v3.tool_execution_attempts AS attempt
-                   JOIN pulsara_v3.assistant_message_blocks AS block
-                     ON block.session_id = attempt.session_id
-                    AND block.assistant_entry_id = attempt.assistant_entry_id
-                    AND block.tool_call_id = attempt.tool_call_id
-                    AND block.block_kind = 'TOOL_CALL'
-                   JOIN pulsara_v3.transcript_entries AS entry
-                     ON entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = block.session_id
-                    AND entry.id = block.assistant_entry_id
-                   WHERE attempt.session_id = %s AND attempt.id = %s""",
-                (candidate.session_id, candidate.source_tool_attempt_id),
-            ).fetchone()
-            if not _subagent_batch_subject_matches(parent, attempt, candidate):
-                return SubagentBatchConfirmation(
-                    SubagentBatchConfirmationKind.CONFLICT
-                )
-            tasks = tuple(
-                connection.execute(
-                    """SELECT * FROM pulsara_v3.subagent_tasks
-                       WHERE session_id = %s AND id = %s""",
-                    (candidate.session_id, item.task_id),
-                ).fetchone()
-                for item in candidate.ordered_tasks
-            )
-            edges = tuple(
-                connection.execute(
-                    """SELECT dependency_task_id, dependency_ordinal
-                       FROM pulsara_v3.subagent_task_dependencies
-                       WHERE session_id = %s AND task_id = %s
-                       ORDER BY dependency_ordinal""",
-                    (candidate.session_id, item.task_id),
-                ).fetchall()
-                for item in candidate.ordered_tasks
-            )
-            events = tuple(
-                connection.execute(
-                    """SELECT * FROM pulsara_v3.agent_events
-                       WHERE session_id = %s AND event_id = %s""",
-                    (
-                        candidate.session_id,
-                        derive_id("event", "accepted", candidate.session_id, "SUBAGENT_TASK_ACCEPTED", "SUBAGENT_TASK", item.task_id, ""),
-                    ),
-                ).fetchone()
-                for item in candidate.ordered_tasks
-            )
-            if all(row is None for row in tasks) and all(not row for row in edges) and all(
-                row is None for row in events
-            ):
-                return SubagentBatchConfirmation(SubagentBatchConfirmationKind.NONE)
-            if any(row is None for row in tasks) or any(row is None for row in events):
-                return SubagentBatchConfirmation(SubagentBatchConfirmationKind.CONFLICT)
-            for item, row, edge_rows, event in zip(
-                candidate.ordered_tasks, tasks, edges, events, strict=True
-            ):
-                assert row is not None and event is not None
-                observed_dependencies = tuple(
-                    str(edge["dependency_task_id"]) for edge in edge_rows
-                )
-                expected_event = self._subagent_batch_task_event(
-                    candidate, item.task_id, item.initial_status.value
-                )
-                if not (
-                    str(row["workspace_id"]) == candidate.workspace_id
-                    and str(row["parent_turn_id"]) == candidate.parent_turn_id
-                    and str(row["batch_id"]) == candidate.batch_id
-                    and row["task_key"] == item.task_key
-                    and row["label"] == item.label
-                    and str(row["profile_kind"]) == item.profile.value
-                    and row["display_role"] == item.display_role
-                    and str(row["context_mode"]) == item.context.mode.value
-                    and row["context_last_n_turns"] == item.context.last_n_turns
-                    and str(row["objective"]) == item.objective
-                    and str(row["status"]) == item.initial_status.value
-                    and row["pending_reason"] == item.pending_reason
-                    and row["terminal_reason"] == item.terminal_reason
-                    and int(row["execution_writer_generation"])
-                    == candidate.writer_generation
-                    and observed_dependencies == item.dependency_task_ids
-                    and tuple(int(edge["dependency_ordinal"]) for edge in edge_rows)
-                    == tuple(range(len(edge_rows)))
-                    and _event_row_matches_draft(event, expected_event)
-                ):
-                    return SubagentBatchConfirmation(
-                        SubagentBatchConfirmationKind.CONFLICT
-                    )
-            return SubagentBatchConfirmation(SubagentBatchConfirmationKind.FULL)
-
-    def accept_subagent_task_start(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedSubagentTaskStart,
-        deadline_monotonic: float,
-    ) -> bool:
-        """CAS one exact runnable task to ACTIVE with its stable occurrence."""
-
-        if (
-            candidate.session_id != guard.session_id
-            or candidate.writer_generation != guard.writer_generation
-        ):
-            raise ValueError("subagent start guard identity mismatch")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            task = connection.execute(
-                """SELECT * FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s AND id = %s FOR UPDATE""",
-                (guard.session_id, candidate.task_id),
-            ).fetchone()
-            if task is None:
-                raise ConversationKernelConflict("subagent start target is absent")
-            if str(task["status"]) != "PENDING_START":
-                return False
-            if not (
-                str(task["workspace_id"]) == candidate.workspace_id
-                and str(task["parent_turn_id"]) == candidate.parent_turn_id
-                and str(task["objective"]) == candidate.objective
-                and str(task["profile_kind"]) == candidate.profile.value
-                and str(task["context_mode"]) == candidate.parent_context.mode.value
-                and task["context_last_n_turns"]
-                == candidate.parent_context.last_n_turns
-                and int(task["execution_writer_generation"])
-                == candidate.writer_generation
-                and task["pending_reason"] == "CAPACITY"
-                and task["terminal_reason"] is None
-            ):
-                raise ConversationKernelConflict("subagent start target drifted")
-            dependency_rows = connection.execute(
-                """SELECT edge.task_id, edge.dependency_task_id,
-                          edge.dependency_ordinal, dependency.status,
-                          dependency.task_key, dependency.label,
-                          result.id AS result_id, result.result_source,
-                          result.summary, result.data, result.result_fingerprint
-                   FROM pulsara_v3.subagent_task_dependencies AS edge
-                   JOIN pulsara_v3.subagent_tasks AS dependency
-                     ON dependency.session_id = edge.session_id
-                    AND dependency.id = edge.dependency_task_id
-                   LEFT JOIN pulsara_v3.subagent_task_children AS result
-                     ON result.session_id = dependency.session_id
-                    AND result.task_id = dependency.id
-                    AND result.child_kind = 'RESULT'
-                   WHERE edge.session_id = %s AND edge.task_id = %s
-                   ORDER BY edge.dependency_ordinal
-                   FOR SHARE OF dependency""",
-                (guard.session_id, candidate.task_id),
-            ).fetchall()
-            try:
-                observed_context = build_dependency_result_context(
-                    target_task_id=candidate.task_id,
-                    rows=dependency_rows,
-                )
-            except (TypeError, ValueError) as exc:
-                raise ConversationKernelConflict(
-                    "subagent start dependency result set is not ready"
-                ) from exc
-            if observed_context != candidate.dependency_context:
-                raise ConversationKernelConflict(
-                    "subagent start dependency context drifted"
-                )
-            updated = connection.execute(
-                """UPDATE pulsara_v3.subagent_tasks
-                   SET status = 'ACTIVE', pending_reason = NULL,
-                       dependency_context_body = %s,
-                       terminal_material_body = %s
-                   WHERE session_id = %s AND id = %s
-                     AND status = 'PENDING_START'
-                     AND execution_writer_generation = %s
-                   RETURNING id""",
-                (
-                    (
-                        None
-                        if candidate.dependency_context is None
-                        else candidate.dependency_context.rendered_body
-                    ),
-                    candidate.terminal_material_body,
-                    guard.session_id,
-                    candidate.task_id,
-                    guard.writer_generation,
-                ),
-            ).fetchone()
-            if updated is None:
-                raise ConversationKernelConflict("subagent start lost its task winner")
-            self._append_events(
-                connection,
-                guard,
-                workspace_id=candidate.workspace_id,
-                drafts=(self._subagent_task_start_event(candidate),),
-            )
-            return True
-
-    def confirm_subagent_task_start(
-        self,
-        *,
-        candidate: PreparedSubagentTaskStart,
-        deadline_monotonic: float,
-    ) -> SubagentBatchConfirmation:
-        """Stateless FULL/NONE/CONFLICT confirmation for one exact start."""
-
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            task = connection.execute(
-                "SELECT * FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
-                (candidate.session_id, candidate.task_id),
-            ).fetchone()
-            event = connection.execute(
-                "SELECT * FROM pulsara_v3.agent_events WHERE session_id=%s AND event_id=%s",
-                (candidate.session_id, candidate.event_id),
-            ).fetchone()
-            if task is None:
-                return SubagentBatchConfirmation(SubagentBatchConfirmationKind.CONFLICT)
-            common = (
-                str(task["workspace_id"]) == candidate.workspace_id
-                and str(task["parent_turn_id"]) == candidate.parent_turn_id
-                and str(task["objective"]) == candidate.objective
-                and str(task["profile_kind"]) == candidate.profile.value
-                and str(task["context_mode"]) == candidate.parent_context.mode.value
-                and task["context_last_n_turns"]
-                == candidate.parent_context.last_n_turns
-                and int(task["execution_writer_generation"])
-                == candidate.writer_generation
-            )
-            if (
-                common
-                and str(task["status"]) == "PENDING_START"
-                and task["pending_reason"] == "CAPACITY"
-                and event is None
-            ):
-                return SubagentBatchConfirmation(SubagentBatchConfirmationKind.NONE)
-            expected_event = self._subagent_task_start_event(candidate)
-            if (
-                common
-                and str(task["status"]) == "ACTIVE"
-                and task["pending_reason"] is None
-                and task["terminal_reason"] is None
-                and task["dependency_context_body"]
-                == (
-                    None
-                    if candidate.dependency_context is None
-                    else candidate.dependency_context.rendered_body
-                )
-                and task["terminal_material_body"] == candidate.terminal_material_body
-                and event is not None
-                and _event_row_matches_draft(event, expected_event)
-            ):
-                return SubagentBatchConfirmation(SubagentBatchConfirmationKind.FULL)
-            return SubagentBatchConfirmation(SubagentBatchConfirmationKind.CONFLICT)
-
-    def accept_subagent_task_terminal_settlement(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedSubagentTaskTerminalSettlement,
-        deadline_monotonic: float,
-    ) -> bool:
-        """Install one exact task-only terminal winner without touching a turn."""
-
-        if (
-            candidate.session_id != guard.session_id
-            or candidate.writer_generation != guard.writer_generation
-        ):
-            raise ValueError("subagent terminal settlement guard mismatch")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            task = connection.execute(
-                "SELECT * FROM pulsara_v3.subagent_tasks "
-                "WHERE session_id=%s AND id=%s FOR UPDATE",
-                (candidate.session_id, candidate.task_id),
-            ).fetchone()
-            turn = connection.execute(
-                "SELECT status, conversation_scope_kind, scope_subagent_task_id "
-                "FROM pulsara_v3.turns WHERE session_id=%s AND id=%s FOR SHARE",
-                (candidate.session_id, candidate.expected_turn_id),
-            ).fetchone()
-            if task is None or not (
-                str(task["workspace_id"]) == candidate.workspace_id
-                and int(task["execution_writer_generation"])
-                == candidate.writer_generation
-            ):
-                raise ConversationKernelConflict(
-                    "subagent terminal settlement target drifted"
-                )
-            if candidate.require_absent_turn:
-                if turn is not None:
-                    raise ConversationKernelConflict(
-                        "task-only terminal settlement found an admitted turn"
-                    )
-            elif turn is not None and not (
-                str(turn["conversation_scope_kind"]) == "SUBAGENT_TASK"
-                and str(turn["scope_subagent_task_id"]) == candidate.task_id
-                and str(turn["status"]) in {"COMPLETED", "INTERRUPTED"}
-            ):
-                raise ConversationKernelConflict(
-                    "task terminal settlement found a nonterminal child turn"
-                )
-            if str(task["status"]) not in {
-                "PENDING_START",
-                "WAITING_DEPENDENCY",
-                "ACTIVE",
-            }:
-                return False
-            updated = connection.execute(
-                """UPDATE pulsara_v3.subagent_tasks
-                   SET status=%s, pending_reason=NULL, terminal_reason=%s,
-                       terminal_public_detail=%s,
-                       terminal_at=clock_timestamp()
-                   WHERE session_id=%s AND id=%s
-                     AND execution_writer_generation=%s
-                     AND status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE')
-                   RETURNING id""",
-                (
-                    candidate.status.value,
-                    candidate.reason,
-                    candidate.public_detail,
-                    candidate.session_id,
-                    candidate.task_id,
-                    candidate.writer_generation,
-                ),
-            ).fetchone()
-            if updated is None:
-                raise ConversationKernelConflict(
-                    "subagent terminal settlement lost its task winner"
-                )
-            self._append_events(
-                connection,
-                guard,
-                workspace_id=candidate.workspace_id,
-                drafts=(self._subagent_task_terminal_event(candidate),),
-            )
-            return True
-
-    def confirm_subagent_task_terminal_settlement(
-        self,
-        *,
-        candidate: PreparedSubagentTaskTerminalSettlement,
-        deadline_monotonic: float,
-    ) -> SubagentTaskTerminalConfirmationKind:
-        """Statelessly classify one stable task-only terminal candidate."""
-
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            task = connection.execute(
-                "SELECT * FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
-                (candidate.session_id, candidate.task_id),
-            ).fetchone()
-            turn = connection.execute(
-                "SELECT status, conversation_scope_kind, scope_subagent_task_id "
-                "FROM pulsara_v3.turns WHERE session_id=%s AND id=%s",
-                (candidate.session_id, candidate.expected_turn_id),
-            ).fetchone()
-            event = connection.execute(
-                "SELECT * FROM pulsara_v3.agent_events WHERE session_id=%s AND event_id=%s",
-                (candidate.session_id, candidate.event_id),
-            ).fetchone()
-            if task is None or not (
-                str(task["workspace_id"]) == candidate.workspace_id
-                and int(task["execution_writer_generation"])
-                == candidate.writer_generation
-            ):
-                return SubagentTaskTerminalConfirmationKind.CONFLICT
-            turn_matches = (
-                turn is None
-                if candidate.require_absent_turn
-                else turn is None
-                or (
-                    str(turn["conversation_scope_kind"]) == "SUBAGENT_TASK"
-                    and str(turn["scope_subagent_task_id"]) == candidate.task_id
-                    and str(turn["status"]) in {"COMPLETED", "INTERRUPTED"}
-                )
-            )
-            if not turn_matches:
-                return SubagentTaskTerminalConfirmationKind.CONFLICT
-            if (
-                str(task["status"])
-                in {"PENDING_START", "WAITING_DEPENDENCY", "ACTIVE"}
-                and event is None
-            ):
-                return SubagentTaskTerminalConfirmationKind.NONE
-            expected_event = self._subagent_task_terminal_event(candidate)
-            if (
-                str(task["status"]) == candidate.status.value
-                and task["pending_reason"] is None
-                and str(task["terminal_reason"]) == candidate.reason
-                and str(task["terminal_public_detail"]) == candidate.public_detail
-                and task["terminal_at"] is not None
-                and event is not None
-                and _event_row_matches_draft(event, expected_event)
-            ):
-                return SubagentTaskTerminalConfirmationKind.FULL
-            return SubagentTaskTerminalConfirmationKind.CONFLICT
-
-    @staticmethod
-    def _explicit_result_events(
-        candidate: PreparedExplicitSubagentResultSettlement,
-    ) -> tuple[CommittedEventDraft, CommittedEventDraft, CommittedEventDraft]:
-        result = candidate.result
-        observed_at = candidate.tool_result.observed_at
-        return (
-            CommittedEventDraft(
-                event_id=derive_id("event", "accepted", candidate.tool_result.session_id, CommittedEventType.SUBAGENT_RESULT_ACCEPTED.name, SubjectSlot.SUBAGENT_RESULT.name, result.result_id, ""),
-                event_type=CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
-                subject=CommittedEventSubject(
-                    SubjectSlot.SUBAGENT_RESULT, result.result_id
-                ),
-                actor_kind="subagent",
-                actor_id=candidate.task_id,
-                sensitivity_class="PUBLIC",
-                projection_profile="DEFAULT",
-                occurred_at=observed_at,
-                payload={"result_source": "EXPLICIT"},
-            ),
-            CommittedEventDraft(
-                event_id=derive_id("event", "accepted", candidate.tool_result.session_id, CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED.name, SubjectSlot.SUBAGENT_TASK.name, candidate.task_id, "status:COMPLETED"),
-                event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-                subject=CommittedEventSubject(
-                    SubjectSlot.SUBAGENT_TASK, candidate.task_id
-                ),
-                actor_kind="runtime",
-                actor_id="foreground-runner",
-                sensitivity_class="PUBLIC",
-                projection_profile="DEFAULT",
-                occurred_at=observed_at,
-                payload={"status": "COMPLETED", "reason": None},
-            ),
-            CommittedEventDraft(
-                event_id=derive_id("event", "accepted", candidate.tool_result.session_id, CommittedEventType.TURN_COMPLETED.name, SubjectSlot.TURN.name, candidate.tool_result.turn_id, ""),
-                event_type=CommittedEventType.TURN_COMPLETED,
-                subject=CommittedEventSubject(
-                    SubjectSlot.TURN, candidate.tool_result.turn_id
-                ),
-                actor_kind="runtime",
-                actor_id="foreground-runner",
-                sensitivity_class="PUBLIC",
-                projection_profile="DEFAULT",
-                occurred_at=observed_at,
-                payload={"final_entry_id": candidate.tool_result.result_entry_id},
-            ),
-        )
-
-    def accept_explicit_subagent_result(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedExplicitSubagentResultSettlement,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry:
-        """Atomically accept report acknowledgement, result, turn and task."""
-
-        tool = candidate.tool_result
-        result = candidate.result
-        if tool.session_id != guard.session_id:
-            raise ValueError("explicit subagent result belongs to another session")
-        if not isinstance(tool.side_branch, NoToolResultSideBranch):
-            raise ValueError("explicit subagent result cannot own a side branch")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            subject = connection.execute(
-                """SELECT t.workspace_id, t.status AS turn_status,
-                          t.permission_snapshot_fingerprint,
-                          t.scope_subagent_task_id,
-                          task.status AS task_status,
-                          block.tool_name, block.tool_arguments,
-                          attempt.id AS exact_attempt_id,
-                          attempt.permission_snapshot_fingerprint AS attempt_permission
-                   FROM pulsara_v3.turns AS t
-                   JOIN pulsara_v3.subagent_tasks AS task
-                     ON task.session_id = t.session_id
-                    AND task.id = t.scope_subagent_task_id
-                   JOIN pulsara_v3.assistant_message_blocks AS block
-                     ON block.session_id = t.session_id
-                    AND block.assistant_entry_id = %s
-                    AND block.tool_call_id = %s
-                    AND block.block_kind = 'TOOL_CALL'
-                   JOIN pulsara_v3.tool_execution_attempts AS attempt
-                     ON attempt.session_id = block.session_id
-                    AND attempt.assistant_entry_id = block.assistant_entry_id
-                    AND attempt.tool_call_id = block.tool_call_id
-                    AND attempt.id = %s
-                   WHERE t.session_id = %s AND t.id = %s
-                     AND t.conversation_scope_kind = 'SUBAGENT_TASK'
-                     AND t.scope_subagent_task_id = %s
-                   FOR UPDATE OF t, task""",
-                (
-                    tool.assistant_entry_id,
-                    tool.tool_call_id,
-                    tool.attempt_id,
-                    guard.session_id,
-                    tool.turn_id,
-                    candidate.task_id,
-                ),
-            ).fetchone()
-            if (
-                subject is None
-                or str(subject["workspace_id"]) != tool.workspace_id
-                or str(subject["turn_status"]) != "RUNNING"
-                or str(subject["task_status"]) != "ACTIVE"
-                or str(subject["tool_name"]) != "report_agent_result"
-                or str(subject["exact_attempt_id"]) != tool.attempt_id
-                or str(subject["attempt_permission"])
-                != str(subject["permission_snapshot_fingerprint"])
-                or not _explicit_result_arguments_match(
-                    subject["tool_arguments"], result
-                )
-            ):
-                raise ConversationKernelConflict(
-                    "explicit subagent result subject is not active and exact"
-                )
-            entry_sequence = self._allocate_entry_sequence(
-                connection, guard.session_id
-            )
-            self._insert_entry(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=tool.workspace_id,
-                turn_id=tool.turn_id,
-                entry_id=tool.result_entry_id,
-                entry_sequence=entry_sequence,
-                entry_kind=EntryKind.TOOL_RESULT,
-                scope_kind=ConversationScopeKind.SUBAGENT_TASK,
-                scope_task_id=candidate.task_id,
-                content=tool.canonical_preview_content,
-            )
-            connection.execute(
-                """INSERT INTO pulsara_v3.tool_results (
-                       result_record_kind, id, session_id, workspace_id,
-                       tool_call_entry_id, tool_call_id, attempt_id,
-                       result_origin_kind, result_entry_id, result_state,
-                       permission_snapshot_fingerprint,
-                       output_artifact_disposition, output_artifact_id,
-                       output_artifact_blob_id, output_source_coverage,
-                       output_display_kind, output_source_coverage_reason,
-                       output_artifact_unavailability_reason,
-                       model_visible_memory_fact_ids,
-                       observed_at, observation_duration_microseconds,
-                       observation_origin_kind,
-                       tool_reported_duration_microseconds
-                   ) VALUES (
-                       'EXECUTED', %s, %s, %s, %s, %s, %s, 'PHYSICAL_ATTEMPT', %s, %s,
-                       %s, %s, %s, %s, %s, %s, %s, %s,
-                       %s, %s, %s, %s, %s
-                   )""",
-                (
-                    tool.result_id,
-                    guard.session_id,
-                    tool.workspace_id,
-                    tool.assistant_entry_id,
-                    tool.tool_call_id,
-                    tool.attempt_id,
-                    tool.result_entry_id,
-                    tool.result_state,
-                    subject["permission_snapshot_fingerprint"],
-                    tool.artifact_disposition.value,
-                    tool.artifact_id,
-                    None,
-                    tool.source_coverage.value,
-                    tool.display_kind.value,
-                    None
-                    if tool.source_coverage_reason is None
-                    else tool.source_coverage_reason.value,
-                    None
-                    if tool.artifact_unavailability_reason is None
-                    else tool.artifact_unavailability_reason.value,
-                    list(tool.model_visible_memory_fact_ids),
-                    tool.observed_at,
-                    tool.observation_duration_microseconds,
-                    tool.observation_origin_kind.value,
-                    tool.trusted_tool_reported_duration_microseconds,
-                ),
-            )
-            connection.execute(
-                """INSERT INTO pulsara_v3.subagent_task_children (
-                       id, session_id, task_id, child_kind, child_ordinal,
-                       entry_id, result_source, summary, data, output_preview,
-                       diagnostics, result_fingerprint
-                   ) VALUES (
-                       %s, %s, %s, 'RESULT',
-                       (SELECT count(*) FROM pulsara_v3.subagent_task_children
-                         WHERE session_id = %s AND task_id = %s),
-                       %s, 'EXPLICIT', %s, %s, %s, %s::jsonb, %s
-                   )""",
-                (
-                    result.result_id,
-                    guard.session_id,
-                    candidate.task_id,
-                    guard.session_id,
-                    candidate.task_id,
-                    result.producer_entry_id,
-                    result.summary,
-                    Jsonb(thaw_json(result.data)) if result.data is not None else None,
-                    result.output_preview,
-                    json.dumps(
-                        thaw_json(result.diagnostics),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                    result.result_fingerprint,
-                ),
-            )
-            task_row = connection.execute(
-                """UPDATE pulsara_v3.subagent_tasks
-                   SET status = 'COMPLETED', pending_reason = NULL,
-                       terminal_reason = NULL, terminal_public_detail = NULL,
-                       terminal_at = clock_timestamp()
-                   WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
-                     AND execution_writer_generation = %s
-                   RETURNING id""",
-                (guard.session_id, candidate.task_id, guard.writer_generation),
-            ).fetchone()
-            turn_row = connection.execute(
-                """UPDATE pulsara_v3.turns
-                   SET status = 'COMPLETED', final_entry_id = %s,
-                       terminal_reason = 'COMPLETED', terminal_at = clock_timestamp()
-                   WHERE session_id = %s AND id = %s AND status = 'RUNNING'
-                   RETURNING id""",
-                (tool.result_entry_id, guard.session_id, tool.turn_id),
-            ).fetchone()
-            if task_row is None or turn_row is None:
-                raise ConversationKernelConflict(
-                    "explicit subagent result lost its terminal winner"
-                )
-            events = (
-                tool.tool_result_occurrence,
-                *self._explicit_result_events(candidate),
-            )
-            accepted_events = self._append_events(
-                connection,
-                guard,
-                workspace_id=tool.workspace_id,
-                drafts=events,
-            )
-            return AcceptedEntry(
-                entry_id=tool.result_entry_id,
-                turn_id=tool.turn_id,
-                entry_sequence=entry_sequence,
-                event_sequence=accepted_events[0].event_sequence,
-                turn_completed=True,
-            )
-
-    def confirm_explicit_subagent_result(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedExplicitSubagentResultSettlement,
-        deadline_monotonic: float,
-    ) -> ExplicitSubagentResultConfirmation:
-        """Stateless FULL/NONE/CONFLICT confirmation for the exact composite."""
-
-        tool = candidate.tool_result
-        result_fact = candidate.result
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            self._require_writer(connection, guard, lock=False)
-            entry = connection.execute(
-                "SELECT * FROM pulsara_v3.transcript_entries WHERE entry_owner_kind='EXECUTED_TURN' AND session_id=%s AND id=%s",
-                (guard.session_id, tool.result_entry_id),
-            ).fetchone()
-            tool_row = connection.execute(
-                "SELECT * FROM pulsara_v3.tool_results WHERE session_id=%s AND id=%s",
-                (guard.session_id, tool.result_id),
-            ).fetchone()
-            result = connection.execute(
-                """SELECT * FROM pulsara_v3.subagent_task_children
-                   WHERE session_id=%s AND id=%s AND child_kind='RESULT'""",
-                (guard.session_id, result_fact.result_id),
-            ).fetchone()
-            task = connection.execute(
-                "SELECT * FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
-                (guard.session_id, candidate.task_id),
-            ).fetchone()
-            turn = connection.execute(
-                "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND id=%s",
-                (guard.session_id, tool.turn_id),
-            ).fetchone()
-            subject = connection.execute(
-                """SELECT block.tool_name, block.tool_arguments,
-                          attempt.id AS attempt_id,
-                          attempt.permission_snapshot_fingerprint
-                   FROM pulsara_v3.assistant_message_blocks AS block
-                   JOIN pulsara_v3.tool_execution_attempts AS attempt
-                     ON attempt.session_id = block.session_id
-                    AND attempt.assistant_entry_id = block.assistant_entry_id
-                    AND attempt.tool_call_id = block.tool_call_id
-                   WHERE block.session_id=%s
-                     AND block.assistant_entry_id=%s
-                     AND block.tool_call_id=%s""",
-                (guard.session_id, tool.assistant_entry_id, tool.tool_call_id),
-            ).fetchone()
-            if entry is None and tool_row is None and result is None:
-                if (
-                    task is not None
-                    and turn is not None
-                    and subject is not None
-                    and str(task["status"]) == "ACTIVE"
-                    and int(task["execution_writer_generation"])
-                    == guard.writer_generation
-                    and str(turn["status"]) == "RUNNING"
-                    and str(turn["workspace_id"]) == tool.workspace_id
-                    and str(turn["conversation_scope_kind"])
-                    == "SUBAGENT_TASK"
-                    and str(turn["scope_subagent_task_id"])
-                    == candidate.task_id
-                    and str(subject["tool_name"]) == "report_agent_result"
-                    and str(subject["attempt_id"]) == tool.attempt_id
-                    and str(subject["permission_snapshot_fingerprint"])
-                    == str(turn["permission_snapshot_fingerprint"])
-                    and _explicit_result_arguments_match(
-                        subject["tool_arguments"], result_fact
-                    )
-                ):
-                    return ExplicitSubagentResultConfirmation(
-                        ExplicitSubagentResultConfirmationKind.NONE
-                    )
-                return ExplicitSubagentResultConfirmation(
-                    ExplicitSubagentResultConfirmationKind.CONFLICT
-                )
-            if any(
-                value is None
-                for value in (entry, tool_row, result, task, turn, subject)
-            ):
-                return ExplicitSubagentResultConfirmation(
-                    ExplicitSubagentResultConfirmationKind.CONFLICT
-                )
-            assert entry is not None and tool_row is not None and result is not None
-            assert task is not None and turn is not None
-            assert subject is not None
-            blob = tool.artifact_blob_descriptor
-            sibling_count = int(
-                connection.execute(
-                    """SELECT count(*) FROM pulsara_v3.subagent_task_children
-                       WHERE session_id=%s AND task_id=%s AND id<>%s""",
-                    (guard.session_id, candidate.task_id, result_fact.result_id),
-                ).fetchone()["count"]
-            )
-            matches = (
-                str(entry["workspace_id"]) == tool.workspace_id
-                and str(entry["turn_id"]) == tool.turn_id
-                and str(entry["entry_kind"]) == EntryKind.TOOL_RESULT.value
-                and str(entry["conversation_scope_kind"])
-                == ConversationScopeKind.SUBAGENT_TASK.value
-                and str(entry["scope_subagent_task_id"]) == candidate.task_id
-                and self._content_from_row(entry) == tool.canonical_preview_content
-                and str(tool_row["workspace_id"]) == tool.workspace_id
-                and str(tool_row["result_origin_kind"]) == "PHYSICAL_ATTEMPT"
-                and tool_row["control_plan_workflow_id"] is None
-                and tool_row["control_plan_interaction_id"] is None
-                and str(tool_row["tool_call_entry_id"]) == tool.assistant_entry_id
-                and str(tool_row["tool_call_id"]) == tool.tool_call_id
-                and tool_row["attempt_id"] == tool.attempt_id
-                and str(tool_row["result_entry_id"]) == tool.result_entry_id
-                and str(tool_row["result_state"]) == "SUCCESS"
-                and str(tool_row["permission_snapshot_fingerprint"])
-                == str(turn["permission_snapshot_fingerprint"])
-                and str(tool_row["output_artifact_disposition"])
-                == tool.artifact_disposition.value
-                and tool_row["output_artifact_id"] == tool.artifact_id
-                and tool_row["output_artifact_blob_id"]
-                == (None if blob is None else blob.blob_id)
-                and str(tool_row["output_source_coverage"])
-                == tool.source_coverage.value
-                and str(tool_row["output_display_kind"]) == tool.display_kind.value
-                and tool_row["output_source_coverage_reason"]
-                == (
-                    None
-                    if tool.source_coverage_reason is None
-                    else tool.source_coverage_reason.value
-                )
-                and tool_row["output_artifact_unavailability_reason"]
-                == (
-                    None
-                    if tool.artifact_unavailability_reason is None
-                    else tool.artifact_unavailability_reason.value
-                )
-                and tuple(tool_row["model_visible_memory_fact_ids"])
-                == tool.model_visible_memory_fact_ids
-                and tool_row["observed_at"] == tool.observed_at
-                and tool_row["observation_duration_microseconds"]
-                == tool.observation_duration_microseconds
-                and str(tool_row["observation_origin_kind"])
-                == tool.observation_origin_kind.value
-                and tool_row["tool_reported_duration_microseconds"]
-                == tool.trusted_tool_reported_duration_microseconds
-                and str(subject["tool_name"]) == "report_agent_result"
-                and str(subject["attempt_id"]) == tool.attempt_id
-                and str(subject["permission_snapshot_fingerprint"])
-                == str(turn["permission_snapshot_fingerprint"])
-                and _explicit_result_arguments_match(
-                    subject["tool_arguments"], result_fact
-                )
-                and str(result["task_id"]) == candidate.task_id
-                and str(result["entry_id"]) == result_fact.producer_entry_id
-                and str(result["result_source"]) == "EXPLICIT"
-                and str(result["summary"]) == result_fact.summary
-                and (None if result["data"] is None else freeze_json(result["data"])) == result_fact.data
-                and result["output_preview"] == result_fact.output_preview
-                and freeze_json(result["diagnostics"]) == result_fact.diagnostics
-                and str(result["result_fingerprint"])
-                == result_fact.result_fingerprint
-                and int(result["child_ordinal"]) == sibling_count
-                and str(task["status"]) == "COMPLETED"
-                and int(task["execution_writer_generation"])
-                == guard.writer_generation
-                and task["terminal_reason"] is None
-                and str(turn["status"]) == "COMPLETED"
-                and str(turn["workspace_id"]) == tool.workspace_id
-                and str(turn["conversation_scope_kind"]) == "SUBAGENT_TASK"
-                and str(turn["scope_subagent_task_id"]) == candidate.task_id
-                and str(turn["final_entry_id"]) == tool.result_entry_id
-                and str(turn["terminal_reason"]) == "COMPLETED"
-            )
-            if not matches:
-                return ExplicitSubagentResultConfirmation(
-                    ExplicitSubagentResultConfirmationKind.CONFLICT
-                )
-            if blob is not None:
-                try:
-                    self._require_exact_tool_artifact_blob(
-                        connection,
-                        workspace_id=tool.workspace_id,
-                        expected=blob,
-                    )
-                except ConversationKernelConflict:
-                    return ExplicitSubagentResultConfirmation(
-                        ExplicitSubagentResultConfirmationKind.CONFLICT
-                    )
-            try:
-                tool_event = self._exact_event_for_confirmation(
-                    connection,
-                    tool.tool_result_occurrence,
-                    session_id=tool.session_id,
-                    workspace_id=tool.workspace_id,
-                )
-                for event in self._explicit_result_events(candidate):
-                    self._exact_event_for_confirmation(
-                        connection,
-                        event,
-                        session_id=tool.session_id,
-                        workspace_id=tool.workspace_id,
-                    )
-            except ConversationKernelConflict:
-                return ExplicitSubagentResultConfirmation(
-                    ExplicitSubagentResultConfirmationKind.CONFLICT
-                )
-            return ExplicitSubagentResultConfirmation(
-                ExplicitSubagentResultConfirmationKind.FULL,
-                accepted_entry_id=tool.result_entry_id,
-                entry_sequence=int(entry["entry_sequence"]),
-                event_sequence=int(tool_event["event_sequence"]),
-            )
-
-    @staticmethod
-    def _subagent_cancellation_drafts(
-        *,
-        session_id: str,
-        task_id: str,
-        turn_id: str,
-        task_status: str,
-        task_reason: str,
-        terminal_public_detail: str,
-        turn_reason: str,
-        occurred_at: datetime,
-        actor_id: str,
-    ) -> tuple[CommittedEventDraft, CommittedEventDraft]:
-        common = {
-            "actor_kind": "runtime",
-            "actor_id": actor_id,
-            "sensitivity_class": "PUBLIC",
-            "projection_profile": "DEFAULT",
-            "occurred_at": occurred_at,
+        value = {
+            "agent_id": str(row["session_id"]),
+            "work_id": str(row["id"]),
+            "instruction": self._agent_prompt_text(connection, row),
+            "status": execution.status.value,
+            "terminal_reason": execution.terminal_reason,
+            "turn_id": row["turn_id"],
+            "accepted_at": row["accepted_at"],
+            "profile": row["effective_profile"],
+            "waiting_on": row["waiting_on"],
+            "cursor": str(row["id"]),
+            "request_execution": execution,
         }
-        return (
-            CommittedEventDraft(
-                event_id=derive_id("event", "accepted", session_id, CommittedEventType.TURN_INTERRUPTED.name, SubjectSlot.TURN.name, turn_id, ""),
-                event_type=CommittedEventType.TURN_INTERRUPTED,
-                subject=CommittedEventSubject(SubjectSlot.TURN, turn_id),
-                payload=interruption_payload(turn_reason, terminal_public_detail),
-                **common,
-            ),
-            CommittedEventDraft(
-                event_id=derive_id("event", "accepted", session_id, CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED.name, SubjectSlot.SUBAGENT_TASK.name, task_id, turn_id),
-                event_type=CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-                subject=CommittedEventSubject(SubjectSlot.SUBAGENT_TASK, task_id),
-                payload={
-                    "status": task_status,
-                    "reason": task_reason,
-                    "public_detail": terminal_public_detail,
-                },
-                **common,
-            ),
-        )
-
-    def settle_cancelled_subagent_turn_and_task(
-        self,
-        guard: HostWriterGuard,
-        *,
-        task_id: str,
-        turn_id: str,
-        task_status: str,
-        task_reason: str,
-        terminal_public_detail: str,
-        turn_reason: str,
-        occurred_at: datetime,
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> bool:
-        try:
-            SubagentTerminalReason(task_reason)
-        except ValueError as exc:
-            raise ValueError("joint child terminal reason is invalid") from exc
-        if bounded_terminal_public_detail(terminal_public_detail) != terminal_public_detail:
-            raise ValueError("joint child public detail is invalid")
-        closed_disposition = (task_status, task_reason, turn_reason) in {
-            ("CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
-            ("INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
-            (
-                "INTERRUPTED",
-                "HOOK_COMPACTION_BLOCKED",
-                "HOOK_COMPACTION_BLOCKED",
-            ),
-        } or (
-            task_status == "FAILED"
-            and task_reason == turn_reason == "CHILD_START_FAILED"
-        )
-        if not closed_disposition:
-            raise ValueError("joint child terminal disposition is invalid")
-        drafts = self._subagent_cancellation_drafts(
-            session_id=guard.session_id,
-            task_id=task_id,
-            turn_id=turn_id,
-            task_status=task_status,
-            task_reason=task_reason,
-            terminal_public_detail=terminal_public_detail,
-            turn_reason=turn_reason,
-            occurred_at=occurred_at,
-            actor_id=actor_id,
-        )
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            task = connection.execute(
-                """SELECT workspace_id, status, terminal_reason,
-                          execution_writer_generation
-                   FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s AND id = %s FOR UPDATE""",
-                (guard.session_id, task_id),
+        if execution.status.value == "completed":
+            final = connection.execute(
+                "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
+                (row["session_id"], row["final_entry_id"]),
             ).fetchone()
-            turn = connection.execute(
-                """SELECT workspace_id, status, terminal_reason,
-                          conversation_scope_kind, scope_subagent_task_id
-                   FROM pulsara_v3.turns
-                   WHERE session_id = %s AND id = %s FOR UPDATE""",
-                (guard.session_id, turn_id),
-            ).fetchone()
-            if task is None or turn is None:
-                return False
-            if (
-                int(task["execution_writer_generation"]) != guard.writer_generation
-                or str(turn["conversation_scope_kind"]) != "SUBAGENT_TASK"
-                or str(turn["scope_subagent_task_id"]) != task_id
-                or str(task["workspace_id"]) != str(turn["workspace_id"])
-            ):
+            if final is None:
                 raise ConversationKernelConflict(
-                    "subagent cancellation target identity conflicts"
+                    "completed Work lacks its canonical final entry"
                 )
-            if (
-                str(turn["status"]) != "RUNNING"
-                or str(task["status"]) != "ACTIVE"
-            ):
-                return False
-            connection.execute(
-                """UPDATE pulsara_v3.plan_interactions
-                   SET status = 'ABORTED', aborted_at = clock_timestamp()
-                   WHERE session_id = %s AND origin_turn_id = %s
-                     AND kind = 'QUESTION' AND status = 'OPEN'""",
-                (guard.session_id, turn_id),
-            )
-            connection.execute(
-                """UPDATE pulsara_v3.turns
-                   SET status = 'INTERRUPTED', terminal_reason = %s,
-                       terminal_at = clock_timestamp()
-                   WHERE session_id = %s AND id = %s AND status = 'RUNNING'""",
-                (turn_reason, guard.session_id, turn_id),
-            )
-            connection.execute(
-                """UPDATE pulsara_v3.subagent_tasks
-                   SET status = %s, terminal_reason = %s,
-                       terminal_public_detail = %s,
-                       terminal_at = clock_timestamp()
-                   WHERE session_id = %s AND id = %s
-                     AND status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE')""",
-                (
-                    task_status,
-                    task_reason,
-                    terminal_public_detail,
-                    guard.session_id,
-                    task_id,
-                ),
-            )
-            self._append_events(
-                connection,
-                guard,
-                workspace_id=str(task["workspace_id"]),
-                drafts=drafts,
-            )
-            return True
-
-    def confirm_cancelled_subagent_turn_and_task(
-        self,
-        *,
-        session_id: str,
-        task_id: str,
-        turn_id: str,
-        task_status: str,
-        task_reason: str,
-        terminal_public_detail: str,
-        turn_reason: str,
-        occurred_at: datetime,
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> TurnAdmissionConfirmation:
-        try:
-            SubagentTerminalReason(task_reason)
-        except ValueError as exc:
-            raise ValueError("joint child terminal reason is invalid") from exc
-        if bounded_terminal_public_detail(terminal_public_detail) != terminal_public_detail:
-            raise ValueError("joint child public detail is invalid")
-        closed_disposition = (task_status, task_reason, turn_reason) in {
-            ("CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
-            ("INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
-            (
-                "INTERRUPTED",
-                "HOOK_COMPACTION_BLOCKED",
-                "HOOK_COMPACTION_BLOCKED",
-            ),
-        } or (
-            task_status == "FAILED"
-            and task_reason == turn_reason == "CHILD_START_FAILED"
-        )
-        if not closed_disposition:
-            raise ValueError("joint child terminal disposition is invalid")
-        drafts = self._subagent_cancellation_drafts(
-            session_id=session_id,
-            task_id=task_id,
-            turn_id=turn_id,
-            task_status=task_status,
-            task_reason=task_reason,
-            terminal_public_detail=terminal_public_detail,
-            turn_reason=turn_reason,
-            occurred_at=occurred_at,
-            actor_id=actor_id,
-        )
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            task = connection.execute(
-                """SELECT status, terminal_reason, terminal_public_detail
-                   FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s AND id = %s""",
-                (session_id, task_id),
-            ).fetchone()
-            turn = connection.execute(
-                """SELECT status, terminal_reason, conversation_scope_kind,
-                          scope_subagent_task_id, initial_entry_id, final_entry_id
-                   FROM pulsara_v3.turns WHERE session_id = %s AND id = %s""",
-                (session_id, turn_id),
-            ).fetchone()
-            events = tuple(
-                connection.execute(
-                    """SELECT * FROM pulsara_v3.agent_events
-                       WHERE session_id = %s AND event_id = %s""",
-                    (session_id, draft.event_id),
-                ).fetchone()
-                for draft in drafts
-            )
-            no_events = all(row is None for row in events)
-            if turn is None and no_events and task is not None:
-                # The task coordination row is accepted before the task-scoped
-                # turn.  Cancellation may therefore win before admission; that
-                # is a clean NONE for the joint candidate and is settled through
-                # the existing task-only terminal transition.
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
-            if task is None and turn is None and no_events:
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
-            if task is None or turn is None:
-                return TurnAdmissionConfirmation(
-                    TurnAdmissionConfirmationKind.CONFLICT
-                )
-            scope_matches = (
-                str(turn["conversation_scope_kind"]) == "SUBAGENT_TASK"
-                and str(turn["scope_subagent_task_id"]) == task_id
-            )
-            if not scope_matches:
-                return TurnAdmissionConfirmation(
-                    TurnAdmissionConfirmationKind.CONFLICT
-                )
-            if (
-                str(task["status"]) == "ACTIVE"
-                and str(turn["status"]) == "RUNNING"
-                and no_events
-            ):
-                # This is the ordinary confirm-before-write state.  Neither
-                # accepted coordination row is partial; the immutable
-                # cancellation candidate simply has no winner yet.
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
-            if (
-                str(turn["status"]) == "COMPLETED"
-                and str(task["status"]) in {"ACTIVE", "COMPLETED"}
-                and no_events
-                and turn["final_entry_id"] is not None
-            ):
-                # The assistant winner may commit immediately before the child
-                # manager resumes from its runner await.  Cancellation cannot
-                # replace that winner; return its exact entry so the existing
-                # result/task lineage can finish under the same Host owner.
-                return TurnAdmissionConfirmation(
-                    TurnAdmissionConfirmationKind.HISTORICAL_TERMINAL,
-                    self._accepted_entry(
-                        connection, session_id, str(turn["final_entry_id"])
-                    ),
-                )
-            if any(row is None for row in events):
-                return TurnAdmissionConfirmation(
-                    TurnAdmissionConfirmationKind.CONFLICT
-                )
-            assert all(row is not None for row in events)
-            if not (
-                str(task["status"]) == task_status
-                and str(task["terminal_reason"]) == task_reason
-                and str(task["terminal_public_detail"])
-                == terminal_public_detail
-                and str(turn["status"]) == "INTERRUPTED"
-                and str(turn["terminal_reason"]) == turn_reason
-                and all(
-                    _event_row_matches_draft(row, draft)
-                    for row, draft in zip(events, drafts, strict=True)
-                )
-            ):
-                return TurnAdmissionConfirmation(
-                    TurnAdmissionConfirmationKind.CONFLICT
-                )
-            return TurnAdmissionConfirmation(
-                TurnAdmissionConfirmationKind.FULL,
-                self._accepted_entry(
-                    connection, session_id, str(turn["initial_entry_id"])
-                ),
+            from pulsara_agent.conversation_kernel.history_projection import (
+                canonical_history_message,
             )
 
-    def start_subagent_turn(
-        self,
-        guard: HostWriterGuard,
-        *,
-        task_id: str,
-        turn_id: str,
-        entry_id: str,
-        context_binding_revision_id: str,
-        task_start_event_id: str,
-        expected_parent_permission_snapshot: FrozenRunPermissionSnapshot,
-        content: CanonicalContent,
-        occurred_at: datetime,
-        actor_id: str,
-        deadline_monotonic: float,
-        _prepared_candidate: PreparedSubagentTurnAdmission | None = None,
-    ) -> AcceptedEntry:
-        prepared = _prepared_candidate or build_prepared_subagent_turn_admission(
-            session_id=guard.session_id,
-            task_id=task_id,
-            turn_id=turn_id,
-            entry_id=entry_id,
-            context_binding_revision_id=context_binding_revision_id,
-            permission_snapshot_id=derive_id('permission', 'admission', turn_id),
-            task_start_event_id=task_start_event_id,
-            expected_parent_permission_snapshot=(
-                expected_parent_permission_snapshot
-            ),
-            content=content,
-            occurred_at=occurred_at,
-            actor_id=actor_id,
+            message = canonical_history_message(connection, final)
+            value["final"] = "" if message is None else message["text"]
+            value["final_entry_id"] = str(row["final_entry_id"])
+        elif execution.status.value == "stopped":
+            value["diagnostic"] = (
+                row["terminal_public_detail"] or execution.terminal_reason
+            )
+        return value
+
+    @staticmethod
+    def _agent_prompt_text(connection, row):
+        from pulsara_agent.conversation_kernel.prompt_storage import (
+            hydrate_canonical_prompt_owner,
         )
+
+        prompt = hydrate_canonical_prompt_owner(
+            connection, row=row, queue_item_id=str(row["id"])
+        )
+        return "".join(
+            p.text for p in prompt.content.parts if isinstance(p, LLMTextPart)
+        )
+
+    def admit_agent_requests(
+        self,
+        root_guard,
+        *,
+        requests,
+        source_turn_id,
+        source_tool_attempt_id,
+        model_call_binding,
+        permission_snapshot,
+        occurred_at,
+        actor_id,
+        deadline_monotonic,
+    ):
+        requests = tuple(requests)
         if (
-            prepared.session_id != guard.session_id
-            or prepared.task_id != task_id
-            or prepared.turn_id != turn_id
-            or prepared.entry_id != entry_id
-            or prepared.context_binding_revision_id
-            != context_binding_revision_id
-            or prepared.task_start_event_id != task_start_event_id
-            or prepared.expected_parent_permission_snapshot
-            != expected_parent_permission_snapshot
-            or prepared.content != content
-            or prepared.occurred_at != occurred_at
-            or prepared.actor_id != actor_id
+            not requests
+            or len(requests) > 16
+            or any(not isinstance(x, PreparedAgentRequest) for x in requests)
         ):
-            raise ValueError("prepared subagent admission does not exact-join arguments")
+            raise ValueError("one delegation admission accepts 1..16 prepared requests")
+        if sum(len(x.depends_on) for x in requests) > 64:
+            raise ValueError(
+                "one delegation admission accepts at most 64 explicit dependencies"
+            )
+        if permission_snapshot.effective_mode.value != "bypass-permissions":
+            raise ValueError("delegation requires bypass permissions")
         with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
+            root_guard,
+            deadline_monotonic=deadline_monotonic,
+            strong_session_control=True,
         ) as connection:
-            task = connection.execute(
-                """
-                SELECT workspace_id, parent_turn_id, objective, model_call_binding
-                FROM pulsara_v3.subagent_tasks
-                WHERE session_id = %s AND id = %s AND status = 'ACTIVE'
-                  AND execution_writer_generation = %s
-                FOR UPDATE
-                """,
-                (guard.session_id, task_id, guard.writer_generation),
-            ).fetchone()
-            if task is None:
-                raise ConversationKernelConflict("subagent task is not active")
-            if not _canonical_content_matches_utf8_text(
-                prepared.content, str(task["objective"])
-            ):
-                raise ConversationKernelConflict(
-                    "subagent initial content conflicts with immutable objective"
-                )
+            root = self._require_writer(connection, root_guard, lock=True)
+            if root["root_session_id"] is not None:
+                raise ConversationKernelConflict("only ROOT can delegate requests")
             parent = connection.execute(
-                "SELECT * FROM pulsara_v3.turns "
-                "WHERE session_id=%s AND id=%s FOR SHARE",
-                (guard.session_id, str(task["parent_turn_id"])),
+                "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND id=%s",
+                (root_guard.session_id, source_turn_id),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT a.*, i.turn_id FROM pulsara_v3.tool_execution_attempts a JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id WHERE a.session_id=%s AND a.id=%s",
+                (root_guard.session_id, source_tool_attempt_id),
             ).fetchone()
             if (
                 parent is None
-                or self._permission_from_row(parent)
-                != prepared.expected_parent_permission_snapshot
+                or attempt is None
+                or attempt["turn_id"] != source_turn_id
+                or self._permission_from_row(parent) != permission_snapshot
             ):
                 raise ConversationKernelConflict(
-                    "subagent launch precondition drifted before turn admission"
+                    "delegation source does not identify its frozen ROOT execution"
                 )
-            entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
-            permission = self._freeze_subagent_permission_snapshot(
-                connection,
-                session_id=guard.session_id,
-                snapshot_id=prepared.permission_snapshot_id,
-                parent_turn_id=str(task["parent_turn_id"]),
-            )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.turns (
-                    id, session_id, workspace_id, conversation_scope_kind,
-                    scope_subagent_task_id, model_call_binding, status, initial_entry_id,
-                    current_context_binding_revision_id,
-                    permission_snapshot_id, requested_permission_mode,
-                    effective_permission_mode, permission_admission_source,
-                    permission_overlay, permission_plan_context_ordinal,
-                    permission_plan_workflow_id,
-                    permission_plan_revision_at_admission,
-                    permission_inherited_from_turn_id, permission_contract_id,
-                    permission_contract_fingerprint,
-                    permission_snapshot_fingerprint
-                ) VALUES (%s, %s, %s, 'SUBAGENT_TASK', %s, %s,
-                          'RUNNING', %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
+            if (
+                model_call_binding_to_dict(model_call_binding)
+                != parent["model_call_binding"]
+            ):
+                raise ConversationKernelConflict(
+                    "delegation model binding differs from source turn"
+                )
+            # ROOT serialization prevents a concurrent batch from introducing a combined cycle.
+            existing_rows = connection.execute(
+                _WORK_SELECT
+                + " AND (q.status='PENDING' OR qt.status='RUNNING') ORDER BY q.session_id,q.queue_sequence",
+                (root_guard.session_id,),
+            ).fetchall()
+            existing = tuple(
                 (
-                    turn_id,
-                    guard.session_id,
-                    task["workspace_id"],
-                    task_id,
-                    Jsonb(task["model_call_binding"]),
-                    entry_id,
-                    context_binding_revision_id,
-                    *self._permission_columns(permission),
-                ),
+                    str(r["id"]),
+                    str(r["session_id"]),
+                    tuple(x["work_id"] for x in r["waiting_on"]),
+                )
+                for r in existing_rows
             )
-            self._insert_initial_context_binding_revision(
+            validate_agent_request_graph(requests, existing)
+            for agent_id in sorted({r.agent_id for r in requests}):
+                lock_session_admission(connection, session_id=agent_id)
+            batch_ids = {r.work_id for r in requests}
+            if len(batch_ids) != len(requests):
+                raise ValueError("duplicate Work identity")
+            for req in requests:
+                session = connection.execute(
+                    "SELECT * FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE",
+                    (req.agent_id,),
+                ).fetchone()
+                if req.create_agent:
+                    if session is not None:
+                        raise ConversationKernelConflict(
+                            "prepared Agent identity already exists"
+                        )
+                    connection.execute(
+                        """INSERT INTO pulsara_v3.sessions
+                        (id,root_session_id,workspace_id,memory_domain_id,lifecycle,writer_generation,title,model_call_binding)
+                        VALUES (%s,%s,%s,%s,'OPEN',1,%s,%s)""",
+                        (
+                            req.agent_id,
+                            root_guard.session_id,
+                            root["workspace_id"],
+                            root["memory_domain_id"],
+                            req.name,
+                            Jsonb(model_call_binding_to_dict(model_call_binding)),
+                        ),
+                    )
+                elif (
+                    session is None
+                    or session["root_session_id"] != root_guard.session_id
+                    or session["lifecycle"] != "OPEN"
+                ):
+                    raise ConversationKernelConflict(
+                        "Agent does not belong to this ROOT or is unavailable"
+                    )
+                previous = connection.execute(
+                    "SELECT effective_profile FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_INSTRUCTION' ORDER BY queue_sequence DESC LIMIT 1",
+                    (req.agent_id,),
+                ).fetchone()
+                profile = req.profile or (
+                    previous["effective_profile"] if previous else "general_worker"
+                )
+                waiting, materials = [], []
+                for ordinal, work_id in enumerate(req.depends_on):
+                    if work_id in batch_ids:
+                        waiting.append({"work_id": work_id, "ordinal": ordinal})
+                        continue
+                    work = self._agent_work_in_connection(
+                        connection,
+                        root_session_id=root_guard.session_id,
+                        work_id=work_id,
+                    )
+                    if work is None:
+                        raise ConversationKernelConflict(
+                            "prerequisite Work is unavailable"
+                        )
+                    if work["status"] == "completed":
+                        materials.append(
+                            {
+                                "source_work_id": work_id,
+                                "kind": "dependency",
+                                "ordinal": ordinal,
+                                "body": work["final"],
+                            }
+                        )
+                    else:
+                        waiting.append({"work_id": work_id, "ordinal": ordinal})
+                for ordinal, work_id in enumerate(req.materials):
+                    if work_id in req.depends_on:
+                        continue
+                    if work_id in batch_ids:
+                        raise ValueError("unfinished batch work must use depends_on")
+                    work = self._agent_work_in_connection(
+                        connection,
+                        root_session_id=root_guard.session_id,
+                        work_id=work_id,
+                    )
+                    if work is None or work["status"] not in ("completed", "stopped"):
+                        raise ConversationKernelConflict(
+                            "material Work must have ended"
+                        )
+                    materials.append(
+                        {
+                            "source_work_id": work_id,
+                            "kind": "material",
+                            "ordinal": ordinal,
+                            "body": work["final"]
+                            if work["status"] == "completed"
+                            else work.get("diagnostic") or work["terminal_reason"],
+                        }
+                    )
+                prompt = freeze_canonical_prompt(
+                    FrozenPromptContent((LLMTextPart(req.instruction),))
+                )
+                pub = materialize_canonical_prompt(
+                    connection,
+                    publisher=self._canonical_content_publisher,
+                    workspace_id=str(root["workspace_id"]),
+                    prompt=prompt,
+                )
+                sequence = connection.execute(
+                    "UPDATE pulsara_v3.sessions SET latest_prompt_queue_sequence=latest_prompt_queue_sequence+1,idle_since=NULL,updated_at=clock_timestamp() WHERE id=%s RETURNING latest_prompt_queue_sequence",
+                    (req.agent_id,),
+                ).fetchone()["latest_prompt_queue_sequence"]
+                connection.execute(
+                    """INSERT INTO pulsara_v3.prompt_queue_items
+                    (id,session_id,workspace_id,queue_sequence,delivery_mode,input_origin,
+                     source_session_id,source_turn_id,source_tool_attempt_id,effective_profile,profile_text,
+                     initial_context,input_materials,waiting_on,model_call_binding,status,
+                     inline_content,blob_id,content_digest,content_size,content_media_type,content_codec,
+                     permission_snapshot_id,requested_permission_mode,effective_permission_mode,permission_admission_source,
+                     permission_overlay,permission_plan_context_ordinal,permission_plan_workflow_id,
+                     permission_plan_revision_at_admission,permission_inherited_from_turn_id,permission_contract_id,
+                     permission_contract_fingerprint,permission_snapshot_fingerprint)
+                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',
+                    %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        req.work_id,
+                        req.agent_id,
+                        root["workspace_id"],
+                        sequence,
+                        root_guard.session_id,
+                        source_turn_id,
+                        source_tool_attempt_id,
+                        profile,
+                        self._agent_profile_text(profile),
+                        Jsonb(list(req.initial_context)),
+                        Jsonb(materials),
+                        Jsonb(waiting),
+                        Jsonb(model_call_binding_to_dict(model_call_binding)),
+                        *_content_columns(pub.body),
+                        *self._permission_columns(permission_snapshot),
+                    ),
+                )
+                self._agent_queue_event(
+                    connection,
+                    root_guard,
+                    req.agent_id,
+                    str(root["workspace_id"]),
+                    req.work_id,
+                    CommittedEventType.PROMPT_QUEUED,
+                    occurred_at,
+                    actor_id,
+                    {"delivery_mode": "NEW_TURN", "input_origin": "AGENT_INSTRUCTION"},
+                )
+            # Resolve already-terminal prerequisites, including cascading stopped requests,
+            # in the very same atomic admission transaction.
+            self._resolve_agent_dependencies_in_connection(
                 connection,
-                session_id=guard.session_id,
-                turn_id=turn_id,
-                revision_id=context_binding_revision_id,
-                initial_entry_sequence=entry_sequence,
-                scope_kind=ConversationScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id=task_id,
+                root_session_id=root_guard.session_id,
+                guard=root_guard,
+                occurred_at=occurred_at,
+                actor_id=actor_id,
             )
-            self._insert_entry(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=str(task["workspace_id"]),
-                turn_id=turn_id,
-                entry_id=entry_id,
-                entry_sequence=entry_sequence,
-                entry_kind=EntryKind.USER_MESSAGE,
-                scope_kind=ConversationScopeKind.SUBAGENT_TASK,
-                scope_task_id=task_id,
-                content=content,
-            )
-            event = self._append_events(
-                connection,
-                guard,
-                workspace_id=str(task["workspace_id"]),
-                drafts=(prepared.event,),
-            )[0]
-            return AcceptedEntry(
-                entry_id, turn_id, entry_sequence, event.event_sequence
+            return tuple(
+                self._agent_work_in_connection(
+                    connection, root_session_id=root_guard.session_id, work_id=r.work_id
+                )
+                for r in requests
             )
 
-    def accept_subagent_turn(
+    def confirm_agent_requests(
         self,
-        guard: HostWriterGuard,
+        root_guard,
         *,
-        candidate: PreparedSubagentTurnAdmission,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry:
-        if candidate.session_id != guard.session_id:
-            raise ValueError("prepared subagent admission belongs to another session")
-        return self.start_subagent_turn(
-            guard,
-            task_id=candidate.task_id,
-            turn_id=candidate.turn_id,
-            entry_id=candidate.entry_id,
-            context_binding_revision_id=candidate.context_binding_revision_id,
-            task_start_event_id=candidate.task_start_event_id,
-            expected_parent_permission_snapshot=(
-                candidate.expected_parent_permission_snapshot
-            ),
-            content=candidate.content,
-            occurred_at=candidate.occurred_at,
-            actor_id=candidate.actor_id,
-            deadline_monotonic=deadline_monotonic,
-            _prepared_candidate=candidate,
-        )
+        requests,
+        source_turn_id,
+        source_tool_attempt_id,
+        model_call_binding,
+        permission_snapshot,
+        deadline_monotonic,
+    ):
+        """Classify a prepared atomic admission after an uncertain commit acknowledgement.
 
-    def confirm_subagent_turn_admission(
-        self,
-        *,
-        candidate: PreparedSubagentTurnAdmission,
-        guard: HostWriterGuard | None = None,
-        deadline_monotonic: float,
-    ) -> TurnAdmissionConfirmation:
+        Stable request IDs and the original source attempt identify the accepted
+        rows even after their mutable waiting conditions have been satisfied.
+        """
+        requests = tuple(requests)
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
             isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
         ) as connection:
-            if guard is not None:
-                if guard.session_id != candidate.session_id:
-                    raise ValueError(
-                        "subagent admission guard belongs to another session"
-                    )
-                self._require_writer(connection, guard, lock=False)
-            task = connection.execute(
-                """SELECT * FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.task_id),
-            ).fetchone()
-            turn = connection.execute(
-                """SELECT * FROM pulsara_v3.turns
-                   WHERE session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.turn_id),
-            ).fetchone()
-            revision = connection.execute(
-                """SELECT * FROM pulsara_v3.turn_context_binding_revisions
-                   WHERE session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.context_binding_revision_id),
-            ).fetchone()
-            entry = connection.execute(
-                """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE entry_owner_kind = 'EXECUTED_TURN' AND session_id = %s AND id = %s""",
-                (candidate.session_id, candidate.entry_id),
-            ).fetchone()
-            event = connection.execute(
-                """SELECT * FROM pulsara_v3.agent_events
-                   WHERE session_id = %s AND event_id = %s""",
-                (candidate.session_id, candidate.event.event_id),
-            ).fetchone()
-            start_event = connection.execute(
-                "SELECT event_type, subject_subagent_task_id "
-                "FROM pulsara_v3.agent_events "
-                "WHERE session_id=%s AND event_id=%s",
-                (candidate.session_id, candidate.task_start_event_id),
-            ).fetchone()
-            parent = (
-                None
-                if task is None
-                else connection.execute(
-                    "SELECT * FROM pulsara_v3.turns "
-                    "WHERE session_id=%s AND id=%s",
-                    (candidate.session_id, str(task["parent_turn_id"])),
+            self._require_writer(connection, root_guard, lock=False)
+            rows = tuple(
+                connection.execute(
+                    "SELECT q.*,s.root_session_id,s.title FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.sessions s ON s.id=q.session_id WHERE q.id=%s",
+                    (r.work_id,),
                 ).fetchone()
+                for r in requests
             )
-            required = (turn, revision, entry, event)
-            if (
-                task is None
-                or start_event is None
-                or parent is None
-                or not _canonical_content_matches_utf8_text(
-                    candidate.content, str(task["objective"])
-                )
-                or str(start_event["event_type"])
-                != CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED.value
-                or str(start_event["subject_subagent_task_id"])
-                != candidate.task_id
-                or self._permission_from_row(parent)
-                != candidate.expected_parent_permission_snapshot
-            ):
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
-            if all(row is None for row in required):
-                if str(task["status"]) != "ACTIVE":
-                    return TurnAdmissionConfirmation(
-                        TurnAdmissionConfirmationKind.CONFLICT
+            if all(row is None for row in rows):
+                if any(
+                    r.create_agent
+                    and connection.execute(
+                        "SELECT 1 FROM pulsara_v3.sessions WHERE id=%s", (r.agent_id,)
+                    ).fetchone()
+                    is not None
+                    for r in requests
+                ):
+                    raise ConversationKernelConflict(
+                        "Agent rows exist without their atomic requests"
                     )
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.NONE)
-            if any(row is None for row in required):
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
-            assert turn is not None and revision is not None
-            assert entry is not None and event is not None
-            try:
-                permission = self._permission_from_row(turn)
-            except (TypeError, ValueError):
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
-            matches = (
-                str(turn["conversation_scope_kind"]) == "SUBAGENT_TASK"
-                and str(turn["scope_subagent_task_id"]) == candidate.task_id
-                and str(turn["initial_entry_id"]) == candidate.entry_id
-                and str(turn["current_context_binding_revision_id"])
-                == candidate.context_binding_revision_id
-                and permission.snapshot_id == candidate.permission_snapshot_id
-                and permission.admission_source
-                is RunPermissionAdmissionSource.SUBAGENT_INHERITANCE
-                and permission.inherited_from_turn_id == str(task["parent_turn_id"])
-                and self._initial_context_binding_revision_matches(
-                    connection,
-                    row=revision,
-                    session_id=candidate.session_id,
-                    turn_id=candidate.turn_id,
-                    revision_id=candidate.context_binding_revision_id,
-                    initial_entry_sequence=int(entry["entry_sequence"]),
-                    scope_kind=ConversationScopeKind.SUBAGENT_TASK,
-                    scope_subagent_task_id=candidate.task_id,
+                return None
+            if any(row is None for row in rows):
+                raise ConversationKernelConflict(
+                    "only part of an atomic Agent admission exists"
                 )
-                and str(entry["turn_id"]) == candidate.turn_id
-                and str(entry["entry_kind"]) == EntryKind.USER_MESSAGE.value
-                and str(entry["conversation_scope_kind"]) == "SUBAGENT_TASK"
-                and str(entry["scope_subagent_task_id"]) == candidate.task_id
-                and self._content_from_row(entry) == candidate.content
-                and _event_row_matches_draft(event, candidate.event)
-            )
-            if not matches:
-                return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
-            return TurnAdmissionConfirmation(
-                TurnAdmissionConfirmationKind.FULL,
-                self._accepted_entry(connection, candidate.session_id, candidate.entry_id),
+            for req, row in zip(requests, rows, strict=True):
+                if (
+                    row["root_session_id"] != root_guard.session_id
+                    or row["session_id"] != req.agent_id
+                    or row["source_session_id"] != root_guard.session_id
+                    or row["source_turn_id"] != source_turn_id
+                    or row["source_tool_attempt_id"] != source_tool_attempt_id
+                    or row["input_origin"] != "AGENT_INSTRUCTION"
+                    or self._agent_prompt_text(connection, row) != req.instruction
+                    or row["initial_context"] != list(req.initial_context)
+                    or req.profile is not None
+                    and row["effective_profile"] != req.profile
+                    or req.create_agent
+                    and row["title"] != req.name
+                    or row["model_call_binding"]
+                    != model_call_binding_to_dict(model_call_binding)
+                    or self._permission_from_row(row) != permission_snapshot
+                ):
+                    raise ConversationKernelConflict(
+                        "Agent admission differs from its prepared source and inputs"
+                    )
+            return tuple(
+                self._agent_work_in_connection(
+                    connection, root_session_id=root_guard.session_id, work_id=r.work_id
+                )
+                for r in requests
             )
 
-    def query_subagent_task(
+    def _agent_queue_event(
         self,
+        connection,
+        guard,
+        session_id,
+        workspace_id,
+        work_id,
+        event_type,
+        at,
+        actor,
+        payload,
+    ):
+        if guard is None:
+            return
+        self._append_events(
+            connection,
+            guard,
+            owned_session_id=session_id,
+            workspace_id=workspace_id,
+            drafts=(
+                self._event(
+                    event_type,
+                    SubjectSlot.QUEUE_ITEM,
+                    work_id,
+                    session_id=session_id,
+                    occurrence_key="",
+                    occurred_at=at,
+                    actor_kind="runtime",
+                    actor_id=actor,
+                    payload=payload,
+                ),
+            ),
+        )
+
+    def _resolve_agent_dependencies_in_connection(
+        self,
+        connection,
         *,
-        session_id: str,
-        task_id: str,
-        deadline_monotonic: float,
-    ) -> Mapping[str, object] | None:
-        """Read durable task/result state without recovering execution."""
+        root_session_id,
+        guard,
+        occurred_at,
+        actor_id,
+        session_id=None,
+    ):
+        changed = []
+        # Each iteration only consumes a condition or terminalizes a request. No execution recovery.
+        while True:
+            rows = connection.execute(
+                """SELECT q.* FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.sessions s ON s.id=q.session_id
+                WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION' AND q.status='PENDING'
+                AND q.waiting_on <> '[]'::jsonb ORDER BY q.session_id,q.queue_sequence FOR UPDATE OF q""",
+                (root_session_id,),
+            ).fetchall()
+            progressed = False
+            for row in rows:
+                waiting = []
+                materials = list(row["input_materials"])
+                failure = None
+                for condition in row["waiting_on"]:
+                    work = self._agent_work_in_connection(
+                        connection,
+                        root_session_id=root_session_id,
+                        work_id=condition["work_id"],
+                    )
+                    if work is None or work["status"] == "stopped":
+                        failure = condition["work_id"]
+                        break
+                    if work["status"] == "completed":
+                        materials.append(
+                            {
+                                "source_work_id": condition["work_id"],
+                                "kind": "dependency",
+                                "ordinal": condition["ordinal"],
+                                "body": work["final"],
+                            }
+                        )
+                    else:
+                        waiting.append(condition)
+                if failure is not None:
+                    reason = "DEPENDENCY_NOT_SUCCESSFUL:" + failure
+                    connection.execute(
+                        "UPDATE pulsara_v3.prompt_queue_items SET status='REJECTED',terminal_reason=%s,terminal_at=clock_timestamp(),waiting_on='[]'::jsonb WHERE id=%s AND status='PENDING'",
+                        (reason, row["id"]),
+                    )
+                    self._agent_queue_event(
+                        connection,
+                        guard,
+                        str(row["session_id"]),
+                        str(row["workspace_id"]),
+                        str(row["id"]),
+                        CommittedEventType.PROMPT_REJECTED,
+                        occurred_at,
+                        actor_id,
+                        {"reason": reason},
+                    )
+                elif waiting != row["waiting_on"]:
+                    materials.sort(
+                        key=lambda x: (
+                            0 if x["kind"] == "dependency" else 1,
+                            x["ordinal"],
+                        )
+                    )
+                    connection.execute(
+                        "UPDATE pulsara_v3.prompt_queue_items SET waiting_on=%s,input_materials=%s WHERE id=%s",
+                        (Jsonb(waiting), Jsonb(materials), row["id"]),
+                    )
+                else:
+                    continue
+                progressed = True
+                changed.append(str(row["id"]))
+            if not progressed:
+                return tuple(changed)
+
+    def resolve_agent_dependencies(self, *, session_id, deadline_monotonic):
+        self._begin_event_batch()
+        try:
+            with self._provider.connection(
+                lane=PostgresConnectionLane.HOST_CONTROL,
+                row_factory=dict_row,
+                deadline_monotonic=deadline_monotonic,
+            ) as connection:
+                root = connection.execute(
+                    "SELECT coalesce(root_session_id,id) AS root_id FROM pulsara_v3.sessions WHERE id=%s",
+                    (session_id,),
+                ).fetchone()
+                result = ()
+                if root is not None:
+                    lock_session_admission(connection, session_id=str(root["root_id"]))
+                    row = connection.execute(
+                        "SELECT * FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE",
+                        (root["root_id"],),
+                    ).fetchone()
+                    if row is not None:
+                        result = self._resolve_agent_dependencies_in_connection(
+                            connection,
+                            root_session_id=str(row["id"]),
+                            guard=None,
+                            occurred_at=datetime.now(timezone.utc),
+                            actor_id="dependency-owner",
+                        )
+            self._finish_event_batch(committed=True)
+            return result
+        except BaseException:
+            self._finish_event_batch(committed=False)
+            raise
+
+    def query_agent_work(self, *, root_session_id, work_id, deadline_monotonic):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return self._agent_work_in_connection(
+                connection, root_session_id=root_session_id, work_id=work_id
+            )
+
+    def list_agent_sessions(
+        self, *, root_session_id, cursor=None, limit=20, deadline_monotonic
+    ):
+        if limit < 1:
+            raise ValueError("page limit must be positive")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return tuple(
+                dict(x)
+                for x in connection.execute(
+                    _RUNTIME_SELECT
+                    + " WHERE s.root_session_id=%s AND (%s::text IS NULL OR s.id>%s) ORDER BY s.id LIMIT %s",
+                    (root_session_id, cursor, cursor, limit),
+                ).fetchall()
+            )
+
+    def list_agent_works(
+        self, *, root_session_id, agent_id, cursor=None, limit=20, deadline_monotonic
+    ):
+        if limit < 1:
+            raise ValueError("page limit must be positive")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM pulsara_v3.sessions WHERE id=%s AND root_session_id=%s",
+                    (agent_id, root_session_id),
+                ).fetchone()
+                is None
+            ):
+                raise ValueError("Agent does not belong to this ROOT")
+            rows = connection.execute(
+                _WORK_SELECT
+                + """ AND q.session_id=%s AND (%s::text IS NULL OR q.queue_sequence >
+                (SELECT queue_sequence FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s))
+                ORDER BY q.queue_sequence LIMIT %s""",
+                (root_session_id, agent_id, cursor, agent_id, cursor, limit),
+            ).fetchall()
+            return tuple(self._agent_work_value(connection, x) for x in rows)
+
+    def list_root_agent_session_ids(self, *, root_session_id, deadline_monotonic):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return tuple(
+                str(x["id"])
+                for x in connection.execute(
+                    "SELECT id FROM pulsara_v3.sessions WHERE root_session_id=%s ORDER BY id",
+                    (root_session_id,),
+                ).fetchall()
+            )
+
+    def list_all_agent_sessions(self, *, deadline_monotonic):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            return tuple(
+                dict(x)
+                for x in connection.execute(
+                    _RUNTIME_SELECT
+                    + " WHERE s.root_session_id IS NOT NULL ORDER BY s.id"
+                ).fetchall()
+            )
+
+    def read_agent_runtime_state(self, *, session_id, deadline_monotonic):
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
             row = connection.execute(
-                """
-                SELECT t.id, t.workspace_id, t.batch_id, t.task_key, t.label,
-                       t.profile_kind,
-                       t.display_role, t.context_mode, t.context_last_n_turns,
-                       t.model_call_binding, t.model_target_fact,
-                       t.history_source_task_id, t.material_refs,
-                       t.parent_turn_id, t.objective, t.status, t.pending_reason,
-                       t.terminal_reason, t.terminal_public_detail,
-                       c.id AS result_id,
-                       c.entry_id AS result_entry_id, c.result_source,
-                       c.summary AS result_summary,
-                       c.data AS result_data,
-                       c.output_preview AS result_output_preview,
-                       c.diagnostics AS result_diagnostics,
-                       c.result_fingerprint,
-                       accepted.id AS accepted_root_entry_id
-                FROM pulsara_v3.subagent_tasks AS t
-                LEFT JOIN pulsara_v3.subagent_task_children AS c
-                  ON c.session_id = t.session_id AND c.task_id = t.id
-                 AND c.child_kind = 'RESULT'
-                LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                  ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
-                 AND accepted.source_subagent_task_id = t.id
-                WHERE t.session_id = %s AND t.id = %s
-                """,
-                (session_id, task_id),
+                _RUNTIME_SELECT + " WHERE s.id=%s", (session_id,)
             ).fetchone()
             return None if row is None else dict(row)
 
-    def list_subagent_tasks(
-        self,
-        *,
-        session_id: str,
-        maximum_items: int,
-        deadline_monotonic: float,
-        after_accepted_at: datetime | None = None,
-        after_task_id: str | None = None,
-        batch_id: str | None = None,
-        task_id: str | None = None,
-        include_lookahead: bool = False,
-    ) -> tuple[Mapping[str, object], ...]:
-        if not 1 <= maximum_items <= 50:
-            raise ValueError("subagent list bound is invalid")
-        if (after_accepted_at is None) != (after_task_id is None):
-            raise ValueError("subagent list keyset cursor is incomplete")
+    def read_session_root_id(self, *, session_id, deadline_monotonic):
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
-            return tuple(
-                dict(row)
-                for row in connection.execute(
-                    """
-                    WITH inventory AS (
-                        SELECT t.id, t.batch_id, t.task_key, t.label,
-                               t.profile_kind, t.display_role, t.context_mode,
-                               t.context_last_n_turns, t.parent_turn_id,
-                               t.model_call_binding, t.model_target_fact,
-                               t.history_source_task_id, t.material_refs,
-                               t.objective, t.status, t.pending_reason,
-                               t.terminal_reason, t.terminal_public_detail,
-                               t.accepted_at, t.terminal_at,
-                               c.id AS result_id,
-                               c.entry_id AS result_entry_id, c.result_source,
-                               c.summary AS result_summary,
-                               c.data AS result_data,
-                               c.output_preview AS result_output_preview,
-                               c.diagnostics AS result_diagnostics,
-                               c.result_fingerprint,
-                               accepted.id AS accepted_root_entry_id,
-                               s.latest_event_sequence AS read_event_sequence,
-                               dependencies.rows AS dependency_rows,
-                               count(*) OVER () AS total_count
-                        FROM pulsara_v3.subagent_tasks AS t
-                        JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
-                        LEFT JOIN pulsara_v3.subagent_task_children AS c
-                          ON c.session_id = t.session_id AND c.task_id = t.id
-                         AND c.child_kind = 'RESULT'
-                        LEFT JOIN pulsara_v3.transcript_entries AS accepted
-                          ON accepted.entry_owner_kind = 'EXECUTED_TURN' AND accepted.session_id = t.session_id
-                         AND accepted.source_subagent_task_id = t.id
-                        LEFT JOIN LATERAL (
-                            SELECT coalesce(jsonb_agg(jsonb_build_object(
-                                'task_id', edge.task_id,
-                                'dependency_task_id', edge.dependency_task_id,
-                                'dependency_ordinal', edge.dependency_ordinal,
-                                'task_key', dependency.task_key,
-                                'label', dependency.label,
-                                'status', dependency.status,
-                                'result_id', result.id,
-                                'result_source', result.result_source,
-                                'summary', result.summary,
-                                'data', result.data
-                            ) ORDER BY edge.dependency_ordinal), '[]'::jsonb) AS rows
-                            FROM pulsara_v3.subagent_task_dependencies AS edge
-                            JOIN pulsara_v3.subagent_tasks AS dependency
-                              ON dependency.session_id = edge.session_id
-                             AND dependency.id = edge.dependency_task_id
-                            LEFT JOIN pulsara_v3.subagent_task_children AS result
-                              ON result.session_id = dependency.session_id
-                             AND result.task_id = dependency.id
-                             AND result.child_kind = 'RESULT'
-                            WHERE edge.session_id = t.session_id AND edge.task_id = t.id
-                        ) AS dependencies ON TRUE
-                        WHERE t.session_id = %s
-                          AND (%s::text IS NULL OR t.batch_id = %s)
-                          AND (%s::text IS NULL OR t.id = %s)
-                    )
-                    SELECT * FROM inventory
-                    WHERE %s::timestamptz IS NULL
-                       OR (accepted_at, id) > (%s::timestamptz, %s::text)
-                    ORDER BY accepted_at, id LIMIT %s
-                    """,
-                    (
-                        session_id,
-                        batch_id,
-                        batch_id,
-                        task_id,
-                        task_id,
-                        after_accepted_at,
-                        after_accepted_at,
-                        after_task_id,
-                        maximum_items + int(include_lookahead),
-                    ),
-                ).fetchall()
-            )
-
-    def list_subagent_task_groups(
-        self,
-        *,
-        session_id: str,
-        maximum_items: int,
-        deadline_monotonic: float,
-        after_first_accepted_at: datetime | None = None,
-        after_batch_id: str | None = None,
-        batch_id: str | None = None,
-        include_lookahead: bool = False,
-    ) -> tuple[Mapping[str, object], ...]:
-        """Read one keyset page of real batch rows without creating a Host."""
-
-        if not 1 <= maximum_items <= 50:
-            raise ValueError("subagent group page bound is invalid")
-        if (after_first_accepted_at is None) != (after_batch_id is None):
-            raise ValueError("subagent group cursor is incomplete")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            incomplete = connection.execute(
-                """SELECT id FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s AND batch_id IS NULL
-                   ORDER BY accepted_at, id LIMIT 50""",
+            row = connection.execute(
+                "SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s",
                 (session_id,),
-            ).fetchall()
-            if incomplete:
-                ids = ",".join(str(row["id"]) for row in incomplete)
-                raise ValueError(f"TASK_BATCH_DATA_INCOMPLETE:{ids}")
-            return tuple(
-                dict(row)
-                for row in connection.execute(
-                    """
-                    WITH groups AS (
-                        SELECT batch_id, min(parent_turn_id) AS parent_turn_id,
-                               min(accepted_at) AS first_accepted_at,
-                               count(*) AS task_count,
-                               count(*) FILTER (WHERE status = 'PENDING_START') AS pending_count,
-                               count(*) FILTER (WHERE status = 'ACTIVE') AS active_count,
-                               count(*) FILTER (WHERE status = 'WAITING_DEPENDENCY') AS waiting_count,
-                               count(*) FILTER (WHERE status = 'COMPLETED') AS completed_count,
-                               count(*) FILTER (WHERE status = 'CANCELLED') AS cancelled_count,
-                               count(*) FILTER (WHERE status = 'FAILED') AS failed_count,
-                               count(*) FILTER (WHERE status = 'INTERRUPTED') AS interrupted_count,
-                               count(*) FILTER (WHERE status = 'BLOCKED_DEPENDENCY_FAILED') AS blocked_count,
-                               CASE WHEN count(*) = 1
-                                    THEN max(COALESCE(label, task_key, '任务'))
-                                    ELSE NULL END AS single_task_label,
-                               count(*) OVER () AS filtered_count
-                        FROM pulsara_v3.subagent_tasks
-                        WHERE session_id = %s
-                          AND (%s::text IS NULL OR batch_id = %s)
-                        GROUP BY batch_id
-                    )
-                    SELECT groups.*, totals.total_count, session.latest_event_sequence AS read_event_sequence
-                    FROM groups
-                    JOIN pulsara_v3.sessions AS session ON session.id = %s
-                    CROSS JOIN LATERAL (
-                        SELECT count(DISTINCT batch_id) AS total_count
-                        FROM pulsara_v3.subagent_tasks
-                        WHERE session_id = session.id
-                    ) AS totals
-                    WHERE %s::timestamptz IS NULL
-                       OR (first_accepted_at, batch_id) > (%s::timestamptz, %s::text)
-                    ORDER BY first_accepted_at, batch_id LIMIT %s
-                    """,
-                    (
-                        session_id,
-                        batch_id,
-                        batch_id,
-                        session_id,
-                        after_first_accepted_at,
-                        after_first_accepted_at,
-                        after_batch_id,
-                        maximum_items + int(include_lookahead),
-                    ),
-                ).fetchall()
-            )
-
-    def list_subagent_task_activities(
-        self,
-        *,
-        session_id: str,
-        task_id: str,
-        maximum_items: int,
-        after_entry_sequence: int,
-        deadline_monotonic: float,
-    ) -> tuple[
-        tuple[Mapping[str, object], ...],
-        tuple[Mapping[str, object], ...],
-        tuple[Mapping[str, object], ...],
-        bool,
-        Mapping[str, object] | None,
-    ]:
-        """Read canonical entry/block/result identities for one exact task."""
-
-        if not task_id or not 1 <= maximum_items <= 50 or after_entry_sequence < 0:
-            raise ValueError("subagent activity page is invalid")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            task = connection.execute(
-                "SELECT * FROM pulsara_v3.subagent_tasks WHERE session_id = %s AND id = %s",
-                (session_id, task_id),
             ).fetchone()
-            if task is None:
-                raise KeyError(task_id)
-            inherited_ids: list[str] = []
-            inherited_context = None
-            if task["history_source_task_id"] is not None:
-                from pulsara_agent.conversation_kernel.reader import (
-                    CanonicalProviderInputReader,
-                )
-                from pulsara_agent.conversation_kernel.subagents.history import (
-                    historicalize_snapshot,
-                )
-                from pulsara_agent.model_input.contracts import (
-                    PreparedProviderInputCut,
-                    FrozenProviderInputItemKind,
-                    provider_input_item_text,
-                )
+            if row is None:
+                raise LookupError("session not found")
+            return row["root_session_id"]
 
-                source_id = str(task["history_source_task_id"])
-                source = connection.execute(
-                    "SELECT label, task_key FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
-                    (session_id, source_id),
-                ).fetchone()
-                source_cut = PreparedProviderInputCut(
-                    session_id=session_id,
-                    turn_id=validate_worker_history_source(
-                        connection,
-                        session_id=session_id,
-                        source_task_id=source_id,
-                        through_sequence=int(task["history_cut_sequence"]),
-                        binding_revision_id=str(
-                            task["history_context_binding_revision_id"]
-                        ),
-                    ),
-                    context_binding_revision_id=str(
-                        task["history_context_binding_revision_id"]
-                    ),
-                    provider_input_through_sequence=int(task["history_cut_sequence"]),
-                )
-                # Reuse the effective input owner, including compaction and each fixed cut.
-                # Its existing per-operation bounds apply; no UI history/depth cap is added.
-                canonical = (
-                    CanonicalProviderInputReader(self._provider)
-                    .read_frozen_dispatch(
-                        source_cut,
-                        deadline_monotonic=deadline_monotonic,
-                        _connection=connection,
-                        _historical_scope=True,
-                    )
-                    .compile_snapshot.canonical_input
-                )
-                materials = []
-                for item in canonical.items:
-                    if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
-                        carrier = historicalize_snapshot(
-                            connection, item, source_cut
-                        ).content
-                        materials.append(
-                            {
-                                "label": "已压缩的上下文",
-                                "body": carrier.earlier_context_summary,
-                            }
-                        )
-                        for request in (
-                            *carrier.recent_human_requests,
-                            *carrier.retained_historical_requests,
-                        ):
-                            text = "\n".join(
-                                part.text
-                                for part in request.content.parts
-                                if hasattr(part, "text")
-                            )
-                            materials.append({"label": "保留的任务上下文", "body": text})
-                    elif (
-                        item.item_kind
-                        is FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
-                    ):
-                        projected = json.loads(provider_input_item_text(item))["pulsara_initial_context"]
-                        body = json.dumps({key: value for key, value in projected.items() if key != "source"}, ensure_ascii=False)
-                        materials.append({"label": "初始上下文材料", "body": body})
-                    elif item.source_entry_id is not None:
-                        inherited_ids.append(item.source_entry_id)
-                inherited_context = {
-                    "source_label": source["label"] or source["task_key"] or "任务",
-                    "materials": materials,
-                }
-            entries = connection.execute(
-                """SELECT e.*, COALESCE(e.inline_content, blob.body) AS public_content, turn.status AS turn_status, owner.objective AS task_objective,
-                          COALESCE(owner.label, owner.task_key, '任务') AS source_task_label
-                   FROM pulsara_v3.transcript_entries AS e
-                   JOIN pulsara_v3.turns AS turn
-                     ON turn.session_id=e.session_id AND turn.id=e.turn_id
-                   JOIN pulsara_v3.subagent_tasks AS owner
-                     ON owner.session_id=e.session_id AND owner.id=e.scope_subagent_task_id
-                   LEFT JOIN pulsara_v3.blobs AS blob ON blob.id=e.blob_id AND blob.workspace_id=e.workspace_id
-                   WHERE e.entry_owner_kind = 'EXECUTED_TURN'
-                     AND e.session_id = %s
-                     AND e.conversation_scope_kind = 'SUBAGENT_TASK'
-                     AND (e.scope_subagent_task_id = %s OR e.id = ANY(%s))
-                     AND e.entry_sequence > %s
-                   ORDER BY e.entry_sequence, e.id LIMIT %s""",
-                (
-                    session_id,
-                    task_id,
-                    inherited_ids,
-                    after_entry_sequence,
-                    maximum_items + 1,
-                ),
-            ).fetchall()
-            selected = entries[:maximum_items]
-            entry_ids = [str(row["id"]) for row in selected]
-            if not entry_ids:
-                return (), (), (), False, inherited_context
-            blocks = connection.execute(
-                """SELECT b.id, b.assistant_entry_id, b.block_ordinal, b.block_kind,
-                          b.tool_call_id, b.tool_name, attempt.id AS attempt_id,
-                          COALESCE(b.inline_content, blob.body) AS public_content
-                   FROM pulsara_v3.assistant_message_blocks AS b
-                   LEFT JOIN pulsara_v3.blobs AS blob ON blob.id=b.blob_id AND blob.workspace_id=b.workspace_id
-                   LEFT JOIN pulsara_v3.tool_execution_attempts AS attempt
-                     ON attempt.session_id=b.session_id
-                    AND attempt.assistant_entry_id=b.assistant_entry_id
-                    AND attempt.tool_call_id=b.tool_call_id
-                   WHERE b.session_id = %s AND b.assistant_entry_id = ANY(%s)
-                   ORDER BY b.assistant_entry_id, b.block_ordinal""",
-                (session_id, entry_ids),
-            ).fetchall()
-            results = connection.execute(
-                """SELECT result.attempt_id, result.tool_call_entry_id AS assistant_entry_id,
-                          result.tool_call_id, result.result_entry_id, result.result_state
-                   FROM pulsara_v3.tool_results AS result
-                   JOIN pulsara_v3.transcript_entries AS outcome ON outcome.session_id=result.session_id AND outcome.id=result.result_entry_id
-                   WHERE result.session_id = %s
-                     AND (result.tool_call_entry_id = ANY(%s) OR result.result_entry_id = ANY(%s))
-                     AND (outcome.scope_subagent_task_id=%s OR outcome.id=ANY(%s))
-                   ORDER BY result.accepted_at, result.id""",
-                (session_id, entry_ids, entry_ids, task_id, inherited_ids),
-            ).fetchall()
-            enriched = []
-            for row in selected:
-                value = dict(row)
-                value["inherited"] = str(row["scope_subagent_task_id"]) != task_id
-                if row["entry_kind"] == "ASSISTANT_MESSAGE":
-                    from pulsara_agent.conversation_kernel.visualization import saved_visualizations
-                    value["visualizations"] = saved_visualizations(connection, session_id, str(row["id"]))
-                enriched.append(value)
-            return (
-                tuple(enriched),
-                tuple(dict(row) for row in blocks),
-                tuple(dict(row) for row in results),
-                len(entries) > maximum_items,
-                inherited_context,
-            )
-
-    def read_subagent_task_board(
-        self,
-        *,
-        session_id: str,
-        deadline_monotonic: float,
-    ) -> tuple[tuple[Mapping[str, object], ...], tuple[tuple[str, int], ...]]:
-        """Freeze the bounded nonterminal task-board rows and exact counts."""
-
-        statuses = ("ACTIVE", "PENDING_START", "WAITING_DEPENDENCY")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            count_rows = connection.execute(
-                """SELECT status, count(*) AS total
-                   FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s AND status = ANY(%s)
-                   GROUP BY status""",
-                (session_id, list(statuses)),
-            ).fetchall()
-            observed = {str(row["status"]): int(row["total"]) for row in count_rows}
-            rows = connection.execute(
-                """SELECT t.id, t.task_key, t.label, t.objective, t.status,
-                          t.accepted_at,
-                          count(edge.dependency_task_id) AS dependency_total,
-                          count(edge.dependency_task_id) FILTER (
-                            WHERE dependency.status <> 'COMPLETED'
-                          ) AS dependency_remaining
-                   FROM pulsara_v3.subagent_tasks AS t
-                   LEFT JOIN pulsara_v3.subagent_task_dependencies AS edge
-                     ON edge.session_id = t.session_id AND edge.task_id = t.id
-                   LEFT JOIN pulsara_v3.subagent_tasks AS dependency
-                     ON dependency.session_id = edge.session_id
-                    AND dependency.id = edge.dependency_task_id
-                   WHERE t.session_id = %s AND t.status = ANY(%s)
-                   GROUP BY t.id, t.task_key, t.label, t.objective,
-                            t.status, t.accepted_at
-                   ORDER BY CASE t.status
-                              WHEN 'ACTIVE' THEN 0
-                              WHEN 'PENDING_START' THEN 1
-                              ELSE 2
-                            END,
-                            t.accepted_at, t.id
-                   LIMIT 16""",
-                (session_id, list(statuses)),
-            ).fetchall()
-            return (
-                tuple(dict(row) for row in rows),
-                tuple((status, observed.get(status, 0)) for status in statuses),
-            )
-
-    def read_subagent_dependencies(
-        self,
-        *,
-        session_id: str,
-        task_ids: tuple[str, ...],
-        deadline_monotonic: float,
-    ) -> tuple[Mapping[str, object], ...]:
-        if not task_ids or len(task_ids) > 32:
-            raise ValueError("subagent dependency read bound is invalid")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            return tuple(
-                dict(row)
-                for row in connection.execute(
-                    """SELECT edge.task_id, edge.dependency_task_id,
-                              edge.dependency_ordinal, dependency.status,
-                              dependency.task_key, dependency.label,
-                              result.id AS result_id, result.result_source,
-                              result.summary, result.data, result.result_fingerprint
-                       FROM pulsara_v3.subagent_task_dependencies AS edge
-                       JOIN pulsara_v3.subagent_tasks AS dependency
-                         ON dependency.session_id = edge.session_id
-                        AND dependency.id = edge.dependency_task_id
-                       LEFT JOIN pulsara_v3.subagent_task_children AS result
-                         ON result.session_id = dependency.session_id
-                        AND result.task_id = dependency.id
-                        AND result.child_kind = 'RESULT'
-                       WHERE edge.session_id = %s AND edge.task_id = ANY(%s)
-                       ORDER BY edge.task_id, edge.dependency_ordinal""",
-                    (session_id, list(task_ids)),
-                ).fetchall()
-            )
-
-    def list_runnable_subagent_tasks(
-        self,
-        guard: HostWriterGuard,
-        *,
-        maximum_items: int,
-        deadline_monotonic: float,
-    ) -> tuple[Mapping[str, object], ...]:
-        # This is a per-query page bound, independent of the Host's adjustable
-        # worker target and of the session's total accepted task horizon.
-        if not 1 <= maximum_items <= 128:
-            raise ValueError("subagent runnable read bound is invalid")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            return tuple(
-                dict(row)
-                for row in connection.execute(
-                    """SELECT * FROM pulsara_v3.subagent_tasks
-                       WHERE session_id = %s
-                         AND execution_writer_generation = %s
-                         AND status = 'PENDING_START'
-                       ORDER BY accepted_at, id LIMIT %s
-                       FOR UPDATE SKIP LOCKED""",
-                    (guard.session_id, guard.writer_generation, maximum_items),
-                ).fetchall()
-            )
-
-    def settle_subagent_dependency_frontier(
-        self,
-        guard: HostWriterGuard,
-        *,
-        terminal_task_id: str,
-        occurred_at: datetime,
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> tuple[tuple[str, str], ...]:
-        changed: list[tuple[str, str]] = []
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            terminal = connection.execute(
-                """SELECT status FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s AND id = %s FOR SHARE""",
-                (guard.session_id, terminal_task_id),
-            ).fetchone()
-            if terminal is None or str(terminal["status"]) not in {
-                "COMPLETED",
-                "FAILED",
-                "CANCELLED",
-                "INTERRUPTED",
-                "BLOCKED_DEPENDENCY_FAILED",
-            }:
-                return ()
-            frontier = [terminal_task_id]
-            seen: set[str] = set()
-            while frontier:
-                upstream = frontier.pop(0)
-                downstream_rows = connection.execute(
-                    """SELECT task.id
-                       FROM pulsara_v3.subagent_task_dependencies AS edge
-                       JOIN pulsara_v3.subagent_tasks AS task
-                         ON task.session_id = edge.session_id
-                        AND task.id = edge.task_id
-                       WHERE edge.session_id = %s
-                         AND edge.dependency_task_id = %s
-                         AND task.status = 'WAITING_DEPENDENCY'
-                       ORDER BY task.accepted_at, task.id
-                       FOR UPDATE OF task""",
-                    (guard.session_id, upstream),
-                ).fetchall()
-                for downstream in downstream_rows:
-                    task_id = str(downstream["id"])
-                    if task_id in seen:
-                        continue
-                    seen.add(task_id)
-                    dependencies = connection.execute(
-                        """SELECT dependency.status, result.id AS result_id
-                           FROM pulsara_v3.subagent_task_dependencies AS edge
-                           JOIN pulsara_v3.subagent_tasks AS dependency
-                             ON dependency.session_id = edge.session_id
-                            AND dependency.id = edge.dependency_task_id
-                           LEFT JOIN pulsara_v3.subagent_task_children AS result
-                             ON result.session_id = dependency.session_id
-                            AND result.task_id = dependency.id
-                            AND result.child_kind = 'RESULT'
-                           WHERE edge.session_id = %s AND edge.task_id = %s
-                           ORDER BY edge.dependency_ordinal""",
-                        (guard.session_id, task_id),
-                    ).fetchall()
-                    statuses = tuple(str(row["status"]) for row in dependencies)
-                    if any(
-                        value in {
-                            "FAILED", "CANCELLED", "INTERRUPTED",
-                            "BLOCKED_DEPENDENCY_FAILED",
-                        }
-                        for value in statuses
-                    ):
-                        new_status, pending, reason = (
-                            "BLOCKED_DEPENDENCY_FAILED", None, "DEPENDENCY_FAILED"
-                        )
-                        frontier.append(task_id)
-                    elif all(
-                        value == "COMPLETED" and row["result_id"] is not None
-                        for value, row in zip(statuses, dependencies, strict=True)
-                    ):
-                        new_status, pending, reason = "PENDING_START", "CAPACITY", None
-                    elif any(
-                        value == "COMPLETED" and row["result_id"] is None
-                        for value, row in zip(statuses, dependencies, strict=True)
-                    ):
-                        new_status, pending, reason = (
-                            "FAILED", None, "DEPENDENCY_RESULT_INVARIANT"
-                        )
-                        frontier.append(task_id)
-                    else:
-                        continue
-                    row = connection.execute(
-                        """UPDATE pulsara_v3.subagent_tasks
-                           SET status = %s, pending_reason = %s,
-                               terminal_reason = %s,
-                               terminal_public_detail = %s,
-                               terminal_at = CASE WHEN %s THEN clock_timestamp()
-                                                  ELSE NULL END
-                           WHERE session_id = %s AND id = %s
-                             AND status = 'WAITING_DEPENDENCY'
-                           RETURNING workspace_id""",
-                        (
-                            new_status,
-                            pending,
-                            reason,
-                            (
-                                None
-                                if reason is None
-                                else build_default_terminal_public_detail(reason)
-                            ),
-                            SubagentTaskStatus(new_status).terminal,
-                            guard.session_id,
-                            task_id,
-                        ),
-                    ).fetchone()
-                    if row is None:
-                        continue
-                    changed.append((task_id, new_status))
-                    self._append_events(
-                        connection,
-                        guard,
-                        workspace_id=str(row["workspace_id"]),
-                        drafts=(
-                            self._event(
-                                CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-                                SubjectSlot.SUBAGENT_TASK,
-                                task_id,
-                                session_id=guard.session_id, occurrence_key="status:" + new_status, occurred_at=occurred_at,
-                                actor_kind="runtime",
-                                actor_id=actor_id,
-                                payload={"status": new_status, "reason": reason},
-                            ),
-                        ),
-                    )
-            return tuple(changed)
-
-    def accept_inter_agent_mailbox_batch(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedInterAgentMailboxBatch,
-        deadline_monotonic: float,
-    ) -> tuple[str, ...]:
-        """Append one exact process-local mailbox prefix to the child transcript."""
-
-        items = candidate.items
-        first = items[0]
-        if (
-            first.session_id != guard.session_id
-            or any(
-                item.session_id != first.session_id
-                or item.recipient_task_id != first.recipient_task_id
-                or item.recipient_turn_id != first.recipient_turn_id
-                for item in items
-            )
-            or tuple(item.ordinal for item in items)
-            != tuple(range(items[0].ordinal, items[0].ordinal + len(items)))
-        ):
-            raise ValueError("inter-agent mailbox batch identity is invalid")
-        with self._writer_transaction(
-            guard, deadline_monotonic=deadline_monotonic
-        ) as connection:
-            target = connection.execute(
-                """SELECT t.workspace_id, t.status, turn.status AS turn_status,
-                          turn.conversation_scope_kind, turn.scope_subagent_task_id
-                   FROM pulsara_v3.subagent_tasks AS t
-                   JOIN pulsara_v3.turns AS turn
-                     ON turn.session_id = t.session_id
-                    AND turn.id = %s
-                   WHERE t.session_id = %s AND t.id = %s
-                   FOR UPDATE OF t, turn""",
-                (
-                    first.recipient_turn_id,
-                    guard.session_id,
-                    first.recipient_task_id,
-                ),
-            ).fetchone()
-            if (
-                target is None
-                or str(target["status"]) != "ACTIVE"
-                or str(target["turn_status"]) != "RUNNING"
-                or str(target["conversation_scope_kind"]) != "SUBAGENT_TASK"
-                or str(target["scope_subagent_task_id"]) != first.recipient_task_id
-            ):
-                raise ConversationKernelConflict(
-                    "inter-agent target is no longer active"
-                )
-            events: list[CommittedEventDraft] = []
-            entry_ids: list[str] = []
-            for item in items:
-                attempt = connection.execute(
-                    """SELECT entry.turn_id, entry.conversation_scope_kind,
-                              block.tool_name, block.tool_arguments,
-                              attempt.tool_call_id
-                       FROM pulsara_v3.tool_execution_attempts AS attempt
-                       JOIN pulsara_v3.assistant_message_blocks AS block
-                         ON block.session_id = attempt.session_id
-                        AND block.assistant_entry_id = attempt.assistant_entry_id
-                        AND block.tool_call_id = attempt.tool_call_id
-                       JOIN pulsara_v3.transcript_entries AS entry
-                         ON entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = attempt.session_id
-                        AND entry.id = attempt.assistant_entry_id
-                       WHERE attempt.session_id = %s AND attempt.id = %s""",
-                    (guard.session_id, item.sender_tool_attempt_id),
-                ).fetchone()
-                if (
-                    attempt is None
-                    or str(attempt["turn_id"]) != item.sender_turn_id
-                    or str(attempt["conversation_scope_kind"]) != "ROOT"
-                    or str(attempt["tool_name"]) != "send_agent_message"
-                    or str(attempt["tool_call_id"]) != item.sender_tool_call_id
-                    or dict(attempt["tool_arguments"])
-                    != {
-                        "task_id": item.recipient_task_id,
-                        "message": item.message,
-                    }
-                ):
-                    raise ConversationKernelConflict(
-                        "inter-agent source attempt does not exact-join"
-                    )
-                content = InlineContent.from_bytes(item.message.encode("utf-8"))
-                if content.digest != item.message_digest:
-                    raise ConversationKernelConflict("inter-agent message digest drifted")
-                sequence = self._allocate_entry_sequence(connection, guard.session_id)
-                self._insert_entry(
-                    connection,
-                    session_id=guard.session_id,
-                    workspace_id=str(target["workspace_id"]),
-                    turn_id=item.recipient_turn_id,
-                    entry_id=item.entry_id,
-                    entry_sequence=sequence,
-                    entry_kind=EntryKind.INTER_AGENT_MESSAGE,
-                    scope_kind=ConversationScopeKind.SUBAGENT_TASK,
-                    scope_task_id=item.recipient_task_id,
-                    content=content,
-                    source_inter_agent_tool_attempt_id=item.sender_tool_attempt_id,
-                )
-                events.append(
-                    CommittedEventDraft(
-                        event_id=item.event_id,
-                        event_type=CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED,
-                        subject=CommittedEventSubject(SubjectSlot.ENTRY, item.entry_id),
-                        actor_kind="runtime",
-                        actor_id=candidate.actor_id,
-                        sensitivity_class="PUBLIC",
-                        projection_profile="DEFAULT",
-                        occurred_at=candidate.occurred_at,
-                        payload={
-                            "recipient_task_id": item.recipient_task_id,
-                            "message_ordinal": item.ordinal,
-                        },
-                    )
-                )
-                entry_ids.append(item.entry_id)
-            self._append_events(
-                connection,
-                guard,
-                workspace_id=str(target["workspace_id"]),
-                drafts=tuple(events),
-            )
-            return tuple(entry_ids)
-
-    def confirm_inter_agent_mailbox_batch(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: PreparedInterAgentMailboxBatch,
-        deadline_monotonic: float,
-    ) -> str:
-        items = candidate.items
+    def mark_agent_idle(self, *, session_id, idle=True, at=None, deadline_monotonic):
         with self._provider.connection(
             lane=PostgresConnectionLane.HOST_CONTROL,
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
         ) as connection:
-            self._require_writer(connection, guard, lock=False)
+            lock_session_admission(connection, session_id=session_id)
+            connection.execute(
+                "SELECT id FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE",
+                (session_id,),
+            ).fetchone()
+            row = connection.execute(
+                _RUNTIME_SELECT + " WHERE s.id=%s", (session_id,)
+            ).fetchone()
+            if row is None or row["root_session_id"] is None:
+                return None
+            busy = row["has_pending_work"] or row["has_running_turn"]
+            if busy or not idle:
+                connection.execute(
+                    "UPDATE pulsara_v3.sessions SET idle_since=NULL WHERE id=%s",
+                    (session_id,),
+                )
+                return None
+            return connection.execute(
+                "UPDATE pulsara_v3.sessions SET idle_since=coalesce(idle_since,%s) WHERE id=%s RETURNING idle_since",
+                (at or datetime.now(timezone.utc), session_id),
+            ).fetchone()["idle_since"]
+
+    def cancel_agent_requests(
+        self,
+        root_guard,
+        *,
+        agent_id,
+        work_id=None,
+        reason="USER_CANCELLED",
+        occurred_at,
+        actor_id,
+        deadline_monotonic,
+    ):
+        with self._writer_transaction(
+            root_guard,
+            deadline_monotonic=deadline_monotonic,
+            strong_session_control=True,
+        ) as connection:
+            lock_session_admission(connection, session_id=agent_id)
+            session = connection.execute(
+                "SELECT * FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE", (agent_id,)
+            ).fetchone()
+            if session is None or session["root_session_id"] != root_guard.session_id:
+                raise ConversationKernelConflict("Agent does not belong to ROOT")
             rows = connection.execute(
-                """SELECT entry.*, event.event_id, event.event_type,
-                          event.actor_kind, event.actor_id, event.occurred_at,
-                          event.payload
-                   FROM pulsara_v3.transcript_entries AS entry
-                   LEFT JOIN pulsara_v3.agent_events AS event
-                     ON event.session_id = entry.session_id
-                    AND event.subject_entry_id = entry.id
-                    AND event.event_type = 'InterAgentMessageAccepted'
-                   WHERE entry.entry_owner_kind = 'EXECUTED_TURN' AND entry.session_id = %s AND entry.id = ANY(%s)""",
-                (guard.session_id, [item.entry_id for item in items]),
+                _WORK_SELECT
+                + " AND q.session_id=%s AND (%s::text IS NULL OR q.id=%s) AND (q.status='PENDING' OR qt.status='RUNNING' OR %s::text IS NOT NULL) ORDER BY q.queue_sequence FOR UPDATE OF q",
+                (root_guard.session_id, agent_id, work_id, work_id, work_id),
             ).fetchall()
-            if not rows:
-                return "NONE"
-            if len(rows) != len(items):
-                return "CONFLICT"
-            by_id = {str(row["id"]): row for row in rows}
-            for item in items:
-                row = by_id.get(item.entry_id)
-                expected_payload = {
-                    "recipient_task_id": item.recipient_task_id,
-                    "message_ordinal": item.ordinal,
-                }
+            ids = []
+            for row in rows:
+                ids.append(str(row["id"]))
+                if row["status"] == "PENDING":
+                    connection.execute(
+                        "UPDATE pulsara_v3.prompt_queue_items SET status='CANCELLED',terminal_reason=%s,terminal_at=clock_timestamp(),waiting_on='[]'::jsonb WHERE session_id=%s AND id=%s AND status='PENDING'",
+                        (reason, agent_id, row["id"]),
+                    )
+                    self._agent_queue_event(
+                        connection,
+                        root_guard,
+                        agent_id,
+                        str(session["workspace_id"]),
+                        str(row["id"]),
+                        CommittedEventType.PROMPT_CANCELLED,
+                        occurred_at,
+                        actor_id,
+                        {"reason": reason},
+                    )
+            self._resolve_agent_dependencies_in_connection(
+                connection,
+                root_session_id=root_guard.session_id,
+                guard=root_guard,
+                occurred_at=occurred_at,
+                actor_id=actor_id,
+            )
+            return tuple(
+                self._agent_work_in_connection(
+                    connection, root_session_id=root_guard.session_id, work_id=x
+                )
+                for x in ids
+            )
+
+    def enqueue_agent_steer(
+        self,
+        guard,
+        *,
+        target_turn_id,
+        queue_item_id,
+        source_session_id,
+        source_work_id,
+        text,
+        occurred_at,
+        actor_id,
+        deadline_monotonic,
+        input_origin="AGENT_MESSAGE",
+    ):
+        if input_origin not in {"AGENT_MESSAGE", "AGENT_MATERIAL"}:
+            raise ValueError("invalid Agent steer origin")
+        with self._writer_transaction(
+            guard, deadline_monotonic=deadline_monotonic
+        ) as connection:
+            existing = connection.execute(
+                "SELECT * FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+                (queue_item_id,),
+            ).fetchone()
+            if existing is not None:
                 if (
-                    row is None
-                    or str(row["turn_id"]) != item.recipient_turn_id
-                    or str(row["entry_kind"]) != "INTER_AGENT_MESSAGE"
-                    or str(row["conversation_scope_kind"]) != "SUBAGENT_TASK"
-                    or str(row["scope_subagent_task_id"]) != item.recipient_task_id
-                    or str(row["source_inter_agent_tool_attempt_id"])
-                    != item.sender_tool_attempt_id
-                    or str(row["content_digest"]) != item.message_digest
-                    or self._content_from_row(row)
-                    != InlineContent.from_bytes(item.message.encode("utf-8"))
-                    or str(row["event_id"]) != item.event_id
-                    or str(row["event_type"]) != "InterAgentMessageAccepted"
-                    or str(row["actor_kind"]) != "runtime"
-                    or str(row["actor_id"]) != candidate.actor_id
-                    or row["occurred_at"] != candidate.occurred_at
-                    or dict(row["payload"]) != expected_payload
+                    existing["session_id"] != guard.session_id
+                    or existing["source_session_id"] != source_session_id
+                    or existing["source_work_id"] != source_work_id
+                    or (
+                        existing["target_turn_id"] != target_turn_id
+                        and input_origin != "AGENT_MATERIAL"
+                    )
+                    or existing["input_origin"] != input_origin
+                    or self._agent_prompt_text(connection, existing) != text
                 ):
-                    return "CONFLICT"
-            return "FULL"
+                    raise ConversationKernelConflict(
+                        "message request identity was reused"
+                    )
+                return dict(existing)
+            source = connection.execute(
+                "SELECT coalesce(root_session_id,id) root_id FROM pulsara_v3.sessions WHERE id=%s",
+                (source_session_id,),
+            ).fetchone()
+            target = connection.execute(
+                "SELECT coalesce(root_session_id,id) root_id FROM pulsara_v3.sessions WHERE id=%s",
+                (guard.session_id,),
+            ).fetchone()
+            if (
+                source is None
+                or target is None
+                or source["root_id"] != target["root_id"]
+            ):
+                raise ConversationKernelConflict(
+                    "message sender and receiver are outside the same collaboration"
+                )
+            turn = connection.execute(
+                "SELECT workspace_id FROM pulsara_v3.turns WHERE session_id=%s AND id=%s AND status='RUNNING' FOR UPDATE",
+                (guard.session_id, target_turn_id),
+            ).fetchone()
+            if turn is None:
+                return None
+            prompt = freeze_canonical_prompt(FrozenPromptContent((LLMTextPart(text),)))
+            pub = materialize_canonical_prompt(
+                connection,
+                publisher=self._canonical_content_publisher,
+                workspace_id=str(turn["workspace_id"]),
+                prompt=prompt,
+            )
+            seq = connection.execute(
+                "UPDATE pulsara_v3.sessions SET latest_prompt_queue_sequence=latest_prompt_queue_sequence+1 WHERE id=%s RETURNING latest_prompt_queue_sequence",
+                (guard.session_id,),
+            ).fetchone()["latest_prompt_queue_sequence"]
+            row = connection.execute(
+                """INSERT INTO pulsara_v3.prompt_queue_items
+                (id,session_id,workspace_id,queue_sequence,delivery_mode,input_origin,target_turn_id,status,
+                 source_session_id,source_work_id,inline_content,blob_id,content_digest,content_size,content_media_type,content_codec)
+                VALUES (%s,%s,%s,%s,'STEER_ACTIVE_TURN',%s,%s,'PENDING',%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (
+                    queue_item_id,
+                    guard.session_id,
+                    turn["workspace_id"],
+                    seq,
+                    input_origin,
+                    target_turn_id,
+                    source_session_id,
+                    source_work_id,
+                    *_content_columns(pub.body),
+                ),
+            ).fetchone()
+            self._agent_queue_event(
+                connection,
+                guard,
+                guard.session_id,
+                str(turn["workspace_id"]),
+                queue_item_id,
+                CommittedEventType.PROMPT_QUEUED,
+                occurred_at,
+                actor_id,
+                {"delivery_mode": "STEER_ACTIVE_TURN", "input_origin": input_origin},
+            )
+            result = dict(row)
+            work = connection.execute(
+                """SELECT q.id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id WHERE q.session_id=%s AND e.turn_id=%s AND q.input_origin='AGENT_INSTRUCTION' """,
+                (guard.session_id, target_turn_id),
+            ).fetchone()
+            result["work_id"] = None if work is None else work["id"]
+            return result
+
+    def pending_agent_message_sources(
+        self,
+        *,
+        session_id,
+        turn_id,
+        source_session_ids,
+        after_by_sender,
+        deadline_monotonic,
+        accepted_through_sequence=0,
+    ):
+        if not source_session_ids:
+            return {}
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            rows = connection.execute(
+                """SELECT source_session_id,max(queue_sequence) AS latest_sequence FROM pulsara_v3.prompt_queue_items q
+                LEFT JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
+                WHERE q.session_id=%s AND (%s::text IS NULL OR q.target_turn_id=%s) AND q.input_origin='AGENT_MESSAGE'
+                AND (q.status='PENDING' OR (q.status='CONSUMED' AND e.entry_sequence>%s))
+                AND source_session_id=ANY(%s) GROUP BY source_session_id""",
+                (
+                    session_id,
+                    turn_id,
+                    turn_id,
+                    accepted_through_sequence,
+                    list(source_session_ids),
+                ),
+            ).fetchall()
+            return {
+                str(r["source_session_id"]): int(r["latest_sequence"])
+                for r in rows
+                if int(r["latest_sequence"])
+                > after_by_sender.get(str(r["source_session_id"]), 0)
+            }

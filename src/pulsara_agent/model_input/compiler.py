@@ -91,7 +91,6 @@ from pulsara_agent.tools.builtins.filesystem import (
 )
 
 
-
 COMPILER_CONTRACT_VERSION = "pulsara.structured-model-input-compiler.prefix-continuity.v17-canonical-worker-branches"
 
 
@@ -180,11 +179,7 @@ _SOURCE_POLICY = {
         ContextBudgetClass.IMPORTANT,
         55,
         35,
-        (
-            ContextRenderMode.FULL,
-            ContextRenderMode.COMPACT,
-            ContextRenderMode.REF_ONLY,
-        ),
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT, ContextRenderMode.REF_ONLY),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.ACTIVE_SKILL: (
@@ -206,36 +201,6 @@ _SOURCE_POLICY = {
         10,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
         ContextSourceLifecycle.TURN_APPEND,
-    ),
-    ContextSourceKind.PARENT_CONTEXT: (
-        "pulsara.subagent-parent-context.v1",
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.MUST_KEEP,
-        42,
-        5,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.DEPENDENCY_RESULTS: (
-        "pulsara.subagent-dependency-results.v1",
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.MUST_KEEP,
-        43,
-        5,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-    ),
-    ContextSourceKind.TERMINAL_MATERIAL: (
-        "pulsara.subagent-terminal-material.v1",
-        ContextChannel.RUNTIME_OBSERVATION,
-        ContextTrustClass.UNTRUSTED_OBSERVATION,
-        ContextBudgetClass.MUST_KEEP,
-        44,
-        5,
-        (ContextRenderMode.FULL,),
-        ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: (
         "pulsara.tool-observation-freshness.v1",
@@ -274,11 +239,7 @@ _SOURCE_POLICY = {
         ContextBudgetClass.IMPORTANT,
         65,
         48,
-        (
-            ContextRenderMode.FULL,
-            ContextRenderMode.COMPACT,
-            ContextRenderMode.REF_ONLY,
-        ),
+        (ContextRenderMode.FULL, ContextRenderMode.COMPACT, ContextRenderMode.REF_ONLY),
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     ContextSourceKind.MEMORY_WRITE_HINT: (
@@ -338,10 +299,7 @@ _SOURCE_ABSENCE_POLICY = {
         {ContextSourceAbsenceKind.NOT_APPLICABLE}
     ),
     ContextSourceKind.SKILL_CATALOG: frozenset(
-        {
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceAbsenceKind.UNAVAILABLE,
-        }
+        {ContextSourceAbsenceKind.EXPLICIT_EMPTY, ContextSourceAbsenceKind.UNAVAILABLE}
     ),
     ContextSourceKind.MCP_CATALOG: frozenset(
         {
@@ -360,25 +318,9 @@ _SOURCE_ABSENCE_POLICY = {
     ContextSourceKind.PREVIOUS_TURN_OUTCOME: frozenset(
         {ContextSourceAbsenceKind.EXPLICIT_EMPTY}
     ),
-    ContextSourceKind.PARENT_CONTEXT: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-        }
+    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset(
+        {ContextSourceAbsenceKind.NOT_APPLICABLE}
     ),
-    ContextSourceKind.DEPENDENCY_RESULTS: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-        }
-    ),
-    ContextSourceKind.TERMINAL_MATERIAL: frozenset(
-        {
-            ContextSourceAbsenceKind.NOT_APPLICABLE,
-            ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-        }
-    ),
-    ContextSourceKind.TOOL_OBSERVATION_FRESHNESS: frozenset({ContextSourceAbsenceKind.NOT_APPLICABLE}),
     ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: frozenset(
         {
             ContextSourceAbsenceKind.NOT_APPLICABLE,
@@ -686,8 +628,10 @@ def _catalog_render_identity(candidate, text):
     if candidate.source_kind is ContextSourceKind.MCP_CATALOG:
         # The selected visible summary, not hidden schema versions or an unused
         # FULL variant, defines this snapshot's installed prefix occurrence.
-        return context_fingerprint("pulsara:mcp-catalog-render:v1",
-            {"contract": candidate.source_contract_version, "text": text})
+        return context_fingerprint(
+            "pulsara:mcp-catalog-render:v1",
+            {"contract": candidate.source_contract_version, "text": text},
+        )
     return candidate.domain_semantic_fingerprint
 
 
@@ -714,15 +658,20 @@ class StructuredModelInputCompiler:
             if decision is not None:
                 state.omitted = not decision.included
                 if decision.included:
-                    state.selected = tuple(item.mode for item in candidate.variants).index(
-                        decision.selected_mode
-                    )
+                    state.selected = tuple(
+                        item.mode for item in candidate.variants
+                    ).index(decision.selected_mode)
         source_floors = dict(floors)
         if candidate.source_kind in source_floors:
             floor = source_floors[candidate.source_kind]
             if floor is None:
-                if candidate.budget_class is ContextBudgetClass.MUST_KEEP or state.is_unavailable():
-                    raise ValueError("required source cannot be omitted by a wire floor")
+                if (
+                    candidate.budget_class is ContextBudgetClass.MUST_KEEP
+                    or state.is_unavailable()
+                ):
+                    raise ValueError(
+                        "required source cannot be omitted by a wire floor"
+                    )
                 state.omitted = True
             else:
                 index = tuple(item.mode for item in candidate.variants).index(floor)
@@ -786,15 +735,21 @@ class StructuredModelInputCompiler:
         decisions = {item.source_kind: item for item in compiled.source_decisions}
         eligible = []
         previous_heads = (
-            {} if planning is None or planning.predecessor_view is None
-            else {item.source_kind: item for item in planning.predecessor_view.source_heads}
+            {}
+            if planning is None or planning.predecessor_view is None
+            else {
+                item.source_kind: item
+                for item in planning.predecessor_view.source_heads
+            }
         )
         for candidate in request.sources.candidates:
             deadline.check()
             decision = decisions.get(candidate.source_kind)
             if decision is None or not decision.included:
                 continue
-            state = self._source_state_with_render_floor(candidate, source_floors, compiled)
+            state = self._source_state_with_render_floor(
+                candidate, source_floors, compiled
+            )
             if not self._source_can_advance(state):
                 continue
             next_mode = (
@@ -802,15 +757,27 @@ class StructuredModelInputCompiler:
                 if state.selected + 1 < len(candidate.variants)
                 else None
             )
-            if next_mode is None and candidate.source_kind in previous_heads and candidate.lifecycle in {
-                ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
-                ContextSourceLifecycle.TURN_APPEND,
-                ContextSourceLifecycle.TURN_SNAPSHOT,
-                ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
-            }:
+            if (
+                next_mode is None
+                and candidate.source_kind in previous_heads
+                and candidate.lifecycle
+                in {
+                    ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+                    ContextSourceLifecycle.TURN_APPEND,
+                    ContextSourceLifecycle.TURN_SNAPSHOT,
+                    ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
+                }
+            ):
                 # Installed state needs an explicit legal replacement, never silent omission.
                 continue
-            eligible.append((self._source_degradation_key(candidate), candidate.source_kind, next_mode, "source"))
+            eligible.append(
+                (
+                    self._source_degradation_key(candidate),
+                    candidate.source_kind,
+                    next_mode,
+                    "source",
+                )
+            )
         decisions_by_result = {
             item.source_entry_fingerprint: item
             for item in compiled.tool_result_decisions
@@ -831,7 +798,10 @@ class StructuredModelInputCompiler:
             lowered = lower_canonical_item(
                 item,
                 artifact_read_available=artifact_read_available,
-                artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
+                artifact_export_available=any(
+                    tool.name == "artifact_export"
+                    for tool in request.compile_binding.tool_surface.tool_specs
+                ),
                 limits=self._limits,
             )
             deadline.check()
@@ -934,14 +904,19 @@ class StructuredModelInputCompiler:
                 lower_canonical_item(
                     item,
                     artifact_read_available=artifact_read_available,
-                    artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
+                    artifact_export_available=any(
+                        tool.name == "artifact_export"
+                        for tool in request.compile_binding.tool_surface.tool_specs
+                    ),
                     limits=self._limits,
                 )
             )
         lowered = tuple(lowered_items)
         deadline.check()
         source_states = [
-            self._source_state_with_render_floor(item, source_render_floors, wire_selection)
+            self._source_state_with_render_floor(
+                item, source_render_floors, wire_selection
+            )
             for item in request.sources.candidates
         ]
         tool_states = [
@@ -980,9 +955,7 @@ class StructuredModelInputCompiler:
         degraded_source_ids = {
             state.candidate.source_instance_id
             for state in source_states
-            if state.omitted
-            or state.mode()
-            is not state.candidate.initial_mode
+            if state.omitted or state.mode() is not state.candidate.initial_mode
         }
         degraded_tool_ids = {
             state.item.source_entry_id or ""
@@ -1276,7 +1249,6 @@ class StructuredModelInputCompiler:
         if (
             planning.scope.session_id != identity.session_id
             or planning.scope.scope_kind is not identity.conversation_scope_kind
-            or planning.scope.scope_subagent_task_id != identity.scope_subagent_task_id
         ):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
@@ -1376,7 +1348,10 @@ class StructuredModelInputCompiler:
                 lower_canonical_item(
                     item,
                     artifact_read_available=artifact_read_available,
-                    artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
+                    artifact_export_available=any(
+                        tool.name == "artifact_export"
+                        for tool in request.compile_binding.tool_surface.tool_specs
+                    ),
                     limits=self._limits,
                 )
             )
@@ -1472,7 +1447,10 @@ class StructuredModelInputCompiler:
                         or previous.semantic_fingerprint != semantic
                     )
             elif absence is not None:
-                if absence.source_kind in {ContextSourceKind.HOOK_CONTEXT, ContextSourceKind.CAPABILITY_CHANGE}:
+                if absence.source_kind in {
+                    ContextSourceKind.HOOK_CONTEXT,
+                    ContextSourceKind.CAPABILITY_CHANGE,
+                }:
                     # Advisory ONE_SHOT data has no provider-visible clearing
                     # semantics when its future slot is empty.
                     continue
@@ -1649,8 +1627,16 @@ class StructuredModelInputCompiler:
         compiled_fingerprint = compiled_input_identity(
             estimator_fingerprint=request.compile_binding.estimator_fingerprint,
             effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
-            source_contents=self._identity_source_contents(request, fresh.source_decisions),
-            tool_messages=tuple(message for item, message in zip(lowered_delta, selected_delta_messages, strict=True) if item.tool_result_variants),
+            source_contents=self._identity_source_contents(
+                request, fresh.source_decisions
+            ),
+            tool_messages=tuple(
+                message
+                for item, message in zip(
+                    lowered_delta, selected_delta_messages, strict=True
+                )
+                if item.tool_result_variants
+            ),
             protected_messages=messages,
             context_messages=ordered_observations,
             checkpoint=deadline.check,
@@ -1731,7 +1717,10 @@ class StructuredModelInputCompiler:
                 lower_canonical_item(
                     item,
                     artifact_read_available=artifact_read_available,
-                    artifact_export_available=any(tool.name == "artifact_export" for tool in request.compile_binding.tool_surface.tool_specs),
+                    artifact_export_available=any(
+                        tool.name == "artifact_export"
+                        for tool in request.compile_binding.tool_surface.tool_specs
+                    ),
                     limits=self._limits,
                 )
             )
@@ -1765,11 +1754,20 @@ class StructuredModelInputCompiler:
             state = self._source_state_with_render_floor(
                 candidate, source_render_floors, wire_selection
             )
-            if state.omitted and previous is not None and candidate.lifecycle in {
-                ContextSourceLifecycle.SNAPSHOT_ON_CHANGE, ContextSourceLifecycle.TURN_APPEND,
-                ContextSourceLifecycle.TURN_SNAPSHOT, ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
-            }:
-                raise StructuredModelInputCompileError(ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID)
+            if (
+                state.omitted
+                and previous is not None
+                and candidate.lifecycle
+                in {
+                    ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
+                    ContextSourceLifecycle.TURN_APPEND,
+                    ContextSourceLifecycle.TURN_SNAPSHOT,
+                    ContextSourceLifecycle.ACTIVATION_SNAPSHOT,
+                }
+            ):
+                raise StructuredModelInputCompileError(
+                    ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+                )
             semantic = _source_occurrence_fingerprint(
                 _catalog_render_identity(candidate, state.text()),
                 lifecycle=candidate.lifecycle,
@@ -2122,14 +2120,25 @@ class StructuredModelInputCompiler:
             estimator_fingerprint=request.compile_binding.estimator_fingerprint,
             effective_input_budget_tokens=request.compile_binding.effective_input_budget_tokens,
             source_contents=tuple(
-                item.fixed_message if item.state is None else None if item.state.omitted else item.state.message()
-                for item in sorted(emissions, key=lambda value: (value.placement_ordinal, value.source_kind.value))
+                item.fixed_message
+                if item.state is None
+                else None
+                if item.state.omitted
+                else item.state.message()
+                for item in sorted(
+                    emissions,
+                    key=lambda value: (
+                        value.placement_ordinal,
+                        value.source_kind.value,
+                    ),
+                )
             ),
             tool_messages=tuple(state.message() for state in tool_states),
             protected_messages=previous_messages,
             context_messages=tuple(
                 item.fixed_message if item.state is None else item.state.message()
-                for item in emissions if item.state is None or not item.state.omitted
+                for item in emissions
+                if item.state is None or not item.state.omitted
             ),
             checkpoint=deadline.check,
             context_id=request.context_id,
@@ -2207,7 +2216,8 @@ class StructuredModelInputCompiler:
         expanded_delta = _expand_lowered_transcript(
             lowered_delta,
             selected_message_by_identity={
-                identity: state.message() for identity, state in tool_by_identity.items()
+                identity: state.message()
+                for identity, state in tool_by_identity.items()
             },
         )
         delta_messages = tuple(item.message for item in expanded_delta)
@@ -2639,7 +2649,6 @@ class StructuredModelInputCompiler:
         )
         return tuple(items), added
 
-
     def _layout(
         self,
         request: StructuredModelInputCompileRequest,
@@ -2679,7 +2688,8 @@ class StructuredModelInputCompiler:
         expanded_transcript = _expand_lowered_transcript(
             lowered,
             selected_message_by_identity={
-                identity: state.message() for identity, state in tool_by_identity.items()
+                identity: state.message()
+                for identity, state in tool_by_identity.items()
             },
         )
         transcript = tuple(
@@ -2701,7 +2711,6 @@ class StructuredModelInputCompiler:
                 index
                 for index, item in enumerate(lowered)
                 if item.source.source_entry_id == request.dispatch_anchor_entry_id
-                and item.source.item_kind is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
             )
             if len(indexes) != 1:
                 raise StructuredModelInputCompileError(
@@ -2721,19 +2730,23 @@ class StructuredModelInputCompiler:
         active_deadline.check()
         return _Layout(system_prompt, messages, placements)
 
-
     @staticmethod
     def _identity_source_contents(request, decisions):
-        candidates = {c.source_semantic_fingerprint: c for c in request.sources.candidates}
+        candidates = {
+            c.source_semantic_fingerprint: c for c in request.sources.candidates
+        }
         contents = []
         for decision in decisions:
             if not decision.included:
                 contents.append(None)
                 continue
             candidate = candidates[decision.source_instance_fingerprint]
-            variant = next(v for v in candidate.variants if v.mode is decision.selected_mode)
+            variant = next(
+                v for v in candidate.variants if v.mode is decision.selected_mode
+            )
             contents.append(
-                variant.text if candidate.channel is ContextChannel.SYSTEM
+                variant.text
+                if candidate.channel is ContextChannel.SYSTEM
                 else source_variant_message(candidate, variant.text, mode=variant.mode)
             )
         return tuple(contents)
@@ -2815,7 +2828,6 @@ class StructuredModelInputCompiler:
             f"{sequence:020d}",
             state.item.source_entry_id or "",
         )
-
 
     def _add_diagnostic(
         self,

@@ -286,7 +286,7 @@ class SessionEphemeralProducts:
             deadline_monotonic=host._canonical_deadline(),
         )
         scope = ProviderInputContinuityScope(
-            host.session_id, ModelInputScopeKind.ROOT, None
+            host.session_id, ModelInputScopeKind.ROOT
         )
         cohort = host._input_continuity.current_cohort(scope)
         return (
@@ -298,7 +298,7 @@ class SessionEphemeralProducts:
             and cohort is not None
             and cohort.view.wire_input_plan is source.wire_input_plan
             and not host._compaction.is_fenced(
-                scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+                scope_kind=ModelInputScopeKind.ROOT
             )
         )
 

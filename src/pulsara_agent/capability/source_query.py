@@ -140,22 +140,6 @@ def parse_query(arguments: Mapping[str, object], *, inspect=False, subagent=Fals
             "INVALID_ARGUMENTS",
             "skill_path must be the absolute path of an observed Skill.",
         )
-    if subagent and (
-        "scope" in values
-        or "source_kind" in values
-        or values.get("kind") in {"SKILL", "HOOK_SOURCE"}
-        or (
-            target
-            and (
-                target["kind"] in {"PLUGIN", "SKILL", "HOOK_SOURCE"}
-                or (target["kind"] == "MCP_CONNECTION")
-            )
-        )
-    ):
-        raise CapabilityQueryError(
-            "ROOT_ONLY",
-            "Installation sources can only be observed by the main agent; this caller may query its scoped MCP runtime.",
-        )
     if not inspect and target:
         kind = values.get("kind")
         expected = (

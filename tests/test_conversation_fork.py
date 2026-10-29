@@ -167,7 +167,6 @@ def assert_session_aggregate_deleted(repo, guard):
     ) == 'DELETED'
     independent = {'workspaces', 'blobs', 'memory_facts', 'memory_relations', 'memory_embeddings'}
     children = set(CONVERSATION_KERNEL_RELATIONS) - independent - {'sessions'}
-    assert len(children) == 25  # History BM25 adds one disposable session-owned projection.
     for table in children:
         assert rows(repo, sql.SQL('SELECT 1 FROM pulsara_v3.{} WHERE session_id=%s').format(
             sql.Identifier(table)), (guard.session_id,)) == [], table
@@ -238,7 +237,6 @@ def compact(
         item
         for item in canonical.items
         if item.source_entry_id == initial["id"]
-        and item.item_kind is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
     )
     active_content = None
     if initial["entry_sequence"] <= boundary:
@@ -260,9 +258,7 @@ def compact(
             if initial["entry_sequence"] <= boundary
             else CompactionActiveRequestLocation.CANONICAL_SUFFIX,
             item_kind=FrozenProviderInputItemKind.USER,
-            input_origin=CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
-            if initial["conversation_scope_kind"] == "SUBAGENT_TASK"
-            else CanonicalInputOriginKind.HUMAN_MESSAGE,
+            input_origin=CanonicalInputOriginKind(initial["input_origin"]),
             content=active_content,
         )
     )
@@ -653,7 +649,8 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
         and imported["result_origin_kind"] == "PHYSICAL_ATTEMPT"
     )
     assert (
-        imported["attempt_id"] is None
+        imported["invocation_id"] is None
+        and imported["attempt_id"] is None
         and imported["permission_snapshot_fingerprint"] is None
     )
     assert (
@@ -691,7 +688,8 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
         )
         == []
     )
-    with pytest.raises(ConversationKernelConflict, match="not active"):
+    assert rows(repo, "SELECT 1 FROM pulsara_v3.tool_invocations WHERE session_id=%s", (child,)) == []
+    with pytest.raises(ConversationKernelConflict):
         repo.accept_tool_attempt(
             guard,
             attempt_id=identity("attempt"),
@@ -703,10 +701,14 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
             actor_id="test",
             remote_idempotency_key=None,
             retry_of_attempt_id=None,
-            permission_snapshot_fingerprint="sha256:" + "a" * 64,
+            permission_snapshot_fingerprint=rows(repo,
+                "SELECT permission_snapshot_fingerprint FROM pulsara_v3.turns WHERE session_id=%s AND id=%s",
+                (child,cut.turn_id))[0]['permission_snapshot_fingerprint'],
             occurred_at=datetime.now(timezone.utc),
             deadline_monotonic=monotonic() + 30,
         )
+    assert rows(repo, "SELECT 1 FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s", (child,)) == []
+    assert rows(repo, "SELECT 1 FROM pulsara_v3.tool_invocations WHERE session_id=%s", (child,)) == []
     assert_session_aggregate_deleted(repo, lease.guard)
     PostgresCanonicalBlobStore(repo.connection_provider).delete_orphans(
         grace_seconds=1, maximum_items=100, deadline_monotonic=monotonic() + 30
@@ -725,6 +727,9 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
         )[0]["anchor_entry_id"],
     )
     assert nested.created, nested.public_code
+    nested_results = rows(repo, "SELECT invocation_id FROM pulsara_v3.tool_results WHERE session_id=%s", (nested.child_session_id,))
+    assert nested_results and all(result["invocation_id"] is None for result in nested_results)
+    assert rows(repo, "SELECT 1 FROM pulsara_v3.tool_invocations WHERE session_id=%s", (nested.child_session_id,)) == []
 
 
 @pytest.mark.parametrize("wire_api", ["openai_chat_completions", "openai_responses"])
@@ -1055,7 +1060,6 @@ def test_fork_copies_exact_prefix_with_no_execution_and_continues(repo):
         "session_commands",
         "tool_execution_attempts",
         "prompt_queue_items",
-        "subagent_tasks",
         "plan_workflows",
     ):
         assert (

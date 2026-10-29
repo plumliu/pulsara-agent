@@ -37,6 +37,8 @@ async def install_plugin_package(store, connections, observation, request, scrub
         plugin_id=observation.summary.manifest.name,
         workspace_root=request.workspace_root,
     )
+    if set(dict(request.mcp_scope_policies)) - {item.local_server_id for item in observation.summary.mcp.mcp_servers}:
+        raise ValueError("Plugin MCP scope choice refers to an absent component")
     invalidated = []
     try:
         async with connections.lane:
@@ -99,6 +101,7 @@ async def install_plugin_package(store, connections, observation, request, scrub
                     scrub_set=scrub_set,
                     current=current,
                     secret_resolver=private.mcp_secret,
+                    mcp_scope_policies=request.mcp_scope_policies,
                 )
                 published = (
                     result.prior if isinstance(result, StoreCleanupFailure) else result

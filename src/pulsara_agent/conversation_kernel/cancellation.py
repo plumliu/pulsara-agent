@@ -6,8 +6,6 @@ no durable cancellation generation or recovery promise.
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id
-
 from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import Lock
@@ -24,17 +22,12 @@ class ForegroundCancellationCause(StrEnum):
 class ActiveTurnCancellationIntent:
     turn_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     _cause: ForegroundCancellationCause | None = None
     _lock: Lock | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.turn_id:
             raise ValueError("cancellation intent turn identity is empty")
-        if (self.scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("cancellation intent scope union is invalid")
         self._lock = Lock()
 
     @property
@@ -57,24 +50,16 @@ class ActiveTurnCancellationIntent:
         *,
         turn_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> None:
         if (
             self.turn_id != turn_id
             or self.scope_kind is not scope_kind
-            or self.scope_subagent_task_id != scope_subagent_task_id
         ):
             raise RuntimeError("cancellation intent does not exact-join turn")
 
-
-def stable_subagent_turn_id(*, session_id: str, task_id: str) -> str:
-    if not session_id or not task_id:
-        raise ValueError("subagent turn identity input is empty")
-    return derive_id("turn", "worker", session_id, task_id)
 
 
 __all__ = [
     "ActiveTurnCancellationIntent",
     "ForegroundCancellationCause",
-    "stable_subagent_turn_id",
 ]

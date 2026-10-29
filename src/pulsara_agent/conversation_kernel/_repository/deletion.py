@@ -1,5 +1,6 @@
 """Atomic session aggregate deletion; memory and blobs have independent owners."""
 
+from datetime import datetime
 from time import monotonic
 from typing import Literal
 
@@ -54,9 +55,12 @@ class _SessionDeletionOperations:
         closed_writer: HostWriterGuard | None,
         deadline_monotonic: float,
         required_lifecycle: Literal["ARCHIVED"] | None,
-    ) -> Literal["DELETED", "ABSENT", "NOT_ARCHIVED"]:
+        idle_before: datetime | None = None,
+    ) -> Literal["DELETED", "ABSENT", "NOT_ARCHIVED", "NOT_IDLE"]:
         if closed_writer is not None and closed_writer.session_id != session_id:
             raise ValueError("closed writer belongs to another session")
+        if idle_before is not None and idle_before.utcoffset() is None:
+            raise ValueError("automatic retirement cutoff must have a timezone")
         while monotonic() < deadline_monotonic:
             try:
                 with self._provider.connection(
@@ -69,7 +73,8 @@ class _SessionDeletionOperations:
                     # Every replan starts here: a prior physical close does not
                     # authorize deleting a writer that took over after rollback.
                     row = connection.execute(
-                        """SELECT workspace_id, lifecycle, writer_generation, writer_lease_owner_id,
+                        """SELECT workspace_id, lifecycle, root_session_id, idle_since,
+                                  writer_generation, writer_lease_owner_id,
                                   writer_lease_expires_at > clock_timestamp() AS lease_live
                            FROM pulsara_v3.sessions
                            WHERE id=%s AND memory_domain_id=%s FOR UPDATE""",
@@ -77,9 +82,31 @@ class _SessionDeletionOperations:
                     ).fetchone()
                     if row is None:
                         return "ABSENT"
+                    if idle_before is not None:
+                        # Automatic retirement competes with request admission on
+                        # this same lock. A scheduler's earlier idle observation
+                        # cannot authorize deleting newly accepted work.
+                        if (
+                            row["root_session_id"] is None
+                            or row["idle_since"] is None
+                            or row["idle_since"] > idle_before
+                        ):
+                            return "NOT_IDLE"
+                        busy = connection.execute(
+                            """SELECT EXISTS(SELECT 1 FROM pulsara_v3.prompt_queue_items
+                                 WHERE session_id=%s AND status='PENDING')
+                               OR EXISTS(SELECT 1 FROM pulsara_v3.turns
+                                 WHERE session_id=%s AND status='RUNNING') AS busy""",
+                            (session_id, session_id),
+                        ).fetchone()
+                        if busy["busy"]:
+                            return "NOT_IDLE"
                     # Recheck on every replan under the same row lock used by
                     # unarchive; a UI snapshot never authorizes deleting OPEN.
-                    if required_lifecycle is not None and row["lifecycle"] != required_lifecycle:
+                    if (
+                        required_lifecycle is not None
+                        and row["lifecycle"] != required_lifecycle
+                    ):
                         return "NOT_ARCHIVED"
                     if closed_writer is not None:
                         if row[
@@ -92,6 +119,21 @@ class _SessionDeletionOperations:
                             )
                     elif row["writer_lease_owner_id"] is not None and row["lease_live"]:
                         raise SessionDeletionBusy("session has a live writer")
+                    children = connection.execute(
+                        "SELECT id FROM pulsara_v3.sessions WHERE root_session_id=%s ORDER BY id",
+                        (session_id,),
+                    ).fetchall()
+                    for child in children:
+                        lock_session_admission(connection, session_id=str(child["id"]))
+                    live_child = connection.execute(
+                        """SELECT id FROM pulsara_v3.sessions WHERE root_session_id=%s
+                           AND writer_lease_owner_id IS NOT NULL
+                           AND writer_lease_expires_at > clock_timestamp()
+                           ORDER BY id FOR UPDATE""",
+                        (session_id,),
+                    ).fetchone()
+                    if live_child is not None:
+                        raise SessionDeletionBusy("owned Agent has a live writer")
                     lock_canonical_identities(
                         connection,
                         namespace="workspace",

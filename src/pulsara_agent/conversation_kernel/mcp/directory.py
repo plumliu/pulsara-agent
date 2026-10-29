@@ -14,8 +14,8 @@ from .contracts import (
 )
 
 
-def runtime_rows(runtime, plan, scope):
-    if runtime is None or plan is None:
+def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
+    if runtime is None or (plan is None and code_direct_specs is None):
         return (
             [],
             {},
@@ -28,7 +28,8 @@ def runtime_rows(runtime, plan, scope):
         )
     catalog = runtime.catalog_for_scope(scope)
     if (
-        catalog.semantic_fingerprint
+        code_direct_specs is None
+        and catalog.semantic_fingerprint
         != plan.mcp_catalog_route_projection.joined_catalog_semantic_fingerprint
     ):
         return (
@@ -42,7 +43,7 @@ def runtime_rows(runtime, plan, scope):
             ],
         )
     rows, details = [], {}
-    complete_sources = {
+    complete_sources = set(runtime.candidates) if code_direct_specs is not None else {
         snapshot.registration.source.stable_source_id
         for snapshot in plan.dispatch_view.planning_input.mcp.source_snapshots
         if snapshot.registration.source.kind is CapabilitySourceKind.MCP_SERVER
@@ -84,7 +85,15 @@ def runtime_rows(runtime, plan, scope):
             if candidate is not None
             else None
         )
-        for route in plan.mcp_catalog_route_projection.routes:
+        routes = plan.mcp_catalog_route_projection.routes if code_direct_specs is None else ()
+        if code_direct_specs is not None:
+            frozen = {item.name: item for item in code_direct_specs}
+            for tool in snapshot.tools if snapshot is not None else ():
+                direct = frozen.get(tool.provider_tool_name) == tool.provider_spec()
+                rows.append(minimal_row("MCP_TOOL", tool.provider_tool_name,
+                    {"kind": "MCP_TOOL", "server_id": server.server_id, "tool_name": tool.provider_tool_name},
+                    None, "可直接调用；参数见工具定义。" if direct else "先用 inspect_capability 查看参数，再用返回的 invocation.target 调用。", tool.description))
+        for route in routes:
             if route.target.server_id != server.server_id:
                 continue
             tool = next(

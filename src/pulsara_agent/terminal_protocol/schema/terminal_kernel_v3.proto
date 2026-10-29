@@ -47,11 +47,6 @@ enum CommittedEventType {
   PROMPT_CANCELLED = 14;
   PROMPT_REJECTED = 15;
   COMPACTION_ADOPTED = 16;
-  SUBAGENT_TASK_ACCEPTED = 17;
-  SUBAGENT_TASK_STATUS_ACCEPTED = 18;
-  SUBAGENT_MESSAGE_ACCEPTED = 19;
-  SUBAGENT_RESULT_ACCEPTED = 20;
-  INTER_AGENT_MESSAGE_ACCEPTED = 21;
   reserved 22 to 26;
   TERMINAL_OBSERVATION_ACCEPTED = 27;
   PLAN_WORKFLOW_ENTERED = 28;
@@ -88,14 +83,13 @@ enum LiveEventType {
   TERMINAL_MONITOR_OPENED = 20;
   TERMINAL_MONITOR_OBSERVATION = 21;
   TERMINAL_MONITOR_CLOSED = 22;
-  SUBAGENT_PROGRESS = 23;
   TODO_SNAPSHOT_UPDATED = 24;
 }
 
 enum ConversationScopeKind {
   CONVERSATION_SCOPE_KIND_UNSPECIFIED = 0;
   ROOT = 1;
-  SUBAGENT_TASK = 2;
+  SUBAGENT = 2;
 }
 
 enum EntryKind {
@@ -107,7 +101,6 @@ enum EntryKind {
   TOOL_RESULT = 5;
   TERMINAL_OBSERVATION = 6;
   PLAN_CONTINUATION = 7;
-  INTER_AGENT_MESSAGE = 8;
   USER_CONTROL_FEEDBACK = 9;
 }
 
@@ -178,6 +171,13 @@ message CanonicalReasoningBlock {
 }
 
 message CanonicalToolResult {
+  string attempt_id = 15;
+  string invocation_id = 9;
+  string source_kind = 10;
+  string source_exec_attempt_id = 11;
+  uint64 call_sequence = 12;
+  string tool_name = 13;
+  string original_arguments_json = 14;
   string assistant_entry_id = 1;
   string tool_call_id = 2;
   string result_state = 3;
@@ -189,6 +189,8 @@ message CanonicalToolResult {
 }
 
 message CanonicalInputSource {
+  string source_session_id = 4;
+  string source_work_id = 5;
   string queue_item_id = 1;
   string command_id = 2;
   string delivery_mode = 3;
@@ -222,14 +224,12 @@ message CanonicalEntry {
   uint64 entry_sequence = 3;
   EntryKind entry_kind = 4;
   ConversationScopeKind scope_kind = 5;
-  string scope_subagent_task_id = 6;
   string context_binding_revision_id = 7;
   uint64 provider_input_through_sequence = 8;
   CanonicalContentReference content = 9;
   repeated CanonicalAssistantBlock blocks = 10;
   string accepted_at_utc = 11;
   repeated CanonicalReasoningBlock reasoning_blocks = 12;
-  string source_subagent_task_id = 13;
   CanonicalToolResult tool_result = 14;
   bool fork_eligible = 15;
   string entry_owner_kind = 16;
@@ -237,12 +237,12 @@ message CanonicalEntry {
   repeated CanonicalVisualization visualizations = 18;
   bool root_final = 19;
   ScheduledInputProvenance scheduled_input = 20;
+  string input_origin = 21;
 }
 
 message ActiveTurnControl {
   string turn_id = 1;
   ConversationScopeKind scope_kind = 2;
-  string scope_subagent_task_id = 3;
   string status = 4;
   string accepted_at_utc = 5;
   RunPermissionProjection permission = 6;
@@ -304,6 +304,9 @@ message PlanHandoffControl {
 }
 
 message ToolAttemptControl {
+  string invocation_id = 6;
+  string source_kind = 7;
+  string source_exec_attempt_id = 8;
   string attempt_id = 1;
   string assistant_entry_id = 2;
   string tool_call_id = 3;
@@ -338,8 +341,6 @@ message CanonicalControl {
   ContextCompactionControl latest_context_compaction = 12;
   LatestRootTurnControl latest_root_turn = 13;
   InitialContextBase initial_context_base = 14;
-  uint64 task_total_count = 15;
-  uint64 task_unreceived_count = 16;
   uint64 active_turn_total_count = 17;
   uint64 tool_attempt_total_count = 18;
 }
@@ -436,7 +437,6 @@ message HistoryPageResponse {
 
 enum ObservationProjectionKind {
   OBSERVATION_PROJECTION_KIND_UNSPECIFIED = 0;
-  EVENT_ONLY = 1;
   IMMUTABLE_ENTRY = 2;
   CURRENT_CONTROL = 3;
 }
@@ -450,8 +450,6 @@ message CommittedObservationProjection {
   string subject_id = 6;
   CanonicalEntry entry = 7;
   CanonicalControl current_control = 8;
-  string affected_subagent_task_id = 9;
-  string affected_subagent_batch_id = 11;
   uint64 control_read_event_sequence = 10;
   TurnInterruptionNotice interruption_notice = 12;
 }
@@ -461,7 +459,6 @@ enum LiveChannelKind {
   LIVE_CHANNEL_MODEL_OUTPUT = 1;
   LIVE_CHANNEL_TOOL_RESULT = 2;
   LIVE_CHANNEL_TERMINAL_EXTENSION = 3;
-  LIVE_CHANNEL_SUBAGENT_EXTENSION = 4;
 }
 
 enum LiveBlockKind {
@@ -508,6 +505,8 @@ message LiveToolCallEndPayload {
 message LiveToolResultStartPayload {
   string block_identity = 1; string tool_call_id = 2; string attempt_id = 3;
   string assistant_entry_id = 4;
+  string invocation_id = 5;
+  string source_exec_attempt_id = 6;
 }
 message LiveToolResultDeltaPayload { string block_identity = 1; string text = 2; }
 message LiveToolResultEndPayload {
@@ -537,10 +536,6 @@ message LiveTerminalMonitorObservationPayload {
 }
 message LiveTerminalMonitorClosedPayload {
   string monitor_id = 1; string process_id = 2; string reason = 3;
-}
-message LiveSubagentProgressPayload {
-  string task_id = 1; string status = 2; string public_summary = 3;
-  uint64 summary_utf8_bytes = 4; string summary_digest = 5;
 }
 message LiveTodoItemProjection {
   uint32 ordinal = 1; string text = 2; string status = 3;
@@ -576,7 +571,6 @@ message LiveEventPayload {
     LiveTerminalMonitorOpenedPayload terminal_monitor_opened = 20;
     LiveTerminalMonitorObservationPayload terminal_monitor_observation = 21;
     LiveTerminalMonitorClosedPayload terminal_monitor_closed = 22;
-    LiveSubagentProgressPayload subagent_progress = 23;
     LiveTodoSnapshotUpdatedPayload todo_snapshot_updated = 24;
   }
 }
@@ -590,7 +584,6 @@ message LiveEventProjection {
   string draft_identity = 6;
   LiveEventPayload payload = 7;
   ConversationScopeKind scope_kind = 8;
-  string scope_subagent_task_id = 9;
   LiveChannelKind channel_kind = 10;
   string channel_tool_call_id = 11;
   string channel_attempt_id = 12;
@@ -617,7 +610,6 @@ message LiveGenerationSettlement {
   string committed_entry_id = 7;
   string reason_code = 8;
   ConversationScopeKind scope_kind = 9;
-  string scope_subagent_task_id = 10;
   LiveChannelKind channel_kind = 11;
   string channel_tool_call_id = 12;
   string channel_attempt_id = 13;
@@ -647,7 +639,6 @@ message LiveTodoRunSnapshot {
   string todo_run_id = 1;
   uint64 todo_revision = 2;
   ConversationScopeKind scope_kind = 3;
-  string scope_subagent_task_id = 4;
   string disposition = 5;
   repeated LiveTodoItemProjection ordered_items = 6;
   uint32 pending_count = 7;
@@ -764,17 +755,16 @@ enum CommandKind {
   DETACH = 3;
   CLOSE_SESSION = 4;
   reserved 5;
-  ACCEPT_SUBAGENT_COMPLETION = 6;
   reserved 7;
   ENTER_PLAN = 8;
   CANCEL_PLAN = 9;
   FORCE_EXIT_PLAN = 10;
   COMPACT_CONTEXT = 11;
-  CANCEL_SUBAGENT_TASK = 12;
   TERMINATE_BACKGROUND_PROCESS = 13;
   CANCEL_QUEUED_PROMPT = 14;
   STEER_QUEUED_PROMPT = 15;
   STEER_ACTIVE_TURN = 16;
+  STOP_CODE_MODE_CELL = 17;
 }
 
 message CommandRequest {
@@ -786,7 +776,6 @@ message CommandRequest {
   string client_submission_id = 6;
   string plan_reason = 7;
   string target_turn_id = 8;
-  string subagent_task_id = 9;
   reserved 10;
   PermissionMode requested_permission_mode = 11;
   string target_plan_workflow_id = 12;
@@ -798,6 +787,7 @@ message CommandRequest {
   string target_queue_item_id = 18;
   PromptContent prompt_content = 19;
   uint64 control_admission_deadline_ms = 20;
+  string target_cell_id = 21;
 }
 
 message PromptImagePart {
@@ -840,15 +830,15 @@ enum CommandStatus {
 enum UserControlOperation {
   USER_CONTROL_OPERATION_UNSPECIFIED = 0;
   USER_CONTROL_STOP_ACTIVE_TURN = 1;
-  USER_CONTROL_CANCEL_SUBAGENT_TASK = 2;
   USER_CONTROL_TERMINATE_BACKGROUND_PROCESS = 3;
+  USER_CONTROL_STOP_CODE_MODE_CELL = 4;
 }
 
 enum UserControlTargetKind {
   USER_CONTROL_TARGET_KIND_UNSPECIFIED = 0;
   USER_CONTROL_ROOT_TURN = 1;
-  USER_CONTROL_SUBAGENT_TASK = 2;
   USER_CONTROL_BACKGROUND_PROCESS = 3;
+  USER_CONTROL_CODE_MODE_CELL = 4;
 }
 
 enum UserControlExecution {
@@ -868,11 +858,12 @@ message RootControlResult {
   string reason = 2;
 }
 
-message SubagentControlResult {
-  string disposition = 1;
-  string status = 2;
-  string reason = 3;
+message CodeModeControlResult {
+  string cell_id = 1;
+  string state = 2;
+  uint64 pending_calls = 3;
 }
+
 
 message ProcessControlResult {
   string disposition = 1;
@@ -911,10 +902,10 @@ message UserControlOutcome {
   bool accepted = 5;
   UserControlExecution execution = 6;
   RootControlResult root = 7;
-  SubagentControlResult subagent = 8;
   ProcessControlResult process = 9;
   MonitorControlResult monitor = 10;
   UserControlFeedbackState feedback = 11;
+  CodeModeControlResult cell = 12;
 }
 
 message ExpectedUserControl {
@@ -1153,7 +1144,6 @@ message ListBackgroundProcessesRequest {
 message BackgroundProcessOrigin {
   string turn_id = 1;
   string scope_kind = 2;
-  string subagent_task_id = 3;
 }
 
 message BackgroundProcessItem {
@@ -1235,6 +1225,26 @@ message HeartbeatResponse {
   bool active = 2;
 }
 
+message CodeModeCellsRequest {
+  string request_id = 1;
+  string attachment_id = 2;
+  uint64 attachment_generation = 3;
+}
+
+message CodeModeCellState {
+  string cell_id = 1;
+  string state = 2;
+  bool has_unread_output = 3;
+  uint64 pending_calls = 4;
+}
+
+message CodeModeCellsResponse {
+  string request_id = 1;
+  string session_id = 2;
+  string host_session_id = 3;
+  repeated CodeModeCellState cells = 4;
+}
+
 message ClientFrame {
   oneof request {
     HelloRequest hello = 1;
@@ -1254,6 +1264,7 @@ message ClientFrame {
     ListBackgroundProcessesRequest list_background_processes = 15;
     ReadBackgroundProcessLogRequest read_background_process_log = 16;
     SubagentCapacityRequest subagent_capacity = 17;
+    CodeModeCellsRequest code_mode_cells = 18;
   }
 }
 
@@ -1282,5 +1293,6 @@ message ServerFrame {
     BackgroundProcessPage background_processes = 15;
     BackgroundProcessLog background_process_log = 16;
     SubagentCapacityResponse subagent_capacity = 17;
+    CodeModeCellsResponse code_mode_cells = 18;
   }
 }

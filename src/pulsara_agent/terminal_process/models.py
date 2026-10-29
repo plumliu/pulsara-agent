@@ -55,17 +55,13 @@ class TerminalProcessOrigin:
 
     turn_id: str
     conversation_scope_kind: str
-    scope_subagent_task_id: str | None = None
+    session_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.turn_id:
             raise ValueError("terminal process origin turn is required")
-        if self.conversation_scope_kind not in {"ROOT", "SUBAGENT_TASK"}:
+        if self.conversation_scope_kind not in {"ROOT", "SUBAGENT"}:
             raise ValueError("terminal process origin scope is invalid")
-        if (self.conversation_scope_kind == "SUBAGENT_TASK") != (
-            self.scope_subagent_task_id is not None
-        ):
-            raise ValueError("terminal process subagent attribution is inconsistent")
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,6 +9,8 @@ import os
 import subprocess
 import stat
 import sys
+import json
+import tomllib
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
@@ -138,6 +140,24 @@ class CustomBuildHook(BuildHookInterface):
             build_data["force_include"][str(executable.parent)] = (
                 "pulsara_agent/_vendor/ripgrep"
             )
+        code_mode = root / "src/pulsara_agent/_vendor/code_mode"
+        node_version = tomllib.loads((root / "mise.toml").read_text())["tools"]["node"]
+        try:
+            observed = subprocess.check_output([str(code_mode / "node"), "--version"], timeout=60).strip()
+            if observed != f"v{node_version}".encode():
+                raise ValueError("Code Mode Node differs from the mise pin")
+            sdk = code_mode / "quickjs-wasi"
+            if json.loads((sdk / "package.json").read_text())["version"] != "3.6.2":
+                raise ValueError("Code Mode SDK differs from the fixed release")
+            for required in ("dist/index.js", "dist/wasi-shim.js", "dist/extensions.js", "dist/version.js", "quickjs.wasm", "LICENSE"):
+                if not (sdk / required).is_file():
+                    raise ValueError(f"Missing Code Mode SDK asset: {required}")
+            if not (code_mode / "NODE-LICENSE.txt").is_file():
+                raise ValueError("Missing Node distribution notices")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("Run mise exec -- .venv/bin/python tools/prepare_code_mode.py explicitly before offline build/install") from exc
+        if self.target_name == "wheel":
+            build_data["force_include"][str(code_mode)] = "pulsara_agent/_vendor/code_mode"
         classification = _classify_source_inventory(Path(self.root))
         if not classification.valid:
             raise RuntimeError("; ".join(classification.diagnostics))

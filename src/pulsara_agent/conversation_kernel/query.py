@@ -54,7 +54,6 @@ class CanonicalConversationPage:
 class CanonicalProviderCallUsagePage:
     session_id: str
     conversation_scope_kind: str | None
-    scope_subagent_task_id: str | None
     after_observed_at: datetime | None
     after_resolved_model_call_id: str | None
     usages: tuple[Mapping[str, object], ...]
@@ -77,7 +76,6 @@ class CanonicalProviderCallUsagePage:
         return {
             "session_id": self.session_id,
             "conversation_scope_kind": self.conversation_scope_kind,
-            "scope_subagent_task_id": self.scope_subagent_task_id,
             "after_observed_at": _public_value(self.after_observed_at),
             "after_resolved_model_call_id": self.after_resolved_model_call_id,
             "usages": [_public_row(item) for item in self.usages],
@@ -93,7 +91,6 @@ class CanonicalInspectorView:
     turns: tuple[Mapping[str, object], ...]
     tool_attempts: tuple[Mapping[str, object], ...]
     prompt_queue: tuple[Mapping[str, object], ...]
-    subagent_tasks: tuple[Mapping[str, object], ...]
     selective_events: tuple[Mapping[str, object], ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -103,7 +100,6 @@ class CanonicalInspectorView:
             "turns": [_public_row(item) for item in self.turns],
             "tool_attempts": [_public_row(item) for item in self.tool_attempts],
             "prompt_queue": [_public_row(item) for item in self.prompt_queue],
-            "subagent_tasks": [_public_row(item) for item in self.subagent_tasks],
             "selective_events": [_public_row(item) for item in self.selective_events],
         }
 
@@ -146,7 +142,6 @@ class CanonicalConversationQuery:
         *,
         session_id: str,
         conversation_scope_kind: str | None = None,
-        scope_subagent_task_id: str | None = None,
         after_observed_at: datetime | None = None,
         after_resolved_model_call_id: str | None = None,
         maximum_rows: int = 256,
@@ -157,18 +152,11 @@ class CanonicalConversationQuery:
         if (after_observed_at is None) != (after_resolved_model_call_id is None):
             raise ValueError("provider usage cursor must contain both key fields")
         if after_observed_at is not None and (
-            after_observed_at.tzinfo is None
-            or after_observed_at.utcoffset() is None
+            after_observed_at.tzinfo is None or after_observed_at.utcoffset() is None
         ):
             raise ValueError("provider usage cursor timestamp must be aware")
-        if conversation_scope_kind not in {None, "ROOT", "SUBAGENT_TASK"}:
+        if conversation_scope_kind not in {None, "ROOT", "SUBAGENT"}:
             raise ValueError("provider usage scope kind is invalid")
-        if scope_subagent_task_id is not None:
-            if not scope_subagent_task_id or scope_subagent_task_id != scope_subagent_task_id.strip():
-                raise ValueError("subagent task scope id is invalid")
-            if conversation_scope_kind == "ROOT":
-                raise ValueError("ROOT scope cannot name a subagent task")
-            conversation_scope_kind = "SUBAGENT_TASK"
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
@@ -184,26 +172,22 @@ class CanonicalConversationQuery:
             clauses = ["u.session_id = %s"]
             parameters: list[object] = [session_id]
             if conversation_scope_kind is not None:
-                clauses.append("t.conversation_scope_kind = %s")
-                parameters.append(conversation_scope_kind)
-            if scope_subagent_task_id is not None:
-                clauses.append("t.scope_subagent_task_id = %s")
-                parameters.append(scope_subagent_task_id)
-            if after_observed_at is not None:
                 clauses.append(
-                    "(u.observed_at, u.resolved_model_call_id) > (%s, %s)"
+                    "(CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END) = %s"
                 )
-                parameters.extend(
-                    (after_observed_at, after_resolved_model_call_id)
-                )
+                parameters.append(conversation_scope_kind)
+            pass
+            if after_observed_at is not None:
+                clauses.append("(u.observed_at, u.resolved_model_call_id) > (%s, %s)")
+                parameters.extend((after_observed_at, after_resolved_model_call_id))
             parameters.append(maximum_rows + 1)
             rows = connection.execute(
-                f"""SELECT u.*, t.conversation_scope_kind,
-                           t.scope_subagent_task_id
+                f"""SELECT u.*, CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind
                     FROM pulsara_v3.provider_call_usage AS u
+                    JOIN pulsara_v3.sessions AS s ON s.id=u.session_id
                     JOIN pulsara_v3.turns AS t
                       ON t.session_id = u.session_id AND t.id = u.turn_id
-                    WHERE {' AND '.join(clauses)}
+                    WHERE {" AND ".join(clauses)}
                     ORDER BY u.observed_at, u.resolved_model_call_id
                     LIMIT %s""",
                 parameters,
@@ -224,7 +208,6 @@ class CanonicalConversationQuery:
         return CanonicalProviderCallUsagePage(
             session_id=session_id,
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             after_observed_at=after_observed_at,
             after_resolved_model_call_id=after_resolved_model_call_id,
             usages=tuple(items),
@@ -257,11 +240,9 @@ class CanonicalConversationQuery:
                        CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.turn_id
                          ELSE e.imported_history_group_id END AS turn_id,
                        e.entry_sequence, e.entry_kind,
-                       e.conversation_scope_kind, e.scope_subagent_task_id,
+                       CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind,
                        e.context_binding_revision_id,
                        e.provider_input_through_sequence,
-                       CASE e.entry_owner_kind WHEN 'EXECUTED_TURN' THEN e.source_subagent_task_id
-                         ELSE e.imported_source_subagent_task_id END AS source_subagent_task_id,
                        e.content_digest, e.content_size, e.content_media_type,
                        e.content_codec, e.accepted_at,
                        COALESCE(
@@ -280,11 +261,12 @@ class CanonicalConversationQuery:
                          '[]'::jsonb
                        ) AS blocks
                 FROM pulsara_v3.transcript_entries AS e
+                JOIN pulsara_v3.sessions AS s ON s.id=e.session_id
                 LEFT JOIN pulsara_v3.assistant_message_blocks AS b
                   ON b.session_id = e.session_id AND b.assistant_entry_id = e.id
                 WHERE e.session_id = %s
                   AND e.entry_sequence > %s AND e.entry_sequence <= %s
-                GROUP BY e.id
+                GROUP BY e.id,s.root_session_id
                 ORDER BY e.entry_sequence
                 LIMIT %s
                 """,
@@ -349,10 +331,6 @@ class CanonicalConversationQuery:
                 """SELECT * FROM pulsara_v3.prompt_queue_items
                    WHERE session_id = %s ORDER BY queue_sequence, id"""
             )
-            tasks = rows(
-                """SELECT * FROM pulsara_v3.subagent_tasks
-                   WHERE session_id = %s ORDER BY accepted_at, id"""
-            )
             events = tuple(
                 dict(item)
                 for item in connection.execute(
@@ -370,7 +348,6 @@ class CanonicalConversationQuery:
             turns=turns,
             tool_attempts=attempts,
             prompt_queue=queue,
-            subagent_tasks=tasks,
             selective_events=events,
         )
 
@@ -428,7 +405,6 @@ class CanonicalConversationQuery:
 
             sessions = grouped("sessions", "lifecycle")
             queue = grouped("prompt_queue_items", "status")
-            task = grouped("subagent_tasks", "status")
             memory_facts = grouped("memory_facts", "lifecycle")
         return {
             "inspect_kind": "canonical_kernel_health.v3",
@@ -436,7 +412,6 @@ class CanonicalConversationQuery:
             "protocol_major": 3,
             "sessions": sessions,
             "prompt_queue": queue,
-            "subagent_tasks": task,
             "memory_facts": memory_facts,
             "runtime_limit_contract": "stage2_runtime_limits.v1",
             "runtime_limits": asdict(STAGE2_LIMITS),

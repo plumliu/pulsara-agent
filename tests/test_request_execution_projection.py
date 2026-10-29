@@ -13,7 +13,7 @@ from pulsara_agent.desktop_app.http_server import LocalHttpServer
 @pytest.mark.parametrize("changed", [
     {"execution_entry_id": None},
     {"execution_initial_entry_id": "entry:another"},
-    {"execution_scope_kind": "SUBAGENT_TASK"},
+    {"execution_entry_turn_id": "turn:another"},
     {"execution_turn_status": "INTERRUPTED", "execution_turn_reason": None},
 ])
 def test_inconsistent_request_facts_remain_a_query_failure(changed):
@@ -28,7 +28,6 @@ def test_inconsistent_request_facts_remain_a_query_failure(changed):
         "execution_entry_turn_id": "turn:request",
         "execution_turn_id": "turn:request",
         "execution_initial_entry_id": "entry:initial",
-        "execution_scope_kind": "ROOT",
         "execution_turn_status": "RUNNING",
         "execution_turn_reason": None,
     }

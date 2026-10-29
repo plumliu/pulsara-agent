@@ -39,7 +39,10 @@ from pulsara_agent.conversation_kernel.blob import (
     CanonicalContentPublisher,
     PostgresCanonicalBlobStore,
 )
-from pulsara_agent.conversation_kernel.visualization import FrozenVisualizationOccurrence, assistant_display_body
+from pulsara_agent.conversation_kernel.visualization import (
+    FrozenVisualizationOccurrence,
+    assistant_display_body,
+)
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceCollectorPort,
 )
@@ -107,9 +110,6 @@ from pulsara_agent.llm.request import (
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
 )
-from pulsara_agent.conversation_kernel.subagents.model_target import (
-    FrozenSubagentModelTarget,
-)
 from pulsara_agent.ports.provider_stream import (
     ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
@@ -118,7 +118,6 @@ from pulsara_agent.ports.provider_stream import (
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
-    _issue_new_subagent_lease_source,
     _issue_root_bootstrap_lease_source,
 )
 from pulsara_agent.conversation_kernel.contracts import (
@@ -148,7 +147,6 @@ from pulsara_agent.conversation_kernel.extensions import (
 )
 from pulsara_agent.conversation_kernel.limits import (
     PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
-    ROOT_COMPLETION_SUFFIX_BATCH_ITEMS,
 )
 from pulsara_agent.conversation_kernel.memory.contracts import (
     MemoryUsePolicy,
@@ -167,21 +165,6 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     ToolSurfacePlanningPort,
 )
 from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
-from pulsara_agent.conversation_kernel.subagents.runtime_port import (
-    PreparedInferredSubagentCompletion,
-    SubagentRuntimePort,
-)
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    MAXIMUM_RESULT_SUMMARY_UTF8_BYTES,
-    MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES,
-    PreparedSubagentLaunch,
-    SubagentProfileKind,
-    SubagentResultSource,
-    SubagentTaskStatus,
-    SubagentTerminalReason,
-    build_subagent_completion_storage_body,
-    project_subagent_completion_for_provider,
-)
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.tools.builtins.filesystem import (
@@ -191,16 +174,13 @@ from pulsara_agent.tools.builtins.filesystem import (
 )
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
-    AcceptedSubagentCompletion,
     AssistantBlock,
     AssistantDataBlock,
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelRepository,
     ConversationKernelConflict,
-    SubagentCompletionDisposition,
     build_prepared_root_turn_intent,
-    build_prepared_subagent_turn_admission,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.conversation_kernel.plan_runtime import (
@@ -275,7 +255,6 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
     ProcessLocalProviderInputInstallPermit,
-    ProviderInputContinuityScope,
     SourceObservationLifecycle,
     SourceObservationPresence,
     encode_runtime_observation,
@@ -286,7 +265,6 @@ from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
-    freeze_json,
     thaw_json,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
@@ -428,7 +406,9 @@ class _ImageToolResourceQuoteOwner:
     )
     base_suffix_messages: tuple[LLMMessage, ...] = dataclass_field(repr=False)
     base_wire: ProviderFollowupWireResourceQuote = dataclass_field(repr=False)
-    usage_anchor: ProviderInputUsageAnchor | None = dataclass_field(default=None, repr=False)
+    usage_anchor: ProviderInputUsageAnchor | None = dataclass_field(
+        default=None, repr=False
+    )
 
     def quote(
         self,
@@ -457,8 +437,7 @@ class _ImageToolResourceQuoteOwner:
                 quoted.final_wire_utf8_bytes - self.base_wire.final_wire_utf8_bytes
             ),
             input_tokens=(
-                quoted.budget_input_tokens
-                - self.base_wire.budget_input_tokens
+                quoted.budget_input_tokens - self.base_wire.budget_input_tokens
             ),
         )
 
@@ -610,97 +589,6 @@ def _entered_plan_continuation_followup_upper(
     )
 
 
-def _root_completion_followup_upper(
-    item_count: int = ROOT_COMPLETION_SUFFIX_BATCH_ITEMS,
-) -> tuple[int, int, int, tuple[LLMMessage, ...]]:
-    """Quote every completion in the existing per-safe-point FIFO batch.
-
-    Source rows are created only through the bounded subagent task/result
-    contracts.  Control characters produce the largest JSON escaping expansion
-    admitted by those text contracts, so the selected failure projection also
-    bounds both OpenAI wire encoders after their second JSON escape.
-    """
-
-    control_fill = "\x01"
-    task_id = control_fill * 512
-    dependencies = tuple(control_fill * 509 + f"{index:03d}" for index in range(16))
-    profile = max(SubagentProfileKind, key=lambda item: len(item.value)).value
-    projections: list[str] = []
-    for reason in SubagentTerminalReason:
-        body = build_subagent_completion_storage_body(
-            task_id=task_id,
-            task_key="a" * 64,
-            label=control_fill * 256,
-            display_role=control_fill * 256,
-            profile=profile,
-            status=SubagentTaskStatus.FAILED,
-            terminal_reason=reason.value,
-            terminal_public_detail=(
-                control_fill * MAXIMUM_TERMINAL_PUBLIC_DETAIL_UTF8_BYTES
-            ),
-            failed_dependency_task_ids=dependencies,
-            result_id=None,
-            result_source=None,
-            result_summary=None,
-            result_data=None,
-        )
-        projections.append(
-            project_subagent_completion_for_provider(
-                body,
-                source_task_id=task_id,
-            )
-        )
-    completed_body = build_subagent_completion_storage_body(
-        task_id=task_id,
-        task_key="a" * 64,
-        label=control_fill * 256,
-        display_role=control_fill * 256,
-        profile=profile,
-        status=SubagentTaskStatus.COMPLETED,
-        terminal_reason=None,
-        terminal_public_detail=None,
-        failed_dependency_task_ids=(),
-        result_id=control_fill * 512,
-        result_source=SubagentResultSource.EXPLICIT.value,
-        result_summary=control_fill * MAXIMUM_RESULT_SUMMARY_UTF8_BYTES,
-        result_data=None,
-    )
-    projections.append(
-        project_subagent_completion_for_provider(
-            completed_body,
-            source_task_id=task_id,
-        )
-    )
-    structured_body = build_subagent_completion_storage_body(
-        task_id=task_id,
-        task_key="a" * 64,
-        label=control_fill * 256,
-        display_role=control_fill * 256,
-        profile=profile,
-        status=SubagentTaskStatus.COMPLETED,
-        terminal_reason=None,
-        terminal_public_detail=None,
-        failed_dependency_task_ids=(),
-        result_id=control_fill * 512,
-        result_source=SubagentResultSource.EXPLICIT.value,
-        result_summary="x",
-        result_data=freeze_json({"value": "x" * (MAXIMUM_RESULT_SUMMARY_UTF8_BYTES - 13)}),
-    )
-    projections.append(project_subagent_completion_for_provider(structured_body, source_task_id=task_id))
-    projection = max(projections, key=lambda value: len(value.encode("utf-8")))
-    message = LLMMessage.user(projection)
-    canonical = len(projection.encode("utf-8"))
-    logical = provider_neutral_message_logical_bytes(message)
-    if not 0 <= item_count <= ROOT_COMPLETION_SUFFIX_BATCH_ITEMS:
-        raise ValueError("ROOT completion follow-up count is invalid")
-    return (
-        canonical * item_count,
-        logical * item_count,
-        item_count,
-        (message,) * item_count,
-    )
-
-
 def _runtime_source_message_upper(
     *,
     source_kind: ContextSourceKind,
@@ -846,10 +734,6 @@ class CompactionContinuationBlocked(RuntimeError):
     pass
 
 
-class ChildCompactionContinuationBlocked(RuntimeError):
-    pass
-
-
 class RootControlCompletionSettlementPort(Protocol):
     async def __call__(self, turn_id: str, *, turn_completed: bool) -> None: ...
 
@@ -880,6 +764,8 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
         if self.dispatcher is None or self.context_owner is None or self.scope is None:
             return PreparedCompactSessionStart(True)
         public_input = SessionStartInput(
+            session_kind=facts.scope.scope_kind.value,
+            input_origin=None,
             session_id=self.session_id,
             cwd=self.cwd,
             model=facts.model_id,
@@ -931,7 +817,14 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
 class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Protocol):
     """Require one Tool owner to satisfy the runner's two narrow consumers."""
 
-    async def prepare_visualizations(self, body: str, *, io: KernelSessionIO, workspace_id: str, deadline_monotonic: float) -> tuple[FrozenVisualizationOccurrence, ...]: ...
+    async def prepare_visualizations(
+        self,
+        body: str,
+        *,
+        io: KernelSessionIO,
+        workspace_id: str,
+        deadline_monotonic: float,
+    ) -> tuple[FrozenVisualizationOccurrence, ...]: ...
 
 
 class ConversationKernelRunner:
@@ -946,8 +839,10 @@ class ConversationKernelRunner:
         input_reader: CanonicalProviderInputReader | None = None,
         safe_point: ProviderSafePointCoordinator | None = None,
         before_provider_preparation: Callable[[], Awaitable[bool]] | None = None,
-        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]] | None = None,
-        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]] | None = None,
+        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]]
+        | None = None,
+        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]]
+        | None = None,
         workspace_gate: WorkspaceExecutionGate | None = None,
         root_control_preparation_barrier: (
             Callable[[str], Awaitable[None]] | None
@@ -976,7 +871,7 @@ class ConversationKernelRunner:
         assistant_settlement_owner: AssistantMessageSettlementOwner | None = None,
         todo_admission_finalizer: TodoRunAdmissionFinalizer | None = None,
         compaction_owner: HostCompactionRuntimeOwner | None = None,
-        subagent_runtime: SubagentRuntimePort | None = None,
+        root_session_id: str | None = None,
         hook_dispatcher: KernelHookDispatcher | None = None,
         hook_context_owner: HookContextOwner | None = None,
         hook_scope: HookDispatchScopeRef | None = None,
@@ -995,6 +890,11 @@ class ConversationKernelRunner:
         ):
             raise ValueError("runner limits must be finite and positive")
         self._repository = repository
+        self._session_scope_kind = (
+            ModelInputScopeKind.ROOT
+            if root_session_id is None
+            else ModelInputScopeKind.SUBAGENT
+        )
         self._writer_lease = writer_lease
         self._live_bus = live_bus
         self._tools = tools
@@ -1073,7 +973,7 @@ class ConversationKernelRunner:
             deadline_factory=self._deadlines,
             todo_finalizer=todo_admission_finalizer,
         )
-        self._subagent_runtime = subagent_runtime
+        self._root_session_id = root_session_id
         self._context_source_collector = context_source_collector
         self._hook_dispatcher = hook_dispatcher
         self._hook_context_owner = hook_context_owner
@@ -1103,7 +1003,6 @@ class ConversationKernelRunner:
             maximum_input_tokens_per_call=maximum_input_tokens_per_call,
             workspace_resolver=self._workspace_resolver,
             compaction_owner=compaction_owner,
-            subagent_runtime=subagent_runtime,
             capability_change_reader=capability_change_reader,
             capability_change_installed=capability_change_installed,
         )
@@ -1125,6 +1024,7 @@ class ConversationKernelRunner:
             deadline_factory=self._deadlines,
             hook_dispatcher=hook_dispatcher,
             hook_root_scope=hook_scope,
+            session_kind=self._session_scope_kind,
         )
         self._tool_batches = ToolBatchExecutor(
             workspace_gate=workspace_gate,
@@ -1138,7 +1038,6 @@ class ConversationKernelRunner:
             continuity_owner=self._continuity,
             memory_projection=memory_projection,
             extensions=extensions,
-            subagent_runtime=subagent_runtime,
             workspace_resolver=self._workspace_resolver,
             deadline_factory=self._deadlines,
             hook_dispatcher=hook_dispatcher,
@@ -1157,8 +1056,6 @@ class ConversationKernelRunner:
     def _compact_session_start_port(
         self, intent: ActiveTurnCancellationIntent
     ) -> SessionStartCompactPort | None:
-        if intent.scope_kind is not ModelInputScopeKind.ROOT:
-            return None
         return _RootSessionStartCompactPort(
             self._hook_dispatcher,
             self._hook_context_owner,
@@ -1176,8 +1073,6 @@ class ConversationKernelRunner:
     def _compact_session_start_boundary_port(
         self, intent: ActiveTurnCancellationIntent
     ) -> SessionStartCompactBoundaryPort | None:
-        if intent.scope_kind is not ModelInputScopeKind.ROOT:
-            return None
         return self._session_start_boundary
 
     @staticmethod
@@ -1238,77 +1133,6 @@ class ConversationKernelRunner:
             model_resolution_snapshot=model_resolution_snapshot,
         )
 
-    async def admit_subagent_turn(
-        self,
-        *,
-        launch: PreparedSubagentLaunch,
-        cancellation_intent: ActiveTurnCancellationIntent | None = None,
-    ) -> ActiveTurnCancellationIntent:
-        task_start = launch.task_start
-        if task_start.session_id != self._writer_lease.guard.session_id:
-            raise ValueError("subagent launch belongs to another session")
-        turn_id = launch.child_turn_id
-        task_id = task_start.task_id
-        content = await self._content(
-            task_start.objective.encode("utf-8"), deadline=self._canonical_deadline()
-        )
-        occurred_at = datetime.now(timezone.utc)
-        candidate = build_prepared_subagent_turn_admission(
-            session_id=self._writer_lease.guard.session_id,
-            task_id=task_id,
-            turn_id=turn_id,
-            entry_id=derive_id('entry', 'worker', turn_id),
-            context_binding_revision_id=derive_id('binding', 'revision', turn_id, "0"),
-            permission_snapshot_id=derive_id('permission', 'admission', turn_id),
-            task_start_event_id=task_start.event_id,
-            expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
-            content=content,
-            occurred_at=occurred_at,
-            actor_id="subagent-manager",
-        )
-        intent = cancellation_intent or ActiveTurnCancellationIntent(
-            turn_id, ModelInputScopeKind.SUBAGENT_TASK, task_id
-        )
-        intent.require_exact(
-            turn_id=turn_id,
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id=task_id,
-        )
-        await self._turn_admission.accept_subagent(
-            candidate, cancellation_intent=intent
-        )
-        return intent
-
-    async def run_admitted_subagent_turn(
-        self,
-        *,
-        launch: PreparedSubagentLaunch,
-        cancellation_intent: ActiveTurnCancellationIntent,
-    ) -> KernelRunResult:
-        """Own one admitted child run and its exact process-local cleanup."""
-
-        task_id = launch.task_start.task_id
-        scope = ProviderInputContinuityScope(
-            session_id=self._writer_lease.guard.session_id,
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id=task_id,
-        )
-        self._continuity.authorize_new_subagent_scope(
-            scope,
-            source=_issue_new_subagent_lease_source(
-                writer_guard=self._writer_lease.guard,
-                durable_runnable_task_fact=launch.task_start,
-            ),
-        )
-        try:
-            return await self.run_accepted_turn(
-                launch.child_turn_id,
-                cancellation_intent=cancellation_intent,
-                expected_first_model_target_fact=launch.accepted_model_target_fact,
-            )
-        finally:
-            self._continuity.retire_terminal_subagent_scope(scope)
-
     async def _run_turn(
         self,
         canonical_prompt: FrozenCanonicalPrompt,
@@ -1322,7 +1146,7 @@ class ConversationKernelRunner:
     ) -> KernelRunResult:
         if not isinstance(canonical_prompt, FrozenCanonicalPrompt):
             raise TypeError("ROOT turn requires a frozen canonical prompt")
-        stable_command_id = command_id or random_id('command')
+        stable_command_id = command_id or random_id("command")
         identity = build_direct_root_turn_identity(
             self._writer_lease.guard.session_id, stable_command_id
         )
@@ -1351,12 +1175,14 @@ class ConversationKernelRunner:
             expected_permission_snapshot=expected_permission_snapshot,
         )
         intent = cancellation_intent or ActiveTurnCancellationIntent(
-            turn_id, ModelInputScopeKind.ROOT, None
+            turn_id,
+            ModelInputScopeKind.ROOT
+            if self._root_session_id is None
+            else ModelInputScopeKind.SUBAGENT,
         )
         intent.require_exact(
             turn_id=turn_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         )
         prospective_dispatch: PreparedProspectiveRootDispatch | None = None
         try:
@@ -1424,12 +1250,11 @@ class ConversationKernelRunner:
         if self._before_provider_preparation is not None:
             await self._before_provider_preparation()
         intent = cancellation_intent or ActiveTurnCancellationIntent(
-            candidate.exact_turn_id, ModelInputScopeKind.ROOT, None
+            candidate.exact_turn_id, self._session_scope_kind
         )
         intent.require_exact(
             turn_id=candidate.exact_turn_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         )
         try:
             prepared = await self._provider_dispatch.prepare_prospective_root_input(
@@ -1505,8 +1330,7 @@ class ConversationKernelRunner:
         candidate = prepared.admission.candidate
         intent.require_exact(
             turn_id=candidate.exact_turn_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         )
         deadline = self._planning_deadline()
         session_start_context: PendingHookContextReservation | None = None
@@ -1623,7 +1447,7 @@ class ConversationKernelRunner:
         return await self._attach_pending_root_hook_context(
             prepared,
             ActiveTurnCancellationIntent(
-                candidate.exact_turn_id, ModelInputScopeKind.ROOT, None
+                candidate.exact_turn_id, self._session_scope_kind
             ),
         )
 
@@ -1649,8 +1473,7 @@ class ConversationKernelRunner:
             cut = candidate.expected_provider_input_cut
             cancellation_intent.require_exact(
                 turn_id=cut.turn_id,
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
+                scope_kind=self._session_scope_kind,
             )
             return await self.compaction.recover_pending_active_root_input(
                 candidate=candidate,
@@ -1680,31 +1503,27 @@ class ConversationKernelRunner:
         turn_id: str,
         *,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
-        expected_first_model_target_fact: FrozenSubagentModelTarget | None = None,
         prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
     ) -> KernelRunResult:
         """Execute a ROOT/task turn whose user entry is already canonical."""
 
         intent = cancellation_intent or ActiveTurnCancellationIntent(
-            turn_id, ModelInputScopeKind.ROOT, None
+            turn_id,
+            ModelInputScopeKind.ROOT
+            if self._root_session_id is None
+            else ModelInputScopeKind.SUBAGENT,
         )
         intent.require_exact(
             turn_id=turn_id,
             scope_kind=intent.scope_kind,
-            scope_subagent_task_id=intent.scope_subagent_task_id,
         )
-        if expected_first_model_target_fact is not None and (
-            intent.scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
-            or not intent.scope_subagent_task_id
-        ):
-            raise ValueError("first-model precondition is child-only")
 
         model_call_count = 0
         tool_call_count = 0
         current_memory_use_policy = (
             self._root_memory_use_policy
             if intent.scope_kind is ModelInputScopeKind.ROOT
-            else MemoryUsePolicy.ENABLED
+            else MemoryUsePolicy.ALL_DISABLED_BY_USER
         )
         active_surface_borrow: ProcessLocalToolSurfaceBorrow | None = None
         successor_dispatch: PreparedProviderDispatch | None = None
@@ -1714,24 +1533,13 @@ class ConversationKernelRunner:
         stop_continuation_used = False
         input_selection_in_progress = False
         root_completion_phase_opened = False
-        if (
-            intent.scope_kind is ModelInputScopeKind.ROOT
-            and self._subagent_runtime is not None
-        ):
-            await self._subagent_runtime.open_root_completion_delivery(turn_id)
-            root_completion_phase_opened = True
         try:
-            if pending_prospective_root_dispatch is not None:
-                if intent.scope_kind is not ModelInputScopeKind.ROOT:
-                    pending_prospective_root_dispatch.close()
-                    raise ValueError("prospective ROOT input was given to a child turn")
             while True:
                 if self._workspace_gate is not None:
                     await self._workspace_gate.wait_available()
                 if (
                     successor_dispatch is None
                     and pending_prospective_root_dispatch is None
-                    and intent.scope_kind is ModelInputScopeKind.ROOT
                     and self._root_control_preparation_barrier is not None
                 ):
                     await self._root_control_preparation_barrier(turn_id)
@@ -1744,18 +1552,6 @@ class ConversationKernelRunner:
                     # successor must be consumed untouched; edits wait for its next
                     # ordinary preparation boundary instead of replanning it.
                     await self._before_provider_preparation()
-                if (
-                    successor_dispatch is None
-                    and intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
-                    and intent.scope_subagent_task_id is not None
-                    and self._subagent_runtime is not None
-                ):
-                    # A compaction successor already owns its frozen request.
-                    # Leave later guidance queued so its first answer cannot
-                    # complete the child before an ordinary preparation reads it.
-                    await self._subagent_runtime.consume_mailbox_safe_point(
-                        intent.scope_subagent_task_id
-                    )
                 # A successful active compaction already owns the next exact
                 # provider dispatch.  Consume that immutable handoff before
                 # polling a later manual request; otherwise a back-to-back
@@ -1767,7 +1563,6 @@ class ConversationKernelRunner:
                 if successor_dispatch is None:
                     manual_request = await self.compaction.take_manual(
                         scope_kind=intent.scope_kind,
-                        scope_subagent_task_id=intent.scope_subagent_task_id,
                         turn_id=turn_id,
                     )
                 if manual_request is not None:
@@ -1782,7 +1577,6 @@ class ConversationKernelRunner:
                         force=manual_request.force,
                         manual_request=manual_request,
                         scope_kind=intent.scope_kind,
-                        scope_subagent_task_id=intent.scope_subagent_task_id,
                         hook_scope=self._hook_scope,
                         session_start_compact_port=(
                             self._compact_session_start_port(intent)
@@ -1834,12 +1628,10 @@ class ConversationKernelRunner:
                             model_call_count == 1 and not completed_tool_batch
                         ) or self.compaction.context_allowance_change_pending(
                             scope_kind=intent.scope_kind,
-                            scope_subagent_task_id=intent.scope_subagent_task_id,
                             destination=headroom_admission.prepared_target,
                         )
                         precompile_needed = self.compaction.precompile_needed(
                             scope_kind=intent.scope_kind,
-                            scope_subagent_task_id=intent.scope_subagent_task_id,
                             allow_model_switch=allow_model_switch,
                         )
                     except BaseException:
@@ -1857,7 +1649,6 @@ class ConversationKernelRunner:
                             inherited_memory_use_policy=current_memory_use_policy,
                             trigger=auto_trigger,
                             scope_kind=intent.scope_kind,
-                            scope_subagent_task_id=intent.scope_subagent_task_id,
                             headroom_admission=headroom_admission,
                             deadline=planning_deadline,
                             allow_model_switch=allow_model_switch,
@@ -1894,7 +1685,6 @@ class ConversationKernelRunner:
                                 force=False,
                                 manual_request=None,
                                 scope_kind=intent.scope_kind,
-                                scope_subagent_task_id=(intent.scope_subagent_task_id),
                                 hook_scope=self._hook_scope,
                                 session_start_compact_port=(
                                     self._compact_session_start_port(intent)
@@ -1923,9 +1713,6 @@ class ConversationKernelRunner:
                                     ),
                                     candidate=precompile,
                                     scope_kind=intent.scope_kind,
-                                    scope_subagent_task_id=(
-                                        intent.scope_subagent_task_id
-                                    ),
                                     hook_scope=self._hook_scope,
                                     session_start_compact_port=(
                                         self._compact_session_start_port(intent)
@@ -1951,10 +1738,7 @@ class ConversationKernelRunner:
                                 completed_tool_batch = False
                                 continue
                     session_start_context = None
-                    if (
-                        intent.scope_kind is ModelInputScopeKind.ROOT
-                        and self._session_start_boundary.has_pending
-                    ):
+                    if self._session_start_boundary.has_pending:
                         if headroom_admission is None:
                             headroom_admission = (
                                 await self.compaction.prepare_precompile_admission(
@@ -2049,22 +1833,6 @@ class ConversationKernelRunner:
                             "compaction successor belongs to another turn"
                         )
                 try:
-                    if (
-                        model_call_count == 1
-                        and expected_first_model_target_fact is not None
-                        and FrozenSubagentModelTarget.freeze(
-                            dispatch.prepared_call.call.target.fact,
-                            dispatch.prepared_call.epoch_call_target.target_bundle.reasoning_contract,
-                        )
-                        != expected_first_model_target_fact
-                    ):
-                        if reusable_wire_observation is not None:
-                            reusable_wire_observation.discard()
-                            reusable_wire_observation = None
-                        dispatch.close()
-                        raise ConversationKernelConflict(
-                            "child first provider target drifted from accepted task"
-                        )
                     auto_trigger = (
                         CompactionTrigger.MID_TURN_FOLLOWUP
                         if completed_tool_batch
@@ -2100,7 +1868,6 @@ class ConversationKernelRunner:
                                 inherited_memory_use_policy=current_memory_use_policy,
                                 candidate=direct_switch_candidate,
                                 scope_kind=intent.scope_kind,
-                                scope_subagent_task_id=intent.scope_subagent_task_id,
                                 hook_scope=self._hook_scope,
                                 session_start_compact_port=self._compact_session_start_port(
                                     intent
@@ -2127,10 +1894,6 @@ class ConversationKernelRunner:
                             continue
                     if (
                         not automatic_compaction_decided
-                        and self.compaction.automatic_allowed(
-                            scope_kind=intent.scope_kind,
-                            scope_subagent_task_id=intent.scope_subagent_task_id,
-                        )
                         and wire_decision is not None
                         and self.compaction.wire_decision_crosses_automatic_threshold(
                             dispatch, wire_decision
@@ -2145,7 +1908,6 @@ class ConversationKernelRunner:
                             force=False,
                             manual_request=None,
                             scope_kind=intent.scope_kind,
-                            scope_subagent_task_id=intent.scope_subagent_task_id,
                             hook_scope=self._hook_scope,
                             session_start_compact_port=(
                                 self._compact_session_start_port(intent)
@@ -2187,7 +1949,6 @@ class ConversationKernelRunner:
                         "provider execution lacks an execution-backed surface"
                     )
                 provider_replay_reservation = None
-                root_answer_fenced = False
                 control_answer_fenced = False
                 try:
                     canonical_facts = dispatch.canonical_facts
@@ -2238,7 +1999,7 @@ class ConversationKernelRunner:
                     input_selection_in_progress = False
                     execution = provider_open.execution
                     permit = provider_open.permit
-                    entry_id = random_id('entry')
+                    entry_id = random_id("entry")
                     if self._workspace_gate is not None:
                         await self._workspace_gate.wait_available()
                     collected = await self._collect_model(
@@ -2254,36 +2015,9 @@ class ConversationKernelRunner:
                         for item in completed.blocks
                         if isinstance(item, CompletedToolCallBlock)
                     )
-                    pending_completion_count = 0
-                    root_completion_followup_items = 0
-                    if (
-                        identity.conversation_scope_kind is ModelInputScopeKind.ROOT
-                        and self._subagent_runtime is not None
-                    ):
-                        if not calls:
-                            pending_completion_count = await self._subagent_runtime.seal_root_completion_delivery(
-                                turn_id
-                            )
-                            root_answer_fenced = True
-                            root_completion_followup_items = pending_completion_count
-                        elif (
-                            any(
-                                call.tool_name == "create_agent_tasks" for call in calls
-                            )
-                            or await self._subagent_runtime.root_completion_followup_possible(
-                                turn_id
-                            )
-                        ):
-                            root_completion_followup_items = (
-                                ROOT_COMPLETION_SUFFIX_BATCH_ITEMS
-                            )
                     pending_control_feedback = False
                     pending_steer_before_settlement = False
-                    if (
-                        not calls
-                        and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
-                        and self._root_control_completion_fence is not None
-                    ):
+                    if not calls and self._root_control_completion_fence is not None:
                         # The Host callback may wait after installing its exact
                         # process-local seal.  Transfer cleanup ownership before
                         # awaiting so cancellation cannot strand that writer
@@ -2301,52 +2035,19 @@ class ConversationKernelRunner:
                             )
                         )
                     try:
-                        completion_counts = (
-                            range(root_completion_followup_items, 0, -1)
-                            if calls and root_completion_followup_items
-                            else (root_completion_followup_items,)
+                        output_quote = self._quote_post_response_resources(
+                            request=request,
+                            permit=permit,
+                            collected=collected,
+                            canonical_facts=canonical_facts,
+                            pending_root_dynamic_followup=pending_control_feedback
+                            or pending_steer_before_settlement,
                         )
-                        for count in completion_counts:
-                            output_quote = self._quote_post_response_resources(
-                                request=request,
-                                permit=permit,
-                                collected=collected,
-                                canonical_facts=canonical_facts,
-                                root_completion_followup_items=count,
-                                pending_root_dynamic_followup=(
-                                    pending_control_feedback
-                                    or pending_steer_before_settlement
-                                ),
-                            )
-                            try:
-                                self._require_post_response_resources(
-                                    output_quote,
-                                    effective_input_budget_tokens=(
-                                        request.wire_input_plan.quote.effective_input_budget_tokens
-                                    ),
-                                )
-                            except OutputResourceInterruption:
-                                if count > 1 and calls:
-                                    continue
-                                raise
-                            root_completion_followup_items = count
-                            break
-                        if (
-                            calls
-                            and root_completion_followup_items
-                            and self._subagent_runtime is not None
-                        ):
-                            await self._subagent_runtime.set_root_completion_delivery_limit(
-                                turn_id, root_completion_followup_items
-                            )
+                        self._require_post_response_resources(
+                            output_quote,
+                            effective_input_budget_tokens=request.wire_input_plan.quote.effective_input_budget_tokens,
+                        )
                     except OutputResourceInterruption as exc:
-                        if root_answer_fenced and self._subagent_runtime is not None:
-                            await (
-                                self._subagent_runtime.settle_root_completion_delivery(
-                                    turn_id, turn_completed=False
-                                )
-                            )
-                            root_answer_fenced = False
                         if (
                             control_answer_fenced
                             and self._root_control_completion_settlement is not None
@@ -2362,7 +2063,6 @@ class ConversationKernelRunner:
                             draft_identity=entry_id,
                             reason_code=f"OUTPUT_RESOURCE_{exc.reason}",
                             scope_kind=(identity.conversation_scope_kind.value),
-                            scope_subagent_task_id=(identity.scope_subagent_task_id),
                             channel_kind=LiveChannelKind.MODEL_OUTPUT,
                             generation_id=derive_id("generation", "draft", entry_id),
                             proposed_entry_id=entry_id,
@@ -2394,20 +2094,18 @@ class ConversationKernelRunner:
                         parent_bytes, deadline=self._canonical_deadline()
                     )
                     occurred_at = datetime.now(timezone.utc)
-                    completion_prepared: PreparedInferredSubagentCompletion | None = (
-                        None
-                    )
                     complete_turn = not calls
                     stop_continuation = None
                     stop_causal_ref = None
                     if (
                         complete_turn
-                        and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
                         and self._hook_dispatcher is not None
                         and self._hook_context_owner is not None
                         and self._hook_scope is not None
                     ):
                         stop_public_input = StopInput(
+                            session_kind=identity.conversation_scope_kind.value,
+                            input_origin=None,
                             session_id=self._writer_lease.guard.session_id,
                             cwd=str(self._tools.snapshot_workspace_root()),
                             model=request.prepared_call.call.target.fact.model_id,
@@ -2445,52 +2143,21 @@ class ConversationKernelRunner:
                             stop_continuation.decision
                             is ContinuationDecision.TERMINALIZE
                         )
-                    if (
-                        complete_turn
-                        and identity.conversation_scope_kind
-                        is ModelInputScopeKind.SUBAGENT_TASK
-                        and identity.scope_subagent_task_id is not None
-                        and self._subagent_runtime is not None
-                    ):
-                        completion_prepared = await self._subagent_runtime.prepare_inferred_completion(
-                            task_id=identity.scope_subagent_task_id,
-                            entry_id=entry_id,
-                            public_text=completed.public_text,
-                            model_id=request.prepared_call.call.target.fact.model_id,
-                            permission_snapshot=(
-                                canonical_facts.run_permission_snapshot
-                            ),
-                        )
-                        complete_turn = (
-                            completion_prepared is not None
-                            and completion_prepared.result is not None
-                        )
-                    subagent_result = (
-                        None
-                        if completion_prepared is None
-                        else completion_prepared.result
-                    )
-                    if (
-                        complete_turn
-                        and identity.conversation_scope_kind is ModelInputScopeKind.ROOT
-                    ):
-                        pending_completion = False
-                        if self._subagent_runtime is not None:
-                            if not root_answer_fenced:
-                                pending_completion_count = await self._subagent_runtime.seal_root_completion_delivery(
-                                    turn_id
-                                )
-                                root_answer_fenced = True
-                            pending_completion = bool(pending_completion_count)
-                        complete_turn = not (
-                            pending_completion or pending_control_feedback
-                        )
+                    if complete_turn:
+                        complete_turn = not pending_control_feedback
                     frozen_visualizations = ()
                     if not calls:
-                        frozen_visualizations = await self._tools.prepare_visualizations(
-                            assistant_display_body(block.text for block in completed.blocks if isinstance(block, CompletedTextBlock)),
-                            io=self._io, workspace_id=await self._resolved_workspace_id(),
-                            deadline_monotonic=self._canonical_deadline(),
+                        frozen_visualizations = (
+                            await self._tools.prepare_visualizations(
+                                assistant_display_body(
+                                    block.text
+                                    for block in completed.blocks
+                                    if isinstance(block, CompletedTextBlock)
+                                ),
+                                io=self._io,
+                                workspace_id=await self._resolved_workspace_id(),
+                                deadline_monotonic=self._canonical_deadline(),
+                            )
                         )
                     settlement = PreparedAssistantMessageSettlement(
                         guard=self._writer_lease.guard,
@@ -2507,7 +2174,6 @@ class ConversationKernelRunner:
                         visualizations=tuple(frozen_visualizations),
                         provider_replay=collected.provider_replay,
                         provider_replay_reservation=(provider_replay_reservation),
-                        subagent_result=subagent_result,
                     )
                     # The settlement owner now owns promotion/release across
                     # exact-confirm and caller cancellation.
@@ -2523,17 +2189,6 @@ class ConversationKernelRunner:
                                 turn_id, turn_completed=False
                             )
                             control_answer_fenced = False
-                        if root_answer_fenced and self._subagent_runtime is not None:
-                            await (
-                                self._subagent_runtime.settle_root_completion_delivery(
-                                    turn_id, turn_completed=False
-                                )
-                            )
-                            root_answer_fenced = False
-                        if completion_prepared is not None:
-                            await self._subagent_runtime.finish_completion(
-                                completion_prepared.permit, committed=False
-                            )
                         raise
                     if (
                         control_answer_fenced
@@ -2543,15 +2198,6 @@ class ConversationKernelRunner:
                             turn_id, turn_completed=accepted.turn_completed
                         )
                         control_answer_fenced = False
-                    if root_answer_fenced and self._subagent_runtime is not None:
-                        await self._subagent_runtime.settle_root_completion_delivery(
-                            turn_id, turn_completed=accepted.turn_completed
-                        )
-                        root_answer_fenced = False
-                    if completion_prepared is not None:
-                        await self._subagent_runtime.finish_completion(
-                            completion_prepared.permit, committed=True
-                        )
                     if (
                         stop_continuation is not None
                         and stop_continuation.decision
@@ -2578,7 +2224,6 @@ class ConversationKernelRunner:
                         draft_identity=entry_id,
                         committed_entry_id=accepted.entry_id,
                         scope_kind=identity.conversation_scope_kind.value,
-                        scope_subagent_task_id=identity.scope_subagent_task_id,
                         channel_kind=LiveChannelKind.MODEL_OUTPUT,
                         generation_id=derive_id("generation", "draft", entry_id),
                         proposed_entry_id=entry_id,
@@ -2589,10 +2234,6 @@ class ConversationKernelRunner:
                         and self._root_control_completion_settlement is not None
                     ):
                         await self._root_control_completion_settlement(
-                            turn_id, turn_completed=False
-                        )
-                    if root_answer_fenced and self._subagent_runtime is not None:
-                        await self._subagent_runtime.settle_root_completion_delivery(
                             turn_id, turn_completed=False
                         )
                     if provider_replay_reservation is not None:
@@ -2609,15 +2250,26 @@ class ConversationKernelRunner:
                         final_text=completed.public_text,
                         model_call_count=model_call_count,
                         tool_call_count=tool_call_count,
-                        final_source=(AcceptedProviderFinalSource(
-                            call_target=request.prepared_call.epoch_call_target.physical_call_target,
-                            compiled_input=request.compiled_input,
-                            wire_input_plan=request.wire_input_plan,
-                            final_entry_id=accepted.entry_id,
-                            final_message=LLMMessage.assistant(completed.public_text),
-                            provider_replay=None if collected.provider_replay is None else collected.provider_replay.fragment(),
-                            usage_anchor=self._continuity.current_usage_anchor(permit.scope),
-                        ) if identity.conversation_scope_kind is ModelInputScopeKind.ROOT else None),
+                        final_source=(
+                            AcceptedProviderFinalSource(
+                                call_target=request.prepared_call.epoch_call_target.physical_call_target,
+                                compiled_input=request.compiled_input,
+                                wire_input_plan=request.wire_input_plan,
+                                final_entry_id=accepted.entry_id,
+                                final_message=LLMMessage.assistant(
+                                    completed.public_text
+                                ),
+                                provider_replay=None
+                                if collected.provider_replay is None
+                                else collected.provider_replay.fragment(),
+                                usage_anchor=self._continuity.current_usage_anchor(
+                                    permit.scope
+                                ),
+                            )
+                            if identity.conversation_scope_kind
+                            is ModelInputScopeKind.ROOT
+                            else None
+                        ),
                     )
                 if not calls:
                     # A steer arrived after this provider call froze its cut.
@@ -2693,25 +2345,14 @@ class ConversationKernelRunner:
                     canonical_facts=canonical_facts,
                     canonical_identity=identity,
                     request=request,
-                    subagent_parent_context_subject=(
-                        provider_open.subagent_parent_context_subject
-                    ),
+                    agent_invocation_snapshot=(provider_open.agent_invocation_snapshot),
                     continuity_scope=planning.scope,
                     surface_borrow=batch_borrow,
-                    last_assistant_message=(completed.public_text or None),
                     hook_scope=self._hook_scope,
                     image_call_allowances=output_quote.image_call_allowances,
                     cancelled_by_steer=plan_batch_steered,
                 )
                 tool_call_count += batch.tool_call_count
-                if batch.terminal is not None:
-                    return KernelRunResult(
-                        turn_id=turn_id,
-                        final_entry_id=batch.terminal.final_entry_id,
-                        final_text=batch.terminal.final_text,
-                        model_call_count=model_call_count,
-                        tool_call_count=tool_call_count,
-                    )
                 completed_tool_batch = True
         except BaseException as error:
             if successor_dispatch is not None:
@@ -2721,7 +2362,6 @@ class ConversationKernelRunner:
                 active_surface_borrow = None
             if (
                 input_selection_in_progress
-                and intent.scope_kind is ModelInputScopeKind.ROOT
                 and self._provider_input_failure_observer is not None
             ):
                 await self._provider_input_failure_observer(
@@ -2772,21 +2412,13 @@ class ConversationKernelRunner:
                     )
                 )
             cause = intent.cause
-            if intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK and isinstance(
-                error, CompactionContinuationBlocked
-            ):
-                raise ChildCompactionContinuationBlocked(
-                    "HOOK_COMPACTION_BLOCKED"
-                ) from error
-            if (
-                intent.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
-                and cause is not None
-            ):
-                # The child manager owns the atomic turn+task settlement.
-                raise
             # The installed logical stop/close cause remains the ROOT winner
             # even if physical cancellation surfaces a typed provider error.
-            reason = root_cancellation_terminal_reason(intent) if cause is not None else _provider_incomplete_terminal_reason(error)
+            reason = (
+                root_cancellation_terminal_reason(intent)
+                if cause is not None
+                else _provider_incomplete_terminal_reason(error)
+            )
             if reason is None:
                 reason = _model_input_terminal_reason(error)
             if reason is None:
@@ -2805,8 +2437,6 @@ class ConversationKernelRunner:
         finally:
             if pending_prospective_root_dispatch is not None:
                 pending_prospective_root_dispatch.close()
-            if root_completion_phase_opened and self._subagent_runtime is not None:
-                await self._subagent_runtime.close_root_completion_delivery(turn_id)
 
     async def _dispatch_initial_session_start(
         self,
@@ -2833,6 +2463,8 @@ class ConversationKernelRunner:
         )
         cwd = self._tools.snapshot_workspace_root()
         public_input = SessionStartInput(
+            session_kind=self._session_scope_kind.value,
+            input_origin=None,
             session_id=self._writer_lease.guard.session_id,
             cwd=str(cwd),
             model=model_id,
@@ -2867,113 +2499,6 @@ class ConversationKernelRunner:
         if reservation is not None:
             reservation.commit()
         return reservation
-
-    async def accept_subagent_completion(
-        self,
-        *,
-        turn_id: str,
-        new_context_binding_revision_id: str | None = None,
-        requested_permission_mode: PermissionMode | None = None,
-        task_id: str,
-        command_id: str,
-        actor_id: str,
-        deadline_monotonic: float,
-        admitted_writer: CompactionWriteReservation,
-        cancellation_intent: ActiveTurnCancellationIntent | None = None,
-    ) -> tuple[
-        AcceptedSubagentCompletion,
-        PreparedProspectiveRootDispatch | None,
-    ]:
-        if new_context_binding_revision_id is None:
-            candidate = await self._io.run(
-                self._repository.prepare_manual_subagent_completion_provider_input_candidate,
-                self._writer_lease.guard,
-                turn_id=turn_id,
-                task_id=task_id,
-                command_id=command_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-            if isinstance(candidate, AcceptedSubagentCompletion):
-                return candidate, None
-            prepared: PreparedProspectiveActiveRootInput | None = None
-            publication_handle = None
-            try:
-                prepared = await self._prepare_active_root_input(
-                    candidate,
-                    deadline=deadline_monotonic,
-                    cancellation_intent=cancellation_intent,
-                    admitted_writer=admitted_writer,
-                )
-                publication_handle = prepared.take_handle_for_publication()
-                accepted = await self._io.run(
-                    self._safe_point.accept_subagent_completion,
-                    handle=publication_handle,
-                    provider_input_admission=prepared.admission,
-                    turn_id=turn_id,
-                    new_context_binding_revision_id=None,
-                    requested_permission_mode=None,
-                    task_id=task_id,
-                    command_id=command_id,
-                    actor_id=actor_id,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                if accepted.disposition is not SubagentCompletionDisposition.CREATED:
-                    raise ConversationKernelConflict(
-                        "prepared manual completion was not published"
-                    )
-                await self._provider_dispatch.confirm_published_active_root_input(
-                    prepared,
-                    publication_handle=publication_handle,
-                    deadline=deadline_monotonic,
-                )
-                publication_handle = None
-                return accepted, None
-            finally:
-                if publication_handle is not None:
-                    publication_handle.close()
-                if prepared is not None:
-                    prepared.close()
-
-        if requested_permission_mode is None:
-            raise ValueError("new ROOT completion requires a permission mode")
-        candidate = await self._io.run(
-            self._repository.prepare_manual_subagent_completion_root_provider_input_candidate,
-            self._writer_lease.guard,
-            turn_id=turn_id,
-            new_context_binding_revision_id=new_context_binding_revision_id,
-            requested_permission_mode=requested_permission_mode,
-            task_id=task_id,
-            command_id=command_id,
-            deadline_monotonic=deadline_monotonic,
-        )
-        if isinstance(candidate, AcceptedSubagentCompletion):
-            return candidate, None
-        prospective_root: PreparedProspectiveRootDispatch | None = None
-        try:
-            prospective_root = await self.prepare_prospective_root_input(
-                candidate,
-                admitted_writer=admitted_writer,
-                cancellation_intent=cancellation_intent,
-            )
-            accepted = await self._io.run(
-                self._safe_point.accept_subagent_completion,
-                provider_input_admission=prospective_root.admission,
-                turn_id=turn_id,
-                new_context_binding_revision_id=new_context_binding_revision_id,
-                requested_permission_mode=requested_permission_mode,
-                task_id=task_id,
-                command_id=command_id,
-                actor_id=actor_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-            if accepted.disposition is not SubagentCompletionDisposition.CREATED:
-                prospective_root.close()
-                prospective_root = None
-            return accepted, prospective_root
-        except BaseException:
-            if prospective_root is not None:
-                prospective_root.close()
-            raise
 
     async def install_terminal_observation(
         self,
@@ -3148,9 +2673,6 @@ class ConversationKernelRunner:
                 conversation_scope_kind=(
                     request.compiled_input.canonical_input_identity.conversation_scope_kind.value
                 ),
-                scope_subagent_task_id=(
-                    request.compiled_input.canonical_input_identity.scope_subagent_task_id
-                ),
             )
 
         def abort_generation(reason: str) -> None:
@@ -3162,9 +2684,6 @@ class ConversationKernelRunner:
                 reason_code=reason,
                 scope_kind=(
                     request.compiled_input.canonical_input_identity.conversation_scope_kind.value
-                ),
-                scope_subagent_task_id=(
-                    request.compiled_input.canonical_input_identity.scope_subagent_task_id
                 ),
                 channel_kind=LiveChannelKind.MODEL_OUTPUT,
                 generation_id=derive_id("generation", "draft", proposed_entry_id),
@@ -3182,7 +2701,9 @@ class ConversationKernelRunner:
                     proposed_entry_id = random_id("entry")
                     assembler = new_assembler()
                     if self._presentation_notice_sink is not None:
-                        self._presentation_notice_sink("工具参数格式异常，正在重新生成。")
+                        self._presentation_notice_sink(
+                            "工具参数格式异常，正在重新生成。"
+                        )
                     continue
                 assembler.apply(item)
             provider_completion = execution.take_completed_result_once()
@@ -3298,9 +2819,7 @@ class ConversationKernelRunner:
             if call_count
             else (
                 (
-                    HookEventType.STOP_EVENT
-                    if scope_kind is ModelInputScopeKind.ROOT
-                    else HookEventType.SUBAGENT_STOP_EVENT,
+                    HookEventType.STOP_EVENT,
                     1,
                     True,
                 ),
@@ -3326,7 +2845,6 @@ class ConversationKernelRunner:
         permit: ProcessLocalProviderInputInstallPermit,
         collected: _CollectedModelResponse,
         canonical_facts: FrozenCanonicalCompileSnapshot,
-        root_completion_followup_items: int,
         pending_root_dynamic_followup: bool = False,
     ) -> FrozenPostResponseResourceQuote:
         completed = collected.completed
@@ -3336,11 +2854,7 @@ class ConversationKernelRunner:
             for item in completed.blocks
             if isinstance(item, CompletedToolCallBlock)
         )
-        if pending_root_dynamic_followup and (
-            calls
-            or canonical_facts.canonical_input.identity.conversation_scope_kind
-            is not ModelInputScopeKind.ROOT
-        ):
+        if pending_root_dynamic_followup and calls:
             raise ValueError("dynamic ROOT follow-up quote has an invalid response")
         plan_batch = any(call.tool_name in _PLAN_CONTROL_TOOL_NAMES for call in calls)
         canonical_followup = 0
@@ -3434,17 +2948,30 @@ class ConversationKernelRunner:
             and selected_plan_call.tool_name == "enter_plan"
             and canonical_facts.plan_workflow_fact is None
         )
-        raw_exit_plan = (thaw_json(selected_plan_call.arguments).get("plan")
-                         if selected_plan_call is not None and selected_plan_call.tool_name == "exit_plan" else None)
-        fresh_exit_plan = (selected_plan_call is not None
-                           and selected_plan_call.tool_name == "exit_plan"
-                           and canonical_facts.plan_workflow_fact is not None
-                           and (raw_exit_plan is None or (isinstance(raw_exit_plan, str) and not raw_exit_plan.strip())))
-        resume_permission_mode = (canonical_facts.plan_workflow_fact.resume_permission_mode
-                                  if fresh_exit_plan else None)
+        raw_exit_plan = (
+            thaw_json(selected_plan_call.arguments).get("plan")
+            if selected_plan_call is not None
+            and selected_plan_call.tool_name == "exit_plan"
+            else None
+        )
+        fresh_exit_plan = (
+            selected_plan_call is not None
+            and selected_plan_call.tool_name == "exit_plan"
+            and canonical_facts.plan_workflow_fact is not None
+            and (
+                raw_exit_plan is None
+                or (isinstance(raw_exit_plan, str) and not raw_exit_plan.strip())
+            )
+        )
+        resume_permission_mode = (
+            canonical_facts.plan_workflow_fact.resume_permission_mode
+            if fresh_exit_plan
+            else None
+        )
         if fresh_enter_plan or fresh_exit_plan:
             continuation_quote = _entered_plan_continuation_followup_upper(
-                exiting=fresh_exit_plan, resume_permission_mode=resume_permission_mode,
+                exiting=fresh_exit_plan,
+                resume_permission_mode=resume_permission_mode,
             )
             canonical_followup += continuation_quote[0]
             logical_followup += continuation_quote[1]
@@ -3497,7 +3024,11 @@ class ConversationKernelRunner:
             )
         catalog_messages = tuple(source_messages)
         if fresh_exit_plan:
-            source_messages.extend(self._context_source_collector.freeze_exited_plan_source_upper(resume_permission_mode))
+            source_messages.extend(
+                self._context_source_collector.freeze_exited_plan_source_upper(
+                    resume_permission_mode
+                )
+            )
         elif fresh_enter_plan:
             source_messages.extend(
                 self._context_source_collector.freeze_fresh_entered_plan_source_upper(
@@ -3510,30 +3041,8 @@ class ConversationKernelRunner:
         )
         if hook_source is not None:
             source_messages.append(hook_source)
-        if root_completion_followup_items:
-            if (
-                identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
-                or self._subagent_runtime is None
-            ):
-                raise ValueError("ROOT completion quote belongs to a non-ROOT response")
-            completion_quote = _root_completion_followup_upper(
-                root_completion_followup_items
-            )
-            canonical_followup += completion_quote[0]
-            logical_followup += completion_quote[1]
-            followup_items += completion_quote[2]
-            suffix_messages.extend(completion_quote[3])
-        no_call_continuation_possible = (
-            not calls
-            and identity.conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK
-            and self._subagent_runtime is not None
-        )
         needs_followup = (
-            bool(calls)
-            or hook_source is not None
-            or bool(root_completion_followup_items)
-            or no_call_continuation_possible
-            or pending_root_dynamic_followup
+            bool(calls) or hook_source is not None or pending_root_dynamic_followup
         )
         if needs_followup:
             source_messages.extend(
@@ -3694,7 +3203,13 @@ class ConversationKernelRunner:
         if not result:
             result.append(
                 AssistantTextBlock(
-                    block_id=derive_id("block", "message", completed.draft_identity, "text", random_id("segment")),
+                    block_id=derive_id(
+                        "block",
+                        "message",
+                        completed.draft_identity,
+                        "text",
+                        random_id("segment"),
+                    ),
                     text=await self._content(b"", deadline=self._canonical_deadline()),
                 )
             )
@@ -3747,8 +3262,6 @@ class ConversationKernelRunner:
         # already returned and is never invoked by this settlement loop.
 
 
-
-
 def _provider_incomplete_terminal_reason(error: BaseException) -> str | None:
     if not isinstance(error, ProviderModelOutputIncomplete):
         return None
@@ -3783,8 +3296,6 @@ def _model_input_terminal_reason(error: BaseException) -> str | None:
     }:
         return "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
     return None
-
-
 
 
 def _json_digest(value: FrozenJsonObjectFact) -> str:

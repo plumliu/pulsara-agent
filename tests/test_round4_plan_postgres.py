@@ -1484,7 +1484,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         workspace_id=workspace_id,
         turn_id=implementation_turn,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     source_through_sequence = initial_sequence - 1
     source_range = freeze_compaction_canonical_range(

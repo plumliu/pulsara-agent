@@ -124,10 +124,9 @@ def _partition_kwargs(calls, *, hook_scope=None, hook_view=None):
         "canonical_facts": SimpleNamespace(run_permission_snapshot=object()),
         "canonical_identity": object(),
         "request": SimpleNamespace(memory_context=object()),
-        "subagent_parent_context_subject": None,
+        "agent_invocation_snapshot": None,
         "continuity_scope": object(),
         "surface_borrow": object(),
-        "last_assistant_message": None,
         "image_call_allowances": (),
         "call_ordinal_offset": 0,
         "hook_scope": hook_scope,
@@ -146,7 +145,7 @@ def test_present_nonmatching_hook_scope_keeps_contiguous_views_concurrent() -> N
             },
             events,
         )
-        scope = HookDispatchScopeRef(object(), object(), HookScopeKind.ROOT)
+        scope = HookDispatchScopeRef(object(), object(), HookScopeKind.ROOT, "session:cbauiajfisf4gvpdotrq4qgxhq")
 
         result = await executor._execute_partitioned_batch(
             **_partition_kwargs(
@@ -318,10 +317,9 @@ def test_reverse_physical_completion_still_releases_settlement_in_call_order() -
             canonical_facts=object(),
             canonical_identity=object(),
             request=object(),
-            subagent_parent_context_subject=None,
+            agent_invocation_snapshot=None,
             continuity_scope=object(),
             surface_borrow=object(),
-            last_assistant_message=None,
             image_call_allowances=(),
             call_ordinal_offset=0,
         )
@@ -636,11 +634,10 @@ def test_concurrent_view_window_queues_tail_until_physical_completion() -> None:
                 canonical_facts=object(),
                 canonical_identity=object(),
                 request=object(),
-                subagent_parent_context_subject=None,
+                agent_invocation_snapshot=None,
                 continuity_scope=object(),
                 surface_borrow=object(),
-                last_assistant_message=None,
-                image_call_allowances=(),
+                    image_call_allowances=(),
                 call_ordinal_offset=0,
             )
         )
@@ -700,11 +697,10 @@ def test_cancelling_concurrent_view_segment_drains_started_calls() -> None:
                 canonical_facts=object(),
                 canonical_identity=object(),
                 request=object(),
-                subagent_parent_context_subject=None,
+                agent_invocation_snapshot=None,
                 continuity_scope=object(),
                 surface_borrow=object(),
-                last_assistant_message=None,
-                image_call_allowances=(),
+                    image_call_allowances=(),
                 call_ordinal_offset=0,
             )
         )

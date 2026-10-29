@@ -17,7 +17,6 @@ from pulsara_agent.conversation_kernel.contracts import (
     CanonicalContent,
     CommittedEventDraft,
     CommittedEventSubject,
-    ConversationScopeKind,
     EntryKind,
     HostWriterGuard,
     StoredCommittedEvent,
@@ -270,26 +269,6 @@ class _RepositoryKernel:
                 """,
                 (session_id, list(turn_ids)),
             )
-        task_ids = tuple(
-            str(row["id"])
-            for row in connection.execute(
-                """
-                UPDATE pulsara_v3.subagent_tasks
-                SET status = 'INTERRUPTED',
-                    pending_reason = NULL,
-                    terminal_reason = 'HOST_TAKEOVER',
-                    terminal_public_detail =
-                        'The Pulsara runtime changed and the delegated task was interrupted.',
-                    terminal_at = clock_timestamp()
-                WHERE session_id = %s
-                  AND status IN (
-                    'PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE'
-                  )
-                RETURNING id
-                """,
-                (session_id,),
-            ).fetchall()
-        )
         rejected_steer_ids: tuple[str, ...] = ()
         if turn_ids:
             rejected_steer_ids = tuple(
@@ -308,7 +287,7 @@ class _RepositoryKernel:
                     (session_id, list(turn_ids)),
                 ).fetchall()
             )
-        if turn_ids or task_ids or rejected_steer_ids:
+        if turn_ids or rejected_steer_ids:
             occurred_at = _utcnow()
             drafts = (
                 tuple(
@@ -322,18 +301,6 @@ class _RepositoryKernel:
                         payload=interruption_payload("HOST_TAKEOVER"),
                     )
                     for turn_id in turn_ids
-                )
-                + tuple(
-                    self._event(
-                        CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-                        SubjectSlot.SUBAGENT_TASK,
-                        task_id,
-                        session_id=session_id, occurrence_key="status:" + 'INTERRUPTED', occurred_at=occurred_at,
-                        actor_kind="runtime",
-                        actor_id=guard.writer_owner_id,
-                        payload={"status": "INTERRUPTED", "reason": "HOST_TAKEOVER"},
-                    )
-                    for task_id in task_ids
                 )
                 + tuple(
                     self._event(
@@ -506,37 +473,6 @@ class _RepositoryKernel:
             inherited_from_turn_id=inherited_from_turn_id,
         )
 
-    @classmethod
-    def _freeze_subagent_permission_snapshot(
-        cls,
-        connection: Connection,
-        *,
-        session_id: str,
-        snapshot_id: str,
-        parent_turn_id: str,
-    ) -> FrozenRunPermissionSnapshot:
-        parent = connection.execute(
-            """
-            SELECT * FROM pulsara_v3.turns
-            WHERE session_id = %s AND id = %s
-            """,
-            (session_id, parent_turn_id),
-        ).fetchone()
-        if parent is None:
-            raise ConversationKernelConflict("subagent parent turn is absent")
-        parent_snapshot = cls._permission_from_row(parent)
-        return build_run_permission_snapshot(
-            snapshot_id=snapshot_id,
-            requested_mode=parent_snapshot.effective_mode,
-            effective_mode=parent_snapshot.effective_mode,
-            admission_source=RunPermissionAdmissionSource.SUBAGENT_INHERITANCE,
-            overlay=RunPermissionOverlay.NONE,
-            plan_context_ordinal_at_admission=(
-                parent_snapshot.plan_context_ordinal_at_admission
-            ),
-            inherited_from_turn_id=parent_turn_id,
-        )
-
     @staticmethod
     def _workspace_id(connection: Connection, session_id: str) -> str:
         row = connection.execute(
@@ -629,11 +565,18 @@ class _RepositoryKernel:
         *,
         workspace_id: str,
         drafts: Sequence[CommittedEventDraft],
+        owned_session_id: str | None = None,
     ) -> tuple[StoredCommittedEvent, ...]:
         if not drafts:
             return ()
         self._require_writer(connection, guard, lock=False)
-        session_id = guard.session_id
+        session_id = owned_session_id or guard.session_id
+        if session_id != guard.session_id:
+            if any(draft.event_type not in {CommittedEventType.PROMPT_QUEUED,CommittedEventType.PROMPT_CANCELLED,CommittedEventType.PROMPT_REJECTED} for draft in drafts):
+                raise ConversationKernelConflict('ROOT writer can only accept or cancel an owned Agent request')
+            owner = connection.execute('SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE',(session_id,)).fetchone()
+            if owner is None or owner['root_session_id'] != guard.session_id:
+                raise ConversationKernelConflict('ROOT writer cannot append to an unowned Agent')
         guard_kind = AppendGuardKind.HOST_WRITER
         for draft in drafts:
             descriptor = DESCRIPTOR_BY_TYPE[draft.event_type]
@@ -690,11 +633,6 @@ class _RepositoryKernel:
         slots = {slot.value: None for slot in SubjectSlot}
         slots[draft.subject.slot.value] = draft.subject.subject_id
         ordered_slots = tuple(slots[slot.value] for slot in SubjectSlot)
-        subagent_child_kind = None
-        if draft.subject.slot is SubjectSlot.SUBAGENT_MESSAGE:
-            subagent_child_kind = "MESSAGE"
-        elif draft.subject.slot is SubjectSlot.SUBAGENT_RESULT:
-            subagent_child_kind = "RESULT"
         row = connection.execute(
             """
             INSERT INTO pulsara_v3.agent_events (
@@ -706,14 +644,11 @@ class _RepositoryKernel:
                 subject_queue_item_id,
                 subject_interaction_decision_id,
                 subject_context_binding_revision_id,
-                subject_subagent_task_id, subject_subagent_message_id,
-                subject_subagent_result_id, subject_subagent_child_kind,
                 subject_plan_workflow_id, subject_plan_interaction_id
             ) VALUES (
                 %s, %s, %s, %s, 'pulsara.core', %s, 1, 0,
                 %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s
             )
             RETURNING accepted_at
             """,
@@ -729,9 +664,7 @@ class _RepositoryKernel:
                 draft.sensitivity_class,
                 draft.projection_profile,
                 Jsonb(dict(draft.payload)),
-                *ordered_slots[:9],
-                subagent_child_kind,
-                *ordered_slots[9:],
+                *ordered_slots,
             ),
         ).fetchone()
         assert row is not None
@@ -765,10 +698,8 @@ class _RepositoryKernel:
             query = "SELECT turn_id FROM pulsara_v3.transcript_entries WHERE entry_owner_kind = 'EXECUTED_TURN' AND id = %s"
         elif slot is SubjectSlot.TOOL_ATTEMPT:
             query = """
-                SELECT e.turn_id
-                FROM pulsara_v3.tool_execution_attempts AS a
-                JOIN pulsara_v3.transcript_entries AS e
-                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = a.session_id AND e.id = a.assistant_entry_id
+                SELECT i.turn_id FROM pulsara_v3.tool_execution_attempts AS a
+                JOIN pulsara_v3.tool_invocations AS i ON i.session_id=a.session_id AND i.id=a.invocation_id
                 WHERE a.id = %s
             """
         elif slot is SubjectSlot.QUEUE_ITEM:
@@ -781,27 +712,15 @@ class _RepositoryKernel:
             """
         elif slot is SubjectSlot.INTERACTION_DECISION:
             query = """
-                SELECT coalesce(d.subject_turn_id, e.turn_id) AS turn_id
+                SELECT coalesce(d.subject_turn_id, i.turn_id) AS turn_id
                 FROM pulsara_v3.interaction_decisions AS d
-                LEFT JOIN pulsara_v3.transcript_entries AS e
-                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = d.session_id
-                 AND e.id = d.subject_tool_call_entry_id
+                LEFT JOIN pulsara_v3.tool_invocations AS i ON i.session_id=d.session_id AND i.id=d.subject_invocation_id
                 WHERE d.id = %s
             """
         elif slot is SubjectSlot.CONTEXT_BINDING_REVISION:
             query = """
                 SELECT turn_id FROM pulsara_v3.turn_context_binding_revisions
                 WHERE id = %s
-            """
-        elif slot is SubjectSlot.SUBAGENT_TASK:
-            query = "SELECT parent_turn_id AS turn_id FROM pulsara_v3.subagent_tasks WHERE id = %s"
-        elif slot in {SubjectSlot.SUBAGENT_MESSAGE, SubjectSlot.SUBAGENT_RESULT}:
-            query = """
-                SELECT e.turn_id
-                FROM pulsara_v3.subagent_task_children AS c
-                JOIN pulsara_v3.transcript_entries AS e
-                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = c.session_id AND e.id = c.entry_id
-                WHERE c.id = %s
             """
         elif slot is SubjectSlot.PLAN_WORKFLOW:
             query = """
@@ -846,68 +765,26 @@ class _RepositoryKernel:
         )
 
     @staticmethod
-    def _insert_entry(
-        connection: Connection,
-        *,
-        session_id: str,
-        workspace_id: str,
-        turn_id: str,
-        entry_id: str,
-        entry_sequence: int,
-        entry_kind: EntryKind,
-        scope_kind: ConversationScopeKind,
-        scope_task_id: str | None,
-        content: CanonicalContent,
-        context_binding_revision_id: str | None = None,
-        provider_input_through_sequence: int | None = None,
-        source_subagent_task_id: str | None = None,
-        source_inter_agent_tool_attempt_id: str | None = None,
-        source_plan_workflow_id: str | None = None,
-        source_plan_interaction_id: str | None = None,
-        source_plan_handoff_kind: PlanHandoffKind | None = None,
-        scheduled_input=None,
-    ) -> None:
+    def _insert_entry(connection: Connection, *, session_id: str, workspace_id: str,
+                      turn_id: str, entry_id: str, entry_sequence: int, entry_kind: EntryKind,
+                      content: CanonicalContent, context_binding_revision_id: str | None = None,
+                      provider_input_through_sequence: int | None = None,
+                      source_plan_workflow_id: str | None = None,
+                      source_plan_interaction_id: str | None = None,
+                      source_plan_handoff_kind: PlanHandoffKind | None = None,
+                      scheduled_input=None, input_origin=None) -> None:
         connection.execute(
-            """
-            INSERT INTO pulsara_v3.transcript_entries (
-                entry_owner_kind, id, origin_entry_id, session_id, workspace_id, turn_id, entry_sequence,
-                entry_kind, conversation_scope_kind, scope_subagent_task_id,
-                context_binding_revision_id, provider_input_through_sequence,
-                source_subagent_task_id,
-                source_inter_agent_tool_attempt_id,
-                source_plan_workflow_id, source_plan_interaction_id,
-                source_plan_handoff_kind, scheduled_input,
-                inline_content, blob_id, content_digest, content_size,
-                content_media_type, content_codec
-            ) VALUES ('EXECUTED_TURN', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                entry_id,
-                entry_id,
-                session_id,
-                workspace_id,
-                turn_id,
-                entry_sequence,
-                entry_kind.value,
-                scope_kind.value,
-                scope_task_id,
-                context_binding_revision_id,
-                provider_input_through_sequence,
-                source_subagent_task_id,
-                source_inter_agent_tool_attempt_id,
-                source_plan_workflow_id,
-                source_plan_interaction_id,
-                (
-                    None
-                    if source_plan_handoff_kind is None
-                    else source_plan_handoff_kind.value
-                ),
-                None if scheduled_input is None else Jsonb(scheduled_input.to_dict()),
-                *_content_columns(content),
-            ),
-        )
+            """INSERT INTO pulsara_v3.transcript_entries
+                (entry_owner_kind,id,origin_entry_id,session_id,workspace_id,turn_id,entry_sequence,entry_kind,
+                 context_binding_revision_id,provider_input_through_sequence,source_plan_workflow_id,
+                 source_plan_interaction_id,source_plan_handoff_kind,scheduled_input,input_origin,
+                 inline_content,blob_id,content_digest,content_size,content_media_type,content_codec)
+                VALUES ('EXECUTED_TURN',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (entry_id,entry_id,session_id,workspace_id,turn_id,entry_sequence,entry_kind.value,
+             context_binding_revision_id,provider_input_through_sequence,source_plan_workflow_id,
+             source_plan_interaction_id,None if source_plan_handoff_kind is None else source_plan_handoff_kind.value,
+             None if scheduled_input is None else Jsonb(scheduled_input.to_dict()),
+             None if input_origin is None else getattr(input_origin,'value',input_origin), *_content_columns(content)))
 
     @staticmethod
     def _insert_assistant_block(
@@ -975,8 +852,6 @@ class _RepositoryKernel:
         session_id: str,
         turn_id: str,
         initial_entry_sequence: int,
-        scope_kind: ConversationScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> tuple[str, str | None, int]:
         """Resolve revision-zero base values from the exact predecessor cut."""
         predecessor = connection.execute(
@@ -991,8 +866,6 @@ class _RepositoryKernel:
               ON r.session_id = t.session_id
              AND r.id = t.current_context_binding_revision_id
             WHERE t.session_id = %s AND t.id <> %s
-              AND t.conversation_scope_kind = %s
-              AND t.scope_subagent_task_id IS NOT DISTINCT FROM %s
               AND initial.entry_sequence < %s
             ORDER BY initial.entry_sequence DESC
             LIMIT 1
@@ -1000,12 +873,10 @@ class _RepositoryKernel:
             (
                 session_id,
                 turn_id,
-                scope_kind.value,
-                scope_subagent_task_id,
                 initial_entry_sequence,
             ),
         ).fetchone()
-        if predecessor is None and scope_kind is ConversationScopeKind.ROOT:
+        if predecessor is None:
             predecessor = connection.execute(
                 "SELECT base_kind, context_snapshot_id, source_through_sequence "
                 "FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
@@ -1030,8 +901,6 @@ class _RepositoryKernel:
         turn_id: str,
         revision_id: str,
         initial_entry_sequence: int,
-        scope_kind: ConversationScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> None:
         """Insert revision zero using the latest exact-scope snapshot, if any."""
 
@@ -1041,8 +910,6 @@ class _RepositoryKernel:
                 session_id=session_id,
                 turn_id=turn_id,
                 initial_entry_sequence=initial_entry_sequence,
-                scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
             )
         )
         connection.execute(
@@ -1072,8 +939,6 @@ class _RepositoryKernel:
         turn_id: str,
         revision_id: str,
         initial_entry_sequence: int,
-        scope_kind: ConversationScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> bool:
         if row is None:
             return False
@@ -1083,8 +948,6 @@ class _RepositoryKernel:
                 session_id=session_id,
                 turn_id=turn_id,
                 initial_entry_sequence=initial_entry_sequence,
-                scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
             )
         )
         return bool(

@@ -20,6 +20,7 @@ from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
+    ToolOutputSourceFormatHint,
 )
 
 
@@ -142,4 +143,5 @@ class WorkspaceTool:
             status=status,
             output=output,
             metadata=metadata or {},
+            public_format=ToolOutputSourceFormatHint.JSON,
         )

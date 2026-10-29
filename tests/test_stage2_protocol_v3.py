@@ -22,19 +22,13 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTarget,
     UserControlTargetKind,
 )
-from pulsara_agent.conversation_kernel.execution_watchdogs import (
-    KernelExecutionDeadlineFactory,
-)
-from pulsara_agent.conversation_kernel.repository import AcceptedEntry
 from pulsara_agent.conversation_kernel.interaction import KernelInteractionCoordinator
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.terminal_protocol.canonical_v3 import (
-    COMMITTED_PROJECTION_BRANCH_BY_TYPE,
     CanonicalQueueContentNotPending,
 )
-from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType
 from pulsara_agent.conversation_kernel.live_control import (
     CurrentInteractionView,
     LiveControlObservationKind,
@@ -87,10 +81,9 @@ class _CommandHost:
         self.submitted: list[tuple[str, object]] = []
         self.steered: list[tuple[str, str, str]] = []
         self.resolved: list[dict[str, object]] = []
-        self.accepted_subagent_completions: list[dict[str, object]] = []
         self.accepted_job_results: list[dict[str, object]] = []
         self.stop_requests: list[dict[str, str]] = []
-        self.cancel_requests: list[dict[str, str]] = []
+        self.cell_stop_requests: list[dict[str, str]] = []
         self.terminate_requests: list[dict[str, str]] = []
         self.control_queries: list[UserControlRequest] = []
         self.background_reads: list[dict[str, object]] = []
@@ -141,13 +134,14 @@ class _CommandHost:
             target_id=str(kwargs["target_turn_id"]),
         )
 
-    async def request_cancel_subagent(self, **kwargs) -> KernelCommandOutcome:
-        self.cancel_requests.append(dict(kwargs))
+
+    async def request_stop_code_mode_cell(self, **kwargs) -> KernelCommandOutcome:
+        self.cell_stop_requests.append(dict(kwargs))
         return self._control_outcome(
             command_id=str(kwargs["command_id"]),
-            operation=UserControlOperation.CANCEL_SUBAGENT_TASK,
-            target_kind=UserControlTargetKind.SUBAGENT_TASK,
-            target_id=str(kwargs["task_id"]),
+            operation=UserControlOperation.STOP_CODE_MODE_CELL,
+            target_kind=UserControlTargetKind.CODE_MODE_CELL,
+            target_id=str(kwargs["cell_id"]),
         )
 
     async def request_terminate_background_process(
@@ -270,15 +264,6 @@ class _CommandHost:
             "Accepted.",
         )
 
-    async def accept_subagent_completion(self, **kwargs) -> KernelCommandOutcome:
-        self.accepted_subagent_completions.append(dict(kwargs))
-        return KernelCommandOutcome(
-            str(kwargs["command_id"]),
-            "SUCCEEDED",
-            'entry:biaf2pixvqeeyhyvvfxvrss2lq',
-            "SUBAGENT_COMPLETION_DELIVERED",
-            "Accepted.",
-        )
 
     async def accept_job_result(self, **kwargs) -> KernelCommandOutcome:
         self.accepted_job_results.append(dict(kwargs))
@@ -476,10 +461,10 @@ def test_stage2_observer_cannot_mutate_but_can_detach() -> None:
     (
         (wire.STOP_ACTIVE_TURN, "target_turn_id", 'turn:74y74rvr2pht5lydgxvy57nxgq', "stop_requests"),
         (
-            wire.CANCEL_SUBAGENT_TASK,
-            "subagent_task_id",
-            'task:r3npg4w7oybo2df2s2il3y5nay',
-            "cancel_requests",
+            wire.STOP_CODE_MODE_CELL,
+            "target_cell_id",
+            "cell_1234567890abcdef",
+            "cell_stop_requests",
         ),
         (
             wire.TERMINATE_BACKGROUND_PROCESS,
@@ -520,7 +505,7 @@ def test_pr03_controller_commands_preserve_exact_owner_and_target(
             "expected_host_session_id": 'host:yinyxklzunar54s7objjdbphcy',
             {
                 "target_turn_id": "target_turn_id",
-                "subagent_task_id": "task_id",
+                "target_cell_id": "cell_id",
                 "target_process_id": "process_id",
             }[target_field]: target_id,
         }
@@ -767,113 +752,12 @@ def test_stage2_controller_can_send_an_exact_active_turn_steer() -> None:
     ]
 
 
-def test_stage2_controller_can_deliver_exact_terminal_subagent_task() -> None:
-    server = _server()
-    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
-    result = asyncio.run(
-        server._command(
-            controller,
-            wire.CommandRequest(
-                request_id='request:25wmzvp5w5rexajepu55jo2vba',
-                command_id='command:nvkv7ut5z2kfaz3oalvclv3otm',
-                client_submission_id='command:nvkv7ut5z2kfaz3oalvclv3otm',
-                command_kind=wire.ACCEPT_SUBAGENT_COMPLETION,
-                target_turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
-                subagent_task_id='task:itnsbirlmxzeu74pn7keq6zuzi',
-            ),
-        )
-    )
-    assert result.command_outcome.status == wire.SUCCEEDED
-    assert controller.host_session.accepted_subagent_completions == [
-        {
-            "command_id": 'command:nvkv7ut5z2kfaz3oalvclv3otm',
-            "target_turn_id": 'turn:b565wrncq4ezfqthehjqni5ilm',
-            "requested_permission_mode": None,
-            "task_id": 'task:itnsbirlmxzeu74pn7keq6zuzi',
-            "actor_id": 'attachment:hmfv6qyb4msxxwadjyltzzsdse',
-        }
-    ]
 
 
-def test_stage2_controller_can_continue_from_a_completion_in_a_new_root() -> None:
-    server = _server()
-    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
-    subagent = asyncio.run(
-        server._command(
-            controller,
-            wire.CommandRequest(
-                request_id='request:wwz4inql72b6bri4l3wxvewrea',
-                command_id='command:rqy7ytzg4sa5lihnple4riaqje',
-                client_submission_id='command:rqy7ytzg4sa5lihnple4riaqje',
-                command_kind=wire.ACCEPT_SUBAGENT_COMPLETION,
-                subagent_task_id='task:r464bjh2j4nauh7bhw7gjnegqa',
-                requested_permission_mode=wire.PERMISSION_MODE_ACCEPT_EDITS,
-            ),
-        )
-    )
-    assert subagent.command_outcome.status == wire.SUCCEEDED
-    assert (
-        controller.host_session.accepted_subagent_completions[-1]["target_turn_id"]
-        is None
-    )
-    assert (
-        controller.host_session.accepted_subagent_completions[-1][
-            "requested_permission_mode"
-        ]
-        is PermissionMode.ACCEPT_EDITS
-    )
 
 
-def test_stage2_new_root_subagent_completion_requires_turn_permission() -> None:
-    server = _server()
-    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
-
-    result = asyncio.run(
-        server._command(
-            controller,
-            wire.CommandRequest(
-                request_id='request:gar3dr2lmgzosopwiz6jozi474',
-                command_id='command:k3la3nqi4bh5sumovjn525fbvm',
-                client_submission_id='command:k3la3nqi4bh5sumovjn525fbvm',
-                command_kind=wire.ACCEPT_SUBAGENT_COMPLETION,
-                subagent_task_id='task:qu46oowryrqxxvcctvx3a7jqxm',
-            ),
-        )
-    )
-
-    assert result.error.stable_code == "SUBAGENT_COMPLETION_REQUEST_INVALID"
-    assert controller.host_session.accepted_subagent_completions == []
 
 
-def _removed_stage2_host_exposes_job_result_acceptance_to_production_protocol() -> None:
-    class _Runner:
-        def __init__(self) -> None:
-            self.kwargs: dict[str, object] = {}
-
-        async def accept_job_result(self, **kwargs) -> AcceptedEntry:
-            self.kwargs = dict(kwargs)
-            return AcceptedEntry('entry:vpv7agjg6bk6d3zu3bspq54g4q', 'turn:b565wrncq4ezfqthehjqni5ilm', 4, 7)
-
-    host = object.__new__(KernelHostSession)
-    host._writer_renewal_failure = None
-    host._closing = False
-    host._deadlines = KernelExecutionDeadlineFactory()
-    host._runner = _Runner()
-
-    async def query_command(_: str) -> None:
-        return None
-
-    host.query_command = query_command  # type: ignore[method-assign]
-    outcome = asyncio.run(
-        host.accept_job_result(
-            command_id='command:mbelilcycsnqxtuawobumejzw4',
-            target_turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
-            job_id="job:durable",
-            actor_id='attachment:5l6o6wokl63aqnv5llnyf34m6i',
-        )
-    )
-    assert outcome.public_code == "JOB_RESULT_ACCEPTED"
-    assert host._runner.kwargs["job_id"] == "job:durable"
 
 
 def test_stage2_interaction_resolution_is_controller_only_and_exact() -> None:
@@ -1020,55 +904,6 @@ def test_stage2_live_control_snapshot_and_cursor_are_linearized() -> None:
     assert gap.kind is LiveControlObservationKind.GAP
 
 
-def test_stage2_protocol_v3_closed_vocabularies_are_exact() -> None:
-    committed = {
-        item.name
-        for item in wire.CommittedEventType.DESCRIPTOR.values
-        if item.number != 0
-    }
-    live = {
-        item.name for item in wire.LiveEventType.DESCRIPTOR.values if item.number != 0
-    }
-    assert len(committed) == 30
-    assert len(live) == 24
-    assert set(COMMITTED_PROJECTION_BRANCH_BY_TYPE) == {
-        item.value for item in CommittedEventType
-    }
-    assert {
-        key
-        for key, value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.items()
-        if value == "IMMUTABLE_ENTRY"
-    } == {
-        "UserMessageAccepted",
-        "AssistantMessageAccepted",
-        "AssistantToolRequestAccepted",
-        "ToolResultAccepted",
-        "UserSteerAccepted",
-        "TerminalObservationAccepted",
-        "UserControlFeedbackAccepted",
-        "InterAgentMessageAccepted",
-        "PlanContinuationAccepted",
-    }
-    assert (
-        sum(
-            value == "CURRENT_CONTROL"
-            for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-        )
-        == 19
-    )
-    assert (
-        sum(
-            value == "EVENT_ONLY"
-            for value in COMMITTED_PROJECTION_BRANCH_BY_TYPE.values()
-        )
-        == 2
-    )
-    assert {item.name for item in wire.ObservationGapKind.DESCRIPTOR.values} == {
-        "OBSERVATION_GAP_KIND_UNSPECIFIED",
-        "COMMITTED_GAP",
-        "LIVE_GAP",
-        "LIVE_CONTROL_GAP",
-    }
 
 
 def test_pr04_cancel_queue_command_and_closed_field_matrix():

@@ -348,7 +348,6 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
             )
             handoff = await port.freeze_compaction_runtime_handoff(
                 conversation_scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 maximum_utf8_bytes=8192,
             )
             payload = json.loads(handoff.full_text)

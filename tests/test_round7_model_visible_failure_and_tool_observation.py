@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pulsara_agent.identity import random_id
 
-from tests.support.subagents import fixture_parent_target
 
 from pulsara_agent.llm.input import FrozenPromptContent
 
@@ -20,41 +19,24 @@ import pytest
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
     ForegroundCancellationCause,
-    stable_subagent_turn_id,
 )
 from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     _render_previous_turn_outcome,
-    _render_tool_observation_freshness,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
     visible_tool_result_at_cut,
 )
-from pulsara_agent.conversation_kernel.io import KernelSessionIO
-from pulsara_agent.conversation_kernel.execution_watchdogs import (
-    KernelExecutionDeadlineFactory,
-)
 from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
     ConversationKernelRepository,
-    TurnAdmissionConfirmationKind,
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.runner import KernelRunResult
-from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
-from pulsara_agent.conversation_kernel.subagents.launch import (
-    CanonicalSubagentLaunchPreparationPort,
-)
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    SubagentResultSource,
-    build_parent_context_call_subject,
-    build_subagent_result_public_fact,
-)
-from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
@@ -124,7 +106,6 @@ from tests.support.model_config import (
     test_model_runtime,
 )
 from tests.support.round3 import direct_tool_invocation_context
-from tests.support.subagents import accept_active_subagent_fixture
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,82 +115,9 @@ def _id(prefix: str) -> str:
     return random_id(prefix)
 
 
-def _round10_root_invocation_context(
-    *, repository, lease, workspace_id: str, turn_id: str
-):
-    cut = repository.prepare_provider_input_cut(
-        lease.guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30
-    )
-    assistant_entry_id = _id("entry")
-    tool_call_id = _id("call")
-    arguments = {"task": "perform one bounded task"}
-    repository.commit_assistant_message(
-        lease.guard,
-        cut=cut,
-        entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"spawn child"),
-        blocks=(
-            AssistantToolCallBlock(
-                _id("block"),
-                tool_call_id,
-                "spawn_agent",
-                freeze_json(arguments),
-            ),
-        ),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="model:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    attempt_id = _id("attempt")
-    repository.accept_tool_attempt(
-        lease.guard,
-        attempt_id=attempt_id,
-        assistant_entry_id=assistant_entry_id,
-        tool_call_id=tool_call_id,
-        authorization_kind="policy",
-        authorization_reference="allow",
-        actor_kind="runtime",
-        actor_id="executor",
-        remote_idempotency_key=None,
-        retry_of_attempt_id=None,
-        permission_snapshot_fingerprint=_permission_fingerprint(
-            repository, lease, turn_id
-        ),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    subject = build_parent_context_call_subject(
-        session_id=lease.guard.session_id,
-        caller_turn_id=turn_id,
-        provider_input_cut_fingerprint="sha256:round7-cut",
-        continuity_epoch_nonce='epoch:5jddaw3hjgu3cqnyuuwf2lazvy',
-        continuity_epoch_revision=0,
-        compiled_semantic_input_fingerprint="sha256:round7-semantic",
-        compiled_message_placements_fingerprint="sha256:round7-placements",
-        ordered_eligible_units=(),
-    )
-    return SimpleNamespace(
-        session_id=lease.guard.session_id,
-        workspace_id=workspace_id,
-        turn_id=turn_id,
-        attempt_id=attempt_id,
-        conversation_scope_kind="ROOT",
-        scope_subagent_task_id=None,
-        host_owner_epoch=lease.guard.writer_generation,
-        effective_permission_mode=DEFAULT_PERMISSION_MODE,
-        permission_snapshot_fingerprint=_permission_fingerprint(
-            repository, lease, turn_id
-        ),
-        attempt_permission_snapshot_fingerprint=_permission_fingerprint(
-            repository, lease, turn_id
-        ),
-        subagent_parent_context_subject=subject,
-    )
-
-
 def _timing(
     *,
-    turn_id: str = 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+    turn_id: str = "turn:klmmazz67vfgsfsvg6ceqgdsfu",
     origin: ToolObservationOrigin = ToolObservationOrigin.BUILTIN,
     duration: int | None = 12_345,
     reported: int | None = None,
@@ -223,7 +131,7 @@ def _timing(
     )
     values = {
         "source_turn_ref": provider_visible_turn_ref(
-            session_id='session:336wrfwkamrr3up6kjtsgvgcte', turn_id=turn_id
+            session_id="session:336wrfwkamrr3up6kjtsgvgcte", turn_id=turn_id
         ),
         "observed_at_utc": "2026-08-14T03:04:05.123456Z",
         "observation_duration_microseconds": duration,
@@ -251,12 +159,11 @@ def _previous_fact(
     outcome: PreviousTurnOutcomeKind = PreviousTurnOutcomeKind.EXECUTION_FAILED,
 ) -> FrozenPreviousTurnOutcomeCompileFact:
     values = {
-        "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte',
-        "workspace_id": 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
-        "current_turn_id": 'turn:r4yi3mveq6mrj6bcyhwvx4sxky',
+        "session_id": "session:336wrfwkamrr3up6kjtsgvgcte",
+        "workspace_id": "workspace:wdl6b3mtrkghwnvjo4an3ekbau",
+        "current_turn_id": "turn:r4yi3mveq6mrj6bcyhwvx4sxky",
         "current_scope_kind": ModelInputScopeKind.ROOT,
-        "scope_subagent_task_id": None,
-        "predecessor_turn_id": 'turn:mcie4zq2f6b4g2mm2ogvtx2uwq',
+        "predecessor_turn_id": "turn:mcie4zq2f6b4g2mm2ogvtx2uwq",
         "predecessor_initial_entry_sequence": 1,
         "predecessor_terminal_at_utc": "2026-08-14T03:04:05.123456Z",
         "outcome_kind": outcome,
@@ -289,14 +196,14 @@ def _previous_fact(
 def _tool_result_item(body: str) -> FrozenProviderInputItem:
     return FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.TOOL_RESULT,
-        source_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
+        source_entry_id="entry:zvmjajlmix3vyoeoy2zhz6xd2a",
         source_entry_sequence=3,
-        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        source_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         content=(LLMTextPart(body),),
         tool_call_id="call:test",
-        tool_request_entry_id='entry:k5zfbzct6mhkogz33gyubxx3pa',
+        tool_request_entry_id="entry:k5zfbzct6mhkogz33gyubxx3pa",
         tool_result_context=ProviderToolResultContextMetadata(
-            result_id='result:pvg3icg6wn2puqqgiuggdo2ej4',
+            result_id="result:pvg3icg6wn2puqqgiuggdo2ej4",
             result_state="SUCCESS",
             display_kind=ToolResultDisplayKind.COMPLETE,
             artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
@@ -319,7 +226,9 @@ def test_round7_canonical_time_duration_and_process_local_cause_are_closed() -> 
     with pytest.raises(ValueError, match="duration"):
         _timing(duration=MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS + 1)
 
-    intent = ActiveTurnCancellationIntent('turn:klmmazz67vfgsfsvg6ceqgdsfu', ModelInputScopeKind.ROOT, None)
+    intent = ActiveTurnCancellationIntent(
+        "turn:klmmazz67vfgsfsvg6ceqgdsfu", ModelInputScopeKind.ROOT, None
+    )
     assert (
         intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
         is ForegroundCancellationCause.USER_REQUEST
@@ -328,22 +237,6 @@ def test_round7_canonical_time_duration_and_process_local_cause_are_closed() -> 
         intent.install_cause(ForegroundCancellationCause.HOST_SESSION_CLOSE)
         is ForegroundCancellationCause.USER_REQUEST
     )
-
-
-def test_round7_provider_runtime_observation_has_exact_five_keys() -> None:
-    message = encode_runtime_observation(
-        source_kind=ContextSourceKind.PREVIOUS_TURN_OUTCOME,
-        trust_class=ContextTrustClass.AUTHORIZED_RUNTIME_GUIDANCE,
-        lifecycle=SourceObservationLifecycle.TURN,
-        presence=SourceObservationPresence.VALUE,
-        contract_version="internal-only-contract",
-        body='{"outcome":"USER_STOPPED"}',
-    )
-    rendered = text_part_values(message.content)[0]
-    wire = json.loads(rendered)["pulsara_runtime_observation"]
-    assert set(wire) == {"source", "trust", "lifecycle", "presence", "body"}
-    assert "contract" not in rendered
-    assert decode_runtime_observation(message).body == wire["body"]
 
 
 def test_round7_tool_body_cannot_escape_or_forge_runtime_timing() -> None:
@@ -361,7 +254,6 @@ def test_round7_tool_body_cannot_escape_or_forge_runtime_timing() -> None:
     assert payload["body"] == malicious
     observation = payload["observation"]
     assert observation["observed_at_utc"] == "2026-08-14T03:04:05.123456Z"
-    assert observation["observation_origin"] == "BUILTIN"
     assert "schema_version" not in rendered
     assert "contract_version" not in rendered
 
@@ -385,14 +277,12 @@ def test_round7_previous_outcome_preserves_typed_facts_in_both_variants() -> Non
     for rendered in (full, compact):
         payload = json.loads(rendered)
         assert payload["outcome"] == fact.outcome_kind.value
-        assert payload["terminal_reason"] == fact.terminal_reason
         assert payload["accepted_assistant_disposition"] == "ACCEPTED_PREFIX_PRESENT"
-        assert payload["definitely_not_dispatched_tool_count"] == 1
-        assert payload["outcome_unknown_tool_count"] == 1
+        assert payload["not_dispatched_tool_count"] == 1
+        assert payload["unknown_tool_count"] == 1
     full_payload = json.loads(full)
-    assert full_payload["accepted_assistant_entry_count"] == 2
-    assert full_payload["canonical_entries_preserved"] is True
-    assert full_payload["user_input_preserved"] is True
+    assert "incomplete work" in full_payload["guidance"]
+    assert "Do not automatically retry" in full_payload["guidance"]
     stopped, _ = _render_previous_turn_outcome(
         _previous_fact(outcome=PreviousTurnOutcomeKind.USER_STOPPED)
     )
@@ -413,9 +303,9 @@ def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
     )
     item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.PLAN_CONTINUATION,
-        'entry:3l5haylzxbxjrbtnkybkafoypm',
+        "entry:3l5haylzxbxjrbtnkybkafoypm",
         2,
-        'turn:lm5ibydqxua377vt3bxuuqgvvu',
+        "turn:lm5ibydqxua377vt3bxuuqgvvu",
         (LLMTextPart(carrier),),
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
@@ -428,66 +318,11 @@ def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
     assert not rendered.startswith("[RUNTIME_PLAN")
 
 
-def test_round7_source_registry_wire_and_oracle_architecture_guards() -> None:
-    registry = ContextSourceRegistry()
-    assert {registry.binding(kind).source_kind for kind in ContextSourceKind} == set(
-        ContextSourceKind
-    )
-    assert (
-        registry.binding(ContextSourceKind.PREVIOUS_TURN_OUTCOME).contract_version
-        == "pulsara.previous-turn-outcome.v1"
-    )
-    assert (
-        registry.binding(ContextSourceKind.TOOL_OBSERVATION_FRESHNESS).contract_version
-        == "pulsara.tool-observation-freshness.v1"
-    )
-    assert (
-        COMPILER_CONTRACT_VERSION
-        == "pulsara.structured-model-input-compiler.prefix-continuity.v17-canonical-worker-branches"
-    )
-    assert (
-        PROVIDER_MESSAGE_LOWERING_CONTRACT
-        == "pulsara.provider-message-lowering.prefix-continuity.v11-tool-guidance"
-    )
-
-    reader = (ROOT / "src/pulsara_agent/conversation_kernel/reader.py").read_text()
-    collector = (
-        ROOT / "src/pulsara_agent/conversation_kernel/context_sources.py"
-    ).read_text()
-    lowering = (ROOT / "src/pulsara_agent/model_input/lowering.py").read_text()
-    repository_sources = "\n".join(
-        path.read_text()
-        for path in sorted(
-            (ROOT / "src/pulsara_agent/conversation_kernel/_repository").glob("*.py")
-        )
-    )
-    assert "FROM pulsara_v3.agent_events" not in reader
-    assert "conversation_kernel._repository" not in collector
-    assert "PostgresConnection" not in collector
-    assert "render_source_observation" not in lowering
-    assert "[RUNTIME_PLAN_CONTINUATION]" not in lowering
-    for statement in repository_sources.split("INSERT INTO pulsara_v3.tool_results")[
-        1:
-    ]:
-        columns = statement.split(") VALUES", 1)[0]
-        assert "observed_at" in columns
-        assert "observation_duration_microseconds" in columns
-        assert "observation_origin_kind" in columns
-        assert "tool_reported_duration_microseconds" in columns
-    assert "observed_at -" not in reader
-    assert "attempt.started_at" not in reader
-
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == len(CommittedEventType) == 30
-    assert len(LiveEventType) == 24
-    assert len(SUBJECT_SLOTS) == 11
-    assert len(APPEND_GUARDS) == 1
-
-
 def test_round7_result_visibility_helper_exactly_joins_cut() -> None:
     row = {
-        "result_entry_id": 'entry:zvmjajlmix3vyoeoy2zhz6xd2a',
+        "result_entry_id": "entry:zvmjajlmix3vyoeoy2zhz6xd2a",
         "entry_sequence": 11,
-        "result_turn_id": 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        "result_turn_id": "turn:klmmazz67vfgsfsvg6ceqgdsfu",
     }
     assert visible_tool_result_at_cut(row, provider_input_through_sequence=10) is None
     assert visible_tool_result_at_cut(row, provider_input_through_sequence=11) is row
@@ -582,31 +417,6 @@ def _permission_fingerprint(repository, lease, turn_id: str) -> str:
         ).fetchone()
     assert row is not None
     return str(row[0])
-
-
-def _start_active_child(repository, lease) -> tuple[str, str]:
-    parent_turn_id = _start_turn(repository, lease, b"delegate")
-    task_id = accept_active_subagent_fixture(
-        repository,
-        lease,
-        parent_turn_id=parent_turn_id,
-        objective="perform one bounded task",
-    )
-    child_turn_id = _id("turn")
-    repository.start_subagent_turn(
-        lease.guard,
-        task_id=task_id,
-        turn_id=child_turn_id,
-        entry_id=_id("entry"),
-        context_binding_revision_id=_id("binding"),
-        task_start_event_id=task_id.launch.task_start.event_id,
-        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
-        content=InlineContent.from_bytes(b"perform one bounded task"),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="subagent:test",
-        deadline_monotonic=monotonic() + 30,
-    )
-    return task_id, child_turn_id
 
 
 @pytest.mark.postgres
@@ -807,450 +617,3 @@ def test_round7_late_result_changes_only_a_covering_cut(
     assert timing.observation_duration_microseconds == 55_000
     assert timing.tool_reported_duration_microseconds == 50_000
     assert timing.observation_origin is ToolObservationOrigin.TERMINAL_PROCESS
-
-
-@pytest.mark.postgres
-def test_round7_child_user_stop_atomically_settles_turn_task_and_occurrences(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    lease = acquire_bound_test_writer(
-        repository,
-        session_id=_id("session"),
-        workspace_id=_id("workspace"),
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    task_id, child_turn_id = _start_active_child(repository, lease)
-    occurred_at = datetime(2026, 8, 14, 3, 4, 5, 123456, tzinfo=timezone.utc)
-    arguments = {
-        "task_id": task_id,
-        "turn_id": child_turn_id,
-        "task_status": "CANCELLED",
-        "task_reason": "USER_CANCELLED",
-        "terminal_public_detail": "The delegated task was stopped by the user.",
-        "turn_reason": "USER_STOPPED",
-        "occurred_at": occurred_at,
-        "actor_id": 'host:yinyxklzunar54s7objjdbphcy',
-    }
-    assert (
-        repository.confirm_cancelled_subagent_turn_and_task(
-            session_id=lease.guard.session_id,
-            **arguments,
-            deadline_monotonic=monotonic() + 30,
-        ).kind
-        is TurnAdmissionConfirmationKind.NONE
-    )
-    assert repository.settle_cancelled_subagent_turn_and_task(
-        lease.guard,
-        **arguments,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert (
-        repository.confirm_cancelled_subagent_turn_and_task(
-            session_id=lease.guard.session_id,
-            **arguments,
-            deadline_monotonic=monotonic() + 30,
-        ).kind
-        is TurnAdmissionConfirmationKind.FULL
-    )
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        turn = connection.execute(
-            """SELECT status, terminal_reason FROM pulsara_v3.turns
-               WHERE session_id = %s AND id = %s""",
-            (lease.guard.session_id, child_turn_id),
-        ).fetchone()
-        task = connection.execute(
-            """SELECT status, terminal_reason, terminal_public_detail
-               FROM pulsara_v3.subagent_tasks
-               WHERE session_id = %s AND id = %s""",
-            (lease.guard.session_id, task_id),
-        ).fetchone()
-    assert turn == ("INTERRUPTED", "USER_STOPPED")
-    assert task == (
-        "CANCELLED",
-        "USER_CANCELLED",
-        "The delegated task was stopped by the user.",
-    )
-
-
-class _CanonicalChildRaceRunner:
-    def __init__(self, repository, guard, *, complete_before_wait: bool) -> None:
-        self.repository = repository
-        self.guard = guard
-        self.complete_before_wait = complete_before_wait
-        self.started = asyncio.Event()
-        self.final_entry_id: str | None = None
-
-    async def admit_subagent_turn(self, *, launch, cancellation_intent):
-        task_id = launch.task_start.task_id
-        objective = launch.task_start.objective
-        turn_id = cancellation_intent.turn_id
-        self.repository.start_subagent_turn(
-            self.guard,
-            task_id=task_id,
-            turn_id=turn_id,
-            entry_id=_id("entry"),
-            context_binding_revision_id=_id("binding"),
-            task_start_event_id=launch.task_start.event_id,
-            expected_parent_permission_snapshot=(launch.parent_permission_snapshot),
-            content=InlineContent.from_bytes(objective.encode()),
-            occurred_at=datetime.now(timezone.utc),
-            actor_id=task_id,
-            deadline_monotonic=monotonic() + 30,
-        )
-        return cancellation_intent
-
-    async def run_admitted_subagent_turn(
-        self, *, launch, cancellation_intent
-    ) -> KernelRunResult:
-        task_id = launch.task_start.task_id
-        turn_id = cancellation_intent.turn_id
-        if self.complete_before_wait:
-            cut = self.repository.prepare_provider_input_cut(
-                self.guard,
-                turn_id=turn_id,
-                deadline_monotonic=monotonic() + 30,
-            )
-            final_entry_id = _id("entry")
-            content = InlineContent.from_bytes(b"completed child")
-            result = build_subagent_result_public_fact(
-                task_id=task_id,
-                result_id=_id("agent-result"),
-                source=SubagentResultSource.INFERRED,
-                producer_entry_id=final_entry_id,
-                summary="completed child",
-                source_assistant_content_digest=content.digest,
-            )
-            self.repository.commit_assistant_message(
-                self.guard,
-                cut=cut,
-                entry_id=final_entry_id,
-                parent_content=content,
-                blocks=(
-                    AssistantTextBlock(
-                        block_id=_id("block"),
-                        text=InlineContent.from_bytes(b"completed child"),
-                    ),
-                ),
-                subagent_result=result,
-                complete_turn=True,
-                occurred_at=datetime.now(timezone.utc),
-                actor_id="model:child",
-                deadline_monotonic=monotonic() + 30,
-            )
-            self.final_entry_id = final_entry_id
-        self.started.set()
-        await asyncio.Event().wait()
-        raise AssertionError("child race runner unexpectedly resumed")
-
-
-@pytest.mark.postgres
-@pytest.mark.parametrize(
-    ("operation", "expected_task", "expected_reason", "expected_turn_reason"),
-    (
-        ("stop", "CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
-        ("close", "INTERRUPTED", "HOST_CLOSING", "SESSION_CLOSED"),
-        ("stop_then_close", "CANCELLED", "USER_CANCELLED", "USER_STOPPED"),
-    ),
-)
-def test_round7_child_manager_confirm_first_cancellation_settles_exact_turn(
-    stage2_migrated_postgres_database,
-    operation: str,
-    expected_task: str,
-    expected_reason: str,
-    expected_turn_reason: str,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    workspace_id = _id("workspace")
-    lease = acquire_bound_test_writer(
-        repository,
-        session_id=_id("session"),
-        workspace_id=workspace_id,
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    parent_turn_id = _start_turn(repository, lease, b"delegate")
-    runner = _CanonicalChildRaceRunner(
-        repository, lease.guard, complete_before_wait=False
-    )
-    manager = KernelSubagentManager(
-        repository=repository,
-        guard=lease.guard,
-        host_owner_id='host:yinyxklzunar54s7objjdbphcy',
-        io_owner=KernelSessionIO(),
-        live_bus=LiveAgentEventBus(),
-        todo_owner=TodoRunStateOwner(
-            session_id=lease.guard.session_id, owner_epoch='host:yinyxklzunar54s7objjdbphcy'
-        ),
-        launch_preparation=CanonicalSubagentLaunchPreparationPort(
-            inherit_parent_target=fixture_parent_target,
-            repository=repository,
-            guard=lease.guard,
-            io_owner=KernelSessionIO(),
-            model_runtime=test_model_runtime(),
-            deadline_factory=KernelExecutionDeadlineFactory(),
-        ),
-        hook_workspace_root=Path.cwd,
-    )
-    manager.bind_runner_factory(lambda _scope: runner)  # type: ignore[arg-type]
-
-    async def exercise() -> str:
-        context = _round10_root_invocation_context(
-            repository=repository,
-            lease=lease,
-            workspace_id=workspace_id,
-            turn_id=parent_turn_id,
-        )
-        spawned = await manager.invoke(
-            tool_name="spawn_agent",
-            arguments={"task": "perform one bounded task"},
-            invocation_context=context,
-        )
-        task_id = str(json.loads(spawned.content)["task_id"])
-        await asyncio.wait_for(runner.started.wait(), timeout=5)
-        if operation == "stop":
-            stopped = await manager.invoke(
-                tool_name="stop_agent",
-                arguments={"task_id": task_id},
-                invocation_context=context,
-            )
-            assert json.loads(stopped.content)["status"] == expected_task.lower()
-            await manager.aclose(deadline_monotonic=monotonic() + 5)
-        elif operation == "stop_then_close":
-            stopping = asyncio.create_task(
-                manager.invoke(
-                    tool_name="stop_agent",
-                    arguments={"task_id": task_id},
-                    invocation_context=context,
-                )
-            )
-            await asyncio.sleep(0)
-            await manager.aclose(deadline_monotonic=monotonic() + 5)
-            stopped = await stopping
-            assert json.loads(stopped.content)["status"] == expected_task.lower()
-        else:
-            await manager.aclose(deadline_monotonic=monotonic() + 5)
-        return task_id
-
-    task_id = asyncio.run(exercise())
-    child_turn_id = stable_subagent_turn_id(
-        session_id=lease.guard.session_id, task_id=task_id
-    )
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        task = connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.subagent_tasks "
-            "WHERE session_id = %s AND id = %s",
-            (lease.guard.session_id, task_id),
-        ).fetchone()
-        turn = connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.turns "
-            "WHERE session_id = %s AND id = %s",
-            (lease.guard.session_id, child_turn_id),
-        ).fetchone()
-    assert task == (expected_task, expected_reason)
-    assert turn == ("INTERRUPTED", expected_turn_reason)
-
-
-@pytest.mark.postgres
-def test_round7_late_child_cancel_preserves_completed_winner_and_result_lineage(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    workspace_id = _id("workspace")
-    lease = acquire_bound_test_writer(
-        repository,
-        session_id=_id("session"),
-        workspace_id=workspace_id,
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    parent_turn_id = _start_turn(repository, lease, b"delegate")
-    runner = _CanonicalChildRaceRunner(
-        repository, lease.guard, complete_before_wait=True
-    )
-    manager = KernelSubagentManager(
-        repository=repository,
-        guard=lease.guard,
-        host_owner_id='host:yinyxklzunar54s7objjdbphcy',
-        io_owner=KernelSessionIO(),
-        live_bus=LiveAgentEventBus(),
-        todo_owner=TodoRunStateOwner(
-            session_id=lease.guard.session_id, owner_epoch='host:yinyxklzunar54s7objjdbphcy'
-        ),
-        launch_preparation=CanonicalSubagentLaunchPreparationPort(
-            inherit_parent_target=fixture_parent_target,
-            repository=repository,
-            guard=lease.guard,
-            io_owner=KernelSessionIO(),
-            model_runtime=test_model_runtime(),
-            deadline_factory=KernelExecutionDeadlineFactory(),
-        ),
-        hook_workspace_root=Path.cwd,
-    )
-    manager.bind_runner_factory(lambda _scope: runner)  # type: ignore[arg-type]
-
-    async def exercise() -> str:
-        context = _round10_root_invocation_context(
-            repository=repository,
-            lease=lease,
-            workspace_id=workspace_id,
-            turn_id=parent_turn_id,
-        )
-        spawned = await manager.invoke(
-            tool_name="spawn_agent",
-            arguments={"task": "perform one bounded task"},
-            invocation_context=context,
-        )
-        task_id = str(json.loads(spawned.content)["task_id"])
-        await asyncio.wait_for(runner.started.wait(), timeout=5)
-        stopped = await manager.invoke(
-            tool_name="stop_agent",
-            arguments={"task_id": task_id},
-            invocation_context=context,
-        )
-        assert json.loads(stopped.content)["status"] == "completed"
-        await manager.open_root_completion_delivery(parent_turn_id)
-        waited = await manager.invoke(
-            tool_name="wait_agent",
-            arguments={
-                "task_ids": [task_id],
-                "settle": "all",
-                "timeout_seconds": 1,
-            },
-            invocation_context=context,
-        )
-        assert json.loads(waited.content) == {
-            "outcome": "predicate_satisfied",
-            "satisfied_task_ids": [task_id],
-            "pending_task_ids": [],
-        }
-        await manager.aclose(deadline_monotonic=monotonic() + 5)
-        return task_id
-
-    task_id = asyncio.run(exercise())
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        task = connection.execute(
-            "SELECT status, terminal_reason FROM pulsara_v3.subagent_tasks "
-            "WHERE session_id = %s AND id = %s",
-            (lease.guard.session_id, task_id),
-        ).fetchone()
-        result = connection.execute(
-            "SELECT entry_id FROM pulsara_v3.subagent_task_children "
-            "WHERE session_id = %s AND task_id = %s AND child_kind = 'RESULT'",
-            (lease.guard.session_id, task_id),
-        ).fetchone()
-    assert task == ("COMPLETED", None)
-    assert result == (runner.final_entry_id,)
-
-
-@pytest.mark.postgres
-def test_round7_child_cancellation_event_failure_rolls_back_both_rows(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-
-    class FailingCancellationRepository(ConversationKernelRepository):
-        fail_cancellation_events = False
-
-        def _append_events(self, connection, guard, *, workspace_id, drafts):
-            if self.fail_cancellation_events and any(
-                draft.event_type is CommittedEventType.TURN_INTERRUPTED
-                for draft in drafts
-            ):
-                raise RuntimeError("injected cancellation event failure")
-            return super()._append_events(
-                connection,
-                guard,
-                workspace_id=workspace_id,
-                drafts=drafts,
-            )
-
-    repository = FailingCancellationRepository(provider)
-    lease = acquire_bound_test_writer(
-        repository,
-        session_id=_id("session"),
-        workspace_id=_id("workspace"),
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    task_id, child_turn_id = _start_active_child(repository, lease)
-    repository.fail_cancellation_events = True
-    with pytest.raises(RuntimeError, match="injected cancellation event failure"):
-        repository.settle_cancelled_subagent_turn_and_task(
-            lease.guard,
-            task_id=task_id,
-            turn_id=child_turn_id,
-            task_status="INTERRUPTED",
-            task_reason="HOST_CLOSING",
-            terminal_public_detail=(
-                "The delegated task was interrupted because the host is closing."
-            ),
-            turn_reason="SESSION_CLOSED",
-            occurred_at=datetime.now(timezone.utc),
-            actor_id='host:yinyxklzunar54s7objjdbphcy',
-            deadline_monotonic=monotonic() + 30,
-        )
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        turn = connection.execute(
-            """SELECT status, terminal_reason FROM pulsara_v3.turns
-               WHERE session_id = %s AND id = %s""",
-            (lease.guard.session_id, child_turn_id),
-        ).fetchone()
-        task = connection.execute(
-            """SELECT status, terminal_reason, terminal_public_detail
-               FROM pulsara_v3.subagent_tasks
-               WHERE session_id = %s AND id = %s""",
-            (lease.guard.session_id, task_id),
-        ).fetchone()
-        interruption_count = connection.execute(
-            """SELECT count(*) FROM pulsara_v3.agent_events
-               WHERE session_id = %s AND event_type = 'TurnInterrupted'
-                 AND subject_turn_id = %s""",
-            (lease.guard.session_id, child_turn_id),
-        ).fetchone()
-    assert turn == ("RUNNING", None)
-    assert task == ("ACTIVE", None, None)
-    assert interruption_count == (0,)
-
-
-def test_round7_freshness_body_contains_only_two_provider_refs() -> None:
-    # The compiler body must not expose the internal classification contract.
-    from pulsara_agent.model_input.contracts import (
-        build_tool_observation_freshness_fact,
-    )
-
-    fact = build_tool_observation_freshness_fact(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
-        current_turn_id='turn:r4yi3mveq6mrj6bcyhwvx4sxky',
-        current_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        current_initial_entry_sequence=2,
-        immediate_predecessor_turn_id='turn:mcie4zq2f6b4g2mm2ogvtx2uwq',
-    )
-    body = _render_tool_observation_freshness(fact)
-    assert set(json.loads(body)) == {
-        "current_turn_ref",
-        "immediate_predecessor_turn_ref",
-    }
-    assert "classification_contract" not in body

@@ -27,7 +27,6 @@ from pulsara_agent.ports.live_agent_event import (
     InteractionOpenedPayload,
     InteractionReplacedPayload,
     LivePayload,
-    SubagentProgressPayload,
     TerminalMonitorClosedPayload,
     TerminalMonitorObservationPayload,
     TerminalMonitorOpenedPayload,
@@ -72,12 +71,11 @@ LIVE_PAYLOAD_TYPE_BY_EVENT: dict[LiveEventType, type[object]] = {
     LiveEventType.TERMINAL_MONITOR_OPENED: TerminalMonitorOpenedPayload,
     LiveEventType.TERMINAL_MONITOR_OBSERVATION: TerminalMonitorObservationPayload,
     LiveEventType.TERMINAL_MONITOR_CLOSED: TerminalMonitorClosedPayload,
-    LiveEventType.SUBAGENT_PROGRESS: SubagentProgressPayload,
     LiveEventType.TODO_SNAPSHOT_UPDATED: TodoSnapshotUpdatedPayload,
 }
 
 if set(LIVE_PAYLOAD_TYPE_BY_EVENT) != set(LiveEventType):
-    raise RuntimeError("live payload registry must cover exact 24 event types")
+    raise RuntimeError("live payload registry must cover all live event types")
 
 
 class LiveObservationKind(StrEnum):
@@ -95,7 +93,6 @@ class LiveChannelKind(StrEnum):
     MODEL_OUTPUT = "MODEL_OUTPUT"
     TOOL_RESULT = "TOOL_RESULT"
     TERMINAL_EXTENSION = "TERMINAL_EXTENSION"
-    SUBAGENT_EXTENSION = "SUBAGENT_EXTENSION"
 
 
 class LiveBlockKind(StrEnum):
@@ -117,7 +114,6 @@ class LiveAgentEvent:
     draft_identity: str
     payload: LivePayload
     scope_kind: str
-    scope_subagent_task_id: str | None
     channel_kind: LiveChannelKind
     channel_tool_call_id: str | None
     channel_attempt_id: str | None
@@ -139,7 +135,6 @@ class LiveGenerationSettlement:
     committed_entry_id: str | None
     reason_code: str | None
     scope_kind: str
-    scope_subagent_task_id: str | None
     channel_kind: LiveChannelKind
     channel_tool_call_id: str | None
     channel_attempt_id: str | None
@@ -221,7 +216,6 @@ class LiveAgentEventBus:
         draft_identity: str,
         payload: LivePayload,
         scope_kind: str = "ROOT",
-        scope_subagent_task_id: str | None = None,
         channel_kind: LiveChannelKind = LiveChannelKind.MODEL_OUTPUT,
         channel_tool_call_id: str | None = None,
         channel_attempt_id: str | None = None,
@@ -247,7 +241,6 @@ class LiveAgentEventBus:
             event_type=event_type,
             draft_identity=draft_identity,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             channel_kind=channel_kind,
             channel_tool_call_id=channel_tool_call_id,
             channel_attempt_id=channel_attempt_id,
@@ -287,7 +280,6 @@ class LiveAgentEventBus:
                 # proves the exact byte charge used by the bounded ring.
                 payload=payload,
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
                 channel_kind=channel_kind,
                 channel_tool_call_id=channel_tool_call_id,
                 channel_attempt_id=channel_attempt_id,
@@ -381,7 +373,6 @@ class LiveAgentEventBus:
         committed_entry_id: str | None = None,
         reason_code: str | None = None,
         scope_kind: str = "ROOT",
-        scope_subagent_task_id: str | None = None,
         channel_kind: LiveChannelKind = LiveChannelKind.MODEL_OUTPUT,
         channel_tool_call_id: str | None = None,
         channel_attempt_id: str | None = None,
@@ -402,7 +393,6 @@ class LiveAgentEventBus:
         _validate_live_channel(
             draft_identity=draft_identity,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             channel_kind=channel_kind,
             channel_tool_call_id=channel_tool_call_id,
             channel_attempt_id=channel_attempt_id,
@@ -436,7 +426,6 @@ class LiveAgentEventBus:
                 committed_entry_id=committed_entry_id,
                 reason_code=reason_code,
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
                 channel_kind=channel_kind,
                 channel_tool_call_id=channel_tool_call_id,
                 channel_attempt_id=channel_attempt_id,
@@ -574,7 +563,6 @@ def _block_kind(event_type: LiveEventType) -> LiveBlockKind:
         "TerminalMonitorOpened": LiveBlockKind.OPERATIONAL,
         "TerminalMonitorObservation": LiveBlockKind.OPERATIONAL,
         "TerminalMonitorClosed": LiveBlockKind.OPERATIONAL,
-        "SubagentProgress": LiveBlockKind.OPERATIONAL,
         "TodoSnapshotUpdated": LiveBlockKind.OPERATIONAL,
         "InteractionOpened": LiveBlockKind.OPERATIONAL,
         "InteractionReplaced": LiveBlockKind.OPERATIONAL,
@@ -586,7 +574,6 @@ def _validate_live_channel(
     *,
     draft_identity: str,
     scope_kind: str,
-    scope_subagent_task_id: str | None,
     channel_kind: LiveChannelKind,
     channel_tool_call_id: str | None,
     channel_attempt_id: str | None,
@@ -595,9 +582,7 @@ def _validate_live_channel(
 ) -> None:
     if not draft_identity or not generation_id:
         raise ValueError("live generation identity is incomplete")
-    if (scope_kind == "ROOT") != (scope_subagent_task_id is None):
-        raise ValueError("live conversation scope union is invalid")
-    if scope_kind not in {"ROOT", "SUBAGENT_TASK"}:
+    if scope_kind not in {"ROOT", "SUBAGENT"}:
         raise ValueError("live conversation scope is unknown")
     if channel_kind is LiveChannelKind.MODEL_OUTPUT:
         valid_channel = (
@@ -626,7 +611,6 @@ def _validate_live_identity(
     event_type: LiveEventType,
     draft_identity: str,
     scope_kind: str,
-    scope_subagent_task_id: str | None,
     channel_kind: LiveChannelKind,
     channel_tool_call_id: str | None,
     channel_attempt_id: str | None,
@@ -639,7 +623,6 @@ def _validate_live_identity(
     _validate_live_channel(
         draft_identity=draft_identity,
         scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         channel_kind=channel_kind,
         channel_tool_call_id=channel_tool_call_id,
         channel_attempt_id=channel_attempt_id,

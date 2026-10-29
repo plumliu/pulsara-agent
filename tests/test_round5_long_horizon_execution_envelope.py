@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import inspect
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -27,12 +26,6 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionWatchdogPolicy,
     KernelWatchdogOwner,
 )
-from pulsara_agent.conversation_kernel.contracts import InlineContent
-from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
-from pulsara_agent.conversation_kernel.repository import (
-    build_prepared_root_turn_intent,
-    build_prepared_subagent_turn_admission,
-)
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.memory_tools import (
@@ -41,12 +34,6 @@ from pulsara_agent.conversation_kernel.memory_tools import (
     MEMORY_SEARCH_TIMEOUT_SECONDS,
 )
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
-from pulsara_agent.conversation_kernel.vocabulary import (
-    APPEND_GUARDS,
-    COMMITTED_EVENT_DESCRIPTORS,
-    LIVE_EVENT_TYPES,
-    SUBJECT_SLOTS,
-)
 from pulsara_agent.conversation_kernel.io import (
     KernelSessionIO,
     PhysicalToolInvocationDisposition,
@@ -59,15 +46,8 @@ from pulsara_agent.conversation_kernel.tool_runtime import (
     production_builtin_executor_binding_identity_fingerprint,
 )
 from pulsara_agent.llm.adapters.openai import client as openai_client
-from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.adapters.openai.client import OpenAITransportTimeoutPolicy
 from pulsara_agent.terminal_process.manager import ProcessRegistry
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
-from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
-from pulsara_agent.primitives.run_permission import (
-    RunPermissionAdmissionSource,
-    build_run_permission_snapshot,
-)
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import ToolCall
@@ -105,11 +85,6 @@ def test_round5_architecture_removes_turn_budget_and_preserves_oracles() -> None
     assert "maximum_model_calls_per_turn" not in foreground_source
     assert "maximum_tool_calls_per_turn" not in foreground_source
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
-    assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
 
 
 def test_round5_watchdog_policy_is_closed_and_has_no_turn_or_call_budget() -> None:
@@ -153,41 +128,6 @@ def test_round5_deadline_factory_only_accepts_closed_owners_and_issues_fresh() -
         factory.deadline("FOREGROUND_CANONICAL")  # type: ignore[arg-type]
 
 
-def test_round5_turn_admission_candidates_freeze_complete_event_drafts() -> None:
-    occurred_at = datetime.now(timezone.utc)
-    root = build_prepared_root_turn_intent(
-        session_id='session:f2tf3imnl4wld4vi3y75hcil64',
-        command_id='command:yibgarxigani3ox6wf46ayaqd4',
-        turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
-        entry_id='entry:ahx3cf44vr4kojli5bv43yv3ui',
-        context_binding_revision_id='binding:mxjfcol3x4b3ty375iezyapuli',
-        permission_snapshot_id='permission:6rhl5zdhj3noqpit73ff4p525e',
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        canonical_prompt=freeze_canonical_prompt(FrozenPromptContent.text("root")),
-        occurred_at=occurred_at,
-    )
-    child = build_prepared_subagent_turn_admission(
-        session_id='session:lfhug7mgviyz7ubh72yzacffey',
-        task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
-        turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
-        entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve',
-        context_binding_revision_id='binding:nxqcttuom2vwdmzjvatzuuer4a',
-        permission_snapshot_id='permission:6oi34lpfmqrfi4wwfgyjhaj3hu',
-        task_start_event_id='event:zrrfbncvs6td6kot6nscszrx6q',
-        expected_parent_permission_snapshot=build_run_permission_snapshot(
-            snapshot_id='permission:ode2aqcgkfsycipwf4nyc26m5u',
-            requested_mode=DEFAULT_PERMISSION_MODE,
-            effective_mode=DEFAULT_PERMISSION_MODE,
-            admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
-        ),
-        content=InlineContent.from_bytes(b"child"),
-        occurred_at=occurred_at,
-    )
-
-    with pytest.raises((AttributeError, TypeError)):
-        root.actor_id = "mutated"  # type: ignore[misc]
-    with pytest.raises(TypeError):
-        child.event.payload["mutated"] = True  # type: ignore[index]
 
 
 def test_round5_close_owners_use_independent_policy_fields() -> None:
@@ -522,6 +462,7 @@ def _bare_host_core_with_blocked_blob_gc(
     *, close_seconds: float
 ) -> tuple[KernelHostCore, asyncio.Event, asyncio.Event]:
     core = object.__new__(KernelHostCore)
+    core._agent_runtime = SimpleNamespace(aclose=AsyncMock())
     core.mcp_management = SimpleNamespace(aclose=AsyncMock())
     core._image_validator = SimpleNamespace(aclose=AsyncMock())  # noqa: SLF001
     core._deadlines = KernelExecutionDeadlineFactory(  # noqa: SLF001

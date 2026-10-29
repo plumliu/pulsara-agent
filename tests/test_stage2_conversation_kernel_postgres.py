@@ -833,12 +833,12 @@ def test_stage2_maximum_blob_is_read_as_exact_bounded_storage_ranges(
 def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
-    # Fork spec §7.6 adds groups, genesis, and irreducible historical closures.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 31
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    # The clean-v0 catalog and bounded vocabulary share one closed owner.
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
 
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:

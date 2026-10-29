@@ -56,14 +56,21 @@ def _idle_carrier(
 @pytest.mark.parametrize(
     "active,origin",
     (
-        (True, CanonicalInputOriginKind.SUBAGENT_OBJECTIVE),
-        (False, CanonicalInputOriginKind.SUBAGENT_OBJECTIVE),
+        (True, CanonicalInputOriginKind.AGENT_INSTRUCTION),
+        (False, CanonicalInputOriginKind.AGENT_INSTRUCTION),
         (False, CanonicalInputOriginKind.USER_CONTROL_FEEDBACK),
     ),
 )
-def test_compaction_request_images_are_closed_to_human_origins(
+def test_compaction_request_images_accept_agent_instruction_and_reject_feedback(
     active: bool, origin: CanonicalInputOriginKind
 ) -> None:
+    if origin is CanonicalInputOriginKind.AGENT_INSTRUCTION:
+        request = (FrozenCompactionActiveRequest(entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a', entry_sequence=1,
+            location=CompactionActiveRequestLocation.SNAPSHOT_EXACT, item_kind=FrozenProviderInputItemKind.USER,
+            input_origin=origin, content=_mixed_content()) if active else FrozenRetainedHistoricalRequest(
+            item_kind=FrozenProviderInputItemKind.USER,input_origin=origin,content=_mixed_content()))
+        assert request.content == _mixed_content()
+        return
     if active:
         with pytest.raises(ValueError, match="cannot carry image"):
             FrozenCompactionActiveRequest(
@@ -100,7 +107,7 @@ def test_compaction_metadata_decoder_rejects_nonhuman_image_before_hydration() -
             "retained_historical_requests": (
                 {
                     "item_kind": FrozenProviderInputItemKind.USER.value,
-                    "input_origin": CanonicalInputOriginKind.SUBAGENT_OBJECTIVE.value,
+                    "input_origin": CanonicalInputOriginKind.USER_CONTROL_FEEDBACK.value,
                     "scheduled_input": None,
                     "content": {
                         "schema": "pulsara.prompt/v2",

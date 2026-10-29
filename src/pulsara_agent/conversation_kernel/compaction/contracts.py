@@ -147,7 +147,6 @@ class PreparedManualCompactionCommand:
     session_id: str
     command_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     target_turn_id: str
     expected_active_turn_id: str | None
     force: bool
@@ -156,15 +155,10 @@ class PreparedManualCompactionCommand:
     def __post_init__(self) -> None:
         if not self.session_id or not self.command_id or not self.target_turn_id:
             raise ValueError("manual compaction command identity is incomplete")
-        if (self.scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("manual compaction command scope union is invalid")
         expected = manual_compaction_command_semantic_digest(
             session_id=self.session_id,
             command_id=self.command_id,
             scope_kind=self.scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
             target_turn_id=self.target_turn_id,
             expected_active_turn_id=self.expected_active_turn_id,
             force=self.force,
@@ -178,7 +172,6 @@ def manual_compaction_command_semantic_digest(
     session_id: str,
     command_id: str,
     scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     target_turn_id: str,
     expected_active_turn_id: str | None,
     force: bool,
@@ -189,7 +182,6 @@ def manual_compaction_command_semantic_digest(
             "session_id": session_id,
             "command_id": command_id,
             "scope_kind": scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
             "target_turn_id": target_turn_id,
             "expected_active_turn_id": expected_active_turn_id,
             "force": force,
@@ -202,7 +194,6 @@ def build_prepared_manual_compaction_command(
     session_id: str,
     command_id: str,
     scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     target_turn_id: str,
     expected_active_turn_id: str | None,
     force: bool,
@@ -211,7 +202,6 @@ def build_prepared_manual_compaction_command(
         session_id=session_id,
         command_id=command_id,
         scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         target_turn_id=target_turn_id,
         expected_active_turn_id=expected_active_turn_id,
         force=force,
@@ -219,7 +209,6 @@ def build_prepared_manual_compaction_command(
             session_id=session_id,
             command_id=command_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             target_turn_id=target_turn_id,
             expected_active_turn_id=expected_active_turn_id,
             force=force,
@@ -329,9 +318,7 @@ class ResolvedCompactionHeadroomBounds:
             "maximum_epoch_logical_bytes": (self.maximum_epoch_logical_bytes),
             "reserved_canonical_items": self.reserved_canonical_items,
             "reserved_canonical_expanded_bytes": self.reserved_canonical_expanded_bytes,
-            "reserved_epoch_logical_bytes": (
-                self.reserved_epoch_logical_bytes
-            ),
+            "reserved_epoch_logical_bytes": (self.reserved_epoch_logical_bytes),
         }
         if self.resolved_hard_bound_set_fingerprint != context_fingerprint(
             "pulsara.compaction-resource-headroom.v3-expanded-content", values
@@ -351,10 +338,7 @@ class ResolvedCompactionHeadroomBounds:
 
     @property
     def soft_epoch_logical_byte_limit(self) -> int:
-        return (
-            self.maximum_epoch_logical_bytes
-            - self.reserved_epoch_logical_bytes
-        )
+        return self.maximum_epoch_logical_bytes - self.reserved_epoch_logical_bytes
 
 
 def resolved_compaction_headroom_bounds() -> ResolvedCompactionHeadroomBounds:
@@ -405,7 +389,6 @@ class FrozenCompactionHeadroomPreflight:
     turn_id: str
     context_binding_revision_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     effective_materialization_lineage_floor: int
     provider_input_through_sequence: int
     selected_item_count: int
@@ -416,18 +399,20 @@ class FrozenCompactionHeadroomPreflight:
         if (
             not self.session_id
             or not self.turn_id
-            or not self.context_binding_revision_id
-            or (self.scope_kind is ModelInputScopeKind.ROOT)
-            != (self.scope_subagent_task_id is None)
-            or min(
-                self.effective_materialization_lineage_floor,
-                self.provider_input_through_sequence,
-                self.selected_item_count,
-                self.selected_canonical_expanded_bytes,
+            or (not self.context_binding_revision_id)
+            or (
+                min(
+                    self.effective_materialization_lineage_floor,
+                    self.provider_input_through_sequence,
+                    self.selected_item_count,
+                    self.selected_canonical_expanded_bytes,
+                )
+                < 0
             )
-            < 0
-            or self.effective_materialization_lineage_floor
-            > self.provider_input_through_sequence
+            or (
+                self.effective_materialization_lineage_floor
+                > self.provider_input_through_sequence
+            )
         ):
             raise ValueError("compaction headroom preflight is invalid")
 
@@ -438,7 +423,6 @@ def freeze_compaction_headroom_preflight(
     turn_id: str,
     context_binding_revision_id: str,
     scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     effective_materialization_lineage_floor: int,
     provider_input_through_sequence: int,
     selected_item_count: int,
@@ -450,7 +434,6 @@ def freeze_compaction_headroom_preflight(
         turn_id=turn_id,
         context_binding_revision_id=context_binding_revision_id,
         scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         effective_materialization_lineage_floor=(
             effective_materialization_lineage_floor
         ),
@@ -609,15 +592,10 @@ class CompactionScope:
     workspace_id: str
     turn_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
 
     def __post_init__(self) -> None:
         if not self.session_id or not self.workspace_id or not self.turn_id:
             raise ValueError("compaction scope identity is incomplete")
-        if (self.scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("compaction scope union is invalid")
 
     @property
     def fingerprint(self) -> str:
@@ -628,7 +606,6 @@ class CompactionScope:
                 "workspace_id": self.workspace_id,
                 "turn_id": self.turn_id,
                 "scope_kind": self.scope_kind.value,
-                "scope_subagent_task_id": self.scope_subagent_task_id,
             },
         )
 
@@ -746,15 +723,20 @@ class FrozenCompactionCanonicalRead:
             identity.session_id != self.scope.session_id
             or identity.turn_id != self.scope.turn_id
             or identity.conversation_scope_kind is not self.scope.scope_kind
-            or identity.scope_subagent_task_id != self.scope.scope_subagent_task_id
-            or self.lineage_base.scope != self.scope
-            or self.safe_head_range.scope != self.scope
-            or self.safe_head_range.source_through_sequence
-            != identity.provider_input_through_sequence
-            or self.safe_head_range.effective_materialization_lineage_floor
-            != self.lineage_base.effective_materialization_lineage_floor
-            or (self.lineage_base.kind is CompactionLineageBaseKind.CURRENT_SNAPSHOT)
-            != (self.snapshot_carrier is not None)
+            or (self.lineage_base.scope != self.scope)
+            or (self.safe_head_range.scope != self.scope)
+            or (
+                self.safe_head_range.source_through_sequence
+                != identity.provider_input_through_sequence
+            )
+            or (
+                self.safe_head_range.effective_materialization_lineage_floor
+                != self.lineage_base.effective_materialization_lineage_floor
+            )
+            or (
+                (self.lineage_base.kind is CompactionLineageBaseKind.CURRENT_SNAPSHOT)
+                != (self.snapshot_carrier is not None)
+            )
         ):
             raise ValueError("compaction canonical read does not exact-join")
 
@@ -865,22 +847,23 @@ def provider_input_item_canonical_expanded_bytes(
     if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
         raise ValueError("snapshot C charge belongs to its typed carrier")
     if (
-        (
-            item.item_kind is FrozenProviderInputItemKind.USER
-            and item.input_origin
-            in {
-                CanonicalInputOriginKind.HUMAN_MESSAGE,
-                CanonicalInputOriginKind.HUMAN_STEER,
-            }
-        )
-        or (
-            item.item_kind
-            in {
-                FrozenProviderInputItemKind.TOOL_RESULT,
-                FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
-            }
-            and any(isinstance(part, LLMImagePart) for part in item.content)
-        )
+        item.item_kind is FrozenProviderInputItemKind.USER
+        and item.input_origin
+        in {
+            CanonicalInputOriginKind.HUMAN_MESSAGE,
+            CanonicalInputOriginKind.HUMAN_STEER,
+            CanonicalInputOriginKind.AGENT_INSTRUCTION,
+            CanonicalInputOriginKind.AGENT_PROFILE,
+            CanonicalInputOriginKind.AGENT_MATERIAL,
+            CanonicalInputOriginKind.AGENT_MESSAGE,
+        }
+    ) or (
+        item.item_kind
+        in {
+            FrozenProviderInputItemKind.TOOL_RESULT,
+            FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+        }
+        and any(isinstance(part, LLMImagePart) for part in item.content)
     ):
         content = FrozenPromptContent(item.content)
         return len(canonical_prompt_body_bytes(content)) + sum(
@@ -891,8 +874,7 @@ def provider_input_item_canonical_expanded_bytes(
     if any(not isinstance(part, LLMTextPart) for part in item.content):
         raise ValueError("non-prompt canonical item contains image content")
     return sum(len(part.text.encode("utf-8")) for part in item.content) + sum(
-        len(canonical_json_bytes(thaw_json(call.arguments)))
-        for call in item.tool_calls
+        len(canonical_json_bytes(thaw_json(call.arguments))) for call in item.tool_calls
     )
 
 

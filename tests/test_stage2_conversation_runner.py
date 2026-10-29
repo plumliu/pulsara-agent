@@ -43,7 +43,6 @@ from pulsara_agent.conversation_kernel.cancellation import ActiveTurnCancellatio
 from pulsara_agent.conversation_kernel.cold_epoch import (
     CanonicalColdContinuationSeed,
     AdoptedCompactionContinuationSeed,
-    SubagentInitialSeed,
 )
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
 import pulsara_agent.conversation_kernel.input_continuity as input_continuity
@@ -101,7 +100,6 @@ from pulsara_agent.conversation_kernel.repository import (
     build_prepared_tool_result_acceptance,
 )
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
-from pulsara_agent.conversation_kernel.safe_point import ProviderSafePointCoordinator
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
@@ -146,7 +144,6 @@ from pulsara_agent.llm.model_connections import (
 )
 from pulsara_agent.primitives.model_call import ModelCallPurpose, ModelTokenUsageFact
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
     ContextBindingBaseKind,
     ContextRenderMode,
     ContextRenderVariant,
@@ -155,7 +152,6 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     ModelInputCompileFailureKind,
     StructuredModelInputCompileError,
-    provider_input_item_text,
 )
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.continuity import (
@@ -194,16 +190,11 @@ from tests.support.model_config import (
 )
 from tests.support.round3 import (
     CallbackScriptedKernelModel,
-    Round10TestSubagentRuntime,
     ScriptedKernelModel,
     StaticContextSourceCollector,
     StructuredToolPort,
     completed_provider_execution_for_test,
     seal_test_direct_tool_port,
-)
-from tests.support.subagents import (
-    accept_active_subagent_fixture,
-    run_admitted_subagent_fixture,
 )
 
 
@@ -288,7 +279,9 @@ def _seed_artifact_result_with_memory_provenance(
                 block_id=_name("block"),
                 tool_call_id=tool_call_id,
                 tool_name="artifact_read",
-                arguments=freeze_json({"target": {"kind": "ARTIFACT", "artifact_id": _name("artifact")}}),
+                arguments=freeze_json(
+                    {"target": {"kind": "ARTIFACT", "artifact_id": _name("artifact")}}
+                ),
             ),
         ),
         occurred_at=datetime.now(timezone.utc),
@@ -564,8 +557,11 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
 def _context_snapshot_payload(request) -> dict[str, object]:
     matches = []
     for message in request.compiled_input.messages:
-        if (message.role is not MessageRole.USER or not message.content
-                or not isinstance(message.content[0], LLMTextPart)):
+        if (
+            message.role is not MessageRole.USER
+            or not message.content
+            or not isinstance(message.content[0], LLMTextPart)
+        ):
             continue
         parts = message.content[0].text.split("\n", 1)
         if len(parts) != 2:
@@ -574,7 +570,10 @@ def _context_snapshot_payload(request) -> dict[str, object]:
             payload = json.loads(parts[1])
         except json.JSONDecodeError:
             continue
-        if isinstance(payload, dict) and set(payload) == {"continuation", "earlier_context_summary"}:
+        if isinstance(payload, dict) and set(payload) == {
+            "continuation",
+            "earlier_context_summary",
+        }:
             matches.append((message, payload))
     assert len(matches) == 1
     message, value = matches[0]
@@ -1145,7 +1144,9 @@ class _PolicyMemoryProjection:
             texts=(' {"items":[]} ',),
         )
 
-    async def freeze_automatic_recall_source(self, _query: str, *, canonical_facts=None):
+    async def freeze_automatic_recall_source(
+        self, _query: str, *, canonical_facts=None
+    ):
         self.recall_calls += 1
         return build_memory_context_source(
             kind=ContextSourceKind.MEMORY_RECALL,
@@ -1155,6 +1156,7 @@ class _PolicyMemoryProjection:
                 '{"items":[]}',
             ),
         )
+
 
 class _DelayedPreparedExecution:
     def __init__(
@@ -1811,8 +1813,8 @@ def test_k3_user_control_feedback_is_measured_before_atomic_publication(
         content = ProcessControlFeedbackContent(
             command_id=random_id("command"),
             session_id=session_id,
-            host_session_id='host:yinyxklzunar54s7objjdbphcy',
-            process_id='process:ynxq64ktp5aspyvhcguxzui4vy',
+            host_session_id="host:yinyxklzunar54s7objjdbphcy",
+            process_id="process:ynxq64ktp5aspyvhcguxzui4vy",
             command="python worker.py",
             cwd="/tmp",
             origin_turn_id=turn_id,
@@ -1835,12 +1837,10 @@ def test_k3_user_control_feedback_is_measured_before_atomic_publication(
                     entry_id=_name("entry"),
                     content=content,
                     occurred_at=datetime.now(timezone.utc),
-                    actor_id='host:yinyxklzunar54s7objjdbphcy',
+                    actor_id="host:yinyxklzunar54s7objjdbphcy",
                 ),
                 deadline_monotonic=monotonic() + 30,
-                admitted_writer=CompactionWriteReservation(
-                    ModelInputScopeKind.ROOT, None
-                ),
+                admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT),
             )
         )
         return True
@@ -1935,8 +1935,8 @@ def test_k3_user_control_feedback_resource_failure_precedes_publication(
                     content=ProcessControlFeedbackContent(
                         command_id=random_id("command"),
                         session_id=session_id,
-                        host_session_id='host:yinyxklzunar54s7objjdbphcy',
-                        process_id='process:ynxq64ktp5aspyvhcguxzui4vy',
+                        host_session_id="host:yinyxklzunar54s7objjdbphcy",
+                        process_id="process:ynxq64ktp5aspyvhcguxzui4vy",
                         command="python worker.py",
                         cwd="/tmp",
                         origin_turn_id=turn_id,
@@ -1954,12 +1954,10 @@ def test_k3_user_control_feedback_resource_failure_precedes_publication(
                         public_detail="\\" * 28_000,
                     ),
                     occurred_at=datetime.now(timezone.utc),
-                    actor_id='host:yinyxklzunar54s7objjdbphcy',
+                    actor_id="host:yinyxklzunar54s7objjdbphcy",
                 ),
                 deadline_monotonic=monotonic() + 30,
-                admitted_writer=CompactionWriteReservation(
-                    ModelInputScopeKind.ROOT, None
-                ),
+                admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT),
             )
         )
     assert model.requests == []
@@ -2061,8 +2059,8 @@ def test_k3_active_feedback_compacts_before_atomic_publication(
         content=ProcessControlFeedbackContent(
             command_id=random_id("command"),
             session_id=session_id,
-            host_session_id='host:yinyxklzunar54s7objjdbphcy',
-            process_id='process:ynxq64ktp5aspyvhcguxzui4vy',
+            host_session_id="host:yinyxklzunar54s7objjdbphcy",
+            process_id="process:ynxq64ktp5aspyvhcguxzui4vy",
             command="python worker.py",
             cwd="/tmp",
             origin_turn_id=turn_id,
@@ -2076,16 +2074,16 @@ def test_k3_active_feedback_compacts_before_atomic_publication(
             public_detail="\\" * 18_000,
         ),
         occurred_at=datetime.now(timezone.utc),
-        actor_id='host:yinyxklzunar54s7objjdbphcy',
+        actor_id="host:yinyxklzunar54s7objjdbphcy",
     )
 
     async def exercise():
         accepted = await runner.install_user_control_feedback(
             attempt=attempt,
             deadline_monotonic=monotonic() + 30,
-            admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT, None),
+            admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT),
             cancellation_intent=ActiveTurnCancellationIntent(
-                turn_id, ModelInputScopeKind.ROOT, None
+                turn_id, ModelInputScopeKind.ROOT
             ),
         )
         await owner.aclose()
@@ -2181,7 +2179,7 @@ def test_stage2_runner_commits_semantic_invalid_arguments_then_retries_and_compl
                         {
                             "task_key": "reader",
                             "task": "read an unknown dependency",
-                            "depends_on": ['task:6igftxaeldftzfrwddemgpdkja'],
+                            "depends_on": ["task:6igftxaeldftzfrwddemgpdkja"],
                         }
                     ]
                 },
@@ -2493,7 +2491,12 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
 
 @pytest.mark.parametrize(
     ("lose_adoption_ack", "retry_recent", "image_history"),
-    ((False, False, False), (True, False, False), (False, True, False), (False, True, True)),
+    (
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, True, True),
+    ),
 )
 def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     stage2_migrated_postgres_database,
@@ -2595,7 +2598,11 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     async def exercise():
         if image_history:
             from tests.test_kernel_image_input_k2_postgres import _image
-            first_prompt = freeze_canonical_prompt(FrozenPromptContent((LLMTextPart("first question"), _image())), workspace_id=workspace_id)
+
+            first_prompt = freeze_canonical_prompt(
+                FrozenPromptContent((LLMTextPart("first question"), _image())),
+                workspace_id=workspace_id,
+            )
         else:
             first_prompt = frozen_test_prompt("first question")
         first = await runner.run_turn(first_prompt)
@@ -2604,7 +2611,6 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         _request, outcome = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -2635,10 +2641,18 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert len(model.requests) == 2
     if image_history:
         from tests.test_kernel_image_input_k2_postgres import _image
-        successor_text = "\n".join(join_text_content(m.content) for m in model.requests[1].compiled_input.messages)
+
+        successor_text = "\n".join(
+            join_text_content(m.content)
+            for m in model.requests[1].compiled_input.messages
+        )
         assert _image(workspace_id=workspace_id).image_ref in successor_text
         assert "[历史图片引用；此处未包含图像内容]" in successor_text
-        assert not any(isinstance(p, LLMImagePart) for m in model.requests[1].compiled_input.messages for p in m.content)
+        assert not any(
+            isinstance(p, LLMImagePart)
+            for m in model.requests[1].compiled_input.messages
+            for p in m.content
+        )
     successor_snapshot = _context_snapshot_payload(model.requests[1])
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
     assert successor_snapshot["continuation"]["active_request"]["text"] == (
@@ -2794,7 +2808,7 @@ def test_model_switch_uses_exact_three_tier_handover_path(
     destination_runtime = test_model_runtime(
         model_id="destination-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         limits=test_model_limits(
             total_context_tokens=256_000,
             max_input_tokens=12_000,
@@ -2919,7 +2933,7 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
     destination_runtime = test_model_runtime(
         model_id="destination-text-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         input_modalities=("text",),
     )
     include_test_runtime_connections(destination_runtime, source_runtime)
@@ -2963,8 +2977,8 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
     Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
     image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
     image_prompt = freeze_canonical_prompt(
-        FrozenPromptContent((LLMTextPart("inspect"), image))
-    , workspace_id=workspace_id)
+        FrozenPromptContent((LLMTextPart("inspect"), image)), workspace_id=workspace_id
+    )
 
     async def exercise():
         first = await runner.run_turn(image_prompt)
@@ -3000,11 +3014,18 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
         for part in message.content
     )
     successor = _context_snapshot_payload(model.requests[1])
-    recent_sections = [section for section in successor["sections"]
-                       if section["metadata"].get("section") == "recent"]
+    recent_sections = [
+        section
+        for section in successor["sections"]
+        if section["metadata"].get("section") == "recent"
+    ]
     assert recent_sections
-    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[0].image_ref in json.dumps(recent_sections, ensure_ascii=False)
-    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(recent_sections, ensure_ascii=False)
+    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[
+        0
+    ].image_ref in json.dumps(recent_sections, ensure_ascii=False)
+    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(
+        recent_sections, ensure_ascii=False
+    )
 
 
 def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
@@ -3030,7 +3051,7 @@ def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
     destination_runtime = test_model_runtime(
         model_id="destination-text-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         input_modalities=("text",),
     )
     include_test_runtime_connections(destination_runtime, source_runtime)
@@ -3084,8 +3105,9 @@ def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
                 LLMTextPart("old visual request"),
                 LLMImagePart("image/png", image_output.getvalue(), 7, 5),
             )
-        )
-    , workspace_id=workspace_id)
+        ),
+        workspace_id=workspace_id,
+    )
 
     async def exercise():
         await runner.run_turn(image_prompt)
@@ -3179,8 +3201,9 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
                 LLMTextPart("between"),
                 image,
             )
-        )
-    , workspace_id=workspace_id)
+        ),
+        workspace_id=workspace_id,
+    )
 
     async def seed_history():
         result = await source_runner.run_turn(image_prompt)
@@ -3193,7 +3216,7 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
     destination_runtime = test_model_runtime(
         model_id="destination-text-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         input_modalities=("text",),
     )
     include_test_runtime_connections(destination_runtime, source_runtime)
@@ -3265,7 +3288,9 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
     )
     assert (
         sum(
-            join_text_content(message.content).count("[历史图片引用；此处未包含图像内容]")
+            join_text_content(message.content).count(
+                "[历史图片引用；此处未包含图像内容]"
+            )
             for message in summary_context.messages
         )
         == 2
@@ -3276,11 +3301,18 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
         for part in message.content
     )
     successor = _context_snapshot_payload(destination_model.requests[0])
-    recent_sections = [section for section in successor["sections"]
-                       if section["metadata"].get("section") == "recent"]
+    recent_sections = [
+        section
+        for section in successor["sections"]
+        if section["metadata"].get("section") == "recent"
+    ]
     assert recent_sections
-    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[0].image_ref in json.dumps(recent_sections, ensure_ascii=False)
-    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(recent_sections, ensure_ascii=False)
+    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[
+        0
+    ].image_ref in json.dumps(recent_sections, ensure_ascii=False)
+    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(
+        recent_sections, ensure_ascii=False
+    )
     assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
 
 
@@ -3307,7 +3339,7 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
     destination_runtime = test_model_runtime(
         model_id="destination-text-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         input_modalities=("text",),
     )
     include_test_runtime_connections(destination_runtime, source_runtime)
@@ -3370,8 +3402,9 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
                 LLMTextPart("between"),
                 image,
             )
-        )
-    , workspace_id=workspace_id)
+        ),
+        workspace_id=workspace_id,
+    )
 
     async def exercise():
         first = await runner.run_turn(image_prompt)
@@ -3405,7 +3438,9 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
     )
     assert (
         sum(
-            join_text_content(message.content).count("[历史图片引用；此处未包含图像内容]")
+            join_text_content(message.content).count(
+                "[历史图片引用；此处未包含图像内容]"
+            )
             for message in destination_summary.messages
         )
         == 2
@@ -3416,11 +3451,18 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
         for part in message.content
     )
     successor = _context_snapshot_payload(model.requests[-1])
-    recent_sections = [section for section in successor["sections"]
-                       if section["metadata"].get("section") == "recent"]
+    recent_sections = [
+        section
+        for section in successor["sections"]
+        if section["metadata"].get("section") == "recent"
+    ]
     assert recent_sections
-    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[0].image_ref in json.dumps(recent_sections, ensure_ascii=False)
-    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(recent_sections, ensure_ascii=False)
+    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[
+        0
+    ].image_ref in json.dumps(recent_sections, ensure_ascii=False)
+    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(
+        recent_sections, ensure_ascii=False
+    )
     assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
 
 
@@ -3447,7 +3489,7 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
     destination_runtime = test_model_runtime(
         model_id="destination-vision-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         limits=test_model_limits(
             total_context_tokens=256_000,
             # Keep room for the full English summary instructions and recent image;
@@ -3518,8 +3560,9 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
         await runner.run_turn(frozen_test_prompt("old large request"))
         await runner.run_turn(
             freeze_canonical_prompt(
-                FrozenPromptContent((LLMTextPart("recent visual request"), image))
-            , workspace_id=workspace_id)
+                FrozenPromptContent((LLMTextPart("recent visual request"), image)),
+                workspace_id=workspace_id,
+            )
         )
         active_runtime[0] = destination_runtime
         model._model_runtime = destination_runtime
@@ -3604,8 +3647,9 @@ def test_k3_multipart_input_keeps_exact_canonical_service_headroom_before_open(
     Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
     image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
     prompt = freeze_canonical_prompt(
-        FrozenPromptContent((LLMTextPart("before"), image, image))
-    , workspace_id=workspace_id)
+        FrozenPromptContent((LLMTextPart("before"), image, image)),
+        workspace_id=workspace_id,
+    )
     quote = prompt.resource_quote
     values = {
         "maximum_canonical_items": 4_096,
@@ -3698,12 +3742,12 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
     source_runtime = test_model_runtime(
         model_id="same-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:7dy6gjvd3p64ynsewun5vkwc2e'),
+        connection_id=ModelConnectionId("connection:7dy6gjvd3p64ynsewun5vkwc2e"),
     )
     destination_runtime = test_model_runtime(
         model_id="same-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
     )
     include_test_runtime_connections(destination_runtime, source_runtime)
     active_runtime = [source_runtime]
@@ -3736,7 +3780,6 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
 
     async def exercise():
@@ -3771,14 +3814,14 @@ def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
     assert destination_cohort is not None
     assert (
         destination_cohort.target_bundle.connection.connection_id
-        == ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli')
+        == ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli")
     )
     assert model.summary_transport.calls == []
     assert [
         request.prepared_call.call.binding.connection_id for request in model.requests
     ] == [
-        ModelConnectionId('connection:7dy6gjvd3p64ynsewun5vkwc2e'),
-        ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        ModelConnectionId("connection:7dy6gjvd3p64ynsewun5vkwc2e"),
+        ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
     ]
 
 
@@ -3805,7 +3848,7 @@ def test_reasoning_only_change_keeps_the_installed_epoch(
         ),
     )
     low = ModelCallBinding(
-        ModelConnectionId('connection:7dy6gjvd3p64ynsewun5vkwc2e'),
+        ModelConnectionId("connection:7dy6gjvd3p64ynsewun5vkwc2e"),
         ReasoningEffortSelection("low"),
     )
     high = replace(low, reasoning=ReasoningEffortSelection("high"))
@@ -3837,7 +3880,6 @@ def test_reasoning_only_change_keeps_the_installed_epoch(
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
 
     async def exercise():
@@ -3890,7 +3932,7 @@ def test_disabled_compaction_rejects_nonfit_model_switch_without_mutation(
     destination_runtime = test_model_runtime(
         model_id="destination-model",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         limits=test_model_limits(
             total_context_tokens=256_000,
             max_input_tokens=12_000,
@@ -3930,7 +3972,6 @@ def test_disabled_compaction_rejects_nonfit_model_switch_without_mutation(
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
 
     async def exercise():
@@ -4020,7 +4061,7 @@ def test_final_wire_compaction_trigger_and_adoption_ignore_provider_usage(
         first = await runner.run_turn(frozen_test_prompt("identical source question"))
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=first.turn_id,
-            command_id='command:ys2zzcmvpztzxnzeufrjro5tly',
+            command_id="command:ys2zzcmvpztzxnzeufrjro5tly",
             force=True,
         )
         await owner.aclose()
@@ -4136,7 +4177,7 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
         )
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=second.turn_id,
-            command_id='command:burnfnbq5ov4cka232v3r5vl5m',
+            command_id="command:burnfnbq5ov4cka232v3r5vl5m",
             force=True,
         )
         await owner.aclose()
@@ -4265,8 +4306,9 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
                 LLMTextPart("visual suffix" + "x" * text_padding),
                 image,
             )
-        )
-    , workspace_id=workspace_id)
+        ),
+        workspace_id=workspace_id,
+    )
     summary_measurements: list[tuple[int, bool, object]] = []
     freeze_wire_measurement = model.freeze_wire_measurement
 
@@ -4443,10 +4485,14 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
     )
     original_prepare = compaction_model_call.prepare_compaction_summary_semantic
     prepared_semantics: list[object] = []
+
     def prepare_semantic_overbudget(**kwargs):
         # No semantic estimator exists on this owner. Replay-bearing input
         # must reach final-wire admission directly.
-        assert not hasattr(kwargs["source_view"].normal_compile_binding.estimator, "estimate_frozen_input")
+        assert not hasattr(
+            kwargs["source_view"].normal_compile_binding.estimator,
+            "estimate_frozen_input",
+        )
         semantic = original_prepare(**kwargs)
         prepared_semantics.append(semantic)
         return semantic
@@ -4466,7 +4512,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
         )
         outcome = await runner.compaction.compact_idle_turn(
             turn_id=second.turn_id,
-            command_id='command:ptcvf7lv75uwii4lyualddx5au',
+            command_id="command:ptcvf7lv75uwii4lyualddx5au",
             force=True,
         )
         await owner.aclose()
@@ -4570,7 +4616,7 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
         if trigger == "manual":
             outcome = await runner.compaction.compact_idle_turn(
                 turn_id=first.turn_id,
-                command_id='command:q5ve2k6fcmf7xmpditfsnzrjru',
+                command_id="command:q5ve2k6fcmf7xmpditfsnzrjru",
                 force=True,
             )
             second_text = None
@@ -4771,7 +4817,6 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
             _request, waiter = await owner.request_manual(
                 command_id=random_id("command"),
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 expected_turn_id=turn_id,
                 force=True,
             )
@@ -4917,7 +4962,6 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
         _request, waiter = await owner.request_manual(
             command_id=random_id("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -4996,7 +5040,6 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
         _request, waiter = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -5076,7 +5119,6 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
         first_request, first_waiter = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -5094,7 +5136,6 @@ def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
                 _second_request, second_waiter = await owner.request_manual(
                     command_id=_name("command"),
                     scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
                     expected_turn_id=turn_id,
                     force=True,
                 )
@@ -5180,7 +5221,6 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
         _request, outcome = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -5270,7 +5310,6 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
         _request, outcome = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -5349,7 +5388,6 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
         _request, outcome = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -5760,7 +5798,6 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
         _request, waiter = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -5886,7 +5923,6 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
         _request, waiter = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -5958,7 +5994,9 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
             read_dispatch = runner._provider_dispatch.read_dispatch_read
 
             async def fail_adopted_read(cut, **kwargs):
-                if cut.context_binding_revision_id == derive_id("binding", "revision", cut.turn_id, "1"):
+                if cut.context_binding_revision_id == derive_id(
+                    "binding", "revision", cut.turn_id, "1"
+                ):
                     raise RuntimeError("injected post-rotation read failure")
                 return await read_dispatch(cut, **kwargs)
 
@@ -5975,7 +6013,6 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
         _request, waiter = await owner.request_manual(
             command_id=_name("command"),
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             expected_turn_id=turn_id,
             force=True,
         )
@@ -6214,7 +6251,9 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
     assert source_wire_quotes[0][0] <= source_wire_quotes[0][1]
     assert len(model.summary_transport.contexts) == 1
     assert (
-        model.summary_transport.contexts[0].provider_wire_input_plan.quote.budget_input_tokens
+        model.summary_transport.contexts[
+            0
+        ].provider_wire_input_plan.quote.budget_input_tokens
         <= (source_wire_quotes[0][1])
     )
     assert len(model.requests) == 2
@@ -6290,7 +6329,6 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     assert runner._continuity.current_view(scope) is None
     assert (
@@ -6768,10 +6806,12 @@ def test_saved_remember_id_can_be_used_as_a_memory_basis_without_tool_citation(
         ).fetchall()
     assert len(rows) == 2
     by_statement = {statement: fact_id for fact_id, statement in rows}
-    assert relations == [(
-        by_statement["The design review needs a slide deck."],
-        by_statement["The design review is on Tuesday."],
-    )]
+    assert relations == [
+        (
+            by_statement["The design review needs a slide deck."],
+            by_statement["The design review is on Tuesday."],
+        )
+    ]
 
 
 def test_round8_memory_policy_aggregates_steers_and_resets_on_next_root_message(
@@ -7357,7 +7397,7 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
             client_submission_id=future_command_id,
             delivery_mode=PromptDeliveryMode.NEW_TURN,
             target_turn_id=None,
-            permission_snapshot_id='permission:ip5dah7yjavpek6v2qu5lztnge',
+            permission_snapshot_id="permission:ip5dah7yjavpek6v2qu5lztnge",
             requested_permission_mode=DEFAULT_PERMISSION_MODE,
             model_call_binding=test_model_binding(test_model_runtime()),
             content=FrozenPromptContent.text("future"),
@@ -7844,7 +7884,10 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    memory_ids = tuple(derive_id("memory", "test-fixture", f"memory:{index:064x}") for index in range(50))
+    memory_ids = tuple(
+        derive_id("memory", "test-fixture", f"memory:{index:064x}")
+        for index in range(50)
+    )
     result_id = _seed_artifact_result_with_memory_provenance(
         repository,
         lease=lease,
@@ -8144,12 +8187,21 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
     )
     service = preparation(tmp_path)
     target = LocalMcpTarget("fixture", service.workspace_root)
-    args = {'action': "ADD_LOCAL_MCP", 'config': {
+    args = {
+        "action": "ADD_LOCAL_MCP",
+        "config": {
             "transport": {
                 "type": "streamable_http",
                 "endpoint": "https://example.org/mcp",
             }
-        }, 'target': {"kind": "MCP_CONNECTION", 'scope': "WORKSPACE", 'source_kind': 'LOCAL', 'server_id': "fixture"}}
+        },
+        "target": {
+            "kind": "MCP_CONNECTION",
+            "scope": "WORKSPACE",
+            "source_kind": "LOCAL",
+            "server_id": "fixture",
+        },
+    }
     model = _ScriptedModel(
         [
             _named_tool_stream(
@@ -8192,7 +8244,7 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
     live_bus = LiveAgentEventBus()
     tools = DirectKernelToolPort(
         workspace_root=service.workspace_root,
-        host_owner_id='host:qvikojvw2x5443ozczauskeqrq',
+        host_owner_id="host:qvikojvw2x5443ozczauskeqrq",
         session_id=session_id,
         live_bus=live_bus,
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -8281,7 +8333,7 @@ def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
     live_bus = LiveAgentEventBus()
     tools = DirectKernelToolPort(
         workspace_root=workspace,
-        host_owner_id='host:cm55ctep4ovvaazbgmtwxh6ufq',
+        host_owner_id="host:cm55ctep4ovvaazbgmtwxh6ufq",
         session_id=session_id,
         live_bus=live_bus,
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -8354,7 +8406,7 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
     live_bus = LiveAgentEventBus()
     tools = DirectKernelToolPort(
         workspace_root=tmp_path,
-        host_owner_id='host:yinyxklzunar54s7objjdbphcy',
+        host_owner_id="host:yinyxklzunar54s7objjdbphcy",
         session_id=session_id,
         live_bus=live_bus,
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -8392,7 +8444,6 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
     assert result.final_text == "done"
     snapshot = tools.todo_owner.snapshot(
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     assert snapshot is not None and snapshot.revision == 1
     assert [item.text for item in snapshot.ordered_items] == [
@@ -8430,10 +8481,12 @@ def test_stage2_live_bus_overflow_is_nonblocking_and_returns_gap() -> None:
         assert (
             bus.offer_nowait(
                 event_type=LiveEventType.TEXT_DELTA,
-                session_id='session:tpsqggcbte7fwanzpf642ljwli',
+                session_id="session:tpsqggcbte7fwanzpf642ljwli",
                 turn_id="turn",
                 draft_identity="draft",
-                payload=TextDeltaPayload(block_identity='block:b6jcz3ejkiu6yivknhzowsm5eu', delta=str(index)),
+                payload=TextDeltaPayload(
+                    block_identity="block:b6jcz3ejkiu6yivknhzowsm5eu", delta=str(index)
+                ),
             )
             is not None
         )
@@ -8444,11 +8497,11 @@ def test_stage2_live_bus_overflow_is_nonblocking_and_returns_gap() -> None:
     assert (
         bus.offer_nowait(
             event_type=LiveEventType.TEXT_END,
-            session_id='session:tpsqggcbte7fwanzpf642ljwli',
+            session_id="session:tpsqggcbte7fwanzpf642ljwli",
             turn_id="turn",
             draft_identity="draft",
             payload=TextEndPayload(
-                block_identity='block:b6jcz3ejkiu6yivknhzowsm5eu',
+                block_identity="block:b6jcz3ejkiu6yivknhzowsm5eu",
                 final_text="",
                 utf8_bytes=0,
                 digest=live_digest(""),
@@ -8465,10 +8518,12 @@ def test_stage2_live_cursor_is_client_owned_and_lost_response_is_repeatable() ->
     for index in range(3):
         bus.offer_nowait(
             event_type=LiveEventType.TEXT_DELTA,
-            session_id='session:tpsqggcbte7fwanzpf642ljwli',
+            session_id="session:tpsqggcbte7fwanzpf642ljwli",
             turn_id="turn",
-            draft_identity='entry:f2p7dd2kp6ignlhrwpv4ul2vau',
-            payload=TextDeltaPayload(block_identity='block:b6jcz3ejkiu6yivknhzowsm5eu', delta=str(index)),
+            draft_identity="entry:f2p7dd2kp6ignlhrwpv4ul2vau",
+            payload=TextDeltaPayload(
+                block_identity="block:b6jcz3ejkiu6yivknhzowsm5eu", delta=str(index)
+            ),
         )
     first = bus.observe(observer, after_revision=0, maximum_events=2)
     repeated = bus.observe(observer, after_revision=0, maximum_events=2)
@@ -8478,10 +8533,10 @@ def test_stage2_live_cursor_is_client_owned_and_lost_response_is_repeatable() ->
     assert tuple(item.revision for item in tail.events) == (3,)
     settlement = bus.offer_settlement_nowait(
         kind=LiveSettlementKind.COMMITTED,
-        session_id='session:tpsqggcbte7fwanzpf642ljwli',
+        session_id="session:tpsqggcbte7fwanzpf642ljwli",
         turn_id="turn",
-        draft_identity='entry:f2p7dd2kp6ignlhrwpv4ul2vau',
-        committed_entry_id='entry:f2p7dd2kp6ignlhrwpv4ul2vau',
+        draft_identity="entry:f2p7dd2kp6ignlhrwpv4ul2vau",
+        committed_entry_id="entry:f2p7dd2kp6ignlhrwpv4ul2vau",
     )
     assert settlement is not None
     terminal = bus.observe(observer, after_revision=3, maximum_events=2)
@@ -8635,7 +8690,6 @@ def test_round5a1_assistant_settlement_conflict_preserves_epoch_without_hanging(
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     assert runner._continuity.current_view(scope) is not None
     with provider.connection(
@@ -8705,8 +8759,7 @@ def test_round5a1_completed_tool_item_then_incomplete_has_zero_canonical_effect(
             "JOIN pulsara_v3.transcript_entries AS entry "
             "ON entry.session_id = attempt.session_id "
             "AND entry.id = attempt.assistant_entry_id "
-            "WHERE attempt.session_id = %s "
-            "AND entry.conversation_scope_kind = 'SUBAGENT_TASK'",
+            "WHERE attempt.session_id = %s ",
             (session_id,),
         ).fetchone() == (0,)
         assert connection.execute(
@@ -8919,7 +8972,6 @@ def test_round5a1_replay_fragment_binds_only_after_exact_assistant_winner(
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     first_view = runner._continuity.current_view(scope)
     assert first_view is not None
@@ -9032,7 +9084,6 @@ def test_round5a1_complete_tool_loop_replays_exact_reasoning_on_second_call(
     scope = ProviderInputContinuityScope(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     view = runner._continuity.current_view(scope)
     assert view is not None
@@ -9549,518 +9600,6 @@ def test_stage2_lost_tool_request_ack_confirms_before_single_dispatch(
         ).fetchone() == (1,)
 
 
-def test_stage2_subagent_runner_produces_durable_message_child(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    parent_turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=parent_turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("delegate"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    task_id = accept_active_subagent_fixture(
-        repository,
-        lease,
-        parent_turn_id=parent_turn_id,
-        objective="produce one message",
-    )
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=_ScriptedModel([_text_stream("child answer")]),
-        tools=StructuredToolPort(_AssertingTool(provider, session_id)),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        subagent_runtime=Round10TestSubagentRuntime(
-            session_id=session_id,
-            task_id=task_id,
-            parent_turn_id=parent_turn_id,
-            objective="produce one message",
-        ),
-    )
-    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        children = connection.execute(
-            "SELECT child_kind, child_ordinal, entry_id "
-            "FROM pulsara_v3.subagent_task_children "
-            "WHERE session_id = %s AND task_id = %s "
-            "ORDER BY child_ordinal",
-            (session_id, task_id),
-        ).fetchall()
-        assert children == [
-            ("MESSAGE", 0, result.final_entry_id),
-            ("RESULT", 1, result.final_entry_id),
-        ]
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.agent_events "
-            "WHERE session_id = %s AND event_type = 'SubagentMessageAccepted'",
-            (session_id,),
-        ).fetchone() == (1,)
-
-
-@pytest.mark.parametrize(
-    ("api", "scripts", "expected_text"),
-    (
-        ("openai_chat_completions", _round5a1_chat_scripts(), "chat final"),
-        ("openai_responses", _round5a1_responses_scripts(), "responses final"),
-    ),
-)
-def test_round10_child_cold_seed_then_same_epoch_wire_prefix_is_exact(
-    stage2_migrated_postgres_database,
-    api: str,
-    scripts: tuple[tuple[dict[str, object], ...], ...],
-    expected_text: str,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    parent_turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=parent_turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("delegate an exact child tool loop"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    objective = "use the virtual terminal and finish"
-    profile = RouteWireProfile(
-        id=f"test:{api}:round10-child",
-        wire_api=api,
-    )
-    model_runtime = test_model_runtime(
-        api_key="sk-fixture-secret",
-        base_url="https://example.invalid/v1",
-        model_id="test-pro",
-        wire_api=api,
-        route_wire_profile=profile,
-    )
-    task_id = accept_active_subagent_fixture(
-        repository,
-        lease,
-        parent_turn_id=parent_turn_id,
-        objective=objective,
-        model_runtime=model_runtime,
-    )
-    model = _SequencedDirectKernelModel(
-        model_runtime=model_runtime,
-        scripts=scripts,
-    )
-    tools = _AssertingTool(provider, session_id)
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(tools),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        subagent_runtime=Round10TestSubagentRuntime(
-            session_id=session_id,
-            task_id=task_id,
-            parent_turn_id=parent_turn_id,
-            objective=objective,
-        ),
-    )
-    cold = _RecordingColdEpochAssembler(runner._provider_dispatch._cold_epoch_assembler)
-    runner._provider_dispatch._cold_epoch_assembler = cold
-
-    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-
-    assert result.final_text == expected_text
-    assert result.model_call_count == 2
-    assert result.tool_call_count == 1
-    assert len(tools.invocations) == 1
-    assert len(cold.semantic_seeds) == 1
-    assert isinstance(cold.semantic_seeds[0], SubagentInitialSeed)
-    assert cold.finalized == 1
-    assert len(model.requests) == 2
-    first, second = model.requests
-    assert (
-        first.compiled_input.canonical_input_identity.scope_subagent_task_id == task_id
-    )
-    assert first.wire_input_plan.wire_system_fingerprint == (
-        second.wire_input_plan.wire_system_fingerprint
-    )
-    assert first.wire_input_plan.materialization.tool_items == (
-        second.wire_input_plan.materialization.tool_items
-    )
-    first_wire = first.wire_input_plan.materialization.ordered_input_items
-    second_wire = second.wire_input_plan.materialization.ordered_input_items
-    assert second_wire[: len(first_wire)] == first_wire
-    assert len(second_wire) > len(first_wire)
-
-
-def test_round10_sole_report_result_atomically_completes_child_without_second_model_call(
-    stage2_migrated_postgres_database,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    parent_turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=parent_turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("delegate explicit result"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    objective = "produce a sole explicit result"
-    task_id = accept_active_subagent_fixture(
-        repository,
-        lease,
-        parent_turn_id=parent_turn_id,
-        objective=objective,
-    )
-    model = _ScriptedModel(
-        [
-            _named_tool_stream(
-                tool_name="report_agent_result",
-                tool_call_id="call:report",
-                arguments={
-                    "summary": "exact explicit summary",
-                    "output_preview": "file.py:42",
-                    "diagnostics": [{"code": "CHECKED", "severity": "info"}],
-                },
-            )
-        ]
-    )
-    delegate = _AssertingTool(provider, session_id)
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(
-            delegate,
-            tool_names=("report_agent_result",),
-        ),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        subagent_runtime=Round10TestSubagentRuntime(
-            session_id=session_id,
-            task_id=task_id,
-            parent_turn_id=parent_turn_id,
-            objective=objective,
-        ),
-    )
-    original_accept = repository.accept_explicit_subagent_result
-    lost_ack = False
-
-    def commit_then_timeout(*args: object, **kwargs: object):
-        nonlocal lost_ack
-        accepted = original_accept(*args, **kwargs)
-        if not lost_ack:
-            lost_ack = True
-            raise TimeoutError("explicit result commit ACK lost")
-        return accepted
-
-    monkeypatch.setattr(
-        repository,
-        "accept_explicit_subagent_result",
-        commit_then_timeout,
-    )
-    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-    assert lost_ack
-    assert result.final_text == "exact explicit summary"
-    assert result.model_call_count == 1
-    assert result.tool_call_count == 1
-    assert len(model.requests) == 1
-    assert delegate.invocations == []
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        assert connection.execute(
-            "SELECT status FROM pulsara_v3.turns "
-            "WHERE session_id=%s AND conversation_scope_kind='SUBAGENT_TASK'",
-            (session_id,),
-        ).fetchone() == ("COMPLETED",)
-        assert connection.execute(
-            "SELECT t.status, c.result_source, c.summary, c.output_preview "
-            "FROM pulsara_v3.subagent_tasks AS t "
-            "JOIN pulsara_v3.subagent_task_children AS c "
-            "ON c.session_id=t.session_id AND c.task_id=t.id "
-            "AND c.child_kind='RESULT' "
-            "WHERE t.session_id=%s AND t.id=%s",
-            (session_id, task_id),
-        ).fetchone() == (
-            "COMPLETED",
-            "EXPLICIT",
-            "exact explicit summary",
-            "file.py:42",
-        )
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts AS a "
-            "JOIN pulsara_v3.transcript_entries AS e "
-            "ON e.session_id=a.session_id AND e.id=a.assistant_entry_id "
-            "WHERE a.session_id=%s AND e.conversation_scope_kind='SUBAGENT_TASK'",
-            (session_id,),
-        ).fetchone() == (1,)
-
-    accepted = asyncio.run(
-        runner.accept_subagent_completion(
-            turn_id=parent_turn_id,
-            task_id=task_id,
-            command_id=_name("command"),
-            actor_id='host:yinyxklzunar54s7objjdbphcy',
-            deadline_monotonic=monotonic() + 30,
-            admitted_writer=CompactionWriteReservation(ModelInputScopeKind.ROOT, None),
-        )
-    )
-    assert accepted is not None
-    safe_point = ProviderSafePointCoordinator(repository=repository, guard=lease.guard)
-    handle = safe_point.freeze_provider_input(
-        turn_id=parent_turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    try:
-        materialized = CanonicalProviderInputReader(provider).read_frozen_snapshot(
-            handle.cut,
-            deadline_monotonic=monotonic() + 30,
-        )
-    finally:
-        handle.close()
-    envelope = json.loads(provider_input_item_text(materialized.items[-1]))[
-        "pulsara_inter_agent_message"
-    ]
-    assert set(envelope) == {"message_type", "sender", "content"}
-    assert envelope["content"]["result"]["summary"] == "exact explicit summary"
-    assert (
-        materialized.items[-1].input_origin
-        is CanonicalInputOriginKind.INTER_AGENT_MESSAGE
-    )
-
-
-def test_round10_mixed_report_batch_has_zero_attempt_and_physical_effect_then_recovers(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    parent_turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=parent_turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("delegate mixed report rejection"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    objective = "recover after an invalid mixed result batch"
-    task_id = accept_active_subagent_fixture(
-        repository,
-        lease,
-        parent_turn_id=parent_turn_id,
-        objective=objective,
-    )
-    mixed = _named_tool_stream(
-        tool_name="report_agent_result",
-        tool_call_id="call:report-mixed",
-        arguments={"summary": "must not win"},
-    ) + _named_tool_stream(
-        tool_name="terminal",
-        tool_call_id="call:effect-mixed",
-        arguments={"command": "must-not-dispatch"},
-    )
-    model = _ScriptedModel([mixed, _text_stream("recovered inferred result")])
-    delegate = _AssertingTool(provider, session_id)
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(
-            delegate,
-            tool_names=("report_agent_result", "terminal"),
-        ),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        subagent_runtime=Round10TestSubagentRuntime(
-            session_id=session_id,
-            task_id=task_id,
-            parent_turn_id=parent_turn_id,
-            objective=objective,
-        ),
-    )
-    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-    assert result.final_text == "recovered inferred result"
-    assert result.model_call_count == 2
-    assert delegate.invocations == []
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts AS a "
-            "JOIN pulsara_v3.transcript_entries AS e "
-            "ON e.session_id=a.session_id AND e.id=a.assistant_entry_id "
-            "WHERE a.session_id=%s AND e.conversation_scope_kind='SUBAGENT_TASK'",
-            (session_id,),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT result_source, summary "
-            "FROM pulsara_v3.subagent_task_children "
-            "WHERE session_id=%s AND task_id=%s AND child_kind='RESULT'",
-            (session_id, task_id),
-        ).fetchone() == ("INFERRED", "recovered inferred result")
-
-
-def test_round5a1_subagent_incomplete_response_has_no_assistant_or_tool_effect(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    parent_turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=parent_turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("delegate"),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    objective = "produce one bounded answer"
-    task_id = accept_active_subagent_fixture(
-        repository,
-        lease,
-        parent_turn_id=parent_turn_id,
-        objective=objective,
-    )
-
-    async def incomplete_stream(_request):
-        yield TextStartPayload("text:partial")
-        yield TextDeltaPayload("text:partial", "partial")
-        raise ProviderModelOutputIncomplete(
-            ProviderOutputIncompleteReason.OUTPUT_TOKEN_LIMIT
-        )
-
-    tools = _AssertingTool(provider, session_id)
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=CallbackScriptedKernelModel(incomplete_stream),
-        tools=StructuredToolPort(tools),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        subagent_runtime=Round10TestSubagentRuntime(
-            session_id=session_id,
-            task_id=task_id,
-            parent_turn_id=parent_turn_id,
-            objective=objective,
-        ),
-    )
-
-    with pytest.raises(ProviderModelOutputIncomplete):
-        asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-    assert tools.invocations == []
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.transcript_entries "
-            "WHERE session_id = %s AND conversation_scope_kind = "
-            "'SUBAGENT_TASK' AND entry_kind IN "
-            "('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')",
-            (session_id,),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts AS attempt "
-            "JOIN pulsara_v3.transcript_entries AS entry "
-            "ON entry.session_id = attempt.session_id "
-            "AND entry.id = attempt.assistant_entry_id "
-            "WHERE attempt.session_id = %s "
-            "AND entry.conversation_scope_kind = 'SUBAGENT_TASK'",
-            (session_id,),
-        ).fetchone() == (0,)
-
-
 def test_stage2_confirmation_without_controller_keeps_policy_and_result_closed(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -10269,190 +9808,3 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
     )
     assert page.text == "z" * 32_000
     assert page.has_more
-
-
-@pytest.mark.parametrize("drift", ["model", "reasoning"])
-def test_subagent_default_target_is_inherited_from_the_dispatched_parent_epoch(
-    stage2_migrated_postgres_database, drift,
-) -> None:
-    from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
-    from pulsara_agent.conversation_kernel.execution_watchdogs import KernelExecutionDeadlineFactory
-    from pulsara_agent.conversation_kernel.subagents.launch import CanonicalSubagentLaunchPreparationPort
-    from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
-    from pulsara_agent.primitives.permission import PermissionMode
-
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id, workspace_id = _name('session'), _name('workspace')
-    lease = _acquire_bound_host_writer(repository, session_id=session_id, workspace_id=workspace_id,
-        writer_owner_id=_name('host'), lease_seconds=30, deadline_monotonic=monotonic()+30)
-    model = _ScriptedModel([
-        _named_tool_stream(tool_name='spawn_agent', tool_call_id='call:delegate', arguments={'task': 'inherit exact parent target'}),
-        _text_stream('parent stays usable'),
-    ])
-    original_runtime = model.model_runtime
-    from pulsara_agent.llm.model_catalog import ReasoningFixedOn
-    changed_runtime = test_model_runtime(
-        model_id='changed-after-dispatch' if drift == 'model' else 'test-pro',
-        reasoning=ReasoningFixedOn() if drift == 'reasoning' else None,
-        wire_api='openai_chat_completions')
-    observed = {}
-    io = KernelSessionIO()
-
-    class Delegate(_AssertingTool):
-        async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
-            scope = ProviderInputContinuityScope(session_id, ModelInputScopeKind.ROOT, None)
-            cohort = runner._continuity.current_cohort(scope)
-            assert cohort is not None
-            observed['cohort'] = cohort
-            # The saved connection ID stays identical while its target metadata changes.
-            launch._model_runtime = changed_runtime
-            result = await manager.invoke(tool_name=tool_name, arguments=arguments, invocation_context=invocation_context)
-            observed['result'] = result
-            assert runner._continuity.current_cohort(scope) is cohort
-            return result
-
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=original_runtime.freeze_resolution_snapshot,
-        repository=repository, writer_lease=lease, model=model,
-        tools=StructuredToolPort(Delegate(provider, session_id), tool_names=('spawn_agent',)),
-        live_bus=LiveAgentEventBus(), context_source_collector=StaticContextSourceCollector(),
-        workspace_id=workspace_id,
-    )
-    launch = CanonicalSubagentLaunchPreparationPort(
-        repository=repository, guard=lease.guard, io_owner=io, model_runtime=original_runtime,
-        deadline_factory=KernelExecutionDeadlineFactory(),
-        inherit_parent_target=runner._continuity.subagent_parent_target,
-    )
-    manager = KernelSubagentManager(repository=repository, guard=lease.guard,
-        host_owner_id='test:parent-target', io_owner=io, live_bus=LiveAgentEventBus(),
-        todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch='test:parent-target'),
-        launch_preparation=launch, hook_workspace_root=Path.cwd)
-    def unexpected_runner(_scope):
-        raise AssertionError('drifted child must fail before runner creation')
-    manager.bind_runner_factory(unexpected_runner)
-
-    async def exercise():
-        try:
-            result = await runner.run_turn(frozen_test_prompt('delegate'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            assert result.final_text == 'parent stays usable'
-            assert observed['result'].state == 'SUCCESS'
-            rows = repository.list_subagent_tasks(session_id=session_id, maximum_items=50, deadline_monotonic=monotonic()+30)
-            assert len(rows) == 1
-            binding, fact = repository.read_subagent_task_model_target(lease.guard, task_id=rows[0]['id'], deadline_monotonic=monotonic()+30)
-            from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
-            bundle = observed['cohort'].target_bundle
-            assert fact == FrozenSubagentModelTarget.freeze(bundle.target_fact, bundle.reasoning_contract)
-            assert fact.model_id == 'test-pro'
-            assert rows[0]['status'] == 'FAILED'
-            assert (
-                'ModelRuntimeUnavailable: current runtime cannot reproduce the frozen model target'
-                if drift == 'model' else 'target changed'
-            ) in str(rows[0]['terminal_public_detail'])
-            explicit_binding, explicit_fact = launch.freeze_target(binding, use_default=False)
-            assert explicit_binding == binding
-            assert explicit_fact.model_id == ('changed-after-dispatch' if drift == 'model' else 'test-pro')
-            assert explicit_fact != fact
-            if drift == 'reasoning':
-                assert explicit_fact.reasoning_contract.kind == 'fixed_on'
-                assert fact.reasoning_contract.kind == 'provider_default'
-            first, second = model.requests
-            assert first.compiled_input.system_prompt == second.compiled_input.system_prompt
-            assert first.compiled_input.tools == second.compiled_input.tools
-        finally:
-            await manager.aclose(deadline_monotonic=monotonic()+5)
-            await io.aclose(deadline_monotonic=monotonic()+5)
-    asyncio.run(exercise())
-
-
-def test_subagent_completion_reservation_reduces_from_sixteen_to_one(
-    stage2_migrated_postgres_database,
-) -> None:
-    from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
-    from pulsara_agent.conversation_kernel.execution_watchdogs import KernelExecutionDeadlineFactory
-    from pulsara_agent.conversation_kernel.subagents.launch import CanonicalSubagentLaunchPreparationPort
-    from pulsara_agent.conversation_kernel.todo_runtime import TodoRunStateOwner
-    from pulsara_agent.primitives.permission import PermissionMode
-
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id, workspace_id = _name('session'), _name('workspace')
-    lease = _acquire_bound_host_writer(repository, session_id=session_id, workspace_id=workspace_id,
-        writer_owner_id=_name('host'), lease_seconds=30, deadline_monotonic=monotonic()+30)
-    model = _ScriptedModel([
-        _named_tool_stream(tool_name='create_agent_tasks', tool_call_id='call:delegate', arguments={'tasks': [{'task': 'one task'}]}),
-        _text_stream('parent stays usable'),
-        _text_stream('parent stays usable'),
-    ])
-    original_runtime = model.model_runtime
-    observed = {}
-    io = KernelSessionIO()
-
-    class Delegate(_AssertingTool):
-        async def invoke(self, *, tool_name, arguments, invocation_context, **kwargs):
-            scope = ProviderInputContinuityScope(session_id, ModelInputScopeKind.ROOT, None)
-            cohort = runner._continuity.current_cohort(scope)
-            assert cohort is not None
-            observed['cohort'] = cohort
-            result = await manager.invoke(tool_name=tool_name, arguments=arguments, invocation_context=invocation_context)
-            observed['result'] = result
-            assert runner._continuity.current_cohort(scope) is cohort
-            return result
-
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=original_runtime.freeze_resolution_snapshot,
-        repository=repository, writer_lease=lease, model=model,
-        tools=StructuredToolPort(Delegate(provider, session_id), tool_names=('create_agent_tasks',)),
-        live_bus=LiveAgentEventBus(), context_source_collector=StaticContextSourceCollector(),
-        workspace_id=workspace_id,
-    )
-    launch = CanonicalSubagentLaunchPreparationPort(
-        repository=repository, guard=lease.guard, io_owner=io, model_runtime=original_runtime,
-        deadline_factory=KernelExecutionDeadlineFactory(),
-        inherit_parent_target=runner._continuity.subagent_parent_target,
-    )
-    manager = KernelSubagentManager(repository=repository, guard=lease.guard,
-        host_owner_id='test:parent-target', io_owner=io, live_bus=LiveAgentEventBus(),
-        todo_owner=TodoRunStateOwner(session_id=session_id, owner_epoch='test:parent-target'),
-        launch_preparation=launch, hook_workspace_root=Path.cwd)
-    def unexpected_runner(_scope):
-        raise AssertionError('drifted child must fail before runner creation')
-    manager.bind_runner_factory(unexpected_runner)
-
-    runner._subagent_runtime = manager
-    runner._provider_dispatch._subagent_runtime = manager
-    quote_counts = []
-    original_quote = runner._quote_post_response_resources
-    original_require = runner._require_post_response_resources
-    def quote(**kwargs):
-        observed['count'] = kwargs['root_completion_followup_items']
-        quote_counts.append(observed['count'])
-        return original_quote(**kwargs)
-    def require(value, **kwargs):
-        if observed['count'] > 1:
-            raise OutputResourceInterruption('provider_wire_input', value)
-        return original_require(value, **kwargs)
-    runner._quote_post_response_resources = quote
-    runner._require_post_response_resources = require
-
-    async def exercise():
-        try:
-            result = await runner.run_turn(frozen_test_prompt('delegate'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            assert result.final_text == 'parent stays usable'
-            assert observed['result'].state == 'SUCCESS'
-            rows = repository.list_subagent_tasks(session_id=session_id, maximum_items=50, deadline_monotonic=monotonic()+30)
-            assert len(rows) == 1
-            binding, fact = repository.read_subagent_task_model_target(lease.guard, task_id=rows[0]['id'], deadline_monotonic=monotonic()+30)
-            from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
-            bundle = observed['cohort'].target_bundle
-            assert fact == FrozenSubagentModelTarget.freeze(bundle.target_fact, bundle.reasoning_contract)
-            assert quote_counts[:16] == list(range(16, 0, -1))
-            assert len(rows) == 1
-            assert manager._root_completion_delivery_limit == 1
-            first, second = model.requests[:2]
-            assert first.compiled_input.system_prompt == second.compiled_input.system_prompt
-            assert first.compiled_input.tools == second.compiled_input.tools
-        finally:
-            await manager.aclose(deadline_monotonic=monotonic()+5)
-            await io.aclose(deadline_monotonic=monotonic()+5)
-    asyncio.run(exercise())

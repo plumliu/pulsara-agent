@@ -110,9 +110,7 @@ class HistoryProjectionRepository:
                 covered_entry_sequence=cut,
             )
 
-    def publish(
-        self, build: HistoryBuildSuccess, *, deadline_monotonic: float
-    ) -> str:
+    def publish(self, build: HistoryBuildSuccess, *, deadline_monotonic: float) -> str:
         if not isinstance(build, HistoryBuildSuccess):
             raise TypeError("history publication requires a successful canonical build")
         if build.memory_domain_id is None:
@@ -135,8 +133,7 @@ class HistoryProjectionRepository:
                 return "parent_missing"
             question = connection.execute(
                 """SELECT 1 FROM pulsara_v3.transcript_entries
-                   WHERE session_id=%s AND id=%s AND entry_kind='USER_MESSAGE'
-                     AND conversation_scope_kind='ROOT'""",
+                   WHERE session_id=%s AND id=%s AND entry_kind='USER_MESSAGE'""",
                 (build.session_id, build.q1_entry_id),
             ).fetchone()
             if question is None:
@@ -155,7 +152,9 @@ class HistoryProjectionRepository:
                 "DELETE FROM pulsara_v3.history_search_documents WHERE session_id=%s AND q1_entry_id=%s",
                 (build.session_id, build.q1_entry_id),
             )
-            expected = [[variant, tools] for variant, tools in sorted(build.expected_variants)]
+            expected = [
+                [variant, tools] for variant, tools in sorted(build.expected_variants)
+            ]
             for (variant, tools), document in sorted(build.documents.items()):
                 messages = document["messages"]
                 connection.execute(
@@ -212,16 +211,14 @@ class HistoryProjectionRepository:
         ) as connection:
             rows = connection.execute(
                 """WITH changed AS MATERIALIZED (
-                     SELECT id,entry_kind,entry_owner_kind,turn_id,
+                     SELECT id,entry_kind,input_origin,entry_owner_kind,turn_id,
                             imported_history_group_id,entry_sequence
                      FROM pulsara_v3.transcript_entries
                      WHERE session_id=%s AND id=ANY(%s)
-                       AND conversation_scope_kind='ROOT'
                    ), affected AS (
                      SELECT q.id FROM changed e
                      JOIN pulsara_v3.transcript_entries q
-                       ON q.session_id=%s AND q.entry_kind='USER_MESSAGE'
-                      AND q.conversation_scope_kind='ROOT'
+                       ON q.session_id=%s AND q.entry_kind='USER_MESSAGE' AND q.input_origin IN ('HUMAN_MESSAGE','AGENT_INSTRUCTION')
                       AND q.entry_owner_kind=e.entry_owner_kind
                       AND ((e.entry_owner_kind='EXECUTED_TURN' AND q.turn_id=e.turn_id)
                         OR (e.entry_owner_kind='IMPORTED_HISTORY'
@@ -230,11 +227,10 @@ class HistoryProjectionRepository:
                      SELECT previous.id FROM changed e
                      CROSS JOIN LATERAL (
                        SELECT q.id FROM pulsara_v3.transcript_entries q
-                       WHERE q.session_id=%s AND q.entry_kind='USER_MESSAGE'
-                         AND q.conversation_scope_kind='ROOT'
+                       WHERE q.session_id=%s AND q.entry_kind='USER_MESSAGE' AND q.input_origin IN ('HUMAN_MESSAGE','AGENT_INSTRUCTION')
                          AND q.entry_sequence<e.entry_sequence
                        ORDER BY q.entry_sequence DESC LIMIT 1
-                     ) previous WHERE e.entry_kind='USER_MESSAGE'
+                     ) previous WHERE e.entry_kind='USER_MESSAGE' AND e.input_origin IN ('HUMAN_MESSAGE','AGENT_INSTRUCTION')
                    ) SELECT id FROM affected ORDER BY id""",
                 (session_id, list(entry_ids), session_id, session_id),
             ).fetchall()
@@ -243,7 +239,11 @@ class HistoryProjectionRepository:
     def scan_history_questions(
         self, after_id: str, page_size: int, *, deadline_monotonic: float
     ) -> HistoryProjectionPage:
-        if isinstance(page_size, bool) or not isinstance(page_size, int) or page_size < 1:
+        if (
+            isinstance(page_size, bool)
+            or not isinstance(page_size, int)
+            or page_size < 1
+        ):
             raise ValueError("history scan page size must be positive")
         with self._provider.connection(
             lane=PostgresConnectionLane.BACKGROUND_WORK,
@@ -256,23 +256,23 @@ class HistoryProjectionRepository:
                             e.turn_id,e.imported_history_group_id,s.latest_entry_sequence
                      FROM pulsara_v3.transcript_entries e
                      JOIN pulsara_v3.sessions s ON s.id=e.session_id
-                     WHERE e.id>%s AND e.conversation_scope_kind='ROOT'
-                       AND e.entry_kind='USER_MESSAGE'
+                     WHERE e.id>%s
+                       AND e.entry_kind='USER_MESSAGE' AND e.input_origin IN ('HUMAN_MESSAGE','AGENT_INSTRUCTION')
                      ORDER BY e.id LIMIT %s
                    ) SELECT q.id,q.session_id,q.entry_sequence,q.latest_entry_sequence,
                      CASE WHEN q.entry_owner_kind='EXECUTED_TURN' THEN
                        (SELECT max(e.entry_sequence) FROM pulsara_v3.transcript_entries e
-                        WHERE e.session_id=q.session_id AND e.conversation_scope_kind='ROOT'
+                        WHERE e.session_id=q.session_id
                           AND e.entry_owner_kind='EXECUTED_TURN' AND e.turn_id=q.turn_id)
                      ELSE
                        (SELECT max(e.entry_sequence) FROM pulsara_v3.transcript_entries e
-                        WHERE e.session_id=q.session_id AND e.conversation_scope_kind='ROOT'
+                        WHERE e.session_id=q.session_id
                           AND e.entry_owner_kind='IMPORTED_HISTORY'
                           AND e.imported_history_group_id=q.imported_history_group_id)
                      END AS owner_tail,
                      (SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
-                      WHERE e.session_id=q.session_id AND e.conversation_scope_kind='ROOT'
-                        AND e.entry_kind='USER_MESSAGE' AND e.entry_sequence>q.entry_sequence
+                      WHERE e.session_id=q.session_id
+                        AND e.entry_kind='USER_MESSAGE' AND e.input_origin IN ('HUMAN_MESSAGE','AGENT_INSTRUCTION') AND e.entry_sequence>q.entry_sequence
                       ORDER BY e.entry_sequence LIMIT 1) AS successor_sequence,
                      (SELECT jsonb_agg(jsonb_build_array(d.variant,d.include_tools,
                                d.covered_entry_sequence,d.expected_variants))

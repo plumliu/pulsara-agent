@@ -13,7 +13,7 @@ export function PluginConnectionEditor({ plugin, connection, onClose, onSave, on
   const transport = record(connection.config.transport);
   const server: UserMcpServerCapability = {
     id: connection.serverId, name: String(connection.config.display_name ?? connection.serverId), enabled: plugin.enabled,
-    status: plugin.enabled ? 'configured' : 'disabled', required: false, availableToSubagents: true,
+    status: plugin.enabled ? 'configured' : 'disabled', required: false, availableToSubagents: connection.config.scope_policy === 'ROOT_AND_SUBAGENTS',
     toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0, instructions: '', hasFailure: false,
     transport: { kind: transport.type === 'stdio' ? 'stdio' : 'http', summary: String(transport.command ?? transport.endpoint ?? '') },
     tools: [], config: connection.config, currentIdentity: plugin.packageInstallId,
@@ -28,6 +28,7 @@ export function PluginConnectionEditor({ plugin, connection, onClose, onSave, on
     return onSave({
       overlay: {
         local_server_id: connection.serverId, transport_kind: next.type,
+        scope_policy: input.config.scope_policy,
         endpoint: next.type === 'stdio' ? null : next.endpoint !== defaults.endpoint || prior.endpoint != null ? next.endpoint : null,
         public_headers: difference(input.config.public_headers, connection.defaults.public_headers, prior.public_headers),
         environment: difference(next.env, defaults.env, prior.environment),

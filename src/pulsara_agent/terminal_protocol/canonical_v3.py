@@ -157,32 +157,23 @@ _ENTRY_TYPES = frozenset(
         CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED.value,
         CommittedEventType.USER_CONTROL_FEEDBACK_ACCEPTED.value,
         CommittedEventType.PLAN_CONTINUATION_ACCEPTED.value,
-        CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.value,
     }
 )
-_EVENT_ONLY_TYPES = frozenset(
-    {
-        CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED.value,
-        CommittedEventType.SUBAGENT_RESULT_ACCEPTED.value,
-    }
-)
-_CONTROL_TYPES = frozenset(_COMMITTED_ENUM) - _ENTRY_TYPES - _EVENT_ONLY_TYPES
+_CONTROL_TYPES = frozenset(_COMMITTED_ENUM) - _ENTRY_TYPES
 COMMITTED_PROJECTION_BRANCH_BY_TYPE: Mapping[str, str] = MappingProxyType(
     {
         event_type: (
             "IMMUTABLE_ENTRY"
             if event_type in _ENTRY_TYPES
-            else "EVENT_ONLY"
-            if event_type in _EVENT_ONLY_TYPES
             else "CURRENT_CONTROL"
         )
         for event_type in _COMMITTED_ENUM
     }
 )
 
-if len(_COMMITTED_ENUM) != 30 or len(COMMITTED_EVENT_DESCRIPTORS) != 30:
+if len(_COMMITTED_ENUM) != 25 or len(COMMITTED_EVENT_DESCRIPTORS) != 25:
     raise RuntimeError(
-        "Protocol v3 committed projection map must contain exact 30 types"
+        "Protocol v3 committed projection map must contain exact 25 types"
     )
 
 
@@ -315,8 +306,6 @@ class CanonicalProtocolReader:
         self, connection, session_id: str, event_cut: int, row: Mapping[str, object],
         *, relations=None,
     ) -> tuple[wire.TurnInterruptionNotice, ...]:
-        if row["conversation_scope_kind"] != "ROOT":
-            return ()
         if relations is not None and not relations[str(row["id"])]["may_have_notice"]:
             return ()
         sequences = (int(row["entry_sequence"]),)
@@ -644,8 +633,7 @@ class CanonicalProtocolReader:
             else:
                 self._validate_browser_history_cut(connection, session, cut_sequence, event_sequence_cut)
             rows = connection.execute(
-                """SELECT id, entry_sequence, entry_owner_kind, turn_id, imported_history_group_id,
-                          conversation_scope_kind, scope_subagent_task_id, source_subagent_task_id
+                """SELECT id, entry_sequence, entry_owner_kind, turn_id, imported_history_group_id
                    FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=ANY(%s)
                    ORDER BY entry_sequence""",
                 (session_id, entry_ids),
@@ -659,12 +647,12 @@ class CanonicalProtocolReader:
                 "event_sequence_cut": str(event_sequence_cut),
                 "entry_ids": [str(row["id"]) for row in rows],
                 "coverage": _browser_coverage(rows), "groups": [], "entry_contexts": [],
-                "tasks": [], "batches": [], "interruption_notices": [], "compactions": [],
+                "interruption_notices": [], "compactions": [],
                 "boundary_entries": [],
             }
             encoded_bytes = _browser_json_size(response)
             measured_lengths = {name: 0 for name in (
-                "groups", "entry_contexts", "tasks", "batches", "interruption_notices", "compactions",
+                "groups", "entry_contexts", "interruption_notices", "compactions",
                 "boundary_entries",
             )}
 
@@ -691,12 +679,11 @@ class CanonicalProtocolReader:
                 connection, session_id, entry_ids, cut_sequence, event_sequence_cut,
             )
             self._browser_context_groups(connection, session_id, cut_sequence, event_sequence_cut, rows, response, check_budget)
-            self._browser_context_tasks(connection, session_id, event_sequence_cut, rows, response, check_budget)
             sequences = tuple(int(row["entry_sequence"]) for row in rows)
             response["interruption_notices"] = [
                 _browser_wire(self._notice_wire(notice)) for notice in (
                     *read_executed_notices(connection, session_id=session_id, event_cut=event_sequence_cut,
-                                           entry_sequences=sequences, root_only=False),
+                                           entry_sequences=sequences),
                     *read_imported_notices(connection, session_id=session_id, entry_sequences=sequences),
                 )
             ]
@@ -716,13 +703,11 @@ class CanonicalProtocolReader:
                     """WITH requested_edges AS MATERIALIZED (
                          SELECT entry_sequence FROM pulsara_v3.transcript_entries
                          WHERE session_id=%s AND id=ANY(%s) AND entry_owner_kind='EXECUTED_TURN'
-                           AND conversation_scope_kind='ROOT'
                        ), first_acceptances AS (
                          SELECT e.entry_sequence, min(prior.event_sequence) AS first_accepted
                          FROM pulsara_v3.transcript_entries e JOIN pulsara_v3.agent_events prior
                            ON prior.session_id=e.session_id AND prior.subject_entry_id=e.id
-                         WHERE e.session_id=%s AND e.entry_owner_kind='EXECUTED_TURN'
-                           AND e.conversation_scope_kind='ROOT' AND prior.event_sequence<=%s
+                         WHERE e.session_id=%s AND e.entry_owner_kind='EXECUTED_TURN' AND prior.event_sequence<=%s
                            AND e.entry_sequence >= (SELECT min(entry_sequence) FROM requested_edges)
                          GROUP BY e.entry_sequence
                        ), edge_bounds AS (
@@ -739,7 +724,6 @@ class CanonicalProtocolReader:
                            JOIN pulsara_v3.transcript_entries e
                              ON e.session_id=prior.session_id AND e.id=prior.subject_entry_id
                            WHERE e.session_id=%s AND e.entry_owner_kind='EXECUTED_TURN'
-                             AND e.conversation_scope_kind='ROOT'
                          ) WHERE EXISTS (
                            SELECT 1 FROM pulsara_v3.transcript_entries first_entry
                            WHERE first_entry.session_id=%s AND first_entry.id=ANY(%s)
@@ -758,7 +742,7 @@ class CanonicalProtocolReader:
                          ON r.session_id=ev.session_id AND r.id=ev.subject_context_binding_revision_id
                        JOIN pulsara_v3.turns t ON t.session_id=r.session_id AND t.id=r.turn_id
                        WHERE ev.session_id=%s AND ev.event_type='CompactionAdopted'
-                         AND ev.event_sequence<=%s AND t.conversation_scope_kind='ROOT'
+                         AND ev.event_sequence<=%s
                        ORDER BY ev.event_sequence""",
                     (session_id, entry_ids, session_id, event_sequence_cut,
                      session_id, session_id, entry_ids, session_id, event_sequence_cut),
@@ -783,7 +767,7 @@ class CanonicalProtocolReader:
         # that an earlier occurrence has been observed or its page refreshed.
         events = connection.execute(
             """SELECT ev.event_id, ev.event_sequence, ev.event_type,
-                      t.id AS owner_turn_id, t.conversation_scope_kind,
+                      t.id AS owner_turn_id,
                       mount.id AS entry_id, mount.entry_sequence
                FROM pulsara_v3.agent_events ev
                LEFT JOIN pulsara_v3.turn_context_binding_revisions r
@@ -797,9 +781,7 @@ class CanonicalProtocolReader:
                  WHERE e.session_id=ev.session_id AND e.entry_owner_kind='EXECUTED_TURN'
                    AND accepted.event_sequence<ev.event_sequence
                    AND ((ev.event_type='TurnInterrupted' AND e.turn_id=t.id)
-                     OR (ev.event_type='CompactionAdopted' AND (
-                       (t.conversation_scope_kind='ROOT' AND e.conversation_scope_kind='ROOT')
-                       OR (t.conversation_scope_kind='SUBAGENT_TASK' AND e.turn_id=t.id))))
+                     OR ev.event_type='CompactionAdopted')
                  ORDER BY e.entry_sequence DESC LIMIT 1
                ) mount ON true
                WHERE ev.session_id=%s AND ev.event_id=ANY(%s)
@@ -851,8 +833,7 @@ class CanonicalProtocolReader:
         # force mounts for every older owner adoption. No bodies enter the CTEs.
         return connection.execute(
             """WITH requested AS MATERIALIZED (
-                 SELECT id, entry_sequence, entry_owner_kind, turn_id, imported_history_group_id,
-                        conversation_scope_kind, scope_subagent_task_id, source_subagent_task_id
+                 SELECT id, entry_sequence, entry_owner_kind, turn_id, imported_history_group_id
                  FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=ANY(%s)
                ), segment_owners AS MATERIALIZED (
                  SELECT owner.turn_id
@@ -917,7 +898,6 @@ class CanonicalProtocolReader:
                  ) first_entry ON true
                )
                SELECT e.id, e.entry_sequence, e.entry_owner_kind, e.turn_id, e.imported_history_group_id,
-                      e.conversation_scope_kind, e.scope_subagent_task_id, e.source_subagent_task_id,
                       previous_entry.id AS previous_id, next_entry.id AS next_id,
                       segment.event_id AS segment_event_id, mount.segment_start_id AS segment_start_id
                FROM requested e
@@ -945,46 +925,14 @@ class CanonicalProtocolReader:
         ).fetchall()
 
     def _browser_context_groups(self, connection, session_id, cut, event_cut, rows, response, check_budget):
+        session_scope = _session_scope(connection, session_id)
         groups: dict[tuple[str, str], dict[str, object]] = {}
         imported_interruptions: dict[str, int] = {}
         imported_segment_starts: dict[str, str] = {}
-        task_ids = {
-            str(row[field]) for row in rows if row["entry_owner_kind"] == "EXECUTED_TURN"
-            for field in ("scope_subagent_task_id", "source_subagent_task_id") if row[field]
-        }
-        # Retain this query's iteration order: extra parent groups are appended
-        # only after the exact entries, just as in the single-owner builder.
-        parents = connection.execute(
-            """SELECT DISTINCT parent_turn_id FROM pulsara_v3.subagent_tasks
-               WHERE session_id=%s AND id=ANY(%s)""", (session_id, list(task_ids)),
-        ).fetchall()
-        child_owners = list(dict.fromkeys(
-            str(row["turn_id"]) for row in rows
-            if row["entry_owner_kind"] == "EXECUTED_TURN" and row["conversation_scope_kind"] != "ROOT"
-        ))
-        ancestry = connection.execute(
-            """WITH RECURSIVE parents AS (
-                 SELECT t.id AS seed, t.id, t.conversation_scope_kind, task.parent_turn_id
-                 FROM pulsara_v3.turns t LEFT JOIN pulsara_v3.subagent_tasks task
-                   ON task.session_id=t.session_id AND task.id=t.scope_subagent_task_id
-                 WHERE t.session_id=%s AND t.id=ANY(%s)
-                 UNION ALL
-                 SELECT p.seed, t.id, t.conversation_scope_kind, task.parent_turn_id
-                 FROM parents p JOIN pulsara_v3.turns t ON t.id=p.parent_turn_id AND t.session_id=%s
-                 LEFT JOIN pulsara_v3.subagent_tasks task ON task.session_id=t.session_id AND task.id=t.scope_subagent_task_id)
-               SELECT seed.id AS seed,
-                 (SELECT id FROM parents p WHERE p.seed=seed.id AND conversation_scope_kind='ROOT') AS root_id,
-                 (SELECT parent_turn_id FROM parents p WHERE p.seed=seed.id AND id=seed.id) AS parent_id
-               FROM unnest(%s::text[]) AS seed(id)""",
-            (session_id, child_owners, session_id, child_owners),
-        ).fetchall() if child_owners else ()
-        root_cache = {str(item["seed"]): item for item in ancestry}
         owner_keys = {
             (str(row["entry_owner_kind"]), str(row["turn_id"] if row["entry_owner_kind"] == "EXECUTED_TURN" else row["imported_history_group_id"]))
             for row in rows
         }
-        owner_keys.update(("EXECUTED_TURN", str(item["root_id"])) for item in ancestry if item["root_id"] is not None)
-        owner_keys.update(("EXECUTED_TURN", str(parent["parent_turn_id"])) for parent in parents)
         boundaries = self._browser_context_group_rows(connection, session_id, cut, owner_keys)
 
         def group(kind: str, owner_id: str) -> dict[str, object]:
@@ -996,13 +944,11 @@ class CanonicalProtocolReader:
                 raise KeyError("history context owner has no entry at cut")
             value: dict[str, object] = {
                 "owner_kind": kind, "owner_id": owner_id,
-                "scope_kind": str(boundary["conversation_scope_kind"]),
+                "scope_kind": session_scope,
                 "initial_entry_id": str(boundary["initial_entry_id"]),
                 "first_entry_sequence": str(boundary["first_sequence"]),
                 "last_entry_sequence": str(boundary["last_sequence"]),
             }
-            if boundary["scope_subagent_task_id"]:
-                value["scope_subagent_task_id"] = str(boundary["scope_subagent_task_id"])
             if boundary["final_entry_id"]:
                 value["final_entry_id"] = str(boundary["final_entry_id"])
             if boundary["interruption_present"]:
@@ -1036,17 +982,7 @@ class CanonicalProtocolReader:
                 "segment_id": f"{kind}:{owner_id}:initial",
                 "segment_start_entry_id": owner["initial_entry_id"],
             }
-            if row["conversation_scope_kind"] == "ROOT":
-                context["root_owner_id"] = owner_id
-            elif kind == "EXECUTED_TURN":
-                ancestor = root_cache[owner_id]
-                if ancestor["root_id"] is None:
-                    raise ValueError("canonical task owner has no ROOT ancestor")
-                root_id, parent_id = str(ancestor["root_id"]), ancestor["parent_id"]
-                context["root_owner_id"] = root_id
-                if parent_id:
-                    context["parent_turn_id"] = str(parent_id)
-                group("EXECUTED_TURN", root_id)
+            context["root_owner_id"] = owner_id
             if row["previous_id"]:
                 context["previous_entry_id"] = str(row["previous_id"])
             if row["next_id"]:
@@ -1067,11 +1003,6 @@ class CanonicalProtocolReader:
                 context["segment_start_entry_id"] = imported_segment_starts[owner_id]
             response["entry_contexts"].append(context)
             check_budget()
-        # Completion notifications can reference a task created in an earlier
-        # ROOT. Supply that exact parent's relation, even when its entries are
-        # outside this page; never infer "previous" from visible ROOTs.
-        for parent in parents:
-            group("EXECUTED_TURN", str(parent["parent_turn_id"]))
 
     @staticmethod
     def _browser_context_group_rows(connection, session_id, cut, owner_keys):
@@ -1087,7 +1018,6 @@ class CanonicalProtocolReader:
         ):
             owner_queries.append(f"""SELECT '{kind}' AS owner_kind, owner.id AS owner_id,
                       first_entry.id AS initial_entry_id, first_entry.entry_sequence AS first_sequence,
-                      first_entry.conversation_scope_kind, first_entry.scope_subagent_task_id,
                       last_entry.entry_sequence AS last_sequence, owner.final_entry_id,
                       {interruption_fields}
                FROM pulsara_v3.{owner_table} owner
@@ -1103,7 +1033,7 @@ class CanonicalProtocolReader:
             """WITH roots AS (
                  SELECT t.id AS owner_id, e.entry_sequence FROM pulsara_v3.turns t
                  JOIN pulsara_v3.transcript_entries e ON e.session_id=t.session_id AND e.id=t.initial_entry_id
-                 WHERE t.session_id=%s AND t.conversation_scope_kind='ROOT' AND e.entry_sequence<=%s
+                 WHERE t.session_id=%s AND e.entry_sequence<=%s
                  UNION ALL
                  SELECT g.id AS owner_id, first_entry.entry_sequence FROM pulsara_v3.imported_history_groups g
                  JOIN LATERAL (SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
@@ -1115,126 +1045,16 @@ class CanonicalProtocolReader:
                       next.owner_id AS next_root_owner_id
                FROM boundaries boundary
                LEFT JOIN LATERAL (
-                 SELECT owner_id FROM roots WHERE boundary.conversation_scope_kind='ROOT'
-                   AND entry_sequence<boundary.first_sequence ORDER BY entry_sequence DESC LIMIT 1
+                 SELECT owner_id FROM roots WHERE entry_sequence<boundary.first_sequence ORDER BY entry_sequence DESC LIMIT 1
                ) previous ON true
                LEFT JOIN LATERAL (
-                 SELECT owner_id FROM roots WHERE boundary.conversation_scope_kind='ROOT'
-                   AND entry_sequence>boundary.first_sequence ORDER BY entry_sequence LIMIT 1
+                 SELECT owner_id FROM roots WHERE entry_sequence>boundary.first_sequence ORDER BY entry_sequence LIMIT 1
                ) next ON true""",
             parameters,
         ).fetchall()
         return {(str(item["owner_kind"]), str(item["owner_id"])): item for item in result}
 
-    @staticmethod
-    def _browser_context_tasks(connection, session_id, event_cut, rows, response, check_budget):
-        from pulsara_agent.identity import derive_id
 
-        # Imported source labels are provenance only; they cannot authorize a
-        # task lookup or synthesize a child owner in the forked session.
-        task_ids = {
-            str(row[field]) for row in rows if row["entry_owner_kind"] == "EXECUTED_TURN"
-            for field in ("scope_subagent_task_id", "source_subagent_task_id") if row[field]
-        }
-        for task in connection.execute(
-            """SELECT task.id, task.parent_turn_id, task.batch_id, parent.initial_entry_id
-               FROM pulsara_v3.subagent_tasks task JOIN pulsara_v3.turns parent
-                 ON parent.session_id=task.session_id AND parent.id=task.parent_turn_id
-               WHERE task.session_id=%s AND task.id=ANY(%s) ORDER BY task.id""",
-            (session_id, list(task_ids)),
-        ):
-            value = {
-                "task_id": str(task["id"]), "parent_turn_id": str(task["parent_turn_id"]),
-                "parent_initial_entry_id": str(task["initial_entry_id"]),
-            }
-            if task["batch_id"]:
-                value["batch_id"] = str(task["batch_id"])
-            response["tasks"].append(value)
-            check_budget()
-        entry_ids = [str(row["id"]) for row in rows if row["entry_owner_kind"] == "EXECUTED_TURN"]
-        # Forward-only batch derivation from the unique physical attempt. No
-        # transcript JSON decoding, inverse hashes, or scan of the entire ROOT.
-        with connection.cursor(name="browser_history_creators") as attempts:
-            attempts.itersize = MAXIMUM_SNAPSHOT_ENTRIES
-            attempts.execute(
-                """SELECT a.id, a.assistant_entry_id, a.tool_call_id, e.turn_id
-                   FROM pulsara_v3.tool_execution_attempts a
-                   JOIN pulsara_v3.transcript_entries e ON e.session_id=a.session_id AND e.id=a.assistant_entry_id
-                   JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=a.session_id
-                     AND b.assistant_entry_id=a.assistant_entry_id AND b.tool_call_id=a.tool_call_id
-                   WHERE a.session_id=%s AND e.entry_owner_kind='EXECUTED_TURN'
-                     AND b.tool_name IN ('spawn_agent', 'create_agent_tasks')
-                     AND (a.assistant_entry_id=ANY(%s) OR a.assistant_entry_id IN (
-                       SELECT r.tool_call_entry_id FROM pulsara_v3.tool_results r
-                       WHERE r.session_id=a.session_id AND r.result_entry_id=ANY(%s)))
-                   ORDER BY a.assistant_entry_id, a.tool_call_id""",
-                (session_id, entry_ids, entry_ids),
-            )
-            # Keep the named cursor and its existing physical fetch size. A
-            # page can name arbitrarily many attempts; do not materialize them
-            # all or add a logical cap merely to batch their count lookups.
-            while chunk := attempts.fetchmany(MAXIMUM_SNAPSHOT_ENTRIES):
-                batches = [(attempt, derive_id("batch", "spawn", str(attempt["id"]))) for attempt in chunk]
-                counts = connection.execute(
-                    """WITH requested AS (
-                         SELECT DISTINCT parent_id, batch_id FROM unnest(%s::text[], %s::text[])
-                           AS request(parent_id, batch_id))
-                       SELECT task.parent_turn_id, task.batch_id, count(*) AS count
-                       FROM requested JOIN pulsara_v3.subagent_tasks task
-                         ON task.parent_turn_id=requested.parent_id AND task.batch_id=requested.batch_id
-                       WHERE task.session_id=%s
-                         AND EXISTS (SELECT 1 FROM pulsara_v3.agent_events ev
-                           WHERE ev.session_id=task.session_id AND ev.subject_subagent_task_id=task.id
-                             AND ev.event_type='SubagentTaskAccepted' AND ev.event_sequence<=%s)
-                       GROUP BY task.parent_turn_id, task.batch_id""",
-                    ([str(attempt["turn_id"]) for attempt, _ in batches],
-                     [batch_id for _, batch_id in batches], session_id, event_cut),
-                ).fetchall()
-                by_batch = {(str(item["parent_turn_id"]), str(item["batch_id"])): item["count"] for item in counts}
-                for attempt, batch_id in batches:
-                    count = by_batch.get((str(attempt["turn_id"]), batch_id), 0)
-                    if count:
-                        response["batches"].append({
-                            "batch_id": batch_id, "parent_turn_id": str(attempt["turn_id"]),
-                            "creator_entry_id": str(attempt["assistant_entry_id"]),
-                            "creator_tool_call_id": str(attempt["tool_call_id"]), "task_count": str(count),
-                        })
-                        check_budget()
-
-    def subagent_activity_page(
-        self,
-        *,
-        session_id: str,
-        task_id: str,
-        after_entry_sequence: int,
-        maximum_entries: int,
-        deadline_monotonic: float,
-    ) -> tuple[tuple[wire.CanonicalEntry, ...], bool]:
-        """Read exact canonical activity metadata for one durable subagent task."""
-
-        _bounded(maximum_entries, MAXIMUM_SNAPSHOT_ENTRIES, "task activity entries")
-        if not task_id or after_entry_sequence < 0:
-            raise ValueError("task activity cursor is invalid")
-        with self._connection(deadline_monotonic) as connection:
-            task = connection.execute(
-                "SELECT id FROM pulsara_v3.subagent_tasks WHERE session_id = %s AND id = %s",
-                (session_id, task_id),
-            ).fetchone()
-            if task is None:
-                raise KeyError(task_id)
-            rows = connection.execute(
-                """SELECT * FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s
-                     AND conversation_scope_kind = 'SUBAGENT_TASK'
-                     AND scope_subagent_task_id = %s
-                     AND entry_sequence > %s
-                   ORDER BY entry_sequence, id LIMIT %s""",
-                (session_id, task_id, after_entry_sequence, maximum_entries + 1),
-            ).fetchall()
-            return (
-                self._entries(connection, rows[:maximum_entries]),
-                len(rows) > maximum_entries,
-            )
 
     @staticmethod
     def _snapshot_value(
@@ -1319,17 +1139,6 @@ class CanonicalProtocolReader:
                     subject_slot=subject_slot,
                     subject_id=subject_id,
                 )
-                if subject_slot == "subject_subagent_task_id":
-                    projection.affected_subagent_task_id = subject_id
-                elif subject_slot == "subject_subagent_result_id":
-                    child = connection.execute(
-                        """SELECT task_id FROM pulsara_v3.subagent_task_children
-                           WHERE session_id = %s AND id = %s AND child_kind = 'RESULT'""",
-                        (session_id, subject_id),
-                    ).fetchone()
-                    if child is None:
-                        raise RuntimeError("committed result subject is missing")
-                    projection.affected_subagent_task_id = str(child["task_id"])
                 if event_type in _ENTRY_TYPES:
                     row = connection.execute(
                         """SELECT * FROM pulsara_v3.transcript_entries
@@ -1340,20 +1149,6 @@ class CanonicalProtocolReader:
                         raise RuntimeError("committed entry subject is missing")
                     projection.projection_kind = wire.IMMUTABLE_ENTRY
                     projection.entry.CopyFrom(self._entry(connection, row))
-                    if (
-                        event_type
-                        == CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED.value
-                    ):
-                        task_id = (
-                            row["source_subagent_task_id"]
-                            if row["conversation_scope_kind"] == "ROOT"
-                            else row["scope_subagent_task_id"]
-                        )
-                        if task_id is None:
-                            raise RuntimeError(
-                                "accepted inter-agent message lacks task identity"
-                            )
-                        projection.affected_subagent_task_id = str(task_id)
                 elif event_type in _CONTROL_TYPES:
                     if control is None:
                         control = self._control(
@@ -1375,8 +1170,6 @@ class CanonicalProtocolReader:
                         # The event remains ordered and visible; only its
                         # duplicate derived snapshot is coalesced in this batch.
                         projection.projection_kind = wire.CURRENT_CONTROL
-                else:
-                    projection.projection_kind = wire.EVENT_ONLY
                 if event_type == CommittedEventType.TURN_INTERRUPTED.value:
                     facts = read_executed_notices(
                         connection,
@@ -1390,33 +1183,6 @@ class CanonicalProtocolReader:
                         projection.interruption_notice.CopyFrom(
                             self._notice_wire(facts[0])
                         )
-                if projection.affected_subagent_task_id and not projection.HasField(
-                    "current_control"
-                ):
-                    if control is None:
-                        control = self._control(
-                            connection,
-                            session_id=session_id,
-                            lifecycle=str(session["lifecycle"]),
-                            maximum_items=MAXIMUM_CONTROL_ITEMS,
-                            entry_sequence_floor=max(
-                                1,
-                                int(session["latest_entry_sequence"])
-                                - MAXIMUM_SNAPSHOT_ENTRIES
-                                + 1,
-                            ),
-                        )
-                    if not any(item.HasField("current_control") for item in result):
-                        projection.current_control.CopyFrom(control)
-                        projection.control_read_event_sequence = high_water
-                if projection.affected_subagent_task_id:
-                    task = connection.execute(
-                        "SELECT batch_id FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
-                        (session_id, projection.affected_subagent_task_id),
-                    ).fetchone()
-                    if task is None:
-                        raise RuntimeError("affected subagent task is absent")
-                    projection.affected_subagent_batch_id = str(task["batch_id"])
                 total += len(projection.SerializeToString(deterministic=True))
                 if total > maximum_bytes:
                     if not result:
@@ -1668,10 +1434,13 @@ class CanonicalProtocolReader:
         Only the current candidate's JSON/reasoning is decoded. Fork, notice,
         visualization and nonbatchable body owners release the raw window.
         """
+        if not rows:
+            return
+        session_scope = _session_scope(connection, str(rows[0]["session_id"]))
         eligible = {
             str(row["id"]) for row in rows
             if row["entry_kind"] in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}
-            and not (row["entry_kind"] == "ASSISTANT_MESSAGE" and row["conversation_scope_kind"] == "ROOT")
+            and not (row["entry_kind"] == "ASSISTANT_MESSAGE")
             and not relations[str(row["id"])]["may_have_notice"]
             and not relations[str(row["id"])]["has_visualizations"]
         }
@@ -1687,7 +1456,7 @@ class CanonicalProtocolReader:
             entry_id = str(row["id"])
             related = relations[entry_id]
             barrier = (
-                row["entry_kind"] == "ASSISTANT_MESSAGE" and row["conversation_scope_kind"] == "ROOT"
+                row["entry_kind"] == "ASSISTANT_MESSAGE"
             ) or related["may_have_notice"] or related["has_visualizations"]
             if barrier:
                 pending.clear()
@@ -1717,7 +1486,7 @@ class CanonicalProtocolReader:
                 for candidate in rows[index:]:
                     candidate_id = str(candidate["id"])
                     facts = relations[candidate_id]
-                    if ((candidate["entry_kind"] == "ASSISTANT_MESSAGE" and candidate["conversation_scope_kind"] == "ROOT")
+                    if ((candidate["entry_kind"] == "ASSISTANT_MESSAGE")
                         or facts["may_have_notice"] or facts["has_visualizations"]):
                         break
                     if candidate_id not in eligible:
@@ -1732,7 +1501,7 @@ class CanonicalProtocolReader:
                 if len(batch_ids) > 1:
                     pending = self._assistant_parts_batch(connection, str(row["session_id"]), batch_ids)
             parts = pending.pop(entry_id, None)
-            entry = self._entry(connection, row, relations=relations, assistant_parts=parts)
+            entry = self._entry(connection, row, relations=relations, assistant_parts=parts, session_scope=session_scope)
             parts = None
             yield row, entry
 
@@ -1843,11 +1612,13 @@ class CanonicalProtocolReader:
             raise ValueError("entry relation set crosses canonical sessions")
         values = connection.execute(
             """SELECT e.id AS relation_entry_id,
-                      result.id AS tool_result_id, result.tool_call_entry_id, result.tool_call_id,
+                      result.id AS tool_result_id, result.attempt_id, result.tool_call_entry_id, result.tool_call_id,
+                      invocation.id AS invocation_id, invocation.source_kind, invocation.source_exec_attempt_id,
+                      invocation.call_sequence, invocation.tool_name, invocation.original_arguments,
                       result.result_state, result.output_artifact_disposition, result.output_source_coverage,
                       result.output_display_kind, result.output_source_coverage_reason,
                       result.output_artifact_unavailability_reason,
-                      queue.id AS queue_item_id, queue.command_id, queue.delivery_mode,
+                      queue.id AS queue_item_id, queue.command_id, queue.delivery_mode, queue.source_session_id, queue.source_work_id,
                       revision.command_id AS revision_command_id,
                       CASE e.entry_owner_kind
                         WHEN 'EXECUTED_TURN' THEN t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id=e.id
@@ -1861,17 +1632,18 @@ class CanonicalProtocolReader:
                         WHERE e.entry_kind='ASSISTANT_MESSAGE'
                           AND v.session_id=e.session_id AND v.assistant_entry_id=e.id) AS has_visualizations,
                       EXISTS (SELECT 1 FROM pulsara_v3.provider_assistant_replay_fragments replay
-                        WHERE e.entry_kind='ASSISTANT_MESSAGE' AND e.conversation_scope_kind='ROOT'
+                        WHERE e.entry_kind='ASSISTANT_MESSAGE'
                           AND replay.session_id=e.session_id AND replay.assistant_entry_id=e.id) AS has_replay
                FROM pulsara_v3.transcript_entries e
-               LEFT JOIN pulsara_v3.turns t ON e.entry_owner_kind='EXECUTED_TURN'
-                 AND e.conversation_scope_kind='ROOT' AND t.session_id=e.session_id AND t.id=e.turn_id
+               LEFT JOIN pulsara_v3.turns t ON e.entry_owner_kind='EXECUTED_TURN' AND t.session_id=e.session_id AND t.id=e.turn_id
                LEFT JOIN pulsara_v3.imported_history_groups g ON e.entry_owner_kind='IMPORTED_HISTORY'
                  AND g.session_id=e.session_id AND g.id=e.imported_history_group_id
                LEFT JOIN pulsara_v3.tool_results result
                  ON e.entry_kind='TOOL_RESULT' AND result.session_id=e.session_id AND result.result_entry_id=e.id
+               LEFT JOIN pulsara_v3.tool_invocations invocation
+                 ON invocation.session_id=result.session_id AND invocation.id=result.invocation_id
                LEFT JOIN LATERAL (
-                 SELECT id, command_id, delivery_mode FROM pulsara_v3.prompt_queue_items
+                 SELECT id, command_id, delivery_mode, source_session_id, source_work_id FROM pulsara_v3.prompt_queue_items
                  WHERE e.entry_owner_kind='EXECUTED_TURN' AND e.entry_kind IN ('USER_MESSAGE', 'USER_STEER')
                    AND session_id=e.session_id AND consumed_entry_id=e.id LIMIT 1
                ) queue ON true
@@ -1891,17 +1663,15 @@ class CanonicalProtocolReader:
         result = {str(value["relation_entry_id"]): value for value in values}
         return result
 
-    def _entry(self, connection: Any, row: Mapping[str, object], *, relations=None, assistant_parts=None) -> wire.CanonicalEntry:
+    def _entry(self, connection: Any, row: Mapping[str, object], *, relations=None, assistant_parts=None, session_scope=None) -> wire.CanonicalEntry:
         from pulsara_agent.conversation_kernel.fork_history import read_fork_anchor
         from pulsara_agent.conversation_kernel.reader import historical_source_attribution
+        session_scope = session_scope or _session_scope(connection, str(row["session_id"]))
         stored_row = row
         row = historical_source_attribution(row)
         entry_id = str(row["id"])
         related = None if relations is None else relations[entry_id]
-        root_assistant = (
-            row["entry_kind"] == "ASSISTANT_MESSAGE"
-            and row["conversation_scope_kind"] == "ROOT"
-        )
+        root_assistant = row["entry_kind"] == "ASSISTANT_MESSAGE"
         combined_assistant = row["entry_kind"] in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"} and not root_assistant
         replay = None
         # The canonical parent-kind trigger permits blocks only on assistant
@@ -1955,19 +1725,19 @@ class CanonicalProtocolReader:
             root_final=root_final,
             fork_eligible=(
                 root_assistant
+                and session_scope == "ROOT"
                 and read_fork_anchor(connection, str(row["session_id"]), entry_id, candidate_blocks=blocks) is not None
             ),
             entry_sequence=int(row["entry_sequence"]),
             entry_kind=_entry_kind(str(row["entry_kind"])),
-            scope_kind=_scope_kind(str(row["conversation_scope_kind"])),
-            scope_subagent_task_id=str(row["scope_subagent_task_id"] or ""),
+            scope_kind=_scope_kind(session_scope),
             context_binding_revision_id=str(row["context_binding_revision_id"] or ""),
             provider_input_through_sequence=int(
                 row["provider_input_through_sequence"] or 0
             ),
             content=_content_reference(row),
             accepted_at_utc=_utc(row["accepted_at"]),
-            source_subagent_task_id=str(row["source_subagent_task_id"] or ""),
+            input_origin=str(row["input_origin"] or ""),
         )
         if row["scheduled_input"] is not None:
             result.scheduled_input.CopyFrom(wire.ScheduledInputProvenance(**row["scheduled_input"]))
@@ -1975,18 +1745,29 @@ class CanonicalProtocolReader:
             tool_result = related if related is not None and related["tool_result_id"] is not None else None
             if related is None:
                 tool_result = connection.execute(
-                    """SELECT tool_call_entry_id, tool_call_id, result_state,
+                    """SELECT result.attempt_id, result.tool_call_entry_id, result.tool_call_id, result.result_state,
+                              invocation.id AS invocation_id, invocation.source_kind, invocation.source_exec_attempt_id,
+                              invocation.call_sequence, invocation.tool_name, invocation.original_arguments,
                               output_artifact_disposition, output_source_coverage,
                               output_display_kind, output_source_coverage_reason,
                               output_artifact_unavailability_reason
-                       FROM pulsara_v3.tool_results
-                       WHERE session_id=%s AND result_entry_id=%s""",
+                       FROM pulsara_v3.tool_results result
+                       JOIN pulsara_v3.tool_invocations invocation
+                         ON invocation.session_id=result.session_id AND invocation.id=result.invocation_id
+                       WHERE result.session_id=%s AND result.result_entry_id=%s""",
                     (row["session_id"], entry_id),
                 ).fetchone()
             if tool_result is None:
                 raise ValueError("canonical tool result is missing its relational row")
             result.tool_result.CopyFrom(wire.CanonicalToolResult(
-                assistant_entry_id=str(tool_result["tool_call_entry_id"]),
+                assistant_entry_id=str(tool_result["tool_call_entry_id"] or ""),
+                attempt_id=str(tool_result["attempt_id"] or ""),
+                invocation_id=str(tool_result["invocation_id"]),
+                source_kind=str(tool_result["source_kind"]),
+                source_exec_attempt_id=str(tool_result["source_exec_attempt_id"] or ""),
+                call_sequence=int(tool_result["call_sequence"] or 0),
+                tool_name=str(tool_result["tool_name"] or ""),
+                original_arguments_json=(json.dumps(tool_result["original_arguments"], ensure_ascii=False) if tool_result["original_arguments"] is not None else ""),
                 tool_call_id=str(tool_result["tool_call_id"]),
                 result_state=str(tool_result["result_state"]),
                 artifact_disposition=str(tool_result["output_artifact_disposition"]),
@@ -2003,7 +1784,7 @@ class CanonicalProtocolReader:
             if related is None:
                 source = connection.execute(
                     """
-                    SELECT id, command_id, delivery_mode
+                    SELECT id, command_id, delivery_mode, source_session_id, source_work_id
                     FROM pulsara_v3.prompt_queue_items
                     WHERE session_id = %s AND consumed_entry_id = %s
                     """,
@@ -2012,8 +1793,10 @@ class CanonicalProtocolReader:
             if source is not None:
                 result.input_source.CopyFrom(wire.CanonicalInputSource(
                     queue_item_id=str(source["id"] if related is None else source["queue_item_id"]),
-                    command_id=str(source["command_id"]),
+                    command_id=str(source["command_id"] or ""),
                     delivery_mode=str(source["delivery_mode"]),
+                    source_session_id=str(source["source_session_id"] or ""),
+                    source_work_id=str(source["source_work_id"] or ""),
                 ))
             elif row["entry_kind"] == "USER_MESSAGE":
                 revision = (
@@ -2182,8 +1965,7 @@ class CanonicalProtocolReader:
         ).fetchone()["total"])
         turns = tuple(connection.execute(
             """SELECT * FROM pulsara_v3.turns WHERE session_id = %s AND status = 'RUNNING'
-               ORDER BY CASE WHEN conversation_scope_kind = 'ROOT' THEN 0 ELSE 1 END,
-                        accepted_at, id LIMIT %s""",
+               ORDER BY accepted_at, id LIMIT %s""",
             (session_id, maximum_items),
         ).fetchall())
         queue_total = int(
@@ -2199,19 +1981,6 @@ class CanonicalProtocolReader:
                ORDER BY queue_sequence, id LIMIT %s""",
             (session_id,),
         )
-        task_counts = connection.execute(
-            """SELECT count(*) AS total,
-                      count(*) FILTER (WHERE t.status IN ('PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE')
-                        OR (t.status IN ('COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
-                                         'BLOCKED_DEPENDENCY_FAILED') AND NOT EXISTS (
-                          SELECT 1 FROM pulsara_v3.transcript_entries AS accepted
-                          WHERE accepted.entry_owner_kind = 'EXECUTED_TURN'
-                            AND accepted.session_id = t.session_id
-                            AND accepted.source_subagent_task_id = t.id
-                        ))) AS unreceived
-               FROM pulsara_v3.subagent_tasks AS t WHERE t.session_id = %s""",
-            (session_id,),
-        ).fetchone()
         active_plan = connection.execute(
             """
             SELECT * FROM pulsara_v3.plan_workflows
@@ -2286,7 +2055,6 @@ class CanonicalProtocolReader:
                         AND entry.id = prior.subject_entry_id
                        WHERE prior.session_id = event.session_id
                          AND prior.event_sequence < event.event_sequence
-                         AND entry.conversation_scope_kind = 'ROOT'
                    ), 0) AS adopted_after_entry_sequence
             FROM pulsara_v3.agent_events AS event
             JOIN pulsara_v3.turn_context_binding_revisions AS revision
@@ -2297,18 +2065,16 @@ class CanonicalProtocolReader:
              AND turn.id = revision.turn_id
             WHERE event.session_id = %s
               AND event.event_type = 'CompactionAdopted'
-              AND turn.conversation_scope_kind = 'ROOT'
             ORDER BY event.event_sequence DESC
             LIMIT 1
             """,
             (session_id,),
         ).fetchone()
+        session_scope = _session_scope(connection, session_id)
         result = wire.CanonicalControl(
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
             active_turn_total_count=active_turn_total,
-            task_total_count=int(task_counts["total"]),
-            task_unreceived_count=int(task_counts["unreceived"]),
         )
         genesis = connection.execute(
             "SELECT base_kind, source_through_sequence FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
@@ -2333,8 +2099,7 @@ class CanonicalProtocolReader:
         for row in turns:
             target = result.active_turns.add(
                 turn_id=str(row["id"]),
-                scope_kind=_scope_kind(str(row["conversation_scope_kind"])),
-                scope_subagent_task_id=str(row["scope_subagent_task_id"] or ""),
+                scope_kind=_scope_kind(session_scope),
                 status=str(row["status"]),
                 accepted_at_utc=_utc(row["accepted_at"]),
             )
@@ -2349,7 +2114,7 @@ class CanonicalProtocolReader:
                 delivery_mode=str(row["delivery_mode"]),
                 target_turn_id=str(row["target_turn_id"] or ""),
                 content=_content_reference(row),
-                command_id=str(row["command_id"]),
+                command_id=str(row["command_id"] or ""),
                 accepted_at_utc=_utc(row["accepted_at"]),
             )
             if row["input_origin"] == "SCHEDULED_TASK":
@@ -2480,18 +2245,20 @@ class CanonicalProtocolReader:
     ) -> None:
         attempts = tuple(connection.execute(
             """SELECT a.*, r.result_state, r.result_entry_id,
+                      invocation.source_kind, invocation.source_exec_attempt_id,
                       count(*) OVER () AS unresolved_total
                FROM pulsara_v3.tool_execution_attempts AS a
-               JOIN pulsara_v3.transcript_entries AS e
+               JOIN pulsara_v3.tool_invocations invocation
+                 ON invocation.session_id=a.session_id AND invocation.id=a.invocation_id
+               LEFT JOIN pulsara_v3.transcript_entries AS e
                  ON e.entry_owner_kind = 'EXECUTED_TURN' AND e.session_id = a.session_id AND e.id = a.assistant_entry_id
                JOIN pulsara_v3.turns AS t
-                 ON t.session_id = e.session_id AND t.id = e.turn_id
+                 ON t.session_id=invocation.session_id AND t.id=invocation.turn_id
                LEFT JOIN pulsara_v3.tool_results AS r
                  ON r.session_id = a.session_id AND r.attempt_id = a.id
                WHERE a.session_id = %s AND r.id IS NULL
-                 AND (e.entry_sequence >= %s OR t.status = 'RUNNING')
-               ORDER BY CASE WHEN e.conversation_scope_kind = 'ROOT' THEN 0 ELSE 1 END,
-                        a.started_at, a.id LIMIT %s""",
+                 AND (e.entry_sequence >= %s OR t.status = 'RUNNING' OR invocation.source_kind='CODE_MODE_CALL')
+               ORDER BY a.started_at, a.id LIMIT %s""",
             (session_id, entry_sequence_floor, maximum_items),
         ).fetchall())
         result.tool_attempt_total_count = int(attempts[0]["unresolved_total"]) if attempts else 0
@@ -2499,7 +2266,10 @@ class CanonicalProtocolReader:
         for row in attempts:
             result.tool_attempts.add(
                 attempt_id=str(row["id"]),
-                assistant_entry_id=str(row["assistant_entry_id"]),
+                assistant_entry_id=str(row["assistant_entry_id"] or ""),
+                invocation_id=str(row["invocation_id"]),
+                source_kind=str(row["source_kind"]),
+                source_exec_attempt_id=str(row["source_exec_attempt_id"] or ""),
                 tool_call_id=str(row["tool_call_id"]),
                 result_state=str(row["result_state"] or ""),
                 result_entry_id=str(row["result_entry_id"] or ""),
@@ -2563,8 +2333,8 @@ def _utc(value: object) -> str:
 def _scope_kind(value: str) -> int:
     if value == "ROOT":
         return wire.ROOT
-    if value == "SUBAGENT_TASK":
-        return wire.SUBAGENT_TASK
+    if value == "SUBAGENT":
+        return wire.SUBAGENT
     raise RuntimeError("unknown canonical conversation scope")
 
 
@@ -2618,9 +2388,6 @@ def _event_subject(event: Mapping[str, object]) -> tuple[str, str]:
             "subject_queue_item_id",
             "subject_interaction_decision_id",
             "subject_context_binding_revision_id",
-            "subject_subagent_task_id",
-            "subject_subagent_message_id",
-            "subject_subagent_result_id",
             "subject_plan_workflow_id",
             "subject_plan_interaction_id",
         )
@@ -2659,3 +2426,10 @@ __all__ = [
     "MAXIMUM_SNAPSHOT_ENTRIES",
     "MAXIMUM_TOOL_ARGUMENT_PREVIEW_BYTES",
 ]
+
+
+def _session_scope(connection, session_id: str) -> str:
+    row = connection.execute("SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s", (session_id,)).fetchone()
+    if row is None:
+        raise KeyError(session_id)
+    return "ROOT" if row["root_session_id"] is None else "SUBAGENT"

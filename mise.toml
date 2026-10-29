@@ -48,6 +48,12 @@ sources = ["tools/prepare_ripgrep.py", "desktop/build/environment.json"]
 outputs = ["src/pulsara_agent/_vendor/ripgrep/rg", "src/pulsara_agent/_vendor/ripgrep/COPYING", "src/pulsara_agent/_vendor/ripgrep/LICENSE-MIT", "src/pulsara_agent/_vendor/ripgrep/LICENSE-PCRE2"]
 run = ".venv/bin/python tools/prepare_ripgrep.py"
 
+[tasks."desktop:code-mode"]
+depends = ["desktop:environment"]
+sources = ["tools/prepare_code_mode.py", "tools/code_mode_node/package.json", "tools/code_mode_node/package-lock.json", "desktop/build/environment.json"]
+outputs = ["src/pulsara_agent/_vendor/code_mode/node", "src/pulsara_agent/_vendor/code_mode/NODE-LICENSE.txt", "src/pulsara_agent/_vendor/code_mode/quickjs-wasi/quickjs.wasm", "src/pulsara_agent/_vendor/code_mode/quickjs-wasi/dist/index.js"]
+run = ".venv/bin/python tools/prepare_code_mode.py"
+
 [tasks."desktop:frontend-dependencies"]
 depends = ["desktop:environment"]
 sources = ["frontend/package.json", "frontend/package-lock.json", "desktop/build/environment.json"]
@@ -61,7 +67,7 @@ outputs = ["desktop/node_modules/.package-lock.json", "desktop/node_modules/.bin
 run = "npm --prefix desktop ci --no-audit --no-fund"
 
 [tasks."desktop:project"]
-depends = ["desktop:ripgrep"]
+depends = ["desktop:ripgrep", "desktop:code-mode"]
 run = "uv sync --locked --dev --default-index https://pypi.org/simple"
 
 [tasks."desktop:renderer"]
@@ -69,7 +75,7 @@ depends = ["desktop:frontend-dependencies"]
 run = "npm --prefix frontend run build:desktop"
 
 [tasks."desktop:application"]
-depends = ["desktop:python-dependencies", "desktop:ripgrep", "desktop:renderer"]
+depends = ["desktop:python-dependencies", "desktop:ripgrep", "desktop:code-mode", "desktop:renderer"]
 run = ".venv/bin/python desktop/scripts/prepare_resources.py application"
 
 [tasks."desktop:resources"]

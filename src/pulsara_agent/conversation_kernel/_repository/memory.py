@@ -94,7 +94,7 @@ class _MemoryOperations(_MemoryManagementOperations):
         )
         call = connection.execute(
             """
-            SELECT b.tool_name, b.tool_arguments, t.conversation_scope_kind
+            SELECT b.tool_name, b.tool_arguments, CASE WHEN (SELECT root_session_id FROM pulsara_v3.sessions WHERE id=t.session_id) IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS caller_kind
             FROM pulsara_v3.assistant_message_blocks AS b
             JOIN pulsara_v3.turns AS t
               ON t.session_id=b.session_id AND t.id=%s
@@ -108,7 +108,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                 candidate.tool_call_id,
             ),
         ).fetchone()
-        if call is None or str(call["conversation_scope_kind"]) != "ROOT":
+        if call is None or str(call["caller_kind"]) != "ROOT":
             raise ConversationKernelConflict(
                 "memory mutation is not owned by a root tool call"
             )

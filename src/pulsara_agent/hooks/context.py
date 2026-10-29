@@ -37,7 +37,7 @@ class HookContextDiagnosticPort(Protocol):
 @dataclass(frozen=True, slots=True)
 class HookContextOccurrenceRef:
     scope_kind: HookScopeKind
-    child_task_id: str | None
+    session_id: str | None
     event_dispatch_ordinal: int
     causal_identity: tuple[object, ...]
 
@@ -55,7 +55,7 @@ class FrozenHookContextContribution:
 @dataclass(frozen=True, slots=True)
 class FrozenHookContextBatch:
     scope_kind: HookScopeKind
-    child_task_id: str | None
+    session_id: str | None
     contributions: tuple[FrozenHookContextContribution, ...]
 
 
@@ -238,17 +238,17 @@ class HookContextOwner:
         self,
         *,
         scope_kind: str,
-        child_task_id: str | None,
+        session_id: str | None,
         estimator: ModelInputTokenEstimator,
     ) -> PreparedHookContextSource | None:
         expected_kind = (
-            HookScopeKind.ROOT if scope_kind == "ROOT" else HookScopeKind.CHILD
+            HookScopeKind.ROOT if scope_kind == "ROOT" else HookScopeKind.SUBAGENT
         )
         with self._lock:
             matching_keys = tuple(
                 key
                 for key in self._pending
-                if key[2] is expected_kind and key[3] == child_task_id
+                if key[2] is expected_kind and key[3] == session_id
             )
             pending = [
                 item for key in matching_keys for item in self._pending.pop(key, ())
@@ -300,7 +300,7 @@ class HookContextOwner:
             admitted.append(item)
         while admitted:
             batch = FrozenHookContextBatch(
-                expected_kind, child_task_id, tuple(admitted)
+                expected_kind, session_id, tuple(admitted)
             )
             full, compact = render_hook_context_batch(batch)
             if max(len(full.encode("utf-8")), len(compact.encode("utf-8"))) <= (
@@ -570,7 +570,7 @@ def _scope_key(
         id(scope.host_session_owner),
         id(scope.workspace_owner),
         scope.kind,
-        scope.child_task_id,
+        scope.session_id,
     )
 
 
@@ -586,7 +586,7 @@ def _freeze_contributions(
             entry.definition,
             HookContextOccurrenceRef(
                 scope.kind,
-                scope.child_task_id,
+                scope.session_id,
                 entry.event_dispatch_ordinal,
                 _causal_identity(causal_ref),
             ),
@@ -619,7 +619,7 @@ def _domain_identity(item: FrozenHookContextContribution) -> object:
         item.source_ordinal,
         item.definition.source_local_definition_ordinal,
         item.occurrence.scope_kind.value,
-        item.occurrence.child_task_id,
+        item.occurrence.session_id,
         item.occurrence.event_dispatch_ordinal,
         item.occurrence.causal_identity,
     )

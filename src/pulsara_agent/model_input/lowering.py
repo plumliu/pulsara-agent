@@ -76,14 +76,11 @@ class LoweredToolResultVariant:
     utf8_bytes: int
 
     def __post_init__(self) -> None:
-        if self.utf8_bytes != provider_neutral_message_logical_bytes(
-            self.message
-        ):
+        if self.utf8_bytes != provider_neutral_message_logical_bytes(self.message):
             raise ValueError("tool-result variant logical quote mismatch")
         if (
             self.mode is ToolResultProviderRenderMode.FULL
-            and self.utf8_bytes
-            > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+            and self.utf8_bytes > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
         ):
             raise ValueError("FULL tool-result variant exceeds its logical bound")
 
@@ -106,9 +103,8 @@ class LoweredCanonicalItem:
             raise ValueError("lowered canonical item carrier union is invalid")
         modes = tuple(item.mode for item in self.tool_result_variants)
         order = tuple(ToolResultProviderRenderMode)
-        if (
-            len(modes) != len(set(modes))
-            or modes != tuple(mode for mode in order if mode in modes)
+        if len(modes) != len(set(modes)) or modes != tuple(
+            mode for mode in order if mode in modes
         ):
             raise ValueError("tool-result variants are not a unique ordered subset")
 
@@ -141,10 +137,14 @@ def image_reference_part(image: LLMImagePart) -> LLMTextPart:
 
 def image_omission_part(image: LLMImagePart) -> LLMTextPart:
     """Keep an image's identity without its visual content or a read directive."""
-    return LLMTextPart(image_reference_text(
-        image_ref=image.image_ref, media_type=image.media_type,
-        width=image.width, height=image.height,
-    ))
+    return LLMTextPart(
+        image_reference_text(
+            image_ref=image.image_ref,
+            media_type=image.media_type,
+            width=image.width,
+            height=image.height,
+        )
+    )
 
 
 def image_referenced_content(
@@ -216,7 +216,8 @@ def lower_canonical_item(
             item,
             LLMMessage(
                 role=MessageRole.USER,
-                content=scheduled_request_parts(item.scheduled_input) + image_referenced_content(prompt_provider_parts(item.content)),
+                content=scheduled_request_parts(item.scheduled_input)
+                + image_referenced_content(prompt_provider_parts(item.content)),
             ),
         )
     if kind in {
@@ -252,10 +253,7 @@ def lower_canonical_item(
             item,
             LLMMessage.user(_project_plan_continuation(text)),
         )
-    if kind in {
-        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
-        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL,
-    }:
+    if kind in {*()}:
         return LoweredCanonicalItem(item, LLMMessage.user(text))
     if kind is FrozenProviderInputItemKind.ASSISTANT:
         return LoweredCanonicalItem(item, LLMMessage.assistant(text))
@@ -297,10 +295,12 @@ def scheduled_request_parts(provenance) -> tuple[LLMContentPart, ...]:
         ScheduledTriggerSource.TIMER: "Automatic timer",
         ScheduledTriggerSource.RUN_ONCE: "User selected Run once",
     }[provenance.trigger_source]
-    return (LLMTextPart(
-        f"Saved task ({source_text}; requested at {provenance.due_at_utc}; "
-        f"target: {canonical_json_bytes(schedule_target(provenance.task_id)).decode('utf-8')}). Execute the saved instruction:\n"
-    ),)
+    return (
+        LLMTextPart(
+            f"Saved task ({source_text}; requested at {provenance.due_at_utc}; "
+            f"target: {canonical_json_bytes(schedule_target(provenance.task_id)).decode('utf-8')}). Execute the saved instruction:\n"
+        ),
+    )
 
 
 def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
@@ -308,7 +308,9 @@ def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
 
     parts = request.content.parts
     if request.item_kind is FrozenProviderInputItemKind.USER:
-        return scheduled_request_parts(request.scheduled_input) + prompt_provider_parts(parts)
+        return scheduled_request_parts(request.scheduled_input) + prompt_provider_parts(
+            parts
+        )
     if any(isinstance(part, LLMImagePart) for part in parts):
         raise ValueError("non-human retained request contains image content")
     text = "\n".join(part.text for part in parts if isinstance(part, LLMTextPart))
@@ -326,10 +328,7 @@ def lower_retained_request_content(request) -> tuple[LLMContentPart, ...]:
         )
     if request.item_kind is FrozenProviderInputItemKind.PLAN_CONTINUATION:
         return (LLMTextPart(_project_plan_continuation(text)),)
-    if request.item_kind in {
-        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
-        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL,
-    }:
+    if request.item_kind in {*()}:
         return (LLMTextPart(text),)
     raise ValueError("retained request kind cannot be lowered")
 
@@ -340,9 +339,7 @@ def display_json(value: object) -> str:
     encoded = canonical_json_bytes(value).decode("utf-8")
     return encoded.replace(
         "[PULSARA_RETAINED_CONTENT", "\\u005bPULSARA_RETAINED_CONTENT"
-    ).replace(
-        "[/PULSARA_RETAINED_CONTENT", "\\u005b/PULSARA_RETAINED_CONTENT"
-    )
+    ).replace("[/PULSARA_RETAINED_CONTENT", "\\u005b/PULSARA_RETAINED_CONTENT")
 
 
 def compaction_snapshot_display_header(carrier: CompactionSnapshotCarrier) -> str:
@@ -369,14 +366,18 @@ def compaction_snapshot_display_header(carrier: CompactionSnapshotCarrier) -> st
             "corrections, cancellations, or replacement requests take precedence. "
             "Use the summary as background; do not repeat completed or superseded work."
         )
-    return notice + "\n" + display_json(
-        {
-            "continuation": {
-                "mode": carrier.continuation_mode.value,
-                "instruction": instruction,
-            },
-            "earlier_context_summary": carrier.earlier_context_summary,
-        }
+    return (
+        notice
+        + "\n"
+        + display_json(
+            {
+                "continuation": {
+                    "mode": carrier.continuation_mode.value,
+                    "instruction": instruction,
+                },
+                "earlier_context_summary": carrier.earlier_context_summary,
+            }
+        )
     )
 
 
@@ -575,15 +576,19 @@ def ordinary_tool_result_minimum_upper(tool_call_id: str) -> LLMMessage:
         artifacts,
         key=lambda candidate: len(
             canonical_json_bytes(
-                canonical_json_bytes(_omitted_tool_result_body(
-                    candidate, artifact_read_available=True, artifact_export_available=True,
-                )).decode(
-                    "utf-8"
-                )
+                canonical_json_bytes(
+                    _omitted_tool_result_body(
+                        candidate,
+                        artifact_read_available=True,
+                        artifact_export_available=True,
+                    )
+                ).decode("utf-8")
             )
         ),
     )
-    body = _omitted_tool_result_body(item, artifact_read_available=True, artifact_export_available=True)
+    body = _omitted_tool_result_body(
+        item, artifact_read_available=True, artifact_export_available=True
+    )
     messages = tuple(
         _tool_result_message(
             replace(
@@ -662,13 +667,24 @@ def _tool_result_variants(
             ToolOutputArtifactDisposition.INCOMPLETE,
         }
     ):
-        ref = _artifact_reference_body(item, artifact_read_available=artifact_read_available, artifact_export_available=artifact_export_available)
+        ref = _artifact_reference_body(
+            item,
+            artifact_read_available=artifact_read_available,
+            artifact_export_available=artifact_export_available,
+        )
         append(
             ToolResultProviderRenderMode.REF_ONLY,
             ref,
             maximum_message_bytes=limits.maximum_tool_result_ref_only_bytes,
         )
-    append(ToolResultProviderRenderMode.OMITTED_BODY, _omitted_tool_result_body(item, artifact_read_available=artifact_read_available, artifact_export_available=artifact_export_available))
+    append(
+        ToolResultProviderRenderMode.OMITTED_BODY,
+        _omitted_tool_result_body(
+            item,
+            artifact_read_available=artifact_read_available,
+            artifact_export_available=artifact_export_available,
+        ),
+    )
     if not result:
         raise ValueError("tool result lowering produced no legal representation")
     return tuple(result)
@@ -711,9 +727,7 @@ def _project_tool_result_closure(text: str) -> str:
             value = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ValueError("tool result closure storage carrier is invalid") from exc
-        if not isinstance(value, dict) or not isinstance(
-            value.get("disposition"), str
-        ):
+        if not isinstance(value, dict) or not isinstance(value.get("disposition"), str):
             raise ValueError("tool result closure disposition is invalid")
         disposition = value["disposition"]
     return canonical_json_bytes({"disposition": disposition}).decode("utf-8")
@@ -743,7 +757,10 @@ def _project_terminal_observation(text: str) -> dict[str, object]:
     if "monitor_id" in value:
         result["target"] = {"kind": "MONITOR", "monitor_id": value["monitor_id"]}
     if "process_id" in value:
-        result["process_target"] = {"kind": "PROCESS", "process_id": value["process_id"]}
+        result["process_target"] = {
+            "kind": "PROCESS",
+            "process_id": value["process_id"],
+        }
     if result.get("status") == "running" and result.get("exit_code") is None:
         result.pop("exit_code", None)
     return result
@@ -801,32 +818,46 @@ def _essential_tool_result_body(item: FrozenProviderInputItem) -> str:
     metadata = item.tool_result_context
     assert metadata is not None
     body = item.tool_result_body_text or ""
-    if (metadata.timing.observation_origin is ToolObservationOrigin.POLICY
-            and metadata.result_state == "TOOL_UNAVAILABLE"):
+    if (
+        metadata.timing.observation_origin is ToolObservationOrigin.POLICY
+        and metadata.result_state == "TOOL_UNAVAILABLE"
+    ):
         return body
     facts = preserved_tool_result_facts(body)
     return canonical_json_bytes(facts).decode("utf-8") if facts else ""
 
 
 def _compact_tool_result_body(
-    body: str, *, item: FrozenProviderInputItem, maximum_bytes: int,
-    artifact_read_available: bool, artifact_export_available: bool = False,
+    body: str,
+    *,
+    item: FrozenProviderInputItem,
+    maximum_bytes: int,
+    artifact_read_available: bool,
+    artifact_export_available: bool = False,
 ) -> str | None:
     encoded = body.encode("utf-8")
     if len(encoded) <= maximum_bytes:
         return body
     essential = _essential_tool_result_body(item)
     guidance = _saved_tool_output_guidance(
-        item, artifact_read_available=artifact_read_available,
+        item,
+        artifact_read_available=artifact_read_available,
         artifact_export_available=artifact_export_available,
     )
+
     def render(budget):
         head = _utf8_prefix(encoded, budget // 2)
         tail = _utf8_suffix(encoded, budget - budget // 2)
         omitted = len(encoded) - len(head) - len(tail)
-        return ((essential + "\n" if essential else "") + head.decode("utf-8")
-                + f"\n[… omitted {omitted} UTF-8 bytes of tool output …]\n"
-                + tail.decode("utf-8") + "\n" + guidance)
+        return (
+            (essential + "\n" if essential else "")
+            + head.decode("utf-8")
+            + f"\n[… omitted {omitted} UTF-8 bytes of tool output …]\n"
+            + tail.decode("utf-8")
+            + "\n"
+            + guidance
+        )
+
     low, high, winner = 0, min(maximum_bytes, len(encoded) - 1), None
     while low <= high:
         middle = (low + high) // 2
@@ -836,6 +867,7 @@ def _compact_tool_result_body(
         else:
             high = middle - 1
     return winner
+
 
 def _bounded_compact_tool_result_body(
     item: FrozenProviderInputItem,
@@ -865,10 +897,7 @@ def _bounded_compact_tool_result_body(
             low = middle + 1
             continue
         message = _tool_result_message(item, candidate)
-        if (
-            provider_neutral_message_logical_bytes(message)
-            <= maximum_message_bytes
-        ):
+        if provider_neutral_message_logical_bytes(message) <= maximum_message_bytes:
             winner = candidate
             low = middle + 1
         else:
@@ -877,16 +906,26 @@ def _bounded_compact_tool_result_body(
 
 
 def _saved_tool_output_guidance(
-    item: FrozenProviderInputItem, *, artifact_read_available: bool,
+    item: FrozenProviderInputItem,
+    *,
+    artifact_read_available: bool,
     artifact_export_available: bool = False,
 ) -> str:
     metadata = item.tool_result_context
     assert metadata is not None
     if metadata.artifact_id is None:
         return "No readable artifact was retained. Do not rerun the tool just to recover omitted output."
-    result = "Saved output: target=" + canonical_json_bytes({"kind": "ARTIFACT", "artifact_id": metadata.artifact_id}).decode("utf-8") + "; "
+    result = (
+        "Saved output: target="
+        + canonical_json_bytes(
+            {"kind": "ARTIFACT", "artifact_id": metadata.artifact_id}
+        ).decode("utf-8")
+        + "; "
+    )
     if artifact_read_available and artifact_export_available:
-        result += "use artifact_read for pages or artifact_export for extensive processing."
+        result += (
+            "use artifact_read for pages or artifact_export for extensive processing."
+        )
     elif artifact_read_available:
         result += "use artifact_read for pages."
     elif artifact_export_available:
@@ -903,24 +942,40 @@ def _saved_tool_output_guidance(
 
 
 def _artifact_reference_body(
-    item: FrozenProviderInputItem, *, artifact_read_available: bool = True,
+    item: FrozenProviderInputItem,
+    *,
+    artifact_read_available: bool = True,
     artifact_export_available: bool = False,
 ) -> str:
     essential = _essential_tool_result_body(item)
-    return (essential + "\n" if essential else "") + "Tool output omitted. " + _saved_tool_output_guidance(
-        item, artifact_read_available=artifact_read_available,
-        artifact_export_available=artifact_export_available,
+    return (
+        (essential + "\n" if essential else "")
+        + "Tool output omitted. "
+        + _saved_tool_output_guidance(
+            item,
+            artifact_read_available=artifact_read_available,
+            artifact_export_available=artifact_export_available,
+        )
     )
 
+
 def _omitted_tool_result_body(
-    item: FrozenProviderInputItem, *, artifact_read_available: bool = False,
+    item: FrozenProviderInputItem,
+    *,
+    artifact_read_available: bool = False,
     artifact_export_available: bool = False,
 ) -> str:
     essential = _essential_tool_result_body(item)
-    return (essential + "\n" if essential else "") + "Tool result body omitted. " + _saved_tool_output_guidance(
-        item, artifact_read_available=artifact_read_available,
-        artifact_export_available=artifact_export_available,
+    return (
+        (essential + "\n" if essential else "")
+        + "Tool result body omitted. "
+        + _saved_tool_output_guidance(
+            item,
+            artifact_read_available=artifact_read_available,
+            artifact_export_available=artifact_export_available,
+        )
     )
+
 
 def _utf8_prefix(value: bytes, maximum: int) -> bytes:
     candidate = value[:maximum]

@@ -102,8 +102,15 @@ def _integer(value, name, *, minimum=0, maximum=None):
 
 
 def _string(value, name):
-    if name in {"session_id", "entry_id", "task_id", "page_id"}:
-        if not is_valid_id(value, {"session_id": "session", "entry_id": "entry", "task_id": "task", "page_id": "page"}[name]):
+    if name in {"session_id", "entry_id", "page_id"}:
+        if not is_valid_id(
+            value,
+            {
+                "session_id": "session",
+                "entry_id": "entry",
+                "page_id": "page",
+            }[name],
+        ):
             raise SessionQueryError("INVALID_ID", f"Invalid {name}.")
     if not isinstance(value, str) or not value:
         raise SessionQueryError("INVALID_REQUEST", f"Invalid {name}.")
@@ -123,9 +130,13 @@ def _target(arguments, operation, current_session_id):
         return _string(target["session_id"], "session_id"), None
     if kind == "SESSION_ENTRY" and operation == "read_session_content":
         if not {"kind", "entry_id"} <= set(target) or not set(target) <= {
-            "kind", "session_id", "entry_id"
+            "kind",
+            "session_id",
+            "entry_id",
         }:
-            raise SessionQueryError("INVALID_REQUEST", "Invalid SESSION_ENTRY target fields.")
+            raise SessionQueryError(
+                "INVALID_REQUEST", "Invalid SESSION_ENTRY target fields."
+            )
         return (
             _string(target.get("session_id", current_session_id), "session_id"),
             _string(target["entry_id"], "entry_id"),
@@ -157,7 +168,7 @@ _ELIGIBLE = """(e.entry_kind IN ('USER_MESSAGE','USER_STEER') OR
       SELECT 1 FROM pulsara_v3.assistant_message_blocks a
       WHERE a.session_id=e.session_id AND a.assistant_entry_id=e.id
         AND (a.block_kind='TEXT' OR (%s AND a.block_kind='TOOL_CALL'))))
-    OR (%s AND e.entry_kind='TOOL_RESULT'))"""
+    OR (%s AND e.entry_kind='TOOL_RESULT' AND NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_results cr JOIN pulsara_v3.tool_invocations ci ON ci.id=cr.invocation_id WHERE cr.session_id=e.session_id AND cr.result_entry_id=e.id AND ci.source_kind='CODE_MODE_CALL')))"""
 
 
 def _assistant_document(blocks):
@@ -506,7 +517,7 @@ class SessionContentQuery:
             if anchor_id is not None:
                 anchor = connection.execute(
                     """SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
-                       WHERE e.session_id=%s AND e.id=%s AND e.conversation_scope_kind='ROOT'
+                       WHERE e.session_id=%s AND e.id=%s
                          AND e.entry_sequence<=%s AND e.id IS DISTINCT FROM %s AND """
                     + _ELIGIBLE,
                     (
@@ -564,7 +575,7 @@ class SessionContentQuery:
             stream.itersize = SESSION_QUERY_MAX_ITEMS
             stream.execute(
                 """SELECT e.* FROM pulsara_v3.transcript_entries e
-                WHERE e.session_id=%s AND e.conversation_scope_kind='ROOT' AND e.entry_sequence<=%s
+                WHERE e.session_id=%s AND e.entry_sequence<=%s
                   AND e.id IS DISTINCT FROM %s AND e.entry_sequence """
                 + compare
                 + " %s AND "
@@ -576,7 +587,7 @@ class SessionContentQuery:
             if cursor is not None and offset:
                 # An offset must name the exact eligible entry, never a later one.
                 probe = connection.execute(
-                    "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_sequence=%s AND conversation_scope_kind='ROOT'",
+                    "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_sequence=%s",
                     (target, position),
                 ).fetchone()
                 if probe is None or probe["id"] == excluded:
@@ -598,7 +609,9 @@ class SessionContentQuery:
                 caller_workspace_id,
             )
 
-    def _document(self, connection, entry, event_cut, deadline, include_tools, caller_workspace_id):
+    def _document(
+        self, connection, entry, event_cut, deadline, include_tools, caller_workspace_id
+    ):
         if monotonic() >= deadline:
             raise TimeoutError("session content query deadline exceeded")
         kind = entry["entry_kind"]
@@ -645,8 +658,15 @@ class SessionContentQuery:
             ).fetchall()
             text, segments, _ = _assistant_document(blocks)
             bounds = ()
-            from pulsara_agent.conversation_kernel.session_text import visualization_history_text
-            for description in visualization_history_text(connection, entry, image_references=entry["workspace_id"] == caller_workspace_id):
+            from pulsara_agent.conversation_kernel.session_text import (
+                visualization_history_text,
+            )
+
+            for description in visualization_history_text(
+                connection,
+                entry,
+                image_references=entry["workspace_id"] == caller_workspace_id,
+            ):
                 start = len(text) + (1 if text else 0)
                 text += ("\n" if text else "") + description
                 bounds += ((start, len(text)),)
@@ -655,7 +675,8 @@ class SessionContentQuery:
                 connection, row=entry, transcript_entry_id=entry["id"]
             )
             text, segments, bounds = prompt_history_text(
-                decoded.parts, image_references=entry["workspace_id"] == caller_workspace_id
+                decoded.parts,
+                image_references=entry["workspace_id"] == caller_workspace_id,
             )
         else:
             content = entry["inline_content"]
@@ -791,21 +812,25 @@ class SessionContentQuery:
 
         binding = (query, target, tools, end, excluded)
         if previous is not None and previous.query != binding:
-            raise SessionQueryError("CURSOR_INVALID", "Search continuation parameters changed.")
+            raise SessionQueryError(
+                "CURSOR_INVALID", "Search continuation parameters changed."
+            )
         seen = set() if previous is None else previous.consumed_ids()
         consumed = []
         page_id = random_id("page")
         while page_id in self._history_consumed_pages:
             page_id = random_id("page")
-        next_cursor = _encode({
-            "operation": "search_session_content.bm25.v3",
-            "query": query,
-            "session_id": target,
-            "include_tools": tools,
-            "range_end": end,
-            "excluded": excluded,
-            "consumed_page": page_id,
-        })
+        next_cursor = _encode(
+            {
+                "operation": "search_session_content.bm25.v3",
+                "query": query,
+                "session_id": target,
+                "include_tools": tools,
+                "range_end": end,
+                "excluded": excluded,
+                "consumed_page": page_id,
+            }
+        )
 
         def finish(items, more):
             payload = {"items": items, "next_cursor": next_cursor if more else None}
@@ -844,12 +869,16 @@ class SessionContentQuery:
                 consumed.append(row["q1_entry_id"])
                 continue
             item = {
-                "target": session_entry_target(candidate.session_id, candidate.q1_entry_id),
+                "target": session_entry_target(
+                    candidate.session_id, candidate.q1_entry_id
+                ),
                 "title": candidate.title,
                 "score": candidate.score,
                 "messages": [
                     {
-                        "target": session_entry_target(candidate.session_id, m["entry_id"]),
+                        "target": session_entry_target(
+                            candidate.session_id, m["entry_id"]
+                        ),
                         **{k: m[k] for k in ("role", "label", "at", "text")},
                     }
                     for m in candidate.messages
@@ -891,7 +920,12 @@ class SessionContentQuery:
             )
         while entry is not None:
             item, text, _, bounds = self._document(
-                connection, entry, event_cut, deadline, include_tools, caller_workspace_id
+                connection,
+                entry,
+                event_cut,
+                deadline,
+                include_tools,
+                caller_workspace_id,
             )
             # Generated image descriptions stay atomic for every message role.
             image_bounds = bounds

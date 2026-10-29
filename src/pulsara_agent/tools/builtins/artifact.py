@@ -14,7 +14,7 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.artifact import ArtifactContentError, ToolArtifactReadPort
-from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
+from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult, ToolOutputSourceFormatHint
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
 )
@@ -134,6 +134,7 @@ class ArtifactReadTool:
             status=status,
             output=output,
             artifact_inline_result=True,
+            public_format=ToolOutputSourceFormatHint.JSON,
             model_visible_memory_fact_ids=model_visible_memory_fact_ids,
         )
 

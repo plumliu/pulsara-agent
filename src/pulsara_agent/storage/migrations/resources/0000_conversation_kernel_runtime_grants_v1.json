@@ -16,28 +16,26 @@
       "INSERT",
       "DELETE"
     ],
-    "agent_events": [
-      "SELECT",
-      "INSERT"
-    ],
-    "assistant_message_blocks": [
-      "SELECT",
-      "INSERT"
-    ],
-    "assistant_visualizations": [
-      "SELECT",
-      "INSERT"
-    ],
-    "provider_assistant_replay_fragments": [
-      "SELECT",
-      "INSERT"
-    ],
-    "blobs": [
+    "sessions": [
       "SELECT",
       "INSERT",
+      "UPDATE",
       "DELETE"
     ],
-    "canonical_image_refs": [
+    "session_commands": [
+      "SELECT",
+      "INSERT"
+    ],
+    "turns": [
+      "SELECT",
+      "INSERT",
+      "UPDATE"
+    ],
+    "provider_call_usage": [
+      "SELECT",
+      "INSERT"
+    ],
+    "turn_context_binding_revisions": [
       "SELECT",
       "INSERT"
     ],
@@ -57,6 +55,50 @@
       "SELECT",
       "INSERT"
     ],
+    "transcript_entries": [
+      "SELECT",
+      "INSERT"
+    ],
+    "assistant_message_blocks": [
+      "SELECT",
+      "INSERT"
+    ],
+    "assistant_visualizations": [
+      "SELECT",
+      "INSERT"
+    ],
+    "provider_assistant_replay_fragments": [
+      "SELECT",
+      "INSERT"
+    ],
+    "tool_invocations": [
+      "SELECT",
+      "INSERT"
+    ],
+    "tool_execution_attempts": [
+      "SELECT",
+      "INSERT",
+      "UPDATE"
+    ],
+    "tool_results": [
+      "SELECT",
+      "INSERT"
+    ],
+    "prompt_queue_items": [
+      "SELECT",
+      "INSERT",
+      "UPDATE"
+    ],
+    "scheduled_tasks": [
+      "SELECT",
+      "INSERT",
+      "UPDATE",
+      "DELETE"
+    ],
+    "canonical_image_refs": [
+      "SELECT",
+      "INSERT"
+    ],
     "interaction_decisions": [
       "SELECT",
       "INSERT"
@@ -70,10 +112,6 @@
       "SELECT",
       "INSERT",
       "UPDATE"
-    ],
-    "provider_call_usage": [
-      "SELECT",
-      "INSERT"
     ],
     "memory_facts": [
       "SELECT",
@@ -92,61 +130,14 @@
       "UPDATE",
       "DELETE"
     ],
-    "prompt_queue_items": [
+    "blobs": [
       "SELECT",
       "INSERT",
-      "UPDATE"
-    ],
-    "scheduled_tasks": [
-      "SELECT",
-      "INSERT",
-      "UPDATE",
       "DELETE"
     ],
-    "session_commands": [
+    "agent_events": [
       "SELECT",
       "INSERT"
-    ],
-    "sessions": [
-      "SELECT",
-      "INSERT",
-      "UPDATE",
-      "DELETE"
-    ],
-    "subagent_task_children": [
-      "SELECT",
-      "INSERT"
-    ],
-    "subagent_task_dependencies": [
-      "SELECT",
-      "INSERT"
-    ],
-    "subagent_tasks": [
-      "SELECT",
-      "INSERT",
-      "UPDATE"
-    ],
-    "tool_execution_attempts": [
-      "SELECT",
-      "INSERT",
-      "UPDATE"
-    ],
-    "tool_results": [
-      "SELECT",
-      "INSERT"
-    ],
-    "transcript_entries": [
-      "SELECT",
-      "INSERT"
-    ],
-    "turn_context_binding_revisions": [
-      "SELECT",
-      "INSERT"
-    ],
-    "turns": [
-      "SELECT",
-      "INSERT",
-      "UPDATE"
     ],
     "history_search_documents": [
       "SELECT",
@@ -169,6 +160,9 @@
       "EXECUTE"
     ],
     "seal_memory_relation()": [
+      "EXECUTE"
+    ],
+    "enforce_session_root()": [
       "EXECUTE"
     ]
   },

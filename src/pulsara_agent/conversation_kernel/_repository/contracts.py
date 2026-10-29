@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pulsara_agent.identity import derive_id
+from pulsara_agent.conversation_kernel.tool_invocations import ToolInvocationSource, current_tool_invocation
 
 
 from dataclasses import dataclass, field
@@ -41,7 +42,6 @@ from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
     model_call_binding_to_dict,
 )
-from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
@@ -178,58 +178,10 @@ class TurnAdmissionConfirmationKind(StrEnum):
     CONFLICT = "CONFLICT"
 
 
-class SubagentCompletionDisposition(StrEnum):
-    CREATED = "CREATED"
-    ALREADY_DELIVERED = "ALREADY_DELIVERED"
-    TARGET_STALE = "TARGET_STALE"
 
 
-@dataclass(frozen=True, slots=True)
-class AcceptedSubagentCompletion:
-    disposition: SubagentCompletionDisposition
-    entry: AcceptedEntry | None = None
-
-    def __post_init__(self) -> None:
-        if (self.disposition is SubagentCompletionDisposition.TARGET_STALE) != (
-            self.entry is None
-        ):
-            raise ValueError("subagent completion disposition is inconsistent")
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedAutomaticSubagentCompletion:
-    """Exact immutable completion suffix value prepared before its writer."""
-
-    session_id: str
-    workspace_id: str
-    task_id: str
-    target_turn_id: str
-    entry_id: str
-    expected_provider_input_cut: PreparedProviderInputCut
-    storage_body: bytes = field(repr=False)
-
-    def __post_init__(self) -> None:
-        cut = self.expected_provider_input_cut
-        if (
-            not all(
-                (
-                    self.session_id,
-                    self.workspace_id,
-                    self.task_id,
-                    self.target_turn_id,
-                    self.entry_id,
-                )
-            )
-            or cut.session_id != self.session_id
-            or cut.turn_id != self.target_turn_id
-            or not isinstance(self.storage_body, bytes)
-            or not self.storage_body
-        ):
-            raise ValueError("automatic completion candidate is incomplete")
-
-    @property
-    def entry_sequence(self) -> int:
-        return self.expected_provider_input_cut.provider_input_through_sequence + 1
 
 
 class ToolRemoteIdentityConfirmationKind(StrEnum):
@@ -357,65 +309,6 @@ class AcceptedRootTurnAdmission:
     reasoning_preference_reset: bool = False
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedSubagentTurnAdmission:
-    session_id: str
-    task_id: str
-    turn_id: str
-    entry_id: str
-    context_binding_revision_id: str
-    permission_snapshot_id: str
-    task_start_event_id: str
-    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot = field(repr=False)
-    content: CanonicalContent
-    occurred_at: datetime
-    actor_id: str
-    event: CommittedEventDraft
-    candidate_fingerprint: str
-
-    def __post_init__(self) -> None:
-        payload = _subagent_turn_admission_payload(
-            session_id=self.session_id,
-            task_id=self.task_id,
-            turn_id=self.turn_id,
-            entry_id=self.entry_id,
-            context_binding_revision_id=self.context_binding_revision_id,
-            permission_snapshot_id=self.permission_snapshot_id,
-            task_start_event_id=self.task_start_event_id,
-            expected_parent_permission_snapshot=(
-                self.expected_parent_permission_snapshot
-            ),
-            content=self.content,
-            occurred_at=self.occurred_at,
-            actor_id=self.actor_id,
-        )
-        expected = canonical_digest(
-            "pulsara:prepared-subagent-turn-admission:v1", payload
-        )
-        if (
-            not self.session_id
-            or not self.task_id
-            or not self.turn_id
-            or not self.entry_id
-            or not self.context_binding_revision_id
-            or not self.permission_snapshot_id
-            or not self.task_start_event_id
-            or self.expected_parent_permission_snapshot.inherited_from_turn_id
-            is not None
-            or self.candidate_fingerprint != expected
-            or self.event.event_id
-            != derive_id("event", "accepted", self.session_id, "USER_MESSAGE_ACCEPTED", "ENTRY", self.entry_id, "")
-            or self.event.event_type is not CommittedEventType.USER_MESSAGE_ACCEPTED
-            or self.event.subject
-            != CommittedEventSubject(SubjectSlot.ENTRY, self.entry_id)
-            or self.event.actor_kind != "runtime"
-            or self.event.actor_id != self.actor_id
-            or self.event.sensitivity_class != "PUBLIC"
-            or self.event.projection_profile != "DEFAULT"
-            or self.event.occurred_at != self.occurred_at
-            or dict(self.event.payload) != {"source": "SUBAGENT_TASK_OBJECTIVE"}
-        ):
-            raise ValueError("prepared subagent turn admission is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,7 +407,7 @@ class PreparedToolResultAcceptance:
     result_id: str
     result_entry_id: str
     turn_id: str
-    assistant_entry_id: str
+    assistant_entry_id: str | None
     tool_call_id: str
     attempt_id: str | None
     result_state: str
@@ -536,6 +429,7 @@ class PreparedToolResultAcceptance:
     side_branch: ToolResultSideBranch
     model_visible_memory_fact_ids: tuple[str, ...] = ()
     candidate_fingerprint: str = field(init=False)
+    invocation_source: ToolInvocationSource | None = field(default_factory=current_tool_invocation.get)
 
     def __post_init__(self) -> None:
         if not all(
@@ -545,7 +439,6 @@ class PreparedToolResultAcceptance:
                 self.result_id,
                 self.result_entry_id,
                 self.turn_id,
-                self.assistant_entry_id,
                 self.tool_call_id,
                 self.result_state,
                 self.actor_id,
@@ -704,7 +597,7 @@ class PreparedToolResultAcceptance:
 class AcceptedToolAttempt:
     attempt_id: str
     session_id: str
-    assistant_entry_id: str
+    assistant_entry_id: str | None
     tool_call_id: str
     permission_snapshot_fingerprint: str
 
@@ -713,7 +606,7 @@ class AcceptedToolAttempt:
 class AcceptedCapabilityDecision:
     decision_id: str
     decision: str
-    assistant_entry_id: str
+    assistant_entry_id: str | None
     tool_call_id: str
     attempt_id: str | None
     result_entry_id: str | None
@@ -1057,8 +950,6 @@ def _utcnow() -> datetime:
 
 
 
-def _stable_subagent_message_child_id(task_id: str, entry_id: str) -> str:
-    return derive_id("agent-message", "message", task_id, entry_id)
 
 
 def _deterministic_retry_due(
@@ -1259,93 +1150,8 @@ def build_prepared_root_turn_intent(
     )
 
 
-def _subagent_turn_admission_payload(
-    *,
-    session_id: str,
-    task_id: str,
-    turn_id: str,
-    entry_id: str,
-    context_binding_revision_id: str,
-    permission_snapshot_id: str,
-    task_start_event_id: str,
-    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot,
-    content: CanonicalContent,
-    occurred_at: datetime,
-    actor_id: str,
-) -> Mapping[str, object]:
-    return {
-        "session_id": session_id,
-        "task_id": task_id,
-        "turn_id": turn_id,
-        "entry_id": entry_id,
-        "context_binding_revision_id": context_binding_revision_id,
-        "permission_snapshot_id": permission_snapshot_id,
-        "task_start_event_id": task_start_event_id,
-        "expected_parent_permission_snapshot": (
-            expected_parent_permission_snapshot.snapshot_fingerprint
-        ),
-        "content": _canonical_content_identity(content),
-        "occurred_at": occurred_at.isoformat(),
-        "actor_id": actor_id,
-    }
 
 
-def build_prepared_subagent_turn_admission(
-    *,
-    session_id: str,
-    task_id: str,
-    turn_id: str,
-    entry_id: str,
-    context_binding_revision_id: str,
-    permission_snapshot_id: str,
-    task_start_event_id: str,
-    expected_parent_permission_snapshot: FrozenRunPermissionSnapshot,
-    content: CanonicalContent,
-    occurred_at: datetime,
-    actor_id: str = "subagent-manager",
-) -> PreparedSubagentTurnAdmission:
-    payload = _subagent_turn_admission_payload(
-        session_id=session_id,
-        task_id=task_id,
-        turn_id=turn_id,
-        entry_id=entry_id,
-        context_binding_revision_id=context_binding_revision_id,
-        permission_snapshot_id=permission_snapshot_id,
-        task_start_event_id=task_start_event_id,
-        expected_parent_permission_snapshot=expected_parent_permission_snapshot,
-        content=content,
-        occurred_at=occurred_at,
-        actor_id=actor_id,
-    )
-    candidate_fingerprint = canonical_digest(
-        "pulsara:prepared-subagent-turn-admission:v1", payload
-    )
-    event = CommittedEventDraft(
-        event_id=derive_id("event", "accepted", session_id, CommittedEventType.USER_MESSAGE_ACCEPTED.name, SubjectSlot.ENTRY.name, entry_id, ""),
-        event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
-        subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
-        actor_kind="runtime",
-        actor_id=actor_id,
-        sensitivity_class="PUBLIC",
-        projection_profile="DEFAULT",
-        occurred_at=occurred_at,
-        payload=MappingProxyType({"source": "SUBAGENT_TASK_OBJECTIVE"}),
-    )
-    return PreparedSubagentTurnAdmission(
-        session_id=session_id,
-        task_id=task_id,
-        turn_id=turn_id,
-        entry_id=entry_id,
-        context_binding_revision_id=context_binding_revision_id,
-        permission_snapshot_id=permission_snapshot_id,
-        task_start_event_id=task_start_event_id,
-        expected_parent_permission_snapshot=expected_parent_permission_snapshot,
-        content=content,
-        occurred_at=occurred_at,
-        actor_id=actor_id,
-        event=event,
-        candidate_fingerprint=candidate_fingerprint,
-    )
 
 
 def _tool_remote_identity_publication_payload(
@@ -1621,7 +1427,7 @@ def build_prepared_tool_result_acceptance(
     result_id: str,
     result_entry_id: str,
     turn_id: str,
-    assistant_entry_id: str,
+    assistant_entry_id: str | None,
     tool_call_id: str,
     attempt_id: str | None,
     result_state: str,

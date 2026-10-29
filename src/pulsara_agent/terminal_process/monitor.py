@@ -62,6 +62,7 @@ class TerminalMonitorCloseReason(StrEnum):
     DELIVERY_BUDGET_EXHAUSTED = "DELIVERY_BUDGET_EXHAUSTED"
     HOST_CLOSE = "HOST_CLOSE"
     ORIGIN_DISCARDED = "ORIGIN_DISCARDED"
+    WORK_TERMINAL = "WORK_TERMINAL"
 
 
 class TerminalMonitorRejectionReason(StrEnum):
@@ -150,6 +151,9 @@ class _Registration:
     stream_id: str
     owner_epoch: str
     origin_turn_id: str
+    recipient_session_id: str
+    registering_agent_id: str | None
+    work_turn_id: str | None
     origin_attempt_id: str
     origin_result_entry_id: str
     writer_generation: int
@@ -197,6 +201,7 @@ class TerminalMonitorCoordinator:
         self._owner_epoch = owner_epoch
         self._registry = registry
         self._live_bus = live_bus
+        self._live_buses = {session_id: live_bus}
         self._wake_scheduler = wake_scheduler
         self._registrations: dict[str, _Registration] = {}
         self._tokens: dict[str, PreparedTerminalMonitorRegistration] = {}
@@ -211,6 +216,16 @@ class TerminalMonitorCoordinator:
         )
         self._worker.start()
 
+    def bind_live_bus(self, session_id: str, live_bus: LiveAgentEventBus) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("terminal monitor owner is closed")
+            self._live_buses[session_id] = live_bus
+
+    def unbind_live_bus(self, session_id: str) -> None:
+        with self._lock:
+            self._live_buses.pop(session_id, None)
+
     def prepare_registration(
         self,
         *,
@@ -221,7 +236,14 @@ class TerminalMonitorCoordinator:
         writer_generation: int,
         authorization_reference: str,
         policy: TerminalMonitorPolicy,
+        recipient_session_id: str | None = None,
+        registering_agent_id: str | None = None,
+        work_turn_id: str | None = None,
     ) -> PreparedTerminalMonitorRegistration:
+        if (registering_agent_id is None) != (work_turn_id is None):
+            raise ValueError("Subagent monitor must bind an Agent and current Work turn")
+        if work_turn_id is not None and work_turn_id != origin_turn_id:
+            raise ValueError("Subagent monitor origin must be its current Work")
         with self._lock:
             if not self._accepting:
                 raise TerminalMonitorRejected(
@@ -297,6 +319,9 @@ class TerminalMonitorCoordinator:
             stream_id=snapshot.stream_id,
             owner_epoch=self._owner_epoch,
             origin_turn_id=origin_turn_id,
+            recipient_session_id=recipient_session_id or self._session_id,
+            registering_agent_id=registering_agent_id,
+            work_turn_id=work_turn_id,
             origin_attempt_id=origin_attempt_id,
             origin_result_entry_id=origin_result_entry_id,
             writer_generation=writer_generation,
@@ -405,7 +430,7 @@ class TerminalMonitorCoordinator:
                 registration, TerminalMonitorCloseReason.ORIGIN_DISCARDED
             )
 
-    def list_current(self) -> tuple[dict[str, object], ...]:
+    def list_current(self, *, agent_id: str | None = None, work_turn_id: str | None = None) -> tuple[dict[str, object], ...]:
         with self._lock:
             return tuple(
                 {
@@ -419,9 +444,10 @@ class TerminalMonitorCoordinator:
                     self._registrations.values(), key=lambda value: value.monitor_id
                 )
                 if item.state is not TerminalMonitorState.CLOSED
+                and self._visible(item, agent_id=agent_id, work_turn_id=work_turn_id)
             )
 
-    def freeze_compaction_handoff(self) -> tuple[dict[str, object], ...]:
+    def freeze_compaction_handoff(self, *, agent_id: str | None = None, work_turn_id: str | None = None) -> tuple[dict[str, object], ...]:
         """Freeze active/dormant public identities without observation bodies."""
 
         with self._lock:
@@ -441,13 +467,14 @@ class TerminalMonitorCoordinator:
                     self._registrations.values(), key=lambda value: value.monitor_id
                 )
                 if item.state is not TerminalMonitorState.CLOSED
+                and self._visible(item, agent_id=agent_id, work_turn_id=work_turn_id)
             )
 
-    def cancel(self, monitor_id: str) -> str:
+    def cancel(self, monitor_id: str, *, agent_id: str | None = None, work_turn_id: str | None = None) -> str:
         require_id(monitor_id, "monitor")
         with self._lock:
             registration = self._registrations.get(monitor_id)
-            if registration is None:
+            if registration is None or not self._visible(registration, agent_id=agent_id, work_turn_id=work_turn_id):
                 return "not_found"
             if registration.state is TerminalMonitorState.CLOSED:
                 return "already_terminal"
@@ -494,6 +521,25 @@ class TerminalMonitorCoordinator:
                 in_flight_ids,
             )
 
+    @staticmethod
+    def _visible(registration: _Registration, *, agent_id: str | None, work_turn_id: str | None) -> bool:
+        if agent_id is None and work_turn_id is None:
+            return True  # ROOT owns Host-wide management.
+        return (registration.registering_agent_id == agent_id
+                and registration.work_turn_id == work_turn_id)
+
+    def registration_scope(self, monitor_id: str) -> tuple[str, str | None, str | None] | None:
+        with self._lock:
+            item = self._registrations.get(monitor_id)
+            return None if item is None else (item.recipient_session_id, item.registering_agent_id, item.work_turn_id)
+
+    def close_work(self, turn_id: str) -> None:
+        """End subscriptions at real Work settlement; the process is independent."""
+        with self._lock:
+            for registration in self._registrations.values():
+                if registration.work_turn_id == turn_id:
+                    self._close_locked(registration, TerminalMonitorCloseReason.WORK_TERMINAL)
+
     def process_completed(
         self, process_id: str, *, status: str, exit_code: int | None
     ) -> None:
@@ -525,6 +571,9 @@ class TerminalMonitorCoordinator:
                 or registration.state is not TerminalMonitorState.ACTIVE
             ):
                 return None
+            if registration.work_turn_id is not None:
+                if not isinstance(target, ExistingTurnInstallation) or target.turn_id != registration.work_turn_id:
+                    return None
             if registration.writer_generation != writer_generation:
                 return None
             if registration.in_flight is not None or registration.draft is None:
@@ -533,7 +582,7 @@ class TerminalMonitorCoordinator:
             digest = f"sha256:{sha256(draft.content.canonical_bytes()).hexdigest()}"
             occurred_at = datetime.now(timezone.utc)
             attempt = TerminalObservationInstallationAttempt(
-                session_id=self._session_id,
+                session_id=registration.recipient_session_id,
                 workspace_id=workspace_id,
                 writer_generation=writer_generation,
                 origin_turn_id=registration.origin_turn_id,
@@ -868,9 +917,12 @@ class TerminalMonitorCoordinator:
             registration.subscription_token,
             owner_host_session_id=self._owner_epoch,
         )
-        self._live_bus.offer_nowait(
+        live_bus = self._live_buses.get(registration.recipient_session_id)
+        if live_bus is None:
+            return
+        live_bus.offer_nowait(
             event_type=LiveEventType.TERMINAL_MONITOR_CLOSED,
-            session_id=self._session_id,
+            session_id=registration.recipient_session_id,
             turn_id=registration.origin_turn_id,
             draft_identity=registration.monitor_id,
             payload=TerminalMonitorClosedPayload(
@@ -883,9 +935,12 @@ class TerminalMonitorCoordinator:
         )
 
     def _offer_opened(self, registration: _Registration) -> None:
-        self._live_bus.offer_nowait(
+        live_bus = self._live_buses.get(registration.recipient_session_id)
+        if live_bus is None:
+            return
+        live_bus.offer_nowait(
             event_type=LiveEventType.TERMINAL_MONITOR_OPENED,
-            session_id=self._session_id,
+            session_id=registration.recipient_session_id,
             turn_id=registration.origin_turn_id,
             draft_identity=registration.monitor_id,
             payload=TerminalMonitorOpenedPayload(
@@ -904,9 +959,12 @@ class TerminalMonitorCoordinator:
         *,
         source_digest: str,
     ) -> None:
-        self._live_bus.offer_nowait(
+        live_bus = self._live_buses.get(registration.recipient_session_id)
+        if live_bus is None:
+            return
+        live_bus.offer_nowait(
             event_type=LiveEventType.TERMINAL_MONITOR_OBSERVATION,
-            session_id=self._session_id,
+            session_id=registration.recipient_session_id,
             turn_id=registration.origin_turn_id,
             draft_identity=registration.monitor_id,
             payload=TerminalMonitorObservationPayload(

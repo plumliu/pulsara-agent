@@ -23,7 +23,6 @@ from psycopg.types.json import Jsonb
 from pulsara_agent.conversation_kernel.contracts import (
     CommittedEventDraft,
     CommittedEventSubject,
-    ConversationScopeKind,
     EntryKind,
     HostWriterGuard,
     InlineContent,
@@ -327,7 +326,6 @@ def _plan_tool_result_settlement(
     return build_accepted_canonical_tool_result_settlement(
         session_id=candidate.session_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         turn_id=candidate.origin_turn_id,
         assistant_entry_id=candidate.assistant_entry_id,
         call_ordinal=call_ordinal,
@@ -684,9 +682,7 @@ class _PlanOperations:
             connection,
             session_id=candidate.session_id,
             turn_id=candidate.continuation_turn_id,
-            initial_entry_sequence=sequence,
-            scope_kind=ConversationScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            initial_entry_sequence=expected_latest_entry_sequence+1,
         )
         return PreparedRootProviderInputCandidate(
             session_id=candidate.session_id,
@@ -769,7 +765,6 @@ class _PlanOperations:
             if (
                 turn is None
                 or str(turn["workspace_id"]) != candidate.workspace_id
-                or str(turn["conversation_scope_kind"]) != "ROOT"
                 or str(turn["permission_snapshot_fingerprint"])
                 != candidate.permission_snapshot.snapshot_fingerprint
                 or self._permission_from_row(turn) != candidate.permission_snapshot
@@ -918,14 +913,12 @@ class _PlanOperations:
                     entry_id=call.result_entry_id,
                     entry_sequence=entry_sequence,
                     entry_kind=EntryKind.TOOL_RESULT,
-                    scope_kind=ConversationScopeKind.ROOT,
-                    scope_task_id=None,
                     content=_plan_inline(payload),
                 )
                 connection.execute(
                     """
                     INSERT INTO pulsara_v3.tool_results (
-                        result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
+                        invocation_id, result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
                         tool_call_id, attempt_id, result_origin_kind,
                         control_plan_workflow_id, control_plan_interaction_id,
                         permission_snapshot_fingerprint,
@@ -933,10 +926,11 @@ class _PlanOperations:
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
                         tool_reported_duration_microseconds
-                    ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL, %s, %s, %s,
+                    ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL, %s, %s, %s,
                               %s, %s, %s, %s, NULL, %s, NULL)
                     """,
                     (
+                        self._accept_invocation_source(connection,guard,assistant_entry_id=candidate.assistant_entry_id,tool_call_id=call.tool_call_id,turn_id=candidate.origin_turn_id,require_running=False)[0].invocation_id,
                         call.result_id,
                         guard.session_id,
                         candidate.workspace_id,
@@ -1130,14 +1124,12 @@ class _PlanOperations:
                 entry_id=call.result_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TOOL_RESULT,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_task_id=None,
                 content=_plan_inline(payload),
             )
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
-                    result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
+                    invocation_id, result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
                     tool_call_id, attempt_id, result_origin_kind,
                     control_plan_workflow_id, control_plan_interaction_id,
                     permission_snapshot_fingerprint,
@@ -1145,11 +1137,12 @@ class _PlanOperations:
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
                     tool_reported_duration_microseconds
-                ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL,
+                ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL,
                           'POLICY_NO_ATTEMPT', NULL, NULL, %s, %s, %s,
                           %s, NULL, 'POLICY', NULL)
                 """,
                 (
+                    self._accept_invocation_source(connection,guard,assistant_entry_id=candidate.assistant_entry_id,tool_call_id=call.tool_call_id,turn_id=candidate.origin_turn_id,require_running=False)[0].invocation_id,
                     call.result_id,
                     guard.session_id,
                     candidate.workspace_id,
@@ -1373,9 +1366,6 @@ class _PlanOperations:
         ).fetchone()
         if (
             turn is None
-            or str(turn["conversation_scope_kind"])
-            != ConversationScopeKind.ROOT.value
-            or turn["scope_subagent_task_id"] is not None
             or str(turn["workspace_id"]) != str(interaction["workspace_id"])
             or (bool(turn["has_pending_steer"]) != (answer is None))
         ):
@@ -1405,7 +1395,6 @@ class _PlanOperations:
         accepted_settlement = build_accepted_canonical_tool_result_settlement(
             session_id=guard.session_id,
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             turn_id=str(interaction["origin_turn_id"]),
             assistant_entry_id=str(interaction["assistant_entry_id"]),
             call_ordinal=int(interaction["selected_call_ordinal"]),
@@ -1553,14 +1542,12 @@ class _PlanOperations:
                 entry_id=result_entry_id,
                 entry_sequence=entry_sequence,
                 entry_kind=EntryKind.TOOL_RESULT,
-                scope_kind=ConversationScopeKind.ROOT,
-                scope_task_id=None,
                 content=result_content,
             )
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.tool_results (
-                    result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
+                    invocation_id, result_record_kind, id, session_id, workspace_id, tool_call_entry_id,
                     tool_call_id, attempt_id, result_origin_kind,
                     control_plan_interaction_id,
                     permission_snapshot_fingerprint,
@@ -1568,10 +1555,11 @@ class _PlanOperations:
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
                     tool_reported_duration_microseconds
-                ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL',
+                ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL',
                           %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL', NULL)
                 """,
                 (
+                    self._accept_invocation_source(connection,guard,assistant_entry_id=interaction['assistant_entry_id'],tool_call_id=interaction['tool_call_id'],turn_id=interaction['origin_turn_id'],require_running=False)[0].invocation_id,
                     result_id,
                     guard.session_id,
                     interaction["workspace_id"],
@@ -1684,7 +1672,6 @@ class _PlanOperations:
                     build_accepted_canonical_tool_result_settlement(
                         session_id=guard.session_id,
                         scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
                         turn_id=str(interaction["origin_turn_id"]),
                         assistant_entry_id=str(interaction["assistant_entry_id"]),
                         call_ordinal=int(interaction["selected_call_ordinal"]),
@@ -1796,7 +1783,7 @@ class _PlanOperations:
             if (
                 connection.execute(
                     """SELECT 1 FROM pulsara_v3.turns
-                   WHERE session_id = %s AND conversation_scope_kind = 'ROOT'
+                   WHERE session_id = %s
                      AND status = 'RUNNING'""",
                     (guard.session_id,),
                 ).fetchone()
@@ -1938,15 +1925,13 @@ class _PlanOperations:
             expected_turn = None
             if expected_active_turn_id is not None:
                 expected_turn = connection.execute(
-                    """SELECT id, status, conversation_scope_kind,
-                              permission_plan_workflow_id
+                    """SELECT id, status,                               permission_plan_workflow_id
                        FROM pulsara_v3.turns
                        WHERE session_id = %s AND id = %s FOR UPDATE""",
                     (guard.session_id, expected_active_turn_id),
                 ).fetchone()
                 if (
                     expected_turn is None
-                    or str(expected_turn["conversation_scope_kind"]) != "ROOT"
                 ):
                     raise ConversationKernelConflict(
                         "Plan force-exit Host turn identity drifted"
@@ -1956,7 +1941,6 @@ class _PlanOperations:
                 """SELECT id, workspace_id, permission_plan_workflow_id
                    FROM pulsara_v3.turns
                    WHERE session_id = %s
-                     AND conversation_scope_kind = 'ROOT'
                      AND status = 'RUNNING'
                    FOR UPDATE""",
                 (guard.session_id,),
@@ -2103,7 +2087,7 @@ class _PlanOperations:
                 raise ConversationKernelConflict("Plan exit target drifted")
             running = connection.execute(
                 """SELECT 1 FROM pulsara_v3.turns
-                   WHERE session_id = %s AND conversation_scope_kind = 'ROOT'
+                   WHERE session_id = %s
                      AND status = 'RUNNING'""",
                 (guard.session_id,),
             ).fetchone()
@@ -2426,8 +2410,6 @@ class _PlanOperations:
             session_id=guard.session_id,
             turn_id=continuation_turn_id,
             initial_entry_sequence=entry_sequence,
-            scope_kind=ConversationScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         return PreparedRootProviderInputCandidate(
             session_id=guard.session_id,
@@ -3245,8 +3227,7 @@ class _PlanOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.turns (
-                id, session_id, workspace_id, conversation_scope_kind,
-                model_call_binding, status, initial_entry_id,
+                id, session_id, workspace_id,                 model_call_binding, status, initial_entry_id,
                 current_context_binding_revision_id,
                 permission_snapshot_id, requested_permission_mode,
                 effective_permission_mode, permission_admission_source,
@@ -3255,7 +3236,7 @@ class _PlanOperations:
                 permission_plan_revision_at_admission,
                 permission_inherited_from_turn_id, permission_contract_id,
                 permission_contract_fingerprint, permission_snapshot_fingerprint
-            ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
+            ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
@@ -3273,9 +3254,7 @@ class _PlanOperations:
             session_id=candidate.session_id,
             turn_id=candidate.continuation_turn_id,
             revision_id=candidate.continuation_context_binding_revision_id,
-            initial_entry_sequence=entry_sequence,
-            scope_kind=ConversationScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            initial_entry_sequence=entry_sequence-sum(call.result_entry_id is not None for call in candidate.calls),
         )
         _RepositoryKernel._insert_entry(
             connection,
@@ -3285,8 +3264,6 @@ class _PlanOperations:
             entry_id=candidate.continuation_entry_id,
             entry_sequence=entry_sequence,
             entry_kind=EntryKind.PLAN_CONTINUATION,
-            scope_kind=ConversationScopeKind.ROOT,
-            scope_task_id=None,
             content=body,
             source_plan_workflow_id=candidate.workflow_id,
             source_plan_interaction_id=interaction_id,
@@ -3379,7 +3356,6 @@ class _PlanOperations:
             or str(assistant["workspace_id"]) != candidate.workspace_id
             or str(assistant["turn_id"]) != candidate.origin_turn_id
             or str(assistant["entry_kind"]) != EntryKind.ASSISTANT_TOOL_REQUEST.value
-            or str(assistant["conversation_scope_kind"]) != "ROOT"
             or tuple(
                 (
                     str(row["id"]),
@@ -3508,7 +3484,6 @@ class _PlanOperations:
                     or str(entry["workspace_id"]) != candidate.workspace_id
                     or str(entry["turn_id"]) != candidate.origin_turn_id
                     or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                    or str(entry["conversation_scope_kind"]) != "ROOT"
                     or self._content_from_row(entry) != _plan_inline(expected_payload)
                 ):
                     raise ConversationKernelConflict(
@@ -3633,7 +3608,6 @@ class _PlanOperations:
                 or str(entry["workspace_id"]) != candidate.workspace_id
                 or str(entry["turn_id"]) != candidate.origin_turn_id
                 or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
-                or str(entry["conversation_scope_kind"]) != "ROOT"
                 or self._content_from_row(entry) != _plan_inline(expected_payload)
             ):
                 raise ConversationKernelConflict(
@@ -3817,7 +3791,6 @@ class _PlanOperations:
         if (
             turn is None
             or str(turn["workspace_id"]) != candidate.workspace_id
-            or str(turn["conversation_scope_kind"]) != "ROOT"
             or str(turn["permission_snapshot_fingerprint"])
             != candidate.permission_snapshot.snapshot_fingerprint
             or self._permission_from_row(turn) != candidate.permission_snapshot
@@ -3887,7 +3860,6 @@ class _PlanOperations:
                 or str(continuation["workspace_id"]) != candidate.workspace_id
                 or str(continuation["turn_id"]) != candidate.continuation_turn_id
                 or str(continuation["entry_kind"]) != EntryKind.PLAN_CONTINUATION.value
-                or str(continuation["conversation_scope_kind"]) != "ROOT"
                 or str(continuation["source_plan_workflow_id"]) != candidate.workflow_id
                 or continuation["source_plan_interaction_id"] is not None
                 or str(continuation["source_plan_handoff_kind"])
@@ -3906,9 +3878,7 @@ class _PlanOperations:
                     session_id=candidate.session_id,
                     turn_id=candidate.continuation_turn_id,
                     revision_id=candidate.continuation_context_binding_revision_id,
-                    initial_entry_sequence=int(continuation["entry_sequence"]),
-                    scope_kind=ConversationScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    initial_entry_sequence=int(continuation["entry_sequence"])-sum(call.result_entry_id is not None for call in candidate.calls),
                 )
             ):
                 raise ConversationKernelConflict(
@@ -3978,8 +3948,7 @@ class _PlanOperations:
         connection.execute(
             """
             INSERT INTO pulsara_v3.turns (
-                id, session_id, workspace_id, conversation_scope_kind,
-                model_call_binding, status, initial_entry_id,
+                id, session_id, workspace_id,                 model_call_binding, status, initial_entry_id,
                 current_context_binding_revision_id,
                 permission_snapshot_id, requested_permission_mode,
                 effective_permission_mode, permission_admission_source,
@@ -3988,7 +3957,7 @@ class _PlanOperations:
                 permission_plan_revision_at_admission,
                 permission_inherited_from_turn_id, permission_contract_id,
                 permission_contract_fingerprint, permission_snapshot_fingerprint
-            ) VALUES (%s, %s, %s, 'ROOT', %s, 'RUNNING', %s, %s,
+            ) VALUES (%s, %s, %s, %s, 'RUNNING', %s, %s,
                       %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
@@ -4007,8 +3976,6 @@ class _PlanOperations:
             turn_id=turn_id,
             revision_id=context_binding_revision_id,
             initial_entry_sequence=entry_sequence,
-            scope_kind=ConversationScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         publication = None
         if canonical_prompt is not None:
@@ -4025,8 +3992,6 @@ class _PlanOperations:
             entry_id=entry_id,
             entry_sequence=entry_sequence,
             entry_kind=EntryKind.USER_MESSAGE if canonical_prompt is not None else EntryKind.PLAN_CONTINUATION,
-            scope_kind=ConversationScopeKind.ROOT,
-            scope_task_id=None,
             content=body if publication is None else publication.body,
             source_plan_workflow_id=workflow_id,
             source_plan_interaction_id=interaction_id,
@@ -4275,7 +4240,6 @@ class _PlanOperations:
             question_settlement = build_accepted_canonical_tool_result_settlement(
                 session_id=session_id,
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 turn_id=str(row["origin_turn_id"]),
                 assistant_entry_id=str(row["assistant_entry_id"]),
                 call_ordinal=int(row["selected_call_ordinal"]),

@@ -1,6 +1,5 @@
-"""Compatibility facade for the canonical conversation repository."""
+"""Public composition of the canonical conversation repository owners."""
 
-# Re-export compatibility is the entire purpose of this module.
 # ruff: noqa: F401
 
 from __future__ import annotations
@@ -48,7 +47,6 @@ from ._repository.contracts import (
     AcceptedCapabilityDecision,
     AcceptedEntry,
     AcceptedMemoryToolResult,
-    AcceptedSubagentCompletion,
     AcceptedInteractionDecision,
     AcceptedPlanResolution,
     AcceptedPlanToolBatch,
@@ -67,24 +65,20 @@ from ._repository.contracts import (
     PlanQuestionAnswer,
     PlanToolBatchDisposition,
     PlanToolControlKind,
-    PreparedAutomaticSubagentCompletion,
     PreparedMemoryMutationSideBranch,
     PreparedPlanBatchCall,
     PreparedPlanToolBatch,
     PreparedRootTurnIntent,
-    PreparedSubagentTurnAdmission,
     PreparedToolRemoteIdentityPublication,
     PreparedToolResultAcceptance,
     PromptIngressRejected,
     StaleHostWriter,
-    SubagentCompletionDisposition,
     ToolRemoteIdentityConfirmationKind,
     ToolResultSideBranch,
     ToolResultSideBranchKind,
     TurnAdmissionConfirmation,
     TurnAdmissionConfirmationKind,
     build_prepared_root_turn_intent,
-    build_prepared_subagent_turn_admission,
     build_prepared_tool_remote_identity_publication,
     build_prepared_tool_result_acceptance,
     plan_draft_review_semantic_candidate,
@@ -93,7 +87,6 @@ from ._repository.contracts import (
 )
 from ._repository.authority import _AuthorityOperations
 from ._repository.conversation import _ConversationOperations
-from ._repository.completions import _SubagentCompletionOperations
 from ._repository.kernel import _RepositoryKernel
 from ._repository.matching import _MatchingOperations
 from ._repository.memory import _MemoryOperations
@@ -124,7 +117,6 @@ class ConversationKernelRepository(
     _PlanOperations,
     _PromptOperations,
     _SubagentOperations,
-    _SubagentCompletionOperations,
     _MemoryOperations,
     _ProviderUsageOperations,
     _RepositoryKernel,
@@ -137,7 +129,6 @@ _FACADE_OWNED_SYMBOLS = (
     "ProviderCallUsageObservation",
     "ProviderCallUsageWriteDisposition",
     "AcceptedEntry",
-    "AcceptedSubagentCompletion",
     "AcceptedInteractionDecision",
     "AcceptedPlanResolution",
     "AcceptedPlanToolBatch",
@@ -149,7 +140,6 @@ _FACADE_OWNED_SYMBOLS = (
     "AssistantToolCallBlock",
     "ConversationKernelConflict",
     "NoToolResultSideBranch",
-    "PreparedAutomaticSubagentCompletion",
     "PlanContinuationDisposition",
     "PlanContinuationInspection",
     "PlanDraftIdentityConflict",
@@ -160,18 +150,15 @@ _FACADE_OWNED_SYMBOLS = (
     "PreparedPlanBatchCall",
     "PreparedPlanToolBatch",
     "PreparedRootTurnIntent",
-    "PreparedSubagentTurnAdmission",
     "PreparedToolRemoteIdentityPublication",
     "PreparedToolResultAcceptance",
     "PromptIngressRejected",
     "StaleHostWriter",
-    "SubagentCompletionDisposition",
     "ToolRemoteIdentityConfirmationKind",
     "ToolResultSideBranchKind",
     "TurnAdmissionConfirmation",
     "TurnAdmissionConfirmationKind",
     "build_prepared_root_turn_intent",
-    "build_prepared_subagent_turn_admission",
     "build_prepared_tool_remote_identity_publication",
     "build_prepared_tool_result_acceptance",
     "plan_draft_review_semantic_candidate",
@@ -191,7 +178,6 @@ __all__ = [
     "ProviderCallUsageWriteDisposition",
     "AcceptedEntry",
     "AcceptedInteractionDecision",
-    "AcceptedSubagentCompletion",
     "AcceptedToolAttempt",
     "AcceptedRootTurnAdmission",
     "AssistantBlock",
@@ -202,23 +188,19 @@ __all__ = [
     "ConversationKernelRepository",
     "AcceptedMemoryToolResult",
     "NoToolResultSideBranch",
-    "PreparedAutomaticSubagentCompletion",
     "PreparedMemoryMutationSideBranch",
     "PreparedToolResultAcceptance",
     "PlanDraftIdentityConflict",
     "PlanContinuationDisposition",
     "PreparedRootTurnIntent",
-    "PreparedSubagentTurnAdmission",
     "PreparedToolRemoteIdentityPublication",
     "StaleHostWriter",
-    "SubagentCompletionDisposition",
     "ToolResultSideBranch",
     "ToolResultSideBranchKind",
     "ToolRemoteIdentityConfirmationKind",
     "TurnAdmissionConfirmation",
     "TurnAdmissionConfirmationKind",
     "build_prepared_root_turn_intent",
-    "build_prepared_subagent_turn_admission",
     "build_prepared_tool_remote_identity_publication",
     "build_prepared_tool_result_acceptance",
 ]

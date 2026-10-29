@@ -285,115 +285,51 @@ _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
     required=["source", "target", "relation_kind"],
 )
 
-_SUBAGENT_TASK_DESCRIPTION = (
-    "Self-contained objective, deliverable, constraints and exact source or file locations; up to "
-    "65536 UTF-8 bytes."
-)
-_SUBAGENT_PROFILE_DESCRIPTION = (
-    "Working style: general_worker executes; research_worker investigates with sources; "
-    "review_worker finds defects; verification_worker runs checks; synthesizer combines supplied "
-    "findings."
-)
-_SUBAGENT_CONTEXT_DESCRIPTION = (
-    "Omit for no history. last_n adds recent ROOT conversation turns, excluding tool calls and "
-    "results. worker_history adds a started, finished worker's readable public history from this "
-    "conversation. The new worker uses current tools and permissions."
+from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+    PROFILES, target_schema,
 )
 
 
-def _subagent_context_schema() -> dict[str, Any]:
-    # Describe the existing _parse_context variants; runtime history eligibility
-    # remains owned by subagent admission, not by this static schema.
-    fields = {
-        "none": {},
-        "last_n": {
-            "turns": {
-                "type": "integer", "minimum": 1, "maximum": 3,
-            },
-        },
-        "worker_history": {
-            "task_id": {
-                "type": "string", "minLength": 1,
-            },
-        },
-    }
-    return {
-        "description": _SUBAGENT_CONTEXT_DESCRIPTION,
-        "oneOf": [
-            object_schema(
-                properties={"mode": {"const": mode}, **properties},
-                required=["mode", *properties],
-            )
-            for mode, properties in fields.items()
-        ],
-    }
-
-
-def _subagent_model_schema() -> dict[str, Any]:
-    variants = {
-        "effort": {"value": {"type": ["string", "null"]}},
-        "toggle": {"enabled": {"type": "boolean"}},
-        "budget_tokens": {"tokens": {"type": "integer", "minimum": 1}},
-    }
-    return {
-        **object_schema(
-            properties={
-                "connection_id": {"type": "string", "description": "Exact connection_id from list_agent_models."},
-                "reasoning": {
-                    "description": "Copy a supported choice from list_agent_models; effort.value may be null when listed. Omit for this connection's default.",
-                    "oneOf": [
-                        object_schema(
-                            properties={"kind": {"const": kind}, **properties},
-                            required=["kind", *properties],
-                        )
-                        for kind, properties in variants.items()
-                    ],
-                },
-            },
-            required=["connection_id"],
-        ),
-        "description": "Omit to inherit the assigning agent's model and reasoning; otherwise select a saved connection.",
-    }
+def _run_agent_schema() -> dict[str, Any]:
+    works = {"type": "array", "maxItems": 16, "uniqueItems": True,
+             "items": target_schema("WORK")}
+    return object_schema(properties={
+        "instruction": {"type": "string", "minLength": 1, "maxLength": 65536},
+        "target": target_schema("AGENT"),
+        "name": {"type": "string", "minLength": 1, "maxLength": 256},
+        "profile": {"type": "string", "enum": list(PROFILES)},
+        "context": {"oneOf": [
+            object_schema(properties={"mode": {"const": "none"}}, required=["mode"]),
+            object_schema(properties={"mode": {"const": "last_n"}, "turns": {"type": "integer", "minimum": 1, "maximum": 3}}, required=["mode", "turns"]),
+        ]},
+        "materials": works,
+        "depends_on": works,
+    }, required=["instruction"])
 
 
 def _wait_agent_schema() -> dict[str, Any]:
-    timeout = {
-        "type": "number", "minimum": 0, "maximum": 300, "default": 30,
-        "description": "0 returns an immediate snapshot.",
-    }
-    return {
-        "type": "object",
-        "oneOf": [
-            object_schema(properties={"timeout_seconds": timeout}, required=[]),
-            object_schema(
-                properties={
-                    "task_ids": {
-                        "type": "array", "minItems": 1, "maxItems": 16,
-                        "uniqueItems": True,
-                        "items": {"type": "string", "minLength": 1, "maxLength": 512},
-                        "description": "Exact task IDs returned by spawn_agent, create_agent_tasks or list_agents.",
-                    },
-                    "settle": {
-                        "type": "string", "enum": ["all", "first"], "default": "all",
-                    },
-                    "timeout_seconds": timeout,
-                },
-                required=["task_ids"],
-            ),
-        ],
-    }
+    return object_schema(properties={
+        "targets": {"type": "array", "minItems": 1, "uniqueItems": True,
+                    "items": target_schema("AGENT", allow_root=True)},
+        "settle": {"type": "string", "enum": ["all", "first"], "default": "all"},
+        "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 300, "default": 30},
+    }, required=["targets"])
 
 
+def _exec_schema() -> dict[str, Any]:
+    observation = {"type": "integer", "minimum": 0, "maximum": 30000, "default": 1000}
+    return {"oneOf": [object_schema(properties={source: {"type": "string", **({"minLength": 1} if source == "path" else {})},
+        "yield_time_ms": observation}, required=[source]) for source in ("code", "path")]}
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "open_in_pulsara": _descriptor(
         name="open_in_pulsara", description=("ROOT only. Show targets in this conversation's tabs: PATH files, URL webpages, PROCESS "
- 'terminals, runtime MCP_SERVER connections, or PANEL overview entries. Use {type:"task",task_id} '
- 'for a subagent task. Group related targets; the last accepted target is selected. Invalid items '
+ 'terminals, runtime MCP_SERVER connections, or PANEL overview entries. Group related targets; '
+ 'the last accepted target is selected. Invalid items '
  'return their zero-based index while valid items proceed. Results acknowledge requests, not '
- "completed display or webpage contents. Copy each non-task result item's target for reuse. The "
- 'tasks panel shows subagents. PANEL browser creates a blank tab; duplicates share one tab within '
+ "completed display or webpage contents. Copy each result item's target for reuse. "
+ 'PANEL browser creates a blank tab; duplicates share one tab within '
  'a call and later calls create new tabs.'),
         input_schema={'additionalProperties': False,
  'properties': {'targets': {'items': {'anyOf': [{'additionalProperties': False,
@@ -436,25 +372,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                  'required': ['kind', 'process_id'],
                                                  'type': 'object'},
                                                 {'additionalProperties': False,
-                                                 'properties': {'task_id': {'description': 'task_id '
-                                                                                           'from '
-                                                                                           'spawn_agent, '
-                                                                                           'create_agent_tasks '
-                                                                                           'or '
-                                                                                           'list_agents; '
-                                                                                           'opens '
-                                                                                           'its '
-                                                                                           'group '
-                                                                                           'and '
-                                                                                           'selects '
-                                                                                           'the '
-                                                                                           'task.',
-                                                                            'minLength': 1,
-                                                                            'type': 'string'},
-                                                                'type': {'const': 'task'}},
-                                                 'required': ['type', 'task_id'],
-                                                 'type': 'object'},
-                                                {'additionalProperties': False,
                                                  'properties': {'runtime_server_id': {'description': 'runtime_server_id '
                                                                                                      'from '
                                                                                                      'inspect_capability.',
@@ -466,7 +383,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                  'type': 'object'},
                                                 {'additionalProperties': False,
                                                  'properties': {'name': {'enum': ['capabilities',
-                                                                                  'tasks',
+
                                                                                   'background',
                                                                                   'browser'],
                                                                          'type': 'string'},
@@ -1071,303 +988,78 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_read_only=True,
         permission_category="agent_local",
     ),
-    "list_agent_models": _descriptor(
-        name="list_agent_models",
-        description=(
-            "List saved model connections and their supported reasoning choices for delegated tasks. Use "
-            "the returned connection IDs and choices when selecting a different worker model."
-        ),
-        input_schema=object_schema(properties={}, required=[]),
+    "run_agent": _descriptor(
+        name="run_agent",
+        description="Submit work to a new or existing subagent and return its AGENT and WORK references immediately. Omit target to create an Agent; name and context apply only to creation. Reuse target to continue its history. materials copies completed work; depends_on waits for successful work and supplies its final. Ordinary final completes work.",
+        input_schema=_run_agent_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=True,
-        permission_category="subagent_runtime",
-    ),
-    "spawn_agent": _descriptor(
-        name="spawn_agent",
-        description=(
-            "Delegate one self-contained task and return its task_id and initial status. Execution is "
-            "asynchronous and may queue for capacity. Use create_agent_tasks for batches or success "
-            "dependencies. context selects history for the new worker; worker_history creates a new task "
-            "continuing a finished worker's public history. Workers share the workspace. See the "
-            "pulsara-subagent Skill for workflow examples."
-        ),
-        input_schema=object_schema(
-            properties={
-                "task": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 65536,
-                    "description": _SUBAGENT_TASK_DESCRIPTION,
-                },
-                "task_name": {
-                    "type": "string",
-                    "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
-                    "description": (
-                        "Case-sensitive display name for this task."
-                    ),
-                },
-                "profile": {
-                    "type": "string",
-                    "enum": [
-                        "general_worker",
-                        "research_worker",
-                        "review_worker",
-                        "verification_worker",
-                        "synthesizer",
-                    ],
-                    "default": "general_worker",
-                    "description": _SUBAGENT_PROFILE_DESCRIPTION,
-                },
-                "context": _subagent_context_schema(),
-                "model": _subagent_model_schema(),
-                "material_task_ids": {"type": "array", "maxItems": 16, "uniqueItems": True, "items": {"type": "string", "minLength": 1}, "description": "Exact IDs of finished tasks in this conversation whose results or public failure details should be supplied as material."},
-            },
-            required=["task"],
-        ),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        permission_category="subagent_runtime",
-    ),
-    "wait_agent": _descriptor(
-        name="wait_agent",
-        description=(
-            "Wait for delegated task completion. Results arrive as separate conversation messages after "
-            "this call.\nWith task_ids: optional settle and timeout_seconds. settle=first waits for any "
-            "target to finish; settle=all waits for every target.\nWithout task_ids: optional "
-            "timeout_seconds is the only field; wait for any ready result or for nothing to remain "
-            "pending.\nFinished includes success, failure and cancellation. Current-reply guidance "
-            "interrupts the wait with steer_available; later-reply queued guidance does not. timeout ends "
-            "this wait while tasks continue."
-        ),
-        input_schema=_wait_agent_schema(),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        permission_category="subagent_runtime",
-    ),
-    "stop_agent": _descriptor(
-        name="stop_agent",
-        description=(
-            "Cancel a queued, dependency-waiting or running task and return its status. Finished tasks "
-            "retain their final state. Cancelling a prerequisite blocks its dependents. Existing side "
-            "effects, unrelated tasks and background commands remain."
-        ),
-        input_schema=object_schema(
-            properties={
-                "task_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Exact task_id returned by spawn_agent, create_agent_tasks or list_agents.",
-                },
-                "reason": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 4096,
-                    "description": (
-                        "Cancellation note; stored with the call, not delivered as a worker message."
-                    ),
-                },
-            },
-            required=["task_id"],
-        ),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        permission_category="subagent_runtime",
-        is_destructive=True,
+        is_read_only=False, permission_category="subagent_runtime",
     ),
     "list_agents": _descriptor(
         name="list_agents",
-        description=(
-            "List this conversation's delegated tasks, including exact IDs, status, objectives, "
-            "dependencies, pending-message counts and result summaries. Results are status snapshots; use "
-            "wait_agent to wait for completion. Continue paging with next_cursor and unchanged max_items "
-            "and include_dependencies. If a cursor is rejected, omit it to start a new listing."
-        ),
-        input_schema=object_schema(
-            properties={
-                "max_items": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 50,
-                    "default": 50,
-                },
-                "include_dependencies": {
-                    "type": "boolean",
-                    "default": True,
-                    "description": (
-                        "Include each task's prerequisites and their statuses."
-                    ),
-                },
-                "cursor": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": (
-                        "Exact next_cursor from the preceding page; omit for the first page."
-                    ),
-                },
-            },
-            required=[],
-        ),
+        description="List this ROOT's subagents with current and queued work. Continue with next_cursor.",
+        input_schema=object_schema(properties={
+            "cursor": {"type": "string", "minLength": 1},
+            "max_items": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
+        }, required=[]),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=True,
-        permission_category="subagent_runtime",
+        is_read_only=True, permission_category="subagent_runtime",
     ),
-    "create_agent_tasks": _descriptor(
-        name="create_agent_tasks",
-        description=(
-            "Schedule tasks together and return task IDs and initial statuses. Independent tasks run in "
-            "parallel as capacity becomes available. A depends_on prerequisite must succeed before its "
-            "dependent starts; its result becomes task context. An unsuccessful prerequisite blocks the "
-            "dependent. Use material_task_ids for finished results or failures without waiting for success, "
-            "and context for conversation history. Dependencies must be acyclic, with at most 64 references "
-            "in one batch. Use spawn_agent for one task. See the pulsara-subagent Skill for workflow "
-            "examples."
-        ),
-        input_schema=object_schema(
-            properties={
-                "tasks": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 16,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "task_key": {
-                                "type": "string",
-                                "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
-                                "description": (
-                                    "Unique, case-sensitive key that other tasks in this batch can reference in depends_on."
-                                ),
-                            },
-                            "label": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 256,
-                                "description": (
-                                    "Display name; dependencies use task_key or task_id."
-                                ),
-                            },
-                            "profile": {
-                                "type": "string",
-                                "enum": [
-                                    "research_worker",
-                                    "review_worker",
-                                    "verification_worker",
-                                    "general_worker",
-                                    "synthesizer",
-                                ],
-                                "description": _SUBAGENT_PROFILE_DESCRIPTION,
-                                "default": "general_worker",
-                            },
-                            "task": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 65536,
-                                "description": _SUBAGENT_TASK_DESCRIPTION,
-                            },
-                            "display_role": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 256,
-                                "description": (
-                                    "Display-only role; profile selects working style."
-                                ),
-                            },
-                            "context": _subagent_context_schema(),
-                            "model": _subagent_model_schema(),
-                            "material_task_ids": {"type": "array", "maxItems": 16, "uniqueItems": True, "items": {"type": "string", "minLength": 1}, "description": "Exact IDs of finished tasks in this conversation whose results or public failure details should be supplied as material."},
-                            "depends_on": {
-                                "type": "array",
-                                "maxItems": 16,
-                                "uniqueItems": True,
-                                "items": {"type": "string", "minLength": 1},
-                                "description": (
-                                    "Prerequisites: another item's exact task_key in this batch, or an earlier task's complete task_id. Omit or use [] for independent work."
-                                ),
-                            },
-                        },
-                        "required": ["task"],
-                        "additionalProperties": False,
-                    },
-                }
-            },
-            required=["tasks"],
-        ),
+    "inspect_agent": _descriptor(
+        name="inspect_agent",
+        description="Inspect an AGENT's paginated work or one exact WORK's state and result. WORK results belong to that request, including stopped diagnostics.",
+        input_schema={"oneOf": [
+            object_schema(properties={"target": target_schema("AGENT"),
+                "cursor": {"type": "string", "minLength": 1},
+                "max_items": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50}}, required=["target"]),
+            object_schema(properties={"target": target_schema("WORK")}, required=["target"]),
+        ]},
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        permission_category="subagent_runtime",
+        is_read_only=True, permission_category="subagent_runtime",
     ),
     "send_agent_message": _descriptor(
         name="send_agent_message",
-        description=(
-            "Send additional guidance to an ACTIVE worker by task_id. A queued result means the message is "
-            "accepted for delivery; the worker may read it later. For follow-up after a worker finishes, "
-            "use spawn_agent with context.mode=worker_history and its old task_id."
-        ),
-        input_schema=object_schema(
-            properties={
-                "task_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 512,
-                    "description": "Exact task_id returned by spawn_agent, create_agent_tasks or list_agents.",
-                },
-                "message": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 16384,
-                    "description": (
-                        "Self-contained guidance, evidence or correction; up to 16384 UTF-8 bytes."
-                    ),
-                },
-            },
-            required=["task_id", "message"],
-        ),
+        description="Send a message to an Agent's current active work. ROOT addresses this collaboration's ROOT. queued means accepted into that turn; not_started or inactive means not sent. This does not start work or load an inactive Agent.",
+        input_schema=object_schema(properties={"target": target_schema("AGENT", allow_root=True),
+            "message": {"type": "string", "minLength": 1, "maxLength": 16384}}, required=["target", "message"]),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        permission_category="subagent_runtime",
+        is_read_only=False, permission_category="subagent_runtime",
     ),
-    "report_agent_result": _descriptor(
-        name="report_agent_result",
-        description=(
-            "Finish your worker task and deliver its outcome to the ROOT agent. Use this as the only tool "
-            "call in the response when the work is complete. Provide a self-contained summary with "
-            "evidence, constraints and useful file or artifact locations. Optional data carries structured "
-            "results; output_preview and diagnostics provide supporting detail."
-        ),
-        input_schema=object_schema(
-            properties={
-                "summary": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 16384,
-                    "description": (
-                        "Final conclusion, evidence, constraints and useful source locations; understandable on its own."
-                    ),
-                },
-                "data": {"type": "object", "description": "Structured result. Summary UTF-8 bytes plus canonical data JSON share a 16 KiB budget."},
-                "output_preview": {
-                    "type": "string",
-                    "maxLength": 32768,
-                    "description": (
-                        "Supporting excerpts, changed files or command outcomes; up to 32768 UTF-8 bytes."
-                    ),
-                },
-                "diagnostics": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": {"type": "object"},
-                    "description": (
-                        "Structured findings; canonical JSON is limited to 8 KiB per item and 64 KiB for the array."
-                    ),
-                },
-            },
-            required=["summary"],
-        ),
+    "wait_agent": _descriptor(
+        name="wait_agent",
+        description="Wait for a known subagent's message or current work result. Do not wait for ROOT unless ROOT has explicitly asked you to wait for its reply. Targets are AGENT references; an unstarted target returns unavailable. Waiting binds current work and never follows its next request. Timeout ends this observation only.",
+        input_schema=_wait_agent_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False,
-        permission_category="agent_local",
+        is_read_only=True, permission_category="subagent_runtime",
+    ),
+    "stop_agent": _descriptor(
+        name="stop_agent",
+        description="Stop one WORK, or an AGENT's current and already queued work. Return actual outcomes; completed history stays terminal. The Agent and its history remain available for new work.",
+        input_schema=object_schema(properties={"target": {"oneOf": [target_schema("AGENT"), target_schema("WORK")]}}, required=["target"]),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=False, permission_category="subagent_runtime",
+    ),
+    "exec": _descriptor(
+        name="exec",
+        description="Start an independent JavaScript script from code or a workspace path and return observed output and state. Top-level await is supported. Observation timeout does not stop the script. ROOT with bypass permissions only.",
+        input_schema=_exec_schema(),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=False, permission_category="subagent_runtime",
+    ),
+    "wait_exec": _descriptor(
+        name="wait_exec",
+        description="Read subsequent output and state from the same live script. This does not execute its code again; observation timeout leaves it running.",
+        input_schema=object_schema(properties={"cell_id": {"type": "string", "minLength": 1},
+            "yield_time_ms": {"type": "integer", "minimum": 0, "maximum": 30000, "default": 1000}}, required=["cell_id"]),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=True, permission_category="subagent_runtime",
+    ),
+    "stop_exec": _descriptor(
+        name="stop_exec",
+        description="Stop further JavaScript execution and tool submissions in a cell. Already accepted Work is not automatically cancelled; use stop_agent for that work.",
+        input_schema=object_schema(properties={"cell_id": {"type": "string", "minLength": 1}}, required=["cell_id"]),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=False, permission_category="subagent_runtime",
     ),
     "enter_plan": _descriptor(
         name="enter_plan",
@@ -1580,6 +1272,7 @@ class BuiltinToolBindingKind(StrEnum):
     SCHEDULED_TASK_CONTROL = "scheduled_task_control"
     TODO_LOCAL_STATE = "todo_local_state"
     SUBAGENT_CONTROL = "subagent_control"
+    CODE_MODE = "code_mode"
     MCP_CATALOG = "mcp_catalog"
     PLUGIN_CONTROL = "plugin_control"
 
@@ -1594,7 +1287,8 @@ class BuiltinToolAvailabilityKind(StrEnum):
     REQUIRES_MEMORY_QUERY_PORT = "requires_memory_query_port"
     REQUIRES_TERMINAL_PORTS = "requires_terminal_ports"
     REQUIRES_MAIN_SUBAGENT_CONTROL = "requires_main_subagent_control"
-    REQUIRES_CHILD_REPORT_CONTROL = "requires_child_report_control"
+    REQUIRES_SHARED_AGENT_CONTROL = "requires_shared_agent_control"
+    REQUIRES_CODE_MODE = "requires_code_mode"
     REQUIRES_MCP_PORT = "requires_mcp_port"
 
 
@@ -1655,7 +1349,8 @@ class BuiltinToolCatalogEntry:
         "terminal",
         "plan",
         "subagent_parent",
-        "subagent_child",
+        "subagent_shared",
+        "code_mode",
         "local_state",
         "mcp",
     ]
@@ -1675,18 +1370,9 @@ _FILESYSTEM = frozenset(
 _MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
 _MEMORY_QUERY = frozenset({"memory_get"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
-_SUBAGENT_PARENT = frozenset(
-    {
-        "create_agent_tasks",
-        "list_agents",
-        "list_agent_models",
-        "spawn_agent",
-        "stop_agent",
-        "send_agent_message",
-        "wait_agent",
-    }
-)
-_SUBAGENT_CHILD = frozenset({"report_agent_result"})
+_SUBAGENT_PARENT = frozenset({"run_agent", "list_agents", "inspect_agent", "stop_agent"})
+_SUBAGENT_SHARED = frozenset({"send_agent_message", "wait_agent"})
+_CODE_MODE = frozenset({"exec", "wait_exec", "stop_exec"})
 _TERMINAL_PROCESS_ACTIONS = (
     "close_stdin",
     "kill",
@@ -1795,7 +1481,7 @@ def _catalog_entry(
         if name in _PLAN
         else (
             ToolBindingOrigin.SUBAGENT_SYSTEM
-            if name in _SUBAGENT_PARENT | _SUBAGENT_CHILD
+            if name in _SUBAGENT_PARENT | _SUBAGENT_SHARED
             else ToolBindingOrigin.BUILTIN
         )
     )
@@ -1843,7 +1529,7 @@ def _catalog_entry(
 def _catalog_shape(name: str):
     both = (
         ToolInvocationOwnerKind.HOST_MAIN_RUN,
-        ToolInvocationOwnerKind.SUBAGENT_CHILD,
+        ToolInvocationOwnerKind.SUBAGENT,
     )
     if name in SESSION_QUERY_TOOL_NAMES:
         return (BuiltinToolBindingKind.SESSION_QUERY,
@@ -1905,7 +1591,7 @@ def _catalog_shape(name: str):
         return (
             BuiltinToolBindingKind.TERMINAL_MONITOR,
             BuiltinToolAvailabilityKind.REQUIRES_TERMINAL_PORTS,
-            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
+            both,
             "terminal",
         )
     if name == "scheduled_tasks":
@@ -1930,14 +1616,14 @@ def _catalog_shape(name: str):
         return (
             BuiltinToolBindingKind.MEMORY_RECALL,
             BuiltinToolAvailabilityKind.REQUIRES_MEMORY_RECALL_PORT,
-            both,
+            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "memory_read",
         )
     if name in _MEMORY_QUERY:
         return (
             BuiltinToolBindingKind.MEMORY_QUERY,
             BuiltinToolAvailabilityKind.REQUIRES_MEMORY_QUERY_PORT,
-            both,
+            (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "memory_read",
         )
     if name in _MEMORY_MUTATION:
@@ -1954,13 +1640,17 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "subagent_parent",
         )
-    if name in _SUBAGENT_CHILD:
+    if name in _SUBAGENT_SHARED:
         return (
             BuiltinToolBindingKind.SUBAGENT_CONTROL,
-            BuiltinToolAvailabilityKind.REQUIRES_CHILD_REPORT_CONTROL,
-            (ToolInvocationOwnerKind.SUBAGENT_CHILD,),
-            "subagent_child",
+            BuiltinToolAvailabilityKind.REQUIRES_SHARED_AGENT_CONTROL,
+            both,
+            "subagent_shared",
         )
+    if name in _CODE_MODE:
+        return (BuiltinToolBindingKind.CODE_MODE,
+                BuiltinToolAvailabilityKind.REQUIRES_CODE_MODE,
+                (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "code_mode")
     raise ValueError(f"builtin tool is absent from the closed catalog matrix: {name}")
 
 
@@ -2061,18 +1751,6 @@ READ_ONLY_RECOVERY_TOOL_NAMES = frozenset(
     for entry in _BUILTIN_TOOL_CATALOG
     if entry.recovery_contract.severity == "read_only"
 )
-SUBAGENT_SYSTEM_TOOL_NAMES = frozenset(
-    entry.name
-    for entry in _BUILTIN_TOOL_CATALOG
-    if entry.tool_family == "subagent_parent"
-)
-SUBAGENT_CHILD_REPORT_TOOL_NAMES = frozenset(
-    entry.name
-    for entry in _BUILTIN_TOOL_CATALOG
-    if entry.tool_family == "subagent_child"
-)
-
-
 __all__ = [
     "BuiltinActionPermissionOverride",
     "BuiltinTerminalPermissionRule",
@@ -2086,8 +1764,6 @@ __all__ = [
     "FILE_WRITE_TOOL_NAMES",
     "PLAN_WORKFLOW_TOOL_NAMES",
     "READ_ONLY_RECOVERY_TOOL_NAMES",
-    "SUBAGENT_CHILD_REPORT_TOOL_NAMES",
-    "SUBAGENT_SYSTEM_TOOL_NAMES",
     "TERMINAL_TOOL_NAMES",
     "builtin_tool_catalog",
     "builtin_tool_catalog_entry",

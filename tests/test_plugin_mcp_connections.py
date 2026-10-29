@@ -11,7 +11,7 @@ from pulsara_agent.capability.mcp_management import (
     McpManagementConflict,
 )
 from pulsara_agent.capability.pulsara_home import resolve_pulsara_home
-from pulsara_agent.mcp_config import BearerSecret, NoAuth
+from pulsara_agent.mcp_config import BearerSecret, NoAuth, McpScopePolicy
 from pulsara_agent.mcp_credentials import (
     ManagedLocalCredentialReference,
     McpCredentialBinding,
@@ -129,7 +129,11 @@ async def test_model_preparation_rejoins_existing_state_before_expanding_process
             True,
             edit.expected_package_install_id,
             monotonic() + 10,
-            connection_review=(),
+            connection_review=connection_review(
+                original.mcp_connection_overlays, connections.settings.read().mcp_secret,
+                servers=service.inspect_local_plugins(InspectLocalPluginsRequest(monotonic() + 30)).instances[0].summary.mcp.mcp_servers,
+                identity=edit.identity,
+            ),
             external_process_acceptance=ExternalProcessAcceptance.ACCEPTED,
         )
     )
@@ -604,4 +608,72 @@ async def test_disabled_plugin_inspection_keeps_overlay_for_one_shared_editor(tm
         assert "private-fixture-value" not in json.dumps(payload)
     finally:
         inspection.close()
+        await connections.aclose()
+
+
+@pytest.mark.anyio
+async def test_plugin_mcp_scope_is_reviewed_at_enable_and_configured_after_install(tmp_path):
+    service, connections, edit, _ = await fixture(tmp_path)
+    store = service._store()
+    layout = store.layout(edit.identity)
+    observed = service.inspect_local_plugins(InspectLocalPluginsRequest(monotonic() + 30))
+    summary = observed.instances[0].summary
+    initial = store.read_state(layout)
+    review = connection_review(initial.mcp_connection_overlays, connections.settings.read().mcp_secret,
+                              servers=summary.mcp.mcp_servers, identity=edit.identity)
+    assert len(review) == 1
+    assert review[0].overlay.scope_policy is McpScopePolicy.ROOT_ONLY
+    selected = replace(edit.overlay, scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS)
+    await service.replace_plugin_mcp_connection_overlay(replace(edit, overlay=selected), connections=connections)
+    state = store.read_state(layout)
+    current = connection_review(state.mcp_connection_overlays, connections.settings.read().mcp_secret,
+                               servers=summary.mcp.mcp_servers, identity=edit.identity)
+    enable = SetLocalPluginEnabledRequest(PluginScopeKind.USER, edit.identity.plugin_id, True,
+        edit.expected_package_install_id, monotonic() + 30, connection_review=review,
+        external_process_acceptance=ExternalProcessAcceptance.ACCEPTED)
+    assert service.set_local_plugin_enabled(enable).disposition.value == "STALE"
+    assert service.set_local_plugin_enabled(replace(enable, connection_review=current)).disposition.value == "ENABLED"
+    state = store.read_state(layout)
+    config = materialize_plugin_mcp_definition(identity=edit.identity, state=state,
+        server=summary.mcp.mcp_servers[0], package_root=layout.plugin_package_parent / state.current_package_install_id,
+        data_root=layout.data_root, secret_resolver=connections.settings.read().mcp_secret)
+    assert config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
+    revised = replace(selected, scope_policy=McpScopePolicy.ROOT_ONLY)
+    await service.replace_plugin_mcp_connection_overlay(replace(edit, expected_overlay=selected, overlay=revised,
+        secret_changes=()), connections=connections)
+    state = store.read_state(layout)
+    config = materialize_plugin_mcp_definition(identity=edit.identity, state=state,
+        server=summary.mcp.mcp_servers[0], package_root=layout.plugin_package_parent / state.current_package_install_id,
+        data_root=layout.data_root, secret_resolver=connections.settings.read().mcp_secret)
+    assert config.scope_policy is McpScopePolicy.ROOT_ONLY
+    observed.close()
+    await connections.aclose()
+
+
+@pytest.mark.anyio
+async def test_install_scope_review_is_saved_in_the_same_plugin_instance_cut(tmp_path):
+    service, connections, edit, source = await fixture(tmp_path)
+    removed = await service.remove_local_plugin(RemoveLocalPluginRequest(
+        PluginScopeKind.USER, edit.identity.plugin_id, monotonic()+30, edit.expected_package_install_id), connections=connections)
+    assert removed.disposition.value == "REMOVED"
+    installed = await service.install_local_plugin(InstallLocalPluginRequest(
+        source, PluginScopeKind.USER, monotonic()+30,
+        mcp_scope_policies=(("docs", McpScopePolicy.ROOT_AND_SUBAGENTS),)), connections=connections)
+    assert installed.disposition.value == "INSTALLED" and not installed.enabled
+    store = service._store()
+    layout = store.layout(installed.identity)
+    state = store.read_state(layout)
+    assert state.mcp_connection_overlays[0].scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
+    observed = service.inspect_local_plugins(InspectLocalPluginsRequest(monotonic()+30))
+    try:
+        server = observed.instances[0].summary.mcp.mcp_servers[0]
+        configured = materialize_plugin_mcp_definition(identity=installed.identity, state=state,
+            server=server, package_root=layout.plugin_package_parent/state.current_package_install_id,
+            data_root=layout.data_root, secret_resolver=connections.settings.read().mcp_secret)
+        assert configured.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
+        reviewed = connection_review(state.mcp_connection_overlays, connections.settings.read().mcp_secret,
+            servers=(server,), identity=installed.identity)
+        assert reviewed[0].overlay.scope_policy is configured.scope_policy
+    finally:
+        observed.close()
         await connections.aclose()

@@ -320,6 +320,17 @@ def _state_for_workspace(workspace_root: Path) -> _WorkspaceFileState:
 class ReadFileTool(WorkspaceTool):
     name: str = "read_file"
 
+    def read_code_mode_source(self, raw_path: str, *, maximum_bytes: int) -> str:
+        """Resolve source through the file owner, without granting edit observation."""
+        path = self._resolve_read_path(raw_path)
+        state = _state_for_workspace(self.workspace_root)
+        with state.lock_for_path(path):
+            with path.open("rb") as source:
+                content = source.read(maximum_bytes + 1)
+            if len(content) > maximum_bytes:
+                raise ValueError("Code Mode source exceeds its bridge resource boundary")
+            return content.decode("utf-8")
+
     def execute(self, call: ToolCall) -> ToolExecutionResult:
         if set(call.arguments) - {"target", "offset", "limit"}:
             raise ValueError("Unknown read_file arguments")
@@ -338,6 +349,7 @@ class ReadFileTool(WorkspaceTool):
             with path_lock:
                 raw_bytes, layout = _read_existing_text(path)
                 revision = _content_revision(raw_bytes)
+                previous_observation = state.observation(path)
                 total_lines = len(layout.lines)
                 start_index = min(offset - 1, total_lines)
                 end_index = min(start_index + limit, total_lines)
@@ -408,20 +420,21 @@ class ReadFileTool(WorkspaceTool):
                 )
                 intervals = (
                     ((start_index + 1, end_index),)
-                    if fully_visible and end_index > start_index
+                    if (fully_visible or call.defer_file_observation) and end_index > start_index
                     else ()
                 )
-                if not fully_visible:
+                if not fully_visible and not call.defer_file_observation:
                     payload["_warning"] = (
                         "This read exceeds the complete provider-visible ToolResult "
                         "bound, so none of its lines authorize edit_file. Re-read the "
                         "required range with a smaller limit."
                     )
                     output = json_text(payload)
-                state.observe(path, revision, intervals)
+                if not call.defer_file_observation:
+                    state.observe(path, revision, intervals)
         except _FileApplicationError as exc:
             return _application_error_result(self, call, path, exc)
-        return self._result(
+        result = self._result(
             call,
             status=ToolResultState.SUCCESS,
             output=output,
@@ -433,6 +446,22 @@ class ReadFileTool(WorkspaceTool):
                 "workspace_relative": workspace_relative,
             },
         )
+        if call.defer_file_observation:
+            def delivered() -> None:
+                # A delayed old read cannot replace newer shared observations.
+                with path_lock:
+                    try:
+                        current_bytes, _ = _read_existing_text(path)
+                    except _FileApplicationError:
+                        return
+                    observed = state.observation(path)
+                    if (_content_revision(current_bytes) == revision
+                        and (observed is previous_observation
+                             or (observed is not None and observed.content_revision == revision))):
+                        state.observe(path, revision, intervals)
+            from dataclasses import replace
+            result = replace(result, delivery_succeeded=delivered)
+        return result
 
 
 @dataclass(slots=True)

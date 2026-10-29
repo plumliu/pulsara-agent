@@ -1,6 +1,6 @@
 """Closed conversation-kernel event vocabulary and subject/guard descriptor.
 
-The descriptor is the single Python owner for the exact 30/24/11/1 oracle.
+The descriptor is the single Python owner for the exact 25/23/8/1 oracle.
 SQL checks, repository validation, protocol projection mapping, and generated
 test fixtures consume these values; callers cannot register new entries.
 """
@@ -22,9 +22,6 @@ class SubjectSlot(StrEnum):
     QUEUE_ITEM = "subject_queue_item_id"
     INTERACTION_DECISION = "subject_interaction_decision_id"
     CONTEXT_BINDING_REVISION = "subject_context_binding_revision_id"
-    SUBAGENT_TASK = "subject_subagent_task_id"
-    SUBAGENT_MESSAGE = "subject_subagent_message_id"
-    SUBAGENT_RESULT = "subject_subagent_result_id"
     PLAN_WORKFLOW = "subject_plan_workflow_id"
     PLAN_INTERACTION = "subject_plan_interaction_id"
 
@@ -48,11 +45,6 @@ class CommittedEventType(StrEnum):
     PROMPT_CANCELLED = "PromptCancelled"
     PROMPT_REJECTED = "PromptRejected"
     COMPACTION_ADOPTED = "CompactionAdopted"
-    SUBAGENT_TASK_ACCEPTED = "SubagentTaskAccepted"
-    SUBAGENT_TASK_STATUS_ACCEPTED = "SubagentTaskStatusAccepted"
-    SUBAGENT_MESSAGE_ACCEPTED = "SubagentMessageAccepted"
-    SUBAGENT_RESULT_ACCEPTED = "SubagentResultAccepted"
-    INTER_AGENT_MESSAGE_ACCEPTED = "InterAgentMessageAccepted"
     PLAN_WORKFLOW_ENTERED = "PlanWorkflowEntered"
     PLAN_QUESTION_ASKED = "PlanQuestionAsked"
     PLAN_QUESTION_ANSWERED = "PlanQuestionAnswered"
@@ -85,7 +77,6 @@ class LiveEventType(StrEnum):
     TERMINAL_MONITOR_OPENED = "TerminalMonitorOpened"
     TERMINAL_MONITOR_OBSERVATION = "TerminalMonitorObservation"
     TERMINAL_MONITOR_CLOSED = "TerminalMonitorClosed"
-    SUBAGENT_PROGRESS = "SubagentProgress"
     TODO_SNAPSHOT_UPDATED = "TodoSnapshotUpdated"
 
 
@@ -137,20 +128,6 @@ COMMITTED_EVENT_DESCRIPTORS = (
         CommittedEventType.COMPACTION_ADOPTED,
         SubjectSlot.CONTEXT_BINDING_REVISION,
     ),
-    _host(CommittedEventType.SUBAGENT_TASK_ACCEPTED, SubjectSlot.SUBAGENT_TASK),
-    _host(
-        CommittedEventType.SUBAGENT_TASK_STATUS_ACCEPTED,
-        SubjectSlot.SUBAGENT_TASK,
-    ),
-    _host(
-        CommittedEventType.SUBAGENT_MESSAGE_ACCEPTED,
-        SubjectSlot.SUBAGENT_MESSAGE,
-    ),
-    _host(
-        CommittedEventType.SUBAGENT_RESULT_ACCEPTED,
-        SubjectSlot.SUBAGENT_RESULT,
-    ),
-    _host(CommittedEventType.INTER_AGENT_MESSAGE_ACCEPTED, SubjectSlot.ENTRY),
     _host(CommittedEventType.PLAN_WORKFLOW_ENTERED, SubjectSlot.PLAN_WORKFLOW),
     _host(CommittedEventType.PLAN_QUESTION_ASKED, SubjectSlot.PLAN_INTERACTION),
     _host(CommittedEventType.PLAN_QUESTION_ANSWERED, SubjectSlot.PLAN_INTERACTION),
@@ -169,12 +146,12 @@ APPEND_GUARDS = tuple(item.value for item in AppendGuardKind)
 
 DESCRIPTOR_BY_TYPE = {item.event_type: item for item in COMMITTED_EVENT_DESCRIPTORS}
 
-if len(COMMITTED_EVENT_DESCRIPTORS) != 30 or len(DESCRIPTOR_BY_TYPE) != 30:
-    raise RuntimeError("committed event descriptor must contain exact 30 types")
-if len(LIVE_EVENT_TYPES) != 24 or len(set(LIVE_EVENT_TYPES)) != 24:
-    raise RuntimeError("live event registry must contain exact 24 types")
-if len(SUBJECT_SLOTS) != 11 or len(set(SUBJECT_SLOTS)) != 11:
-    raise RuntimeError("subject registry must contain exact 11 slots")
+if len(COMMITTED_EVENT_DESCRIPTORS) != 25 or len(DESCRIPTOR_BY_TYPE) != 25:
+    raise RuntimeError("committed event descriptor must contain exact 25 types")
+if len(LIVE_EVENT_TYPES) != 23 or len(set(LIVE_EVENT_TYPES)) != 23:
+    raise RuntimeError("live event registry must contain exact 23 types")
+if len(SUBJECT_SLOTS) != 8 or len(set(SUBJECT_SLOTS)) != 8:
+    raise RuntimeError("subject registry must contain exact 8 slots")
 if len(APPEND_GUARDS) != 1:
     raise RuntimeError("append guard registry must contain exact 1 guard")
 

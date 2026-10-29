@@ -202,23 +202,20 @@ def capability_source_registration_identity_digest(
     )
 
 
-def _validate_scope(scope: ModelInputScopeKind, subagent_task_id: str | None) -> None:
+def _validate_scope(scope: ModelInputScopeKind) -> None:
     if not isinstance(scope, ModelInputScopeKind):
         raise TypeError("capability scope kind is not closed")
-    if (scope is ModelInputScopeKind.ROOT) != (subagent_task_id is None):
-        raise ValueError("capability scope identity is invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class FrozenCapabilitySourceRegistrationSet:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     builtin_registration: FrozenCapabilitySourceRegistration
     mcp_registrations: tuple[FrozenCapabilitySourceRegistration, ...]
     local_skill_catalog_registration: FrozenCapabilitySourceRegistration
 
     def __post_init__(self) -> None:
-        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
+        _validate_scope(self.conversation_scope_kind)
         if (
             self.builtin_registration.source.kind
             is not CapabilitySourceKind.BUILTIN_REGISTRY
@@ -423,12 +420,11 @@ NativeToolWireEligibility = (
 @dataclass(frozen=True, slots=True)
 class FrozenNativeToolWireEligibilitySet:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     native_function_tool_wire_contract_fingerprint: str
     entries: tuple[NativeToolWireEligibility, ...]
 
     def __post_init__(self) -> None:
-        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
+        _validate_scope(self.conversation_scope_kind)
         versions = tuple(item.version for item in self.entries)
         keys = tuple(
             (item.provider_name, item.identity_fingerprint, item.semantic_fingerprint)
@@ -447,14 +443,13 @@ class FrozenNativeToolWireEligibilitySet:
 @dataclass(frozen=True, slots=True)
 class FrozenNativeToolProjectionSet:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     native_function_tool_wire_contract_fingerprint: str
     tool_versions: tuple[ToolCapabilityVersionRef, ...]
     projections: tuple[FrozenNativeToolWireProjection, ...] = field(repr=False)
     projection_set_fingerprint: str
 
     def __post_init__(self) -> None:
-        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
+        _validate_scope(self.conversation_scope_kind)
         if len(self.tool_versions) != len(self.projections):
             raise ValueError("native projection set pair count conflicts")
         names = tuple(item.provider_name for item in self.tool_versions)
@@ -480,10 +475,7 @@ class FrozenNativeToolProjectionSet:
             raise ValueError("native tool wire byte bound exceeded")
         expected = native_tool_projection_set_fingerprint(
             conversation_scope_kind=self.conversation_scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
-            native_function_tool_wire_contract_fingerprint=(
-                self.native_function_tool_wire_contract_fingerprint
-            ),
+            native_function_tool_wire_contract_fingerprint=self.native_function_tool_wire_contract_fingerprint,
             tool_versions=self.tool_versions,
             projections=self.projections,
         )
@@ -494,7 +486,6 @@ class FrozenNativeToolProjectionSet:
 def native_tool_projection_set_fingerprint(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     native_function_tool_wire_contract_fingerprint: str,
     tool_versions: tuple[ToolCapabilityVersionRef, ...],
     projections: tuple[FrozenNativeToolWireProjection, ...],
@@ -503,7 +494,6 @@ def native_tool_projection_set_fingerprint(
         "native-tool-projection-set:v1",
         {
             "scope": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
             "contract": native_function_tool_wire_contract_fingerprint,
             "versions": tuple(
                 tool_capability_version_identity_digest(item) for item in tool_versions
@@ -656,12 +646,11 @@ FrozenCapabilityFact = FrozenToolCapabilityFact | FrozenSkillCapabilityFact
 class FrozenCapabilitySourceSnapshot:
     registration: FrozenCapabilitySourceRegistration
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     disposition: CapabilitySourceSnapshotDisposition
     facts: tuple[FrozenCapabilityFact, ...]
 
     def __post_init__(self) -> None:
-        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
+        _validate_scope(self.conversation_scope_kind)
         if not isinstance(self.disposition, CapabilitySourceSnapshotDisposition):
             raise TypeError("capability source disposition is not closed")
         if (
@@ -720,7 +709,6 @@ def capability_source_snapshot_semantic_digest(
                 snapshot.registration
             ),
             "scope": snapshot.conversation_scope_kind.value,
-            "scope_subagent_task_id": snapshot.scope_subagent_task_id,
             "disposition": snapshot.disposition.value,
             "facts": tuple(item.fact_semantic_fingerprint for item in snapshot.facts),
         },
@@ -731,7 +719,6 @@ def freeze_capability_source_snapshot(
     *,
     registration: FrozenCapabilitySourceRegistration,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     disposition: CapabilitySourceSnapshotDisposition,
     facts: tuple[FrozenCapabilityFact, ...],
 ) -> FrozenCapabilitySourceSnapshot:
@@ -748,7 +735,6 @@ def freeze_capability_source_snapshot(
     return FrozenCapabilitySourceSnapshot(
         registration=registration,
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         disposition=disposition,
         facts=ordered,
     )
@@ -776,8 +762,6 @@ class FrozenCapabilityRegistrySnapshot:
             if (
                 snapshot.conversation_scope_kind
                 is not self.registration_set.conversation_scope_kind
-                or snapshot.scope_subagent_task_id
-                != self.registration_set.scope_subagent_task_id
             ):
                 raise ValueError("registry source snapshot scope conflicts")
             for fact in snapshot.facts:
@@ -1008,14 +992,13 @@ class McpProviderNameCollisionFact:
 @dataclass(frozen=True, slots=True)
 class FrozenMcpCapabilityProjectionInput:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...] = field(repr=False)
     catalog_semantic_fingerprint: str
     inspectability_facts: tuple[FrozenMcpInspectabilityFact, ...]
     provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = ()
 
     def __post_init__(self) -> None:
-        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
+        _validate_scope(self.conversation_scope_kind)
         source_ids = tuple(
             item.registration.source.stable_source_id for item in self.source_snapshots
         )
@@ -1026,7 +1009,6 @@ class FrozenMcpCapabilityProjectionInput:
         if any(
             item.registration.source.kind is not CapabilitySourceKind.MCP_SERVER
             or item.conversation_scope_kind is not self.conversation_scope_kind
-            or item.scope_subagent_task_id != self.scope_subagent_task_id
             for item in self.source_snapshots
         ):
             raise ValueError("MCP source snapshot scope or kind conflicts")
@@ -1139,15 +1121,11 @@ class FrozenToolCapabilityPlanningInput:
         if (
             self.native_wire.conversation_scope_kind
             is not self.mcp.conversation_scope_kind
-            or self.native_wire.scope_subagent_task_id
-            != self.mcp.scope_subagent_task_id
         ):
             raise ValueError("Tool planning input scopes conflict")
         if isinstance(self.predecessor, InstalledCapabilityEpochPredecessor) and (
             self.predecessor.direct_projection_set.conversation_scope_kind
             is not self.native_wire.conversation_scope_kind
-            or self.predecessor.direct_projection_set.scope_subagent_task_id
-            != self.native_wire.scope_subagent_task_id
         ):
             raise ValueError("installed Tool predecessor scope conflicts")
 
@@ -1155,21 +1133,17 @@ class FrozenToolCapabilityPlanningInput:
 @dataclass(frozen=True, slots=True)
 class FrozenCapabilityDispatchCut:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     registry: FrozenCapabilityRegistrySnapshot
     tools: FrozenToolCapabilityPlanningInput
     skills: FrozenSkillProjectionInput
 
     def __post_init__(self) -> None:
-        _validate_scope(self.conversation_scope_kind, self.scope_subagent_task_id)
+        _validate_scope(self.conversation_scope_kind)
         registration = self.registry.registration_set
         if (
             registration.conversation_scope_kind is not self.conversation_scope_kind
-            or registration.scope_subagent_task_id != self.scope_subagent_task_id
             or self.tools.native_wire.conversation_scope_kind
             is not self.conversation_scope_kind
-            or self.tools.native_wire.scope_subagent_task_id
-            != self.scope_subagent_task_id
         ):
             raise ValueError("capability dispatch cut scopes conflict")
 
@@ -1232,7 +1206,7 @@ class FrozenToolCapabilityExposureSelection:
             item.identity_fingerprint for item in self.direct_tool_versions
         }:
             raise ValueError("native meta choices escaped the installed cohort")
-        _validate_scope(native.conversation_scope_kind, native.scope_subagent_task_id)
+        _validate_scope(native.conversation_scope_kind)
         if (
             self.direct_tool_surface.conversation_scope_kind
             is not native.conversation_scope_kind
@@ -1245,7 +1219,6 @@ class FrozenToolCapabilityExposureSelection:
         reusable = self.reusable_direct_projection_set
         if reusable is not None and (
             reusable.conversation_scope_kind is not native.conversation_scope_kind
-            or reusable.scope_subagent_task_id != native.scope_subagent_task_id
             or reusable.native_function_tool_wire_contract_fingerprint
             != native.native_function_tool_wire_contract_fingerprint
             or reusable.tool_versions != self.direct_tool_versions
@@ -1256,9 +1229,6 @@ class FrozenToolCapabilityExposureSelection:
     def conversation_scope_kind(self) -> ModelInputScopeKind:
         return self.dispatch_view.planning_input.native_wire.conversation_scope_kind
 
-    @property
-    def scope_subagent_task_id(self) -> str | None:
-        return self.dispatch_view.planning_input.native_wire.scope_subagent_task_id
 
     @property
     def native_function_tool_wire_contract_fingerprint(self) -> str:

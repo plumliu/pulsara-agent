@@ -40,13 +40,11 @@ _COMMON_CONTROL_EVENTS = {
     HookEventType.USER_PROMPT_SUBMIT_EVENT,
     HookEventType.PRE_COMPACT_EVENT,
     HookEventType.POST_COMPACT_EVENT,
-    HookEventType.SUBAGENT_STOP_EVENT,
     HookEventType.STOP_EVENT,
 }
 _PLAIN_CONTEXT_EVENTS = {
     HookEventType.SESSION_START_EVENT,
     HookEventType.USER_PROMPT_SUBMIT_EVENT,
-    HookEventType.SUBAGENT_START_EVENT,
 }
 
 
@@ -63,6 +61,7 @@ class ValidHandlerContribution:
     reason: str | None = None
     diagnostics: tuple[HookDiagnostic, ...] = ()
     scrub_set: object | None = field(default=None, repr=False, compare=False)
+    updated_input: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +107,6 @@ def parse_handler_output(execution: HookCommandExecution) -> ParsedHandlerOutput
             HookEventType.PRE_TOOL_USE_EVENT,
             HookEventType.USER_PROMPT_SUBMIT_EVENT,
             HookEventType.STOP_EVENT,
-            HookEventType.SUBAGENT_STOP_EVENT,
         }:
             return _invalid(execution, "HOOK_ASYNC_CONTROL_UNSUPPORTED", diagnostics)
         reason = stderr.strip() or None
@@ -127,7 +125,6 @@ def parse_handler_output(execution: HookCommandExecution) -> ParsedHandlerOutput
                 diagnostics=tuple(diagnostics),
             )
         if event in {
-            HookEventType.SUBAGENT_STOP_EVENT,
             HookEventType.STOP_EVENT,
         }:
             return ValidHandlerContribution(
@@ -194,7 +191,6 @@ def parse_handler_output(execution: HookCommandExecution) -> ParsedHandlerOutput
             diagnostics=tuple(diagnostics),
         )
     if event in {
-        HookEventType.SUBAGENT_STOP_EVENT,
         HookEventType.STOP_EVENT,
     }:
         return _invalid(execution, "HOOK_PLAIN_CONTINUATION_UNSUPPORTED", diagnostics)
@@ -218,7 +214,6 @@ def _parse_json_object(
         root_allowed.update({"continue", "stopReason", "suppressOutput"})
     if event in {
         HookEventType.POST_TOOL_USE_EVENT,
-        HookEventType.SUBAGENT_START_EVENT,
     }:
         root_allowed.add("continue")
     if event in {
@@ -226,14 +221,12 @@ def _parse_json_object(
         HookEventType.USER_PROMPT_SUBMIT_EVENT,
         HookEventType.PRE_TOOL_USE_EVENT,
         HookEventType.POST_TOOL_USE_EVENT,
-        HookEventType.SUBAGENT_START_EVENT,
         HookEventType.PERMISSION_REQUEST_EVENT,
     }:
         root_allowed.add("hookSpecificOutput")
     if event in {
         HookEventType.USER_PROMPT_SUBMIT_EVENT,
         HookEventType.PRE_TOOL_USE_EVENT,
-        HookEventType.SUBAGENT_STOP_EVENT,
         HookEventType.STOP_EVENT,
     }:
         root_allowed.update({"decision", "reason"})
@@ -250,6 +243,7 @@ def _parse_json_object(
         return _neutral(execution, diagnostics)
 
     context: str | None = None
+    updated_input = None
     gate_block = False
     permission: PermissionDecision | None = None
     continuation = False
@@ -260,6 +254,10 @@ def _parse_json_object(
         if not isinstance(specific, dict):
             raise ValueError("hookSpecificOutput must be an object")
         context, gate_block, permission, reason = _parse_specific(execution, specific)
+        if event is HookEventType.PRE_TOOL_USE_EVENT and "updatedInput" in specific:
+            updated_input = specific["updatedInput"]
+            if not isinstance(updated_input, dict):
+                raise ValueError("updatedInput must be a complete tool-arguments object")
 
     if event in _COMMON_CONTROL_EVENTS:
         suppress = value.get("suppressOutput")
@@ -277,7 +275,6 @@ def _parse_json_object(
             raise ValueError("stopReason requires continue:false")
         if continue_value is False:
             if event in {
-                HookEventType.SUBAGENT_STOP_EVENT,
                 HookEventType.STOP_EVENT,
             }:
                 explicit_terminalize = True
@@ -292,12 +289,6 @@ def _parse_json_object(
             raise ValueError("PostTool continue must be true")
         if "stopReason" in value:
             raise ValueError("PostTool stopReason is unsupported")
-    if event is HookEventType.SUBAGENT_START_EVENT and "continue" in value:
-        if not isinstance(value["continue"], bool):
-            raise ValueError("SubagentStart continue must be boolean")
-        diagnostics.append(
-            _diag(execution, "HOOK_SUBAGENT_START_CONTINUE_IGNORED", "continue")
-        )
     legacy = value.get("decision")
     legacy_reason = value.get("reason")
     if legacy is not None or legacy_reason is not None:
@@ -309,7 +300,6 @@ def _parse_json_object(
         }:
             gate_block = True
         elif event in {
-            HookEventType.SUBAGENT_STOP_EVENT,
             HookEventType.STOP_EVENT,
         }:
             continuation = True
@@ -333,6 +323,7 @@ def _parse_json_object(
         explicit_terminalize,
         reason,
         tuple(diagnostics),
+        updated_input=updated_input,
     )
 
 
@@ -351,7 +342,6 @@ def _parse_specific(
         HookEventType.SESSION_START_EVENT,
         HookEventType.USER_PROMPT_SUBMIT_EVENT,
         HookEventType.POST_TOOL_USE_EVENT,
-        HookEventType.SUBAGENT_START_EVENT,
     }:
         allowed = {"hookEventName", "additionalContext"}
         if specific.keys() - allowed:
@@ -365,6 +355,7 @@ def _parse_specific(
             "permissionDecision",
             "permissionDecisionReason",
             "additionalContext",
+            "updatedInput",
         }
         if specific.keys() - allowed:
             raise ValueError("unsupported PreTool output")

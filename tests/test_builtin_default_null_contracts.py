@@ -9,7 +9,10 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
-from pulsara_agent.conversation_kernel.subagent import _parse_context
+from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+    prepared_request,
+    validate_collaboration_parameters,
+)
 from pulsara_agent.llm.adapters.openai.function_tools import (
     lower_openai_function_parameters,
 )
@@ -50,57 +53,20 @@ def assert_shape(name, arguments, valid):
         ).is_valid(arguments)
 
 
-@pytest.mark.parametrize("name", ["spawn_agent", "create_agent_tasks"])
-@pytest.mark.parametrize(
-    "context,valid",
-    [
-        ({"mode": "none"}, True),
-        ({"mode": "last_n", "turns": 1}, True),
-        ({"mode": "last_n", "turns": 3}, True),
-        ({"mode": "worker_history", "task_id": 'task:fuyejuysqofwdfmpmtb7nq5iim'}, True),
-        ({}, False),
-        (None, False),
-        ({"mode": "last_n"}, False),
-        ({"mode": "last_n", "turns": True}, False),
-        ({"mode": "last_n", "turns": 4}, False),
-        ({"mode": "last_n", "turns": 1, "task_id": 'task:fuyejuysqofwdfmpmtb7nq5iim'}, False),
-        ({"mode": "none", "turns": 1}, False),
-        ({"mode": "none", "task_id": None}, False),
-        ({"mode": "worker_history"}, False),
-        ({"mode": "worker_history", "task_id": ""}, False),
-    ],
-)
-def test_subagent_context_public_variants(name, context, valid):
-    task = {"task": "Inspect the fixture", "context": context}
-    assert_shape(name, task if name == "spawn_agent" else {"tasks": [task]}, valid)
-    if valid:
-        _parse_context(context)
-
-
-@pytest.mark.parametrize("name", ["spawn_agent", "create_agent_tasks"])
-@pytest.mark.parametrize(
-    "reasoning,valid",
-    [
-        ({"kind": "effort", "value": None}, True),
-        ({"kind": "effort", "value": "high"}, True),
-        ({"kind": "toggle", "enabled": False}, True),
-        ({"kind": "budget_tokens", "tokens": 1024}, True),
-        (None, False),
-        ({}, False),
-        ({"kind": "effort"}, False),
-        ({"kind": "effort", "value": None, "enabled": False}, False),
-        ({"kind": "toggle", "enabled": None}, False),
-        ({"kind": "budget_tokens", "tokens": True}, False),
-    ],
-)
-def test_subagent_reasoning_exact_shape(name, reasoning, valid):
-    task = {
-        "task": "Inspect the fixture",
-        "model": {"connection_id": "connection", "reasoning": reasoning},
-    }
-    assert_shape(name, task if name == "spawn_agent" else {"tasks": [task]}, valid)
-    if valid:
-        assert reasoning_selection_from_dict(reasoning) is not None
+@pytest.mark.parametrize("field", ["context", "profile", "target", "name"])
+def test_run_agent_omitted_creation_options_and_explicit_null_have_distinct_meaning(
+    field,
+):
+    omitted = prepared_request({"instruction": "Inspect"})
+    assert (
+        omitted.create_agent
+        and omitted.context_mode == "none"
+        and omitted.profile is None
+    )
+    with pytest.raises(ValueError):
+        validate_collaboration_parameters(
+            "run_agent", {"instruction": "Inspect", field: None}
+        )
 
 
 def test_null_effort_is_an_exact_choice_not_an_omitted_selection():
@@ -117,30 +83,13 @@ def test_null_effort_is_an_exact_choice_not_an_omitted_selection():
     assert default_reasoning_selection(with_null) != choice
 
 
-
-
-
-
-@pytest.mark.parametrize(
-    "args,valid",
-    [
-        ({}, True),
-        ({"timeout_seconds": 0}, True),
-        ({"task_ids": ['task:74xe3yvbpqgx6s4jejk25ed6c4']}, True),
-        ({"task_ids": ['task:74xe3yvbpqgx6s4jejk25ed6c4'], "settle": "first"}, True),
-        ({"settle": "all"}, False),
-        ({"settle": None}, False),
-        ({"task_ids": []}, False),
-        ({"task_ids": None}, False),
-    ],
-)
-def test_wait_join_shape(args, valid):
-    assert_shape("wait_agent", args, valid)
-
-
 def scheduled_args(action):
     if action == "list":
-        return {"action": action, "status": "PAUSED", "cursor": 'schedule:bcud6jffakbgubat6jskaqqhme'}
+        return {
+            "action": action,
+            "status": "PAUSED",
+            "cursor": "schedule:bcud6jffakbgubat6jskaqqhme",
+        }
     if action == "create":
         return {
             "action": action,
@@ -150,7 +99,7 @@ def scheduled_args(action):
                 "timezone": "Asia/Shanghai",
                 "permission_mode": "read-only",
                 "schedule": {
-                    "contract": 'scheduled-rule:v1',
+                    "contract": "scheduled-rule:v1",
                     "kind": "interval",
                     "anchor_at_utc": "2026-10-07T00:00:00Z",
                     "seconds": 60,
@@ -164,9 +113,17 @@ def scheduled_args(action):
 @pytest.mark.parametrize(
     "session_field,expected",
     [
-        ({}, 'session:6g3pqrtwdp2ilmnlzfmxxxhelu'),
-        ({"session": None}, 'session:6g3pqrtwdp2ilmnlzfmxxxhelu'),
-        ({"session": {"kind": "SESSION", "session_id": 'session:pusyod5zvaz4i6yode652m7ble'}}, 'session:pusyod5zvaz4i6yode652m7ble'),
+        ({}, "session:6g3pqrtwdp2ilmnlzfmxxxhelu"),
+        ({"session": None}, "session:6g3pqrtwdp2ilmnlzfmxxxhelu"),
+        (
+            {
+                "session": {
+                    "kind": "SESSION",
+                    "session_id": "session:pusyod5zvaz4i6yode652m7ble",
+                }
+            },
+            "session:pusyod5zvaz4i6yode652m7ble",
+        ),
     ],
 )
 def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_identity(
@@ -174,19 +131,26 @@ def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_ident
 ):
     async def run():
         service = ScheduledTaskService(SimpleNamespace())
-        target = AsyncMock(return_value=(
-            {"tasks": [], "next_cursor": None} if action == "list"
-            else {"id": "schedule:fixture", "session_id": expected}
-        ))
+        target = AsyncMock(
+            return_value=(
+                {"tasks": [], "next_cursor": None}
+                if action == "list"
+                else {"id": "schedule:fixture", "session_id": expected}
+            )
+        )
         setattr(service, action, target)
         arguments = {**scheduled_args(action), **session_field}
         original = deepcopy(arguments)
         await service.invoke(
             arguments,
-            default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
+            default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         )
-        dispatched = {key: value for key, value in original.items() if key not in {"action", "session"}}
+        dispatched = {
+            key: value
+            for key, value in original.items()
+            if key not in {"action", "session"}
+        }
         dispatched["session_id"] = expected
         target.assert_awaited_once_with(**dispatched)
         assert arguments == original
@@ -205,11 +169,14 @@ def test_scheduled_service_none_keeps_its_unfiltered_meaning():
         service._read.reset_mock()
         await service.invoke(
             {"action": "list", "session": None},
-            default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
+            default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.READ_ONLY,
         )
         service._read.assert_awaited_once_with(
-            "list_scheduled_tasks", cursor=None, status=None, session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu'
+            "list_scheduled_tasks",
+            cursor=None,
+            status=None,
+            session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
         )
 
     asyncio.run(run())
@@ -223,7 +190,11 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
         service = ScheduledTaskService(SimpleNamespace())
         service.get = AsyncMock()
         service.mutate = AsyncMock()
-        args = {"action": action, "target": {"kind": "SCHEDULE", "task_id": "scheduled:one"}, "session": None}
+        args = {
+            "action": action,
+            "target": {"kind": "SCHEDULE", "task_id": "scheduled:one"},
+            "session": None,
+        }
         if action != "get":
             args["expected_revision"] = 1
         if action == "update":
@@ -231,7 +202,7 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
         with pytest.raises(ScheduledTaskError):
             await service.invoke(
                 args,
-                default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu',
+                default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
                 permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
         service.get.assert_not_awaited()
@@ -240,14 +211,29 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("status_fields", [{}, {"status": None}, {"status": "PAUSED"}, {"status": "ACTIVE"}])
+@pytest.mark.parametrize(
+    "status_fields", [{}, {"status": None}, {"status": "PAUSED"}, {"status": "ACTIVE"}]
+)
 def test_scheduled_create_status_schema_and_dispatch(status_fields):
     async def run():
         service = ScheduledTaskService(SimpleNamespace())
-        service.create = AsyncMock(return_value={"id": "schedule:fixture", "session_id": "session:6g3pqrtwdp2ilmnlzfmxxxhelu"})
+        service.create = AsyncMock(
+            return_value={
+                "id": "schedule:fixture",
+                "session_id": "session:6g3pqrtwdp2ilmnlzfmxxxhelu",
+            }
+        )
         arguments = {**scheduled_args("create"), **status_fields}
-        await service.invoke(arguments, default_session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu', permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-        service.create.assert_awaited_once_with(session_id='session:6g3pqrtwdp2ilmnlzfmxxxhelu', values=arguments["values"], **status_fields)
+        await service.invoke(
+            arguments,
+            default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
+            permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+        )
+        service.create.assert_awaited_once_with(
+            session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
+            values=arguments["values"],
+            **status_fields,
+        )
 
     asyncio.run(run())
 
@@ -263,14 +249,12 @@ def test_scheduled_create_rejects_invalid_status(status):
         creation_status(status)
 
 
-
-
-
-
 def test_existing_empty_values_remain_operations():
     assert_shape("todo", {"items": []}, True)
-    assert_shape("report_agent_result", {"summary": "done", "data": {}}, True)
-    assert_shape("create_agent_tasks", {"tasks": []}, False)
+    assert_shape(
+        "run_agent", {"instruction": "Inspect", "materials": [], "depends_on": []}, True
+    )
+    assert_shape("wait_agent", {"targets": []}, False)
     base = {"action": "register", "target": {"kind": "PROCESS", "process_id": "p"}}
     assert (
         parse_terminal_monitor_input(
@@ -300,17 +284,24 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
                     "action": "run_now",
                     "task_id": "schedule:" + "a" * 26,
                     "expected_revision": 1,
-                    "client_command_id": 'command:knzz7jzjjydzbbeubc3tt7q32m',
+                    "client_command_id": "command:knzz7jzjjydzbbeubc3tt7q32m",
                     "request_at_utc": "2026-10-13T00:00:00Z",
                 },
                 default_session_id="session:" + "a" * 26,
                 permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
         assert error.value.code == "INVALID_ACTION"
-        assert_shape("scheduled_tasks", {
-            "action": "run_now", "task_id": "schedule:" + "a" * 26, "expected_revision": 1,
-            "client_command_id": 'command:knzz7jzjjydzbbeubc3tt7q32m', "request_at_utc": "2026-10-13T00:00:00Z",
-        }, False)
+        assert_shape(
+            "scheduled_tasks",
+            {
+                "action": "run_now",
+                "task_id": "schedule:" + "a" * 26,
+                "expected_revision": 1,
+                "client_command_id": "command:knzz7jzjjydzbbeubc3tt7q32m",
+                "request_at_utc": "2026-10-13T00:00:00Z",
+            },
+            False,
+        )
         service.run_now.assert_not_awaited()
         service.get = AsyncMock(return_value={"permission_mode": "bypass-permissions"})
         service.switch = AsyncMock()
@@ -322,7 +313,10 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
                     "expected_revision": 1,
                     "replacement": {
                         "kind": "existing",
-                        "target": {"kind": "SCHEDULE", "task_id": "schedule:" + "b" * 25 + "a"},
+                        "target": {
+                            "kind": "SCHEDULE",
+                            "task_id": "schedule:" + "b" * 25 + "a",
+                        },
                         "expected_revision": 2,
                     },
                 },

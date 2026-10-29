@@ -12,7 +12,6 @@ from pulsara_agent.terminal_protocol.canonical_v3 import (
     CanonicalProtocolReader,
     CanonicalProtocolResourceExhausted,
 )
-from tests.support.subagents import accept_active_subagent_fixture
 from tests.test_conversation_fork import repo as repo, new_session, rows, turn, fork, compact, final
 from tests.test_turn_interruption_history import stop
 
@@ -152,35 +151,6 @@ def test_sparse_latest_entry_keeps_segment_mounts_lazy_after_many_legal_adoption
     assert all(node["Actual Loops"] == 1 and node["Actual Rows"] == 1 for node in candidates), candidates
 
 
-def test_creator_counts_stream_across_deliveries_and_retain_the_event_cut(repo, monkeypatch):
-    lease = new_session(repo)
-    session = lease.guard.session_id
-    parent, _, _ = turn(repo, lease.guard, "delegate", finish=False)
-    for index in range(3):
-        accept_active_subagent_fixture(repo, lease, parent_turn_id=parent, objective=str(index))
-    creators = [str(item["assistant_entry_id"]) for item in rows(repo,
-        "SELECT assistant_entry_id FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s ORDER BY assistant_entry_id", (session,))]
-    normal = CanonicalProtocolReader(repo.connection_provider)
-    expected = context(normal, session, creators)
-    assert len(expected["batches"]) == 3
-    assert all(batch["task_count"] == "1" for batch in expected["batches"])
-    split, statements = traced_reader(repo, monkeypatch, split_creators=True)
-    assert context(split, session, creators) == expected
-    assert len([sql for sql in statements if "SELECT DISTINCT parent_id, batch_id FROM unnest" in sql]) == 3
-    size = len(json.dumps(expected).encode())
-    assert context(split, session, creators, maximum_serialized_bytes=size) == expected
-    with pytest.raises(CanonicalProtocolResourceExhausted):
-        context(split, session, creators, maximum_serialized_bytes=size - 1)
-
-    accepted = rows(repo,
-        "SELECT min(event_sequence) AS sequence FROM pulsara_v3.agent_events WHERE session_id=%s AND event_type='SubagentTaskAccepted'", (session,))[0]["sequence"]
-    event_cut = int(accepted) - 1
-    head = rows(repo, """SELECT e.id, e.entry_sequence FROM pulsara_v3.transcript_entries e
-        JOIN pulsara_v3.agent_events ev ON ev.session_id=e.session_id AND ev.subject_entry_id=e.id
-        WHERE e.session_id=%s AND ev.event_sequence<=%s ORDER BY e.entry_sequence DESC LIMIT 1""", (session, event_cut))[0]
-    frozen = context(split, session, [str(head["id"])],
-        cut_sequence=int(head["entry_sequence"]), event_sequence_cut=event_cut)
-    assert frozen["batches"] == []
 
 
 def test_later_malformed_imported_group_cannot_preempt_an_earlier_byte_rejection(

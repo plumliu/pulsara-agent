@@ -1,6 +1,6 @@
 # Pulsara Code Mode：ROOT＋bypass、工具子集与执行合同
 
-日期：2026-10-28。状态：冻结候选；生产尚未实施。
+日期：2026-10-29。状态：本轮运行时已实施；实际验收与边界见 §10，暂缓表面仍按配套范围执行。
 
 本轮提示词、profile 文案、Skill 与前端暂缓范围，以及 Code Mode 工具 schema 首版要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
@@ -47,7 +47,7 @@ JS 只增加程序执行和结果桥接。派活进入接收 session 的共同�
 | MCP | `use_new_mcp_tool`、`read_mcp_resource`、`get_mcp_prompt`；cell 创建时可用的直接 MCP 工具 |
 | Agent | `run_agent`、`list_agents`、`inspect_agent`、`send_agent_message`、`wait_agent`、`stop_agent` |
 
-这是 17 个现有普通内置工具、6 个目标 Agent 工具，加动态 MCP 直接入口。Agent 按配套文档 hard cut，当前生产旧八工具不代表已支持新参数。
+这是 17 个现有普通内置工具、6 个目标 Agent 工具，加动态 MCP 直接入口。Agent 已按配套文档 hard cut；当前接口及实际验收见 §10。
 
 同名操作共用参数、target、默认值、校验、Hook、业务结果与执行 owner。原生把结果呈现给模型，JS 得到同一个公共业务值；不加通用 `.data` 封套：
 
@@ -320,7 +320,7 @@ exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按�
 | reader／history／fork／UI／用户控制 | 模型来源过滤在分页／预算前完成；UI 使用同一真实结果并归组到父 exec；状态、输出、精确停止复用既有 owner |
 | SYSTEM／工具／bundled skill | 短环境合同＋原生 schema；复杂编排按需读取既有 skill，不写实验过程 |
 
-主代码证据是 `_repository/tools.py` 的真实 TOOL_CALL／RUNNING 接纳，`tool_execution.py` 的单槽与 current_view，`tool_runtime.py` 的 surface／META，`tool_artifacts.py` 的真实输出与预览，以及 `host.py` 的控制关闭。它们证明接缝需要修改，不证明目标已实施。
+本轮实施与验证总览见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)，逐项行为、证据层级和未覆盖边界见 [验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)。
 
 ### 10.2 本轮证据
 
@@ -330,7 +330,7 @@ exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按�
 - [ROOT 汇总](output/code-mode-freeze-20261028/root/REVIEW.zh.md)：专项代码证据与最终选择。
 - [共同引擎复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md)：请求／turn、上下文、消息／monitor、工具结果的唯一归属与必要适配。
 
-这些不是生产端到端验证。旧 fake compaction 实验仅给模拟窗口换标签，没有执行 Pulsara 真实压缩。[SDK 官方接口](https://github.com/vercel-labs/quickjs-wasi#interrupt-handler) 用于核对公开能力，结论以固定发布版本实测为准。
+以上前置实验不作为生产端到端通过证据。旧 fake compaction 实验仅给模拟窗口换标签，没有执行 Pulsara 真实压缩。[SDK 官方接口](https://github.com/vercel-labs/quickjs-wasi#interrupt-handler) 用于核对公开能力，结论以固定发布版本实测为准。
 
 ### 10.3 实施验收
 
@@ -343,7 +343,7 @@ exec 在 1 秒后返回 running，ROOT 随后压缩，research／review 仍按�
 7. Stop、steer、Plan、stop_exec、Host close、进程死亡按表工作；未 await 的已提交操作正确结算。
 8. 配套 Agent 的 batch／history／message／wait／monitor 验收；WORK ID 从队列到 turn 保持不变，启动／取消只结算一个实际阶段，final 读原 entry；已接纳请求不依赖 cell 存活。
 
-只测可观察行为，不冻结自然语言或整份 schema。实现后才用已保存 provider 配置验收两种 API 的 prefix、调用与结果，不把文档例子当已通过证据。
+只测可观察行为，不冻结自然语言或整份 schema。本轮已用保存 provider 配置验证两种 API 的实际 prefix、调用、结果与生产压缩；真实 SDK MCP 的同 cell／ref 跨压缩也已验证。完整输入、canonical 核对与覆盖层级见 [验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)，不把文档例子当通过证据。
 
 ### SUPERSEDES
 

@@ -7,7 +7,6 @@ from pulsara_agent.llm.input import FrozenPromptContent
 
 import asyncio
 import json
-from dataclasses import replace
 from collections.abc import Callable
 from datetime import datetime, timezone
 from threading import Event
@@ -18,7 +17,6 @@ import pytest
 from psycopg import OperationalError
 
 from pulsara_agent.conversation_kernel.contracts import (
-    InlineContent,
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -37,7 +35,6 @@ from pulsara_agent.conversation_kernel.repository import (
     ToolRemoteIdentityConfirmationKind,
     TurnAdmissionConfirmation,
     TurnAdmissionConfirmationKind,
-    build_prepared_subagent_turn_admission,
 )
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
@@ -69,24 +66,14 @@ from pulsara_agent.ports.live_agent_event import (
     live_digest,
 )
 from pulsara_agent.llm.input import LLMTextPart, MessageRole
-from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from tests.support.postgres import verified_postgres_provider
 from tests.support.model_config import (
     acquire_bound_test_writer,
     enqueue_test_prompt,
-    start_test_root_turn,
-    test_model_binding,
     test_model_resolution_snapshot,
-    test_model_runtime,
-)
-from tests.support.subagents import (
-    ActiveSubagentFixtureId,
-    accept_active_subagent_fixture,
-    run_admitted_subagent_fixture,
 )
 from tests.support.round3 import (
     CallbackScriptedKernelModel,
-    Round10TestSubagentRuntime,
     ScriptedKernelModel,
     StaticContextSourceCollector,
     StructuredToolPort,
@@ -224,72 +211,14 @@ class _FlakyCancelledRootConfirmationRepository(_CancelledRootAdmissionRepositor
         return super().confirm_root_turn_intent(**kwargs)
 
 
-class _LostSubagentAdmissionAckRepository(ConversationKernelRepository):
-    def __init__(self, provider) -> None:
-        super().__init__(provider)
-        self.calls = 0
-
-    def accept_subagent_turn(self, *args, **kwargs):
-        self.calls += 1
-        accepted = super().accept_subagent_turn(*args, **kwargs)
-        if self.calls == 1:
-            raise OSError("injected lost subagent admission acknowledgement")
-        return accepted
 
 
-class _FlakyLostSubagentAdmissionAckRepository(_LostSubagentAdmissionAckRepository):
-    def __init__(self, provider) -> None:
-        super().__init__(provider)
-        self.confirmation_calls = 0
-
-    def confirm_subagent_turn_admission(self, **kwargs):
-        self.confirmation_calls += 1
-        if self.confirmation_calls <= 2:
-            raise OSError("injected transient subagent confirmation failure")
-        return super().confirm_subagent_turn_admission(**kwargs)
 
 
-class _SubagentNoneThenFullRepository(ConversationKernelRepository):
-    def __init__(self, provider) -> None:
-        super().__init__(provider)
-        self.calls = 0
-
-    def accept_subagent_turn(self, *args, **kwargs):
-        self.calls += 1
-        if self.calls == 1:
-            raise OSError("injected pre-commit subagent failure")
-        return super().accept_subagent_turn(*args, **kwargs)
 
 
-class _SubagentConflictRepository(ConversationKernelRepository):
-    def __init__(self, provider) -> None:
-        super().__init__(provider)
-        self.calls = 0
-
-    def accept_subagent_turn(self, *args, **kwargs):
-        del args, kwargs
-        self.calls += 1
-        raise OSError("injected subagent admission conflict window")
-
-    def confirm_subagent_turn_admission(self, **kwargs):
-        del kwargs
-        return TurnAdmissionConfirmation(TurnAdmissionConfirmationKind.CONFLICT)
 
 
-class _CancelledSubagentAdmissionRepository(ConversationKernelRepository):
-    def __init__(self, provider) -> None:
-        super().__init__(provider)
-        self.started = Event()
-        self.release = Event()
-        self.calls = 0
-
-    def accept_subagent_turn(self, *args, **kwargs):
-        del args, kwargs
-        self.calls += 1
-        self.started.set()
-        if not self.release.wait(5):
-            raise TimeoutError("test did not release subagent admission")
-        raise OSError("injected pre-commit subagent admission failure")
 
 
 class _PhysicalFailureTool(_KnownReadOnlyTool):
@@ -471,7 +400,6 @@ def _runner(
     *,
     tool_names: tuple[str, ...] = ("test_tool",),
     deadline_factory: KernelExecutionDeadlineFactory | None = None,
-    subagent_runtime: Round10TestSubagentRuntime | None = None,
 ):
     # These fixtures run a bare Runner, without KernelHostSession's renewal
     # task. Keep the real lease alive at each model boundary so machine load
@@ -498,7 +426,6 @@ def _runner(
         live_bus=LiveAgentEventBus(),
         context_source_collector=StaticContextSourceCollector(),
         deadline_factory=deadline_factory,
-        subagent_runtime=subagent_runtime,
     )
 
 
@@ -516,43 +443,8 @@ def _lease(repository: ConversationKernelRepository) -> tuple[str, str, object]:
     return session_id, workspace_id, lease
 
 
-def _prepare_subagent_task(repository, lease) -> ActiveSubagentFixtureId:
-    parent_turn_id = _name("turn")
-    start_test_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=parent_turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        requested_permission_mode=DEFAULT_PERMISSION_MODE,
-        model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text('delegate'),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
-    return accept_active_subagent_fixture(
-        repository,
-        lease,
-        parent_turn_id=parent_turn_id,
-        objective="answer once",
-    )
 
 
-def _round10_subagent_runtime(repository, lease, task_id: str):
-    row = repository.query_subagent_task(
-        session_id=lease.guard.session_id,
-        task_id=task_id,
-        deadline_monotonic=monotonic() + 10,
-    )
-    assert row is not None
-    return Round10TestSubagentRuntime(
-        session_id=lease.guard.session_id,
-        task_id=task_id,
-        parent_turn_id=str(row["parent_turn_id"]),
-        objective=str(row["objective"]),
-    )
 
 
 def test_round5_sixty_four_model_calls_finalize_without_a_turn_cap(
@@ -735,7 +627,7 @@ def test_root_stale_head_cancellation_during_confirmation_never_readmits(
         from pulsara_agent.conversation_kernel.steer import build_direct_root_turn_identity
         command = _name("command")
         identity = build_direct_root_turn_identity(session_id, command)
-        intent = ActiveTurnCancellationIntent(identity.turn_id, ModelInputScopeKind.ROOT, None)
+        intent = ActiveTurnCancellationIntent(identity.turn_id, ModelInputScopeKind.ROOT)
         task = asyncio.create_task(runner.run_turn(
             frozen_test_prompt("cancel before canonical admission"),
             command_id=command, cancellation_intent=intent,
@@ -1003,86 +895,6 @@ def test_root_stale_head_reprepares_same_intent_without_rebuilding_prefix(
     asyncio.run(scenario())
 
 
-def test_root_child_admission_after_root_accept_reprepares_only_the_accepted_turn(
-    stage2_migrated_postgres_database,
-) -> None:
-    class ChildAfterRootRepository(ConversationKernelRepository):
-        child_admission = None
-        target_command = None
-        target_intents = []
-
-        def accept_root_turn_intent(self, *args, **kwargs):
-            accepted = super().accept_root_turn_intent(*args, **kwargs)
-            if kwargs["intent"].command_id == self.target_command:
-                self.target_intents.append(kwargs["intent"])
-                assert self.child_admission is not None
-                child, self.child_admission = self.child_admission, None
-                self.accept_subagent_turn(
-                    args[0], candidate=child,
-                    deadline_monotonic=monotonic() + 10,
-                )
-            return accepted
-
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ChildAfterRootRepository(provider)
-    session_id, _, lease = _lease(repository)
-    task = _prepare_subagent_task(repository, lease)
-    repository.interrupt_turn(
-        lease.guard, turn_id=task.launch.task_start.parent_turn_id,
-        reason="test fixture delegated parent finished", occurred_at=datetime.now(timezone.utc),
-        actor_id="test-fixture", deadline_monotonic=monotonic() + 10,
-    )
-    model = ScriptedKernelModel([
-        _text_stream("first", block_id="first"),
-        _text_stream("second", block_id="second"),
-    ])
-    runner = _runner(repository, lease, model)
-    preparations = []
-    activations = []
-    original_prepare = runner.prepare_prospective_root_input
-    original_activate = runner._provider_dispatch.activate_prospective_root_input
-
-    async def prepare(*args, **kwargs):
-        prepared = await original_prepare(*args, **kwargs)
-        preparations.append(prepared)
-        return prepared
-
-    async def activate(prepared, **kwargs):
-        result = await original_activate(prepared, **kwargs)
-        activations.append(result is None)
-        return result
-
-    runner.prepare_prospective_root_input = prepare
-    runner._provider_dispatch.activate_prospective_root_input = activate
-
-    async def scenario():
-        await runner.run_turn(frozen_test_prompt("first"))
-        first = model.requests[0].compiled_input
-        repository.child_admission = build_prepared_subagent_turn_admission(
-            session_id=session_id, task_id=task, turn_id=_name("turn"),
-            entry_id=_name("entry"), context_binding_revision_id=_name("binding"),
-            permission_snapshot_id=_name("permission"),
-            task_start_event_id=task.launch.task_start.event_id,
-            expected_parent_permission_snapshot=task.launch.parent_permission_snapshot,
-            content=InlineContent.from_bytes(b"answer once"),
-            occurred_at=datetime.now(timezone.utc), actor_id="subagent-manager",
-        )
-        command = repository.target_command = _name("command")
-        result = await runner.run_turn(frozen_test_prompt("second"), command_id=command)
-        assert result.final_text == "second"
-        assert len(repository.target_intents) == 1
-        assert repository.child_admission is None
-        assert len(preparations) == 2
-        assert activations == [False, True]
-        assert preparations[-1].admission.candidate.exact_turn_id == result.turn_id
-        assert all(not prepared.owns_resources for prepared in preparations)
-        assert runner._safe_point._active_handle is None
-        second = model.requests[1].compiled_input
-        assert second.system_prompt == first.system_prompt
-        assert second.tools == first.tools
-        assert second.messages[:len(first.messages)] == first.messages
-
-    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("commit_before_block", (False, True))
@@ -1162,230 +974,16 @@ def test_round5_cancelled_root_admission_joins_transient_confirmation_failures(
         ).fetchone() == ("INTERRUPTED",)
 
 
-def test_round5_subagent_turn_lost_ack_confirms_exact_winner_once(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = _LostSubagentAdmissionAckRepository(provider)
-    session_id, _workspace_id, lease = _lease(repository)
-    task_id = _prepare_subagent_task(repository, lease)
-    streams = [_tool_stream(index) for index in range(63)]
-    streams.append(_text_stream("child", block_id="child-answer"))
-    model = ScriptedKernelModel(streams)
-
-    runner = _runner(
-        repository,
-        lease,
-        model,
-        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-    )
-    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-
-    assert result.final_text == "child"
-    assert result.model_call_count == 64
-    assert result.tool_call_count == 63
-    assert repository.calls == 1
-    assert len(model.requests) == 64
-    assert session_id == lease.guard.session_id
 
 
-def test_subagent_first_provider_call_rejects_full_target_drift(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    _session_id, _workspace_id, lease = _lease(repository)
-    fixture = _prepare_subagent_task(repository, lease)
-    model = ScriptedKernelModel([_text_stream("must not execute", block_id="answer")])
-    runner = _runner(
-        repository, lease, model,
-        subagent_runtime=_round10_subagent_runtime(repository, lease, fixture),
-    )
-    drifted = replace(
-        fixture.launch,
-        accepted_model_target_fact=fixture.launch.accepted_model_target_fact.model_copy(
-            update={"canonical_endpoint_base_url": "https://drift.invalid/v1"},
-        ),
-    )
-
-    async def exercise() -> None:
-        intent = await runner.admit_subagent_turn(launch=drifted)
-        with pytest.raises(ConversationKernelConflict, match="target drifted"):
-            await runner.run_admitted_subagent_turn(launch=drifted, cancellation_intent=intent)
-
-    asyncio.run(exercise())
-    assert model.requests == []
 
 
-def test_round5_subagent_lost_ack_joins_transient_confirmation_failures(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = _FlakyLostSubagentAdmissionAckRepository(provider)
-    _session_id, _workspace_id, lease = _lease(repository)
-    task_id = _prepare_subagent_task(repository, lease)
-    model = ScriptedKernelModel([_text_stream("child", block_id="child-answer")])
-
-    runner = _runner(
-        repository,
-        lease,
-        model,
-        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-    )
-    result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-
-    assert result.final_text == "child"
-    assert repository.calls == 1
-    assert repository.confirmation_calls == 3
-    assert len(model.requests) == 1
 
 
-def test_round5_subagent_admission_exact_joins_immutable_objective(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id, _workspace_id, lease = _lease(repository)
-    task_id = _prepare_subagent_task(repository, lease)
-    occurred_at = datetime.now(timezone.utc)
-    mismatched = build_prepared_subagent_turn_admission(
-        session_id=session_id,
-        task_id=task_id,
-        turn_id=_name("turn"),
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        task_start_event_id=task_id.launch.task_start.event_id,
-        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
-        content=InlineContent.from_bytes(b"different objective"),
-        occurred_at=occurred_at,
-        actor_id="subagent-manager",
-    )
-    assert (
-        repository.confirm_subagent_turn_admission(
-            candidate=mismatched,
-            guard=lease.guard,
-            deadline_monotonic=monotonic() + 10,
-        ).kind
-        is TurnAdmissionConfirmationKind.CONFLICT
-    )
-    with pytest.raises(Exception, match="immutable objective"):
-        repository.accept_subagent_turn(
-            lease.guard,
-            candidate=mismatched,
-            deadline_monotonic=monotonic() + 10,
-        )
-
-    accepted_candidate = build_prepared_subagent_turn_admission(
-        session_id=session_id,
-        task_id=task_id,
-        turn_id=_name("turn"),
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        permission_snapshot_id=_name("permission"),
-        task_start_event_id=task_id.launch.task_start.event_id,
-        expected_parent_permission_snapshot=(task_id.launch.parent_permission_snapshot),
-        content=InlineContent.from_bytes(b"answer once"),
-        occurred_at=datetime.now(timezone.utc),
-        actor_id="subagent-manager",
-    )
-    repository.accept_subagent_turn(
-        lease.guard,
-        candidate=accepted_candidate,
-        deadline_monotonic=monotonic() + 10,
-    )
-    assert (
-        repository.confirm_subagent_turn_admission(
-            candidate=accepted_candidate,
-            guard=lease.guard,
-            deadline_monotonic=monotonic() + 10,
-        ).kind
-        is TurnAdmissionConfirmationKind.FULL
-    )
-    with pytest.raises(Exception, match="immutable identity or lifecycle"):
-        with provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            deadline_monotonic=monotonic() + 10,
-        ) as connection:
-            connection.execute(
-                "UPDATE pulsara_v3.subagent_tasks SET objective = %s "
-                "WHERE session_id = %s AND id = %s",
-                ("corrupted objective", session_id, task_id),
-            )
-    assert (
-        repository.confirm_subagent_turn_admission(
-            candidate=accepted_candidate,
-            guard=lease.guard,
-            deadline_monotonic=monotonic() + 10,
-        ).kind
-        is TurnAdmissionConfirmationKind.FULL
-    )
 
 
-@pytest.mark.parametrize(
-    ("repository_type", "expected_calls", "should_open"),
-    (
-        (_SubagentNoneThenFullRepository, 2, True),
-        (_SubagentConflictRepository, 1, False),
-    ),
-)
-def test_round5_subagent_turn_admission_none_conflict_matrix(
-    stage2_migrated_postgres_database,
-    repository_type,
-    expected_calls: int,
-    should_open: bool,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = repository_type(provider)
-    _session_id, _workspace_id, lease = _lease(repository)
-    task_id = _prepare_subagent_task(repository, lease)
-    model = ScriptedKernelModel([_text_stream("child", block_id="child-answer")])
-    runner = _runner(
-        repository,
-        lease,
-        model,
-        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-    )
-
-    if should_open:
-        result = asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-        assert result.final_text == "child"
-        assert len(model.requests) == 1
-    else:
-        with pytest.raises(Exception, match="conflicting winner"):
-            asyncio.run(run_admitted_subagent_fixture(runner, task_id))
-        assert model.requests == []
-    assert repository.calls == expected_calls
 
 
-def test_round5_cancelled_subagent_admission_none_never_reissues(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = _CancelledSubagentAdmissionRepository(provider)
-    _session_id, _workspace_id, lease = _lease(repository)
-    task_id = _prepare_subagent_task(repository, lease)
-    model = ScriptedKernelModel([_text_stream("must-not-open", block_id="answer")])
-    runner = _runner(
-        repository,
-        lease,
-        model,
-        subagent_runtime=_round10_subagent_runtime(repository, lease, task_id),
-    )
-
-    async def scenario() -> None:
-        operation = asyncio.create_task(run_admitted_subagent_fixture(runner, task_id))
-        assert await asyncio.to_thread(repository.started.wait, 5)
-        operation.cancel()
-        await asyncio.sleep(0)
-        assert not operation.done()
-        repository.release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await operation
-
-    asyncio.run(scenario())
-    assert repository.calls == 1
-    assert model.requests == []
 
 
 @pytest.mark.parametrize(
@@ -1633,9 +1231,9 @@ def test_real_file_write_failure_can_be_inspected_without_replaying_write(
             _tool_stream(
                 1,
                 tool_name="write_file",
-                arguments='{"path":"result.txt","content":"written before failure"}',
+                arguments='{"target":{"kind":"PATH","path":"result.txt"},"content":"written before failure"}',
             ),
-            _tool_stream(2, tool_name="read_file", arguments='{"path":"result.txt"}'),
+            _tool_stream(2, tool_name="read_file", arguments='{"target":{"kind":"PATH","path":"result.txt"}}'),
             _text_stream("actual file state checked", block_id="answer"),
         ]
     )

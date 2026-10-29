@@ -72,6 +72,8 @@ if name == 'desktop:python-dependencies' and (root / 'fail-python').exists():
         ".python-version": "3.12.15", "uv.lock": "fixture dev requirements",
         "desktop/scripts/prepare_resources.py": "native recipe 1",
         "tools/prepare_ripgrep.py": "ripgrep recipe 1",
+        "tools/prepare_code_mode.py": "Code Mode recipe 1",
+        "tools/code_mode_node/package.json": "{}", "tools/code_mode_node/package-lock.json": "{}",
         "frontend/package.json": "{}", "frontend/package-lock.json": "{}",
         "desktop/package.json": "{}", "desktop/package-lock.json": "{}",
     }.items():
@@ -104,7 +106,7 @@ def test_warm_build_and_application_edits_reuse_only_dependency_resources(graph)
     run()
     assert counts()["desktop:postgres"] == 1
     run()
-    for task in ("postgres", "python-dependencies", "browsers", "ripgrep", "frontend-dependencies", "shell-dependencies"):
+    for task in ("postgres", "python-dependencies", "browsers", "ripgrep", "code-mode", "frontend-dependencies", "shell-dependencies"):
         assert counts()[f"desktop:{task}"] == 1
     assert counts()["desktop:application"] == 2
     (root / "app.txt").write_text("new prompt and UI")
@@ -312,3 +314,14 @@ def test_stdlib_compilation_leaves_uv_site_packages_caches_alone(tmp_path):
     resources.compile_python_stdlib(Path(sys.executable), stdlib)
     assert cache.read_bytes() == before
     assert cache.stat().st_mtime_ns == before_mtime
+
+
+def test_code_mode_sdk_lock_change_reprepares_only_its_dependency_layer(graph):
+    root, run, counts = graph
+    run()
+    (root / "tools/code_mode_node/package-lock.json").write_text('{"locked-sdk":"changed"}')
+    run()
+    assert counts()["desktop:code-mode"] == 2
+    assert counts()["desktop:postgres"] == 1
+    assert counts()["desktop:python-dependencies"] == 1
+    assert counts()["desktop:ripgrep"] == 1

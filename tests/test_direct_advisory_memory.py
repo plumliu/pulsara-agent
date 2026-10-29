@@ -1,6 +1,7 @@
 """Clean-v0 direct memory writes through canonical ToolResult settlement."""
 
 from __future__ import annotations
+from tests.test_agent_requests_persistence import source as agent_source
 
 from pulsara_agent.memory.targets import memory_target
 from uuid import uuid4
@@ -73,30 +74,34 @@ from tests.test_stage2_conversation_kernel_postgres import (
 pytestmark = pytest.mark.postgres
 
 
-def _open_direct_memory_session(repository, *, workspace_root: str | None = None):
-    workspace_root = workspace_root or _name("workspace")
-    workspace_id = workspace_context_id(workspace_root)
-    lease = repository.acquire_host_writer(
-        intent="NEW",
-        session_id=_name("session"),
-        workspace_id=workspace_id,
-        workspace_root=workspace_root,
-        writer_owner_id=_name("host"),
-        lease_seconds=120,
-        deadline_monotonic=monotonic() + 30,
-    )
-    turn_id = _name("turn")
-    _start_root_turn(
-        repository,
-        lease.guard,
-        command_id=_name("command"),
-        turn_id=turn_id,
-        entry_id=_name("entry"),
-        context_binding_revision_id=_name("binding"),
-        content=FrozenPromptContent.text("Remember and relate these observations."),
-        occurred_at=datetime.now(timezone.utc),
-        deadline_monotonic=monotonic() + 30,
-    )
+def _open_direct_memory_session(repository, *, workspace_root: str | None = None, accepted_agent=None):
+    if accepted_agent is None:
+        workspace_root = workspace_root or _name("workspace")
+        workspace_id = workspace_context_id(workspace_root)
+        lease = repository.acquire_host_writer(
+            intent="NEW",
+            session_id=_name("session"),
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
+            writer_owner_id=_name("host"),
+            lease_seconds=120,
+            deadline_monotonic=monotonic() + 30,
+        )
+        turn_id = _name("turn")
+        _start_root_turn(
+            repository,
+            lease.guard,
+            command_id=_name("command"),
+            turn_id=turn_id,
+            entry_id=_name("entry"),
+            context_binding_revision_id=_name("binding"),
+            content=FrozenPromptContent.text("Remember and relate these observations."),
+            occurred_at=datetime.now(timezone.utc),
+            deadline_monotonic=monotonic() + 30,
+        )
+    else:
+        lease, turn_id = accepted_agent
+        workspace_id = repository.read_agent_runtime_state(session_id=lease.guard.session_id, deadline_monotonic=monotonic()+30)['workspace_id']
 
     def invoke(name: str, arguments: dict, mutation, *, active_turn_id: str | None = None):
         deadline = monotonic() + 30
@@ -1300,31 +1305,21 @@ def test_direct_memory_admission_rejects_inconsistent_candidate(direct_memory_se
         assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s", ("An inconsistent candidate cannot save this fact.",)).fetchone() is None
 
 
-def test_direct_memory_writer_rejects_subagent_tool_call(direct_memory_session):
-    from tests.support.subagents import accept_active_subagent_fixture
-
-    repository, lease, invoke, _remember = direct_memory_session
-    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as c:
-        parent = c.execute("SELECT id FROM pulsara_v3.turns WHERE session_id=%s AND conversation_scope_kind='ROOT'", (lease.guard.session_id,)).fetchone()[0]
-    task = accept_active_subagent_fixture(repository, lease, parent_turn_id=parent, objective="Verify root-only memory writes.")
-    launch = task.launch
-    repository.start_subagent_turn(
-        lease.guard, task_id=task, turn_id=launch.child_turn_id,
-        entry_id=_name("entry"), context_binding_revision_id=_name("binding"),
-        task_start_event_id=launch.task_start.event_id,
-        expected_parent_permission_snapshot=launch.parent_permission_snapshot,
-        content=InlineContent.from_bytes(b"Verify root-only memory writes."),
-        occurred_at=datetime.now(timezone.utc), actor_id=task,
-        deadline_monotonic=monotonic()+30,
-    )
+def test_direct_memory_writer_rejects_subagent_tool_call(agent_source):
+    from tests.test_agent_requests_persistence import request, start
+    repository, _, admit = agent_source
+    item = request(instruction="Verify ROOT-only memory writes.")
+    admit(item)
+    child, candidate = start(repository, item)
+    _, invoke, _ = _open_direct_memory_session(repository, accepted_agent=(child,candidate.exact_turn_id))
     mutation = PreparedRememberWrite(memory_domain_id="u_local", context_id=CTX_GLOBAL,
         kind=MemoryFactKind.FACT, statement="A worker must not save this fact.",
         basis_refs=(), related=(), retrieval_summary=freeze_json({"status":"COMPLETE"}))
     with pytest.raises(ConversationKernelConflict, match="root tool call"):
-        invoke("remember", {"statement":mutation.statement, "kind":"FACT", "context_target":"GLOBAL"}, mutation, active_turn_id=launch.child_turn_id)
-    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic()+30) as c:
-        assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s", (mutation.statement,)).fetchone() is None
-        assert c.execute("SELECT r.id FROM pulsara_v3.tool_results r JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id AND e.id=r.tool_call_entry_id WHERE e.session_id=%s AND e.turn_id=%s", (lease.guard.session_id,launch.child_turn_id)).fetchall() == []
+        invoke("remember", {"statement":mutation.statement,"kind":"FACT","context_target":"GLOBAL"}, mutation)
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,deadline_monotonic=monotonic()+30) as c:
+        assert c.execute("SELECT id FROM pulsara_v3.memory_facts WHERE statement=%s",(mutation.statement,)).fetchone() is None
+        assert c.execute("SELECT id FROM pulsara_v3.tool_results WHERE session_id=%s",(child.guard.session_id,)).fetchall() == []
 
 
 def test_clean_memory_schema_has_no_creation_source(direct_memory_session):

@@ -30,7 +30,9 @@ jobs:
           --health-interval 10s --health-timeout 5s --health-retries 5
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: jdx/mise-action@v5.2.1
+        with:
+          version: '2026.10.15'
       - name: Install Python and build tools
         run: |
           uv python install 3.12
@@ -38,6 +40,8 @@ jobs:
           sudo apt-get install -y binutils
       - name: Prepare pinned private ripgrep
         run: uv run --no-project --python 3.12 python tools/prepare_ripgrep.py
+      - name: Prepare locked offline Code Mode runtime
+        run: uv run --no-project --python 3.12 python tools/prepare_code_mode.py
       - name: Install editable application and test dependencies
         run: uv sync --locked --dev
       - name: Prepare Chromium with Ubuntu dependencies

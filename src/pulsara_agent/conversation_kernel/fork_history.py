@@ -120,8 +120,11 @@ def _deadline(deadline: float) -> None:
 
 
 def read_fork_anchor(
-    connection: Connection, session_id: str, entry_id: str,
-    *, candidate_blocks: Sequence[Mapping[str, object]] | None = None,
+    connection: Connection,
+    session_id: str,
+    entry_id: str,
+    *,
+    candidate_blocks: Sequence[Mapping[str, object]] | None = None,
 ) -> FrozenForkAnchor | None:
     """The one eligibility predicate shared by creation and UI projection.
 
@@ -148,11 +151,12 @@ def read_fork_anchor(
            WHERE e.session_id = %s AND e.id = %s""",
         (session_id, entry_id),
     ).fetchone()
-    if (
-        row is None
-        or row["entry_kind"] != "ASSISTANT_MESSAGE"
-        or row["conversation_scope_kind"] != "ROOT"
-    ):
+    if row is None or row["entry_kind"] != "ASSISTANT_MESSAGE":
+        return None
+    session = connection.execute(
+        "SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s", (session_id,)
+    ).fetchone()
+    if session is None or session["root_session_id"] is not None:
         return None
     executed = row["entry_owner_kind"] == "EXECUTED_TURN"
     prefix = "executed" if executed else "genesis"
@@ -168,18 +172,35 @@ def read_fork_anchor(
     if row[prefix + "_base"] not in {"FULL_HISTORY", "SNAPSHOT"}:
         return None
     inline_blocks = (
-        tuple(sorted((block for block in candidate_blocks
-                      if block["block_kind"] == "TEXT" and block["content_codec"] == "utf-8"),
-                     key=lambda block: block["block_ordinal"]))
-        if candidate_blocks is not None else None
+        tuple(
+            sorted(
+                (
+                    block
+                    for block in candidate_blocks
+                    if block["block_kind"] == "TEXT"
+                    and block["content_codec"] == "utf-8"
+                ),
+                key=lambda block: block["block_ordinal"],
+            )
+        )
+        if candidate_blocks is not None
+        else None
     )
     # The protocol already loaded this candidate's complete block rows. Reuse
     # only a wholly inline TEXT set; a mixed/blob set keeps the original whole
     # query and its adaptation point. Eligibility and validation stay here.
-    if inline_blocks is not None and all(block["inline_content"] is not None for block in inline_blocks):
-        blocks = tuple({"block_ordinal": block["block_ordinal"], "content_digest": block["content_digest"],
-                        "content_size": block["content_size"], "body": block["inline_content"]}
-                       for block in inline_blocks)
+    if inline_blocks is not None and all(
+        block["inline_content"] is not None for block in inline_blocks
+    ):
+        blocks = tuple(
+            {
+                "block_ordinal": block["block_ordinal"],
+                "content_digest": block["content_digest"],
+                "content_size": block["content_size"],
+                "body": block["inline_content"],
+            }
+            for block in inline_blocks
+        )
     else:
         blocks = connection.execute(
             """SELECT b.block_ordinal, b.content_digest, b.content_size,
@@ -242,9 +263,6 @@ def read_fork_historical_material(
         historical_tool_closure_kind,
         _project_plan_continuation_storage,
         _validate_terminal_observation_content,
-    )
-    from pulsara_agent.conversation_kernel.subagents.contracts import (
-        validate_subagent_completion_storage_body,
     )
 
     if connection.isolation_level is not IsolationLevel.READ_COMMITTED:
@@ -325,7 +343,9 @@ def read_fork_historical_material(
             kinds = {
                 "USER_MESSAGE": (
                     FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.HUMAN_MESSAGE if initial["scheduled_input"] is None else CanonicalInputOriginKind.SCHEDULED_TASK,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE
+                    if initial["scheduled_input"] is None
+                    else CanonicalInputOriginKind.SCHEDULED_TASK,
                 ),
                 "USER_STEER": (
                     FrozenProviderInputItemKind.USER,
@@ -334,10 +354,6 @@ def read_fork_historical_material(
                 "PLAN_CONTINUATION": (
                     FrozenProviderInputItemKind.PLAN_CONTINUATION,
                     CanonicalInputOriginKind.PLAN_CONTINUATION,
-                ),
-                "INTER_AGENT_MESSAGE": (
-                    FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
-                    CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
                 ),
                 "TERMINAL_OBSERVATION": (
                     FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
@@ -348,16 +364,21 @@ def read_fork_historical_material(
                     CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
                 ),
             }
-            if (
-                initial["entry_kind"] not in kinds
-                or initial["conversation_scope_kind"] != "ROOT"
-            ):
+            if initial["entry_kind"] not in kinds:
                 raise ConversationKernelConflict(
                     "Fork retained request origin is invalid"
                 )
             kind, origin = kinds[initial["entry_kind"]]
-            if (kind is not active.item_kind or origin is not active.input_origin
-                or initial["scheduled_input"] != (None if active.scheduled_input is None else active.scheduled_input.to_dict())):
+            if (
+                kind is not active.item_kind
+                or origin is not active.input_origin
+                or initial["scheduled_input"]
+                != (
+                    None
+                    if active.scheduled_input is None
+                    else active.scheduled_input.to_dict()
+                )
+            ):
                 raise ConversationKernelConflict(
                     "Fork snapshot active request attribution drifted"
                 )
@@ -405,7 +426,8 @@ def read_fork_historical_material(
                  AND t.session_id = e.session_id AND t.id = e.turn_id
                LEFT JOIN pulsara_v3.imported_history_groups AS g ON e.entry_owner_kind = 'IMPORTED_HISTORY'
                  AND g.session_id = e.session_id AND g.id = e.imported_history_group_id
-               WHERE e.session_id = %s AND e.conversation_scope_kind = 'ROOT'
+               WHERE e.session_id = %s
+                 AND (e.entry_kind <> 'TOOL_RESULT' OR NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_results cr JOIN pulsara_v3.tool_invocations ci ON ci.id=cr.invocation_id WHERE cr.session_id=e.session_id AND cr.result_entry_id=e.id AND ci.source_kind='CODE_MODE_CALL'))
                  AND e.entry_sequence > %s AND (e.entry_sequence, e.id) > (%s, %s)
                  AND e.entry_sequence <= %s ORDER BY e.entry_sequence, e.id LIMIT 256""",
             (
@@ -441,7 +463,10 @@ def read_fork_historical_material(
                     "Fork visualization ordinals are not contiguous"
                 )
             next_ordinal[owner] = ordinal + 1
-            from pulsara_agent.conversation_kernel.visualization import visualization_metadata
+            from pulsara_agent.conversation_kernel.visualization import (
+                visualization_metadata,
+            )
+
             visualization_metadata(row)
             if row["state"] == "READY":
                 if row["logical_digest"] is None or row["logical_size"] is None:
@@ -568,12 +593,6 @@ def read_fork_historical_material(
                             "Fork user control feedback descriptor is invalid"
                         )
                     project_user_control_feedback_for_provider(body)
-                elif raw["entry_kind"] == "INTER_AGENT_MESSAGE":
-                    completion = validate_subagent_completion_storage_body(body)
-                    if completion["task_id"] != attributed["source_subagent_task_id"]:
-                        raise ConversationKernelConflict(
-                            "Fork completion attribution differs"
-                        )
             elif raw["entry_kind"] not in {
                 "ASSISTANT_MESSAGE",
                 "ASSISTANT_TOOL_REQUEST",
@@ -638,6 +657,7 @@ def read_fork_historical_material(
             if isinstance(value, list):
                 safe[key] = tuple(value)
         for key in (
+            "invocation_id",
             "permission_snapshot_fingerprint",
             "attempt_id",
             "control_plan_workflow_id",
@@ -788,7 +808,8 @@ def read_fork_historical_material(
     frozen_groups = tuple(
         FrozenForkGroup(
             g.source_group_key,
-            g.source_group_kind,            g.settled_status,
+            g.source_group_kind,
+            g.settled_status,
             g.accepted_at,
             g.terminal_at,
             g.copied_final_source_entry_id

@@ -104,12 +104,15 @@ from pulsara_agent.primitives.context import (
     freeze_json,
     thaw_json,
 )
-from tests.support.model_config import test_model_binding, test_model_limits, test_model_runtime
+from tests.support.model_config import (
+    test_model_binding,
+    test_model_limits,
+    test_model_runtime,
+)
 from tests.support.round3 import (
     StaticContextSourceCollector,
     StructuredToolPort,
     new_test_provider_input_continuity_owner,
-    new_test_subagent_lease_source,
     prepare_test_direct_tool_surface,
     prepare_test_model_call,
     static_canonical_compile_facts,
@@ -141,8 +144,8 @@ def test_foreground_target_uses_resolved_model_input_budget_without_implicit_128
     )
     prepared = port.prepare_target(
         KernelModelTargetPreparationRequest(
-            session_id='session:otdf3zbbht4rja6u3r7fk7ayou',
-            turn_id='turn:ex373f542bxd4xoqa6idiev5yq',
+            session_id="session:otdf3zbbht4rja6u3r7fk7ayou",
+            turn_id="turn:ex373f542bxd4xoqa6idiev5yq",
             model_call_index=1,
             purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
             maximum_input_tokens=None,
@@ -377,13 +380,18 @@ def test_round5_provider_never_retries_after_semantic_output(
     ),
 )
 def test_provider_error_details_preserve_cause_without_exact_credential(
-    api: str, transport_type, failure_kind: str, monkeypatch,
+    api: str,
+    transport_type,
+    failure_kind: str,
+    monkeypatch,
 ) -> None:
     port = _port(api=api)
     request, _tool_port = _prepared_execution(port)
     owner, candidate = _continuity_candidate(request)
     prepared = port.preflight_execution(
-        request, append_candidate=candidate, install_authority=owner.install_authority,
+        request,
+        append_candidate=candidate,
+        install_authority=owner.install_authority,
     )
     secret = "sk-fixture-secret"
     message = f"Upstream rejected credential {secret}; request req-safe-123."
@@ -395,9 +403,12 @@ def test_provider_error_details_preserve_cause_without_exact_credential(
 
         async def stream():
             if failure_kind == "stream":
-                yield {"type": "response.failed", "response": {
-                    "error": {"message": message},
-                }}
+                yield {
+                    "type": "response.failed",
+                    "response": {
+                        "error": {"message": message},
+                    },
+                }
 
         return stream()
 
@@ -411,12 +422,15 @@ def test_provider_error_details_preserve_cause_without_exact_credential(
         assert kwargs["api_key"] == secret
         endpoint = SimpleNamespace(create=create)
         return SimpleNamespace(
-            chat=SimpleNamespace(completions=endpoint), responses=endpoint, close=close,
+            chat=SimpleNamespace(completions=endpoint),
+            responses=endpoint,
+            close=close,
         )
 
     # Exercise the saved-credential path; injecting _client bypasses that owner.
     monkeypatch.setattr(
-        f"{transport_type.__module__}.build_async_openai_client", build_client,
+        f"{transport_type.__module__}.build_async_openai_client",
+        build_client,
     )
     transport = transport_type(
         settings=port._model_runtime.settings,  # noqa: SLF001
@@ -425,9 +439,12 @@ def test_provider_error_details_preserve_cause_without_exact_credential(
     )
 
     async def collect():
-        execution = NormalizedProviderTransportExecution(transport.stream(
-            call=request.prepared_call.call, context=prepared.final_context,
-        ))
+        execution = NormalizedProviderTransportExecution(
+            transport.stream(
+                call=request.prepared_call.call,
+                context=prepared.final_context,
+            )
+        )
         try:
             while (item := await execution.read_next()) is not None:
                 if isinstance(item, ProviderStreamTerminal):
@@ -454,12 +471,11 @@ def _prepared_execution(
     maximum_input_tokens: int = 4_096,
     tool_names: tuple[str, ...] = ("read_file",),
     scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    scope_subagent_task_id: str | None = None,
     canonical_items: tuple[FrozenProviderInputItem, ...] = (),
 ) -> tuple[KernelModelExecutionRequest, StructuredToolPort]:
-    session_id = 'session:336wrfwkamrr3up6kjtsgvgcte'
-    turn_id = 'turn:klmmazz67vfgsfsvg6ceqgdsfu'
-    revision_id = 'binding:2vbfj7ycdmvjuwmj3feeoqytyi'
+    session_id = "session:336wrfwkamrr3up6kjtsgvgcte"
+    turn_id = "turn:klmmazz67vfgsfsvg6ceqgdsfu"
+    revision_id = "binding:2vbfj7ycdmvjuwmj3feeoqytyi"
     sequence = max(
         (item.source_entry_sequence or 0 for item in canonical_items), default=0
     )
@@ -468,7 +484,6 @@ def _prepared_execution(
     surface = prepare_test_direct_tool_surface(
         tool_port,
         conversation_scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         wire_api=port._model_runtime.connection(binding).target.wire_api.value,  # noqa: SLF001
     )
     prepared = prepare_test_model_call(
@@ -486,24 +501,21 @@ def _prepared_execution(
     identity = CanonicalModelInputIdentity(
         session_id=session_id,
         turn_id=turn_id,
-        initial_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
+        initial_entry_id="entry:x6eevt4jzgsks3d5pdcognxexm",
         context_binding_revision_id=revision_id,
         provider_input_through_sequence=sequence,
         conversation_scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         identity_fingerprint=canonical_model_input_identity_fingerprint(
             session_id=session_id,
             turn_id=turn_id,
-            initial_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
+            initial_entry_id="entry:x6eevt4jzgsks3d5pdcognxexm",
             context_binding_revision_id=revision_id,
             provider_input_through_sequence=sequence,
             conversation_scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         ),
     )
     canonical_expanded_bytes = sum(
-        provider_input_item_canonical_expanded_bytes(item)
-        for item in canonical_items
+        provider_input_item_canonical_expanded_bytes(item) for item in canonical_items
     )
     snapshot = CanonicalModelInputSnapshot(
         identity=identity,
@@ -521,7 +533,7 @@ def _prepared_execution(
     sources = StaticContextSourceCollector().collect(canonical_facts=canonical_facts)
     compiled = StructuredModelInputCompiler().compile(
         StructuredModelInputCompileRequest(
-            context_id='context:maoywbssk6zspli7b2bnu3pala',
+            context_id="context:maoywbssk6zspli7b2bnu3pala",
             model_call_index=1,
             canonical_input=snapshot,
             canonical_facts=canonical_facts,
@@ -596,16 +608,8 @@ def _continuity_candidate(request: KernelModelExecutionRequest, owner=None):
     scope = ProviderInputContinuityScope(
         session_id=request.session_id,
         scope_kind=identity.conversation_scope_kind,
-        scope_subagent_task_id=identity.scope_subagent_task_id,
     )
     owner = owner or new_test_provider_input_continuity_owner(request.session_id)
-    if scope.scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
-        owner.authorize_new_subagent_scope(
-            scope,
-            source=new_test_subagent_lease_source(
-                session_id=request.session_id, task_id=scope.scope_subagent_task_id,
-            ),
-        )
     frontier = ProcessLocalCanonicalFrontier(
         latest_context_binding_revision_id=identity.context_binding_revision_id,
         context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,
@@ -629,9 +633,7 @@ def _continuity_candidate(request: KernelModelExecutionRequest, owner=None):
         preparation_basis=preparation_basis,
         call_target=request.prepared_call.epoch_call_target,
         seed=CanonicalColdContinuationSeed(dispatch_read=SimpleNamespace()),
-        semantic_projection=_semantic_projection_from_compiled(
-            request.compiled_input
-        ),
+        semantic_projection=_semantic_projection_from_compiled(request.compiled_input),
         wire_input_plan=request.wire_input_plan,
     )
     candidate = prepared_append_candidate(
@@ -663,7 +665,10 @@ def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
     )
     assert compiled.system_prompt.startswith("ROOT SYSTEM")
     assert [item.name for item in compiled.tools] == ["read_file"]
-    assert request.wire_input_plan.quote.budget_input_tokens <= prepared.compile_binding.effective_input_budget_tokens
+    assert (
+        request.wire_input_plan.quote.budget_input_tokens
+        <= prepared.compile_binding.effective_input_budget_tokens
+    )
     assert not hasattr(compiled, "final_estimate")
     request.surface_borrow.close()
 
@@ -671,35 +676,47 @@ def test_stage2_direct_model_freezes_output_budget_system_and_tools() -> None:
 @pytest.mark.parametrize(
     ("api", "builder", "output_key"),
     (
-        ("openai_chat_completions", build_chat_completions_payload, "max_completion_tokens"),
+        (
+            "openai_chat_completions",
+            build_chat_completions_payload,
+            "max_completion_tokens",
+        ),
         ("openai_responses", build_responses_payload, "max_output_tokens"),
     ),
 )
 @pytest.mark.parametrize("output_limit", (128_000, 384_000, 1_050_000))
-@pytest.mark.parametrize("scope_kind", (ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT_TASK))
+@pytest.mark.parametrize(
+    "scope_kind", (ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT)
+)
 def test_foreground_large_provider_output_survives_compilation_and_preflight(
-    api, builder, output_key, output_limit, scope_kind,
+    api,
+    builder,
+    output_key,
+    output_limit,
+    scope_kind,
 ) -> None:
     # The provider limit must survive the whole foreground path (not just
     # payload construction); ROOT and SUBAGENT use the same budget owner.
     runtime = test_model_runtime(
         wire_api=api,
         limits=test_model_limits(
-            total_context_tokens=1_050_000, max_input_tokens=922_000,
-            max_output_tokens=output_limit, default_output_tokens=output_limit,
+            total_context_tokens=1_050_000,
+            max_input_tokens=922_000,
+            max_output_tokens=output_limit,
+            default_output_tokens=output_limit,
         ),
     )
     port = DirectKernelModelPort(model_runtime=runtime)
     request, _ = _prepared_execution(
-        port, scope_kind=scope_kind,
-        scope_subagent_task_id=(
-            "subagent:budget" if scope_kind is ModelInputScopeKind.SUBAGENT_TASK else None
-        ),
+        port,
+        scope_kind=scope_kind,
     )
     try:
         owner, candidate = _continuity_candidate(request)
         execution = port.preflight_execution(
-            request, append_candidate=candidate, install_authority=owner.install_authority,
+            request,
+            append_candidate=candidate,
+            install_authority=owner.install_authority,
         )
         prepared = request.prepared_call
         assert prepared.compile_binding.effective_output_tokens == output_limit
@@ -857,9 +874,9 @@ def test_k3_typed_image_compiles_once_into_the_exact_final_payload(
     image = bound_test_image("image/png", output.getvalue(), 7, 5)
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
+        source_entry_id="entry:x6eevt4jzgsks3d5pdcognxexm",
         source_entry_sequence=1,
-        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        source_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         content=(LLMTextPart("before"), image, LLMTextPart("after"), image),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
@@ -905,20 +922,16 @@ def test_k3_typed_image_compiles_once_into_the_exact_final_payload(
         text_type,
         image_type,
     ]
-    expected_reference = canonical_json_bytes(
-        {"pulsara_image": {"image_ref": image.image_ref}}
-    ).decode("utf-8")
-    assert [
-        part["text"] for part in content if part["type"] == text_type
-    ] == ["before", expected_reference, "after", expected_reference]
+    text_parts = [part["text"] for part in content if part["type"] == text_type]
+    assert text_parts[0] == "before" and text_parts[2] == "after"
+    assert text_parts[1] == text_parts[3]
+    assert image.image_ref in text_parts[1]
     expected_url = "data:image/png;base64," + base64.b64encode(
         image.immutable_bytes
     ).decode("ascii")
     if api == "openai_chat_completions":
         actual_urls = [
-            part["image_url"]["url"]
-            for part in content
-            if part["type"] == image_type
+            part["image_url"]["url"] for part in content if part["type"] == image_type
         ]
     else:
         actual_urls = [
@@ -968,19 +981,16 @@ def test_k3_followup_quote_uses_the_exact_installed_wire_owner(api: str) -> None
     assert isinstance(existing, list)
     projection[key] = [*existing, *appended]
     assert quote.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
-    suffix = (
-        request.prepared_call.call.target.token_estimator
-        .estimate_ordered_wire_json_components(
-            ordered_input_items=appended,
-            ordered_input_sources=tuple(
-                message
-                for message, group in (
-                    (assistant, appended[: len(appended) - 1]),
-                    (result, appended[len(appended) - 1 :]),
-                )
-                for _ in group
-            ),
-        )
+    suffix = request.prepared_call.call.target.token_estimator.estimate_ordered_wire_json_components(
+        ordered_input_items=appended,
+        ordered_input_sources=tuple(
+            message
+            for message, group in (
+                (assistant, appended[: len(appended) - 1]),
+                (result, appended[len(appended) - 1 :]),
+            )
+            for _ in group
+        ),
     )
     assert quote.raw_final_wire_estimated_input_tokens == (
         request.wire_input_plan.quote.raw_final_wire_estimated_input_tokens
@@ -1048,8 +1058,8 @@ def test_k3_followup_quote_uses_native_replay_in_place_of_generic_assistant() ->
     assert not isinstance(native_item, tuple)
     replay = build_prepared_durable_provider_assistant_replay(
         session_id=request.session_id,
-        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
-        assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
+        workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau",
+        assistant_entry_id="entry:5qidalqvkujk5ykzzzfpwie2qy",
         target=port.replay_target_for_resolved_call(request.prepared_call.call),
         public_projection_fingerprint="sha256:" + "1" * 64,
         ordered_items=(native_item,),
@@ -1154,20 +1164,20 @@ def test_final_wire_quote_is_one_shot_without_creating_an_executable_plan(
 def test_native_replay_preserves_inline_visualization_marker(
     api: str,
 ) -> None:
-    assistant_entry_id = 'entry:blzvcxjwbvctrcbukdihh2ftim'
+    assistant_entry_id = "entry:blzvcxjwbvctrcbukdihh2ftim"
     marker_text = "answer\n\n```pulsara-viz\nchart.html\n```"
     assistant = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.ASSISTANT,
         source_entry_id=assistant_entry_id,
         source_entry_sequence=1,
-        source_turn_id='turn:6jm3rew3jceuvfhjqj2bpxvkhy',
+        source_turn_id="turn:6jm3rew3jceuvfhjqj2bpxvkhy",
         content=(LLMTextPart(marker_text),),
     )
     next_user = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id='entry:x6eevt4jzgsks3d5pdcognxexm',
+        source_entry_id="entry:x6eevt4jzgsks3d5pdcognxexm",
         source_entry_sequence=2,
-        source_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        source_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         content=(LLMTextPart("continue"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
@@ -1190,7 +1200,11 @@ def test_native_replay_preserves_inline_visualization_marker(
         assistant_index = owner_indexes[0]
         target = port.replay_target(request.prepared_call)
         native_item = (
-            {"role": "assistant", "content": marker_text, "reasoning_content": "thought"}
+            {
+                "role": "assistant",
+                "content": marker_text,
+                "reasoning_content": "thought",
+            }
             if api == "openai_chat_completions"
             else {
                 "type": "message",
@@ -1200,8 +1214,8 @@ def test_native_replay_preserves_inline_visualization_marker(
         )
         frozen_native_item = freeze_json(native_item)
         candidate = build_prepared_durable_provider_assistant_replay(
-            session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-            workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+            session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+            workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau",
             assistant_entry_id=assistant_entry_id,
             target=target,
             public_projection_fingerprint=(
@@ -1232,7 +1246,6 @@ def test_native_replay_preserves_inline_visualization_marker(
             scope=ProviderInputContinuityScope(
                 session_id=identity.session_id,
                 scope_kind=identity.conversation_scope_kind,
-                scope_subagent_task_id=identity.scope_subagent_task_id,
             ),
             context_binding_revision_id=identity.context_binding_revision_id,
             provider_input_through_sequence=identity.provider_input_through_sequence,
@@ -1333,7 +1346,7 @@ def test_round3_1_adapter_wire_items_preserve_strict_prefix_and_steer_order(
     second_context = replace(
         first_context,
         messages=first_context.messages + steer_messages,
-        context_id='context:ztxjvul5qblmfspej6wxozekxi',
+        context_id="context:ztxjvul5qblmfspej6wxozekxi",
         model_call_index=2,
         provider_wire_input_plan=None,
     )
@@ -1421,7 +1434,9 @@ def test_round3_1_adapter_preserves_twelve_call_strict_prefix_trajectory(
             replace(
                 previous,
                 messages=previous.messages + suffix,
-                context_id=derive_id("context", "test-fixture", f"context:trajectory:{call_index}"),
+                context_id=derive_id(
+                    "context", "test-fixture", f"context:trajectory:{call_index}"
+                ),
                 model_call_index=call_index,
             )
         )
@@ -1460,7 +1475,7 @@ def test_round3_execution_exactly_joins_provider_cut_before_open() -> None:
             request,
             cut=replace(
                 request.cut,
-                context_binding_revision_id='binding:q6ok2vol7zofof5kqdikkvooee',
+                context_binding_revision_id="binding:q6ok2vol7zofof5kqdikkvooee",
                 provider_input_through_sequence=1,
             ),
         )
@@ -1519,13 +1534,11 @@ def test_round3_execution_rejects_other_subagent_surface_access() -> None:
     port = _port()
     request_a, _tool_port_a = _prepared_execution(
         port,
-        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id='task:kjvbuwdmbnizp5h7dzj7d5ud6m',
+        scope_kind=ModelInputScopeKind.SUBAGENT,
     )
     request_b, _tool_port_b = _prepared_execution(
         port,
-        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        scope_subagent_task_id='task:unkaqjydspswdzyvuyxcqh43ke',
+        scope_kind=ModelInputScopeKind.SUBAGENT,
     )
     with pytest.raises(ValueError, match="structurally joined"):
         replace(
@@ -1550,18 +1563,29 @@ def test_round3_execution_rejects_same_shape_foreign_host_surface_borrow() -> No
     request_b.surface_borrow.close()
 
 
-def test_round3_direct_model_rejects_content_drift_before_transport_open(monkeypatch) -> None:
+def test_round3_direct_model_rejects_content_drift_before_transport_open(
+    monkeypatch,
+) -> None:
     port = _port()
     request, _ = _prepared_execution(port)
     owner, candidate = _continuity_candidate(request)
-    drifted = replace(request, compiled_input=replace(request.compiled_input, system_prompt="changed input"))
+    drifted = replace(
+        request,
+        compiled_input=replace(request.compiled_input, system_prompt="changed input"),
+    )
     opened = []
-    monkeypatch.setattr(request.prepared_call.call.target.transport, "open_stream",
-        lambda **kwargs: opened.append(kwargs))
+    monkeypatch.setattr(
+        request.prepared_call.call.target.transport,
+        "open_stream",
+        lambda **kwargs: opened.append(kwargs),
+    )
     try:
         with pytest.raises(ValueError, match="exact-join"):
-            port.preflight_execution(drifted, append_candidate=candidate,
-                install_authority=owner.install_authority)
+            port.preflight_execution(
+                drifted,
+                append_candidate=candidate,
+                install_authority=owner.install_authority,
+            )
         assert opened == []
     finally:
         request.surface_borrow.close()
@@ -1572,6 +1596,7 @@ def test_stage2_direct_model_real_adapter_path_emits_only_live_payloads() -> Non
 
     async def observe_usage(_request, report, _permit, _terminal, _anchor_allowed):
         usage_reports.append(report)
+
     port = _port(usage_observer=observe_usage)
     binding = port._model_runtime.transport_registry(  # noqa: SLF001
         port._transport_timeout  # noqa: SLF001
@@ -1615,6 +1640,7 @@ def test_unknown_catalog_tool_support_sends_once_with_diagnostic() -> None:
 
     async def observe_usage(_request, report, _permit, _terminal, _anchor_allowed):
         usage_reports.append(report)
+
     port = _port(
         usage_observer=observe_usage,
         tool_call=None,

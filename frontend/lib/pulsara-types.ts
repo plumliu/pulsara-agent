@@ -302,12 +302,6 @@ export interface SessionSummary {
       | { kind: 'budget_tokens'; tokens: number }
       | null;
   } | null;
-  taskCounts?: {
-    total: number;
-    active: number;
-    waiting: number;
-    attention: number;
-  };
   workspace?: Workspace;
 }
 
@@ -329,6 +323,8 @@ export interface TodoRun {
 }
 
 export interface ToolTrace {
+  attemptId?: string;
+  programCalls?: ToolTrace[];
   id: string;
   kind: 'terminal' | 'read' | 'edit' | 'search' | 'artifact' | 'mcp';
   toolName?: string;
@@ -354,43 +350,11 @@ export interface ToolTrace {
   meta?: string;
 }
 
-export interface SubagentActivity {
-  turnId?: string;
-  sourceEntryIds?: string[];
-  historyContextState?: 'loading' | 'ready' | 'error';
-  historyContextError?: string;
-  contentState?: 'unloaded' | 'loading' | 'ready' | 'error';
-  contentError?: string;
-  reasoningContentState?: 'unloaded' | 'loading' | 'ready' | 'error';
-  reasoningContentError?: string;
-  visualizations?: VisualizationOccurrence[];
-  id: string;
-  time: string;
-  body: string;
-  kind?: 'work' | 'guidance';
-  reasoning?: ReasoningBlock[];
-  status?: TaskStatus;
-  traces?: ToolTrace[];
-}
-
 export interface ReasoningBlock {
   id: string;
   kind: 'full' | 'summary';
   body: string;
   active?: boolean;
-}
-
-export interface SubagentRun {
-  id: string;
-  batchId?: string;
-  label: string;
-  role: string;
-  objective: string;
-  status: TaskStatus | 'ended' | 'unknown';
-  parentId?: string;
-  summary?: string;
-  color: 'blue' | 'amber' | 'violet' | 'green';
-  activities: SubagentActivity[];
 }
 
 export interface Message {
@@ -415,7 +379,7 @@ export interface Message {
   turnId?: string;
   entrySequence?: number;
   role: 'user' | 'assistant';
-  userKind?: 'prompt' | 'scheduled' | 'steer' | 'plan-continuation' | 'subagent-completion';
+  userKind?: 'prompt' | 'scheduled' | 'steer' | 'plan-continuation';
   scheduledInput?: { taskId: string; taskRevision: number; dueAtUtc: string; triggerSource: 'TIMER' | 'RUN_ONCE' };
   inputSource?: {
     queueItemId: string;
@@ -423,9 +387,6 @@ export interface Message {
     deliveryMode: 'new-turn' | 'steer';
   };
   assistantKind?: 'terminal' | 'tool-request' | 'live';
-  sourceSubagentTaskId?: string;
-  sourceSubagentLabel?: string;
-  sourceSubagentRelation?: 'current' | 'previous' | 'earlier';
   time: string;
   body: string;
   promptContent?: CanonicalPromptContent;
@@ -437,7 +398,6 @@ export interface Message {
   model?: string;
   status?: SessionStatus;
   traces?: ToolTrace[];
-  subagentRuns?: SubagentRun[];
   visualizations?: VisualizationOccurrence[];
 }
 
@@ -454,56 +414,6 @@ export interface VisualizationOccurrence {
   contentSize?: number;
   failureCode?: string;
   failureDetail?: string;
-}
-
-export interface AgentTask {
-  id: string;
-  label: string;
-  role: string;
-  profile?: string;
-  objective: string;
-  status: TaskStatus;
-  parentId?: string;
-  batchId?: string;
-  taskKey?: string;
-  context?: {
-    mode: 'none' | 'last-n' | 'worker-history';
-    lastNTurns?: number;
-    historyTaskId?: string;
-  };
-  modelConnectionId?: string;
-  modelId?: string;
-  reasoning?: unknown;
-  materialTaskIds?: string[];
-  pendingReason?: string;
-  terminalReason?: string;
-  terminalPublicDetail?: string;
-  completionAccepted: boolean;
-  acceptedAt?: string;
-  terminalAt?: string;
-  dependencyIds: string[];
-  dependencies?: AgentTaskDependency[];
-  summary?: string;
-  progress?: string;
-  result?: AgentTaskResult;
-  color: 'blue' | 'amber' | 'violet' | 'green';
-}
-
-export interface AgentTaskDependency {
-  id: string;
-  taskKey?: string;
-  label?: string;
-  status: TaskStatus;
-  resultSummary?: string;
-}
-
-export interface AgentTaskResult {
-  id: string;
-  entryId?: string;
-  summary: string;
-  data?: Record<string, unknown>;
-  outputPreview?: string;
-  diagnostics: Array<Record<string, unknown>>;
 }
 
 export interface ToastMessage {
@@ -559,6 +469,7 @@ export interface McpImportPreview {
   notices: string[];
 }
 export interface PluginImportOptions {
+  mcp_scope_policies?: Record<string, 'ROOT_ONLY' | 'ROOT_AND_SUBAGENTS'>;
   source_format: 'native' | 'claude' | 'codex' | 'cursor';
   classifications: Record<string, string>;
   public_values: Record<string, string>;

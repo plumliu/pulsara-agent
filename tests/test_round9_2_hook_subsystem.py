@@ -4,7 +4,7 @@ from __future__ import annotations
 from pulsara_agent.identity import derive_id
 
 import asyncio
-from dataclasses import fields, replace
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -19,10 +19,6 @@ import pytest
 
 from pulsara_agent.hooks.presentation import hook_snapshot_public
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
-from pulsara_agent.conversation_kernel.tool_contracts import (
-    AcceptedCanonicalToolResultSettlement,
-    PreparedPermissionRequest,
-)
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
@@ -79,10 +75,6 @@ from pulsara_agent.hooks.contracts import (
     SessionStartRef,
     StopInput,
     StopRef,
-    SubagentStartInput,
-    SubagentStartRef,
-    SubagentStopInput,
-    SubagentStopRef,
     UserPromptSubmitInput,
     external_permission_mode,
 )
@@ -223,26 +215,26 @@ def _view(
     return FrozenHookDefinitionView((snapshot,))
 
 
-def _scope(*, child_task_id: str | None = None) -> HookDispatchScopeRef:
+def _scope(*, session_id: str | None = None) -> HookDispatchScopeRef:
     return HookDispatchScopeRef(
         object(),
         object(),
-        HookScopeKind.CHILD if child_task_id is not None else HookScopeKind.ROOT,
-        child_task_id,
+        HookScopeKind.SUBAGENT if session_id is not None else HookScopeKind.ROOT,
+        session_id or "session:cbauiajfisf4gvpdotrq4qgxhq",
     )
 
 
 def _inputs() -> tuple[object, ...]:
     common = {"session_id": 'session:cbauiajfisf4gvpdotrq4qgxhq', "cwd": "/tmp", "model": "model:1"}
     return (
-        SessionStartInput(**common, source="startup", permission_mode="default"),
-        SessionEndInput(**common),
+        SessionStartInput(**common, source="startup", permission_mode="default", session_kind="ROOT", input_origin=None),
+        SessionEndInput(**common, session_kind="ROOT", input_origin=None),
         UserPromptSubmitInput(
             **common,
             turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             prompt="hello",
             permission_mode="acceptEdits",
-        ),
+        session_kind="ROOT", input_origin='HUMAN_MESSAGE'),
         PreToolUseInput(
             **common,
             turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
@@ -250,14 +242,14 @@ def _inputs() -> tuple[object, ...]:
             tool_use_id="call:1",
             tool_input={"command": "pwd"},
             permission_mode="bypassPermissions",
-        ),
+        session_kind="ROOT", input_origin='MODEL_TOOL_CALL'),
         PermissionRequestInput(
             **common,
             turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             tool_name="remote.tool",
             tool_input={"value": 1},
             permission_mode="default",
-        ),
+        session_kind="ROOT", input_origin='MODEL_TOOL_CALL'),
         PostToolUseInput(
             **common,
             turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
@@ -266,32 +258,16 @@ def _inputs() -> tuple[object, ...]:
             tool_input={"value": 1},
             tool_response={"status": "ok"},
             permission_mode="default",
-        ),
-        PreCompactInput(**common, turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', trigger="auto"),
-        PostCompactInput(**common, turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', trigger="auto"),
-        SubagentStartInput(
-            **common,
-            turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
-            agent_id='task:itnsbirlmxzeu74pn7keq6zuzi',
-            agent_type="research_worker",
-            permission_mode="dontAsk",
-        ),
-        SubagentStopInput(
-            **common,
-            turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
-            agent_id='task:itnsbirlmxzeu74pn7keq6zuzi',
-            agent_type="research_worker",
-            stop_hook_active=False,
-            last_assistant_message="done",
-            permission_mode="dontAsk",
-        ),
+        session_kind="ROOT", input_origin='MODEL_TOOL_CALL'),
+        PreCompactInput(**common, turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', trigger="auto", session_kind="ROOT", input_origin=None),
+        PostCompactInput(**common, turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', trigger="auto", session_kind="ROOT", input_origin=None),
         StopInput(
             **common,
             turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             stop_hook_active=False,
             last_assistant_message="done",
             permission_mode="default",
-        ),
+        session_kind="ROOT", input_origin=None),
     )
 
 
@@ -308,8 +284,6 @@ def _causal_refs() -> tuple[object, ...]:
         ),
         PreCompactRef(object(), "ROOT", 'turn:nzc36cttgo7xxki7bcjc7ops7a', "auto"),
         PostCompactRef(object(), 'snapshot:hui7qoo4witxjjls4whfaupz2e', "revision:compact"),
-        SubagentStartRef('event:4f5ye2dst5usqy5siopmw5skua', 'task:itnsbirlmxzeu74pn7keq6zuzi', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m'),
-        SubagentStopRef('task:itnsbirlmxzeu74pn7keq6zuzi', "INFERRED", 'entry:5qidalqvkujk5ykzzzfpwie2qy'),
         StopRef('turn:nzc36cttgo7xxki7bcjc7ops7a', 'entry:5qidalqvkujk5ykzzzfpwie2qy', object(), "revision:1"),
     )
 
@@ -337,9 +311,9 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     causal_refs = _causal_refs()
     alias = HookDispatchCausalRef.__value__
 
-    assert len(HookEventType) == 11
-    assert len(inputs) == 11
-    assert len(EVENT_OUTCOME_FAMILY) == 11
+    assert len(HookEventType) == 9
+    assert len(inputs) == 9
+    assert len(EVENT_OUTCOME_FAMILY) == 9
     assert {value.__name__ for value in EVENT_OUTCOME_FAMILY.values()} == {
         "ObserveOutcome",
         "ContextOutcome",
@@ -347,7 +321,7 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
         "PermissionOutcome",
         "ContinuationOutcome",
     }
-    assert len(get_args(alias)) == 12
+    assert len(get_args(alias)) == 10
     assert {type(item) for item in causal_refs} == set(get_args(alias))
 
     internal_fields = {
@@ -376,11 +350,11 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     assert external_permission_mode("read-only", active_plan_workflow=True) == "plan"
     assert external_permission_mode("bypass-permissions") == "bypassPermissions"
 
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert not hasattr(STAGE2_LIMITS, "model_calls_per_turn_hard")
 
 
@@ -673,8 +647,7 @@ def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
     terminal_process = tool_matcher_subject("terminal_process")
     edit = tool_matcher_subject("edit_file")
     write = tool_matcher_subject("write_file")
-    agent = tool_matcher_subject("spawn_agent")
-    task_batch = tool_matcher_subject("create_agent_tasks")
+    agent = tool_matcher_subject("run_agent")
     remote = tool_matcher_subject(
         "use_new_mcp_tool", resolved_remote_identity="server.remote_tool"
     )
@@ -684,7 +657,7 @@ def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
     assert "Bash" not in terminal_process.candidates
     assert edit.canonical_subject == "edit_file" and "Edit" in edit.candidates
     assert write.canonical_subject == "write_file" and "Write" in write.candidates
-    assert "Agent" in agent.candidates and "Agent" not in task_batch.candidates
+    assert agent.canonical_subject == "run_agent" and "Agent" in agent.candidates
     assert remote.candidates == ("server.remote_tool",)
     assert remote.canonical_subject == "server.remote_tool"
 
@@ -693,6 +666,7 @@ def test_round9_2_matcher_aliases_and_no_exact_alternative_bypass(
     )
     from pulsara_agent.hooks.matcher import definition_matches
 
+    assert definition_matches(_definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, "noop", matcher="Agent"), agent)
     assert definition_matches(definition, terminal)
     assert definition_matches(definition, edit)
     assert not definition_matches(definition, terminal_process)
@@ -728,7 +702,7 @@ def test_round9_2_edit_alias_preserves_native_line_operation_input() -> None:
         tool_use_id="call:1",
         tool_input=native_input,
         permission_mode="default",
-    ).to_wire()
+    session_kind="ROOT", input_origin='MODEL_TOOL_CALL').to_wire()
 
     assert public["tool_name"] == "edit_file"
     assert "pulsara_tool_name" not in public
@@ -806,12 +780,6 @@ def test_round9_2_single_parser_control_matrix_and_invalid_output(
     postcompact = parsed(HookEventType.POST_COMPACT_EVENT, stdout=b'{"continue":true}')
     assert (
         isinstance(postcompact, ValidHandlerContribution) and not postcompact.gate_block
-    )
-    substart = parsed(HookEventType.SUBAGENT_START_EVENT, stdout=b"worker context")
-    assert isinstance(substart, ValidHandlerContribution) and substart.context_text
-    substop = parsed(HookEventType.SUBAGENT_STOP_EVENT, exit_code=2, stderr=b"more")
-    assert (
-        isinstance(substop, ValidHandlerContribution) and substop.continuation_request
     )
     stop = parsed(
         HookEventType.STOP_EVENT, stdout=b'{"continue":false,"stopReason":"done"}'
@@ -1022,8 +990,6 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
         )
         outputs["PreCompact"] = (0, b'{"continue":false}', b"")
         outputs["PostCompact"] = (0, b'{"continue":true}', b"")
-        outputs["SubagentStart"] = (0, b"child context", b"")
-        outputs["SubagentStop"] = (2, b"", b"continue child")
         outputs["Stop"] = (0, b'{"continue":false}', b"")
         definitions = tuple(
             _definition(
@@ -1103,18 +1069,13 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
         assert (
             outcomes[HookEventType.POST_COMPACT_EVENT].decision is GateDecision.PROCEED
         )
-        assert isinstance(outcomes[HookEventType.SUBAGENT_START_EVENT], ContextOutcome)
-        assert (
-            outcomes[HookEventType.SUBAGENT_STOP_EVENT].decision
-            is ContinuationDecision.CONTINUE_ONCE
-        )
         assert (
             outcomes[HookEventType.STOP_EVENT].decision
             is ContinuationDecision.TERMINALIZE
         )
         assert isinstance(terminal, ObserveOutcome)
-        assert len(executor.calls) == 11
-        assert sum(item.code == "HOOK_STATUS" for item in diagnostics.values) == 11
+        assert len(executor.calls) == 9
+        assert sum(item.code == "HOOK_STATUS" for item in diagnostics.values) == 9
 
     asyncio.run(exercise())
 
@@ -1127,8 +1088,6 @@ def _matcher_for_input(public_input):
         return event_matcher_subject(event, reason=public_input.reason)
     if event in {HookEventType.PRE_COMPACT_EVENT, HookEventType.POST_COMPACT_EVENT}:
         return event_matcher_subject(event, trigger=public_input.trigger)
-    if event in {HookEventType.SUBAGENT_START_EVENT, HookEventType.SUBAGENT_STOP_EVENT}:
-        return event_matcher_subject(event, agent_type=public_input.agent_type)
     if event in {
         HookEventType.PRE_TOOL_USE_EVENT,
         HookEventType.PERMISSION_REQUEST_EVENT,
@@ -1186,7 +1145,7 @@ print('visible stderr ' + secret, file=sys.stderr)
                 'turn:nzc36cttgo7xxki7bcjc7ops7a',
                 "prompt contains " + secret,
                 "default",
-            ).to_wire(),
+            session_kind="ROOT", input_origin='HUMAN_MESSAGE').to_wire(),
             scope,
             1,
             0,
@@ -1225,14 +1184,14 @@ print('visible stderr ' + secret, file=sys.stderr)
             entries=outcome.context_entries,
         )
         prepared = owner.freeze_for_target(
-            scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+            scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
         )
         assert prepared is not None
         assert secret not in prepared.full_text
         prepared.reservation.retire()
         assert (
             owner.freeze_for_target(
-                scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+                scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
             )
             is None
         )
@@ -1323,7 +1282,7 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
 ) -> None:
     scrub = HookSecretScrubSet.capture()
     root = _scope()
-    child = _scope(child_task_id='task:itnsbirlmxzeu74pn7keq6zuzi')
+    child = _scope(session_id='session:itnsbirlmxzeu74pn7keq6zuzi')
     owner = HookContextOwner()
     owner.register_scope(root)
     owner.register_scope(child)
@@ -1345,7 +1304,7 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
     )
     assert (
         owner.freeze_for_target(
-            scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+            scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
         )
         is None
     )
@@ -1368,14 +1327,14 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
         entries=(second,),
     )
     prepared = owner.freeze_for_target(
-        scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+        scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
     )
     assert prepared is not None
     assert prepared.full_text.count("identical") == 2
     assert len(set(prepared.domain_identity)) == 2
     assert (
         owner.freeze_for_target(
-            scope_kind="CHILD", child_task_id='task:itnsbirlmxzeu74pn7keq6zuzi', estimator=_Estimator()
+            scope_kind="SUBAGENT", session_id='session:itnsbirlmxzeu74pn7keq6zuzi', estimator=_Estimator()
         )
         is None
     )
@@ -1383,13 +1342,13 @@ def test_round9_2_context_scope_threshold_occurrence_and_terminal_drop(
 
     owner.accept_sync(
         scope=child,
-        causal_ref=SubagentStartRef('event:kbzy7pq2fiwhwkbekyclr7czmy', 'task:itnsbirlmxzeu74pn7keq6zuzi', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m'),
+        causal_ref=QueuedPromptRef(None, 'queue:kbzy7pq2fiwhwkbekyclr7czmy', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', 'entry:5qidalqvkujk5ykzzzfpwie2qy', 'revision:work'),
         entries=(HookContextEntry(accepted, 0, 4, "child only", scrub),),
     )
     owner.retire_scope(child)
     assert (
         owner.freeze_for_target(
-            scope_kind="CHILD", child_task_id='task:itnsbirlmxzeu74pn7keq6zuzi', estimator=_Estimator()
+            scope_kind="SUBAGENT", session_id='session:itnsbirlmxzeu74pn7keq6zuzi', estimator=_Estimator()
         )
         is None
     )
@@ -1464,100 +1423,6 @@ def test_round9_2_reload_publishes_future_view_and_old_attempt_keeps_reference(
     asyncio.run(exercise())
 
 
-def test_round9_2_architecture_has_one_independent_engine_and_no_new_durability() -> (
-    None
-):
-    hook_files = tuple((ROOT / "src/pulsara_agent/hooks").glob("*.py"))
-    source = "\n".join(path.read_text(encoding="utf-8") for path in hook_files)
-    assert "pulsara_agent.plugins" not in source
-    assert "OperationalHookType" not in source
-    assert "KernelExtensionHost" not in source
-    assert "ConversationKernelRepository" not in source
-    assert "PluginHookDispatcher" not in source
-    assert "PLUGIN_HOOK_CONTEXT" not in source
-    assert "receipt" not in source.lower()
-    assert "checkpoint" not in source.lower()
-    assert "retry_queue" not in source.lower()
-    assert "digest_to_object" not in source.lower()
-
-    for value in (
-        PreparedPermissionRequest,
-        AcceptedCanonicalToolResultSettlement,
-    ):
-        assert all("fingerprint" not in item.name for item in fields(value))
-    for path in hook_files:
-        module_source = path.read_text(encoding="utf-8")
-        assert "class PluginHookDispatcher" not in module_source
-
-    production = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (ROOT / "src/pulsara_agent/conversation_kernel").rglob("*.py")
-    )
-    assert "def run_subagent_turn(" not in production
-    assert "_spawning" not in production
-    assert "maximum_hook_handlers" not in source
-    assert "maximum_hooks_per_session" not in source
-    assert "def restore(" not in source
-    assert "_restore_reservation" not in source
-
-    provider_dispatch = (
-        ROOT / "src/pulsara_agent/conversation_kernel/provider_dispatch.py"
-    ).read_text(encoding="utf-8")
-    assert "hook_context_reservation.restore" not in provider_dispatch
-    runner_source = (
-        ROOT / "src/pulsara_agent/conversation_kernel/runner.py"
-    ).read_text(encoding="utf-8")
-    coordinator_source = (
-        ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
-    ).read_text(encoding="utf-8")
-    assert "install_provider_open(" in runner_source
-    assert "hook_context_reservation.retire()" in runner_source
-    assert "install_provider_open(" in coordinator_source
-    assert "hook_sibling.retire()" in coordinator_source
-    assert "pending_start.retire()" in coordinator_source
-
-    host_source = (ROOT / "src/pulsara_agent/conversation_kernel/host.py").read_text(
-        encoding="utf-8"
-    )
-    close_start = host_source.index(
-        "    async def aclose(\n        self,\n        *,\n        deadline_monotonic"
-    )
-    close_end = host_source.index("    async def _renew_writer", close_start)
-    close_source = host_source[close_start:close_end]
-    ordered_close_markers = (
-        "session_end_cwd = self._tools.snapshot_workspace_root()",
-        "self._hooks.begin_host_close",
-        "self._delivery_task.cancel()",
-        "await self._settle_active_root_task(task)",
-        "await self._subagents.aclose",
-        "await self._hooks.fence_ordinary()",
-        "await self._hooks.dispatch_terminal",
-        "await self._hooks.aclose",
-        "await self._io.aclose",
-    )
-    assert tuple(close_source.index(item) for item in ordered_close_markers) == tuple(
-        sorted(close_source.index(item) for item in ordered_close_markers)
-    )
-    terminal_lane = close_source[
-        close_source.index("await self._hooks.fence_ordinary()") :
-    ]
-    assert "cwd=str(session_end_cwd)" in terminal_lane
-    assert "snapshot_workspace_root()" not in terminal_lane
-
-    tool_runtime_source = (
-        ROOT / "src/pulsara_agent/conversation_kernel/tool_runtime.py"
-    ).read_text(encoding="utf-8")
-    permission_start = tool_runtime_source.index("    def prepare_permission_request(")
-    permission_end = tool_runtime_source.index(
-        "    async def request_confirmation(", permission_start
-    )
-    permission_source = tool_runtime_source[permission_start:permission_end]
-    assert "state_key = (access.surface_generation, tool_call_id)" in permission_source
-    assert "_mcp_confirmation_admissions.get(state_key)" in permission_source
-    assert "_mcp_dispatch_permits.get(state_key)" in permission_source
-    assert ".items()" not in permission_source
-
-
 def test_round9_2_normalized_digest_has_no_recursive_script_or_description_input(
     tmp_path: Path,
 ) -> None:
@@ -1621,7 +1486,7 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
     queued.commit_prompt_bound('queue:dvzibiul2jmfaj5m6reewz35fe')
 
     selected_for_a = owner.freeze_for_target(
-        scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+        scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
     )
     assert selected_for_a is not None
     assert "context-for-active-turn-A" in selected_for_a.full_text
@@ -1630,7 +1495,7 @@ def test_round9_2_queued_prompt_context_stays_candidate_bound_until_full(
 
     owner.activate_prompt_candidate(scope=scope, prompt_candidate_id='queue:dvzibiul2jmfaj5m6reewz35fe')
     selected_for_b = owner.freeze_for_target(
-        scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+        scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
     )
     assert selected_for_b is not None
     assert "context-for-active-turn-A" not in selected_for_b.full_text
@@ -1781,6 +1646,7 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
 
         initial_boundary = _SessionStartColdBoundaryOwner("resume")
         runner = object.__new__(ConversationKernelRunner)
+        runner._session_scope_kind = ModelInputScopeKind.ROOT
         runner._session_start_boundary = initial_boundary
         runner._hook_dispatcher = dispatcher
         runner._hook_context_owner = context_owner
@@ -1804,7 +1670,6 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             turn_id='turn:g2nuzaupht4ax6fo5ydrqiuzni',
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             trigger=CompactionTrigger.MANUAL,
         )
         await compact_boundary.arm_compact_boundary(
@@ -1822,7 +1687,6 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
                 'workspace:tx722zsrfsrhp7m363cs7ve6ii',
                 'turn:g2nuzaupht4ax6fo5ydrqiuzni',
                 ModelInputScopeKind.ROOT,
-                None,
             ),
             turn_id='turn:g2nuzaupht4ax6fo5ydrqiuzni',
             model_id="model:1",
@@ -1938,6 +1802,7 @@ def test_pending_root_session_start_failure_retires_hook_context(
         provider_dispatch = _ProviderDispatch()
         prepared = _Prepared()
         runner = object.__new__(ConversationKernelRunner)
+        runner._session_scope_kind = ModelInputScopeKind.ROOT
         runner._session_start_boundary = _SessionStartColdBoundaryOwner("startup")
         runner._hook_dispatcher = _Dispatcher()
         runner._hook_context_owner = context_owner
@@ -1966,7 +1831,7 @@ def test_pending_root_session_start_failure_retires_hook_context(
         assert prepared.closed
         assert (
             context_owner.freeze_for_target(
-                scope_kind="ROOT", child_task_id=None, estimator=_Estimator()
+                scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
             )
             is None
         )
@@ -2095,13 +1960,11 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             'workspace:tx722zsrfsrhp7m363cs7ve6ii',
             'turn:nzc36cttgo7xxki7bcjc7ops7a',
             ModelInputScopeKind.ROOT,
-            None,
         )
         attempt = _new_compaction_attempt_token(
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
             trigger=CompactionTrigger.MANUAL,
         )
         candidate = SimpleNamespace(
@@ -2208,7 +2071,6 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             manual = SimpleNamespace(
                 command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
             )
             with pytest.raises(type(failure)) as propagated:
                 await outer._execute_active(
@@ -2219,7 +2081,6 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     force=False,
                     manual_request=manual,
                     scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
                     hook_scope=None,
                     session_start_compact_port=None,
                     session_start_boundary_port=None,
@@ -2271,7 +2132,7 @@ def test_v3_invalidates_old_trust_without_changing_enabled_or_time(tmp_path, mon
     assert restarted.assess(provenance.trust_subject, current).disposition is HookTrustDisposition.TRUSTED
 
 
-@pytest.mark.parametrize('event', [HookEventType.PRE_TOOL_USE_EVENT, HookEventType.USER_PROMPT_SUBMIT_EVENT, HookEventType.STOP_EVENT, HookEventType.SUBAGENT_STOP_EVENT])
+@pytest.mark.parametrize('event', [HookEventType.PRE_TOOL_USE_EVENT, HookEventType.USER_PROMPT_SUBMIT_EVENT, HookEventType.STOP_EVENT])
 def test_async_exit_two_has_explicit_unsupported_control_diagnostic(tmp_path, event):
     definition = _definition(tmp_path, event, 'deny', asynchronous=True)
     parsed = parse_handler_output(_execution(definition, exit_code=2, stderr=b'deny', stdout=b'{invalid ignored}'))

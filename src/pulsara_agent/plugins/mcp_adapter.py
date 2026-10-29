@@ -404,7 +404,9 @@ def materialize_plugin_mcp_definition(
         transport=transport,
         auth=auth,
         exposure_policy=McpExposurePolicy(),
-        scope_policy=McpScopePolicy.ROOT_AND_SUBAGENTS,
+        scope_policy=next((item.scope_policy for item in state.mcp_connection_overlays
+                           if item.local_server_id == server.local_server_id),
+                          McpScopePolicy.ROOT_ONLY),
         effect_policy=McpEffectPolicyConfig(default_effect=McpConfiguredEffect.AUTO),
         supports_parallel_tool_calls=False,
         stateless_http_max_in_flight=1,

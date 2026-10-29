@@ -86,22 +86,23 @@ SHA256_PREFIX = "sha256:"
 
 class ModelInputScopeKind(StrEnum):
     ROOT = "ROOT"
-    SUBAGENT_TASK = "SUBAGENT_TASK"
+    SUBAGENT = "SUBAGENT"
 
 
 class CapabilityActivationSubjectKind(StrEnum):
     ROOT_HUMAN_PROMPT = "ROOT_HUMAN_PROMPT"
     ROOT_NON_HUMAN_TRIGGER = "ROOT_NON_HUMAN_TRIGGER"
-    SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
 
 
 class CanonicalInputOriginKind(StrEnum):
     HUMAN_MESSAGE = "HUMAN_MESSAGE"
     SCHEDULED_TASK = "SCHEDULED_TASK"
     HUMAN_STEER = "HUMAN_STEER"
-    SUBAGENT_OBJECTIVE = "SUBAGENT_OBJECTIVE"
+    AGENT_INSTRUCTION = "AGENT_INSTRUCTION"
+    AGENT_PROFILE = "AGENT_PROFILE"
+    AGENT_MATERIAL = "AGENT_MATERIAL"
+    AGENT_MESSAGE = "AGENT_MESSAGE"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
-    INTER_AGENT_MESSAGE = "INTER_AGENT_MESSAGE"
     USER_CONTROL_FEEDBACK = "USER_CONTROL_FEEDBACK"
 
 
@@ -124,9 +125,6 @@ class ContextSourceKind(StrEnum):
     HOOK_CONTEXT = "HOOK_CONTEXT"
     COMPACTION_RUNTIME_HANDOFF = "COMPACTION_RUNTIME_HANDOFF"
     RETAINED_SKILL_CONTEXT = "RETAINED_SKILL_CONTEXT"
-    PARENT_CONTEXT = "PARENT_CONTEXT"
-    DEPENDENCY_RESULTS = "DEPENDENCY_RESULTS"
-    TERMINAL_MATERIAL = "TERMINAL_MATERIAL"
 
 
 class ContextChannel(StrEnum):
@@ -295,7 +293,9 @@ class FrozenToolSpec:
             raise ValueError("frozen tool specification identity is incomplete")
         if not isinstance(self.parameters, FrozenJsonObjectFact):
             raise TypeError("tool parameters must be a frozen JSON object")
-        if self.output_schema is not None and not isinstance(self.output_schema, FrozenJsonObjectFact):
+        if self.output_schema is not None and not isinstance(
+            self.output_schema, FrozenJsonObjectFact
+        ):
             raise TypeError("tool output schema must be a frozen JSON object")
 
     @property
@@ -752,8 +752,6 @@ class FrozenProviderInputItemKind(StrEnum):
     TOOL_RESULT_CLOSURE = "TOOL_RESULT_CLOSURE"
     LATE_TOOL_OUTCOME = "LATE_TOOL_OUTCOME"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
-    INTER_AGENT_MESSAGE = "INTER_AGENT_MESSAGE"
-    INITIAL_CONTEXT_MATERIAL = "INITIAL_CONTEXT_MATERIAL"
 
 
 class CompactionContinuationMode(StrEnum):
@@ -780,21 +778,34 @@ class FrozenCompactionActiveRequest:
     scheduled_input: ScheduledProvenance | None = None
 
     def __post_init__(self) -> None:
-        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (self.scheduled_input is not None):
+        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
+            self.scheduled_input is not None
+        ):
             raise ValueError("scheduled request provenance is incomplete")
         if not self.entry_id or self.entry_sequence < 0:
             raise ValueError("compaction active request identity is incomplete")
         snapshot_exact = self.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
         if snapshot_exact != (self.content is not None):
-            raise ValueError("compaction active request location/content union is invalid")
+            raise ValueError(
+                "compaction active request location/content union is invalid"
+            )
         if self.content is not None and not isinstance(
             self.content, FrozenPromptContent
         ):
             raise TypeError("compaction active request content must be frozen")
-        if self.content is not None and any(isinstance(part, PromptAnnotationPart) for part in self.content.parts) and (
-            self.item_kind is not FrozenProviderInputItemKind.USER or self.input_origin not in {
-                CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.HUMAN_STEER,
-            }
+        if (
+            self.content is not None
+            and any(
+                isinstance(part, PromptAnnotationPart) for part in self.content.parts
+            )
+            and (
+                self.item_kind is not FrozenProviderInputItemKind.USER
+                or self.input_origin
+                not in {
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    CanonicalInputOriginKind.HUMAN_STEER,
+                }
+            )
         ):
             raise ValueError("only human requests can contain annotations")
         validate_compaction_request_shape(
@@ -815,7 +826,9 @@ class FrozenCompactionActiveRequest:
             "input_origin": (
                 None if self.input_origin is None else self.input_origin.value
             ),
-            "scheduled_input": None if self.scheduled_input is None else self.scheduled_input.to_dict(),
+            "scheduled_input": None
+            if self.scheduled_input is None
+            else self.scheduled_input.to_dict(),
             "content": (
                 None
                 if self.content is None
@@ -835,14 +848,25 @@ class FrozenRetainedHistoricalRequest:
     scheduled_input: ScheduledProvenance | None = None
 
     def __post_init__(self) -> None:
-        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (self.scheduled_input is not None):
+        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
+            self.scheduled_input is not None
+        ):
             raise ValueError("scheduled request provenance is incomplete")
         if not isinstance(self.content, FrozenPromptContent):
             raise TypeError("retained historical request content must be frozen")
-        if self.content is not None and any(isinstance(part, PromptAnnotationPart) for part in self.content.parts) and (
-            self.item_kind is not FrozenProviderInputItemKind.USER or self.input_origin not in {
-                CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.HUMAN_STEER,
-            }
+        if (
+            self.content is not None
+            and any(
+                isinstance(part, PromptAnnotationPart) for part in self.content.parts
+            )
+            and (
+                self.item_kind is not FrozenProviderInputItemKind.USER
+                or self.input_origin
+                not in {
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    CanonicalInputOriginKind.HUMAN_STEER,
+                }
+            )
         ):
             raise ValueError("only human requests can contain annotations")
         validate_compaction_request_shape(
@@ -858,7 +882,9 @@ class FrozenRetainedHistoricalRequest:
             "input_origin": (
                 None if self.input_origin is None else self.input_origin.value
             ),
-            "scheduled_input": None if self.scheduled_input is None else self.scheduled_input.to_dict(),
+            "scheduled_input": None
+            if self.scheduled_input is None
+            else self.scheduled_input.to_dict(),
             "content": frozen_prompt_content_canonical_value(self.content),
         }
 
@@ -877,26 +903,26 @@ def validate_compaction_request_shape(
             CanonicalInputOriginKind.HUMAN_MESSAGE,
             CanonicalInputOriginKind.SCHEDULED_TASK,
             CanonicalInputOriginKind.HUMAN_STEER,
-            CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
+            CanonicalInputOriginKind.AGENT_INSTRUCTION,
+            CanonicalInputOriginKind.AGENT_PROFILE,
+            CanonicalInputOriginKind.AGENT_MATERIAL,
+            CanonicalInputOriginKind.AGENT_MESSAGE,
             CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
         },
         FrozenProviderInputItemKind.PLAN_CONTINUATION: {
             CanonicalInputOriginKind.PLAN_CONTINUATION
         },
-        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE: {
-            CanonicalInputOriginKind.INTER_AGENT_MESSAGE
-        },
         FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {None},
-        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL: {None},
     }
     allowed = origins.get(item_kind)
     if allowed is None or input_origin not in allowed:
         raise ValueError("compaction request kind/origin union is invalid")
-    if active and item_kind is FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL:
-        raise ValueError("initial context material cannot be an active request")
     if active and input_origin in {
         CanonicalInputOriginKind.HUMAN_STEER,
         CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
+        CanonicalInputOriginKind.AGENT_PROFILE,
+        CanonicalInputOriginKind.AGENT_MATERIAL,
+        CanonicalInputOriginKind.AGENT_MESSAGE,
     }:
         raise ValueError("compaction active request origin is invalid")
     if has_image and not (
@@ -905,6 +931,10 @@ def validate_compaction_request_shape(
         in {
             CanonicalInputOriginKind.HUMAN_MESSAGE,
             CanonicalInputOriginKind.HUMAN_STEER,
+            CanonicalInputOriginKind.AGENT_INSTRUCTION,
+            CanonicalInputOriginKind.AGENT_PROFILE,
+            CanonicalInputOriginKind.AGENT_MATERIAL,
+            CanonicalInputOriginKind.AGENT_MESSAGE,
         }
     ):
         raise ValueError("compaction request origin cannot carry image content")
@@ -963,8 +993,7 @@ class CompactionSnapshotCarrier:
                 },
                 "earlier_context_summary": self.earlier_context_summary,
                 "recent_human_requests": tuple(
-                    request.canonical_value()
-                    for request in self.recent_human_requests
+                    request.canonical_value() for request in self.recent_human_requests
                 ),
                 "retained_historical_requests": tuple(
                     request.canonical_value()
@@ -1043,9 +1072,7 @@ class FrozenProviderInputItem:
         BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     )
     tool_call_ordinal: int | None = None
-    tool_call_arguments: FrozenJsonObjectFact | None = field(
-        default=None, repr=False
-    )
+    tool_call_arguments: FrozenJsonObjectFact | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         snapshot_kind = self.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
@@ -1054,7 +1081,10 @@ class FrozenProviderInputItem:
                 raise TypeError("context snapshot content must be its typed carrier")
         elif not isinstance(self.content, tuple) or any(
             not isinstance(part, (LLMTextPart, LLMImagePart, PromptAnnotationPart))
-            or (isinstance(part, PromptAnnotationPart) and self.item_kind is not FrozenProviderInputItemKind.USER)
+            or (
+                isinstance(part, PromptAnnotationPart)
+                and self.item_kind is not FrozenProviderInputItemKind.USER
+            )
             for part in self.content
         ):
             raise TypeError("provider input content must be typed immutable parts")
@@ -1089,15 +1119,22 @@ class FrozenProviderInputItem:
         has_origin = self.item_kind in {
             FrozenProviderInputItemKind.USER,
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
-            FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
         }
-        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (self.scheduled_input is not None):
+        if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
+            self.scheduled_input is not None
+        ):
             raise ValueError("scheduled origin/provenance union is invalid")
         if has_origin != (self.input_origin is not None):
             raise ValueError("provider input origin union is invalid")
-        if not snapshot_kind and any(isinstance(part, PromptAnnotationPart) for part in self.content) and self.input_origin not in {
-            CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.HUMAN_STEER,
-        }:
+        if (
+            not snapshot_kind
+            and any(isinstance(part, PromptAnnotationPart) for part in self.content)
+            and self.input_origin
+            not in {
+                CanonicalInputOriginKind.HUMAN_MESSAGE,
+                CanonicalInputOriginKind.HUMAN_STEER,
+            }
+        ):
             raise ValueError("only human USER input can contain annotations")
         images_allowed = (
             self.item_kind is FrozenProviderInputItemKind.USER
@@ -1105,13 +1142,13 @@ class FrozenProviderInputItem:
             in {
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
                 CanonicalInputOriginKind.HUMAN_STEER,
+                CanonicalInputOriginKind.AGENT_INSTRUCTION,
+                CanonicalInputOriginKind.AGENT_PROFILE,
+                CanonicalInputOriginKind.AGENT_MATERIAL,
+                CanonicalInputOriginKind.AGENT_MESSAGE,
             }
         ) or result_kind
-        if (
-            not snapshot_kind
-            and content_has_image(self.content)
-            and not images_allowed
-        ):
+        if not snapshot_kind and content_has_image(self.content) and not images_allowed:
             raise ValueError("provider input origin cannot carry image content")
         if self.source_entry_sequence is not None and self.source_entry_sequence < 0:
             raise ValueError("provider input entry sequence is invalid")
@@ -1183,7 +1220,6 @@ class CanonicalModelInputIdentity:
     context_binding_revision_id: str
     provider_input_through_sequence: int
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     identity_fingerprint: str
 
     def __post_init__(self) -> None:
@@ -1195,10 +1231,6 @@ class CanonicalModelInputIdentity:
             or self.provider_input_through_sequence < 0
         ):
             raise ValueError("canonical model input identity is incomplete")
-        if (self.conversation_scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("canonical model input scope identity is invalid")
         expected = canonical_model_input_identity_fingerprint(
             session_id=self.session_id,
             turn_id=self.turn_id,
@@ -1206,7 +1238,6 @@ class CanonicalModelInputIdentity:
             context_binding_revision_id=self.context_binding_revision_id,
             provider_input_through_sequence=self.provider_input_through_sequence,
             conversation_scope_kind=self.conversation_scope_kind,
-            scope_subagent_task_id=self.scope_subagent_task_id,
         )
         if self.identity_fingerprint != expected:
             raise ValueError("canonical model input identity fingerprint mismatch")
@@ -1220,7 +1251,6 @@ def canonical_model_input_identity_fingerprint(
     context_binding_revision_id: str,
     provider_input_through_sequence: int,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
 ) -> str:
     return context_fingerprint(
         "canonical-model-input-identity:v1",
@@ -1231,7 +1261,6 @@ def canonical_model_input_identity_fingerprint(
             "context_binding_revision_id": context_binding_revision_id,
             "provider_input_through_sequence": provider_input_through_sequence,
             "conversation_scope_kind": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
         },
     )
 
@@ -1401,7 +1430,8 @@ class FrozenPlanHandoffCompileFact:
         ):
             raise ValueError("compiled Plan handoff sequence is invalid")
         if (
-            self.handoff_kind in {PlanHandoffKind.ENTERED_PLAN, PlanHandoffKind.EXITED_PLAN}
+            self.handoff_kind
+            in {PlanHandoffKind.ENTERED_PLAN, PlanHandoffKind.EXITED_PLAN}
             and self.interaction_id is not None
         ) or (
             self.handoff_kind
@@ -1548,7 +1578,6 @@ class FrozenPreviousTurnOutcomeCompileFact:
     workspace_id: str
     current_turn_id: str
     current_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     predecessor_turn_id: str
     predecessor_initial_entry_sequence: int
     predecessor_terminal_at_utc: str
@@ -1574,10 +1603,6 @@ class FrozenPreviousTurnOutcomeCompileFact:
             )
         ):
             raise ValueError("previous-turn outcome identity is incomplete")
-        if (self.current_scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("previous-turn outcome scope union is invalid")
         if self.predecessor_initial_entry_sequence < 1:
             raise ValueError("previous-turn sequence is invalid")
         parsed = datetime.fromisoformat(
@@ -1621,7 +1646,6 @@ def previous_turn_outcome_fingerprint(
             "workspace_id": fact.workspace_id,
             "current_turn_id": fact.current_turn_id,
             "current_scope_kind": fact.current_scope_kind.value,
-            "scope_subagent_task_id": fact.scope_subagent_task_id,
             "predecessor_turn_id": fact.predecessor_turn_id,
             "predecessor_initial_entry_sequence": (
                 fact.predecessor_initial_entry_sequence
@@ -1651,7 +1675,6 @@ class FrozenToolObservationFreshnessCompileFact:
     workspace_id: str
     current_turn_id: str
     current_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     current_turn_ref: str
     current_initial_entry_sequence: int
     immediate_predecessor_turn_id: str | None
@@ -1660,10 +1683,6 @@ class FrozenToolObservationFreshnessCompileFact:
     fact_fingerprint: str
 
     def __post_init__(self) -> None:
-        if (self.current_scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("tool freshness scope union is invalid")
         if self.current_initial_entry_sequence < 1:
             raise ValueError("tool freshness current sequence is invalid")
         if (self.immediate_predecessor_turn_id is None) != (
@@ -1694,7 +1713,6 @@ def tool_observation_freshness_fingerprint(
             "workspace_id": fact.workspace_id,
             "current_turn_id": fact.current_turn_id,
             "current_scope_kind": fact.current_scope_kind.value,
-            "scope_subagent_task_id": fact.scope_subagent_task_id,
             "current_turn_ref": fact.current_turn_ref,
             "current_initial_entry_sequence": fact.current_initial_entry_sequence,
             "immediate_predecessor_turn_id": fact.immediate_predecessor_turn_id,
@@ -1710,7 +1728,6 @@ def build_tool_observation_freshness_fact(
     workspace_id: str,
     current_turn_id: str,
     current_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     current_initial_entry_sequence: int,
     immediate_predecessor_turn_id: str | None,
 ) -> FrozenToolObservationFreshnessCompileFact:
@@ -1719,7 +1736,6 @@ def build_tool_observation_freshness_fact(
         "workspace_id": workspace_id,
         "current_turn_id": current_turn_id,
         "current_scope_kind": current_scope_kind,
-        "scope_subagent_task_id": scope_subagent_task_id,
         "current_turn_ref": current_turn_id,
         "current_initial_entry_sequence": current_initial_entry_sequence,
         "immediate_predecessor_turn_id": immediate_predecessor_turn_id,
@@ -1894,15 +1910,13 @@ class FrozenCanonicalCompileSnapshot:
             freshness.session_id != identity.session_id
             or freshness.current_turn_id != identity.turn_id
             or freshness.current_scope_kind is not identity.conversation_scope_kind
-            or freshness.scope_subagent_task_id != identity.scope_subagent_task_id
         ):
             raise ValueError("tool freshness fact does not exact-join input")
         if previous is not None and (
             previous.session_id != identity.session_id
             or previous.current_turn_id != identity.turn_id
             or previous.current_scope_kind is not identity.conversation_scope_kind
-            or previous.scope_subagent_task_id != identity.scope_subagent_task_id
-            or previous.predecessor_turn_id != freshness.immediate_predecessor_turn_id
+            or (previous.predecessor_turn_id != freshness.immediate_predecessor_turn_id)
         ):
             raise ValueError("previous-turn fact does not exact-join freshness")
         if self.canonical_read_cut_fingerprint != (
@@ -1976,7 +1990,9 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
         "input_origin": (
             None if item.input_origin is None else item.input_origin.value
         ),
-        "scheduled_input": None if item.scheduled_input is None else item.scheduled_input.to_dict(),
+        "scheduled_input": None
+        if item.scheduled_input is None
+        else item.scheduled_input.to_dict(),
         "content": llm_content_identity_value(content),
         "calls": tuple(
             (call.tool_call_id, call.tool_name, call.arguments)
@@ -2155,9 +2171,7 @@ class CompiledSourceDecision:
             raise ValueError("compiled source decision is invalid")
         if self.included != (self.selected_mode is not None):
             raise ValueError("compiled source inclusion union is invalid")
-        if not self.included and (
-            self.reason_code != "OMITTED_FOR_BUDGET"
-        ):
+        if not self.included and (self.reason_code != "OMITTED_FOR_BUDGET"):
             raise ValueError("omitted source decision is inconsistent")
 
 

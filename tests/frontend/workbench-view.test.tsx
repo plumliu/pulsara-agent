@@ -429,8 +429,6 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     isObserver: false,
     permission: 'read-only',
     skills: [],
-    focusTaskRevision: 0,
-    focusTaskHighlighted: false,
     onFork: vi.fn(async () => undefined),
     onReconnect: vi.fn(),
     onTakeControl: vi.fn(),
@@ -897,28 +895,6 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.getByText('此窗口仅供查看')).toBeTruthy();
   });
 
-  it('renders current, previous, and earlier ROOT completion acceptance precisely', () => {
-    render(<WorkbenchView {...props({
-      isRunning: false,
-      messages: [{
-        id: 'accepted-current', role: 'user', userKind: 'subagent-completion', time: '18:01', body: '',
-        sourceSubagentTaskId: 'task-current', sourceSubagentLabel: 'builder', sourceSubagentRelation: 'current',
-      }, {
-        id: 'accepted-previous', role: 'user', userKind: 'subagent-completion', time: '18:02', body: '',
-        sourceSubagentTaskId: 'task-previous', sourceSubagentLabel: 'reader', sourceSubagentRelation: 'previous',
-      }, {
-        id: 'accepted-earlier', role: 'user', userKind: 'subagent-completion', time: '18:03', body: '',
-        sourceSubagentTaskId: 'task-earlier', sourceSubagentLabel: 'reviewer', sourceSubagentRelation: 'earlier',
-      }],
-    })} />);
-
-    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    expect(screen.getByLabelText('builder 的结果已加入本轮对话')).toBeTruthy();
-    expect(screen.getByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
-    expect(screen.getByLabelText('此前 reviewer 的结果已加入本轮对话')).toBeTruthy();
-    expect(screen.queryByText(/主任务会结合|用于当前处理|模型已收到/)).toBeNull();
-  });
-
   it('hides builtin raw previews and artifact pages by default, retaining diffs, commands, and terminal output', async () => {
     const readArtifact = vi.fn(async () => ({ resultEntryId: 'result', text: 'retained output',
       offsetChars: 0, returnedChars: 15, totalChars: 15, hasMore: false }));
@@ -1236,46 +1212,6 @@ describe('completed reply process disclosure', () => {
     expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
     expect(screen.getByText('后面还有消息')).toBeTruthy();
     expect(screen.queryByText('后续记录尚未加载')).toBeNull();
-  });
-
-  it.each([1, 3])('folds %s leading completion notifications without an earlier assistant step', count => {
-    const notices = Array.from({ length: count }, (_, i) => ({
-      id: `completion-${i}`, turnId: 'turn-one', role: 'user' as const,
-      userKind: 'subagent-completion' as const, time: '13:02', body: '', sourceSubagentLabel: `任务 ${i}`,
-    }));
-    render(<ConversationMessages messages={[
-      { id: 'prompt', turnId: 'turn-one', role: 'user', userKind: 'prompt', time: '13:01', body: '继续汇总' },
-      ...notices, final,
-    ]} artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
-    expect(screen.getByText('继续汇总').closest('.conversation-run')).toBeNull();
-    expect(screen.queryAllByRole('article', { name: /的结果已加入本轮对话/ })).toHaveLength(0);
-    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    expect(screen.getAllByRole('article', { name: /的结果已加入本轮对话/ })).toHaveLength(count);
-    expect(screen.getByText(final.body).closest('.conversation-run__step')).toBeNull();
-  });
-
-  it('folds completion notifications into the process and portals their help outside clipped rows', () => {
-    const completion = { id: 'completion', turnId: 'turn-one', role: 'user' as const,
-      userKind: 'subagent-completion' as const, time: '13:02', body: '', sourceSubagentLabel: '事实核对' };
-    const view = render(<ConversationMessages messages={[progress, completion, steer, final]}
-      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
-    expect(screen.queryByRole('article', { name: '事实核对 的结果已加入本轮对话' })).toBeNull();
-    expect(screen.getByText(steer.body).closest('[inert]')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    const card = screen.getByRole('article', { name: '事实核对 的结果已加入本轮对话' });
-    fireEvent.mouseEnter(card);
-    const tooltip = screen.getByRole('tooltip');
-    expect(tooltip.parentElement).toBe(document.body);
-    expect(card.getAttribute('aria-describedby')).toBe(tooltip.id);
-    expect(view.container.querySelector('[role="tooltip"]')).toBeNull();
-    fireEvent.keyDown(document, { key: 'Escape' });
-    expect(screen.queryByRole('tooltip')).toBeNull();
-    fireEvent.focus(card);
-    expect(screen.getByRole('tooltip')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '收起处理过程' }));
-    expect(screen.queryByRole('tooltip')).toBeNull();
-    expect(card.isConnected).toBe(false);
-    expect(screen.getByText(final.body).closest('.conversation-run__step')).toBeNull();
   });
 
   it('keeps streaming and steer in order, closes only on a confirmed final, and preserves manual expansion', () => {
@@ -1745,53 +1681,6 @@ describe('ROOT context compaction progress', () => {
   });
 });
 
-
-it('keeps child details and visualization reads in the sidebar, with compact navigation in the parent', () => {
-  const body = '```pulsara-viz\nchart.html\n```';
-  const read = vi.fn();
-  const present = vi.fn();
-  const view = render(<PresentationContext.Provider value={present}><ConversationMessages messages={[{
-    id: 'parent-call', role: 'assistant', status: 'completed', time: 'now', body: '', subagentRuns: [{
-      id: 'task-1', batchId: 'batch-1', label: 'worker', role: '研究', objective: '只在任务详情显示的目标', color: 'blue', status: 'running', summary: '结果' + body,
-      activities: [{ id: 'worker-entry', time: '', status: 'running', body, reasoning: [{id:'thinking', kind:'full', body:'任务内部思考'}],
-        visualizations: [{ordinal:0,state:'READY',contentDigest:'sha256:'+'a'.repeat(64),contentSize:15,mediaType:'text/html',codec:'utf-8'}] }],
-    }],
-  }]} artifactOwnerKey="session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read}/></PresentationContext.Provider>);
-  fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-  const group = screen.getByLabelText('任务执行');
-  const node = within(group).getByRole('button', { name: '查看任务：worker' });
-  expect(node.classList.contains('trace-card__summary')).toBe(true);
-  expect(group.textContent).toContain('0 / 1 已结束');
-  expect(group.textContent).not.toMatch(/只在任务详情|任务内部思考|chart.html/);
-  expect(node.hasAttribute('aria-expanded')).toBe(false);
-  fireEvent.click(node);
-  expect(present).toHaveBeenLastCalledWith([{ type: 'task', task_id: 'task-1' }]);
-  fireEvent.click(within(group).getByRole('button', { name: '打开任务组' }));
-  expect(present).toHaveBeenCalledTimes(2);
-  expect(read).not.toHaveBeenCalled();
-  expect(view.container.querySelector('.subagent-run__body, .subagent-guidance, .inline-visualization')).toBeNull();
-});
-
-it('keeps distinct canonical task groups separate and updates their compact progress', () => {
-  const present = vi.fn();
-  const runs = [{ id: 'a', batchId: 'group-one', label: '甲', role: '研究', status: 'running' as const, color: 'blue' as const, objective: '', activities: [] },
-    { id: 'b', batchId: 'group-one', label: '乙', role: '研究', status: 'completed' as const, color: 'blue' as const, objective: '', activities: [] },
-    { id: 'c', batchId: 'group-two', label: '丙', role: '研究', status: 'pending' as const, color: 'blue' as const, objective: '', activities: [] }];
-  const display = (completed = false) => <PresentationContext.Provider value={present}><ConversationMessages
-    messages={[{ id:'parent',role:'assistant',time:'',body:'',subagentRuns: runs.map(run => completed ? {...run,status:'completed' as const} : run) }]}
-    artifactOwnerKey="session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} /></PresentationContext.Provider>;
-  const view = render(display());
-  fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-  expect(screen.getAllByLabelText('任务执行')).toHaveLength(2);
-  expect(screen.getByText('1 / 2 已结束')).toBeTruthy();
-  const node = screen.getByRole('button', { name: '查看任务：乙' });
-  fireEvent.click(node);
-  expect(present).toHaveBeenCalledWith([{type:'task',task_id:'b'}]);
-  view.rerender(display(true));
-  expect(screen.getByRole('button', { name: '查看任务：乙' })).toBe(node);
-  expect(screen.getByText('2 / 2 已结束')).toBeTruthy();
-});
-
 describe('bounded history reading and DOM locations', () => {
   const answer = (id: string, group = 'root-one') => ({ id, turnId: group, historyGroupId: group,
     historyWindowId: 'tail', role: 'assistant' as const, assistantKind: 'terminal' as const,
@@ -2038,23 +1927,6 @@ describe('independent interruption timeline rows', () => {
 });
 
 describe('activity and pending-input body demands', () => {
-  it('does not hydrate child history from the parent task summary', () => {
-    const observed: Element[] = [];
-    vi.stubGlobal('IntersectionObserver', class { observe(node: Element) { observed.push(node); } disconnect() {} });
-    const read = vi.fn(async () => {});
-    const present = vi.fn();
-    render(<PresentationContext.Provider value={present}><WorkbenchView {...props({ isRunning: false, onHydrateEntries: read, messages: [{
-      id: 'final-task', role: 'assistant', assistantKind: 'terminal', time: '', body: '任务完成', rootFinal: true, contentState: 'ready',
-      subagentRuns: [{ id: 'worker', label: '审查worker', role: 'builder', color: 'blue', status: 'completed', objective: '核对', activities: [{
-        id: 'worker-entry', time: '', body: '', contentState: 'unloaded', sourceEntryIds: ['worker-entry'], reasoningContentState: 'unloaded',
-      }] }],
-    }] })} /></PresentationContext.Provider>);
-    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    fireEvent.click(screen.getByRole('button', { name: '查看任务：审查worker' }));
-    expect(present).toHaveBeenCalledWith([{type:'task',task_id:'worker'}]);
-    expect(observed).toHaveLength(0);
-    expect(read).not.toHaveBeenCalled();
-  });
 
   it('retains reader-held known queue text during canonical and context hydration with no local submission', () => {
     render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [], messages: [{
@@ -2164,15 +2036,6 @@ describe('source location disclosure demand', () => {
     expect(view.container.querySelector('[data-result-entry="tool-result"]')).toBeTruthy();
     view.rerender(<ConversationMessages {...base} focusedEntry={{ sessionId: 'one', entryId: 'final' }} />);
     expect(screen.getByRole('button', { name: '收起处理过程' })).toBeTruthy();
-  });
-
-  it('still expands tasks attached to a final answer when the task itself is the target', () => {
-    const view = render(<ConversationMessages messages={[{ ...final, reasoningContentState: 'ready', subagentRuns: [{
-      id: 'worker', label: '目标worker', role: 'reviewer', objective: '核对', status: 'completed', color: 'blue', activities: [],
-    }] }]} artifactOwnerKey="one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
-      focusTaskId="worker" focusTaskHighlighted focusTaskRevision={1} />);
-    expect(screen.getByRole('button', { name: '收起处理过程' })).toBeTruthy();
-    expect(view.container.querySelector('[data-task-id="worker"]')).toBeTruthy();
   });
 });
 

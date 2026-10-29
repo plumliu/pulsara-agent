@@ -296,34 +296,7 @@ class KernelModelExecutionRequest:
     def __post_init__(self) -> None:
         identity = self.compiled_input.canonical_input_identity
         if (
-            not self.session_id
-            or not self.turn_id
-            or self.model_call_index < 1
-            or self.cut.session_id != self.session_id
-            or self.cut.turn_id != self.turn_id
-            or identity.session_id != self.cut.session_id
-            or identity.turn_id != self.cut.turn_id
-            or identity.context_binding_revision_id
-            != self.cut.context_binding_revision_id
-            or identity.provider_input_through_sequence
-            != self.cut.provider_input_through_sequence
-            or identity.conversation_scope_kind
-            is not self.prepared_call.tool_surface.access.conversation_scope_kind
-            or identity.scope_subagent_task_id
-            != self.prepared_call.tool_surface.access.scope_subagent_task_id
-            or self.wire_input_plan.context_id != self.compiled_input.context_id
-            or self.wire_input_plan.compiled_semantic_fingerprint
-            != self.compiled_input.compiled_semantic_fingerprint
-            or self.wire_input_plan.message_placements_fingerprint
-            != compiled_message_placements_fingerprint(
-                self.compiled_input.message_placements
-            )
-            or self.wire_input_plan.materialization.tool_items
-            != tuple(
-                item.wire_tool
-                for item in self.prepared_call.native_projection_set.projections
-            )
-            or not self.surface_borrow.exactly_joins(self.prepared_call.tool_surface)
+            not self.session_id or not self.turn_id or self.model_call_index < 1 or (self.cut.session_id != self.session_id) or (self.cut.turn_id != self.turn_id) or (identity.session_id != self.cut.session_id) or (identity.turn_id != self.cut.turn_id) or (identity.context_binding_revision_id != self.cut.context_binding_revision_id) or (identity.provider_input_through_sequence != self.cut.provider_input_through_sequence) or (identity.conversation_scope_kind is not self.prepared_call.tool_surface.access.conversation_scope_kind) or (self.wire_input_plan.context_id != self.compiled_input.context_id) or (self.wire_input_plan.compiled_semantic_fingerprint != self.compiled_input.compiled_semantic_fingerprint) or (self.wire_input_plan.message_placements_fingerprint != compiled_message_placements_fingerprint(self.compiled_input.message_placements)) or (self.wire_input_plan.materialization.tool_items != tuple((item.wire_tool for item in self.prepared_call.native_projection_set.projections))) or (not self.surface_borrow.exactly_joins(self.prepared_call.tool_surface))
         ):
             raise ValueError("model execution request is not structurally joined")
 
@@ -527,16 +500,7 @@ class PreparedKernelModelExecution:
     ) -> AsyncIterator[ProviderStreamPayload | ProviderGenerationRetry]:
         request = self.request
         if (
-            permit.scope.session_id != request.session_id
-            or permit.scope.scope_kind
-            is not request.compiled_input.canonical_input_identity.conversation_scope_kind
-            or permit.scope.scope_subagent_task_id
-            != request.compiled_input.canonical_input_identity.scope_subagent_task_id
-            or permit.epoch_nonce != self.append_candidate.epoch_nonce
-            or permit.epoch_revision
-            != self.append_candidate.expected_epoch_revision + 1
-            or request.prepared_call.transport_timeout_policy_fingerprint
-            != self._transport_timeout_policy_fingerprint
+            permit.scope.session_id != request.session_id or permit.scope.scope_kind is not request.compiled_input.canonical_input_identity.conversation_scope_kind or permit.epoch_nonce != self.append_candidate.epoch_nonce or (permit.epoch_revision != self.append_candidate.expected_epoch_revision + 1) or (request.prepared_call.transport_timeout_policy_fingerprint != self._transport_timeout_policy_fingerprint)
         ):
             raise RuntimeError("provider-input install permit does not exact-join")
         self._install_authority.consume(
@@ -853,7 +817,7 @@ class DirectKernelModelPort:
         *,
         prepared_target: PreparedKernelModelTarget,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+
         tool_facts: tuple[FrozenToolCapabilityFact, ...],
         retained_direct_inputs: tuple[
             tuple[ToolCapabilityVersionRef, FrozenToolSpec], ...
@@ -862,7 +826,7 @@ class DirectKernelModelPort:
     ) -> FrozenNativeToolWireEligibilitySet:
         return freeze_openai_native_tool_eligibility(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
+
             wire_api=(prepared_target.target.model_profile.route_wire_profile.wire_api),
             tool_facts=tool_facts,
             retained_direct_inputs=retained_direct_inputs,
@@ -874,7 +838,7 @@ class DirectKernelModelPort:
         *,
         prepared_target: PreparedKernelModelTarget,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+
         tool_versions: tuple[ToolCapabilityVersionRef, ...],
         tool_specs: tuple[FrozenToolSpec, ...],
         eligibility: FrozenNativeToolWireEligibilitySet,
@@ -882,7 +846,7 @@ class DirectKernelModelPort:
     ) -> FrozenNativeToolProjectionSet:
         return materialize_openai_native_tool_projection_set(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
+
             wire_api=(prepared_target.target.model_profile.route_wire_profile.wire_api),
             tool_versions=tool_versions,
             tool_specs=tool_specs,
@@ -1076,10 +1040,7 @@ class DirectKernelModelPort:
         if not request.surface_borrow.exactly_joins(prepared.tool_surface):
             raise ValueError("model execution surface borrow does not join preparation")
         if (
-            compiled.canonical_input_identity.conversation_scope_kind
-            is not prepared.tool_surface.access.conversation_scope_kind
-            or compiled.canonical_input_identity.scope_subagent_task_id
-            != prepared.tool_surface.access.scope_subagent_task_id
+            compiled.canonical_input_identity.conversation_scope_kind is not prepared.tool_surface.access.conversation_scope_kind
         ):
             raise ValueError("model execution scope access does not exact-join input")
         # Revalidate the complete advertised binding immediately before any
@@ -1502,12 +1463,7 @@ def freeze_provider_wire_measurement(
     if replay_hydration is not None:
         identity = semantic_input.canonical_input_identity
         if (
-            replay_hydration.scope.session_id != identity.session_id
-            or replay_hydration.scope.scope_kind is not identity.conversation_scope_kind
-            or replay_hydration.scope.scope_subagent_task_id
-            != identity.scope_subagent_task_id
-            or replay_hydration.replay_target_fingerprint
-            != replay_target.replay_target_fingerprint
+            replay_hydration.scope.session_id != identity.session_id or replay_hydration.scope.scope_kind is not identity.conversation_scope_kind or replay_hydration.replay_target_fingerprint != replay_target.replay_target_fingerprint
         ):
             raise ValueError("provider replay hydration does not join wire plan")
     fragment_by_entry = {item.assistant_entry_id: item for item in fragments}

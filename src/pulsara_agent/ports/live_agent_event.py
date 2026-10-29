@@ -1,4 +1,4 @@
-"""Renderer-neutral payload vocabulary for the exact 24 live events.
+"""Renderer-neutral payload vocabulary for the live events.
 
 This module is the final type owner shared by provider adapters, the Runtime
 live bus, hooks, and Protocol v3.  Keeping these values in ``ports`` prevents
@@ -186,10 +186,16 @@ class ToolResultStartPayload:
     block_identity: str
     tool_call_id: str
     attempt_id: str
-    assistant_entry_id: str
+    assistant_entry_id: str | None
+    invocation_id: str | None = None
+    source_exec_attempt_id: str | None = None
 
     def __post_init__(self) -> None:
-        _require_identity(self.block_identity, self.tool_call_id, self.attempt_id, self.assistant_entry_id)
+        _require_identity(self.block_identity, self.tool_call_id, self.attempt_id)
+        if self.assistant_entry_id is None:
+            _require_identity(self.invocation_id, self.source_exec_attempt_id)
+        elif self.source_exec_attempt_id is not None:
+            raise ValueError("model tool result cannot have a code source")
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,19 +320,6 @@ class TerminalMonitorClosedPayload:
         _require_identity(self.monitor_id, self.process_id, self.reason)
 
 
-@dataclass(frozen=True, slots=True)
-class SubagentProgressPayload:
-    task_id: str
-    status: str
-    public_summary: str
-    summary_utf8_bytes: int
-    summary_digest: str
-
-    def __post_init__(self) -> None:
-        _require_identity(self.task_id, self.status, self.summary_digest)
-        _validate_frozen_text(
-            self.public_summary, self.summary_utf8_bytes, self.summary_digest
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,7 +421,6 @@ LivePayload: TypeAlias = (
     | TerminalMonitorOpenedPayload
     | TerminalMonitorObservationPayload
     | TerminalMonitorClosedPayload
-    | SubagentProgressPayload
     | TodoSnapshotUpdatedPayload
 )
 
@@ -482,7 +474,6 @@ __all__ = [
     "LivePayload",
     "ProviderStreamPayload",
     "ReasoningPresentationKind",
-    "SubagentProgressPayload",
     "TodoLiveItemProjection",
     "TodoSnapshotUpdatedPayload",
     "TerminalMonitorClosedPayload",

@@ -74,12 +74,13 @@ def test_renewal_done_callback_uses_the_original_close_attempt(close_failure):
 
         session = SimpleNamespace(
             host_session_id='host:writer-unavailable', session_id='session:writer-unavailable',
-            writer_unavailable=True, aclose=close, _lease=SimpleNamespace(guard=object()),
+            writer_unavailable=True, aclose=close, _lease=SimpleNamespace(guard=object()), root_session_id=None,
         )
         core = object.__new__(KernelHostCore)
         core._lock = asyncio.Lock()
         core._deadlines = KernelExecutionDeadlineFactory()
         core._sessions = {session.host_session_id: session}
+        core._suspended_agent_roots = set()
         core._close_attempts = {}
         core._extension_routes = {}
         core._repository = SimpleNamespace(release_host_writer=lambda *_args, **_kwargs: None)

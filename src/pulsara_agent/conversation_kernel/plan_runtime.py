@@ -370,6 +370,8 @@ class PlanToolBatchCoordinator:
         subject = tool_matcher_subject(prepared.requested_tool_name)
         public_input = PreToolUseInput(
             session_id=self._writer_lease.guard.session_id,
+            session_kind=self._hook_scope.kind.value,
+            input_origin="MODEL_TOOL_CALL",
             cwd=cwd,
             model=model,
             turn_id=turn_id,
@@ -449,6 +451,8 @@ class PlanToolBatchCoordinator:
         )
         public_input = PostToolUseInput(
             session_id=self._writer_lease.guard.session_id,
+            session_kind=self._hook_scope.kind.value,
+            input_origin="MODEL_TOOL_CALL",
             cwd=cwd,
             model=model,
             turn_id=settlement.turn_id,

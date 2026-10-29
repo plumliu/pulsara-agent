@@ -7,7 +7,7 @@ import { LocalScheduledTasksApi } from '../../frontend/lib/scheduled-tasks-api';
 import { promptContentTextProjection } from '../../frontend/lib/prompt-content';
 import { RuntimeApiError } from '../../frontend/lib/runtime-adapter';
 import type { CommandReceipt, LocalPromptSubmission, RuntimeAdapter, RuntimeBootstrap, RuntimeConnection, RuntimeProjection, WorkspaceAvailability } from '../../frontend/lib/runtime-adapter';
-import type { AgentTask, CapabilitySnapshot, ProjectCapabilityMutationResult, SessionSummary, UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
+import type { CapabilitySnapshot, ProjectCapabilityMutationResult, SessionSummary, UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
 
 import PulsaraApp from '../../frontend/app/pulsara-app';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
@@ -1360,10 +1360,6 @@ describe('PulsaraApp', () => {
         id: 'user-steer', turnId: 'turn-one', role: 'user', userKind: 'steer', time: '18:12',
         body: '也检查真实页面。', status: 'waiting',
       }, {
-        id: 'completion-one', turnId: 'turn-one', role: 'user', userKind: 'subagent-completion', time: '18:12',
-        body: '', status: 'completed', sourceSubagentTaskId: 'task-one',
-        sourceSubagentLabel: 'reader', sourceSubagentRelation: 'current',
-      }, {
         id: 'assistant-tool-after-steer', turnId: 'turn-one', role: 'assistant', assistantKind: 'tool-request', forkEligible: false,
         time: '18:12', body: '', status: 'completed',
         reasoning: [{ id: 'reasoning-after-steer', kind: 'full', body: '继续检查真实页面。' }],
@@ -1395,15 +1391,13 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.user-steer')).toHaveLength(1);
     expect(screen.getByText('引导')).toBeTruthy();
     expect(screen.queryByText('你 · 引导')).toBeNull();
-    expect(screen.queryByLabelText('reader 的结果已加入本轮对话')).toBeNull();
     expect(container.querySelectorAll('.assistant-heading')).toHaveLength(2);
     expect(container.querySelectorAll('.assistant-heading--run-start')).toHaveLength(1);
     expect(container.querySelectorAll('.assistant-heading--response')).toHaveLength(1);
     expect(container.querySelectorAll('.conversation-run > .assistant-heading--run-start')).toHaveLength(1);
 
     fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    expect(await screen.findByLabelText('reader 的结果已加入本轮对话')).toBeTruthy();
-    expect(screen.getByText('读取文件')).toBeTruthy();
+    expect(await screen.findByText('读取文件')).toBeTruthy();
     expect(screen.getByRole('button', { name: '展开思考摘要' })).toBeTruthy();
 
     const finalTurn = screen.getByText('检查已经完成。').closest('.assistant-turn--response');
@@ -2089,41 +2083,6 @@ describe('PulsaraApp', () => {
     expect(turns[1].classList.contains('assistant-turn--tool-chain-before')).toBe(true);
     expect(turns[1].classList.contains('assistant-turn--tool-chain-after')).toBe(false);
     expect(turns[2].classList.contains('assistant-turn--tool-chain-before')).toBe(false);
-  });
-
-  it('renders an accepted previous-root subtask completion without implying provider use', async () => {
-    const adapter = new FakeAdapter();
-    adapter.connectionValue = {
-      ...projection(''),
-      canonicalRootTurnIds: ['turn-source', 'turn-target'],
-      agentTasks: [{ id: 'task-internal', parentId: 'turn-source', label: 'reader', role: '研究',
-        objective: '读取结果', dependencyIds: [], status: 'completed', color: 'blue', completionAccepted: true }],
-      messages: [{
-        id: 'accepted-result', turnId: 'turn-target', role: 'user', userKind: 'subagent-completion', time: '18:14',
-        body: '{"status":"accepted","task_id":"internal"}',
-        sourceSubagentTaskId: 'task-internal',
-        sourceSubagentLabel: 'reader',
-        sourceSubagentRelation: 'previous',
-        status: 'completed',
-      }, {
-        id: 'assistant-after-result', turnId: 'turn-target', role: 'assistant', time: '18:15',
-        body: '我会基于子任务结果继续。', status: 'completed',
-      }],
-      isRunning: false,
-      activeTurnId: undefined,
-    };
-
-    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
-    expect(await screen.findByLabelText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
-    expect(screen.getByText('上一轮 reader 的结果已加入本轮对话')).toBeTruthy();
-    expect(screen.queryByRole('tooltip')).toBeNull();
-    fireEvent.mouseEnter(screen.getByRole('article', { name: '上一轮 reader 的结果已加入本轮对话' }));
-    expect(screen.getByRole('tooltip').textContent).toContain('已记录到当前对话');
-    expect(screen.queryByText(/用于当前处理|会结合这项工作的结果/)).toBeNull();
-    expect(screen.queryByText(/"status":"accepted"/)).toBeNull();
-    expect(container.querySelectorAll('.user-heading')).toHaveLength(0);
-    expect(container.querySelectorAll('.conversation-run > .assistant-heading')).toHaveLength(1);
   });
 
   it('defaults builtin raw results off and remembers the settings switch across reloads', async () => {
@@ -3658,327 +3617,6 @@ describe('PulsaraApp', () => {
     expect(adapter.connectCalls).toHaveLength(2);
   });
 
-  it('opens a single worker group from the compact transcript without expanding child details', async () => {
-    const adapter = new FakeAdapter();
-    adapter.connectionValue = {
-      ...projection('正在并行检查。'),
-      messages: [{
-        id: 'assistant-subagents', turnId: 'turn-1',
-        role: 'assistant',
-        assistantKind: 'tool-request',
-        forkEligible: false,
-        time: '现在',
-        body: '正在并行检查。',
-        status: 'completed',
-        traces: [{id:'spawn',kind:'mcp',toolName:'spawn_agent',title:'创建子任务',subtitle:'',status:'running'}],
-      }],
-      taskCreators: { 'task-readme': 'assistant-subagents' },
-      subagentRuns: [{
-          id: 'task-readme', parentId: 'turn-1', batchId: 'batch-1',
-          label: '检查 README',
-          role: '研究',
-          objective: '读取 README.md 并报告一级标题。',
-          status: 'completed',
-          color: 'blue',
-          summary: '# Pulsara',
-          activities: [{
-            id: 'activity-readme',
-            time: '现在',
-            body: '# Pulsara',
-            status: 'completed',
-            traces: [{
-              id: 'trace-readme', kind: 'read', title: '读取文件', subtitle: '已完成',
-              status: 'completed', meta: '操作完成', resultText: '已读取 README.md · 1 行',
-            }],
-          }],
-        }],
-      isRunning: false,
-      activeTurnId: undefined,
-    };
-    adapter.taskInventory = [{id:'task-readme',label:'检查 README',role:'研究',objective:'读取 README.md 并报告一级标题。',status:'completed',color:'blue',parentId:'turn-1',batchId:'batch-1',dependencyIds:[],completionAccepted:true}];
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByRole('heading', { name: '准备发布' });
-    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    const summary = await screen.findByLabelText('任务执行');
-    expect(summary.textContent).not.toContain('读取 README.md 并报告一级标题。');
-    expect(summary.querySelector('.subagent-run__body')).toBeNull();
-    fireEvent.click(within(summary).getByRole('button', { name: '查看任务：检查 README' }));
-    const tab = await screen.findByRole('tab', {name: '检查 README'});
-    expect(tab.getAttribute('aria-selected')).toBe('true');
-    expect(adapter.readSessionTask).toHaveBeenCalledWith(initialSession.id, 'task-readme');
-    await waitFor(() => expect(adapter.listSessionTasks).toHaveBeenCalledWith(initialSession.id, undefined, 'batch-1'));
-    expect(await screen.findByRole('heading', {name:'任务对话'})).toBeTruthy();
-    fireEvent.click(within(summary).getByRole('button', { name: '查看任务：检查 README' }));
-    await waitFor(() => expect(adapter.readSessionTask).toHaveBeenCalledTimes(2));
-    expect(screen.getAllByRole('tab', {name: '检查 README'})).toHaveLength(1);
-  });
-
-  it('keeps the complete durable child-task history inside its session', async () => {
-    const adapter = new FakeAdapter();
-    adapter.connectionValue = {
-      ...projection('主任务继续运行。'),
-      messages: [{
-        id: 'assistant-root', turnId: 'turn-1', role: 'assistant', time: '现在',
-        body: '主任务继续运行。', status: 'running',
-        traces: [{
-          id: 'spawn-task', kind: 'mcp', toolName: 'spawn_agent', title: '创建子任务',
-          subtitle: '已完成', status: 'completed', meta: '操作完成',
-        }],
-      }],
-      isRunning: false,
-      activeTurnId: undefined,
-      agentTasks: [],
-    };
-    adapter.taskInventory = [{
-      id: 'task-complete', label: '汇总研究', role: '研究', profile: 'research_worker',
-      objective: '### 汇总目标\n\n整理可见结果。', status: 'completed',
-      parentId: 'turn-1', batchId: 'batch-1', taskKey: 'research',
-      context: { mode: 'last-n', lastNTurns: 4 }, dependencyIds: [],
-      completionAccepted: false,
-      acceptedAt: '2026-08-30T12:00:00Z', terminalAt: '2026-08-30T12:01:00Z',
-      summary: '### 研究结论\n\n页面符合契约。', color: 'blue',
-      result: {
-        id: 'result-complete', entryId: 'entry-result', summary: '### 研究结论\n\n页面符合契约。',
-        outputPreview: '- 完整输出', diagnostics: [{ message: '目视检查通过' }],
-      },
-    }, {
-      id: 'task-interrupted', label: '中断检查', role: '验证', objective: '验证重启边界。',
-      status: 'interrupted', parentId: 'turn-2', batchId: 'batch-2', dependencyIds: [], color: 'amber',
-      completionAccepted: false,
-    }, {
-      id: 'task-blocked', label: '等待产物', role: '整合', objective: '整合前置产物。',
-      status: 'blocked', parentId: 'turn-1', batchId: 'batch-1', dependencyIds: ['task-interrupted'],
-      dependencies: [{ id: 'task-interrupted', label: '中断检查', status: 'interrupted' }], color: 'violet',
-      completionAccepted: false,
-    }];
-
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByRole('heading', { name: '准备发布' });
-    await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
-
-    expect(screen.queryByRole('tab')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    expect(screen.getByRole('button', { name: '任务' }).classList.contains('is-active')).toBe(true);
-    expect(await screen.findByText(/1 已完成 · 0 进行中 · 1 需留意/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /中断检查/ })).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: /任务组/ }));
-    const dialog = await screen.findByRole('region', { name: /任务组/ });
-    await waitFor(() => expect(adapter.listSessionTasks).toHaveBeenCalledWith(expect.anything(), undefined, 'batch-1'));
-    expect(within(dialog).getByRole('button', { name: /等待产物/ })).toBeTruthy();
-    fireEvent.click(within(dialog).getByRole('button', { name: /汇总研究/ }));
-    const taskConversation = dialog.querySelector('.task-conversation');
-    expect(taskConversation).toBeTruthy();
-    expect(within(taskConversation as HTMLElement).getByText('主 Agent')).toBeTruthy();
-    expect(taskConversation?.querySelectorAll('.user-turn')).toHaveLength(1);
-    expect(taskConversation?.querySelector('.user-turn')?.textContent).toContain('### 汇总目标\n\n整理可见结果。');
-    expect(within(dialog).queryByRole('heading', { name: '汇总目标' })).toBeNull();
-    expect(screen.getByRole('heading', { name: '研究结论' })).toBeTruthy();
-    expect(within(dialog).getByText('目视检查通过')).toBeTruthy();
-
-    expect(within(dialog).queryByText('结果尚未加入主对话。')).toBeNull();
-    expect(within(dialog).queryByRole('button', { name: '用这份结果继续' })).toBeNull();
-    expect(within(dialog).queryByText(/不会重新运行子任务/)).toBeNull();
-    fireEvent.click(within(dialog).getByRole('button', { name: '其他任务组依赖来源：中断检查' }));
-    const detail = await screen.findByRole('complementary', { name: '中断检查 详情' });
-    expect(within(detail).getByText('验证重启边界。')).toBeTruthy();
-    expect(adapter.readSessionTask).toHaveBeenCalledWith('session:bwpogagzox7onyn52iumyctnkq', 'task-interrupted');
-    const reads = adapter.readSessionTask.mock.calls.length;
-    const activityReads = adapter.listSessionTaskActivities.mock.calls.length;
-    const background = vi.spyOn(adapter.lastConnection!, 'listBackgroundProcesses');
-    await act(async () => {
-      const current = adapter.lastConnection!.current();
-      adapter.lastConnection!.emit({ ...current, messages: current.messages.map(message => ({ ...message, body: '新的实时内容' })) });
-    });
-    expect(adapter.readSessionTask).toHaveBeenCalledTimes(reads);
-    expect(adapter.listSessionTaskActivities).toHaveBeenCalledTimes(activityReads);
-    expect(background).not.toHaveBeenCalled();
-  });
-
-  it('shows exact cross-group worker live activity without making its observations task authority', async () => {
-    const adapter = new FakeAdapter();
-    const source: AgentTask = { id: 'source', label: '事实核对', role: '研究', objective: '检查事实', status: 'running', batchId: 'prior',
-      parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' };
-    adapter.taskInventory = [source, { ...source, id: 'follow', label: '综合审阅', status: 'waiting', batchId: 'next',
-      dependencyIds: ['source'], dependencies: [{ id: 'source', label: '事实核对', status: 'running' }] }];
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await screen.findByRole('heading', { name: '准备发布' });
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    fireEvent.click(await screen.findByRole('button', { name: /综合审阅/ }));
-    fireEvent.click(await screen.findByRole('button', { name: '其他任务组依赖来源：事实核对' }));
-    const detail = await screen.findByRole('complementary', { name: '事实核对 详情' });
-    await waitFor(() => expect(adapter.listSessionTaskActivities).toHaveBeenLastCalledWith(
-      'session:bwpogagzox7onyn52iumyctnkq', 'source', undefined,
-    ));
-    const reads = adapter.readSessionTask.mock.calls.length;
-    const activityReads = adapter.listSessionTaskActivities.mock.calls.length;
-    const emitWorker = async () => { await act(async () => {
-      const current = adapter.lastConnection!.current();
-      adapter.lastConnection!.emit({ ...current, subagentRuns: [{ ...source, activities: [{
-        id: 'live:worker-entry', kind: 'work', body: '跨组 worker 正在核对资料', time: '现在', status: 'running',
-        traces: [{ id: 'worker-read', kind: 'read', title: '读取产品事实', subtitle: '正在读取', toolName: 'read_file', status: 'running' }],
-      }] }] });
-    }); };
-    await emitWorker();
-    expect(await within(detail).findByText('跨组 worker 正在核对资料')).toBeTruthy();
-    expect(within(detail).getByText('读取文件')).toBeTruthy();
-    expect(adapter.readSessionTask).toHaveBeenCalledTimes(reads);
-    expect(adapter.listSessionTaskActivities).toHaveBeenCalledTimes(activityReads);
-    fireEvent.click(screen.getByRole('button', { name: '关闭 综合审阅' }));
-    adapter.taskInventory[0] = { ...source, status: 'completed' };
-    fireEvent.click(screen.getByRole('button', { name: /综合审阅/ }));
-    fireEvent.click(await screen.findByRole('button', { name: '其他任务组依赖来源：事实核对' }));
-    const completedDetail = await screen.findByRole('complementary', { name: '事实核对 详情' });
-    await emitWorker();
-    expect(within(completedDetail).getByText('已完成')).toBeTruthy();
-    expect(within(completedDetail).queryByText('跨组 worker 正在核对资料')).toBeNull();
-  });
-
-  it('keeps a newer group page when the initial page returns late', async () => {
-    const adapter = new FakeAdapter();
-    const oldTask: AgentTask = {
-      id: 'task-race', batchId: 'batch-race', label: '旧状态任务', role: '通用协作',
-      objective: '检查页读取水位', status: 'running', parentId: 'turn-1',
-      dependencyIds: [], completionAccepted: false, color: 'blue',
-    };
-    const newTask: AgentTask = { ...oldTask, label: '更新后任务', status: 'completed' };
-    adapter.taskInventory = [oldTask];
-    const counts = (completed: number) => ({
-      pending: 0, active: 1 - completed, waiting: 0, completed,
-      cancelled: 0, failed: 0, interrupted: 0, blocked: 0,
-    });
-    const oldPage = deferred<Awaited<ReturnType<typeof adapter.listSessionTaskGroups>>>();
-    adapter.taskInventory = [newTask];
-    adapter.listSessionTasks.mockResolvedValue({ tasks: [newTask], readEventSequence: 110, totalCount: 1, remainingCount: 0 });
-    adapter.listSessionTaskGroups.mockResolvedValue({ groups: [{ id: 'batch-race', parentTurnId: 'turn-1', firstAcceptedAt: '', taskCount: 1, statusCounts: counts(1), singleTaskLabel: '更新后任务' }], readEventSequence: 110, totalCount: 1, remainingCount: 0 });
-    adapter.listSessionTaskGroups.mockImplementationOnce(() => oldPage.promise);
-    adapter.readSessionTaskGroup.mockResolvedValue({
-      group: { id: 'batch-race', parentTurnId: 'turn-1', firstAcceptedAt: '',
-        taskCount: 1, statusCounts: counts(1), singleTaskLabel: '更新后任务' },
-      readEventSequence: 110, totalCount: 1,
-    });
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
-    await act(async () => adapter.lastConnection?.emit({
-      ...projection(''), eventSequence: 110, taskInvalidations: ['task-race'], taskGroupInvalidations: ['batch-race'],
-    }));
-    await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalledTimes(2));
-    expect(adapter.readSessionTask).not.toHaveBeenCalled();
-    await act(async () => oldPage.resolve({
-      groups: [{ id: 'batch-race', parentTurnId: 'turn-1', firstAcceptedAt: '',
-        taskCount: 1, statusCounts: counts(0), singleTaskLabel: '旧状态任务' }],
-      totalCount: 1, readEventSequence: 100, remainingCount: 0,
-    }));
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    expect(await screen.findByRole('button', { name: /更新后任务/ })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /旧状态任务/ })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /更新后任务/ }));
-    const dialog = await screen.findByRole('region', { name: '更新后任务' });
-    expect(within(dialog).getByRole('button', { name: /更新后任务.*已完成/ })).toBeTruthy();
-  });
-  it('refreshes an open group after a same-connection snapshot and releases its rows on close', async () => {
-    const adapter = new FakeAdapter();
-    const oldTask: AgentTask = { id: 'snapshot-task', batchId: 'snapshot-batch', label: '快照任务', role: '通用协作', objective: 'inspect', status: 'running', parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' };
-    adapter.taskInventory = [oldTask];
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    fireEvent.click(await screen.findByRole('button', { name: /快照任务/ }));
-    let dialog = await screen.findByRole('region', { name: '快照任务' });
-    expect(within(dialog).getByRole('button', { name: /快照任务.*进行中/ })).toBeTruthy();
-    adapter.taskInventory = [{ ...oldTask, status: 'completed' }];
-    await act(async () => adapter.lastConnection?.emit({ ...projection(''), eventSequence: 120, taskSnapshotRevision: 2 }));
-    await waitFor(() => expect(within(dialog).getByRole('button', { name: /快照任务.*已完成/ })).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: '关闭 快照任务' }));
-    await waitFor(() => expect(screen.queryByRole('region', { name: '快照任务' })).toBeNull());
-    const reads = adapter.listSessionTasks.mock.calls.length;
-    await act(async () => adapter.lastConnection?.emit({ ...projection(''), eventSequence: 121, taskSnapshotRevision: 2, taskInvalidations: ['snapshot-task'], taskGroupInvalidations: ['snapshot-batch', 'snapshot-batch'] }));
-    await waitFor(() => expect(adapter.readSessionTaskGroup).toHaveBeenCalled());
-    expect(adapter.listSessionTasks.mock.calls.length).toBe(reads);
-    expect(adapter.readSessionTask).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: /快照任务/ }));
-    dialog = await screen.findByRole('region', { name: '快照任务' });
-    expect(adapter.listSessionTasks.mock.calls.length).toBe(reads + 1);
-  });
-
-  it('does not let an older exact group read roll back the overview total', async () => {
-    const adapter = new FakeAdapter();
-    adapter.taskInventory = [{ id: 'a', batchId: 'batch-a', label: '总数检查', role: '通用协作', objective: 'read', status: 'running', parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' }];
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    await screen.findByRole('button', { name: /总数检查/ });
-    const base = await adapter.readSessionTaskGroup('session:bwpogagzox7onyn52iumyctnkq', 'batch-a');
-    const delayed = deferred<typeof base>();
-    adapter.readSessionTaskGroup.mockImplementationOnce(() => delayed.promise);
-    await act(async () => adapter.lastConnection?.emit({ ...projection(''), eventSequence: 110, taskGroupInvalidations: ['batch-a'] }));
-    adapter.readSessionTaskGroup.mockResolvedValue({ ...base, totalCount: 2, readEventSequence: 120 });
-    await act(async () => adapter.lastConnection?.emit({ ...projection(''), eventSequence: 120, taskGroupInvalidations: ['batch-a'] }));
-    await screen.findByRole('button', { name: '加载更多任务组' });
-    await act(async () => delayed.resolve({ ...base, totalCount: 1, readEventSequence: 110 }));
-    expect(screen.getByRole('button', { name: '加载更多任务组' })).toBeTruthy();
-  });
-
-  it('refreshes the open group when an external dependency changes without its own transition', async () => {
-    const adapter = new FakeAdapter();
-    adapter.taskInventory = [
-      { id: 'a', batchId: 'batch-a', label: '前置 A', role: '通用协作', objective: 'read', status: 'running', parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' },
-      { id: 'b', batchId: 'batch-b', label: '等待两个来源', role: '通用协作', objective: 'read', status: 'waiting', parentId: 'turn-1', dependencyIds: ['a', 'c'], completionAccepted: false, color: 'blue' },
-    ];
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    fireEvent.click(await screen.findByRole('button', { name: /等待两个来源/ }));
-    await screen.findByRole('region', { name: '等待两个来源' });
-    const reads = adapter.listSessionTasks.mock.calls.length;
-    await act(async () => adapter.lastConnection?.emit({ ...projection(''), eventSequence: 130, taskInvalidations: ['a'], taskGroupInvalidations: ['batch-a'] }));
-    await waitFor(() => expect(adapter.listSessionTasks.mock.calls.length).toBe(reads + 1));
-    expect(adapter.listSessionTasks).toHaveBeenLastCalledWith('session:bwpogagzox7onyn52iumyctnkq', undefined, 'batch-b');
-  });
-
-  it('coalesces repeated more-page clicks and rejects a page from an old snapshot owner', async () => {
-    const adapter = new FakeAdapter();
-    const group = (id: string) => ({id, parentTurnId:'turn-1', firstAcceptedAt:'',taskCount:1,singleTaskLabel:id,statusCounts:{pending:1,active:0,waiting:0,completed:0,cancelled:0,failed:0,interrupted:0,blocked:0}});
-    const delayed = deferred<Awaited<ReturnType<typeof adapter.listSessionTaskGroups>>>();
-    const fresh = {...group('old-first'), singleTaskLabel:'fresh'};
-    adapter.listSessionTaskGroups.mockResolvedValue({groups:[fresh],totalCount:1,remainingCount:0,readEventSequence:120});
-    adapter.readSessionTaskGroup.mockResolvedValue({group:fresh,totalCount:1,readEventSequence:120});
-    adapter.listSessionTaskGroups.mockResolvedValueOnce({groups:[group('old-first')],totalCount:2,remainingCount:1,nextCursor:'old-cursor',readEventSequence:100});
-    adapter.listSessionTaskGroups.mockImplementationOnce(()=>delayed.promise);
-    renderWorkbench(<PulsaraApp adapter={adapter}/>);
-    fireEvent.click(await screen.findByRole('button',{name:'任务'}));
-    const more = await screen.findByRole('button',{name:'加载更多任务组'});
-    fireEvent.click(more);
-    fireEvent.click(more);
-    expect(adapter.listSessionTaskGroups).toHaveBeenCalledTimes(2);
-    await act(async()=>adapter.lastConnection?.emit({...projection(''),eventSequence:120,taskSnapshotRevision:2}));
-    await screen.findByRole('button',{name:/fresh/});
-    await act(async()=>delayed.resolve({groups:[group('old-delayed')],totalCount:3,remainingCount:1,nextCursor:'another-old-cursor',readEventSequence:110}));
-    expect(screen.queryByRole('button',{name:/old-delayed/})).toBeNull();
-    expect(screen.queryByRole('button',{name:'加载更多任务组'})).toBeNull();
-  });
-
-  it('keeps newly appended groups reachable after exhausting more than one page', async () => {
-    const adapter = new FakeAdapter();
-    const group = (index: number) => ({ id: `batch-${index}`, parentTurnId: 'turn-1', firstAcceptedAt: '', taskCount: 1, singleTaskLabel: `分组 ${index}`, statusCounts: {pending: 1, active: 0, waiting: 0, completed: 0, cancelled: 0, failed: 0, interrupted: 0, blocked: 0} });
-    let count = 64;
-    adapter.listSessionTaskGroups.mockImplementation(async (_sessionId, cursor) => ({
-      groups: Array.from({length: cursor ? count - 50 : 50}, (_, i) => group(i + (cursor ? 50 : 0))),
-      totalCount: count, readEventSequence: count, remainingCount: cursor ? 0 : count - 50,
-      nextCursor: cursor ? undefined : 'after-49',
-    }));
-    renderWorkbench(<PulsaraApp adapter={adapter} />);
-    await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    fireEvent.click(await screen.findByRole('button', { name: '加载更多任务组' }));
-    await screen.findByRole('button', { name: /分组 63/ });
-    expect(screen.queryByRole('button', { name: '加载更多任务组' })).toBeNull();
-    count = 65;
-    await act(async () => adapter.lastConnection?.emit({ ...projection(''), eventSequence: 65, taskGroupInvalidations: ['batch-64'] }));
-    expect(await screen.findByRole('button', { name: /分组 64/ })).toBeTruthy();
-    expect(adapter.listSessionTaskGroups).toHaveBeenLastCalledWith('session:bwpogagzox7onyn52iumyctnkq', 'after-49');
-    expect(adapter.readSessionTask).not.toHaveBeenCalled();
-  });
-
 });
 
 describe('PR04 atomic queue action ownership', () => {
@@ -4570,20 +4208,6 @@ describe('explicit runtime reopen owner', () => {
   });
 });
 
-it('loads existing task groups for a cold history view without opening a runtime', async () => {
-  const { CanonicalHistoryView } = await import('../../frontend/lib/runtime-adapter');
-  const adapter = new FakeAdapter();
-  const history = new CanonicalHistoryView('session:bwpogagzox7onyn52iumyctnkq', {outcome:'MISSING', path:'/tmp/project'},
-    {session_id:'session:bwpogagzox7onyn52iumyctnkq', entries:[], control:{}, event_sequence_cut:'0'});
-  vi.spyOn(adapter, 'connect').mockResolvedValue(history);
-  vi.spyOn(adapter, 'workspaceAvailability').mockResolvedValue({outcome:'MISSING', path:'/tmp/project'});
-  renderWorkbench(<PulsaraApp adapter={adapter} />);
-  expect(await screen.findByText('工作目录已丢失')).toBeTruthy();
-  await waitFor(() => expect(adapter.listSessionTaskGroups).toHaveBeenCalledWith('session:bwpogagzox7onyn52iumyctnkq', undefined));
-  expect(adapter.lastConnection).toBeUndefined();
-  expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
-});
-
 
 it('opens the unique ACTIVE schedule from the session header and hides the alarm after it pauses', async () => {
   const task = { id: 'scheduled:header', session_id: initialSession.id, name: '会话活跃计划', prompt: '检查进展', status: 'ACTIVE' as const, revision: 1,
@@ -4801,30 +4425,6 @@ it('retries only initial context from the opening error page and keeps the retur
   expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
   expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('恢复后保留的草稿');
   expect(adapter.connectCalls).toHaveLength(connects);
-});
-
-it('keeps independently opened group memberships and releases only the closed group', async () => {
-  const adapter = new FakeAdapter();
-  const base: AgentTask = { id: 'independent-a', batchId: 'batch-independent-a', label: '组甲', role: '研究', objective: '检查甲', status: 'running', parentId: 'turn-1', dependencyIds: [], completionAccepted: false, color: 'blue' };
-  adapter.taskInventory = [base, { ...base, id: 'independent-b', batchId: 'batch-independent-b', label: '组乙', objective: '检查乙' }];
-  renderWorkbench(<PulsaraApp adapter={adapter} />);
-  await screen.findByRole('heading', { name: '准备发布' });
-  fireEvent.click(screen.getByRole('button', { name: '任务' }));
-  fireEvent.click(await screen.findByRole('button', { name: /组甲/ }));
-  await screen.findByRole('region', { name: '组甲' });
-  fireEvent.click(screen.getByRole('tab', { name: '任务', exact: true }));
-  fireEvent.click(await screen.findByRole('button', { name: /组乙/ }));
-  await screen.findByRole('region', { name: '组乙' });
-  const aReads = adapter.listSessionTasks.mock.calls.filter(call => call[2] === 'batch-independent-a').length;
-  fireEvent.click(screen.getByRole('tab', { name: '组甲' }));
-  await screen.findByRole('region', { name: '组甲' });
-  expect(adapter.listSessionTasks.mock.calls.filter(call => call[2] === 'batch-independent-a')).toHaveLength(aReads);
-  fireEvent.click(screen.getByRole('button', { name: '关闭 组乙' }));
-  expect(screen.getByRole('region', { name: '组甲' })).toBeTruthy();
-  adapter.taskInventory[0] = { ...base, status: 'completed' };
-  await act(async () => adapter.lastConnection?.emit({ ...projection(''), eventSequence: 124, taskGroupInvalidations: ['batch-independent-a'] }));
-  await waitFor(() => expect(within(screen.getByRole('region', { name: '组甲' })).getByRole('button', { name: /组甲.*已完成/ })).toBeTruthy());
-  expect(screen.queryByRole('tab', { name: '组乙' })).toBeNull();
 });
 
 

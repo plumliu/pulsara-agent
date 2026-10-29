@@ -59,9 +59,7 @@ class FrozenRetainedSkillContextItem:
     catalog_location: str
     body: str = field(repr=False)
     delivery_sequence: int
-    evidence_source_entry_fingerprint: str | None = field(
-        default=None, repr=False
-    )
+    evidence_source_entry_fingerprint: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -125,10 +123,9 @@ def freeze_retained_skill_context(
     if predecessor_epoch is None:
         return _selection((), estimator)
     identity = canonical_read.dispatch_read.compile_snapshot.canonical_input.identity
-    if predecessor_epoch.scope.session_id != identity.session_id or (
-        predecessor_epoch.scope.scope_kind is not identity.conversation_scope_kind
-        or predecessor_epoch.scope.scope_subagent_task_id
-        != identity.scope_subagent_task_id
+    if (
+        predecessor_epoch.scope.session_id != identity.session_id
+        or predecessor_epoch.scope.scope_kind is not identity.conversation_scope_kind
     ):
         raise ValueError("retained Skill predecessor belongs to another scope")
 
@@ -189,7 +186,11 @@ def freeze_retained_skill_context(
         if item.tool_request_entry_id != call[0].source_entry_id:
             continue
         target = call[2].get("target")
-        path = target.get("path") if isinstance(target, dict) and target.get("kind") == "PATH" else None
+        path = (
+            target.get("path")
+            if isinstance(target, dict) and target.get("kind") == "PATH"
+            else None
+        )
         offset = call[2].get("offset", 1)
         if not isinstance(path, str) or offset != 1:
             continue
@@ -335,9 +336,9 @@ def _assistant_request_message_ordinal(
         predecessor.messages, predecessor.message_placements, strict=True
     ):
         if (
-            (placement.origin_entry_id, placement.origin_item_fingerprint) == key
-            and any(call.id == tool_call_id for call in message.tool_calls)
-        ):
+            placement.origin_entry_id,
+            placement.origin_item_fingerprint,
+        ) == key and any(call.id == tool_call_id for call in message.tool_calls):
             matches.append(placement.message_ordinal)
     return matches[0] if len(matches) == 1 else None
 
@@ -427,15 +428,19 @@ def _exact_historical_read(
         "truncated",
         "content",
     }
-    if not required.issubset(payload) or not (
-        set(payload) - required
-    ).issubset({"had_utf8_bom", "_hint", "_warning"}):
+    if not required.issubset(payload) or not (set(payload) - required).issubset(
+        {"had_utf8_bom", "_hint", "_warning"}
+    ):
         return None
     target = payload.get("target")
     revision = payload.get("content_revision")
-    if (not isinstance(target, dict) or set(target) != {"kind", "path"}
-        or target.get("kind") != "PATH" or not isinstance(revision, str)
-        or re.fullmatch(REVISION_PATTERN, revision) is None):
+    if (
+        not isinstance(target, dict)
+        or set(target) != {"kind", "path"}
+        or target.get("kind") != "PATH"
+        or not isinstance(revision, str)
+        or re.fullmatch(REVISION_PATTERN, revision) is None
+    ):
         return None
     content = payload.get("content")
     total_lines = payload.get("total_lines")
@@ -584,8 +589,7 @@ def remove_full_tail_duplicates(
     retained = tuple(
         item
         for item in selection.ordered_items
-        if item.evidence_source_entry_fingerprint
-        not in full_source_entry_fingerprints
+        if item.evidence_source_entry_fingerprint not in full_source_entry_fingerprints
     )
     if retained == selection.ordered_items:
         return selection
@@ -661,8 +665,7 @@ def _installed_observation_fingerprint(message: LLMMessage) -> str:
                 # the superseded semantic-thinking DTO slot.
                 "thinking": (),
                 "tool_calls": tuple(
-                    (call.id, call.name, call.arguments)
-                    for call in message.tool_calls
+                    (call.id, call.name, call.arguments) for call in message.tool_calls
                 ),
                 "tool_call_id": message.tool_call_id,
                 "name": message.name,

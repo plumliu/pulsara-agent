@@ -1,10 +1,10 @@
 # Pulsara：Subagent／Work 与双入口编排设计
 
-日期：2026-10-28。状态：冻结候选；产品语义、接口与实施边界已整理，生产尚未实施。
+日期：2026-10-29。状态：本轮协作运行时已实施；实际验收与未覆盖边界见 §9，暂缓表面仍按配套范围执行。
 
 本轮提示词、profile 文案、Skill 与前端暂缓范围，以及 Code Mode 工具 schema 首版要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
-本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施基线。示例表示目标接口，不表示生产已经支持。
+本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施合同；示例中的 ID 仍须替换为运行时真实返回值。
 
 ## 1. 核心语义
 
@@ -854,7 +854,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 
 ### SUPERSEDES 范围
 
-本文作为本轮接口讨论基线，替代旧方案中以下产品表述；不宣称对应代码已经变更。
+本文为本轮协作运行时的实施合同，替代旧方案中以下产品表述。实施及实际验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)。
 
 | 来源 | 本文负责的新语义 |
 |---|---|
@@ -891,4 +891,4 @@ Agent 使用 session 身份及 `root_session_id` 归属；委派来源、profile
 
 能力验收覆盖 §1.5 的四种变化：手动配置与插件 MCP 使用同一提供范围设置；每个受影响的活动 session 收到相应观察；禁用后阻止新调用，同 epoch 已安装 schema 保持不变；能力查询不扩大原生管理工具权限。
 
-调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本次仅修订规格；上述生产行为仍须在实现中验证。
+前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界，提示词、profile 正文、Skill 教学和新的前端表面仍按暂缓范围处理。

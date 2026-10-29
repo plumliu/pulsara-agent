@@ -345,6 +345,10 @@ def _delete_orphans_in_connection(
                   WHERE v.blob_id = b.id
               )
               AND NOT EXISTS (
+                  SELECT 1 FROM pulsara_v3.tool_execution_attempts AS a
+                  WHERE a.code_source_blob_id = b.id
+              )
+              AND NOT EXISTS (
                   SELECT 1 FROM pulsara_v3.tool_results AS r
                   WHERE r.output_artifact_blob_id = b.id
               )

@@ -91,7 +91,6 @@ def _require_bounded_planner_framing(
 def freeze_capability_registration_set(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     builtin_registration: FrozenCapabilitySourceRegistration,
     mcp_registrations: tuple[FrozenCapabilitySourceRegistration, ...],
     local_skill_catalog_registration: FrozenCapabilitySourceRegistration,
@@ -109,7 +108,6 @@ def freeze_capability_registration_set(
     )
     return FrozenCapabilitySourceRegistrationSet(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         builtin_registration=builtin_registration,
         mcp_registrations=ordered_mcp,
         local_skill_catalog_registration=local_skill_catalog_registration,
@@ -167,7 +165,6 @@ def freeze_tool_planning_input(
 def freeze_capability_dispatch_cut_and_views(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     registry: FrozenCapabilityRegistrySnapshot,
     tools: FrozenToolCapabilityPlanningInput,
     skills: FrozenSkillProjectionInput,
@@ -179,11 +176,8 @@ def freeze_capability_dispatch_cut_and_views(
     registration_set = registry.registration_set
     if (
         registration_set.conversation_scope_kind is not conversation_scope_kind
-        or registration_set.scope_subagent_task_id != scope_subagent_task_id
         or tools.native_wire.conversation_scope_kind is not conversation_scope_kind
-        or tools.native_wire.scope_subagent_task_id != scope_subagent_task_id
         or tools.mcp.conversation_scope_kind is not conversation_scope_kind
-        or tools.mcp.scope_subagent_task_id != scope_subagent_task_id
     ):
         raise ValueError("capability dispatch cut scope conflicts")
 
@@ -262,7 +256,6 @@ def freeze_capability_dispatch_cut_and_views(
 
     parent = FrozenCapabilityDispatchCut(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         registry=registry,
         tools=tools,
         skills=skills,

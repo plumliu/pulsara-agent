@@ -37,9 +37,7 @@ from pulsara_agent.llm.provider_replay import (
 )
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    FrozenSubagentResultPublicFact,
-)
+
 from pulsara_agent.conversation_kernel.visualization import FrozenVisualizationOccurrence
 
 
@@ -72,9 +70,7 @@ class PreparedAssistantMessageSettlement:
     provider_replay_reservation: (
         ProcessLocalAssistantReplayFragmentReservation | None
     ) = field(default=None, repr=False, compare=False)
-    subagent_result: FrozenSubagentResultPublicFact | None = field(
-        default=None, repr=False
-    )
+
 
     def __post_init__(self) -> None:
         if (
@@ -104,15 +100,7 @@ class PreparedAssistantMessageSettlement:
                 or reservation.fragment != self.provider_replay.fragment()
             ):
                 raise ValueError("assistant replay reservation does not exact-join")
-        if self.subagent_result is not None and (
-            not self.complete_turn
-            or self.continuity_scope.scope_kind.value != "SUBAGENT_TASK"
-            or self.continuity_scope.scope_subagent_task_id
-            != self.subagent_result.task_id
-            or self.subagent_result.producer_entry_id != self.entry_id
-            or self.subagent_result.source.value != "INFERRED"
-        ):
-            raise ValueError("inferred subagent result does not exact-join assistant")
+
 
 
 @dataclass(slots=True)
@@ -272,7 +260,6 @@ class AssistantMessageSettlementOwner:
                         blocks=candidate.blocks,
                         visualizations=candidate.visualizations,
                         provider_replay=candidate.provider_replay,
-                        subagent_result=candidate.subagent_result,
                         complete_turn=candidate.complete_turn,
                         occurred_at=candidate.occurred_at,
                         actor_id=candidate.actor_id,
@@ -294,8 +281,7 @@ class AssistantMessageSettlementOwner:
                             blocks=candidate.blocks,
                             visualizations=candidate.visualizations,
                             provider_replay=candidate.provider_replay,
-                            subagent_result=candidate.subagent_result,
-                            complete_turn=candidate.complete_turn,
+                                complete_turn=candidate.complete_turn,
                             occurred_at=candidate.occurred_at,
                             actor_id=candidate.actor_id,
                             deadline_monotonic=self._deadline(),

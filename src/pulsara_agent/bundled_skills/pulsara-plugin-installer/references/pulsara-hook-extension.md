@@ -82,8 +82,6 @@ PermissionRequest
 PostToolUse
 PreCompact
 PostCompact
-SubagentStart
-SubagentStop
 Stop
 ```
 
@@ -101,7 +99,6 @@ Matcher subjects are fixed:
 | `UserPromptSubmit` | matcher ignored; always selected |
 | tool lifecycle events | frozen tool identity and closed aliases below |
 | `PreCompact`, `PostCompact` | `manual` or `auto` |
-| `SubagentStart`, `SubagentStop` | exact existing worker-profile selector |
 | `Stop` | matcher ignored; always selected |
 
 The existing worker-profile matcher values are exactly. They select an existing
@@ -128,8 +125,6 @@ Important tool aliases and public names are:
 | `read_file` | `read_file`, `Read` | `read_file` |
 | `search_content` | `search_content`, `Grep` | `search_content` |
 | `find_files` | `find_files`, `Glob` | `find_files` |
-| `spawn_agent` | `spawn_agent`, `Agent` | `spawn_agent` |
-| `create_agent_tasks` | `create_agent_tasks` | `create_agent_tasks` |
 | MCP tool | exact provider-qualified remote identity | same identity |
 
 Other builtins use their exact Pulsara descriptor name. `edit_file` and
@@ -177,8 +172,6 @@ Event-specific fields are:
 | `PermissionRequest` | `turn_id`, `tool_name`, `tool_input`, `permission_mode` |
 | `PostToolUse` | `turn_id`, `tool_name`, `tool_use_id`, `tool_input`, public `tool_response`, `permission_mode` |
 | `PreCompact`, `PostCompact` | `turn_id`, `trigger` |
-| `SubagentStart` | `turn_id`, `agent_id`, `agent_type`, `permission_mode` |
-| `SubagentStop` | `turn_id`, `agent_id`, `agent_type`, `agent_transcript_path: null`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
 | `Stop` | `turn_id`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
 
 `permission_mode` is one of `default`, `acceptEdits`, `plan`, `dontAsk`, or
@@ -230,8 +223,7 @@ The supported behavior is:
 | `PermissionRequest` | hook-specific decision object with `behavior:"allow"|"deny"` and optional message |
 | `PostToolUse` | hook-specific additional context only; result rewrite or suppression is forbidden |
 | `PreCompact`, `PostCompact` | `continue:false` blocks; other stdout is diagnostic |
-| `SubagentStart` | plain or hook-specific additional context; root `continue` is ignored |
-| `SubagentStop`, `Stop` | exit 2 or legacy block requests at most one continuation; `continue:false` terminalizes |
+| `Stop` | exit 2 or legacy block requests at most one continuation; `continue:false` terminalizes |
 
 JSON `hookSpecificOutput.hookEventName` must equal the current event. PreTool does
 not support `allow` or `ask`; only `PermissionRequest` can explicitly allow.
@@ -240,8 +232,7 @@ fields, and output suppression have no target. `suppressOutput:true` is invalid.
 PostTool exit 2 does not replace or hide its already-settled result.
 
 An asynchronous handler cannot emit any control-vocabulary field. Plain async
-stdout is context only for `SessionStart`, `UserPromptSubmit`, and
-`SubagentStart`; otherwise it is diagnostic. Do not convert a vendor background
+stdout is context only for `SessionStart` and `UserPromptSubmit`; otherwise it is diagnostic. Do not convert a vendor background
 Hook whose correctness depends on blocking, permission, continuation, ordering,
 or durable completion.
 

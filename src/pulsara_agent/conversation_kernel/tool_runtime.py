@@ -74,7 +74,7 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.mcp_config import McpServerConfig
-from pulsara_agent.ports.artifact import ToolArtifactReadPort
+from pulsara_agent.ports.artifact import ToolArtifactReadPort, ToolResultDisplayKind
 from pulsara_agent.ports.terminal import (
     TerminalMonitorRegisterInput,
     parse_terminal_input,
@@ -88,6 +88,7 @@ from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
     ToolOutputSourceFormatHint,
+    encode_tool_public_json,
 )
 from pulsara_agent.ports.tool_registry import (
     tool_binding_contract_identity_fingerprint,
@@ -220,6 +221,7 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     ToolDispatchDecisionKind,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
+    CodeModeToolDirectory,
     BuiltinExecutionPolicyRef,
     DirectToolAccessLeaf,
     McpEffectKind,
@@ -274,6 +276,7 @@ from pulsara_agent.capability.source_query import (
 )
 from .mcp.meta import (
     McpToolRefCapacityExceeded,
+    McpToolRefConsumerKind,
     NewMcpToolRef,
     PreparedNewMcpToolRefSettlement,
     ProcessLocalNewMcpToolRefOwner,
@@ -407,7 +410,7 @@ class KernelSubagentToolPort(Protocol):
         invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult: ...
 
-    async def freeze_compaction_handoff(self) -> tuple[dict[str, str], ...]: ...
+    async def freeze_compaction_handoff(self) -> tuple[dict[str, object], ...]: ...
 
 
 class KernelMemoryToolPort(Protocol):
@@ -651,7 +654,6 @@ class _PendingMcpConfirmationAdmission:
     generation: int
     executor: McpBoundToolExecutor
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     turn_id: str
     tool_call_id: str
 
@@ -659,7 +661,6 @@ class _PendingMcpConfirmationAdmission:
 @dataclass(frozen=True, slots=True)
 class _InstalledBorrowEpoch:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     epoch_nonce: str
     epoch_revision: int
 
@@ -669,6 +670,12 @@ class _PreparedMcpMetaInvocation:
     executor: McpBoundToolExecutor
     ref: NewMcpToolRef
     arguments: FrozenJsonObjectFact
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeModeObservationSettlement:
+    owner: object
+    observation: object
 
 
 class DirectKernelToolPort:
@@ -691,6 +698,7 @@ class DirectKernelToolPort:
         image_validator: HostPromptImageValidator | None = None,
         scheduled_tasks=None,
         session_content_query=None,
+        shared_terminal_owner: "DirectKernelToolPort | None" = None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
         frozen_user_home = user_home_resolution or resolve_user_home()
@@ -706,18 +714,23 @@ class DirectKernelToolPort:
         self._image_validator = image_validator
         self._image_reference_read_port = image_reference_read_port
         self._visualization_screenshots = VisualizationScreenshotOwner()
-        self._terminal = TerminalManager(
-            workspace_root=root,
-            completion_subscriber=self._terminal_process_completed,
-        )
-        self._terminal.activate_owner(host_owner_id)
-        self._terminal_monitor = TerminalMonitorCoordinator(
-            session_id=session_id,
-            owner_epoch=host_owner_id,
-            registry=self._terminal.process_registry,
-            live_bus=live_bus,
-            wake_scheduler=terminal_monitor_wake_scheduler or (lambda: None),
-        )
+        self._owns_terminal = shared_terminal_owner is None
+        self._terminal_owner_id = host_owner_id if shared_terminal_owner is None else shared_terminal_owner._terminal_owner_id
+        if shared_terminal_owner is None:
+            self._terminal_live_buses = {session_id: live_bus}
+            self._terminal = TerminalManager(workspace_root=root,
+                completion_subscriber=self._terminal_process_completed)
+            self._terminal.activate_owner(self._terminal_owner_id)
+            self._terminal_monitor = TerminalMonitorCoordinator(
+                session_id=session_id, owner_epoch=host_owner_id,
+                registry=self._terminal.process_registry, live_bus=live_bus,
+                wake_scheduler=terminal_monitor_wake_scheduler or (lambda: None))
+        else:
+            self._terminal = shared_terminal_owner._terminal
+            self._terminal_monitor = shared_terminal_owner._terminal_monitor
+            self._terminal_live_buses = shared_terminal_owner._terminal_live_buses
+            self._terminal_live_buses[session_id] = live_bus
+            self._terminal_monitor.bind_live_bus(session_id, live_bus)
         tools: tuple[Tool, ...] = (
             ReadFileTool(
                 root,
@@ -751,8 +764,8 @@ class DirectKernelToolPort:
             ),
             OpenInPulsaraTool(root, pulsara_home_resolution=frozen_pulsara_home, user_home_resolution=frozen_user_home, host_session_id=host_owner_id),
             TodoTool(),
-            _DirectTerminalTool(self._terminal, host_owner_id),
-            _DirectTerminalProcessTool(self._terminal, host_owner_id),
+            _DirectTerminalTool(self._terminal, self._terminal_owner_id),
+            _DirectTerminalProcessTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalMonitorTool(self._terminal_monitor),
             _DirectPlanControlTool("enter_plan"),
             _DirectPlanControlTool("ask_plan_question"),
@@ -791,8 +804,9 @@ class DirectKernelToolPort:
         self._surface_owner_epoch = 1
         self._surface_borrows: dict[str, int] = {}
         self._surface_borrow_owners: dict[str, ProcessLocalToolSurfaceBorrow] = {}
+        self._execution_borrows: dict[str, ProcessLocalToolSurfaceBorrow] = {}
         self._prepared_surfaces: dict[
-            tuple[int, ModelInputScopeKind, str | None], PreparedKernelToolSurface
+            tuple[int, ModelInputScopeKind], PreparedKernelToolSurface
         ] = {}
         self._closed = False
         self._builtin_composition_state = BuiltinCompositionState.PREPARING
@@ -815,6 +829,11 @@ class DirectKernelToolPort:
             owner_epoch=host_owner_id,
         )
         self._subagent: KernelSubagentToolPort | None = None
+        self._code_mode = None
+        self._code_mode_invoke = None
+        self._code_mode_freeze_source = None
+        self._code_mode_archive_output = None
+        self._code_observation_settlements = {}
         self._memory: KernelMemoryToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
         self._capability_reload: KernelCapabilityReloadPort | None = None
@@ -825,6 +844,7 @@ class DirectKernelToolPort:
         self._mcp_runtime_by_surface_generation: dict[
             int, McpInstalledRuntimeGeneration
         ] = {}
+        self._mcp_dispatch_resources: dict[tuple[int, str], McpBoundToolExecutor | McpInstalledRuntimeGeneration] = {}
         self._mcp_dispatch_permits: dict[
             tuple[int, str], McpDispatchAdmissionPermit
         ] = {}
@@ -860,6 +880,19 @@ class DirectKernelToolPort:
             if self._memory is not None:
                 raise RuntimeError("memory tool port is already bound")
             self._memory = port
+            self._surface_generation += 1
+
+    def bind_code_mode_executor(self, *, invoke, freeze_source, archive_output) -> None:
+        self._code_mode_invoke = invoke
+        self._code_mode_freeze_source = freeze_source
+        self._code_mode_archive_output = archive_output
+
+    def bind_code_mode_port(self, port) -> None:
+        with self._surface_lock:
+            self._require_builtin_composition_preparing_locked()
+            self._code_mode = port
+            for name in ("exec", "wait_exec", "stop_exec"):
+                self._tools[name] = _DirectCapabilityControlTool(name)
             self._surface_generation += 1
 
     def offer_memory_embedding_wake(self) -> None:
@@ -930,48 +963,34 @@ class DirectKernelToolPort:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+        effective_permission_mode: PermissionMode,
     ) -> SealedBuiltinCapabilitySnapshot:
-        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
-            scope_subagent_task_id is None
-        ):
-            raise ValueError("builtin capability scope identity is invalid")
+        if not isinstance(effective_permission_mode, PermissionMode):
+            raise TypeError("builtin selection requires the actual turn permission mode")
         with self._surface_lock:
             if self._builtin_composition_state is not BuiltinCompositionState.SEALED:
                 raise RuntimeError("builtin composition is not sealed")
             assert self._sealed_builtin_bindings is not None
             assert self._builtin_composition_seal is not None
             bindings = self._sealed_builtin_bindings
-            if conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
+            if conversation_scope_kind is ModelInputScopeKind.ROOT and effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
+                bindings = tuple(item for item in bindings if item.tool_name not in {
+                    "exec", "wait_exec", "stop_exec", "run_agent", "list_agents",
+                    "inspect_agent", "send_agent_message", "wait_agent", "stop_agent",
+                })
+            if conversation_scope_kind is ModelInputScopeKind.SUBAGENT:
                 bindings = tuple(
                     item
                     for item in bindings
                     if item.tool_name
                     not in {
-                        "open_in_pulsara",
-                        "search_sessions",
-                        "search_session_content",
-                        "read_session_content",
-                        "scheduled_tasks",
-                        "remember",
-                        "mark_memory_relation",
-                        "terminal_monitor",
-                        "enter_plan",
-                        "ask_plan_question",
-                        "exit_plan",
-                        "reload_capabilities",
-                        "spawn_agent",
-                        "create_agent_tasks",
-                        "list_agents",
-                        "list_agent_models",
-                        "wait_agent",
-                        "send_agent_message",
-                        "stop_agent",
+                        "open_in_pulsara", "search_sessions", "search_session_content",
+                        "read_session_content", "scheduled_tasks", "memory_search", "memory_get",
+                        "remember", "mark_memory_relation", "enter_plan", "ask_plan_question",
+                        "exit_plan", "reload_capabilities", "manage_capability",
+                        "run_agent", "list_agents", "inspect_agent", "stop_agent",
+                        "exec", "wait_exec", "stop_exec",
                     }
-                )
-            else:
-                bindings = tuple(
-                    item for item in bindings if item.tool_name != "report_agent_result"
                 )
             source = capability_source_ref(
                 CapabilitySourceKind.BUILTIN_REGISTRY,
@@ -1022,13 +1041,11 @@ class DirectKernelToolPort:
             source_snapshot = freeze_capability_source_snapshot(
                 registration=registration,
                 conversation_scope_kind=conversation_scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
                 disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
                 facts=tuple(facts),
             )
             return issue_sealed_builtin_capability_snapshot(
                 conversation_scope_kind=conversation_scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
                 source_snapshot=source_snapshot,
                 executor_bindings=bindings,
                 builtin_composition_seal=self._builtin_composition_seal,
@@ -1063,14 +1080,12 @@ class DirectKernelToolPort:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ):
         supervisor = self._mcp_supervisor
         if supervisor is None:
             raise RuntimeError("MCP supervisor is not bound")
         return supervisor.freeze_capability_source_snapshot_set(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
 
     def observe_hook_review_tools(self):
@@ -1083,7 +1098,6 @@ class DirectKernelToolPort:
             subjects = tuple(
                 tool_matcher_subject(binding.tool_name)
                 for binding in self._sealed_builtin_bindings
-                if binding.tool_name != "report_agent_result"
             )
             supervisor = self._mcp_supervisor
         if supervisor is None:
@@ -1155,14 +1169,6 @@ class DirectKernelToolPort:
             if admission.executor.semantic.server_id in disabled_or_removed:
                 self._mcp_confirmation_admissions.pop(key, None)
                 self._mcp_meta_invocations.pop(key, None)
-        for key, permit in tuple(self._mcp_dispatch_permits.items()):
-            if (
-                permit.lease._slot.server_id in disabled_or_removed  # noqa: SLF001
-                and permit.state.value == "ADMITTED"
-            ):
-                self._mcp_dispatch_permits.pop(key, None)
-                self._mcp_meta_invocations.pop(key, None)
-                permit.release()
         return changed
 
     @property
@@ -1171,7 +1177,7 @@ class DirectKernelToolPort:
 
     def list_background_terminal_processes(self):
         return self._terminal.list_background_processes(
-            owner_host_session_id=self._host_owner_id
+            owner_host_session_id=self._terminal_owner_id
         )
 
     def read_background_terminal_log(
@@ -1180,7 +1186,7 @@ class DirectKernelToolPort:
         return self._terminal.log_process(
             process_id,
             max_output_chars=maximum_chars,
-            owner_host_session_id=self._host_owner_id,
+            owner_host_session_id=self._terminal_owner_id,
             since_cursor=since_cursor,
         )
 
@@ -1195,7 +1201,7 @@ class DirectKernelToolPort:
         return self._terminal.terminate_process_if_running(
             process_id,
             max_output_chars=maximum_chars,
-            owner_host_session_id=self._host_owner_id,
+            owner_host_session_id=self._terminal_owner_id,
         )
 
     @property
@@ -1272,6 +1278,17 @@ class DirectKernelToolPort:
                 f"mcp-direct:{binding.unavailable_reason_code}",
                 _mcp_unavailable_direct_message(binding.unavailable_reason_code, binding.target, binding.tool_name),
             )
+        if tool_name in {"run_agent.batch", "wait_agent.works"}:
+            if surface_borrow.code_cell_id is None or self._subagent is None:
+                return reject(KernelToolAuthorizationKind.TOOL_UNAVAILABLE, "code-only-descriptor", "Code Mode owner is unavailable")
+            error = self._subagent.validate_arguments(tool_name=tool_name, arguments=arguments)
+            if error:
+                return reject(KernelToolAuthorizationKind.INVALID_ARGUMENTS, "code-only-descriptor", error)
+            return PreparedResolvedToolInvocation(tool_name, tool_name, frozen_original)
+        if self._subagent is not None and tool_name in self._subagent.tool_names:
+            error = self._subagent.validate_arguments(tool_name=tool_name, arguments=arguments)
+            if error:
+                return reject(KernelToolAuthorizationKind.INVALID_ARGUMENTS, "agent-arguments", error)
         entry = (
             builtin_tool_catalog_entry(tool_name) if tool_name in self._tools else None
         )
@@ -1296,12 +1313,8 @@ class DirectKernelToolPort:
                     "invalid new MCP tool reference or arguments",
                 )
             try:
-                epoch = self._installed_epoch_for_borrow(surface_borrow)
                 ref = self._mcp_meta_refs.resolve_callable(
-                    token,
-                    conversation_scope_kind=epoch.conversation_scope_kind,
-                    scope_subagent_task_id=epoch.scope_subagent_task_id,
-                    continuity_epoch_nonce=epoch.epoch_nonce,
+                    token, **self._mcp_ref_consumer_for_borrow(surface_borrow)
                 )
                 executor, _generation = self._resolve_meta_ref_executor(
                     ref=ref, surface_borrow=surface_borrow
@@ -1345,7 +1358,7 @@ class DirectKernelToolPort:
         if isinstance(binding.execution_policy, McpToolExecutionPolicyFact):
             semantic = next(
                 item
-                for item in surface_borrow.prepared.model_surface.tool_specs
+                for item in surface_borrow.tool_specs
                 if item.name == binding.tool_name
             )
             schema = thaw_json(semantic.parameters)
@@ -1377,15 +1390,10 @@ class DirectKernelToolPort:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         maximum_utf8_bytes: int,
     ) -> FrozenCompactionRuntimeHandoff | None:
         """Compose exact bounded views frozen by the existing live owners."""
 
-        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
-            scope_subagent_task_id is None
-        ):
-            raise ValueError("runtime handoff scope union is invalid")
         root = self._terminal.workspace_root
         process_facts = tuple(
             FrozenTerminalProcessHandoffFact(
@@ -1395,11 +1403,11 @@ class DirectKernelToolPort:
                 cwd=_workspace_relative_handoff_path(Path(item.cwd), root),
             )
             for item in self._terminal.freeze_compaction_handoff(
-                owner_host_session_id=self._host_owner_id
+                owner_host_session_id=self._terminal_owner_id
             )
             if (
-                item.origin.conversation_scope_kind == conversation_scope_kind.value
-                and item.origin.scope_subagent_task_id == scope_subagent_task_id
+                conversation_scope_kind is ModelInputScopeKind.ROOT
+                or item.origin.session_id == self._session_id
             )
         )
         monitor_facts = tuple(
@@ -1409,36 +1417,21 @@ class DirectKernelToolPort:
                 state=str(item["state"]),
                 pending_observation=bool(item["pending_observation"]),
             )
-            for item in (
-                self._terminal_monitor.freeze_compaction_handoff()
-                if conversation_scope_kind is ModelInputScopeKind.ROOT
-                else ()
-            )
+            for item in self._terminal_monitor.freeze_compaction_handoff()
+            if conversation_scope_kind is ModelInputScopeKind.ROOT or item["session_id"] == self._session_id
         )
         todo = self._todo_owner.freeze_compaction_handoff(
             scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
-        subagent_facts = ()
-        subagent_totals = (
-            ("ACTIVE", 0),
-            ("PENDING_START", 0),
-            ("WAITING_DEPENDENCY", 0),
-        )
-        if (
-            conversation_scope_kind is ModelInputScopeKind.ROOT
-            and self._subagent is not None
-        ):
-            (
-                subagent_facts,
-                subagent_totals,
-            ) = await self._subagent.freeze_compaction_handoff()
+        agent_work_index = ()
+        if conversation_scope_kind is ModelInputScopeKind.ROOT and self._subagent is not None:
+            agent_work_index = await self._subagent.freeze_compaction_handoff()
         return freeze_compaction_runtime_handoff(
             terminal_processes=process_facts,
             terminal_monitors=monitor_facts,
             todo=todo,
-            subagent_tasks=subagent_facts,
-            subagent_task_totals=subagent_totals,
+            agent_work_index=agent_work_index,
+            code_cells=tuple(self._code_mode.index()) if self._code_mode is not None else (),
             maximum_utf8_bytes=maximum_utf8_bytes,
         )
 
@@ -1452,13 +1445,10 @@ class DirectKernelToolPort:
 
         surface = plan.direct_tool_surface
         scope = surface.conversation_scope_kind
-        task_id = builtin.scope_subagent_task_id
         if (
             builtin.conversation_scope_kind is not scope
-            or plan.direct_projection_set.scope_subagent_task_id != task_id
             or plan.dispatch_view.parent_dispatch_cut.conversation_scope_kind
             is not scope
-            or plan.dispatch_view.parent_dispatch_cut.scope_subagent_task_id != task_id
         ):
             raise ValueError("planned tool surface scope is invalid")
         with self._surface_lock:
@@ -1470,8 +1460,11 @@ class DirectKernelToolPort:
                 is not self._builtin_composition_seal
             ):
                 raise RuntimeError("foreign or unsealed builtin snapshot")
+            # Selection describes what a new epoch offers. Physical bindings
+            # also realize schemas retained by an already installed prefix;
+            # each invocation still checks its actual turn permission below.
             builtin_by_name = {
-                item.tool_name: item for item in builtin.executor_bindings
+                item.tool_name: item for item in self._sealed_builtin_bindings
             }
             current_mcp = self._mcp_current
             mcp_binding_by_name = (
@@ -1551,8 +1544,8 @@ class DirectKernelToolPort:
                 owner_epoch=self._surface_owner_epoch,
                 surface_generation=self._surface_generation,
                 conversation_scope_kind=scope,
-                scope_subagent_task_id=task_id,
                 _authority=self._surface_authority,
+                session_id=self._session_id,
             )
             prepared = PreparedKernelToolSurface(
                 model_surface=surface,
@@ -1560,7 +1553,7 @@ class DirectKernelToolPort:
                 access=access,
                 capability_exposure_plan=plan,
             )
-            self._prepared_surfaces[(self._surface_generation, scope, task_id)] = (
+            self._prepared_surfaces[(self._surface_generation, scope)] = (
                 prepared
             )
             return prepared
@@ -1586,6 +1579,33 @@ class DirectKernelToolPort:
             self._surface_borrow_owners[borrow_id] = borrow
             return borrow
 
+    def borrow_code_mode_surface(
+        self, prepared: CodeModeToolDirectory, *, cell_id: str, tool_name: str | None = None
+    ) -> ProcessLocalToolSurfaceBorrow:
+        """Borrow a physical invocation without pinning a provider epoch."""
+        self.prepare_tool_surface_safe_point()
+        with self._surface_lock:
+            if self._closed or prepared.access._authority is not self._surface_authority:
+                raise RuntimeError("Code Mode tool owner is unavailable")
+            access = replace(prepared.access, surface_generation=self._surface_generation)
+            physical_surface = replace(prepared, access=access)
+            internal_binding = None
+            if tool_name in {"run_agent.batch", "wait_agent.works"}:
+                base_name = "run_agent" if tool_name == "run_agent.batch" else "wait_agent"
+                base = prepared.binding(base_name)
+                if not isinstance(base, PreparedToolExecutionBinding) or not isinstance(base.execution_policy, BuiltinExecutionPolicyRef):
+                    raise RuntimeError("internal Agent descriptor requires its ordinary owner")
+                internal_binding = replace(base, tool_name=tool_name,
+                    execution_policy=replace(base.execution_policy, tool_name=tool_name))
+            borrow = ProcessLocalToolSurfaceBorrow(
+                prepared=physical_surface, borrow_id=random_id("borrow"),
+                _authority=self._surface_authority,
+                _validate=self._validate_surface_borrow,
+                _release=self._release_surface_borrow, code_cell_id=cell_id, internal_binding=internal_binding,
+            )
+            self._execution_borrows[borrow.borrow_id] = borrow
+            return borrow
+
     def validate_tool_surface_borrow(
         self,
         borrow: ProcessLocalToolSurfaceBorrow,
@@ -1608,15 +1628,12 @@ class DirectKernelToolPort:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> None:
         """Prove all process-local surface borrows for this scope are closed."""
 
         with self._surface_lock:
             if any(
                 borrow.prepared.access.conversation_scope_kind is scope_kind
-                and borrow.prepared.access.scope_subagent_task_id
-                == scope_subagent_task_id
                 for borrow in self._surface_borrow_owners.values()
             ):
                 raise RuntimeError("no-continuation left a tool surface borrow active")
@@ -1649,8 +1666,6 @@ class DirectKernelToolPort:
             if (
                 access.conversation_scope_kind
                 is not capability_dispatch_cut.conversation_scope_kind
-                or access.scope_subagent_task_id
-                != capability_dispatch_cut.scope_subagent_task_id
             ):
                 raise RuntimeError(
                     "capability dispatch observation does not exact-join"
@@ -1682,7 +1697,6 @@ class DirectKernelToolPort:
         if (
             permit.scope.session_id != self._session_id
             or permit.scope.scope_kind is not access.conversation_scope_kind
-            or permit.scope.scope_subagent_task_id != access.scope_subagent_task_id
         ):
             raise RuntimeError("provider-input install scope does not join tool borrow")
         self.validate_tool_surface_borrow(surface_borrow, surface_borrow.prepared)
@@ -1716,7 +1730,6 @@ class DirectKernelToolPort:
             full_inspect_entry_ids.append(item.source_entry_id)
         epoch = _InstalledBorrowEpoch(
             conversation_scope_kind=access.conversation_scope_kind,
-            scope_subagent_task_id=access.scope_subagent_task_id,
             epoch_nonce=permit.epoch_nonce,
             epoch_revision=permit.epoch_revision,
         )
@@ -1726,7 +1739,7 @@ class DirectKernelToolPort:
             self._installed_epoch_by_borrow[surface_borrow.borrow_id] = epoch
         self._mcp_meta_refs.retire_scope_except_epoch(
             conversation_scope_kind=epoch.conversation_scope_kind,
-            scope_subagent_task_id=epoch.scope_subagent_task_id,
+            session_id=access.session_id,
             continuity_epoch_nonce=epoch.epoch_nonce,
         )
         plan = surface_borrow.prepared.capability_exposure_plan
@@ -1739,16 +1752,16 @@ class DirectKernelToolPort:
                         and executor is not None
                         and _mcp_executor_capability_version(executor) == route.version):
                     allowed.add((route.version.identity_fingerprint, route.version.semantic_fingerprint,
-                                 execution_policy_fingerprint(executor.policy), route.route_fingerprint))
+                                 execution_policy_fingerprint(executor.policy), route.route_fingerprint, executor.runtime_generation_id))
         self._mcp_meta_refs.retire_unroutable(
             conversation_scope_kind=epoch.conversation_scope_kind,
-            scope_subagent_task_id=epoch.scope_subagent_task_id,
+            session_id=access.session_id,
             continuity_epoch_nonce=epoch.epoch_nonce, allowed=allowed)
         for entry_id in full_inspect_entry_ids:
             self._mcp_meta_refs.install_full_result(
                 result_entry_id=entry_id,
                 conversation_scope_kind=epoch.conversation_scope_kind,
-                scope_subagent_task_id=epoch.scope_subagent_task_id,
+                session_id=access.session_id,
                 continuity_epoch_nonce=epoch.epoch_nonce,
             )
 
@@ -1759,7 +1772,6 @@ class DirectKernelToolPort:
         key = (
             access.surface_generation,
             access.conversation_scope_kind,
-            access.scope_subagent_task_id,
         )
         retained = self._prepared_surfaces.get(key)
         if (
@@ -1775,6 +1787,14 @@ class DirectKernelToolPort:
         self, borrow: ProcessLocalToolSurfaceBorrow, tool_name: str
     ) -> DirectToolAccessLeaf:
         with self._surface_lock:
+            if borrow.code_cell_id is not None:
+                if (self._closed or borrow._closed
+                    or borrow._authority is not self._surface_authority
+                    or self._execution_borrows.get(borrow.borrow_id) is not borrow):
+                    raise RuntimeError("Code Mode invocation resource is unavailable")
+                if borrow.internal_binding is not None and borrow.internal_binding.tool_name == tool_name:
+                    return borrow.internal_binding
+                return borrow.prepared.binding(tool_name)
             if (
                 borrow._closed
                 or borrow._authority is not self._surface_authority
@@ -1790,6 +1810,11 @@ class DirectKernelToolPort:
 
     def _release_surface_borrow(self, borrow: ProcessLocalToolSurfaceBorrow) -> None:
         with self._surface_condition:
+            if borrow.code_cell_id is not None:
+                if self._execution_borrows.pop(borrow.borrow_id, None) is not borrow:
+                    raise RuntimeError("Code Mode invocation resource is not current")
+                self._surface_condition.notify_all()
+                return
             if borrow._authority is not self._surface_authority:
                 raise RuntimeError("tool surface borrow authority conflicts")
             if self._surface_borrow_owners.get(borrow.borrow_id) is not borrow:
@@ -1845,6 +1870,15 @@ class DirectKernelToolPort:
                 permission_snapshot=permission_snapshot,
                 surface_borrow=surface_borrow,
             )
+        if tool_name in {"run_agent.batch", "wait_agent.works"}:
+            if (surface_borrow.code_cell_id is None or self._subagent is None
+                or permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS):
+                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    "code-only-descriptor", "This operation requires an admitted ROOT Code Mode cell")
+            error = self._subagent.validate_arguments(tool_name=tool_name, arguments=arguments)
+            return KernelToolAuthorization(
+                KernelToolAuthorizationKind.INVALID_ARGUMENTS if error else KernelToolAuthorizationKind.ALLOW,
+                "code-only:" + tool_name, error or "")
         tool = self._tools.get(tool_name)
         subagent = self._subagent is not None and tool_name in self._subagent.tool_names
         memory = self._memory is not None and tool_name in self._memory.tool_names
@@ -1899,11 +1933,16 @@ class DirectKernelToolPort:
                     f"descriptor:{entry.descriptor.id}",
                     f"invalid tool arguments: {exc}",
                 )
+        if tool_name in {"exec", "wait_exec", "stop_exec"}:
+            if (surface_borrow.code_cell_id is not None
+                or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
+                or permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS):
+                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    "code-mode:root-bypass-required", "Code Mode requires ROOT bypass-permissions mode")
         if tool_name == "reload_capabilities":
             access = surface_borrow.prepared.access
             if (
                 access.conversation_scope_kind is not ModelInputScopeKind.ROOT
-                or access.scope_subagent_task_id is not None
                 or permission_snapshot.effective_mode
                 is not PermissionMode.BYPASS_PERMISSIONS
             ):
@@ -1918,33 +1957,13 @@ class DirectKernelToolPort:
             )
         if subagent:
             access = surface_borrow.prepared.access
-            root_tools = {
-                "spawn_agent",
-                "create_agent_tasks",
-                "list_agents",
-                "list_agent_models",
-                "wait_agent",
-                "send_agent_message",
-                "stop_agent",
-            }
-            if tool_name in root_tools and (
-                access.conversation_scope_kind is not ModelInputScopeKind.ROOT
-                or permission_snapshot.effective_mode
-                is not PermissionMode.BYPASS_PERMISSIONS
-            ):
+            root_tools = {"run_agent", "list_agents", "inspect_agent", "stop_agent"}
+            if ((access.conversation_scope_kind is ModelInputScopeKind.ROOT
+                 and permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS)
+                or (access.conversation_scope_kind is not ModelInputScopeKind.ROOT and tool_name in root_tools)):
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "subagent_requires_bypass_mode",
-                    "ROOT subagent orchestration requires bypass-permissions mode",
-                )
-            if tool_name == "report_agent_result" and (
-                access.conversation_scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
-                or access.scope_subagent_task_id is None
-            ):
-                return KernelToolAuthorization(
-                    KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "subagent_report_scope_invalid",
-                    "report_agent_result is available only to its worker task",
+                    "agent_requires_root_bypass", "Agent management requires ROOT bypass-permissions mode",
                 )
             argument_error = self._subagent.validate_arguments(
                 tool_name=tool_name,
@@ -1969,7 +1988,6 @@ class DirectKernelToolPort:
             try:
                 self._todo_owner.require_active(
                     scope_kind=access.conversation_scope_kind,
-                    scope_subagent_task_id=access.scope_subagent_task_id,
                     exact_turn_id=turn_id,
                 )
             except LookupError:
@@ -2075,7 +2093,7 @@ class DirectKernelToolPort:
             raise RuntimeError("permission decision vocabulary is invalid")
         if tool_name in {"read_mcp_resource", "get_mcp_prompt"}:
             generation = surface_borrow.prepared.access.surface_generation
-            runtime = self._mcp_runtime_by_surface_generation.get(generation)
+            runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
             if runtime is None:
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
@@ -2089,9 +2107,6 @@ class DirectKernelToolPort:
                     descriptor_fingerprint=entry.descriptor.fingerprint(),
                     session_id=self._session_id,
                     scope_kind=(surface_borrow.prepared.access.conversation_scope_kind),
-                    scope_subagent_task_id=(
-                        surface_borrow.prepared.access.scope_subagent_task_id
-                    ),
                     turn_id=turn_id,
                     tool_call_id=tool_call_id,
                 )
@@ -2114,6 +2129,7 @@ class DirectKernelToolPort:
                 permit.release()
                 raise RuntimeError("MCP standard operation was authorized twice")
             self._mcp_dispatch_permits[key] = permit
+            self._mcp_dispatch_resources[key] = runtime
         return KernelToolAuthorization(
             KernelToolAuthorizationKind.ALLOW,
             f"descriptor:{entry.descriptor.id}:{entry.entry_fingerprint}",
@@ -2129,10 +2145,36 @@ class DirectKernelToolPort:
         access = surface_borrow.prepared.access
         if (
             epoch.conversation_scope_kind is not access.conversation_scope_kind
-            or epoch.scope_subagent_task_id != access.scope_subagent_task_id
         ):
             raise RuntimeError("installed MCP ref epoch scope drifted")
         return epoch
+
+    def _mcp_ref_consumer_for_borrow(self, borrow: ProcessLocalToolSurfaceBorrow) -> dict[str, object]:
+        access = borrow.prepared.access
+        cell_id = borrow.code_cell_id
+        if cell_id is not None:
+            return dict(conversation_scope_kind=access.conversation_scope_kind,
+                        session_id=access.session_id,
+                        continuity_epoch_nonce=cell_id,
+                        consumer_kind=McpToolRefConsumerKind.CODE_CELL,
+                        consumer_id=cell_id)
+        epoch = self._installed_epoch_for_borrow(borrow)
+        return dict(conversation_scope_kind=epoch.conversation_scope_kind,
+                    session_id=access.session_id,
+                    continuity_epoch_nonce=epoch.epoch_nonce)
+
+    def _current_mcp_runtime_for_borrow(self, borrow: ProcessLocalToolSurfaceBorrow):
+        generation = self._surface_generation if borrow.code_cell_id is not None else borrow.prepared.access.surface_generation
+        return self._mcp_runtime_by_surface_generation.get(generation), generation
+
+    def install_code_cell_tool_result_delivery(self, *, result_entry_id: str, cell_id: str, borrow: ProcessLocalToolSurfaceBorrow) -> bool:
+        if borrow.code_cell_id != cell_id:
+            raise ValueError("Code result delivery needs its exact cell consumer")
+        return self._mcp_meta_refs.install_full_result(result_entry_id=result_entry_id,
+            **self._mcp_ref_consumer_for_borrow(borrow))
+
+    def release_code_cell_mcp_refs(self, cell_id: str) -> None:
+        self._mcp_meta_refs.retire_consumer(consumer_kind=McpToolRefConsumerKind.CODE_CELL, consumer_id=cell_id)
 
     def _resolve_meta_ref_executor(
         self,
@@ -2140,6 +2182,21 @@ class DirectKernelToolPort:
         ref: NewMcpToolRef,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
     ) -> tuple[McpBoundToolExecutor, int]:
+        if ref.consumer_kind is McpToolRefConsumerKind.CODE_CELL:
+            runtime, generation = self._current_mcp_runtime_for_borrow(surface_borrow)
+            if runtime is None:
+                raise LookupError("MCP_TOOL_REF_RUNTIME_UNAVAILABLE")
+            specs = runtime.root_tool_specs if ref.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
+            executors = [runtime.executors[item.provider_tool_name] for item in specs
+                         if item.provider_tool_name in runtime.executors]
+            matches = [item for item in executors
+                       if _mcp_executor_capability_version(item).identity_fingerprint == ref.capability_identity_fingerprint
+                       and _mcp_executor_capability_version(item).semantic_fingerprint == ref.tool_semantic_fingerprint
+                       and execution_policy_fingerprint(item.policy) == ref.mcp_execution_policy_fingerprint
+                       and item.runtime_generation_id == ref.runtime_generation]
+            if len(matches) != 1:
+                raise LookupError("MCP_TOOL_REF_BINDING_STALE")
+            return matches[0], surface_borrow.prepared.access.surface_generation
         plan = surface_borrow.prepared.capability_exposure_plan
         if plan is None:
             raise LookupError("MCP_TOOL_REF_ROUTE_UNAVAILABLE")
@@ -2165,6 +2222,7 @@ class DirectKernelToolPort:
         version = _mcp_executor_capability_version(executor)
         if (
             version != route.version
+            or executor.runtime_generation_id != ref.runtime_generation
             or execution_policy_fingerprint(executor.policy)
             != ref.mcp_execution_policy_fingerprint
         ):
@@ -2190,12 +2248,8 @@ class DirectKernelToolPort:
                 "invalid new MCP tool reference or arguments",
             )
         try:
-            epoch = self._installed_epoch_for_borrow(surface_borrow)
             ref = self._mcp_meta_refs.resolve_callable(
-                token,
-                conversation_scope_kind=epoch.conversation_scope_kind,
-                scope_subagent_task_id=epoch.scope_subagent_task_id,
-                continuity_epoch_nonce=epoch.epoch_nonce,
+                token, **self._mcp_ref_consumer_for_borrow(surface_borrow)
             )
             executor, generation = self._resolve_meta_ref_executor(
                 ref=ref, surface_borrow=surface_borrow
@@ -2257,9 +2311,6 @@ class DirectKernelToolPort:
                 generation=generation,
                 executor=executor,
                 scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
-                scope_subagent_task_id=(
-                    surface_borrow.prepared.access.scope_subagent_task_id
-                ),
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
             )
@@ -2272,9 +2323,6 @@ class DirectKernelToolPort:
             permit = executor.admit(
                 session_id=self._session_id,
                 scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
-                scope_subagent_task_id=(
-                    surface_borrow.prepared.access.scope_subagent_task_id
-                ),
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
             )
@@ -2307,7 +2355,7 @@ class DirectKernelToolPort:
             raise TypeError("dynamic MCP policy union is invalid")
         semantic = next(
             item
-            for item in surface_borrow.prepared.model_surface.tool_specs
+            for item in surface_borrow.tool_specs
             if item.name == binding.tool_name
         )
         schema = thaw_json(semantic.parameters)
@@ -2329,8 +2377,8 @@ class DirectKernelToolPort:
                 f"mcp-descriptor:{binding.descriptor_fingerprint}",
                 f"invalid MCP tool arguments: {exc.message}",
             )
+        runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
         generation = surface_borrow.prepared.access.surface_generation
-        runtime = self._mcp_runtime_by_surface_generation.get(generation)
         if runtime is None:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
@@ -2344,7 +2392,13 @@ class DirectKernelToolPort:
                 "mcp-runtime:binding-missing",
                 "MCP tool binding is unavailable",
             )
-        if (executor.policy is not policy or (binding.current_mcp_spec is not None
+        if surface_borrow.code_cell_id is not None:
+            scoped = runtime.root_tool_specs if surface_borrow.prepared.access.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
+            if executor.semantic not in scoped or executor.semantic.provider_spec() != semantic:
+                return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                    "mcp-runtime:binding-stale", "MCP_SNAPSHOT_STALE: inspect the current tool before retrying")
+            policy = executor.policy
+        elif (executor.policy is not policy or (binding.current_mcp_spec is not None
                 and executor.semantic.provider_spec() != binding.current_mcp_spec)):
             return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "mcp-runtime:binding-stale", "MCP_SNAPSHOT_STALE: inspect the current tool before retrying")
@@ -2372,9 +2426,6 @@ class DirectKernelToolPort:
                 generation=generation,
                 executor=executor,
                 scope_kind=(surface_borrow.prepared.access.conversation_scope_kind),
-                scope_subagent_task_id=(
-                    surface_borrow.prepared.access.scope_subagent_task_id
-                ),
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
             )
@@ -2387,9 +2438,6 @@ class DirectKernelToolPort:
             permit = executor.admit(
                 session_id=self._session_id,
                 scope_kind=surface_borrow.prepared.access.conversation_scope_kind,
-                scope_subagent_task_id=(
-                    surface_borrow.prepared.access.scope_subagent_task_id
-                ),
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
             )
@@ -2400,6 +2448,7 @@ class DirectKernelToolPort:
                 "MCP_SNAPSHOT_STALE",
             )
         self._mcp_dispatch_permits[key] = permit
+        self._mcp_dispatch_resources[key] = executor
         return KernelToolAuthorization(
             KernelToolAuthorizationKind.ALLOW,
             f"mcp-policy:{execution_policy_fingerprint(policy)}",
@@ -2420,13 +2469,11 @@ class DirectKernelToolPort:
             admission.generation != access.surface_generation
             or admission.turn_id != turn_id
             or admission.scope_kind is not access.conversation_scope_kind
-            or admission.scope_subagent_task_id != access.scope_subagent_task_id
         ):
             raise RuntimeError("permission request admission does not exact-join")
         if permit is not None and (
             permit.turn_id != turn_id
             or permit.scope_kind is not access.conversation_scope_kind
-            or permit.scope_subagent_task_id != access.scope_subagent_task_id
         ):
             raise RuntimeError("permission request permit does not exact-join")
         if admission is None and permit is None:
@@ -2435,7 +2482,6 @@ class DirectKernelToolPort:
             tool_call_id=tool_call_id,
             turn_id=turn_id,
             scope_kind=access.conversation_scope_kind,
-            scope_subagent_task_id=access.scope_subagent_task_id,
             request_nonce=object(),
             pending_state_key=state_key,
             pending_admission=admission,
@@ -2477,6 +2523,7 @@ class DirectKernelToolPort:
                 self._mcp_confirmation_admissions.pop(key, None)
                 self._mcp_meta_invocations.pop(key, None)
             if key is not None and permit is not None:
+                self._mcp_dispatch_resources.pop(key, None)
                 self._mcp_dispatch_permits.pop(key, None)
                 if permit.state.value == "ADMITTED":
                     permit.release()
@@ -2492,7 +2539,6 @@ class DirectKernelToolPort:
                 permit = admission.executor.admit(
                     session_id=self._session_id,
                     scope_kind=admission.scope_kind,
-                    scope_subagent_task_id=admission.scope_subagent_task_id,
                     turn_id=admission.turn_id,
                     tool_call_id=admission.tool_call_id,
                 )
@@ -2503,6 +2549,7 @@ class DirectKernelToolPort:
                 permit.release()
                 raise RuntimeError("MCP Hook permission permit already exists")
             self._mcp_dispatch_permits[key] = permit
+            self._mcp_dispatch_resources[key] = admission.executor
         return KernelToolAuthorization(
             KernelToolAuthorizationKind.ALLOW,
             "hook:permission-allow",
@@ -2590,6 +2637,7 @@ class DirectKernelToolPort:
                 self._mcp_confirmation_admissions.pop(admission_entry[0], None)
                 self._mcp_meta_invocations.pop(admission_entry[0], None)
             if permit_entry is not None:
+                self._mcp_dispatch_resources.pop(permit_entry[0], None)
                 self._mcp_dispatch_permits.pop(permit_entry[0], None)
                 permit_entry[1].release()
             return KernelToolAuthorization(
@@ -2607,7 +2655,6 @@ class DirectKernelToolPort:
             permit = admission.executor.admit(
                 session_id=self._session_id,
                 scope_kind=admission.scope_kind,
-                scope_subagent_task_id=admission.scope_subagent_task_id,
                 turn_id=admission.turn_id,
                 tool_call_id=admission.tool_call_id,
             )
@@ -2615,11 +2662,13 @@ class DirectKernelToolPort:
                 permit.release()
                 raise RuntimeError("MCP confirmation permit already exists")
             self._mcp_dispatch_permits[key] = permit
+            self._mcp_dispatch_resources[key] = admission.executor
 
         def discard_admission() -> None:
             if admission_entry is not None:
                 self._mcp_confirmation_admissions.pop(admission_entry[0], None)
                 self._mcp_meta_invocations.pop(admission_entry[0], None)
+                self._mcp_dispatch_resources.pop(admission_entry[0], None)
                 current = self._mcp_dispatch_permits.pop(admission_entry[0], None)
                 if current is not None and current.state.value == "ADMITTED":
                     current.release()
@@ -2666,6 +2715,7 @@ class DirectKernelToolPort:
             )
         if resolution.decision == "DENY":
             if permit_entry is not None:
+                self._mcp_dispatch_resources.pop(permit_entry[0], None)
                 self._mcp_dispatch_permits.pop(permit_entry[0], None)
                 self._mcp_meta_invocations.pop(permit_entry[0], None)
                 if permit_entry[1].state.value == "ADMITTED":
@@ -2693,7 +2743,7 @@ class DirectKernelToolPort:
             values = parse_query(
                 arguments,
                 inspect=tool_name == "inspect_capability",
-                subagent=scope is ModelInputScopeKind.SUBAGENT_TASK,
+                subagent=scope is ModelInputScopeKind.SUBAGENT,
             )
             if (
                 tool_name == "inspect_capability"
@@ -2702,14 +2752,13 @@ class DirectKernelToolPort:
                 return self._inspect_mcp_tool_result(
                     target=values["target"], invocation_context=invocation_context
                 )
-            runtime = self._mcp_runtime_by_surface_generation.get(
-                borrow.prepared.access.surface_generation
-            )
+            runtime, _generation = self._current_mcp_runtime_for_borrow(borrow)
             result = await CapabilitySourceQuery(
                 self._capability_management,
                 runtime=runtime,
                 plan=borrow.prepared.capability_exposure_plan,
                 scope=scope,
+                code_direct_specs=borrow.tool_specs if borrow.code_cell_id is not None else None,
             ).execute(values, inspect=tool_name == "inspect_capability")
             content = canonical_json_bytes(result)
             # Only MCP_TOOL schema inspection is FULL-required. Ordinary details
@@ -2725,14 +2774,14 @@ class DirectKernelToolPort:
                     source_format_hint=ToolOutputSourceFormatHint.TEXT,
                 )
             )
-            return KernelToolResult(
+            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="SUCCESS",
                 content=content,
                 output_artifact_candidate=candidate,
                 effect_class="read_only",
             )
         except CapabilityQueryError as exc:
-            return KernelToolResult(
+            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="APPLICATION_ERROR",
                 content=canonical_json_bytes(
                     {
@@ -2758,7 +2807,7 @@ class DirectKernelToolPort:
                     InspectLocalPluginsRequest(self._capability_management.deadline()),
                 )
                 result = scrub.scrub_json(result)
-            return KernelToolResult(
+            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="APPLICATION_ERROR",
                 content=canonical_json_bytes(result),
                 effect_class="read_only",
@@ -2775,6 +2824,27 @@ class DirectKernelToolPort:
         if not isinstance(server_id, str) or not isinstance(remote_name, str):
             return _local_mcp_application_error("INVALID_ARGUMENTS")
         borrow = invocation_context.surface_borrow
+        if borrow.code_cell_id is not None:
+            runtime, _generation = self._current_mcp_runtime_for_borrow(borrow)
+            if runtime is None:
+                return _local_mcp_application_error("MCP_RUNTIME_UNAVAILABLE")
+            specs = runtime.root_tool_specs if borrow.prepared.access.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
+            semantic = next((item for item in specs if item.server_id == server_id
+                             and item.provider_tool_name == remote_name), None)
+            if semantic is None:
+                return _local_mcp_application_error("MCP_TOOL_NOT_FOUND")
+            executor = runtime.executors.get(semantic.provider_tool_name)
+            if executor is None:
+                return _local_mcp_application_error("MCP_TOOL_BINDING_STALE")
+            frozen = next((item for item in borrow.tool_specs
+                           if item.name == semantic.provider_tool_name), None)
+            if frozen == semantic.provider_spec():
+                return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON, state="SUCCESS", effect_class="read_only",
+                    content=canonical_json_bytes({"target": dict(target), "description": frozen.description,
+                        "input_schema": thaw_json(frozen.parameters),
+                        "invocation": {"mode": "DIRECT", "tool_name": frozen.name}}))
+            return self._prepare_mcp_inspection_result(executor=executor,
+                route_fingerprint="CODE_CELL", invocation_context=invocation_context)
         plan = borrow.prepared.capability_exposure_plan
         if plan is None:
             return _local_mcp_application_error("MCP_CATALOG_UNAVAILABLE")
@@ -2790,7 +2860,7 @@ class DirectKernelToolPort:
         if route.route is ToolCapabilityRouteKind.DIRECT:
             direct_binding = borrow.execution_binding(route.version.provider_name)
             if isinstance(direct_binding, PreparedUnavailableDirectMcpGate):
-                return KernelToolResult(
+                return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                     state="SUCCESS",
                     effect_class="read_only",
                     content=canonical_json_bytes(
@@ -2811,7 +2881,7 @@ class DirectKernelToolPort:
             spec = next(
                 (
                     item
-                    for item in borrow.prepared.model_surface.tool_specs
+                    for item in borrow.tool_specs
                     if item.name == route.version.provider_name
                 ),
                 None,
@@ -2826,13 +2896,13 @@ class DirectKernelToolPort:
             }
             if not fits_result(body):
                 return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
-            return KernelToolResult(
+            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="SUCCESS",
                 content=canonical_json_bytes(body),
                 effect_class="read_only",
             )
         if route.route is ToolCapabilityRouteKind.UNAVAILABLE:
-            return KernelToolResult(
+            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="SUCCESS",
                 effect_class="read_only",
                 content=canonical_json_bytes(
@@ -2860,22 +2930,36 @@ class DirectKernelToolPort:
             or _mcp_executor_capability_version(executor) != route.version
         ):
             return _local_mcp_application_error("MCP_TOOL_BINDING_STALE")
+        return self._prepare_mcp_inspection_result(executor=executor,
+            route_fingerprint=route.route_fingerprint, invocation_context=invocation_context)
+
+    def _prepare_mcp_inspection_result(self, *, executor, route_fingerprint, invocation_context):
+        borrow = invocation_context.surface_borrow
+        if borrow.code_cell_id is not None:
+            runtime, _generation = self._current_mcp_runtime_for_borrow(borrow)
+            scoped = runtime.root_tool_specs if borrow.prepared.access.conversation_scope_kind is ModelInputScopeKind.ROOT else runtime.subagent_tool_specs
+            allowed = set()
+            for semantic in scoped:
+                current = runtime.executors.get(semantic.provider_tool_name)
+                if current is not None:
+                    version = _mcp_executor_capability_version(current)
+                    allowed.add((version.identity_fingerprint, version.semantic_fingerprint,
+                                 execution_policy_fingerprint(current.policy), "CODE_CELL", current.runtime_generation_id))
+            self._mcp_meta_refs.retire_unroutable(**self._mcp_ref_consumer_for_borrow(borrow), allowed=allowed)
         values = _mcp_inspection_values(executor)
         quote = conservative_mcp_inspection_logical_utf8_bytes(values)
         if quote > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES:
             return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
-        epoch = self._installed_epoch_for_borrow(borrow)
         try:
             prepared = self._mcp_meta_refs.prepare(
-                conversation_scope_kind=epoch.conversation_scope_kind,
-                scope_subagent_task_id=epoch.scope_subagent_task_id,
-                continuity_epoch_nonce=epoch.epoch_nonce,
-                capability_identity_fingerprint=(route.version.identity_fingerprint),
-                tool_semantic_fingerprint=route.version.semantic_fingerprint,
+                **self._mcp_ref_consumer_for_borrow(borrow),
+                capability_identity_fingerprint=_mcp_executor_capability_version(executor).identity_fingerprint,
+                tool_semantic_fingerprint=_mcp_executor_capability_version(executor).semantic_fingerprint,
                 mcp_execution_policy_fingerprint=(
                     execution_policy_fingerprint(executor.policy)
                 ),
-                tool_route_fingerprint=route.route_fingerprint,
+                tool_route_fingerprint=route_fingerprint,
+                runtime_generation=executor.runtime_generation_id,
                 result_entry_id=invocation_context.result_entry_id,
             )
         except McpToolRefCapacityExceeded:
@@ -2896,12 +2980,81 @@ class DirectKernelToolPort:
             prepared,
         )
         self._mcp_ref_settlements[token.token_id] = token
-        return KernelToolResult(
+        return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
             state="SUCCESS",
             content=body,
             process_local_settlement=token,
             effect_class="read_only",
         )
+
+    async def _invoke_code_mode_control(self, tool_name, arguments, context):
+        from pulsara_agent.code_mode.contracts import CodeModeError
+        from pulsara_agent.primitives.tool_result_projection import conservative_artifact_page_logical_utf8_bytes
+        if self._code_mode is None:
+            raise RuntimeError("Code Mode Host owner is not bound")
+        archived = []
+        async def archive(record):
+            if archived:
+                raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Only one archived record can be accepted per observation")
+            prepared = await self._code_mode_archive_output(context=context, record=record)
+            archived.append(prepared)
+            return {"kind": record.get("kind", "log"), "output_artifact": {
+                "disposition": prepared.artifact_disposition.value,
+                "target": {"kind": "ARTIFACT", "artifact_id": prepared.artifact_id},
+                "source_coverage": prepared.source_coverage.value}}
+        observation = None
+        try:
+            if tool_name == "stop_exec":
+                value = await self._code_mode.stop(arguments["cell_id"])
+            else:
+                if tool_name == "exec":
+                    if self._code_mode_invoke is None or context.code_mode_snapshot is None:
+                        raise RuntimeError("exec lost its common execution snapshot")
+                    if "code" in arguments:
+                        source = arguments["code"]
+                    else:
+                        reader = self._tools["read_file"]
+                        source = await asyncio.to_thread(reader.read_code_mode_source,
+                            arguments["path"], maximum_bytes=self._code_mode.limits.value_bytes)
+                    await self._code_mode_freeze_source(attempt_id=context.attempt_id, source=source)
+                    directory = context.code_mode_snapshot.tool_directory
+                    catalog = {spec.name: {"parameters": thaw_json(spec.parameters)}
+                        for spec in directory.tool_specs}
+                    cell_id = await self._code_mode.start(source=source, source_exec_attempt_id=context.attempt_id,
+                        turn_id=context.turn_id, snapshot=context.code_mode_snapshot,
+                        tool_catalog=catalog, invoke=self._code_mode_invoke,
+                        on_cell_closed=self.release_code_cell_mcp_refs)
+                else:
+                    cell_id = arguments["cell_id"]
+                observation = await self._code_mode.observe(cell_id,
+                    yield_time_ms=arguments.get("yield_time_ms", 1000), archive_output=archive,
+                    maximum_page_bytes=(MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+                        - conservative_artifact_page_logical_utf8_bytes(tool_call_id=context.tool_call_id,
+                            body="", model_visible_memory_ids=())))
+                value = observation.public_value()
+            encoded = encode_tool_public_json(value)
+            projection = None
+            if archived:
+                from pulsara_agent.conversation_kernel.contracts import InlineContent
+                projection = replace(archived[0], canonical_preview=InlineContent.from_bytes(encoded),
+                    display_kind=ToolResultDisplayKind.COMPLETE)
+            token = None
+            if observation is not None:
+                token = ProcessLocalEffectSettlementToken(random_id("settlement"),
+                    _CodeModeObservationSettlement(self._code_mode, observation))
+                self._code_observation_settlements[token.token_id] = token
+            return KernelToolResult(state="SUCCESS", content=encoded,
+                public_format=ToolOutputSourceFormatHint.JSON,
+                artifact_inline_result=not bool(archived),
+                process_local_settlement=token, prepared_output_projection=projection,
+                physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
+        except (CodeModeError, ValueError, OSError, UnicodeError) as exc:
+            if observation is not None:
+                self._code_mode.abandon(observation)
+            value = {"error": getattr(exc, "code", "CODE_MODE_ERROR"), "message": str(exc)}
+            return KernelToolResult(state="APPLICATION_ERROR", content=json.dumps(value, ensure_ascii=False).encode(),
+                public_format=ToolOutputSourceFormatHint.JSON,
+                physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
 
     async def invoke(
         self,
@@ -2933,8 +3086,6 @@ class DirectKernelToolPort:
         if (
             invocation_context.conversation_scope_kind
             != invocation_context.surface_borrow.prepared.access.conversation_scope_kind.value
-            or invocation_context.scope_subagent_task_id
-            != invocation_context.surface_borrow.prepared.access.scope_subagent_task_id
         ):
             raise RuntimeError("tool invocation surface binding does not exact-join")
         self._validate_surface_borrow(invocation_context.surface_borrow, tool_name)
@@ -2945,6 +3096,7 @@ class DirectKernelToolPort:
             key = (invocation_context.surface_borrow.prepared.access.surface_generation, tool_call_id)
             self._mcp_confirmation_admissions.pop(key, None)
             self._mcp_meta_invocations.pop(key, None)
+            self._mcp_dispatch_resources.pop(key, None)
             permit = self._mcp_dispatch_permits.pop(key, None)
             if permit is not None:
                 permit.release()
@@ -2955,6 +3107,8 @@ class DirectKernelToolPort:
         observation_origin = tool_observation_origin_for_binding(binding)
         from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
 
+        if tool_name in {"exec", "wait_exec", "stop_exec"}:
+            return await self._invoke_code_mode_control(tool_name, arguments, invocation_context)
         if tool_name in SESSION_QUERY_TOOL_NAMES:
             from pulsara_agent.conversation_kernel.session_content import (
                 SessionQueryError,
@@ -3060,6 +3214,7 @@ class DirectKernelToolPort:
                     value, ensure_ascii=False, separators=(",", ":")
                 ).encode(),
                 artifact_inline_result=True,
+                public_format=ToolOutputSourceFormatHint.JSON,
                 caller_cancelled_while_running=physical.caller_cancelled,
                 effect_class="read_only",
                 physical_timing=physical.timing.value,
@@ -3190,46 +3345,17 @@ class DirectKernelToolPort:
             )
             key = (generation, tool_call_id)
             prepared_meta = self._mcp_meta_invocations.pop(key, None)
+            self._mcp_dispatch_resources.pop(key, None)
             permit = self._mcp_dispatch_permits.pop(key, None)
             if prepared_meta is None or permit is None:
                 if permit is not None and permit.state.value == "ADMITTED":
                     permit.release()
                 raise RuntimeError("MCP meta invocation admission is incomplete")
-            target = arguments.get("target")
-            token = target.get("tool_ref") if isinstance(target, Mapping) and target.get("kind") == "MCP_TOOL_REF" else None
             inner = arguments.get("arguments")
-            frozen_inner = (
-                freeze_json(dict(inner)) if isinstance(inner, Mapping) else None
-            )
-            try:
-                epoch = self._installed_epoch_for_borrow(
-                    invocation_context.surface_borrow
-                )
-                resolved_ref = self._mcp_meta_refs.resolve_callable(
-                    str(token),
-                    conversation_scope_kind=epoch.conversation_scope_kind,
-                    scope_subagent_task_id=epoch.scope_subagent_task_id,
-                    continuity_epoch_nonce=epoch.epoch_nonce,
-                )
-                resolved_executor, resolved_generation = (
-                    self._resolve_meta_ref_executor(
-                        ref=resolved_ref,
-                        surface_borrow=invocation_context.surface_borrow,
-                    )
-                )
-                if (
-                    resolved_generation != generation
-                    or resolved_ref != prepared_meta.ref
-                    or resolved_executor != prepared_meta.executor
-                    or frozen_inner != prepared_meta.arguments
-                ):
-                    raise RuntimeError(
-                        "MCP meta invocation changed after authorization"
-                    )
-            except BaseException:
-                if permit.state.value == "ADMITTED":
-                    permit.release()
-                raise
+            frozen_inner = freeze_json(dict(inner)) if isinstance(inner, Mapping) else None
+            if frozen_inner != prepared_meta.arguments:
+                permit.release()
+                raise RuntimeError("MCP meta arguments changed after authorization")
             if permit.state.value == "ADMITTED":
                 permit.mark_attempt_accepted()
             operation_task = asyncio.create_task(
@@ -3251,16 +3377,13 @@ class DirectKernelToolPort:
             generation = (
                 invocation_context.surface_borrow.prepared.access.surface_generation
             )
-            runtime = self._mcp_runtime_by_surface_generation.get(generation)
-            if runtime is None:
-                raise RuntimeError("MCP runtime generation was retired")
-            executor = runtime.executors.get(tool_name)
-            if executor is None:
-                raise RuntimeError("MCP executor binding is unavailable")
             key = (generation, tool_call_id)
+            executor = self._mcp_dispatch_resources.pop(key, None)
             permit = self._mcp_dispatch_permits.pop(key, None)
-            if permit is None:
-                raise RuntimeError("MCP dispatch admission permit is missing")
+            if not isinstance(executor, McpBoundToolExecutor) or permit is None:
+                if permit is not None:
+                    permit.release()
+                raise RuntimeError("MCP dispatch admission resource is missing")
             if permit.state.value == "ADMITTED":
                 permit.mark_attempt_accepted()
             operation_task = asyncio.create_task(
@@ -3269,7 +3392,7 @@ class DirectKernelToolPort:
             )
             known, caller_cancelled = await _await_mcp_operation(operation_task)
             text = known.content.decode("utf-8")
-            return KernelToolResult(
+            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state=known.state,
                 content=known.content,
                 remote_identity=known.remote_identity,
@@ -3287,7 +3410,7 @@ class DirectKernelToolPort:
                 caller_cancelled_while_running=caller_cancelled,
                 effect_class=(
                     "read_only"
-                    if binding.execution_policy.effect_kind is McpEffectKind.READ_ONLY
+                    if executor.policy.effect_kind is McpEffectKind.READ_ONLY
                     else "unknown_effect"
                 ),
                 physical_observation=_freeze_physical_observation(
@@ -3301,10 +3424,13 @@ class DirectKernelToolPort:
             generation = (
                 invocation_context.surface_borrow.prepared.access.surface_generation
             )
-            runtime = self._mcp_runtime_by_surface_generation.get(generation)
-            if runtime is None:
-                raise RuntimeError("MCP runtime generation was retired")
-            permit = self._mcp_dispatch_permits.pop((generation, tool_call_id), None)
+            key = (generation, tool_call_id)
+            runtime = self._mcp_dispatch_resources.pop(key, None)
+            permit = self._mcp_dispatch_permits.pop(key, None)
+            if not isinstance(runtime, McpInstalledRuntimeGeneration) or permit is None:
+                if permit is not None:
+                    permit.release()
+                raise RuntimeError("MCP standard admission resource is missing")
             operation_task = asyncio.create_task(
                 runtime.invoke_standard(
                     tool_name=tool_name,
@@ -3325,7 +3451,7 @@ class DirectKernelToolPort:
                         permit.release()
                 raise
             text = known.content.decode("utf-8")
-            return KernelToolResult(
+            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state=known.state,
                 content=known.content,
                 remote_identity=known.remote_identity,
@@ -3342,7 +3468,7 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
-        if self._subagent is not None and tool_name in self._subagent.tool_names:
+        if self._subagent is not None and (tool_name in self._subagent.tool_names or tool_name in {"run_agent.batch", "wait_agent.works"}):
             result = await self._subagent.invoke(
                 tool_name=tool_name,
                 arguments=arguments,
@@ -3393,7 +3519,6 @@ class DirectKernelToolPort:
                     scope_kind=(
                         invocation_context.surface_borrow.prepared.access.conversation_scope_kind
                     ),
-                    scope_subagent_task_id=(invocation_context.scope_subagent_task_id),
                     exact_turn_id=turn_id,
                     attempt_id=attempt_id,
                     proposed_result_entry_id=invocation_context.result_entry_id,
@@ -3429,6 +3554,7 @@ class DirectKernelToolPort:
             id=tool_call_id,
             name=tool_name,
             arguments=dict(arguments),
+            defer_file_observation=invocation_context.code_cell_id is not None,
         )
         if isinstance(tool, ViewImageTool):
             source = parse_view_image_source(arguments)
@@ -3704,7 +3830,7 @@ class DirectKernelToolPort:
             origin = TerminalProcessOrigin(
                 turn_id=turn_id,
                 conversation_scope_kind=(invocation_context.conversation_scope_kind),
-                scope_subagent_task_id=invocation_context.scope_subagent_task_id,
+                session_id=invocation_context.session_id,
             )
             owner = (
                 KernelWatchdogOwner.TERMINAL_FOREGROUND_DECISION
@@ -3826,6 +3952,8 @@ class DirectKernelToolPort:
                 claimed=result.trusted_observation,
             ),
             model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
+            public_format=result.public_format,
+            delivery_succeeded=result.delivery_succeeded,
         )
 
     def _invoke_terminal_monitor(
@@ -3836,8 +3964,8 @@ class DirectKernelToolPort:
         context: KernelToolInvocationContext,
     ) -> tuple[ToolExecutionResult, ProcessLocalEffectSettlementToken | None]:
         request = parse_terminal_monitor_input(call.arguments)
-        if context.conversation_scope_kind != "ROOT":
-            return _terminal_monitor_rejected(call, "ROOT_SCOPE_REQUIRED"), None
+        agent_id = context.session_id if context.conversation_scope_kind == "SUBAGENT" else None
+        work_turn_id = context.turn_id if agent_id is not None else None
         if request.action == "list":
             return (
                 _success(
@@ -3846,14 +3974,14 @@ class DirectKernelToolPort:
                         "status": "INVENTORY",
                         "monitors": [
                             _terminal_monitor_payload(item)
-                            for item in tool.coordinator.list_current()
+                            for item in tool.coordinator.list_current(agent_id=agent_id, work_turn_id=work_turn_id)
                         ],
                     },
                 ),
                 None,
             )
         if request.action == "cancel":
-            outcome = tool.coordinator.cancel(request.target.monitor_id)
+            outcome = tool.coordinator.cancel(request.target.monitor_id, agent_id=agent_id, work_turn_id=work_turn_id)
             return (
                 _success(
                     call,
@@ -3870,6 +3998,9 @@ class DirectKernelToolPort:
         output_condition = request.conditions.output
         try:
             prepared = tool.coordinator.prepare_registration(
+                recipient_session_id=context.session_id,
+                registering_agent_id=agent_id,
+                work_turn_id=work_turn_id,
                 process_id=request.target.process_id,
                 origin_turn_id=context.turn_id,
                 origin_attempt_id=context.attempt_id,
@@ -3933,9 +4064,11 @@ class DirectKernelToolPort:
         process_id = info.process_id
         generation_id = derive_id("generation", "channel", "terminal-process", process_id)
         origin = info.origin
-        self._live_bus.offer_nowait(
+        live_bus = self._terminal_live_buses.get(origin.session_id)
+        if live_bus is not None:
+            live_bus.offer_nowait(
             event_type=LiveEventType.TERMINAL_PROCESS_COMPLETED,
-            session_id=self._session_id,
+            session_id=origin.session_id,
             turn_id=origin.turn_id,
             draft_identity=generation_id,
             payload=TerminalProcessCompletedPayload(
@@ -3946,13 +4079,12 @@ class DirectKernelToolPort:
                 live_digest(snapshot.text),
             ),
             scope_kind=origin.conversation_scope_kind,
-            scope_subagent_task_id=origin.scope_subagent_task_id,
             channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
             generation_id=generation_id,
             block_id=process_id,
             block_ordinal=0,
             block_kind=LiveBlockKind.OPERATIONAL,
-        )
+            )
         self._terminal_monitor.process_completed(
             process_id, status=info.status, exit_code=info.exit_code
         )
@@ -3962,6 +4094,15 @@ class DirectKernelToolPort:
         token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
     ) -> ProcessLocalEffectSettlementResult:
+        if isinstance(token.prepared, _CodeModeObservationSettlement):
+            retained = self._code_observation_settlements.pop(token.token_id, None)
+            if retained is not token:
+                raise RuntimeError("Code Mode observation settlement is not current")
+            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
+                await token.prepared.owner.acknowledge(token.prepared.observation)
+                return ProcessLocalEffectSettlementResult(ProcessLocalEffectSettlementOutcome.INSTALLED)
+            token.prepared.owner.abandon(token.prepared.observation)
+            return ProcessLocalEffectSettlementResult(ProcessLocalEffectSettlementOutcome.DISCARDED)
         if isinstance(token.prepared, PreparedNewMcpToolRefSettlement):
             retained = self._mcp_ref_settlements.get(token.token_id)
             if retained is not token:
@@ -4041,7 +4182,6 @@ class DirectKernelToolPort:
             completed_count=0,
             turn_id=projection.last_turn_id,
             scope_kind=identity.scope_kind,
-            scope_subagent_task_id=identity.subagent_task_id,
         )
 
     def offer_todo_installation(self, installation: TodoInstallation | None) -> None:
@@ -4062,7 +4202,6 @@ class DirectKernelToolPort:
             completed_count=snapshot.completed_count,
             turn_id=installation.turn_id,
             scope_kind=identity.scope_kind,
-            scope_subagent_task_id=identity.subagent_task_id,
         )
 
     def _offer_todo_snapshot(
@@ -4077,7 +4216,6 @@ class DirectKernelToolPort:
         completed_count: int,
         turn_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> None:
         draft_identity = f"todo:{todo_run_id}:{todo_revision}"
         try:
@@ -4096,7 +4234,6 @@ class DirectKernelToolPort:
                     completed_count=completed_count,
                 ),
                 scope_kind=scope_kind.value,
-                scope_subagent_task_id=scope_subagent_task_id,
                 channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
                 generation_id=derive_id("generation", "channel", "todo", todo_run_id),
                 proposed_entry_id=None,
@@ -4115,6 +4252,8 @@ class DirectKernelToolPort:
         async with self._close_async_lock:
             if self._physically_closed:
                 return
+            self._terminal_live_buses.pop(self._session_id, None)
+            self._terminal_monitor.unbind_live_bus(self._session_id)
             deadline = monotonic() + timeout_seconds
             with self._surface_condition:
                 self._closed = True
@@ -4142,6 +4281,7 @@ class DirectKernelToolPort:
             with self._surface_lock:
                 permits = tuple(self._mcp_dispatch_permits.values())
                 self._mcp_dispatch_permits.clear()
+                self._mcp_dispatch_resources.clear()
                 self._mcp_confirmation_admissions.clear()
                 self._mcp_meta_invocations.clear()
                 self._installed_epoch_by_borrow.clear()
@@ -4194,6 +4334,9 @@ class DirectKernelToolPort:
     ) -> None:
         if self._terminal_physically_closed:
             return
+        if not self._owns_terminal:
+            self._terminal_physically_closed = True
+            return
         with self._close_lock:
             self._closed = True
         with self._surface_condition:
@@ -4244,20 +4387,20 @@ class DirectKernelToolPort:
         try:
             await asyncio.to_thread(
                 self._terminal.release_owner,
-                self._host_owner_id,
+                self._terminal_owner_id,
                 timeout_seconds=max(0.001, deadline_monotonic - monotonic()),
             )
         except TimeoutError:
             await asyncio.to_thread(
                 self._terminal.release_owner_and_join,
-                self._host_owner_id,
+                self._terminal_owner_id,
             )
             raise
 
     def _wait_for_surface_borrows(self, deadline_monotonic: float) -> bool:
         deadline_expired = False
         with self._surface_condition:
-            while self._surface_borrows:
+            while self._surface_borrows or self._execution_borrows:
                 remaining = deadline_monotonic - monotonic()
                 if remaining <= 0:
                     deadline_expired = True
@@ -4483,7 +4626,10 @@ def _terminal_execution_result(
         tool_name=call.name,
         status=state,
         output=json.dumps(payload, ensure_ascii=False),
-        output_artifact_candidate=result.output_artifact_candidate,
+        public_format=ToolOutputSourceFormatHint.JSON,
+        output_artifact_candidate=(replace(result.output_artifact_candidate,
+            source_format_hint=ToolOutputSourceFormatHint.JSON)
+            if result.output_artifact_candidate is not None else None),
         trusted_observation=(
             TrustedToolObservationSupplement(trusted_duration)
             if trusted_duration is not None
@@ -4531,6 +4677,7 @@ def _success(
         tool_name=call.name,
         status=ToolResultState.SUCCESS,
         output=json.dumps(dict(payload), ensure_ascii=False),
+        public_format=ToolOutputSourceFormatHint.JSON,
         output_artifact_candidate=output_artifact_candidate,
     )
 
@@ -4540,6 +4687,7 @@ def _terminal_monitor_rejected(call: ToolCall, reason: str) -> ToolExecutionResu
         call_id=call.id,
         tool_name=call.name,
         status=ToolResultState.ERROR,
+        public_format=ToolOutputSourceFormatHint.JSON,
         output=json.dumps(
             {"status": "REJECTED", "reason": reason},
             ensure_ascii=False,
@@ -4651,7 +4799,7 @@ def _mcp_unavailable_direct_message(reason: str, target, provider_tool_name: str
 
 
 def _local_mcp_application_error(code: str) -> KernelToolResult:
-    return KernelToolResult(
+    return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
         state="APPLICATION_ERROR",
         content=canonical_json_bytes({"status": code}),
         effect_class="read_only",
@@ -4666,7 +4814,7 @@ def _kernel_result_from_mcp_known(
     physical_observation: PhysicalToolObservationSupplement,
 ) -> KernelToolResult:
     text = known.content.decode("utf-8")
-    return KernelToolResult(
+    return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
         state=known.state,
         content=known.content,
         remote_identity=known.remote_identity,

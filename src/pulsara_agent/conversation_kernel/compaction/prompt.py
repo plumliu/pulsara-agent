@@ -339,8 +339,14 @@ def _decode_request(value: object, *, active: bool) -> _DecodedRequest:
         )
     except (TypeError, ValueError) as error:
         raise ValueError("snapshot request kind/origin is invalid") from error
-    scheduled = None if value["scheduled_input"] is None else ScheduledProvenance.from_dict(value["scheduled_input"])
-    if (input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (scheduled is not None):
+    scheduled = (
+        None
+        if value["scheduled_input"] is None
+        else ScheduledProvenance.from_dict(value["scheduled_input"])
+    )
+    if (input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
+        scheduled is not None
+    ):
         raise ValueError("scheduled snapshot request provenance is incomplete")
     encoded_body = canonical_json_bytes(value["content"])
     body = decode_canonical_prompt_body(encoded_body)
@@ -414,9 +420,17 @@ def _decode_compaction_snapshot_carrier(value: str | bytes) -> _DecodedCarrier:
                 else CanonicalInputOriginKind(active_value["input_origin"])
             )
         except (TypeError, ValueError) as error:
-            raise ValueError("snapshot active-request kind/origin is invalid") from error
-        scheduled = None if active_value["scheduled_input"] is None else ScheduledProvenance.from_dict(active_value["scheduled_input"])
-        if (input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (scheduled is not None):
+            raise ValueError(
+                "snapshot active-request kind/origin is invalid"
+            ) from error
+        scheduled = (
+            None
+            if active_value["scheduled_input"] is None
+            else ScheduledProvenance.from_dict(active_value["scheduled_input"])
+        )
+        if (input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
+            scheduled is not None
+        ):
             raise ValueError("active scheduled snapshot provenance is incomplete")
         content_value = active_value["content"]
         decoded_request = (
@@ -437,9 +451,7 @@ def _decode_compaction_snapshot_carrier(value: str | bytes) -> _DecodedCarrier:
         if (
             not entry_id
             or entry_sequence < 0
-            or (
-                location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
-            )
+            or (location is CompactionActiveRequestLocation.SNAPSHOT_EXACT)
             != (decoded_request is not None)
         ):
             raise ValueError("snapshot active-request shape is invalid")
@@ -544,8 +556,7 @@ def compaction_snapshot_canonical_expanded_bytes(value: str | bytes) -> int:
 
     decoded = _decode_compaction_snapshot_carrier(value)
     charge = len(decoded.encoded) + sum(
-        descriptor.encoded_bytes
-        for descriptor in _decoded_image_descriptors(decoded)
+        descriptor.encoded_bytes for descriptor in _decoded_image_descriptors(decoded)
     )
     if charge > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
         raise ValueError("snapshot carrier exceeds the canonical expanded bound")
@@ -644,8 +655,7 @@ def compaction_snapshot_image_parts(
     requests = (
         (
             ()
-            if carrier.active_request is None
-            or carrier.active_request.content is None
+            if carrier.active_request is None or carrier.active_request.content is None
             else (carrier.active_request.content,)
         )
         + tuple(request.content for request in carrier.recent_human_requests)

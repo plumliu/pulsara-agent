@@ -47,6 +47,7 @@ _ATTACHED_FIELDS: Final = frozenset(
         "command",
         "query_command",
         "subagent_capacity",
+        "code_mode_cells",
         "read_content",
         "read_tool_artifact",
         "list_background_processes",

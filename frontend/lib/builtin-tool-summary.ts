@@ -15,14 +15,6 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   terminal_process: ['管理命令', '正在处理命令进程', '已查看命令状态'],
   terminal_monitor: ['关注命令进展', '正在设置进展通知', '已处理通知设置'],
   todo: ['更新工作清单', '正在更新工作清单', '已更新工作清单'],
-  spawn_agent: ['创建任务', '正在创建任务', '已创建任务'],
-  create_agent_tasks: ['创建任务', '正在创建任务', '已创建任务'],
-  list_agent_models: ['查看可用模型', '正在读取已保存的模型配置', '已读取可用模型'],
-  list_agents: ['查看任务', '正在查看任务状态', '已读取任务状态'],
-  wait_agent: ['等待任务', '正在等待任务进展', '已等待任务'],
-  stop_agent: ['停止任务', '正在请求停止任务', '已请求停止任务'],
-  send_agent_message: ['联系任务', '正在发送补充信息', '已发送补充信息'],
-  report_agent_result: ['提交任务结果', '正在提交任务结果', '已提交任务结果'],
   enter_plan: ['开始规划', '正在进入规划模式', '已进入规划模式'],
   ask_plan_question: ['确认方案细节', '等待你的选择', '已记录你的选择'],
   exit_plan: ['提交方案', '正在提交方案', '方案已提交，等待你的确认'],
@@ -57,11 +49,7 @@ function compact(value: string): string {
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 }
 
-const taskStates: Record<string, string> = {
-  active: '正在执行', pending_start: '等待开始', waiting_dependency: '等待前置任务',
-  completed: '已完成', cancelled: '已取消', failed: '执行失败',
-  interrupted: '已中断', blocked_dependency_failed: '前置任务失败，暂时无法开始',
-};
+
 const processActions: Record<string, string> = {
   list: '查看命令列表', poll: '查看命令状态', wait: '等待命令结束',
   write: '向命令输入内容', submit: '向命令提交输入', close_stdin: '结束命令输入', kill: '停止命令',
@@ -124,7 +112,6 @@ function failure(trace: ToolTrace, result: Record<string, unknown>): string {
     if (result.status === 'CONFLICT') return '配置已变化，本次变更未应用';
     if (result.status === 'REJECTED') return '配置变更未被接受';
   }
-  if (trace.toolName === 'report_agent_result' && result.status === 'not_accepted') return '任务结果未被接收';
   return errors[text(result.error)] ?? states[trace.resultState ?? ''] ?? '操作失败';
 }
 
@@ -149,7 +136,6 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
     if (name === 'view_image' && record(args.target).kind === 'IMAGE_REF') target = '对话中已保存的图片';
     if (name === 'search_content' || name === 'find_files') target = [text(name === 'find_files' ? args.glob : args.pattern), target].filter(Boolean).join(' · ');
   } else if (name === 'terminal') target = trace.command ?? text(args.command);
-  else if (name === 'spawn_agent') target = text(args.task_name);
   else if (name === 'memory_search') target = text(args.query);
 
   let detail = label[1];
@@ -223,33 +209,6 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
         }
         break;
       }
-      case 'spawn_agent':
-      case 'stop_agent':
-        detail = taskStates[status] ? `任务${taskStates[status]}` : detail;
-        break;
-      case 'create_agent_tasks':
-      case 'list_agents': {
-        const total = count(result.tasks);
-        if (total !== undefined) detail = name === 'create_agent_tasks' ? `已创建 ${total} 个任务` : `本次列出 ${total} 个任务`;
-        if (result.has_more === true) detail += '，还有后续任务';
-        break;
-      }
-      case 'list_agent_models': {
-        const total = count(result.models);
-        if (total !== undefined) detail = total === 0 ? '暂无可用模型' : `已读取 ${total} 个可用模型`;
-        break;
-      }
-      case 'wait_agent':
-        detail = ({ timeout: '已等待任务', steer_available: '已收到你的补充',
-          nothing_pending: '没有待处理的任务', predicate_satisfied: '已有任务结束' } as Record<string, string>)[text(result.outcome)] ?? detail;
-        break;
-      case 'send_agent_message':
-        if (status === 'queued') detail = '已发送补充信息';
-        break;
-      case 'report_agent_result':
-        if (status === 'accepted') detail = '任务结果已接收';
-        if (status === 'not_accepted') detail = '任务结果未被接收';
-        break;
       case 'memory_search':
         if (Array.isArray(result.memories)) detail = `本次找到 ${result.memories.length} 条相关记忆`;
         break;

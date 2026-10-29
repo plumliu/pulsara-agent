@@ -25,7 +25,6 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     ConversationKernelRepository,
     PreparedRootTurnIntent,
-    PreparedSubagentTurnAdmission,
     StaleHostWriter,
     TurnAdmissionConfirmationKind,
 )
@@ -34,9 +33,7 @@ from pulsara_agent.conversation_kernel.steer import (
     PreparedRootProviderInputAdmission,
 )
 from pulsara_agent.conversation_kernel.todo_runtime import (
-    PreparedTodoChildRunActivation,
     PreparedTodoRootRunActivation,
-    build_child_activation,
     build_root_activation,
 )
 
@@ -44,33 +41,13 @@ from pulsara_agent.conversation_kernel.todo_runtime import (
 class TodoRunAdmissionFinalizer(Protocol):
     async def __call__(
         self,
-        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        prepared: PreparedTodoRootRunActivation,
         accepted: AcceptedEntry,
     ) -> None: ...
 
 
-class SubagentTurnAdmissionPostCommitError(RuntimeError):
-    """A child turn committed before its process-local activation failed."""
-
-    def __init__(
-        self,
-        accepted: AcceptedEntry,
-        activation_error: BaseException,
-    ) -> None:
-        super().__init__(
-            "subagent turn admission committed before TODO activation failed"
-        )
-        self.accepted = accepted
-        self.activation_error = activation_error
 
 
-@dataclass(slots=True)
-class _TurnAdmissionSettlementAttempt:
-    candidate: PreparedSubagentTurnAdmission
-    reissue_allowed: bool
-    todo_activation: PreparedTodoChildRunActivation
-    cancellation_requested: bool = False
-    cancellation_intent: ActiveTurnCancellationIntent | None = None
 
 
 class TurnAdmissionCoordinator:
@@ -225,130 +202,12 @@ class TurnAdmissionCoordinator:
             await self._finalize_todo(activation, outcome.accepted)
             return outcome.accepted
 
-    async def accept_subagent(
-        self,
-        candidate: PreparedSubagentTurnAdmission,
-        *,
-        cancellation_intent: ActiveTurnCancellationIntent,
-    ) -> AcceptedEntry:
-        if self._workspace_gate is not None:
-            self._workspace_gate.require_available()
-        return await self._accept_subagent(
-            candidate=candidate,
-            cancellation_intent=cancellation_intent,
-            todo_activation=build_child_activation(
-                session_id=candidate.session_id,
-                subagent_task_id=candidate.task_id,
-                exact_turn_id=candidate.turn_id,
-                exact_initial_entry_id=candidate.entry_id,
-                exact_context_binding_revision_id=(
-                    candidate.context_binding_revision_id
-                ),
-            ),
-        )
 
-    async def _accept_subagent(
-        self,
-        *,
-        candidate: PreparedSubagentTurnAdmission,
-        cancellation_intent: ActiveTurnCancellationIntent,
-        todo_activation: (PreparedTodoChildRunActivation),
-    ) -> AcceptedEntry:
-        try:
-            accepted = await self._io.run(
-                self._repository.accept_subagent_turn,
-                self._writer_lease.guard,
-                candidate=candidate,
-                deadline_monotonic=self._deadline(),
-            )
-        except asyncio.CancelledError as cancellation:
-            attempt = _TurnAdmissionSettlementAttempt(
-                candidate=candidate,
-                reissue_allowed=False,
-                todo_activation=todo_activation,
-                cancellation_requested=True,
-                cancellation_intent=cancellation_intent,
-            )
-            settlement = asyncio.create_task(
-                self._settle(attempt),
-                name=f"kernel-cancelled-turn-admission:{candidate.turn_id}",
-            )
-            await _await_admission_settlement(settlement, attempt)
-            raise cancellation
-        except BaseException:
-            attempt = _TurnAdmissionSettlementAttempt(
-                candidate=candidate,
-                reissue_allowed=True,
-                todo_activation=todo_activation,
-            )
-            settlement = asyncio.create_task(
-                self._settle(attempt),
-                name=f"kernel-turn-admission-settlement:{candidate.turn_id}",
-            )
-            accepted, cancellation = await _await_admission_settlement(
-                settlement, attempt
-            )
-            if cancellation is not None:
-                raise cancellation
-            if accepted is None:
-                raise ConversationKernelConflict("turn admission did not settle")
-            return accepted
-        try:
-            await self._finalize_todo(todo_activation, accepted)
-        except asyncio.CancelledError as cancellation:
-            raise cancellation
-        return accepted
 
-    async def _settle(
-        self,
-        attempt: _TurnAdmissionSettlementAttempt,
-    ) -> AcceptedEntry | None:
-        while True:
-            try:
-                confirmation = await self._io.run(
-                    self._repository.confirm_subagent_turn_admission,
-                    candidate=attempt.candidate,
-                    guard=self._writer_lease.guard,
-                    deadline_monotonic=self._deadline(),
-                )
-            except StaleHostWriter:
-                raise
-            except BaseException:
-                await asyncio.sleep(0.05)
-                continue
-            if confirmation.kind is TurnAdmissionConfirmationKind.FULL:
-                assert confirmation.accepted is not None
-                await self._finalize_todo(
-                    attempt.todo_activation, confirmation.accepted
-                )
-                if attempt.cancellation_requested:
-                    return None
-                return confirmation.accepted
-            if confirmation.kind is TurnAdmissionConfirmationKind.CONFLICT:
-                raise ConversationKernelConflict(
-                    "subagent turn admission has a conflicting winner"
-                )
-            if attempt.cancellation_requested or not attempt.reissue_allowed:
-                return None
-            try:
-                accepted = await self._io.run(
-                    self._repository.accept_subagent_turn,
-                    self._writer_lease.guard,
-                    candidate=attempt.candidate,
-                    deadline_monotonic=self._deadline(),
-                )
-            except StaleHostWriter:
-                raise
-            except BaseException:
-                continue
-            if attempt.cancellation_requested:
-                return None
-            await self._finalize_todo(attempt.todo_activation, accepted)
-            return accepted
 
     async def _finalize_todo(
         self,
-        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        prepared: PreparedTodoRootRunActivation,
         accepted: AcceptedEntry,
     ) -> None:
         if self._todo_finalizer is None:
@@ -362,11 +221,6 @@ class TurnAdmissionCoordinator:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
-            if isinstance(prepared, PreparedTodoChildRunActivation):
-                # The canonical child turn already exists.  Its manager owns
-                # the joint task/turn terminal winner, so retain that boundary
-                # explicitly instead of terminalizing only the turn here.
-                raise SubagentTurnAdmissionPostCommitError(accepted, exc) from exc
             await self.interrupt_turn(
                 accepted.turn_id,
                 reason="FOREGROUND_EXECUTION_INTERRUPTED",
@@ -457,25 +311,9 @@ async def _await_shielded(task: asyncio.Task[object]) -> object:
     return result
 
 
-async def _await_admission_settlement(
-    task: asyncio.Task[AcceptedEntry | None],
-    attempt: _TurnAdmissionSettlementAttempt,
-) -> tuple[AcceptedEntry | None, asyncio.CancelledError | None]:
-    cancellation: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            attempt.cancellation_requested = True
-            cancellation = exc
-            continue
-        except BaseException:
-            break
-    return task.result(), cancellation
 
 
 __all__ = [
-    "SubagentTurnAdmissionPostCommitError",
     "TodoRunAdmissionFinalizer",
     "TurnAdmissionCoordinator",
     "root_cancellation_terminal_reason",

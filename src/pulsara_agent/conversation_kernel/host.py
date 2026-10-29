@@ -98,7 +98,7 @@ from pulsara_agent.conversation_kernel.contracts import (
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.history_maintenance import HistoryProjectionMaintainer
-from pulsara_agent.conversation_kernel.vocabulary import SubjectSlot
+from pulsara_agent.conversation_kernel.vocabulary import SubjectSlot, CommittedEventType
 from pulsara_agent.conversation_kernel.queued_prompt_actions import (
     QueuedPromptAction,
     QueuedPromptActionRejected,
@@ -150,7 +150,6 @@ from pulsara_agent.conversation_kernel.repository import (
     AcceptedPlanWorkflowCommand,
     ConversationKernelConflict,
     ConversationKernelRepository,
-    SubagentCompletionDisposition,
     PromptIngressRejected,
     PlanContinuationDisposition,
     PlanQuestionAnswer,
@@ -193,10 +192,7 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
     PreparedProspectiveRootDispatch,
 )
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
-from pulsara_agent.conversation_kernel.subagent import KernelSubagentManager
-from pulsara_agent.conversation_kernel.subagent import (
-    SubagentCancelDisposition,
-)
+from pulsara_agent.conversation_kernel.subagent import AgentSessionRuntime
 from pulsara_agent.conversation_kernel.user_control import (
     CONTROL_ADMISSION_WINDOW_MS,
     CONTROL_RESULT_RETENTION_MS,
@@ -208,7 +204,7 @@ from pulsara_agent.conversation_kernel.user_control import (
     MonitorControlResult,
     ProcessControlResult,
     RootControlResult,
-    SubagentControlResult,
+    CodeModeControlResult,
     UserControlExecution,
     UserControlFeedbackState,
     UserControlOperation,
@@ -217,14 +213,11 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTarget,
     UserControlTargetKind,
 )
-from pulsara_agent.conversation_kernel.subagents.launch import (
-    CanonicalSubagentLaunchPreparationPort,
-)
+
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.todo_runtime import (
     FrozenTodoCloseProjection,
     FrozenTodoSnapshot,
-    PreparedTodoChildRunActivation,
     PreparedTodoRootRunActivation,
     build_root_activation,
 )
@@ -271,7 +264,7 @@ from pulsara_agent.tool_permission import (
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.plan_workflow import PlanDraftDecision, PlanHandoffKind
-from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
+from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT, DEFAULT_SUBAGENT_SYSTEM_PROMPT
 from pulsara_agent.ports.terminal_observation import (
     ExistingTurnInstallation,
     NewTurnInstallation,
@@ -394,10 +387,6 @@ class KernelSessionSummary:
     title: str | None = None
     model_call_binding: ModelCallBinding | None = None
     latest_root_turn: dict[str, str] | None = None
-    subagent_task_total: int = 0
-    subagent_task_active: int = 0
-    subagent_task_waiting: int = 0
-    subagent_task_attention: int = 0
 
     @property
     def runtime_session_id(self) -> str:
@@ -623,6 +612,8 @@ class KernelHostSession:
         self,
         *,
         model_runtime: ModelRuntime,
+        agent_runtime: AgentSessionRuntime,
+        root_session_id: str | None,
         workspace: ResolvedWorkspace,
         repository: ConversationKernelRepository,
         writer_lease: WriterLease,
@@ -653,6 +644,9 @@ class KernelHostSession:
         control_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._model_runtime = model_runtime
+        self._agent_runtime = agent_runtime
+        self.root_session_id = root_session_id
+        self._session_scope_kind = ModelInputScopeKind.SUBAGENT if root_session_id is not None else ModelInputScopeKind.ROOT
         self._image_validator = image_validator
         self.mcp_management = mcp_management
         self._capability_change_notifier = capability_change_notifier
@@ -699,7 +693,8 @@ class KernelHostSession:
         self._plan_interactions = KernelPlanInteractionCoordinator()
         self._plan_continuations = ContinuationAdmissionOwner()
         self._input_continuity = HostProviderInputContinuityOwner(
-            root_lease_source=_issue_root_bootstrap_lease_source(writer_lease)
+            root_lease_source=_issue_root_bootstrap_lease_source(writer_lease),
+            session_kind=self._session_scope_kind,
         )
         self._compaction = HostCompactionRuntimeOwner()
         self._assistant_settlements = AssistantMessageSettlementOwner(
@@ -722,7 +717,8 @@ class KernelHostSession:
         self._hook_root_scope = HookDispatchScopeRef(
             self,
             workspace,
-            HookScopeKind.ROOT,
+            HookScopeKind.SUBAGENT if root_session_id is not None else HookScopeKind.ROOT,
+            session_id=session_id,
         )
         self._hook_context.register_scope(self._hook_root_scope)
         self._hook_source_provider = hook_source_provider
@@ -743,13 +739,17 @@ class KernelHostSession:
         self._local_mcp_configs = local_mcp_configs
 
         def wake_terminal_monitor_scheduler() -> None:
-            self._event_loop.call_soon_threadsafe(self._monitor_wake.set)
+            self._event_loop.call_soon_threadsafe(self._agent_runtime.wake_monitors)
 
         from pulsara_agent.conversation_kernel.session_content import SessionContentQuery
 
         self._tools = DirectKernelToolPort(
             workspace_root=workspace.workspace_root,
             host_owner_id=host_session_id,
+            shared_terminal_owner=(
+                self._agent_runtime.shared_terminal_owner(root_session_id)
+                if root_session_id is not None else None
+            ),
             session_id=session_id,
             live_bus=self.live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -796,30 +796,16 @@ class KernelHostSession:
                 ),
             )
         )
-        self._subagents = KernelSubagentManager(
-            workspace_gate=self.workspace_gate,
+        from pulsara_agent.conversation_kernel.subagents.collaboration_api import CollaborationToolPort
+        self._collaboration = CollaborationToolPort(
             repository=repository,
-            guard=self._lease.guard,
-            host_owner_id=host_session_id,
-            io_owner=self._io,
-            live_bus=self.live_bus,
-            todo_owner=self._tools.todo_owner,
-            launch_preparation=CanonicalSubagentLaunchPreparationPort(
-                inherit_parent_target=self._input_continuity.subagent_parent_target,
-                repository=repository,
-                guard=self._lease.guard,
-                io_owner=self._io,
-                model_runtime=model_runtime,
-                deadline_factory=self._deadlines,
-            ),
-            hook_workspace_root=self._tools.snapshot_workspace_root,
-            todo_close_projector=self._tools.offer_todo_close,
-            deadline_factory=self._deadlines,
-            hook_dispatcher=self._hooks,
-            hook_context_owner=self._hook_context,
-            hook_root_scope=self._hook_root_scope,
+            io=self._io,
+            root_session_id=root_session_id or session_id,
+            session_id=session_id,
+            runtime=agent_runtime,
+            admission_facts=self._agent_admission_facts,
         )
-        self._tools.bind_subagent_port(self._subagents)
+        self._tools.bind_subagent_port(self._collaboration)
         memory_read_binding = freeze_memory_read_context_binding(
             domain=workspace.memory_domain,
             host_workspace_id=workspace.workspace_key,
@@ -855,6 +841,9 @@ class KernelHostSession:
             credential_boundary=credential_boundary,
         )
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
+        from pulsara_agent.code_mode.host import CodeModeHost
+        self._code_mode = CodeModeHost()
+        self._tools.bind_code_mode_port(self._code_mode)
         self._tools.seal_builtin_composition()
         pulsara_home_path = pulsara_home_resolution.path
         if pulsara_home_path is None:
@@ -891,10 +880,12 @@ class KernelHostSession:
             workspace_kind=workspace.workspace_kind,
             workspace_root=workspace.workspace_root,
             capability_composer=self._capabilities,
-            base_system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+            base_system_prompt=(system_prompt if system_prompt is not None else
+                DEFAULT_SUBAGENT_SYSTEM_PROMPT if root_session_id is not None else DEFAULT_SYSTEM_PROMPT),
             display_timezone=display_timezone,
             mcp_catalog=self._mcp_supervisor,
             hook_context_owner=self._hook_context,
+            code_mode_index_provider=self._code_mode.index,
         )
         self._runner = ConversationKernelRunner(
             repository=repository,
@@ -931,7 +922,7 @@ class KernelHostSession:
             assistant_settlement_owner=self._assistant_settlements,
             todo_admission_finalizer=self._finalize_todo_run_activation,
             compaction_owner=self._compaction,
-            subagent_runtime=self._subagents,
+            root_session_id=self.root_session_id,
             hook_dispatcher=self._hooks,
             hook_context_owner=self._hook_context,
             hook_scope=self._hook_root_scope,
@@ -944,7 +935,6 @@ class KernelHostSession:
                 self._record_user_control_provider_input_failure
             ),
         )
-        self._subagents.bind_runner_factory(self._new_child_runner)
         self._active_task: asyncio.Task[KernelRunResult] | None = None
         self._active_turn_id: str | None = None
         self._active_cancellation_intent: ActiveTurnCancellationIntent | None = None
@@ -971,9 +961,10 @@ class KernelHostSession:
         self._capability_refresh_attention: str | None = None
         self._pending_capability_change: FrozenCapabilityChange | None = None
         self._prompt_admission_attempts: dict[str, _PromptAdmissionAttempt] = {}
+        self._agent_prompt_hooks: dict[str, tuple[str | None, PendingHookContextReservation | None]] = {}
         self._runtime_reopen_quiescence: KernelRuntimeReopenQuiescence | None = None
         self._compaction_write_reservations: dict[
-            tuple[ModelInputScopeKind, str | None], set[CompactionWriteReservation]
+            ModelInputScopeKind, set[CompactionWriteReservation]
         ] = {}
         self._root_compaction_write_changed = asyncio.Event()
         self._root_compaction_write_changed.set()
@@ -996,12 +987,21 @@ class KernelHostSession:
             self._prompt_delivery_loop(),
             name=f"kernel-prompt-delivery:{session_id}",
         )
-        self._memory_embedding_maintainer.start()
+        if self.root_session_id is None:
+            self._memory_embedding_maintainer.start()
         self._monitor_task = asyncio.create_task(
             self._terminal_monitor_delivery_loop(),
             name=f"kernel-terminal-monitor-delivery:{session_id}",
         )
         self._queue_wake.set()
+
+    async def _agent_admission_facts(self, context, requests) -> dict[str, object]:
+        if self.root_session_id is not None or context.session_id != self.session_id:
+            raise PermissionError("Only ROOT may delegate new Agent work")
+        self._require_open()
+        return {"root_guard": self._lease.guard,
+                "actor_id": self.host_session_id,
+                "deadline_monotonic": self._canonical_deadline()}
 
     async def _install_compaction_fence(
         self,
@@ -1017,13 +1017,13 @@ class KernelHostSession:
         async with self._lock:
             self._require_open()
             key = self._compaction.scope_key(
-                scope.scope_kind, scope.scope_subagent_task_id
+                scope.scope_kind
             )
             admitted_writers = self._compaction_write_reservations.get(key, set())
             external_recovery_owner = (
                 admitted_writer is not None
                 and admitted_writers == {admitted_writer}
-                and scope.scope_kind is ModelInputScopeKind.ROOT
+                and scope.scope_kind is self._session_scope_kind
             )
             if admitted_writer is not None and not external_recovery_owner:
                 raise RuntimeError(
@@ -1031,55 +1031,46 @@ class KernelHostSession:
                 )
             if admitted_writers and not external_recovery_owner:
                 raise RuntimeError("compaction target has an admitted writer")
-            if scope.scope_kind is ModelInputScopeKind.ROOT:
-                self._retire_done_active_root_locked()
-                active_owner = self._active_task is owner_task
-                idle_owner = self._active_task is None
-                pending_root_owner = (
-                    pending_root_turn_id is not None
-                    and scope.turn_id != pending_root_turn_id
-                    and (
-                        (
-                            active_owner
-                            and admitted_writer is None
-                            and not admitted_writers
-                            and self._active_turn_id == pending_root_turn_id
-                        )
-                        or (idle_owner and external_recovery_owner)
+            self._retire_done_active_root_locked()
+            active_owner = self._active_task is owner_task
+            idle_owner = self._active_task is None
+            pending_root_owner = (
+                pending_root_turn_id is not None
+                and scope.turn_id != pending_root_turn_id
+                and (
+                    (
+                        active_owner
+                        and admitted_writer is None
+                        and not admitted_writers
+                        and self._active_turn_id == pending_root_turn_id
                     )
+                    or (idle_owner and external_recovery_owner)
                 )
-                if pending_root_turn_id is not None and not pending_root_owner:
-                    raise RuntimeError(
-                        "compaction pending ROOT owner does not exact-join"
-                    )
-                if not (active_owner or idle_owner or external_recovery_owner):
-                    raise RuntimeError("compaction ROOT task ownership changed")
-                if (
-                    active_owner
-                    and not external_recovery_owner
-                    and not pending_root_owner
-                    and self._active_turn_id != scope.turn_id
-                ):
-                    raise RuntimeError("compaction active ROOT target changed")
-                if (
-                    idle_owner
-                    and not external_recovery_owner
-                    and (
-                        self._external_new_turn_accepting
-                        or self._pending_root_successor is not None
-                    )
-                ):
-                    raise RuntimeError("compaction idle ROOT admission is busy")
-                if self._plan_exit_fence:
-                    raise RuntimeError("compaction conflicts with Plan force exit")
-            else:
-                task_id = scope.scope_subagent_task_id
-                if task_id is None or not self._subagents.owns_active_compaction_target(
-                    task_id=task_id,
-                    turn_id=scope.turn_id,
-                    owner_task=owner_task,
-                ):
-                    raise RuntimeError("compaction child task ownership changed")
+            )
+            if pending_root_turn_id is not None and not pending_root_owner:
+                raise RuntimeError(
+                    "compaction pending ROOT owner does not exact-join"
+                )
+            if not (active_owner or idle_owner or external_recovery_owner):
+                raise RuntimeError("compaction ROOT task ownership changed")
+            if (
+                active_owner
+                and not external_recovery_owner
+                and not pending_root_owner
+                and self._active_turn_id != scope.turn_id
+            ):
+                raise RuntimeError("compaction active ROOT target changed")
+            if (
+                idle_owner
+                and not external_recovery_owner
+                and (
+                    self._external_new_turn_accepting
+                    or self._pending_root_successor is not None
+                )
+            ):
+                raise RuntimeError("compaction idle ROOT admission is busy")
+            if self._plan_exit_fence:
+                raise RuntimeError("compaction conflicts with Plan force exit")
             self._compaction.install_fence_under_host_lock(
                 scope=scope,
                 trigger=trigger,
@@ -1106,20 +1097,17 @@ class KernelHostSession:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> CompactionWriteReservation:
-        key = self._compaction.scope_key(scope_kind, scope_subagent_task_id)
+        key = self._compaction.scope_key(scope_kind)
         if self._compaction.is_fenced(
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         ):
             raise RuntimeError("COMPACTION_IN_PROGRESS")
         reservation = CompactionWriteReservation(
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
         self._compaction_write_reservations.setdefault(key, set()).add(reservation)
-        if scope_kind is ModelInputScopeKind.ROOT:
+        if scope_kind is self._session_scope_kind:
             self._root_compaction_write_changed.clear()
         return reservation
 
@@ -1134,7 +1122,6 @@ class KernelHostSession:
     ) -> None:
         key = self._compaction.scope_key(
             reservation.scope_kind,
-            reservation.scope_subagent_task_id,
         )
         owners = self._compaction_write_reservations.get(key)
         if owners is None or reservation not in owners:
@@ -1142,7 +1129,7 @@ class KernelHostSession:
         owners.remove(reservation)
         if not owners:
             self._compaction_write_reservations.pop(key, None)
-        if reservation.scope_kind is ModelInputScopeKind.ROOT:
+        if reservation.scope_kind is self._session_scope_kind:
             self._root_compaction_write_changed.set()
 
     async def start_mcp(self) -> None:
@@ -1521,8 +1508,7 @@ class KernelHostSession:
         self._require_open()
         mcp = self._tools.inspect_mcp_discovery_catalog()
         skills = self._capabilities.freeze_owner_snapshot(
-            conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            conversation_scope_kind=self._session_scope_kind,
         )
         return KernelCapabilityCatalogInspection(
             mcp_catalog=mcp.catalog_snapshot,
@@ -1624,13 +1610,12 @@ class KernelHostSession:
             if binding is None:
                 return {"state": "unavailable", "connection_id": None}
             scope = ProviderInputContinuityScope(
-                self.session_id, ModelInputScopeKind.ROOT, None
+                self.session_id, self._session_scope_kind
             )
             cohort = self._input_continuity.current_cohort(scope)
             turn_id = self._active_turn_id
             compacting = self._compaction.is_fenced(
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
+                scope_kind=self._session_scope_kind,
             )
             busy = self._active_task is not None or compacting
             if not busy:
@@ -1638,7 +1623,6 @@ class KernelHostSession:
                     self.repository.read_latest_terminal_scope_turn_id,
                     self._lease.guard,
                     scope_kind=ConversationScopeKind.ROOT,
-                    scope_subagent_task_id=None,
                     deadline_monotonic=self._canonical_deadline(),
                 )
             target = self._model.prepare_target(
@@ -1662,8 +1646,7 @@ class KernelHostSession:
                 or (
                     policy.automatic_enabled
                     and self._compaction.automatic_allowed(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        scope_kind=self._session_scope_kind,
                     )
                 )
             )
@@ -1791,6 +1774,7 @@ class KernelHostSession:
         identity: PreparedRootTurnIdentity,
         permission: FrozenRunPermissionSnapshot,
         model_call_binding: ModelCallBinding,
+        input_origin: str = "HUMAN_MESSAGE",
     ) -> tuple[str | None, PendingHookContextReservation | None]:
         view = self._hooks.capture_view()
         cwd = self._tools.snapshot_workspace_root()
@@ -1800,6 +1784,8 @@ class KernelHostSession:
             model=self._model_identity(model_call_binding),
             turn_id=identity.turn_id,
             prompt=prompt_text_projection(key.canonical_prompt.content),
+            session_kind="SUBAGENT" if self.root_session_id is not None else "ROOT",
+            input_origin=input_origin,
             permission_mode=external_permission_mode(
                 permission.effective_mode.value,
                 active_plan_workflow=permission.plan_workflow_id is not None,
@@ -1901,8 +1887,7 @@ class KernelHostSession:
                 self._retire_done_active_root_locked()
                 if (
                     self._compaction.is_fenced(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        scope_kind=self._session_scope_kind,
                     )
                     or self._plan_exit_fence
                     or self._external_new_turn_accepting
@@ -1928,6 +1913,7 @@ class KernelHostSession:
                 identity=identity,
                 permission=permission,
                 model_call_binding=model_call_binding,
+                input_origin="HUMAN_MESSAGE",
             )
             if block_reason is not None:
                 raise PromptBlockedByHook(block_reason)
@@ -1937,8 +1923,7 @@ class KernelHostSession:
                 if (
                     self._prompt_admission_attempts.get(command) is not attempt
                     or self._compaction.is_fenced(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        scope_kind=self._session_scope_kind,
                     )
                     or self._plan_exit_fence
                     or self._external_new_turn_accepting
@@ -2030,7 +2015,6 @@ class KernelHostSession:
                 self.repository.read_latest_terminal_scope_turn_id,
                 self._lease.guard,
                 scope_kind=ConversationScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 deadline_monotonic=self._canonical_deadline(),
             )
             if target_turn_id is None:
@@ -2045,8 +2029,7 @@ class KernelHostSession:
         candidate = build_prepared_manual_compaction_command(
             session_id=self.session_id,
             command_id=command_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
             target_turn_id=target_turn_id,
             expected_active_turn_id=expected_active_turn_id,
             force=force,
@@ -2063,8 +2046,7 @@ class KernelHostSession:
         if existing is not None:
             local = await self._compaction.find_manual(
                 command_id=command_id,
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
+                scope_kind=self._session_scope_kind,
             )
             if local is not None:
                 return await asyncio.shield(local)
@@ -2091,8 +2073,7 @@ class KernelHostSession:
             self._retire_done_active_root_locked()
             request, future = await self._compaction.request_manual(
                 command_id=command_id,
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
+                scope_kind=self._session_scope_kind,
                 expected_turn_id=target_turn_id,
                 force=force,
             )
@@ -2240,7 +2221,7 @@ class KernelHostSession:
     def root_compaction_in_progress(self) -> bool:
         """Disposable GUI progress, owned by the existing ROOT compaction fence."""
         return self._compaction.is_fenced(
-            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+            scope_kind=self._session_scope_kind
         )
 
     def current_compaction_projection(
@@ -2318,8 +2299,7 @@ class KernelHostSession:
                 ):
                     raise asyncio.CancelledError
                 self._tools.todo_owner.bind_continuation(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                     turn_id=continuation_turn_id,
                 )
                 if self._control_completion_sealed_turn_id == pending.origin_turn_id:
@@ -2331,7 +2311,7 @@ class KernelHostSession:
                     self._control_completion_seal_changed.set()
                 self._active_turn_id = continuation_turn_id
                 cancellation_intent = ActiveTurnCancellationIntent(
-                    continuation_turn_id, ModelInputScopeKind.ROOT, None
+                    continuation_turn_id, self._session_scope_kind
                 )
                 self._active_cancellation_intent = cancellation_intent
                 self._pending_root_successor = None
@@ -2360,16 +2340,18 @@ class KernelHostSession:
         command_id: str | None,
         name: str,
         run: Callable[[ActiveTurnCancellationIntent], Awaitable[KernelRunResult]],
+        work_id: str | None = None,
     ) -> asyncio.Task[KernelRunResult]:
         """Install the sole Host-owned ROOT task while ``self._lock`` is held."""
 
         self._retire_done_active_root_locked()
         if self._active_task is not None:
             raise RuntimeError("a canonical ROOT turn is already running")
-        intent = ActiveTurnCancellationIntent(turn_id, ModelInputScopeKind.ROOT, None)
-        self._ephemeral.activate(turn_id)
+        intent = ActiveTurnCancellationIntent(turn_id, self._session_scope_kind)
+        if self.root_session_id is None:
+            self._ephemeral.activate(turn_id)
         task = asyncio.create_task(
-            self._run_owned_root_task(run, intent),
+            self._run_owned_root_task(run, intent, work_id),
             name=name,
         )
         self._active_task = task
@@ -2399,12 +2381,15 @@ class KernelHostSession:
         self,
         run: Callable[[ActiveTurnCancellationIntent], Awaitable[KernelRunResult]],
         intent: ActiveTurnCancellationIntent,
+        work_id: str | None = None,
     ) -> KernelRunResult:
         task = asyncio.current_task()
         if task is None:
             raise RuntimeError("ROOT task has no asyncio owner")
         result: KernelRunResult | None = None
         try:
+            if self.root_session_id is None:
+                await self._agent_runtime.deliver_pending_completions(self.session_id)
             result = await run(intent)
             return result
         finally:
@@ -2415,6 +2400,20 @@ class KernelHostSession:
                 settled = True
             finally:
                 self._ephemeral.completed(intent.turn_id, result if settled else None)
+                self._tools.terminal_monitor_coordinator.close_work(intent.turn_id)
+                if self.root_session_id is not None:
+                    await self._agent_runtime.release(self.session_id)
+                    try:
+                        await self._io.run(
+                            self.repository.mark_agent_idle, session_id=self.session_id,
+                            idle=True, at=datetime.now(timezone.utc),
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).exception("Agent idle observation will be retried by scheduler")
+                if self.root_session_id is not None and work_id is not None:
+                    await self._agent_runtime.completed_work(self.root_session_id, work_id)
+                await self._agent_runtime.notify_changed()
 
     async def _settle_pending_root_successor(self, task: asyncio.Task[object]) -> None:
         async with self._lock:
@@ -2459,8 +2458,7 @@ class KernelHostSession:
                 active_turn_id = self._active_turn_id
                 if active_turn_id is not None and not self._closing:
                     manual = await self._compaction.take_manual(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        scope_kind=self._session_scope_kind,
                         turn_id=active_turn_id,
                     )
                 if manual is None and active_turn_id is not None:
@@ -2505,19 +2503,19 @@ class KernelHostSession:
 
     async def _finalize_todo_run_activation(
         self,
-        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        prepared: PreparedTodoRootRunActivation,
         accepted: object,
     ) -> None:
         async with self._lock:
             closed = self._finalize_todo_run_activation_locked(prepared, accepted)
         self._tools.offer_todo_close(closed)
 
-        if isinstance(prepared, PreparedTodoRootRunActivation):
+        if self.root_session_id is None:
             self._ephemeral.admitted(accepted.turn_id)
 
     def _finalize_todo_run_activation_locked(
         self,
-        prepared: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+        prepared: PreparedTodoRootRunActivation,
         accepted: object,
     ) -> FrozenTodoCloseProjection | None:
         """Apply the common admission finalizer while the Host lock is held."""
@@ -2527,13 +2525,10 @@ class KernelHostSession:
             or accepted.entry_id != prepared.exact_initial_entry_id
         ):
             raise RuntimeError("TODO activation does not exact-join admission")
-        if isinstance(prepared, PreparedTodoRootRunActivation):
-            return self._tools.todo_owner.activate_root_run(
-                prepared,
-                allow_closing_predecessor=self._closing,
-            )
-        self._tools.todo_owner.activate_child_run(prepared)
-        return None
+        return self._tools.todo_owner.activate_root_run(
+            prepared,
+            allow_closing_predecessor=self._closing,
+        )
 
     def _retire_done_active_root_locked(self) -> None:
         task = self._active_task
@@ -2574,8 +2569,7 @@ class KernelHostSession:
                 "Plan resolution conflicts with force exit"
             )
         if self._compaction.is_fenced(
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         ):
             raise ConversationKernelConflict(
                 "Plan resolution conflicts with context compaction"
@@ -2587,8 +2581,7 @@ class KernelHostSession:
                     "a canonical ROOT turn is already running"
                 )
         reservation = self._reserve_compaction_write_locked(
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         )
         if creates_turn:
             self._external_new_turn_accepting = True
@@ -2747,8 +2740,7 @@ class KernelHostSession:
                     self._closing
                     or self._plan_exit_fence
                     or self._compaction.is_fenced(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        scope_kind=self._session_scope_kind,
                     )
                     or self._active_task is not origin_task
                     or self._active_turn_id != candidate.origin_turn_id
@@ -2781,7 +2773,7 @@ class KernelHostSession:
         async with self._lock:
             self._require_open()
             reservation = self._reserve_compaction_write_locked(
-                scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None)
+                scope_kind=self._session_scope_kind)
         cancelled: list[QueuedPromptAction] = []
         if method in {"mutate_scheduled_task", "switch_scheduled_task"}:
             arguments = {**arguments, "cancelled_candidates": cancelled}
@@ -3003,6 +2995,7 @@ class KernelHostSession:
                 identity=identity,
                 permission=permission_projection,
                 model_call_binding=model_call_binding,
+                input_origin="SCHEDULED_TASK" if _scheduled is not None else "HUMAN_MESSAGE",
             )
             if block_reason is not None:
                 return KernelCommandOutcome(
@@ -3041,8 +3034,7 @@ class KernelHostSession:
                 else:
                     try:
                         reservation = self._reserve_compaction_write_locked(
-                            scope_kind=ModelInputScopeKind.ROOT,
-                            scope_subagent_task_id=None,
+                            scope_kind=self._session_scope_kind,
                         )
                     except RuntimeError:
                         if hook_context_reservation is not None:
@@ -3289,7 +3281,7 @@ class KernelHostSession:
             if terminal is None:
                 raise ConversationKernelConflict("accepted Steer lost its canonical owner") from error
             return terminal
-        await self._subagents.notify_root_input_activity()
+        await self._agent_runtime.notify_changed()
         return outcome
 
     async def cancel_queued_prompt(
@@ -3361,8 +3353,7 @@ class KernelHostSession:
                 )
             try:
                 reservation = self._reserve_compaction_write_locked(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                 )
             except RuntimeError:
                 return KernelCommandOutcome(
@@ -3476,8 +3467,7 @@ class KernelHostSession:
             if (
                 self._plan_exit_fence
                 or self._compaction.is_fenced(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                 )
                 or self._external_new_turn_accepting
                 or active is not None
@@ -3568,8 +3558,7 @@ class KernelHostSession:
             if (
                 self._plan_exit_fence
                 or self._compaction.is_fenced(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                 )
                 or self._external_new_turn_accepting
             ):
@@ -4122,8 +4111,7 @@ class KernelHostSession:
             ):
                 return False
             self._tools.todo_owner.bind_continuation_if_present(
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
+                scope_kind=self._session_scope_kind,
                 turn_id=inspection.turn_id,
             )
             self._install_active_root_task_locked(
@@ -4252,10 +4240,12 @@ class KernelHostSession:
                     active = self._active_task
                     external_new_turn_accepting = self._external_new_turn_accepting
                     plan_exit_fence = self._plan_exit_fence
+                    reopen_gated = self._runtime_reopen_quiescence is not None
                     compaction_fenced = self._compaction.is_fenced(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        scope_kind=self._session_scope_kind,
                     )
+                if reopen_gated:
+                    break
                 if compaction_fenced:
                     await asyncio.sleep(0.05)
                     self._queue_wake.set()
@@ -4287,12 +4277,18 @@ class KernelHostSession:
                     self._queue_wake.set()
                     break
                 if candidate is None:
+                    if self.root_session_id is not None:
+                        await self._agent_runtime.release(self.session_id)
+                    break
+                if self.root_session_id is not None and not await self._agent_runtime.try_acquire(self.session_id):
                     break
                 try:
                     model_resolution_snapshot = (
                         self._model_runtime.freeze_resolution_snapshot()
                     )
                 except ModelRuntimeUnavailable:
+                    if self.root_session_id is not None:
+                        await self._agent_runtime.release(self.session_id)
                     # No trustworthy process-local catalog/settings cut exists.
                     # The canonical queue row stays pending until an ordinary
                     # refresh or settings repair wakes delivery again.
@@ -4302,6 +4298,8 @@ class KernelHostSession:
                 try:
                     model_resolution_snapshot.validate(candidate.model_call_binding)
                 except (KeyError, ValueError):
+                    if self.root_session_id is not None:
+                        await self._agent_runtime.release(self.session_id)
                     rejected = await self._settle_queued_model_rejection(candidate)
                     if rejected:
                         self._queue_wake.set()
@@ -4310,10 +4308,11 @@ class KernelHostSession:
                 async with self._lock:
                     try:
                         write_reservation = self._reserve_compaction_write_locked(
-                            scope_kind=ModelInputScopeKind.ROOT,
-                            scope_subagent_task_id=None,
+                            scope_kind=self._session_scope_kind,
                         )
                     except RuntimeError:
+                        if self.root_session_id is not None:
+                            await self._agent_runtime.release(self.session_id)
                         self._queue_wake.set()
                         break
                 settlement = asyncio.create_task(
@@ -4407,13 +4406,14 @@ class KernelHostSession:
         candidate: PreparedQueuedRootTurnAdmission,
         reservation: CompactionWriteReservation,
     ) -> asyncio.Task[KernelRunResult] | None:
+        task = None
         try:
-            return await self._settle_queued_root_admission(
-                candidate,
-                reservation=reservation,
-            )
+            task = await self._settle_queued_root_admission(candidate, reservation=reservation)
+            return task
         finally:
             await self._release_compaction_write_reservation(reservation)
+            if task is None and self.root_session_id is not None:
+                await self._agent_runtime.release(self.session_id)
 
     async def _settle_queued_root_admission(
         self,
@@ -4423,6 +4423,38 @@ class KernelHostSession:
     ) -> asyncio.Task[KernelRunResult] | None:
         """Own one queued mutation through confirmation and task installation."""
 
+        if self.root_session_id is not None:
+            outcome = self._agent_prompt_hooks.get(candidate.queue_item_id)
+            if outcome is None:
+                key = _IngressHookReservationKey(
+                    _IngressHookApiVariant.QUEUED,
+                    candidate.command_id,
+                    candidate.canonical_prompt,
+                    candidate.permission_snapshot.requested_mode,
+                    candidate.queue_item_id,
+                    None,
+                    PromptDeliveryMode.NEW_TURN,
+                    None,
+                )
+                outcome = await self._dispatch_user_prompt_hook(
+                    key=key,
+                    identity=build_queued_root_turn_identity(self.session_id, candidate.queue_item_id),
+                    permission=candidate.permission_snapshot,
+                    model_call_binding=candidate.model_call_binding,
+                    input_origin="AGENT_INSTRUCTION",
+                )
+                self._agent_prompt_hooks[candidate.queue_item_id] = outcome
+                if outcome[1] is not None:
+                    outcome[1].commit_prompt_bound(candidate.queue_item_id)
+            if outcome[0] is not None:
+                await self._io.run(
+                    self.repository.reject_prepared_prompt_head_hook_blocked,
+                    self._lease.guard, candidate=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                self._agent_prompt_hooks.pop(candidate.queue_item_id, None)
+                await self._agent_runtime.completed_work(self.root_session_id, candidate.queue_item_id)
+                return None
         activation = build_root_activation(
             session_id=candidate.session_id,
             admission_kind="QUEUED",
@@ -4513,6 +4545,7 @@ class KernelHostSession:
             raise RuntimeError("queued ROOT admission has an invalid disposition")
         accepted = confirmation.accepted
         assert accepted is not None
+        self._agent_prompt_hooks.pop(candidate.queue_item_id, None)
         if self._scheduled_tasks is not None:
             self._scheduled_tasks.wake()
         closed: FrozenTodoCloseProjection | None = None
@@ -4529,11 +4562,13 @@ class KernelHostSession:
                         turn_id=accepted.turn_id,
                         command_id=None,
                         name=f"kernel-queued-turn:{accepted.turn_id}",
+                        work_id=candidate.queue_item_id if self.root_session_id is not None else None,
                         run=lambda intent: self._run_accepted_root_chain(
                             accepted.turn_id, intent, prospective_dispatch
                         ),
                     )
-                    self._ephemeral.admitted(accepted.turn_id)
+                    if self.root_session_id is None:
+                        self._ephemeral.admitted(accepted.turn_id)
                 except BaseException:
                     task = None
             elif finalization_failed:
@@ -4610,7 +4645,11 @@ class KernelHostSession:
                 return
             delivered = 0
             while delivered < STAGE2_LIMITS.pending_prompt_hard_items:
-                monitor_ids = coordinator.pending_monitor_ids()
+                monitor_ids = tuple(
+                    monitor_id for monitor_id in coordinator.pending_monitor_ids()
+                    if (scope := coordinator.registration_scope(monitor_id)) is not None
+                    and scope[0] == self.session_id
+                )
                 if not monitor_ids or self._closing:
                     break
                 try:
@@ -4632,13 +4671,19 @@ class KernelHostSession:
                     self._monitor_wake.set()
                     break
                 if self._compaction.is_fenced(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                 ):
                     await asyncio.sleep(0.05)
                     self._monitor_wake.set()
                     break
                 monitor_id = monitor_ids[0]
+                registration_scope = coordinator.registration_scope(monitor_id)
+                if registration_scope is None:
+                    continue
+                work_turn_id = registration_scope[2]
+                if work_turn_id is not None and self.active_root_turn_id() != work_turn_id:
+                    coordinator.close_work(work_turn_id)
+                    continue
                 observation_id = coordinator.pending_observation_id(monitor_id)
                 if observation_id is None:
                     continue
@@ -4655,8 +4700,7 @@ class KernelHostSession:
                             try:
                                 write_reservation = (
                                     self._reserve_compaction_write_locked(
-                                        scope_kind=ModelInputScopeKind.ROOT,
-                                        scope_subagent_task_id=None,
+                                        scope_kind=self._session_scope_kind,
                                     )
                                 )
                             except RuntimeError:
@@ -4667,14 +4711,14 @@ class KernelHostSession:
                                     entry_id=derive_id("entry", "terminal-observation", derive_id("turn", "terminal-observation", self.session_id, observation_id)),
                                 )
                         elif (
-                            not self._plan_exit_fence
+                            self.root_session_id is None
+                            and not self._plan_exit_fence
                             and not self._external_new_turn_accepting
                         ):
                             try:
                                 write_reservation = (
                                     self._reserve_compaction_write_locked(
-                                        scope_kind=ModelInputScopeKind.ROOT,
-                                        scope_subagent_task_id=None,
+                                        scope_kind=self._session_scope_kind,
                                     )
                                 )
                             except RuntimeError:
@@ -4699,8 +4743,7 @@ class KernelHostSession:
                             try:
                                 write_reservation = (
                                     self._reserve_compaction_write_locked(
-                                        scope_kind=ModelInputScopeKind.ROOT,
-                                        scope_subagent_task_id=None,
+                                        scope_kind=self._session_scope_kind,
                                     )
                                 )
                             except RuntimeError:
@@ -4714,8 +4757,7 @@ class KernelHostSession:
                             try:
                                 write_reservation = (
                                     self._reserve_compaction_write_locked(
-                                        scope_kind=ModelInputScopeKind.ROOT,
-                                        scope_subagent_task_id=None,
+                                        scope_kind=self._session_scope_kind,
                                     )
                                 )
                             except RuntimeError:
@@ -4731,8 +4773,7 @@ class KernelHostSession:
                     async with self._lock:
                         try:
                             write_reservation = self._reserve_compaction_write_locked(
-                                scope_kind=ModelInputScopeKind.ROOT,
-                                scope_subagent_task_id=None,
+                                scope_kind=self._session_scope_kind,
                             )
                         except RuntimeError:
                             target = None
@@ -4853,8 +4894,7 @@ class KernelHostSession:
                     prospective_root_dispatch.close()
                 raise RuntimeError("terminal observation turn lost its local admission")
             self._tools.todo_owner.bind_continuation_if_present(
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
+                scope_kind=self._session_scope_kind,
                 turn_id=turn_id,
             )
             self._install_active_root_task_locked(
@@ -4911,7 +4951,7 @@ class KernelHostSession:
             )
             or self._capability_reload_settlement_lock.locked()
             or self._compaction.has_active_work()
-            or self._subagents.has_active_work()
+            or self._code_mode.has_live_cells()
             or not self._runner._safe_point.is_idle()
         )
 
@@ -4936,6 +4976,13 @@ class KernelHostSession:
             return quiescence
 
     def archive_has_terminal_work(self) -> bool:
+        if self.root_session_id is not None:
+            coordinator = self._tools.terminal_monitor_coordinator
+            return bool(coordinator.list_current(agent_id=self.session_id)) or any(
+                (scope := coordinator.registration_scope(monitor_id)) is not None
+                and scope[0] == self.session_id
+                for monitor_id in coordinator.pending_monitor_ids()
+            )
         return (
             any(p.physical_state in ('RUNNING', 'TERMINALIZING') for p in self._tools.list_background_terminal_processes())
             or bool(self._tools.terminal_monitor_coordinator.list_current())
@@ -4958,6 +5005,8 @@ class KernelHostSession:
                 raise RuntimeError("runtime-reopen quiescence is stale")
             quiescence._consume(self)
             self._runtime_reopen_quiescence = None
+            self._queue_wake.set()
+            self._monitor_wake.set()
 
     async def commit_safe_runtime_reopen(
         self, quiescence: KernelRuntimeReopenQuiescence
@@ -4996,9 +5045,7 @@ class KernelHostSession:
     ) -> KernelCommandOutcome | None:
         expected_target_kind = {
             UserControlOperation.STOP_ACTIVE_TURN: UserControlTargetKind.ROOT_TURN,
-            UserControlOperation.CANCEL_SUBAGENT_TASK: (
-                UserControlTargetKind.SUBAGENT_TASK
-            ),
+            UserControlOperation.STOP_CODE_MODE_CELL: UserControlTargetKind.CODE_MODE_CELL,
             UserControlOperation.TERMINATE_BACKGROUND_PROCESS: (
                 UserControlTargetKind.BACKGROUND_PROCESS
             ),
@@ -5297,7 +5344,7 @@ class KernelHostSession:
                         "another ROOT control-completion phase is still sealed"
                     )
                 root_write_key = self._compaction.scope_key(
-                    ModelInputScopeKind.ROOT, None
+                    self._session_scope_kind
                 )
                 admitted_writers = self._compaction_write_reservations.get(
                     root_write_key, set()
@@ -5313,8 +5360,7 @@ class KernelHostSession:
                 if not wait_for_root_writer:
                     if sealed_turn_id is None:
                         reservation = self._reserve_compaction_write_locked(
-                            scope_kind=ModelInputScopeKind.ROOT,
-                            scope_subagent_task_id=None,
+                            scope_kind=self._session_scope_kind,
                         )
                         self._control_completion_write_reservation = reservation
                         self._control_completion_sealed_turn_id = turn_id
@@ -5465,7 +5511,7 @@ class KernelHostSession:
         async with self._lock:
             try:
                 reservation = self._reserve_compaction_write_locked(
-                    scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None)
+                    scope_kind=self._session_scope_kind)
             except RuntimeError:
                 return
             cancellation = self._active_cancellation_intent
@@ -5493,7 +5539,7 @@ class KernelHostSession:
         while True:
             async with self._lock:
                 root_write_key = self._compaction.scope_key(
-                    ModelInputScopeKind.ROOT, None
+                    self._session_scope_kind
                 )
                 if self._compaction_write_reservations.get(root_write_key, 0):
                     self._root_compaction_write_changed.clear()
@@ -5656,6 +5702,7 @@ class KernelHostSession:
         self, attempt: _UserControlAttempt, task: asyncio.Task[KernelRunResult]
     ) -> None:
         try:
+            await self._code_mode.stop_turn(attempt.request.target.target_id)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             await self._settle_active_root_task(task)
@@ -5714,42 +5761,17 @@ class KernelHostSession:
         async with self._lock:
             self._finish_control_attempt_locked(attempt, outcome)
 
-    async def subagent_capacity_state(self) -> tuple[int, int]:
-        return await self._subagents.capacity_state()
+    def code_mode_cells(self) -> tuple[dict[str, object], ...]:
+        return self._code_mode.index()
 
-    async def set_subagent_capacity(self, target: int) -> tuple[int, int]:
-        """Apply a controller's Host-local worker target under writer ownership."""
-
-        async with self._lock:
-            if self._closing or self._closed:
-                raise RuntimeError("Host owner is closing")
-            await self._io.run(
-                self.repository.validate_host_writer,
-                self._lease.guard,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-            raised = await self._subagents.set_capacity_target(target)
-        # Child admission finalizes TODO under this Host lock. Join the shared
-        # scheduler only after releasing it; target admission stays owner-bound.
-        if raised:
-            await self._subagents.fill_available_capacity()
-        return await self._subagents.capacity_state()
-
-    async def request_cancel_subagent(
-        self,
-        *,
-        command_id: str,
-        admission_deadline_ms: int,
-        expected_session_id: str,
-        expected_host_session_id: str,
-        task_id: str,
+    async def request_stop_code_mode_cell(
+        self, *, command_id: str, admission_deadline_ms: int,
+        expected_session_id: str, expected_host_session_id: str, cell_id: str,
     ) -> KernelCommandOutcome:
         request = UserControlRequest(
-            UserControlOperation.CANCEL_SUBAGENT_TASK,
-            command_id,
-            expected_session_id,
-            expected_host_session_id,
-            UserControlTarget(UserControlTargetKind.SUBAGENT_TASK, task_id),
+            UserControlOperation.STOP_CODE_MODE_CELL, command_id,
+            expected_session_id, expected_host_session_id,
+            UserControlTarget(UserControlTargetKind.CODE_MODE_CELL, cell_id),
             admission_deadline_ms,
         )
         async with self._lock:
@@ -5759,113 +5781,62 @@ class KernelHostSession:
             rejection = self._validate_new_control_request_locked(request)
             if rejection is not None:
                 return rejection
-        preflight = await self._subagents.preflight_cancel_task(task_id)
-        async with self._lock:
-            existing = self._existing_control_outcome_locked(request)
-            if existing is not None:
-                return existing
-            rejection = self._validate_new_control_request_locked(request)
-            if rejection is not None:
-                return rejection
-            if preflight is not None:
-                if (
-                    preflight.disposition
-                    is SubagentCancelDisposition.TARGET_UNAVAILABLE
-                ):
-                    return self._control_rejection(
-                        request,
-                        "CONTROL_TARGET_UNAVAILABLE",
-                        "The subagent target is unavailable.",
-                    )
-                outcome = KernelCommandOutcome(
-                    request.command_id,
-                    "SUCCEEDED",
-                    request.target.target_id,
-                    "CONTROL_ALREADY_TERMINAL",
-                    "The subagent task was already terminal.",
-                    user_control=UserControlOutcome(
-                        request.operation,
-                        request.session_id,
-                        request.host_session_id,
-                        request.target,
-                        False,
-                        UserControlExecution.FINISHED,
-                        subagent=SubagentControlResult(
-                            preflight.disposition.value,
-                            preflight.status,
-                            preflight.reason,
-                        ),
-                    ),
-                )
+            current = next((cell for cell in self._code_mode.index()
+                            if cell["cell_id"] == cell_id), None)
+            if current is None:
+                return self._control_rejection(request, "CONTROL_TARGET_UNAVAILABLE",
+                                               "The script execution is unavailable.")
+            if current["state"] in {"completed", "failed", "terminated"}:
+                result = CodeModeControlResult(cell_id, str(current["state"]), int(current["pending_calls"]))
+                outcome = KernelCommandOutcome(command_id, "SUCCEEDED", cell_id,
+                    "CONTROL_ALREADY_TERMINAL", "The script has already stopped.",
+                    user_control=UserControlOutcome(request.operation, request.session_id,
+                        request.host_session_id, request.target, False,
+                        UserControlExecution.FINISHED, cell=result))
                 attempt = self._install_control_attempt_locked(request, outcome)
                 self._finish_control_attempt_locked(attempt, outcome)
                 return outcome
             pending = self._pending_control_outcome(request)
             attempt = self._install_control_attempt_locked(request, pending)
-            attempt.task = asyncio.create_task(
-                self._execute_cancel_subagent_attempt(attempt),
-                name=f"kernel-user-cancel-subagent:{task_id}",
-            )
+            attempt.task = asyncio.create_task(self._execute_stop_code_mode_cell(attempt),
+                name=f"kernel-user-stop-cell:{cell_id}")
             return pending
 
-    async def _execute_cancel_subagent_attempt(
-        self, attempt: _UserControlAttempt
-    ) -> None:
+    async def _execute_stop_code_mode_cell(self, attempt: _UserControlAttempt) -> None:
+        request = attempt.request
         try:
-            result = await self._subagents.cancel_task(attempt.request.target.target_id)
+            actual = await self._code_mode.stop(request.target.target_id)
+            cell = CodeModeControlResult(str(actual["cell_id"]), str(actual["state"]),
+                                         int(actual["pending_calls"]))
+            outcome = KernelCommandOutcome(request.command_id, "SUCCEEDED", cell.cell_id,
+                "CODE_MODE_CELL_STOPPED", "The script stopped; accepted work keeps its own lifecycle.",
+                user_control=UserControlOutcome(request.operation, request.session_id,
+                    request.host_session_id, request.target, True,
+                    UserControlExecution.FINISHED, cell=cell))
         except asyncio.CancelledError:
             raise
         except Exception:
-            outcome = KernelCommandOutcome(
-                attempt.request.command_id,
-                "FAILED",
-                attempt.request.target.target_id,
-                "CONTROL_FAILED",
-                "The subagent control owner failed before confirming cancellation.",
-                user_control=UserControlOutcome(
-                    attempt.request.operation,
-                    attempt.request.session_id,
-                    attempt.request.host_session_id,
-                    attempt.request.target,
-                    True,
-                    UserControlExecution.FINISHED,
-                ),
-            )
-            async with self._lock:
-                self._finish_control_attempt_locked(attempt, outcome)
-            return
-        unavailable = result.disposition is SubagentCancelDisposition.TARGET_UNAVAILABLE
-        already = result.disposition is SubagentCancelDisposition.ALREADY_TERMINAL
-        outcome = KernelCommandOutcome(
-            attempt.request.command_id,
-            "REJECTED" if unavailable else "SUCCEEDED",
-            attempt.request.target.target_id,
-            "CONTROL_TARGET_UNAVAILABLE"
-            if unavailable
-            else "CONTROL_ALREADY_TERMINAL"
-            if already
-            else "SUBAGENT_CANCELLED",
-            "The subagent target is unavailable."
-            if unavailable
-            else "The subagent task was already terminal."
-            if already
-            else "The subagent task was cancelled.",
-            user_control=UserControlOutcome(
-                attempt.request.operation,
-                attempt.request.session_id,
-                attempt.request.host_session_id,
-                attempt.request.target,
-                not unavailable and not already,
-                UserControlExecution.FINISHED,
-                subagent=SubagentControlResult(
-                    result.disposition.value,
-                    result.status,
-                    result.reason,
-                ),
-            ),
-        )
+            outcome = KernelCommandOutcome(request.command_id, "FAILED", request.target.target_id,
+                "CONTROL_FAILED", "The script owner could not confirm stopping.",
+                user_control=UserControlOutcome(request.operation, request.session_id,
+                    request.host_session_id, request.target, True, UserControlExecution.FINISHED))
         async with self._lock:
             self._finish_control_attempt_locked(attempt, outcome)
+
+    async def subagent_capacity_state(self) -> tuple[int, int]:
+        return await self._agent_runtime.capacity_state()
+
+    async def set_subagent_capacity(self, target: int) -> tuple[int, int]:
+        async with self._lock:
+            self._require_open()
+            await self._io.run(
+                self.repository.validate_host_writer,
+                self._lease.guard,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+        await self._agent_runtime.set_capacity_target(target)
+        await self._agent_runtime.wake_agent_requests(self.root_session_id or self.session_id)
+        return await self._agent_runtime.capacity_state()
 
     async def request_terminate_background_process(
         self,
@@ -6169,7 +6140,6 @@ class KernelHostSession:
                 command=process_info.command,
                 cwd=process_info.cwd,
                 origin_turn_id=process_info.origin.turn_id,
-                origin_subagent_task_id=(process_info.origin.scope_subagent_task_id),
                 target_root_turn_id=target_turn_id,
                 process=UserControlProcessFact(
                     process.disposition,
@@ -6356,8 +6326,7 @@ class KernelHostSession:
             async with self._lock:
                 try:
                     write_reservation = self._reserve_compaction_write_locked(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
+                        scope_kind=self._session_scope_kind,
                     )
                 except RuntimeError:
                     pass
@@ -6520,7 +6489,7 @@ class KernelHostSession:
         if (
             request.session_id != self.session_id
             or request.compiled_input.canonical_input_identity.conversation_scope_kind
-            is not ModelInputScopeKind.ROOT
+            is not self._session_scope_kind
         ):
             return
         async with self._lock:
@@ -6617,7 +6586,7 @@ class KernelHostSession:
         if (
             request.session_id != self.session_id
             or request.compiled_input.canonical_input_identity.conversation_scope_kind
-            is not ModelInputScopeKind.ROOT
+            is not self._session_scope_kind
         ):
             return
         async with self._lock:
@@ -6763,14 +6732,6 @@ class KernelHostSession:
                 str(row.get("target_interaction_decision_id") or ""),
                 f"INTERACTION_{decision}",
                 "Interaction decision accepted.",
-            )
-        if row.get("command_kind") == "ACCEPT_SUBAGENT_COMPLETION":
-            return KernelCommandOutcome(
-                command_id,
-                "SUCCEEDED",
-                str(row.get("target_entry_id") or ""),
-                "SUBAGENT_COMPLETION_DELIVERED",
-                "The delegated task outcome was delivered to Pulsara.",
             )
         status = str(row.get("turn_status") or "")
         target = str(row.get("target_turn_id") or "")
@@ -6965,152 +6926,6 @@ class KernelHostSession:
             submission=submission,
         )
 
-    async def accept_subagent_completion(
-        self,
-        *,
-        command_id: str,
-        target_turn_id: str | None,
-        requested_permission_mode: PermissionMode | None,
-        task_id: str,
-        actor_id: str,
-    ) -> KernelCommandOutcome:
-        self._require_open()
-        existing = await self.query_command(command_id)
-        if existing is not None:
-            return existing
-        new_turn = target_turn_id is None
-        if new_turn and requested_permission_mode is None:
-            return KernelCommandOutcome(
-                command_id,
-                "REJECTED",
-                task_id,
-                "PERMISSION_MODE_REQUIRED",
-                "A new ROOT turn requires an explicit permission mode.",
-            )
-        if not new_turn and requested_permission_mode is not None:
-            return KernelCommandOutcome(
-                command_id,
-                "REJECTED",
-                task_id,
-                "PERMISSION_FIELD_NOT_ALLOWED",
-                "An existing ROOT turn already owns its permission snapshot.",
-            )
-        resolved_turn_id = target_turn_id or derive_id('turn', 'command', self.session_id, command_id)
-        new_revision_id = (
-            derive_id('binding', 'revision', resolved_turn_id, "0") if new_turn else None
-        )
-        write_reservation: CompactionWriteReservation | None = None
-        active_cancellation_intent: ActiveTurnCancellationIntent | None = None
-        if new_turn:
-            write_reservation = await self._reserve_external_new_turn()
-            if write_reservation is None:
-                return KernelCommandOutcome(
-                    command_id,
-                    "REJECTED",
-                    task_id,
-                    "ROOT_TURN_ALREADY_RUNNING",
-                    "A ROOT turn is already running.",
-                )
-        else:
-            async with self._lock:
-                try:
-                    write_reservation = self._reserve_compaction_write_locked(
-                        scope_kind=ModelInputScopeKind.ROOT,
-                        scope_subagent_task_id=None,
-                    )
-                except RuntimeError:
-                    return KernelCommandOutcome(
-                        command_id,
-                        "REJECTED",
-                        task_id,
-                        "COMPACTION_IN_PROGRESS",
-                        "Context compaction is in progress for the ROOT scope.",
-                    )
-                if self._active_turn_id == resolved_turn_id:
-                    active_cancellation_intent = self._active_cancellation_intent
-        try:
-            assert write_reservation is not None
-            (
-                accepted,
-                prospective_root_dispatch,
-            ) = await self._runner.accept_subagent_completion(
-                turn_id=resolved_turn_id,
-                new_context_binding_revision_id=new_revision_id,
-                requested_permission_mode=requested_permission_mode,
-                task_id=task_id,
-                command_id=command_id,
-                actor_id=actor_id,
-                deadline_monotonic=self._canonical_deadline(),
-                admitted_writer=write_reservation,
-                cancellation_intent=active_cancellation_intent,
-            )
-        except ExternalSourceNotAtSafePoint:
-            if new_turn:
-                await self._release_external_new_turn_reservation()
-            return KernelCommandOutcome(
-                command_id,
-                "REJECTED",
-                task_id,
-                "PROVIDER_SAFE_POINT_REQUIRED",
-                "The ROOT turn is currently dispatching a provider call.",
-            )
-        except BaseException as error:
-            confirmed = await self._confirm_subagent_completion_command(
-                command_id=command_id,
-                command_kind="ACCEPT_SUBAGENT_COMPLETION",
-                task_id=task_id,
-            )
-            if confirmed is not None:
-                outcome, winner_turn_id = confirmed
-                if new_turn and winner_turn_id == resolved_turn_id:
-                    await self._start_subagent_completion_turn(
-                        resolved_turn_id, command_id
-                    )
-                elif new_turn:
-                    await self._release_external_new_turn_reservation()
-                if isinstance(error, asyncio.CancelledError):
-                    raise
-                return outcome
-            if new_turn:
-                await self._release_external_new_turn_reservation()
-            raise
-        finally:
-            if write_reservation is not None:
-                await self._release_compaction_write_reservation(write_reservation)
-        if accepted.disposition is SubagentCompletionDisposition.TARGET_STALE:
-            if prospective_root_dispatch is not None:
-                prospective_root_dispatch.close()
-            if new_turn:
-                await self._release_external_new_turn_reservation()
-            return KernelCommandOutcome(
-                command_id,
-                "REJECTED",
-                task_id,
-                "SUBAGENT_COMPLETION_TARGET_STALE",
-                "The conversation changed before this task outcome could be delivered.",
-            )
-        assert accepted.entry is not None
-        if new_turn and accepted.disposition is SubagentCompletionDisposition.CREATED:
-            await self._start_subagent_completion_turn(
-                accepted.entry.turn_id,
-                command_id,
-                prospective_root_dispatch=prospective_root_dispatch,
-            )
-        elif new_turn:
-            if prospective_root_dispatch is not None:
-                prospective_root_dispatch.close()
-            await self._release_external_new_turn_reservation()
-        elif prospective_root_dispatch is not None:
-            prospective_root_dispatch.close()
-            raise RuntimeError("active completion returned a ROOT dispatch")
-        return KernelCommandOutcome(
-            command_id,
-            "SUCCEEDED",
-            accepted.entry.entry_id,
-            "SUBAGENT_COMPLETION_DELIVERED",
-            "The delegated task outcome was delivered to Pulsara.",
-        )
-
     async def _reserve_external_new_turn(
         self,
     ) -> CompactionWriteReservation | None:
@@ -7120,88 +6935,24 @@ class KernelHostSession:
                 self._closing
                 or self._plan_exit_fence
                 or self._compaction.is_fenced(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                 )
                 or self._external_new_turn_accepting
                 or self._active_task is not None
             ):
                 return None
             reservation = self._reserve_compaction_write_locked(
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
+                scope_kind=self._session_scope_kind,
             )
             self._external_new_turn_accepting = True
             self._external_new_turn_settled.clear()
             return reservation
-
-    async def _confirm_subagent_completion_command(
-        self,
-        *,
-        command_id: str,
-        command_kind: str,
-        task_id: str,
-    ) -> tuple[KernelCommandOutcome, str] | None:
-        try:
-            row = await self._query_command_row(command_id)
-        except BaseException:
-            return None
-        if row is None or row.get("command_kind") != command_kind:
-            return None
-        observed_source = row.get("target_entry_source_subagent_task_id")
-        if (
-            observed_source != task_id
-            or not row.get("target_entry_id")
-            or not row.get("target_entry_turn_id")
-        ):
-            return None
-        return (
-            KernelCommandOutcome(
-                command_id,
-                "SUCCEEDED",
-                str(row["target_entry_id"]),
-                "SUBAGENT_COMPLETION_DELIVERED",
-                "The delegated task outcome was delivered to Pulsara.",
-            ),
-            str(row["target_entry_turn_id"]),
-        )
 
     async def _release_external_new_turn_reservation(self) -> None:
         async with self._lock:
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
             self._queue_wake.set()
-
-    async def _start_subagent_completion_turn(
-        self,
-        turn_id: str,
-        command_id: str,
-        *,
-        prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
-    ) -> None:
-        async with self._lock:
-            self._retire_done_active_root_locked()
-            if not self._external_new_turn_accepting or self._active_task is not None:
-                self._external_new_turn_accepting = False
-                self._external_new_turn_settled.set()
-                raise RuntimeError("subagent completion turn lost its local admission")
-            self._tools.todo_owner.bind_continuation_if_present(
-                scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-                turn_id=turn_id,
-            )
-            self._install_active_root_task_locked(
-                turn_id=turn_id,
-                command_id=command_id,
-                name=f"kernel-subagent-completion-turn:{turn_id}",
-                run=lambda intent: self._run_accepted_root_chain(
-                    turn_id,
-                    intent,
-                    prospective_root_dispatch=prospective_root_dispatch,
-                ),
-            )
-            self._external_new_turn_accepting = False
-            self._external_new_turn_settled.set()
 
     async def aclose(
         self,
@@ -7224,13 +6975,13 @@ class KernelHostSession:
                     self._active_cancellation_intent.install_cause(
                         ForegroundCancellationCause.HOST_SESSION_CLOSE)
                 self._presentation_notices.clear()
+                self._agent_prompt_hooks.clear()
                 self._tools.todo_owner.mark_closing(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                 )
                 self._queue_wake.set()
                 self._monitor_wake.set()
-            await self._subagents.install_host_close_intents()
+            await self._code_mode.aclose()
             self.workspace_gate.begin_close()
             # SessionEnd consumes the exact close-attempt carrier.  Freeze the
             # fixed workspace root for this attempt; the later terminal Hook
@@ -7355,8 +7106,7 @@ class KernelHostSession:
                 # legitimate producer that can advance it, so fail closed
                 # instead of sleeping on an ownerless condition.
                 todo_closed = self._tools.todo_owner.close_run(
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
+                    scope_kind=self._session_scope_kind,
                 )
             except BaseException as exc:
                 todo_closed = None
@@ -7377,10 +7127,6 @@ class KernelHostSession:
                     await close_operation()
                 except BaseException as exc:
                     close_error = close_error or exc
-            try:
-                await self._subagents.aclose(deadline_monotonic=deadline)
-            except BaseException as exc:
-                close_error = close_error or exc
             try:
                 await self._assistant_settlements.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
@@ -7409,6 +7155,8 @@ class KernelHostSession:
                             else self._model_identity(current_binding)
                         ),
                         reason="other",
+                        session_kind="SUBAGENT" if self.root_session_id is not None else "ROOT",
+                        input_origin=None,
                     )
                     await self._hooks.dispatch_terminal(
                         HookDispatchEnvelope(
@@ -7488,38 +7236,6 @@ class KernelHostSession:
             except Exception as error:
                 self._writer_renewal_failure = error
                 raise
-
-    def _new_child_runner(
-        self, hook_scope: HookDispatchScopeRef | None
-    ) -> ConversationKernelRunner:
-        return ConversationKernelRunner(
-            repository=self.repository,
-            writer_lease=self._lease,
-            model=self._model,
-            tools=self._tools,
-            live_bus=self.live_bus,
-            workspace_gate=self.workspace_gate,
-            before_provider_preparation=self._adopt_capabilities_if_requested,
-            capability_change_reader=self.freeze_capability_change,
-            capability_change_installed=self.consume_capability_change,
-            io_owner=self._io,
-            context_source_collector=self._context_sources,
-            model_resolution_snapshot_provider=(
-                self._model_runtime.freeze_resolution_snapshot
-            ),
-            continuity_owner=self._input_continuity,
-            extensions=self.extensions,
-            workspace_id=self.workspace.workspace_key,
-            launch_permission_mode=self._launch_permission_mode,
-            deadline_factory=self._deadlines,
-            assistant_settlement_owner=self._assistant_settlements,
-            todo_admission_finalizer=self._finalize_todo_run_activation,
-            compaction_owner=self._compaction,
-            subagent_runtime=self._subagents,
-            hook_dispatcher=self._hooks,
-            hook_context_owner=self._hook_context,
-            hook_scope=hook_scope,
-        )
 
     async def _observe_provider_usage(
         self,
@@ -7721,23 +7437,12 @@ def _list_resumable_session_rows(
                        LIMIT 1
                    )) END AS updated_at,
                    s.model_call_binding,
-                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn,
-                   count(t.id) AS subagent_task_total,
-                   count(t.id) FILTER (WHERE t.status = 'ACTIVE')
-                       AS subagent_task_active,
-                   count(t.id) FILTER (WHERE t.status IN (
-                       'PENDING_START', 'WAITING_DEPENDENCY'
-                   )) AS subagent_task_waiting,
-                   count(t.id) FILTER (WHERE t.status IN (
-                       'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
-                   )) AS subagent_task_attention
+                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn
             FROM pulsara_v3.sessions AS s
             JOIN pulsara_v3.workspaces AS w
               ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id
-            LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
-            WHERE s.workspace_id = %s AND s.memory_domain_id = %s
+            WHERE s.root_session_id IS NULL AND s.workspace_id = %s AND s.memory_domain_id = %s
               AND (%s OR s.lifecycle = 'OPEN')
-            GROUP BY s.id, w.memory_domain_id, w.id
             -- sessions.updated_at includes writer-lease maintenance.  Order the
             -- user-facing list by canonical conversation activity instead.
             ORDER BY updated_at DESC, s.id LIMIT %s
@@ -7771,22 +7476,11 @@ def _list_resumable_session_rows_across_workspaces(
                        LIMIT 1
                    )) END AS updated_at,
                    s.model_call_binding,
-                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn,
-                   count(t.id) AS subagent_task_total,
-                   count(t.id) FILTER (WHERE t.status = 'ACTIVE')
-                       AS subagent_task_active,
-                   count(t.id) FILTER (WHERE t.status IN (
-                       'PENDING_START', 'WAITING_DEPENDENCY'
-                   )) AS subagent_task_waiting,
-                   count(t.id) FILTER (WHERE t.status IN (
-                       'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
-                   )) AS subagent_task_attention
+                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn
             FROM pulsara_v3.sessions AS s
             JOIN pulsara_v3.workspaces AS w
               ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id
-            LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
-            WHERE s.memory_domain_id = %s AND (%s OR s.lifecycle = 'OPEN')
-            GROUP BY s.id, w.memory_domain_id, w.id
+            WHERE s.root_session_id IS NULL AND s.memory_domain_id = %s AND (%s OR s.lifecycle = 'OPEN')
             -- sessions.updated_at includes writer-lease maintenance.  Order the
             -- user-facing list by canonical conversation activity instead.
             ORDER BY updated_at DESC, s.id
@@ -7817,23 +7511,12 @@ def _read_resumable_session_row(
                        FROM pulsara_v3.transcript_entries AS e WHERE e.session_id = s.id
                        ORDER BY e.entry_sequence DESC LIMIT 1)) END AS updated_at,
                    s.model_call_binding,
-                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn,
-                   count(t.id) AS subagent_task_total,
-                   count(t.id) FILTER (WHERE t.status = 'ACTIVE')
-                       AS subagent_task_active,
-                   count(t.id) FILTER (WHERE t.status IN (
-                       'PENDING_START', 'WAITING_DEPENDENCY'
-                   )) AS subagent_task_waiting,
-                   count(t.id) FILTER (WHERE t.status IN (
-                       'FAILED', 'INTERRUPTED', 'BLOCKED_DEPENDENCY_FAILED'
-                   )) AS subagent_task_attention
+                   {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn
             FROM pulsara_v3.sessions AS s
             JOIN pulsara_v3.workspaces AS w
               ON w.memory_domain_id=s.memory_domain_id AND w.id=s.workspace_id
-            LEFT JOIN pulsara_v3.subagent_tasks AS t ON t.session_id = s.id
             WHERE s.id = %s AND s.memory_domain_id = %s
               AND (%s OR s.lifecycle = 'OPEN')
-            GROUP BY s.id, w.memory_domain_id, w.id
             """,
             (session_id, memory_domain_id, include_archived),
         ).fetchone()
@@ -7854,10 +7537,6 @@ def _kernel_session_summary(row) -> KernelSessionSummary:
         updated_at=row["updated_at"],
         model_call_binding=model_call_binding_from_dict(row["model_call_binding"]),
         latest_root_turn=row["latest_root_turn"],
-        subagent_task_total=int(row.get("subagent_task_total") or 0),
-        subagent_task_active=int(row.get("subagent_task_active") or 0),
-        subagent_task_waiting=int(row.get("subagent_task_waiting") or 0),
-        subagent_task_attention=int(row.get("subagent_task_attention") or 0),
     )
 
 
@@ -7908,6 +7587,8 @@ class KernelHostCore:
         self._blob_gc_task: asyncio.Task[None] | None = None
         self._history_maintenance: HistoryProjectionMaintainer | None = None
         self._sessions: dict[str, KernelHostSession] = {}
+        self._agent_runtime = AgentSessionRuntime(self)
+        self._suspended_agent_roots: set[str] = set()
         self._workspace_capability_revisions: dict[Path, int] = {}
         self._open_attempts: dict[asyncio.Future[None], frozenset[str]] = {}
         self._session_retirements: dict[str, KernelSessionRetirement] = {}
@@ -7928,6 +7609,165 @@ class KernelHostCore:
             model_runtime.settings, credential_boundary=self._credential_boundary,
             open_browser=open_browser,
         )
+
+    def _live_agent_session(self, session_id: str) -> KernelHostSession | None:
+        for session in self._sessions.values():
+            if session.session_id == session_id and not (session._closing or session._closed):
+                return session
+        return None
+
+    async def _load_agent_session(self, row: Mapping[str, object]) -> KernelHostSession:
+        session_id = str(row["id"])
+        live = self._live_agent_session(session_id)
+        if live is not None:
+            live.wake_queued_inputs()
+            return live
+        from pulsara_agent.tool_permission import preset_to_policy
+        workspace_input = HostWorkspaceInput(
+            workspace_kind=str(row["workspace_kind"]),
+            workspace_root=str(row["workspace_root"]),
+            display_label=(str(row.get("workspace_label") or "Agent")
+                           if row["workspace_kind"] == "transient" else None),
+            memory_domain_id=str(row["memory_domain_id"]),
+        )
+        settlement = await self._admit_session_open(session_id, str(row["root_session_id"]))
+        try:
+            return await self.resume_session(
+                session_id,
+                workspace_input=workspace_input,
+                permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+            )
+        finally:
+            await self._settle_session_open(settlement)
+
+    async def _send_agent_message(self, agent_id: str, message: str, context) -> dict[str, object]:
+        recipient = {"kind": "AGENT", "agent_id": agent_id}
+        live = self._live_agent_session(agent_id)
+        if live is None:
+            repository = await self._ensure_resources()
+            state = await asyncio.to_thread(repository.read_agent_runtime_state,
+                session_id=agent_id, deadline_monotonic=self._canonical_deadline())
+            pending = state is not None and state["has_pending_work"]
+            return {"recipient": recipient, "work": None,
+                    "delivery": "not_started" if pending else "inactive",
+                    "message": "Message was not accepted: the recipient has no active turn."}
+        async with live._lock:
+            turn_id = live.active_root_turn_id()
+        if turn_id is None:
+            state = await live._io.run(live.repository.read_agent_runtime_state,
+                session_id=agent_id, deadline_monotonic=live._canonical_deadline())
+            return {"recipient": recipient, "work": None,
+                    "delivery": "not_started" if state is not None and state["has_pending_work"] else "inactive",
+                    "message": "Message was not accepted: the recipient has no active turn."}
+        # Exact turn identity is captured once. Repository admission serializes
+        # against ordinary assistant completion and never redirects to a successor.
+        accepted = await live._io.run(
+            live.repository.enqueue_agent_steer, live._lease.guard,
+            target_turn_id=turn_id, queue_item_id=random_id("queue"),
+            source_session_id=context.session_id,
+            source_work_id=getattr(context, "work_id", None), text=message,
+            occurred_at=datetime.now(timezone.utc), actor_id=context.session_id,
+            deadline_monotonic=live._canonical_deadline(),
+        )
+        if accepted is None:
+            return {"recipient": recipient, "work": None, "delivery": "inactive",
+                    "message": "Message was not accepted: the recipient turn ended."}
+        live.wake_queued_inputs()
+        await self._agent_runtime.notify_changed()
+        work_id = accepted.get("work_id")
+        return {"recipient": recipient,
+                "work": None if work_id is None else {"kind": "WORK", "work_id": work_id},
+                "delivery": "queued", "message": "Message accepted by the active turn."}
+
+    async def _deliver_agent_completion(self, root_session_id: str, work_id: str) -> bool:
+        root = self._live_agent_session(root_session_id)
+        if root is None:
+            return False
+        async with root._lock:
+            turn_id = root.active_root_turn_id()
+        if turn_id is None:
+            return False
+        work = await root._io.run(root.repository.query_agent_work,
+            root_session_id=root_session_id, work_id=work_id,
+            deadline_monotonic=root._canonical_deadline())
+        if work is None:
+            return True
+        if work["status"] not in {"completed", "stopped"}:
+            return False
+        text = work.get("final") if work["status"] == "completed" else work.get("diagnostic") or work.get("terminal_reason")
+        if not isinstance(text, str):
+            raise RuntimeError("terminal Work has no canonical completion content")
+        accepted = await root._io.run(root.repository.enqueue_agent_steer,
+            root._lease.guard, target_turn_id=turn_id,
+            queue_item_id=derive_id("queue", "agent-completion", root_session_id, work_id),
+            source_session_id=work["agent_id"], source_work_id=work_id,
+            text=text, input_origin="AGENT_MATERIAL", occurred_at=datetime.now(timezone.utc),
+            actor_id=work["agent_id"], deadline_monotonic=root._canonical_deadline())
+        if accepted is None:
+            return False
+        root.wake_queued_inputs()
+        return True
+
+    async def _stop_agent_active_work(self, agent_id: str, work_id: str | None = None) -> None:
+        live = self._live_agent_session(agent_id)
+        if live is None:
+            return
+        expected_turn_id = None
+        if work_id is not None:
+            row = await live._io.run(live.repository.query_agent_work,
+                root_session_id=live.root_session_id or live.session_id,
+                work_id=work_id, deadline_monotonic=live._canonical_deadline())
+            if row is None:
+                return
+            expected_turn_id = row.get("turn_id")
+        async with live._lock:
+            task = live._active_task
+            intent = live._active_cancellation_intent
+            if (task is None or task.done() or intent is None
+                or (work_id is not None and live._active_turn_id != expected_turn_id)):
+                return
+            intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await live._settle_active_root_task(task)
+        await self._agent_runtime.notify_changed()
+
+    async def _retire_idle_agent(self, row: Mapping[str, object], *, delete: bool) -> None:
+        from pulsara_agent.conversation_kernel.subagent import AGENT_DELETE_IDLE, AGENT_UNLOAD_IDLE
+        session_id = str(row["id"])
+        try:
+            operation = await self.begin_session_retirement(session_id, str(row["memory_domain_id"]))
+        except SessionDeleteRejected:
+            return
+        gate = None
+        live = None
+        committed = False
+        try:
+            live = self._live_agent_session(session_id)
+            if live is not None:
+                try:
+                    gate = await live.prepare_safe_runtime_reopen()
+                except RuntimeError:
+                    return
+                if live.archive_has_terminal_work():
+                    return
+            repository = await self._ensure_resources()
+            cutoff = datetime.now(timezone.utc) - (AGENT_DELETE_IDLE if delete else AGENT_UNLOAD_IDLE)
+            state = await self._agent_runtime._io.run(repository.read_agent_runtime_state,
+                session_id=session_id, deadline_monotonic=self._canonical_deadline())
+            if (state is None or state["has_pending_work"] or state["has_running_turn"]
+                or state.get("idle_since") is None or state["idle_since"] > cutoff):
+                return
+            if live is not None:
+                await live.commit_safe_runtime_reopen(gate)
+                committed = True
+            await self.quiesce_session_retirement(operation)
+            if delete:
+                await self.commit_session_deletion(operation, idle_before=cutoff)
+        finally:
+            if gate is not None and not committed and live is not None and not live._closing:
+                await live.abort_safe_runtime_reopen(gate)
+            await self.finish_session_retirement(operation, quarantine=False)
 
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -7956,8 +7796,11 @@ class KernelHostCore:
         source_format="native",
         import_classifications=(),
         import_public_values=(),
+        mcp_scope_policies=(),
     ) -> PluginInstallOutcome:
         """Install one local package into the user Plugin store, initially disabled."""
+
+        from pulsara_agent.mcp_config import McpScopePolicy
 
         request = InstallLocalPluginRequest(
             source_path=source_path,
@@ -7966,6 +7809,7 @@ class KernelHostCore:
             source_format=source_format,
             import_classifications=import_classifications,
             import_public_values=import_public_values,
+            mcp_scope_policies=tuple((name, McpScopePolicy(policy)) for name, policy in mcp_scope_policies),
         )
         return await self._plugin_management().install_local_plugin(
             request,
@@ -8079,6 +7923,7 @@ class KernelHostCore:
             self._blob_gc_task = asyncio.create_task(
                 self._blob_gc_loop(), name="kernel-blob-orphan-gc"
             )
+            self._agent_runtime.start()
         return self._repository
 
     async def fork_conversation(
@@ -8403,6 +8248,12 @@ class KernelHostCore:
             require_workspace(workspace.workspace_root)
             session = KernelHostSession(
                 model_runtime=self._model_runtime,
+                agent_runtime=self._agent_runtime,
+                root_session_id=await io_owner.run(
+                    repository.read_session_root_id,
+                    session_id=session_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                ),
                 mcp_management=self.mcp_management,
                 capability_change_notifier=self.mark_capability_change,
                 workspace=workspace,
@@ -8456,7 +8307,11 @@ class KernelHostCore:
                 )
             if session.host_session_id in self._sessions:
                 raise ConversationKernelConflict("IDENTITY_CONFLICT: Host identity already published")
+            if session.root_session_id in self._suspended_agent_roots:
+                raise RuntimeError("Owning ROOT Host is closing")
             self._sessions[session.host_session_id] = session
+            if session.root_session_id is None:
+                self._suspended_agent_roots.discard(session.session_id)
             self._extension_routes[session.session_id] = (
                 session.host_session_id,
                 session.extensions,
@@ -8467,6 +8322,7 @@ class KernelHostCore:
         )
         if changed:
             await session.request_capability_refresh()
+        await self._agent_runtime.wake_agent_requests(session.root_session_id or session.session_id)
 
     def _close_unavailable_writer(
         self, session: KernelHostSession, renewal: asyncio.Task[None]
@@ -8739,7 +8595,6 @@ class KernelHostCore:
         *,
         session_id: str,
         conversation_scope_kind: str | None = None,
-        scope_subagent_task_id: str | None = None,
         after_observed_at: datetime | None = None,
         after_resolved_model_call_id: str | None = None,
         maximum_rows: int = 256,
@@ -8757,100 +8612,9 @@ class KernelHostCore:
             query.page_provider_call_usage,
             session_id=session_id,
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             after_observed_at=after_observed_at,
             after_resolved_model_call_id=after_resolved_model_call_id,
             maximum_rows=maximum_rows,
-            deadline_monotonic=self._canonical_deadline(),
-        )
-
-    async def read_subagent_task_page(
-        self,
-        *,
-        session_id: str,
-        maximum_items: int,
-        after_accepted_at: datetime | None = None,
-        after_task_id: str | None = None,
-        batch_id: str | None = None,
-        task_id: str | None = None,
-    ) -> tuple[
-        tuple[Mapping[str, object], ...],
-        tuple[Mapping[str, object], ...],
-    ]:
-        """Cold-read one durable, session-scoped task page plus its edges."""
-
-        if not session_id:
-            raise ValueError("session_id is required")
-        if not 1 <= maximum_items <= 50:
-            raise ValueError("subagent task page bound is invalid")
-        repository = await self._ensure_resources()
-        deadline = self._canonical_deadline()
-        rows = await asyncio.to_thread(
-            repository.list_subagent_tasks,
-            session_id=session_id,
-            maximum_items=maximum_items,
-            after_accepted_at=after_accepted_at,
-            after_task_id=after_task_id,
-            batch_id=batch_id,
-            task_id=task_id,
-            include_lookahead=True,
-            deadline_monotonic=deadline,
-        )
-        # Rows, their dependency view, and the read watermark come from one
-        # repeatable-read transaction in list_subagent_tasks.
-        dependencies = [
-            edge
-            for row in rows[:maximum_items]
-            for edge in row["dependency_rows"]
-        ]
-        return rows, tuple(dependencies)
-
-    async def read_subagent_task_group_page(
-        self,
-        *,
-        session_id: str,
-        maximum_items: int,
-        after_first_accepted_at: datetime | None = None,
-        after_batch_id: str | None = None,
-        batch_id: str | None = None,
-    ) -> tuple[Mapping[str, object], ...]:
-        """Cold-read real batch aggregates without activating a Host."""
-
-        if not session_id:
-            raise ValueError("session_id is required")
-        if not 1 <= maximum_items <= 50:
-            raise ValueError("subagent group page bound is invalid")
-        repository = await self._ensure_resources()
-        return await asyncio.to_thread(
-            repository.list_subagent_task_groups,
-            session_id=session_id,
-            maximum_items=maximum_items,
-            after_first_accepted_at=after_first_accepted_at,
-            after_batch_id=after_batch_id,
-            batch_id=batch_id,
-            include_lookahead=True,
-            deadline_monotonic=self._canonical_deadline(),
-        )
-
-    async def read_subagent_task_activity_page(
-        self,
-        *,
-        session_id: str,
-        task_id: str,
-        maximum_items: int,
-        after_entry_sequence: int = 0,
-    ):
-        """Cold-read exact canonical activity identities for one task."""
-
-        if not session_id or not task_id:
-            raise ValueError("session and task identity are required")
-        repository = await self._ensure_resources()
-        return await asyncio.to_thread(
-            repository.list_subagent_task_activities,
-            session_id=session_id,
-            task_id=task_id,
-            maximum_items=maximum_items,
-            after_entry_sequence=after_entry_sequence,
             deadline_monotonic=self._canonical_deadline(),
         )
 
@@ -8948,17 +8712,20 @@ class KernelHostCore:
         async with self._lock:
             if self._session_retirements.get(operation.session_id) is not operation:
                 raise RuntimeError("session deletion owner is stale")
-            sessions = tuple(s for s in self._sessions.values() if s.session_id == operation.session_id)
+            sessions = tuple(s for s in self._sessions.values()
+                if s.session_id == operation.session_id or s.root_session_id == operation.session_id)
         for session in sorted(sessions, key=lambda s: s._lease.guard.writer_generation):
             if session.workspace.memory_domain.memory_domain_id != operation.memory_domain_id:
                 raise RuntimeError("session deletion domain mismatch")
             await self.close_session(session.host_session_id)
-            operation.closed_writer = session._lease.guard
+            if session.session_id == operation.session_id:
+                operation.closed_writer = session._lease.guard
         operation.physical_full = True
 
     async def commit_session_deletion(
         self, operation: KernelSessionRetirement, *,
         required_lifecycle: Literal["ARCHIVED"] | None = None,
+        idle_before: datetime | None = None,
     ) -> str:
         if (operation.owner is not self or not operation.physical_full
             or operation.quarantined
@@ -8971,9 +8738,13 @@ class KernelHostCore:
             memory_domain_id=operation.memory_domain_id,
             closed_writer=operation.closed_writer, deadline_monotonic=deadline,
             required_lifecycle=required_lifecycle,
+            idle_before=idle_before,
         ))
         await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
-        return worker.result()
+        result = worker.result()
+        if result == "DELETED":
+            self._agent_runtime.forget_root(operation.session_id)
+        return result
 
     async def finish_session_retirement(
         self, operation: KernelSessionRetirement, *, quarantine: bool,
@@ -9025,10 +8796,19 @@ class KernelHostCore:
         session: KernelHostSession,
         deadline_monotonic: float,
     ) -> None:
+        if session.root_session_id is None:
+            async with self._lock:
+                self._suspended_agent_roots.add(session.session_id)
+                children = tuple(child for child in self._sessions.values()
+                    if child.root_session_id == session.session_id)
+            for child in children:
+                await self.close_session(child.host_session_id)
         try:
             await session.aclose(
                 deadline_monotonic=deadline_monotonic,
             )
+            if session.root_session_id is not None:
+                await self._agent_runtime.release(session.session_id)
         except BaseException:
             async with self._lock:
                 attempt = self._close_attempts.get(host_session_id)
@@ -9094,6 +8874,7 @@ class KernelHostCore:
     async def _shutdown_owner(
         self, open_settlements: tuple[asyncio.Future[None], ...]
     ) -> None:
+        await self._agent_runtime.aclose()
         if open_settlements:
             await asyncio.gather(*open_settlements)
         await self.mcp_management.aclose()
@@ -9194,6 +8975,15 @@ class KernelHostCore:
     def _deliver_committed_events(
         self, events: tuple[StoredCommittedEvent, ...]
     ) -> None:
+        if any(event.event_type in {
+            CommittedEventType.TURN_COMPLETED, CommittedEventType.TURN_INTERRUPTED,
+            CommittedEventType.PROMPT_QUEUED, CommittedEventType.PROMPT_CONSUMED,
+            CommittedEventType.PROMPT_CANCELLED, CommittedEventType.PROMPT_REJECTED,
+        } for event in events):
+            # Existing committed occurrences are wake hints only; subscribers
+            # re-read canonical requests/turns instead of caching event state.
+            asyncio.create_task(self._agent_runtime.notify_changed(),
+                                name="kernel-agent-canonical-change")
         if self._history_maintenance is not None:
             entries: dict[str, list[str]] = {}
             for event in events:

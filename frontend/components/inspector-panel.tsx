@@ -24,7 +24,6 @@ import { McpEditor } from './mcp-editor';
 import { McpImporter } from './mcp-importer';
 import { SkillImporter } from './skill-importer';
 import type {
-  AgentTask,
   CapabilitySnapshot,
   McpEditInput,
   McpImportSource,
@@ -38,10 +37,8 @@ import type {
   SkillCapability,
   SkillImportInput,
   SkillImportCandidate,
-  SubagentActivity,
 } from '../lib/pulsara-types';
 import type { MarkdownNotify } from './markdown-body';
-import { TaskWorkspace, TaskGraphDetail } from './task-workspace';
 import { inspectorTab, DesktopWorkspace, useDesktopWorkspace, type WorkspaceTab } from './desktop-workspace';
 import { FileLinkContext } from './file-link-context';
 import { BackgroundTerminalPanel } from './background-terminal-panel';
@@ -50,7 +47,6 @@ import { usePromptHover } from '../lib/prompt-hover';
 import type {
   BackgroundProcessLog,
   BackgroundProcessPage,
-  AgentTaskGroup,
   ModelConfigurationSummary,
   CommandReceipt,
   ToolArtifactPage,
@@ -63,32 +59,16 @@ interface InspectorPanelProps {
   projectMcpForms: ProjectMcpForms;
   session: SessionSummary;
   isOpen: boolean;
-  agentTasks: AgentTask[];
   modelConfigurations?: readonly ModelConfigurationSummary[];
-  taskGroups?: AgentTaskGroup[];
-  loadedTaskGroups?: ReadonlySet<string>;
-  taskGroupTotal?: number;
-  onUnloadTaskGroup?: (groupId: string) => void;
-  onLoadTaskGroup?: (groupId: string) => Promise<void>;
-  onLoadMoreTaskGroups?: () => Promise<void>;
-  onReadSubagentCapacity?: () => Promise<{ target: number; occupied: number }>;
-  loading: boolean;
   canControl: boolean;
   capabilities?: CapabilitySnapshot;
   capabilityLoading: boolean;
   capabilityError?: string;
   capabilityBusy?: string;
-  error?: string;
-  onRetry: () => void;
-  taskActivities: ReadonlyMap<string, SubagentActivity[]>;
-  onLoadTask?: (taskId: string) => Promise<AgentTask>;
-  onLoadTaskActivities: (taskId: string, cursor?: string) => ReturnType<import('../lib/runtime-adapter').RuntimeAdapter['listSessionTaskActivities']>;
-  taskArtifactOwnerKey: string;
   onReadVisualization?: import("./inline-visualization").ReadVisualization;
   onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
   onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
-  onCancelTask: (task: AgentTask) => Promise<void>;
   backgroundOwnerKey: string;
   backgroundHostSessionId?: string;
   backgroundControlAdmissionDeadlineMs?: number;
@@ -295,10 +275,10 @@ function ProjectCapabilityPanel({
   kind: ProjectCapabilityKind;
   setKind: (kind: ProjectCapabilityKind) => void;
   snapshot?: CapabilitySnapshot;
-  loading: boolean;
+  loading?: boolean;
   error?: string;
-  busy?: string;
   onRetry: () => void;
+  busy?: string;
   onToggleSkill: (skill: SkillCapability, enabled: boolean) => Promise<void>;
   onPreviewSkills: (sourcePath: string) => Promise<SkillImportCandidate[]>;
   onInstallSkill: (input: SkillImportInput) => Promise<void>;
@@ -507,32 +487,16 @@ export function InspectorPanel({
   projectMcpForms,
   session,
   isOpen,
-  agentTasks,
   modelConfigurations,
-  taskGroups,
-  loadedTaskGroups,
-  taskGroupTotal,
-  onLoadTaskGroup,
-  onUnloadTaskGroup,
-  onLoadMoreTaskGroups,
-  onReadSubagentCapacity,
-  loading,
   canControl,
   capabilities,
   capabilityLoading,
   capabilityError,
   capabilityBusy,
-  error,
-  onRetry,
-  taskActivities,
-  onLoadTask,
-  onLoadTaskActivities,
-  taskArtifactOwnerKey,
   onReadToolArtifact,
   onReadPromptImage,
   onReadVisualization,
   onReadVisualizationThumbnail,
-  onCancelTask,
   backgroundOwnerKey,
   backgroundHostSessionId,
   backgroundControlAdmissionDeadlineMs,
@@ -562,22 +526,10 @@ export function InspectorPanel({
 
   const open = (kind: WorkspaceTab['kind'], title: string, entityId?: string, hostSessionId?: string) => workspace?.open({
     ...inspectorTab(session.id, kind, title, entityId, hostSessionId),
-    onClose: kind === 'group' && entityId ? () => onUnloadTaskGroup?.(entityId) : undefined,
   });
   const renderTab = (tab: WorkspaceTab) => {
     if (!session.id) return <div className="inspector-empty">创建或选择会话后查看内容</div>;
     if ((tab.kind === 'process' || tab.kind === 'mcp') && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">原运行实例已不可用。此标签不会改绑到新的实例。</div>;
-    if (tab.kind === 'tasks') return <TaskWorkspace onOpenGroup={(id, title) => open("group", title, id)}
-      tasks={agentTasks} groups={taskGroups} totalGroupCount={taskGroupTotal}
-      onLoadMoreGroups={onLoadMoreTaskGroups} readCapacity={onReadSubagentCapacity}
-      loading={loading} error={error} onRetry={onRetry} />;
-    if (tab.kind === 'group' || tab.kind === 'task') return <WorkspaceTaskDetail
-      tab={tab} tasks={agentTasks} loadedGroupIds={loadedTaskGroups} onLoadGroup={onLoadTaskGroup} loadTask={onLoadTask}
-      modelConfigurations={modelConfigurations ?? []} canControl={canControl} onCancel={onCancelTask} onNotify={onNotify}
-      activities={taskActivities} loadActivities={onLoadTaskActivities} loadBackgroundProcesses={onLoadBackgroundProcesses}
-      skills={(capabilities?.skills.items ?? []).filter(skill => skill.enabled && skill.effective)} artifactOwnerKey={taskArtifactOwnerKey}
-      onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
-      onOpenTask={task => open('task', task.label, task.id)} />;
     if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
             ownerKey={backgroundOwnerKey}
             sessionId={session.id}
@@ -618,33 +570,8 @@ export function InspectorPanel({
   };
   return <DesktopWorkspace isOpen={isOpen} onClose={onClose} renderTab={renderTab} toolbar={<nav aria-label="工作区入口">
     <button type="button" aria-label="项目能力" title="项目能力" onClick={() => open('capabilities', '会话能力')}><Blocks size={13} />能力</button>
-    <button type="button" title="任务" className={workspace?.tabs.find(tab => tab.id === workspace.activeId)?.kind === "tasks" ? "is-active" : undefined} onClick={() => open('tasks', '任务')}><ListChecks size={13} />任务</button>
+
     <button type="button" title="后台进程" onClick={() => open('background', '后台进程')}><TerminalSquare size={13} />后台进程</button>
     <button type="button" title="新建网页" aria-label="新建网页" disabled={!session.id} onClick={() => workspace?.browserTabs.open(session.id)}><Globe size={13} />新建网页</button>
   </nav>} />;
-}
-
-function WorkspaceTaskDetail({ tab, tasks, loadedGroupIds, onLoadGroup, ...props }: Omit<React.ComponentProps<typeof TaskGraphDetail>, 'tasks'> & {
-  tab: WorkspaceTab; tasks: AgentTask[]; loadedGroupIds?: ReadonlySet<string>; onLoadGroup?: (id: string) => Promise<void>;
-}) {
-  const [loaded, setLoaded] = useState<AgentTask>();
-  const [error, setError] = useState<string>();
-  const [retry, setRetry] = useState(0);
-  const local = tasks.find(task => task.id === tab.entityId);
-  const readTask = props.loadTask;
-  const groupLoaded = loadedGroupIds?.has(tab.entityId!);
-  useEffect(() => {
-    let current = true;
-    setError(undefined);
-    const operation = tab.kind === 'group'
-      ? (!groupLoaded ? onLoadGroup?.(tab.entityId!) : undefined)
-      : (!local ? readTask?.(tab.entityId!).then(task => { if (current) setLoaded(task); }) : undefined);
-    void operation?.catch(caught => { if (current) setError(caught instanceof Error ? caught.message : '任务暂时无法读取'); });
-    return () => { current = false; };
-  }, [tab.entityId, tab.kind, groupLoaded, onLoadGroup, local, readTask, retry]);
-  const selected = tab.kind === 'group' ? tasks.filter(task => task.batchId === tab.entityId) : local ? [local] : loaded ? [loaded] : [];
-  if (error) return <div className="task-inventory-notice"><p role="alert">{error}</p><button onClick={() => setRetry(value => value + 1)}>重试</button></div>;
-  if (!selected.length && tab.kind === 'group' && groupLoaded) return <div className="inspector-empty" role="status">这个任务组已没有可读取的任务。</div>;
-  if (!selected.length) return <WorkspaceLoading/>;
-  return <TaskGraphDetail {...props} viewState={tab.view} tasks={selected} initialTaskId={tab.kind === 'task' ? tab.entityId : tab.view?.taskId} />;
 }

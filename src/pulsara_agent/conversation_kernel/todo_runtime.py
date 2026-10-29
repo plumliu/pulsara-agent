@@ -34,32 +34,17 @@ class TodoRunIdentity:
     session_id: str
     scope_kind: ModelInputScopeKind
     root_run_id: str | None
-    subagent_task_id: str | None
     owner_epoch: str
 
     @property
     def todo_run_id(self) -> str:
-        value = self.root_run_id or self.subagent_task_id
+        value = self.root_run_id
         if value is None:
             raise RuntimeError("TODO run identity has no public run ID")
         return value
 
     def __post_init__(self) -> None:
-        root = (
-            self.scope_kind is ModelInputScopeKind.ROOT
-            and self.root_run_id is not None
-            and self.subagent_task_id is None
-        )
-        child = (
-            self.scope_kind is ModelInputScopeKind.SUBAGENT_TASK
-            and self.root_run_id is None
-            and self.subagent_task_id is not None
-        )
-        if (
-            not self.session_id
-            or not self.owner_epoch
-            or root == child
-        ):
+        if not self.session_id or not self.owner_epoch or not self.root_run_id:
             raise ValueError("TODO run identity is invalid")
 
 
@@ -102,15 +87,6 @@ class PreparedTodoRootRunActivation:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedTodoChildRunActivation:
-    session_id: str
-    subagent_task_id: str
-    exact_turn_id: str
-    exact_initial_entry_id: str
-    exact_context_binding_revision_id: str
-
-
-@dataclass(frozen=True, slots=True)
 class PreparedTodoReplacement:
     run_identity: TodoRunIdentity
     attempt_id: str
@@ -138,7 +114,7 @@ class FrozenTodoCloseProjection:
 @dataclass(slots=True)
 class _TodoRunRecord:
     run_identity: TodoRunIdentity
-    activation: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation
+    activation: PreparedTodoRootRunActivation
     phase: TodoRunPhase
     last_turn_id: str
     current_snapshot: FrozenTodoSnapshot
@@ -154,7 +130,6 @@ class TodoRunStateOwner:
         self._session_id = session_id
         self._owner_epoch = owner_epoch
         self._root: _TodoRunRecord | None = None
-        self._children: dict[str, _TodoRunRecord] = {}
         self._lock = RLock()
 
     def activate_root_run(
@@ -175,8 +150,12 @@ class TodoRunStateOwner:
             old = self._root
             if old is not None and old.pending_settlements:
                 raise RuntimeError("ROOT TODO run changed with pending settlement")
-            if old is not None and old.phase is not TodoRunPhase.IDLE and not (
-                allow_closing_predecessor and old.phase is TodoRunPhase.CLOSING
+            if (
+                old is not None
+                and old.phase is not TodoRunPhase.IDLE
+                and not (
+                    allow_closing_predecessor and old.phase is TodoRunPhase.CLOSING
+                )
             ):
                 raise RuntimeError("ROOT TODO run changed before becoming idle")
             closed = None if old is None else self._close_projection(old)
@@ -188,34 +167,14 @@ class TodoRunStateOwner:
             self._root = _new_record(identity, prepared.exact_turn_id, prepared)
             return closed
 
-    def activate_child_run(self, prepared: PreparedTodoChildRunActivation) -> None:
-        with self._lock:
-            self._require_session(prepared.session_id)
-            current = self._children.get(prepared.subagent_task_id)
-            if current is not None:
-                if current.last_turn_id == prepared.exact_turn_id:
-                    if current.activation != prepared:
-                        raise RuntimeError("child TODO activation identity conflicts")
-                    return
-                raise RuntimeError("child TODO run identity conflicts")
-            identity = _child_identity(
-                session_id=self._session_id,
-                task_id=prepared.subagent_task_id,
-                owner_epoch=self._owner_epoch,
-            )
-            self._children[prepared.subagent_task_id] = _new_record(
-                identity, prepared.exact_turn_id, prepared
-            )
-
     def bind_continuation(
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         turn_id: str,
     ) -> None:
         with self._lock:
-            record = self._record(scope_kind, scope_subagent_task_id)
+            record = self._record(scope_kind)
             if record is None or record.phase is TodoRunPhase.CLOSING:
                 raise RuntimeError("TODO continuation has no active run")
             record.last_turn_id = turn_id
@@ -225,13 +184,12 @@ class TodoRunStateOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         turn_id: str,
     ) -> bool:
         """Bind an external continuation without reconstructing lost TODO state."""
 
         with self._lock:
-            record = self._record(scope_kind, scope_subagent_task_id)
+            record = self._record(scope_kind)
             if record is None:
                 return False
             if record.phase is TodoRunPhase.CLOSING:
@@ -261,17 +219,18 @@ class TodoRunStateOwner:
                         completed_count=0,
                     )
                     record.current_snapshot = snapshot
-                    return TodoInstallation(snapshot, exact_turn_id, TodoLiveDisposition.CLEARED)
+                    return TodoInstallation(
+                        snapshot, exact_turn_id, TodoLiveDisposition.CLEARED
+                    )
 
     def require_active(
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         exact_turn_id: str,
     ) -> TodoRunIdentity:
         with self._lock:
-            record = self._record(scope_kind, scope_subagent_task_id)
+            record = self._record(scope_kind)
             if (
                 record is None
                 or record.phase is not TodoRunPhase.ACTIVE
@@ -284,7 +243,6 @@ class TodoRunStateOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         exact_turn_id: str,
         attempt_id: str,
         proposed_result_entry_id: str,
@@ -292,7 +250,7 @@ class TodoRunStateOwner:
         acknowledgement: bytes,
     ) -> PreparedTodoReplacement:
         with self._lock:
-            record = self._record(scope_kind, scope_subagent_task_id)
+            record = self._record(scope_kind)
             if (
                 record is None
                 or record.phase is not TodoRunPhase.ACTIVE
@@ -362,10 +320,9 @@ class TodoRunStateOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> bool:
         with self._lock:
-            record = self._record(scope_kind, scope_subagent_task_id)
+            record = self._record(scope_kind)
             if record is None:
                 return False
             record.phase = TodoRunPhase.CLOSING
@@ -375,37 +332,30 @@ class TodoRunStateOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> FrozenTodoCloseProjection | None:
         with self._lock:
-            record = self._record(scope_kind, scope_subagent_task_id)
+            record = self._record(scope_kind)
             if record is None:
                 return None
             if record.pending_settlements:
                 raise RuntimeError("TODO run closed before settlement drain")
             projection = self._close_projection(record)
-            if scope_kind is ModelInputScopeKind.ROOT:
-                self._root = None
-            else:
-                assert scope_subagent_task_id is not None
-                self._children.pop(scope_subagent_task_id, None)
+            self._root = None
             return projection
 
     def snapshot(
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> FrozenTodoSnapshot | None:
         with self._lock:
-            record = self._record(scope_kind, scope_subagent_task_id)
+            record = self._record(scope_kind)
             return None if record is None else record.current_snapshot
 
     def current_snapshots(self) -> tuple[FrozenTodoSnapshot, ...]:
         with self._lock:
             records: Iterable[_TodoRunRecord] = (
                 *((self._root,) if self._root is not None else ()),
-                *(self._children[key] for key in sorted(self._children)),
             )
             return tuple(record.current_snapshot for record in records)
 
@@ -413,33 +363,19 @@ class TodoRunStateOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> FrozenTodoSnapshot | None:
         return self.snapshot(
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
 
     def _record(
         self,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> _TodoRunRecord | None:
-        if scope_kind is ModelInputScopeKind.ROOT:
-            if scope_subagent_task_id is not None:
-                raise ValueError("ROOT TODO scope cannot carry a child task")
-            return self._root
-        if (
-            scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
-            or not scope_subagent_task_id
-        ):
-            raise ValueError("child TODO scope requires its exact task")
-        return self._children.get(scope_subagent_task_id)
+        return self._root
 
-    def _record_for_identity(
-        self, identity: TodoRunIdentity
-    ) -> _TodoRunRecord | None:
-        record = self._record(identity.scope_kind, identity.subagent_task_id)
+    def _record_for_identity(self, identity: TodoRunIdentity) -> _TodoRunRecord | None:
+        record = self._record(identity.scope_kind)
         if record is None or record.run_identity != identity:
             return None
         return record
@@ -477,11 +413,7 @@ def build_root_activation(
         raise ValueError("TODO ROOT admission identity is incomplete")
     if admission_kind not in {"DIRECT", "QUEUED"}:
         raise ValueError("TODO ROOT admission kind is invalid")
-    direct = (
-        command_id is not None
-        and queue_item_id is None
-        and queue_sequence is None
-    )
+    direct = command_id is not None and queue_item_id is None and queue_sequence is None
     queued = (
         command_id is None
         and queue_item_id is not None
@@ -506,31 +438,6 @@ def build_root_activation(
     )
 
 
-def build_child_activation(
-    *,
-    session_id: str,
-    subagent_task_id: str,
-    exact_turn_id: str,
-    exact_initial_entry_id: str,
-    exact_context_binding_revision_id: str,
-) -> PreparedTodoChildRunActivation:
-    if (
-        not session_id
-        or not subagent_task_id
-        or not exact_turn_id
-        or not exact_initial_entry_id
-        or not exact_context_binding_revision_id
-    ):
-        raise ValueError("TODO child admission identity is incomplete")
-    return PreparedTodoChildRunActivation(
-        session_id=session_id,
-        subagent_task_id=subagent_task_id,
-        exact_turn_id=exact_turn_id,
-        exact_initial_entry_id=exact_initial_entry_id,
-        exact_context_binding_revision_id=exact_context_binding_revision_id,
-    )
-
-
 def _root_identity(
     *, session_id: str, root_run_id: str, owner_epoch: str
 ) -> TodoRunIdentity:
@@ -538,19 +445,6 @@ def _root_identity(
         session_id=session_id,
         scope_kind=ModelInputScopeKind.ROOT,
         root_run_id=root_run_id,
-        subagent_task_id=None,
-        owner_epoch=owner_epoch,
-    )
-
-
-def _child_identity(
-    *, session_id: str, task_id: str, owner_epoch: str
-) -> TodoRunIdentity:
-    return TodoRunIdentity(
-        session_id=session_id,
-        scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-        root_run_id=None,
-        subagent_task_id=task_id,
         owner_epoch=owner_epoch,
     )
 
@@ -558,7 +452,7 @@ def _child_identity(
 def _new_record(
     identity: TodoRunIdentity,
     turn_id: str,
-    activation: PreparedTodoRootRunActivation | PreparedTodoChildRunActivation,
+    activation: PreparedTodoRootRunActivation,
 ) -> _TodoRunRecord:
     empty = FrozenTodoCandidate(
         ordered_items=(),
@@ -593,7 +487,6 @@ def _snapshot(
 __all__ = [
     "FrozenTodoCloseProjection",
     "FrozenTodoSnapshot",
-    "PreparedTodoChildRunActivation",
     "PreparedTodoReplacement",
     "PreparedTodoRootRunActivation",
     "TodoInstallation",
@@ -601,6 +494,5 @@ __all__ = [
     "TodoRunIdentity",
     "TodoRunPhase",
     "TodoRunStateOwner",
-    "build_child_activation",
     "build_root_activation",
 ]

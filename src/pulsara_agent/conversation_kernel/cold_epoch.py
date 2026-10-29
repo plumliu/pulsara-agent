@@ -24,23 +24,13 @@ from pulsara_agent.capability.contracts import (
 )
 from pulsara_agent.conversation_kernel.context_sources import (
     FrozenNonTriggerContextSources,
-    build_subagent_context_source,
-)
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    SubagentProfileKind,
 )
 from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.llm.request import FrozenProviderWireInputPlan
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.model_input.contracts import (
-    CanonicalInputOriginKind,
-    ContextSourceKind,
     FrozenCompiledModelInput,
-    FrozenProviderInputItem,
-    FrozenProviderInputItemKind,
-    ModelInputScopeKind,
     StructuredModelInputCompileRequest,
-    provider_input_item_text,
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputAppendCompileResult,
@@ -144,9 +134,7 @@ class AdoptedCompactionContinuationSeed:
     ) -> None:
         if (
             _seal is not _ADOPTED_COMPACTION_SEED_SEAL
-            or getattr(
-                getattr(authority.confirmation, "kind", None), "value", None
-            )
+            or getattr(getattr(authority.confirmation, "kind", None), "value", None)
             != "FULL"
             or not binding_rewrite_identity
             or not protected_tail_selection_fingerprint.startswith("sha256:")
@@ -181,7 +169,9 @@ class AdoptedCompactionContinuationSeed:
             or (
                 old_identity.turn_id != new_identity.turn_id
                 and old_identity.turn_id
-                != getattr(getattr(self._authority.candidate, "scope", None), "turn_id", None)
+                != getattr(
+                    getattr(self._authority.candidate, "scope", None), "turn_id", None
+                )
             )
         ):
             raise RuntimeError("adopted compaction seed variant changed its base")
@@ -232,90 +222,9 @@ def _issue_adopted_compaction_continuation_seed(
     return AdoptedCompactionContinuationSeed(
         dispatch_read=dispatch_read,
         binding_rewrite_identity=binding_rewrite_identity,
-        protected_tail_selection_fingerprint=(
-            protected_tail_selection_fingerprint
-        ),
+        protected_tail_selection_fingerprint=(protected_tail_selection_fingerprint),
         authority=authority,
         _seal=_ADOPTED_COMPACTION_SEED_SEAL,
-    )
-
-
-_SUBAGENT_SEED_AUTHORITY = object()
-
-
-def subagent_initial_material_absences():
-    # Initial public material now belongs to canonical items. Keep the existing
-    # context-source slots explicitly absent so it is never injected twice.
-    return tuple(
-        build_subagent_context_source(kind=kind, text=None, domain_identity=None)
-        for kind in (
-            ContextSourceKind.PARENT_CONTEXT,
-            ContextSourceKind.DEPENDENCY_RESULTS,
-            ContextSourceKind.TERMINAL_MATERIAL,
-        )
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class SubagentInitialSeed:
-    """First-open task identity; all inherited/public material is canonical."""
-
-    dispatch_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
-    task_id: str
-    parent_turn_id: str
-    profile_kind: SubagentProfileKind
-    objective: str = field(repr=False)
-    objective_item: FrozenProviderInputItem = field(repr=False)
-    _authority: object = field(repr=False, compare=False)
-
-    def __post_init__(self):
-        canonical = self.dispatch_read.compile_snapshot.canonical_input
-        identity = canonical.identity
-        matches = tuple(
-            item
-            for item in canonical.items
-            if item.source_entry_id == identity.initial_entry_id
-            and item.item_kind is FrozenProviderInputItemKind.USER
-            and item.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
-        )
-        if (
-            self._authority is not _SUBAGENT_SEED_AUTHORITY
-            or identity.conversation_scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
-            or identity.scope_subagent_task_id != self.task_id
-            or not self.parent_turn_id
-            or not isinstance(self.profile_kind, SubagentProfileKind)
-            or matches != (self.objective_item,)
-            or provider_input_item_text(self.objective_item) != self.objective
-            or self.objective_item.source_turn_id != identity.turn_id
-        ):
-            raise ValueError("subagent canonical initial seed is invalid")
-
-    @property
-    def source_replacements(self):
-        return subagent_initial_material_absences()
-
-
-def build_subagent_initial_seed(
-    *, dispatch_read, task_id, parent_turn_id, profile_kind, objective
-):
-    canonical = dispatch_read.compile_snapshot.canonical_input
-    matches = tuple(
-        item
-        for item in canonical.items
-        if item.source_entry_id == canonical.identity.initial_entry_id
-        and item.item_kind is FrozenProviderInputItemKind.USER
-        and item.input_origin is CanonicalInputOriginKind.SUBAGENT_OBJECTIVE
-    )
-    if len(matches) != 1:
-        raise ValueError("child canonical cut lacks one exact current objective")
-    return SubagentInitialSeed(
-        dispatch_read,
-        task_id,
-        parent_turn_id,
-        profile_kind,
-        objective,
-        matches[0],
-        _SUBAGENT_SEED_AUTHORITY,
     )
 
 
@@ -323,7 +232,6 @@ FrozenColdConversationSeed = (
     CanonicalColdContinuationSeed
     | CompactionDryProjectionSeed
     | AdoptedCompactionContinuationSeed
-    | SubagentInitialSeed
 )
 
 
@@ -488,7 +396,6 @@ class KernelColdEpochInputAssembler:
             CanonicalColdContinuationSeed,
             CompactionDryProjectionSeed,
             AdoptedCompactionContinuationSeed,
-            SubagentInitialSeed,
         }:
             raise TypeError("cold epoch seed union is not closed")
         canonical = seed.dispatch_read.compile_snapshot.canonical_input
@@ -497,43 +404,29 @@ class KernelColdEpochInputAssembler:
             compile_request.canonical_facts != seed.dispatch_read.compile_snapshot
             or compile_request.canonical_input != canonical
             or planning.scope.session_id != identity.session_id
-            or planning.scope.scope_kind is not identity.conversation_scope_kind
-            or planning.scope.scope_subagent_task_id != identity.scope_subagent_task_id
-            or capability_dispatch_cut.conversation_scope_kind
-            is not identity.conversation_scope_kind
-            or capability_dispatch_cut.scope_subagent_task_id
-            != identity.scope_subagent_task_id
-            or tool_view.parent_dispatch_cut is not capability_dispatch_cut
-            or skill_view.parent_dispatch_cut is not capability_dispatch_cut
-            or tool_exposure_plan.dispatch_view is not tool_view
-            or non_trigger_sources.tool_exposure_plan != tool_exposure_plan
-            or non_trigger_sources.skill_dispatch_view != skill_view
-            or compile_request.compile_binding.tool_surface
-            != tool_exposure_plan.direct_tool_surface
-            or prepared_call.compile_binding is not compile_request.compile_binding
-            or prepared_call.native_projection_set
-            is not tool_exposure_plan.direct_projection_set
-            or prepared_call.session_id != identity.session_id
-            or prepared_call.turn_id != identity.turn_id
+            or (planning.scope.scope_kind is not identity.conversation_scope_kind)
+            or (
+                capability_dispatch_cut.conversation_scope_kind
+                is not identity.conversation_scope_kind
+            )
+            or (tool_view.parent_dispatch_cut is not capability_dispatch_cut)
+            or (skill_view.parent_dispatch_cut is not capability_dispatch_cut)
+            or (tool_exposure_plan.dispatch_view is not tool_view)
+            or (non_trigger_sources.tool_exposure_plan != tool_exposure_plan)
+            or (non_trigger_sources.skill_dispatch_view != skill_view)
+            or (
+                compile_request.compile_binding.tool_surface
+                != tool_exposure_plan.direct_tool_surface
+            )
+            or (prepared_call.compile_binding is not compile_request.compile_binding)
+            or (
+                prepared_call.native_projection_set
+                is not tool_exposure_plan.direct_projection_set
+            )
+            or (prepared_call.session_id != identity.session_id)
+            or (prepared_call.turn_id != identity.turn_id)
         ):
             raise ValueError("cold epoch inputs do not exact-join")
-        if isinstance(seed, SubagentInitialSeed):
-            observed = {
-                item.source_kind: item
-                for item in (
-                    *non_trigger_sources.candidates,
-                    *non_trigger_sources.absent_facts,
-                )
-                if item.source_kind
-                in {
-                    ContextSourceKind.PARENT_CONTEXT,
-                    ContextSourceKind.DEPENDENCY_RESULTS,
-                    ContextSourceKind.TERMINAL_MATERIAL,
-                }
-            }
-            expected = {item.source_kind: item for item in seed.source_replacements}
-            if observed != expected or planning.predecessor_view is not None:
-                raise ValueError("subagent cold seed sources do not exact-join")
 
 
 __all__ = [
@@ -545,6 +438,4 @@ __all__ = [
     "FrozenColdConversationSeed",
     "KernelColdEpochInputAssembler",
     "PreparedColdEpochSemanticAssembly",
-    "SubagentInitialSeed",
-    "build_subagent_initial_seed",
 ]

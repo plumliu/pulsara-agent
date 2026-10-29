@@ -7,6 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
+from pulsara_agent.mcp_config import McpScopePolicy
 from pulsara_agent.hooks.contracts import HookTrustDisposition
 from pulsara_agent.hooks.config_parser import ParsedHookConfig
 from pulsara_agent.plugins.mcp_connection import PluginMcpConnectionOverlay, PluginConnectionReview
@@ -392,6 +393,7 @@ class InstallLocalPluginRequest:
     source_format: str = field(default="native", kw_only=True)
     import_classifications: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
     import_public_values: tuple[tuple[str, str], ...] = field(default=(), kw_only=True)
+    mcp_scope_policies: tuple[tuple[str, McpScopePolicy], ...] = field(default=(), kw_only=True)
     workspace_root: Path | None = None
     replace: bool = False
     prepared_current: PreparedPluginInstanceObservation | None = field(default=None, repr=False, kw_only=True)
@@ -400,6 +402,10 @@ class InstallLocalPluginRequest:
     )
 
     def __post_init__(self) -> None:
+        if (len(dict(self.mcp_scope_policies)) != len(self.mcp_scope_policies)
+                or any(not isinstance(name, str) or not name or not isinstance(policy, McpScopePolicy)
+                       for name, policy in self.mcp_scope_policies)):
+            raise ValueError("Plugin MCP scope choices are invalid")
         if not self.source_path.is_absolute() or self.deadline_monotonic <= 0:
             raise ValueError("Plugin install request is not frozen")
         if (self.scope is PluginScopeKind.WORKSPACE) != (

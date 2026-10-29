@@ -7,11 +7,8 @@ import {
   createUserControlCommandRef,
   LocalHttpRuntimeAdapter,
   CanonicalHistoryView,
-  mergeRuntimeTaskInventory,
-  projectAgentTaskConversation,
   type RuntimeProjection,
 } from '../../frontend/lib/runtime-adapter';
-import type { AgentTask } from '../../frontend/lib/pulsara-types';
 
 const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null};
 let historyOwnerFixture: Record<string, unknown> = {};
@@ -22,13 +19,11 @@ afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOw
 // canonical metadata and return its explicit per-entry owner context here.
 function stubRuntimeFetch(fetcher: typeof fetch) {
   const entries = new Map<string, Record<string, unknown>>();
-  const tasks = new Map<string, Record<string, unknown>>();
-  const collect = (value: unknown) => {
+    const collect = (value: unknown) => {
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value)) { value.forEach(collect); return; }
     const item = value as Record<string, unknown>;
     if (typeof item.entry_id === 'string' && item.entry_kind) entries.set(item.entry_id, item);
-    if (typeof item.task_id === 'string' && typeof item.parent_turn_id === 'string') tasks.set(item.task_id, item);
     Object.values(item).forEach(collect);
   };
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -45,7 +40,6 @@ function stubRuntimeFetch(fetcher: typeof fetch) {
         groups: owners.map((id, index) => ({owner_kind:'EXECUTED_TURN',owner_id:id,previous_root_owner_id:owners[index - 1],initial_entry_id:String(selected.find(entry => String(entry.turn_id ?? entry.entry_id) === id)!.entry_id)})),
         entry_contexts: selected.map(entry => ({entry_id:entry.entry_id,owner_kind:'EXECUTED_TURN',owner_id:entry.turn_id ?? entry.entry_id,
           root_owner_id:entry.turn_id ?? entry.entry_id,segment_id:entry.turn_id ?? entry.entry_id,segment_start_entry_id:entry.entry_id})),
-        tasks: [...tasks.values()].map(task => ({task_id:task.task_id,parent_turn_id:task.parent_turn_id,parent_initial_entry_id:task.parent_turn_id,batch_id:task.batch_id})), batches: [], interruption_notices: [], compactions: [],
         ...historyOwnerFixture,
       }), {status:200});
     }
@@ -177,13 +171,6 @@ const SOURCE_FIDELITY_TEXT = [
   '{"tool":"edit_file","owner":"HostSession","status":"read-only"}',
   '',
 ].join('\n');
-
-function inventoryTask(id: string, label: string, status: AgentTask['status'], parentId: string, objective = ''): AgentTask {
-  return {
-    id, label, role: '通用协作', objective, status, parentId,
-    dependencyIds: [], completionAccepted: status === 'completed', color: 'blue',
-  };
-}
 
 function inlineContent(value: string) {
   const bytes = new TextEncoder().encode(value);
@@ -576,7 +563,7 @@ describe('exact prompt projection', () => {
     }]);
   });
 
-  it('preserves canonical ROOT order through inventory merges when an observation-only ROOT has no message', async () => {
+  it('preserves canonical ROOT order when an observation-only ROOT has no message', async () => {
     const entry = (id: string, turn: string, sequence: number, kind: string) => ({
       entry_id: id, turn_id: turn, entry_sequence: String(sequence), entry_kind: kind,
       scope_kind: 'ROOT', content: kind === 'USER_MESSAGE'
@@ -592,19 +579,15 @@ describe('exact prompt projection', () => {
         // B was started by a monitor, then interrupted before assistant output.
         entry('monitor-b', 'B', 3, 'TERMINAL_OBSERVATION'),
         entry('prompt-c', 'C', 4, 'USER_MESSAGE'),
-        { ...entry('completion', 'C', 5, 'INTER_AGENT_MESSAGE'), source_subagent_task_id: 'reader' },
-      ], control: { subagent_tasks: [{ task_id: 'reader', parent_turn_id: 'A', label: 'reader',
-        status: 'COMPLETED', completion_accepted: true }] } } },
+        { ...entry('material', 'C', 5, 'USER_MESSAGE'), input_origin: 'AGENT_MATERIAL' },
+      ], control: {} } },
       live_control_snapshot: { snapshot: {} },
     }), { status: 200 })));
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
     await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
     const projection = connection.current();
-    expect(projection.messages.find(message => message.id === 'completion')?.sourceSubagentTaskId).toBe('reader');
-    const merged = mergeRuntimeTaskInventory(projection, [inventoryTask('reader', 'reader', 'completed', 'A')]);
-    expect(merged.messages.find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
-    expect(mergeRuntimeTaskInventory(merged, merged.agentTasks).messages
-      .find(message => message.id === 'completion')?.sourceSubagentRelation).toBe('earlier');
+    expect(projection.canonicalRootTurnIds).toEqual(['A', 'B', 'C']);
+    expect(projection.messages.find(message => message.id === 'material')?.body).toBe('text');
   });
 
   it('joins tool results exactly across interrupted history, reordered results, and paging', async () => {
@@ -694,16 +677,8 @@ describe('exact prompt projection', () => {
           }, {
             entry_id: 'steer-1', turn_id: 'turn-1', entry_sequence: '2',
             entry_kind: 'USER_STEER', scope_kind: 'ROOT', content: inlinePrompt('先检查真实页面'),
-          }, {
-            entry_id: 'accepted-result-1', turn_id: 'turn-2', entry_sequence: '3',
-            entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'ROOT',
-            source_subagent_task_id: 'task-1',
-            content: content('{"status":"accepted"}'),
           }],
-          control: { subagent_tasks: [{
-            task_id: 'task-1', parent_turn_id: 'turn-1', label: 'reader',
-            objective: '读取文件', status: 'COMPLETED', completion_accepted: true,
-          }] },
+          control: {},
         },
       },
       live_control_snapshot: { snapshot: {} },
@@ -718,14 +693,8 @@ describe('exact prompt projection', () => {
     }))).toEqual([
       { body: '完成这项工作', userKind: 'prompt' },
       { body: '先检查真实页面', userKind: 'steer' },
-      { body: '', userKind: 'subagent-completion' },
     ]);
-    expect(connection.current().messages[2]?.sourceSubagentTaskId).toBe('task-1');
-    const withTask = mergeRuntimeTaskInventory(connection.current(), [inventoryTask('task-1', 'reader', 'completed', 'turn-1')]);
-    expect(withTask.messages[2]).toMatchObject({
-      sourceSubagentLabel: 'reader',
-      sourceSubagentRelation: 'previous',
-    });
+
   });
 
   it.each(['0', '9007199254740993'])('exposes only the tail then loads requested history pages preserving event cut %s', async (eventCut) => {
@@ -1081,7 +1050,7 @@ describe('exact prompt projection', () => {
           snapshot: {
             owner_epoch: '1', live_revision: '0',
             current_todos: [{
-              todo_run_id: 'todo-child', scope_kind: 'SUBAGENT_TASK',
+              todo_run_id: 'todo-child', scope_kind: 'SUBAGENT',
               scope_subagent_task_id: 'task-1', disposition: 'ACTIVE',
               ordered_items: [{ ordinal: 0, text: '任务步骤', status: 'in_progress' }],
             }, {
@@ -1420,324 +1389,6 @@ describe('exact prompt projection', () => {
       .rejects.toMatchObject({code:'CONTENT_INTEGRITY_INVALID'});
   });
 
-  it('keeps observed task navigation before an exact task page and joins details only for loaded canonical rows', async () => {
-    historyOwnerFixture = {tasks:Array.from({length:144},(_,i)=>({task_id:`worker-${i}`,parent_turn_id:'root',parent_initial_entry_id:'create',batch_id:'workers'})),batches:[{batch_id:'workers',parent_turn_id:'root',creator_entry_id:'create',creator_tool_call_id:'spawn',task_count:144}]};
-    const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
-    const payload = connectPayload([
-      {entry_id:'create',turn_id:'root',entry_sequence:'1',entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'ROOT',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'create_agent_tasks'}]},
-      {entry_id:'created',turn_id:'root',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',tool_result:{assistant_entry_id:'create',tool_call_id:'spawn',result_state:'SUCCESS'},content:inlineContent(JSON.stringify({tasks:ids.map(task_id=>({task_id}))}))},
-      ...ids.map((id,i)=>({entry_id:`entry-${id}`,turn_id:`turn-${id}`,entry_sequence:String(i+3),entry_kind:'ASSISTANT_MESSAGE',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:id,blocks:[{block_id:`text-${id}`,block_kind:'TEXT',content:inlineContent('intermediate commentary')},{block_id:`call-${id}`,block_kind:'TOOL_CALL',tool_call_id:`call-${id}`,tool_name:'terminal'}]})),
-    ], {active_turns:[{turn_id:'root',scope_kind:'ROOT',status:'RUNNING'}]}, [{
-      live_revision:'1', event_type:'TEXT_DELTA', draft_identity:'worker-live', turn_id:'turn-worker-143', scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:'worker-143',payload:{text_delta:{delta:'still working'}},
-    }]);
-    stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
-    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
-    const raw = connection.current();
-    expect(raw.subagentRuns).toHaveLength(144);
-    expect(raw.subagentRuns?.[0].status).toBe('unknown');
-    expect(raw.subagentRuns?.[0].activities[0].traces?.[0].status).toBe('running');
-    const task = inventoryTask('worker-143','visible worker','running','root','work');
-    const loaded = mergeRuntimeTaskInventory(raw,[task]);
-    const runs = loaded.messages.find(m=>m.id==='create')?.subagentRuns;
-    expect(runs).toHaveLength(144);
-    const selected = runs?.find(run => run.id === task.id);
-    expect(selected?.activities.some(a=>a.body==='still working')).toBe(true);
-    expect(selected?.activities[0].traces?.[0].status).toBe('running');
-    expect(runs?.filter(run => run.id !== task.id).every(run => run.activities.length === 0)).toBe(true);
-    const terminal = mergeRuntimeTaskInventory(raw,[{...task,status:'completed'}]);
-    const done = terminal.messages.find(m=>m.id==='create')?.subagentRuns?.[0];
-    expect(done?.activities.some(a=>a.id.startsWith('live:'))).toBe(false);
-    expect(done?.activities[0].traces?.[0].status).toBe('cancelled');
-    expect(raw.subagentRuns?.[143].activities[0].traces?.[0].status).toBe('running');
-    const summaries = mergeRuntimeTaskInventory(raw, []).messages.find(m => m.id === 'create')?.subagentRuns;
-    expect(summaries).toHaveLength(144);
-    expect(summaries?.every(run => run.batchId === 'workers' && run.activities.length === 0 && run.status === raw.subagentRuns?.find(source => source.id === run.id)?.status)).toBe(true);
-    expect(mergeRuntimeTaskInventory(raw, []).agentTasks).toEqual([]);
-  });
-
-  it.each(['start', 'delta', 'end'])('keeps the 144th worker result %s and progress outside bounded control', async phase => {
-    historyOwnerFixture = {tasks:Array.from({length:144},(_,i)=>({task_id:`worker-${i}`,parent_turn_id:'root',parent_initial_entry_id:'create',batch_id:'workers'})),batches:[{batch_id:'workers',parent_turn_id:'root',creator_entry_id:'create',creator_tool_call_id:'spawn',task_count:144}]};
-    const ids = Array.from({length: 144}, (_, i) => `worker-${i}`);
-    const target = ids[143];
-    const event = {turn_id: `turn-${target}`, scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: target,
-      channel_kind: 'TOOL_RESULT', channel_attempt_id: 'attempt-143', channel_tool_call_id: 'same-call-id'};
-    const events = [
-      {...event, live_revision:'1', event_type:'TOOL_RESULT_START', payload:{tool_result_start:{assistant_entry_id:'entry-worker-143',tool_call_id:'same-call-id',attempt_id:'attempt-143'}}},
-      {...event, live_revision:'2', event_type:'TOOL_RESULT_DELTA', payload:{tool_result_delta:{text:'partial result'}}},
-      {...event, live_revision:'3', event_type:'TOOL_RESULT_END', payload:{tool_result_end:{result_state:'SUCCESS',final_text:'complete result'}}},
-    ].slice(0, phase === 'start' ? 1 : phase === 'delta' ? 2 : 3);
-    const payload = connectPayload([
-      {entry_id:'create',turn_id:'root',entry_sequence:'1',entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'ROOT',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'create_agent_tasks'}]},
-      ...ids.map((id,i)=>({entry_id:`entry-${id}`,turn_id:`turn-${id}`,entry_sequence:String(i+2),entry_kind:'ASSISTANT_TOOL_REQUEST',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:id,blocks:[{block_id:`call-${id}`,block_kind:'TOOL_CALL',tool_call_id:'same-call-id',tool_name:'terminal'}]})),
-    ], {
-      active_turns: ids.slice(0,128).map(id=>({turn_id:`turn-${id}`,scope_kind:'SUBAGENT_TASK',status:'RUNNING'})),
-      tool_attempts: ids.slice(0,128).map((id,i)=>({attempt_id:`attempt-${i}`,assistant_entry_id:`entry-${id}`,tool_call_id:'same-call-id'})),
-    }, [...events, {live_revision:'4',event_type:'SUBAGENT_PROGRESS',scope_kind:'SUBAGENT_TASK',scope_subagent_task_id:target,payload:{subagent_progress:{task_id:target,status:'ACTIVE',public_summary:'examining last worker'}}}]);
-    stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(payload),{status:200,headers:{'Content-Type':'application/json'}})));
-    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
-    const raw = connection.current();
-    const task = inventoryTask(target,'last worker','running','root');
-    const merged = mergeRuntimeTaskInventory(raw,[task]);
-    const trace = merged.messages[0].subagentRuns?.[0].activities[0].traces?.[0];
-    expect(trace).toMatchObject({id:'same-call-id',status:phase === 'end' ? 'completed' : 'running'});
-    expect(trace?.resultText).toBe(phase === 'start' ? undefined : phase === 'delta' ? 'partial result' : 'complete result');
-    expect(raw.subagentRuns?.[0].activities[0].traces?.[0].resultText).toBeUndefined();
-    expect(merged.agentTasks[0].progress).toBe('examining last worker');
-    expect(mergeRuntimeTaskInventory(raw,[{...task,status:'completed'}]).agentTasks[0].progress).toBeUndefined();
-    expect(mergeRuntimeTaskInventory(raw,[]).agentTasks).toEqual([]);
-  });
-
-  it('projects successful orchestration results and exposes child execution', async () => {
-    historyOwnerFixture = {tasks:['task-1','task-2'].map(task_id=>({task_id,parent_turn_id:'turn-root',parent_initial_entry_id:'root-create',batch_id:'created'})),batches:[{batch_id:'created',parent_turn_id:'turn-root',creator_entry_id:'root-create',creator_tool_call_id:'call-create',task_count:2}]};
-    const content = (value: string) => ({ kind: 'INLINE', inline_content: btoa(String.fromCharCode(...new TextEncoder().encode(value))) });
-    const toolRequest = (
-      sequence: number,
-      entryId: string,
-      toolName: string,
-      callId: string,
-      scope = 'ROOT',
-      taskId = '',
-      argumentsJson = '{}',
-    ) => ({
-      entry_id: entryId,
-      turn_id: scope === 'ROOT' ? 'turn-root' : `turn-${taskId}`,
-      entry_sequence: String(sequence),
-      entry_kind: 'ASSISTANT_TOOL_REQUEST',
-      scope_kind: scope,
-      scope_subagent_task_id: taskId,
-      blocks: [{
-        block_id: `block-${sequence}`,
-        block_kind: 'TOOL_CALL',
-        tool_call_id: callId,
-        tool_name: toolName,
-        tool_arguments_preview: btoa(argumentsJson),
-      }],
-    });
-    const entries = [
-      toolRequest(1, 'root-create', 'create_agent_tasks', 'call-create'),
-      {
-        entry_id: 'task-objective', turn_id: 'turn-task-1', entry_sequence: '2',
-        entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
-        scope_subagent_task_id: 'task-1', content: content('Read README.md.'),
-      },
-      {
-        entry_id: 'task-guidance', turn_id: 'turn-task-1', entry_sequence: '3',
-        entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
-        scope_subagent_task_id: 'task-1', content: content('Also verify the visible heading.'),
-      },
-      {
-        entry_id: 'create-result', turn_id: 'turn-root', entry_sequence: '4',
-        tool_result: { assistant_entry_id: 'root-create', tool_call_id: 'call-create', result_state: 'SUCCESS' },
-        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        content: content(JSON.stringify({ tasks: [
-          { task_id: 'task-1', status: 'active' },
-          { task_id: 'task-2', status: 'pending_start' },
-        ] })),
-      },
-      toolRequest(5, 'task-read', 'read_file', 'call-read', 'SUBAGENT_TASK', 'task-1'),
-      {
-        entry_id: 'read-result', turn_id: 'turn-task-1', entry_sequence: '6',
-        tool_result: { assistant_entry_id: 'task-read', tool_call_id: 'call-read', result_state: 'SUCCESS' },
-        entry_kind: 'TOOL_RESULT', scope_kind: 'SUBAGENT_TASK',
-        scope_subagent_task_id: 'task-1',
-        content: content(JSON.stringify({ status: 'ok', path: 'README.md', total_lines: 1 })),
-      },
-      {
-        entry_id: 'task-answer', turn_id: 'turn-task-1', entry_sequence: '7',
-        entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
-        scope_subagent_task_id: 'task-1',
-        blocks: [{ block_id: 'task-text', block_kind: 'TEXT', content: content('# Pulsara') }],
-      },
-      toolRequest(8, 'root-wait', 'wait_agent', 'call-wait'),
-      {
-        entry_id: 'wait-result', turn_id: 'turn-root', entry_sequence: '9',
-        tool_result: { assistant_entry_id: 'root-wait', tool_call_id: 'call-wait', result_state: 'SUCCESS' },
-        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        content: content(JSON.stringify({ pending_task_ids: [], settled: [{ status: 'completed' }] })),
-      },
-      toolRequest(10, 'root-denied', 'create_agent_tasks', 'call-denied'),
-      {
-        entry_id: 'denied-result', turn_id: 'turn-root', entry_sequence: '11',
-        tool_result: { assistant_entry_id: 'root-denied', tool_call_id: 'call-denied', result_state: 'PERMISSION_DENIED' },
-        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        content: content('ROOT subagent orchestration requires bypass-permissions mode'),
-      },
-      toolRequest(
-        12,
-        'root-user-denied',
-        'terminal',
-        'call-user-denied',
-        'ROOT',
-        '',
-        JSON.stringify({ command: 'printf "visible command"' }),
-      ),
-      {
-        entry_id: 'user-denied-result', turn_id: 'turn-root', entry_sequence: '13',
-        tool_result: { assistant_entry_id: 'root-user-denied', tool_call_id: 'call-user-denied', result_state: 'PERMISSION_DENIED' },
-        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        content: content('tool execution denied by user'),
-      },
-      toolRequest(14, 'root-artifact-read', 'artifact_read', 'call-artifact-read'),
-      {
-        entry_id: 'artifact-read-result', turn_id: 'turn-root', entry_sequence: '15',
-        tool_result: { assistant_entry_id: 'root-artifact-read', tool_call_id: 'call-artifact-read', result_state: 'SUCCESS' },
-        entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-        content: content(JSON.stringify({ status: 'ok', content: 'retained page' })),
-      },
-      {
-        entry_id: 'orphan-objective', turn_id: 'turn-orphan', entry_sequence: '16',
-        entry_kind: 'USER_MESSAGE', scope_kind: 'SUBAGENT_TASK',
-        scope_subagent_task_id: 'task-orphan', content: content('Interrupted before a final reply.'),
-      },
-      toolRequest(17, 'root-orphan-tool', 'wait_agent', 'call-orphan'),
-    ];
-    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
-      connection_id: 'connection-1',
-      workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
-      session_id: 'session-1',
-      role: 'controller',
-      live_hello: {
-        live_owner_epoch: '1', live_revision: '1',
-        live_snapshot: {
-          events: [{
-            live_revision: '1', event_type: 'TEXT_DELTA', draft_identity: 'stale-task-draft',
-            turn_id: 'turn-task-1', scope_kind: 'SUBAGENT_TASK',
-            scope_subagent_task_id: 'task-1', payload: { text_delta: { delta: 'stale live text' } },
-          }],
-        },
-      },
-      snapshot: {
-        snapshot: {
-          session_id: 'session-1', writer_generation: '1', event_sequence_cut: '0',
-          entries,
-          control: {
-            subagent_tasks: [{
-              task_id: 'task-1', parent_turn_id: 'turn-root', status: 'COMPLETED',
-              label: '读取标题', display_role: '研究', objective: 'Read README.md.',
-              result_summary: '# Pulsara',
-            }, {
-              task_id: 'task-2', parent_turn_id: 'turn-root', status: 'PENDING_START',
-              label: '等待槽位', display_role: '研究', objective: 'Wait for capacity.',
-            }],
-          },
-        },
-      },
-      live_control_snapshot: { snapshot: {} },
-    }), { status: 200, headers: { 'Content-Type': 'application/json' } })));
-
-    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
-    const projected = mergeRuntimeTaskInventory(connection.current(), [
-      { ...inventoryTask('task-1', '读取标题', 'completed', 'turn-root', 'Read README.md.'), summary: '# Pulsara' },
-      inventoryTask('task-2', '等待槽位', 'pending', 'turn-root', 'Wait for capacity.'),
-    ]);
-    const create = projected.messages.find((message) => message.id === 'root-create');
-    const wait = projected.messages.find((message) => message.id === 'root-wait');
-    const denied = projected.messages.find((message) => message.id === 'root-denied');
-    const userDenied = projected.messages.find((message) => message.id === 'root-user-denied');
-    const artifactRead = projected.messages.find((message) => message.id === 'root-artifact-read');
-    const orphanTool = projected.messages.find((message) => message.id === 'root-orphan-tool');
-
-    expect(create?.assistantKind).toBe('tool-request');
-    expect(create?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
-    expect(create?.traces?.[0].toolName).toBe('create_agent_tasks');
-    expect(wait?.traces?.[0]).toMatchObject({ status: 'completed', meta: '操作完成' });
-    expect(denied?.traces?.[0]).toMatchObject({ status: 'failed', subtitle: '已拒绝' });
-    expect(userDenied?.traces?.[0]).toMatchObject({
-      toolName: 'terminal', command: 'printf "visible command"',
-      argumentsJson: JSON.stringify({ command: 'printf "visible command"' }),
-      resultText: 'tool execution denied by user',
-      status: 'failed', subtitle: '已拒绝', meta: '操作未完成',
-    });
-    expect(artifactRead?.traces?.[0]).toMatchObject({
-      title: '读取保留内容', status: 'completed', meta: '操作完成',
-    });
-    expect(create?.subagentRuns?.find((run) => run.id === 'task-orphan')).toBeUndefined();
-    expect(orphanTool?.traces?.[0]).toMatchObject({
-      status: 'cancelled', subtitle: '已结束', meta: '结果待核实',
-      resultSummary: '原运行已结束，操作结果尚未记录；需要核实实际状态。',
-    });
-    expect(orphanTool?.traces?.[0].resultText).toBeUndefined();
-    expect(orphanTool?.subagentRuns).toBeUndefined();
-    expect(create?.subagentRuns?.[0]).toMatchObject({
-      id: 'task-1', label: '读取标题', status: 'completed', objective: 'Read README.md.',
-    });
-    expect(create?.subagentRuns?.[0].activities.some(activity => activity.id === 'task-read')).toBe(true);
-    expect(create?.subagentRuns?.find((run) => run.id === 'task-2')).toMatchObject({
-      label: '等待槽位', status: 'pending', activities: [],
-    });
-    expect(projected.agentTasks).toHaveLength(2);
-    expect(projected.agentTasks[1].status).toBe('pending');
-    expect(JSON.stringify(create?.subagentRuns)).not.toContain('stale live text');
-  });
-
-  it('attaches child execution to the successful creator instead of an earlier failed call', async () => {
-    historyOwnerFixture = {tasks:[{task_id:'task-success',parent_turn_id:'turn-root',parent_initial_entry_id:'create-invalid',batch_id:'batch-success'}],batches:[{batch_id:'batch-success',parent_turn_id:'turn-root',creator_entry_id:'create-success',creator_tool_call_id:'call-success',task_count:1}]};
-    const entries = [{
-      entry_id: 'create-invalid', turn_id: 'turn-root', entry_sequence: '1',
-      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
-      blocks: [{
-        block_id: 'invalid-block', block_kind: 'TOOL_CALL',
-        tool_call_id: 'call-invalid', tool_name: 'create_agent_tasks',
-        tool_arguments_preview: btoa('{}'),
-      }],
-    }, {
-      entry_id: 'result-invalid', turn_id: 'turn-root', entry_sequence: '2',
-      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-      tool_result: {
-        assistant_entry_id: 'create-invalid', tool_call_id: 'call-invalid',
-        result_state: 'INVALID_ARGUMENTS',
-      },
-      content: inlineContent(JSON.stringify({ error: 'dependency reference is unknown' })),
-    }, {
-      entry_id: 'create-success', turn_id: 'turn-root', entry_sequence: '3',
-      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
-      blocks: [{
-        block_id: 'success-block', block_kind: 'TOOL_CALL',
-        tool_call_id: 'call-success', tool_name: 'create_agent_tasks',
-        tool_arguments_preview: btoa('{}'),
-      }],
-    }, {
-      entry_id: 'result-success', turn_id: 'turn-root', entry_sequence: '4',
-      entry_kind: 'TOOL_RESULT', scope_kind: 'ROOT',
-      tool_result: {
-        assistant_entry_id: 'create-success', tool_call_id: 'call-success',
-        result_state: 'SUCCESS',
-      },
-      content: inlineContent(JSON.stringify({
-        batch_id: 'batch-success',
-        tasks: [{ task_id: 'task-success', status: 'active' }],
-      })),
-    }];
-    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(
-      entries,
-      { subagent_tasks: [{
-        task_id: 'task-success', parent_turn_id: 'turn-root', batch_id: 'batch-success',
-        status: 'COMPLETED', label: 'reader', display_role: '通用协作',
-        objective: 'Read the target file.', result_summary: 'done',
-      }] },
-    )), { status: 200, headers: { 'Content-Type': 'application/json' } })));
-
-    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
-    const projection = mergeRuntimeTaskInventory(connection.current(), [
-      { ...inventoryTask('task-success', 'reader', 'completed', 'turn-root', 'Read the target file.'), batchId: 'batch-success' },
-    ]);
-    const invalid = projection.messages.find((message) => message.id === 'create-invalid');
-    const success = projection.messages.find((message) => message.id === 'create-success');
-
-    expect(invalid?.traces?.[0]).toMatchObject({
-      resultState: 'INVALID_ARGUMENTS', status: 'failed',
-    });
-    expect(invalid?.subagentRuns).toBeUndefined();
-    expect(success?.traces?.[0]).toMatchObject({ resultState: 'SUCCESS', status: 'completed' });
-    expect(success?.subagentRuns).toEqual([
-      expect.objectContaining({ id: 'task-success', label: 'reader', status: 'completed' }),
-    ]);
-  });
-
   it('keeps exact MCP meta-tool arguments and results for structured UI projection', async () => {
     const argumentsJson = JSON.stringify({ kind: 'MCP_TOOL', parent: { kind: 'MCP_SERVER', runtime_server_id: 'firecrawl' } });
     const resultText = JSON.stringify({
@@ -1786,7 +1437,7 @@ describe('exact prompt projection', () => {
     });
   });
 
-  it('keeps detached child result data without inferring active membership or showing unloaded tasks', async () => {
+  it('keeps detached session result observations from implying an active turn', async () => {
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
       connection_id: 'connection-1', workspace_availability: connectedWorkspaceAvailability, connection_generation: 1,
       session_id: 'session-1', role: 'controller',
@@ -1796,7 +1447,7 @@ describe('exact prompt projection', () => {
           events: [{
             live_revision: '1', event_type: 'TOOL_RESULT_START',
             draft_identity: 'stale-child-tool-result',
-            turn_id: 'turn-task-1', scope_kind: 'SUBAGENT_TASK',
+            turn_id: 'turn-task-1', scope_kind: 'SUBAGENT',
             scope_subagent_task_id: 'task-1',
             payload: { tool_result_start: { tool_call_id: 'call-1' } },
           }],
@@ -2093,41 +1744,6 @@ describe('LocalHttpRuntimeAdapter connection ownership', () => {
   });
 });
 
-describe('subagent completion continuation', () => {
-  it('carries the selected permission into the new root turn command', async () => {
-    let commandBody: Record<string, unknown> | undefined;
-    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = String(input);
-      if (path.endsWith('/command')) {
-        commandBody = JSON.parse(String(init?.body));
-        return new Response(JSON.stringify({
-          command_outcome: {
-            command_id: commandBody?.command_id,
-            status: 'SUCCEEDED',
-            public_code: 'SUBAGENT_COMPLETION_DELIVERED',
-          },
-        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-      }
-      return new Response(JSON.stringify({
-        connection_id: 'connection-result', workspace_availability: connectedWorkspaceAvailability, connection_generation: 3,
-        session_id: 'session-1', role: 'controller',
-        live_hello: { live_owner_epoch: '1', live_revision: '0', live_snapshot: {} },
-        snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', entries: [], control: {} } },
-        live_control_snapshot: { snapshot: {} },
-      }), { status: 201, headers: { 'Content-Type': 'application/json' } });
-    }));
-
-    const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    await connection.acceptSubagentCompletion('task-1', 'read-only');
-
-    expect(commandBody).toMatchObject({
-      command_kind: 'ACCEPT_SUBAGENT_COMPLETION',
-      subagent_task_id: 'task-1',
-      requested_permission_mode: 'PERMISSION_MODE_READ_ONLY',
-    });
-  });
-});
-
 describe('session summaries', () => {
   it('keeps process-loaded state structured for the sidebar', async () => {
     stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify({
@@ -2155,123 +1771,12 @@ describe('session summaries', () => {
       id: session.id,
       subtitle: session.subtitle,
       live: session.live,
-      taskCounts: session.taskCounts,
     }))).toEqual([
       {
         id: 'session-loaded', subtitle: '13 条记录', live: true,
-        taskCounts: { total: 5, active: 1, waiting: 2, attention: 1 },
       },
-      { id: 'session-resumable', subtitle: '8 条记录', live: false, taskCounts: undefined },
+      { id: 'session-resumable', subtitle: '8 条记录', live: false },
     ]);
-  });
-});
-
-describe('session task inventory', () => {
-  it('projects the durable page with every state, result field, and dependency', async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => {
-      void _input;
-      return new Response(JSON.stringify({
-      session_id: 'session-1',
-      tasks: [{
-        id: 'task-blocked', parent_turn_id: 'turn-1', batch_id: 'batch-1',
-        task_key: 'verify', label: '验证结果', profile: 'verification_worker',
-        display_role: '验证', context: { mode: 'LAST_N', last_n_turns: 4 },
-        objective: '确认结果可以使用。', status: 'BLOCKED_DEPENDENCY_FAILED',
-        terminal_public_detail: '前置任务未能完成。', completion_accepted: true,
-        accepted_at: '2026-08-30T12:00:00Z', terminal_at: '2026-08-30T12:01:00Z',
-        dependencies: [{
-          task_id: 'task-failed', task_key: 'build', label: '生成结果',
-          status: 'FAILED', result_summary: null,
-        }],
-        result: {
-          id: 'result-1', entry_id: 'entry-1', source: 'EXPLICIT',
-          summary: '保留的总结', output_preview: '输出摘录',
-          diagnostics: [{ message: '前置检查失败' }],
-        },
-      }],
-      total_count: 51, remaining_count: 50, next_cursor: 'page-2',
-      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    });
-    stubRuntimeFetch(fetchMock);
-
-    const page = await new LocalHttpRuntimeAdapter().listSessionTasks('session-1');
-
-    expect(String(fetchMock.mock.calls[0][0])).toContain('/api/sessions/session-1/tasks?limit=50');
-    expect(page).toMatchObject({ totalCount: 51, remainingCount: 50, nextCursor: 'page-2' });
-    expect(page.tasks[0]).toMatchObject({
-      id: 'task-blocked', status: 'blocked', role: '验证',
-      terminalPublicDetail: '前置任务未能完成。', completionAccepted: true,
-      context: { mode: 'last-n', lastNTurns: 4 },
-      dependencyIds: ['task-failed'],
-      dependencies: [{ id: 'task-failed', status: 'failed', label: '生成结果' }],
-      result: {
-        id: 'result-1', entryId: 'entry-1', summary: '保留的总结',
-        outputPreview: '输出摘录',
-      },
-    });
-  });
-
-  it('uses durable terminal truth over stale live progress while preserving live active progress', () => {
-    const durable: AgentTask[] = [{
-      id: 'task-1', label: '持久任务', role: '研究', objective: '完成检查',
-      status: 'interrupted', dependencyIds: [], color: 'blue',
-      completionAccepted: false,
-      summary: '中断前的最后结果',
-    }];
-    const projection: RuntimeProjection = {
-      messages: [], isRunning: true, queuedCount: 0, queuedPrompts: [], promptTransitions: [], planMode: false,
-      control: {}, liveControl: {}, todo: undefined,
-      agentTasks: [{
-        ...durable[0], status: 'running', progress: '仍在运行', summary: undefined,
-      }],
-      eventSequence: 1, liveOwnerEpoch: 1, liveRevision: 1,
-      liveControlOwnerEpoch: 1, liveControlRevision: 1,
-    };
-
-    const merged = mergeRuntimeTaskInventory(projection, durable);
-
-    expect(merged.agentTasks[0]).toMatchObject({
-      status: 'interrupted', progress: undefined, summary: '中断前的最后结果',
-    });
-    expect(merged.messages).toEqual([]);
-  });
-
-  it('preserves owner-classified completion sources through inventory merges', () => {
-    const baseTask = {
-      role: '研究', objective: '检查结果', status: 'completed' as const,
-      completionAccepted: true, dependencyIds: [], color: 'blue' as const,
-    };
-    const projection: RuntimeProjection = {
-      canonicalRootTurnIds: ['turn-1', 'turn-2', 'turn-3'],
-      messages: [
-        { id: 'root-1', turnId: 'turn-1', entrySequence: 1, role: 'user', time: '1', body: '一' },
-        { id: 'root-2', turnId: 'turn-2', entrySequence: 2, role: 'user', time: '2', body: '二' },
-        { id: 'root-3', turnId: 'turn-3', entrySequence: 3, role: 'user', time: '3', body: '三' },
-        { id: 'accepted-old', turnId: 'turn-3', entrySequence: 4, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-old', sourceSubagentRelation: 'earlier' },
-        { id: 'accepted-previous', turnId: 'turn-3', entrySequence: 5, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-previous', sourceSubagentRelation: 'previous' },
-        { id: 'accepted-current', turnId: 'turn-3', entrySequence: 6, role: 'user', time: '3', body: '', userKind: 'subagent-completion', sourceSubagentTaskId: 'task-current', sourceSubagentRelation: 'current' },
-      ],
-      isRunning: false, queuedCount: 0, queuedPrompts: [], promptTransitions: [], planMode: false,
-      control: {}, liveControl: {}, agentTasks: [], eventSequence: 6,
-      liveOwnerEpoch: 1, liveRevision: 1, liveControlOwnerEpoch: 1, liveControlRevision: 1,
-    };
-    const merged = mergeRuntimeTaskInventory(projection, [
-      { ...baseTask, id: 'task-old', label: '旧任务', parentId: 'turn-1' },
-      { ...baseTask, id: 'task-previous', label: '上一任务', parentId: 'turn-2' },
-      { ...baseTask, id: 'task-current', label: '当前任务', parentId: 'turn-3' },
-    ]);
-
-    expect(merged.messages.slice(-3).map((message) => ({
-      label: message.sourceSubagentLabel,
-      relation: message.sourceSubagentRelation,
-    }))).toEqual([
-      { label: '旧任务', relation: 'earlier' },
-      { label: '上一任务', relation: 'previous' },
-      { label: '当前任务', relation: 'current' },
-    ]);
-    const withoutOrder = mergeRuntimeTaskInventory({ ...merged, canonicalRootTurnIds: undefined }, merged.agentTasks);
-    expect(withoutOrder.messages.slice(-3).map(message => message.sourceSubagentRelation))
-      .toEqual(['earlier', 'previous', 'current']);
   });
 });
 
@@ -2702,139 +2207,25 @@ describe('source text fidelity hard cut', () => {
     });
   });
 
-  it('preserves task inventory, dependencies, progress, TODOs, results, and child activities', async () => {
-    historyOwnerFixture = {tasks:[{task_id:'task-1',parent_turn_id:'turn-root',parent_initial_entry_id:'root-create',batch_id:'batch-1'}],batches:[{batch_id:'batch-1',parent_turn_id:'turn-root',creator_entry_id:'root-create',creator_tool_call_id:'create-call',task_count:1}]};
+  it('preserves session-local Agent guidance, final, reasoning, visualizations and TODO source text', async () => {
     const visualizations = [{ordinal:0,state:'READY',content_digest:'sha256:'+'a'.repeat(64),content_size:16,media_type:'image/png',codec:'binary',image_ref:'image:'+'a'.repeat(26),width:7,height:5}];
-    const task = {
-      id: 'task-1', parent_turn_id: 'turn-root', batch_id: 'batch-1', task_key: 'source-task',
-      label: SOURCE_FIDELITY_TEXT, profile: 'research_worker', display_role: SOURCE_FIDELITY_TEXT,
-      context: { mode: 'LAST_N', last_n_turns: 3 }, objective: SOURCE_FIDELITY_TEXT,
-      status: 'ACTIVE', terminal_public_detail: SOURCE_FIDELITY_TEXT, completion_accepted: false,
-      dependencies: [{
-        task_id: 'task-dependency', task_key: 'dependency', label: SOURCE_FIDELITY_TEXT,
-        status: 'COMPLETED', result_summary: SOURCE_FIDELITY_TEXT,
-      }],
-      result: {
-        id: 'result-1', entry_id: 'entry-result', summary: SOURCE_FIDELITY_TEXT,
-        output_preview: SOURCE_FIDELITY_TEXT, diagnostics: [],
-      },
-    };
-    const rootToolRequest = {
-      entry_id: 'root-create', turn_id: 'turn-root', entry_sequence: '1',
-      entry_kind: 'ASSISTANT_TOOL_REQUEST', scope_kind: 'ROOT',
-      blocks: [{
-        block_id: 'create-block', block_kind: 'TOOL_CALL', tool_call_id: 'create-call',
-        tool_name: 'spawn_agent', tool_arguments_preview: btoa('{}'),
-      }],
-    };
-    const childEntries = [{
-      entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2',
-      entry_kind: 'INTER_AGENT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
-      scope_subagent_task_id: 'task-1', content: inlineContent(SOURCE_FIDELITY_TEXT),
+    const entries = [{
+      entry_id:'guidance',turn_id:'turn-agent',entry_sequence:'1',entry_kind:'USER_STEER',scope_kind:'SUBAGENT',content:inlinePrompt(SOURCE_FIDELITY_TEXT),
     }, {
-      visualizations, entry_id: 'child-answer', turn_id: 'turn-child', entry_sequence: '3',
-      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK',
-      scope_subagent_task_id: 'task-1',
-      blocks: [{ block_id: 'child-text', block_kind: 'TEXT', content: inlineContent(SOURCE_FIDELITY_TEXT) }],
-      reasoning_blocks: [{
-        block_id: 'child-reasoning', ordinal: '0',
-        presentation_kind: 'REASONING_PRESENTATION_SUMMARY', content: inlineContent(SOURCE_FIDELITY_TEXT),
-      }],
+      entry_id:'answer',turn_id:'turn-agent',entry_sequence:'2',entry_kind:'ASSISTANT_MESSAGE',scope_kind:'SUBAGENT',root_final:true,
+      blocks:[{block_id:'text',block_kind:'TEXT',content:inlineContent(SOURCE_FIDELITY_TEXT)}],
+      reasoning_blocks:[{block_id:'reasoning',ordinal:'0',presentation_kind:'REASONING_PRESENTATION_SUMMARY',content:inlineContent(SOURCE_FIDELITY_TEXT)}],
+      visualizations,
     }];
-    const connect = connectPayload(
-      [rootToolRequest, ...childEntries],
-      { subagent_tasks: [{
-        task_id: 'task-1', parent_turn_id: 'turn-root', status: 'ACTIVE',
-        label: SOURCE_FIDELITY_TEXT, display_role: SOURCE_FIDELITY_TEXT,
-        profile: 'research_worker', objective: SOURCE_FIDELITY_TEXT,
-        terminal_public_detail: SOURCE_FIDELITY_TEXT, result_summary: SOURCE_FIDELITY_TEXT,
-      }, {
-        task_id: 'task-default-role', parent_turn_id: 'turn-root', status: 'PENDING_START',
-        label: 'default', profile: 'research_worker', objective: 'default',
-      }] },
-      [{
-        live_revision: '1', event_type: 'SUBAGENT_PROGRESS', turn_id: 'turn-child',
-        scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: 'task-1',
-        payload: { subagent_progress: {
-          task_id: 'task-1', status: 'ACTIVE', public_summary: SOURCE_FIDELITY_TEXT,
-        } },
-      }],
-      { current_todos: [{
-        todo_run_id: 'todo-root', scope_kind: 'ROOT', disposition: 'ACTIVE',
-        ordered_items: [{ ordinal: 0, text: SOURCE_FIDELITY_TEXT, status: 'IN_PROGRESS' }],
-      }] },
-    );
-    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
-      String(input).includes('/activities?')
-        ? { activities: [{ entry_id: 'child-guidance', turn_id: 'turn-child', entry_sequence: '2', entry_kind: 'INTER_AGENT_MESSAGE', accepted_at: '2026-09-01T00:00:00Z', objective: SOURCE_FIDELITY_TEXT, content: inlineContent(SOURCE_FIDELITY_TEXT) }, {...childEntries[1], content:inlineContent(SOURCE_FIDELITY_TEXT), accepted_at:'2026-09-01T00:00:00Z', inherited:true, turn_status:'COMPLETED'}] }
-        : String(input).includes('/tasks?')
-          ? { session_id: 'session-1', tasks: [task], total_count: 1, remaining_count: 0 }
-          : connect,
-    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
-
-    const adapter = new LocalHttpRuntimeAdapter();
-    const inventory = (await adapter.listSessionTasks('session-1')).tasks[0];
-    const connection = await adapter.connect('session-1');
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload(entries, {}, [], {
+      current_todos:[{todo_run_id:'todo-root',scope_kind:'ROOT',disposition:'ACTIVE',ordered_items:[{ordinal:0,text:SOURCE_FIDELITY_TEXT,status:'IN_PROGRESS'}]}],
+    })), {status:200})));
+    const connection=await new LocalHttpRuntimeAdapter().connect('session-1');
     await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
-    const projection = mergeRuntimeTaskInventory(connection.current(), [inventory]);
-    const liveTask = projection.agentTasks.find((item) => item.id === 'task-1');
-    const activityPage = await adapter.listSessionTaskActivities('session-1', 'task-1');
-    const run = projection.messages.find((message) => message.id === 'root-create')?.subagentRuns
-      ?.find((item) => item.id === 'task-1');
-
-    expect(inventory).toMatchObject({
-      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT, objective: SOURCE_FIDELITY_TEXT,
-      terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
-      dependencies: [{ label: SOURCE_FIDELITY_TEXT, resultSummary: SOURCE_FIDELITY_TEXT }],
-      result: { summary: SOURCE_FIDELITY_TEXT, outputPreview: SOURCE_FIDELITY_TEXT },
-    });
-    expect(liveTask).toMatchObject({
-      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT, objective: SOURCE_FIDELITY_TEXT,
-      terminalPublicDetail: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
-    });
-    expect(activityPage.activities[0]).toMatchObject({ body: SOURCE_FIDELITY_TEXT, entryKind: 'INTER_AGENT_MESSAGE' });
-    expect(run?.activities.find(item => item.id === 'child-answer')?.visualizations).toMatchObject([{imageRef:visualizations[0].image_ref}]);
-    const cold = projectAgentTaskConversation(activityPage.activities);
-    expect(cold.find(item => item.id === 'child-answer')).toMatchObject({visualizations:[{imageRef:visualizations[0].image_ref,width:7,height:5}]});
-    expect(projection.todo?.items).toEqual([{
-      id: 'todo-root:0', label: SOURCE_FIDELITY_TEXT, status: 'in-progress',
-    }]);
-    expect(run).toMatchObject({
-      label: SOURCE_FIDELITY_TEXT, role: SOURCE_FIDELITY_TEXT,
-      objective: SOURCE_FIDELITY_TEXT, summary: SOURCE_FIDELITY_TEXT,
-    });
-    expect(liveTask?.progress).toBe(SOURCE_FIDELITY_TEXT);
-    expect(run?.activities).toMatchObject([
-      {id: 'child-guidance', turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT},
-      {id: 'child-answer', turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT, reasoning: [{body: SOURCE_FIDELITY_TEXT}]},
-    ]);
-    expect(projectAgentTaskConversation([], run?.activities).find(message => message.id === 'child-answer'))
-      .toMatchObject({ turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT });
-    expect(projectAgentTaskConversation([], run?.activities).find(message => message.id === 'child-guidance'))
-      .toMatchObject({ role: 'user', userKind: 'steer', turnId: 'turn-child', body: SOURCE_FIDELITY_TEXT });
-  });
-
-  it('uses task API public content when root history still holds an unloaded blob', async () => {
-    const full = '任务接口已读出的完整最终回复。';
-    const entry = { entry_id: 'blob-child-answer', turn_id: 'turn-child', entry_sequence: '2',
-      entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'SUBAGENT_TASK', scope_subagent_task_id: 'task-1',
-      content: blobContent(full), accepted_at: '2026-10-21T00:00:00Z' };
-    const connect = connectPayload([entry], { subagent_tasks: [{ task_id: 'task-1', parent_turn_id: 'turn-root',
-      status: 'COMPLETED', label: '审阅', objective: '检查输出', profile: 'research_worker' }] });
-    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(
-      String(input).includes('/activities?')
-        ? { activities: [{ ...entry, content: { ...blobContent(full), ...inlineContent(full), kind: 'CANONICAL_BLOB' }, turn_status: 'COMPLETED' }] }
-        : connect,
-    ), { status: 200, headers: { 'Content-Type': 'application/json' } })));
-    const adapter = new LocalHttpRuntimeAdapter();
-    const connection = await adapter.connect('session-1');
-    await vi.waitFor(() => expect(connection.current().history?.windows.every(window => window.contextState === 'ready')).toBe(true));
-    const activities = connection.current().subagentRuns?.find(run => run.id === 'task-1')?.activities;
-    expect(activities?.find(activity => activity.id === entry.entry_id)).toMatchObject({ body: '', contentState: 'unloaded' });
-    const page = await adapter.listSessionTaskActivities('session-1', 'task-1');
-    expect(page.activities[0].body).toBe(full);
-    expect(projectAgentTaskConversation(page.activities, activities).find(message => message.id === entry.entry_id))
-      .toMatchObject({ body: full, role: 'assistant', assistantKind: 'terminal' });
+    const projection=connection.current();
+    expect(projection.messages.find(message=>message.id==='guidance')).toMatchObject({role:'user',userKind:'steer',body:SOURCE_FIDELITY_TEXT});
+    expect(projection.messages.find(message=>message.id==='answer')).toMatchObject({body:SOURCE_FIDELITY_TEXT,reasoning:[{body:SOURCE_FIDELITY_TEXT}],visualizations:[{imageRef:visualizations[0].image_ref,width:7,height:5}]});
+    expect(projection.todo?.items).toEqual([{id:'todo-root:0',label:SOURCE_FIDELITY_TEXT,status:'in-progress'}]);
   });
 
   it('preserves plain and JSON message tool text while keeping typed tool labels', async () => {
@@ -3344,7 +2735,6 @@ it('refreshes only advisory live state after ring overflow with a fresh empty li
   expect(restored.messages.map(m => m.body)).toContain('already hydrated');
   expect(restored.messages.map(m => m.body)).toContain('new committed input');
   expect(restored.messages.map(m => m.body)).not.toContain('stale draft');
-  expect(restored.subagentProgress).toEqual({});
   expect(restored.liveControl.current_todos).toEqual([]);
   expect(restored.liveControl.root_compaction_in_progress).toBe(true);
   expect(restored.presentationNotices[0]).toContain('临时进展已丢失');
@@ -3473,7 +2863,7 @@ it('refreshes TODOs once per live batch without jumping interaction state or its
 
 it('presents only fresh authenticated complete root results, without history replay or blocking observe', async () => {
   const assistant = {entry_id:'open-call',turn_id:'turn-open',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'open-1',tool_name:'open_in_pulsara'}]};
-  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{target:{kind:'PANEL',name:'tasks'}}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
+  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{target:{kind:'PANEL',name:'capabilities'}}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
   let committed: unknown[] = [];
   let cut = '9007199254740993';
   let releaseWindow!: () => void;
@@ -3497,7 +2887,7 @@ it('presents only fresh authenticated complete root results, without history rep
   await connection.observe(); // The association read is still pending.
   expect(seen).toHaveLength(1); expect(windows).toEqual([expect.objectContaining({anchor_entry_id:'open-call',maximum_entries:1})]);
   await connection.observe(); expect(seen).toHaveLength(1);
-  releaseWindow(); expect(await reads[0]).toEqual({targets:[{type:'panel',name:'tasks'}],errors:[{index:1,message:'invalid'}]});
+  releaseWindow(); expect(await reads[0]).toEqual({targets:[{type:'panel',name:'capabilities'}],errors:[{index:1,message:'invalid'}]});
   cut='9007199254740996'; await connection.snapshot(); expect(seen[0].signal.aborted).toBe(true);
   committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740995',entry:result},{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740997',entry:{...result,entry_id:'imported',entry_owner_kind:'IMPORTED_HISTORY'}}];cut='9007199254740997';
   await connection.observe(); expect(seen).toHaveLength(1);

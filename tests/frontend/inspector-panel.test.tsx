@@ -128,7 +128,6 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
     },
     session: { id: 'session-one', title: 'PR03 会话', subtitle: '', status: 'running', updatedAt: '刚刚', live: true },
     isOpen: true,
-    agentTasks: [],
     loading: false,
     canControl: false,
     capabilities: undefined,
@@ -137,12 +136,8 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
     capabilityBusy: undefined,
     error: undefined,
     onRetry: vi.fn(),
-    taskActivities: new Map(),
-    onLoadTaskActivities: vi.fn(async () => ({ activities: [] })),
-    taskArtifactOwnerKey: 'session-one:generation-one',
     onReadToolArtifact: vi.fn(),
     onReadPromptImage: vi.fn(),
-    onCancelTask: vi.fn(async () => undefined),
     backgroundOwnerKey: 'session-one:host-one',
     backgroundHostSessionId: 'host-one',
     backgroundControlAdmissionDeadlineMs: 4_200,
@@ -247,10 +242,6 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '添加' })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: '任务' }));
-    expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
-    expect(screen.queryByText('这个会话还没有任务')).toBeNull();
-
     fireEvent.click(screen.getByRole('button', { name: '后台进程' }));
     expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
@@ -266,21 +257,18 @@ describe('InspectorPanel PR03 production navigation', () => {
     expect(screen.queryByText('sleep 30')).toBeNull();
   });
 
-  it('keeps capability access and adds task/background tabs in the frozen order', async () => {
+  it('keeps capability and background navigation available', async () => {
     const loadBackground = vi.fn(async () => ({ processes: [backgroundProcess] }));
     render(<Panel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
 
     const navigation = screen.getByRole('navigation', { name: '工作区入口' });
     expect(within(navigation).getAllByRole('button').map((button) => button.textContent?.trim() || button.getAttribute('aria-label'))).toEqual([
-      '能力', '任务', '后台进程', '新建网页',
+      '能力', '后台进程', '新建网页',
     ]);
     expect(screen.queryAllByRole('tab')).toHaveLength(0);
     fireEvent.click(within(navigation).getByRole('button', { name: '项目能力' }));
     expect(screen.getByRole('tab', { name: '会话能力' })).toBeTruthy();
     expect(screen.getByText('正在加载...')).toBeTruthy();
-
-    fireEvent.click(within(navigation).getByRole('button', { name: '任务' }));
-    expect(screen.getByText('这个会话还没有任务')).toBeTruthy();
 
     fireEvent.click(within(navigation).getByRole('button', { name: '后台进程' }));
     await waitFor(() => expect(loadBackground).toHaveBeenCalledWith(undefined));

@@ -111,7 +111,6 @@ class KernelSkillProjectionComposer:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         deadline_monotonic: float | None = None,
     ) -> PreparedSkillCatalogSourceSnapshot:
         check_skill_deadline(deadline_monotonic)
@@ -183,13 +182,11 @@ class KernelSkillProjectionComposer:
         snapshot = freeze_capability_source_snapshot(
             registration=registration,
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             disposition=disposition,
             facts=facts,
         )
         return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
             inspection=inspection,
             owner_authenticity=self._owner_authenticity,

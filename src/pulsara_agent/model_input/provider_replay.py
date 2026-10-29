@@ -203,10 +203,7 @@ def provider_replay_manifest_cut_fingerprint(
         "pulsara.durable-provider-replay-manifest-cut:v1",
         {
             "session": cut.session_id,
-            "scope": (
-                cut.scope.scope_kind.value,
-                cut.scope.scope_subagent_task_id,
-            ),
+            "scope": (cut.scope.scope_kind.value,),
             "binding_revision": cut.context_binding_revision_id,
             "through": cut.provider_input_through_sequence,
             "manifests": tuple(item.manifest_fingerprint for item in cut.manifests),
@@ -262,8 +259,7 @@ class FrozenCanonicalProviderDispatchRead:
             or identity.context_binding_revision_id != cut.context_binding_revision_id
             or identity.provider_input_through_sequence
             != cut.provider_input_through_sequence
-            or identity.conversation_scope_kind is not cut.scope.scope_kind
-            or identity.scope_subagent_task_id != cut.scope.scope_subagent_task_id
+            or (identity.conversation_scope_kind is not cut.scope.scope_kind)
         ):
             raise ValueError("provider dispatch read cut does not exact-join")
         expected = context_fingerprint(
@@ -311,7 +307,6 @@ class FrozenSelectedDurableProviderReplayHydration:
                 "scope": (
                     self.scope.session_id,
                     self.scope.scope_kind.value,
-                    self.scope.scope_subagent_task_id,
                 ),
                 "source_cut": self.source_manifest_cut_fingerprint,
                 "replay_target": self.replay_target_fingerprint,
@@ -355,11 +350,12 @@ def select_compatible_provider_replay_manifests(
     if (
         manifest_cut.session_id != identity.session_id
         or manifest_cut.scope.scope_kind is not identity.conversation_scope_kind
-        or manifest_cut.scope.scope_subagent_task_id != identity.scope_subagent_task_id
         or manifest_cut.context_binding_revision_id
         != identity.context_binding_revision_id
-        or manifest_cut.provider_input_through_sequence
-        != identity.provider_input_through_sequence
+        or (
+            manifest_cut.provider_input_through_sequence
+            != identity.provider_input_through_sequence
+        )
     ):
         raise ValueError("provider replay manifest cut does not join compiled input")
 
@@ -474,7 +470,6 @@ def freeze_selected_provider_replay_hydration(
             "scope": (
                 manifest_cut.scope.session_id,
                 manifest_cut.scope.scope_kind.value,
-                manifest_cut.scope.scope_subagent_task_id,
             ),
             "source_cut": manifest_cut.cut_fingerprint,
             "replay_target": replay_target.replay_target_fingerprint,

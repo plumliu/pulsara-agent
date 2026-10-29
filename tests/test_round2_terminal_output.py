@@ -678,7 +678,6 @@ def test_round2_terminal_live_handoff_overflow_is_typed_gap_not_process_failure(
             block_identity='block:p33dmpkex2vzqug7efvolum7dq',
             attribution={
                 "scope_kind": "ROOT",
-                "scope_subagent_task_id": None,
                 "channel_kind": LiveChannelKind.TOOL_RESULT,
                 "channel_tool_call_id": "call:live-overflow",
                 "channel_attempt_id": 'attempt:lmcvqas4frx3x7lakdn5cth5nq',

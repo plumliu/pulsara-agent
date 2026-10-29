@@ -57,14 +57,14 @@ WITH sessions AS MATERIALIZED ("""
         COALESCE(e.inline_content,b.body), e.content_digest,e.content_size, e.accepted_at,e.scheduled_input
  FROM sessions s JOIN pulsara_v3.transcript_entries e ON e.session_id=s.id
  LEFT JOIN pulsara_v3.blobs b ON b.id=e.blob_id AND b.workspace_id=e.workspace_id
- WHERE e.conversation_scope_kind='ROOT' AND e.entry_kind IN ('USER_MESSAGE','USER_STEER')
+ WHERE e.entry_kind IN ('USER_MESSAGE','USER_STEER')
  UNION ALL
  SELECT e.session_id,e.id,e.entry_sequence,a.block_ordinal,'assistant',
         COALESCE(a.inline_content,b.body),a.content_digest,a.content_size,e.accepted_at,e.scheduled_input
  FROM sessions s JOIN pulsara_v3.transcript_entries e ON e.session_id=s.id
  JOIN pulsara_v3.assistant_message_blocks a ON a.assistant_entry_id=e.id AND a.session_id=e.session_id
  LEFT JOIN pulsara_v3.blobs b ON b.id=a.blob_id AND b.workspace_id=a.workspace_id
- WHERE e.conversation_scope_kind='ROOT' AND e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST')
+ WHERE e.entry_kind IN ('ASSISTANT_MESSAGE','ASSISTANT_TOOL_REQUEST')
    AND a.block_kind='TEXT'
 )
 SELECT s.*,d.entry_id,d.sequence,d.ordinal,d.kind,d.content,d.digest,d.size,d.accepted_at,d.scheduled_input

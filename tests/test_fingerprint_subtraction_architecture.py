@@ -17,17 +17,11 @@ from pulsara_agent.conversation_kernel.assistant_settlement import (
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedSkillCatalogSourceSnapshot,
 )
-from pulsara_agent.conversation_kernel.cold_epoch import (
-    SubagentInitialSeed,
-)
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     RecentHumanMessageProof,
 )
-from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    FrozenRootSubagentTaskBoardHandoffFact,
-)
 from pulsara_agent.conversation_kernel.mcp.contracts import McpInstallationCandidate
-from pulsara_agent.conversation_kernel.subagents import contracts as subagent_contracts
+from pulsara_agent.conversation_kernel.subagents import collaboration_contracts
 from pulsara_agent.conversation_kernel.tool_runtime import (
     ProductionBuiltinExecutorBinding,
 )
@@ -53,10 +47,8 @@ def test_hard_cut_mandatory_process_local_fingerprint_fields_are_absent() -> Non
         FrozenToolCapabilityExposureSelection: {"selection_fingerprint"},
         McpInstallationCandidate: {"candidate_fingerprint"},
         PreparedSkillCatalogSourceSnapshot: {"root_policy_fingerprint"},
-        SubagentInitialSeed: {"objective_item_fingerprint", "seed_fingerprint"},
         RecentHumanMessageProof: {"item_fingerprint"},
         FrozenTodoItem: {"item_fingerprint"},
-        FrozenRootSubagentTaskBoardHandoffFact: {"fact_fingerprint"},
         PreparedAssistantMessageSettlement: {"candidate_fingerprint"},
         PreparedProviderInputAppendCandidate: {"candidate_fingerprint"},
         ProcessLocalProviderInputInstallPermit: {
@@ -82,9 +74,9 @@ def test_hard_cut_subagent_process_local_aggregate_fields_are_absent() -> None:
         "mailbox_item_fingerprint",
         "mailbox_batch_candidate_fingerprint",
     }
-    for name in dir(subagent_contracts):
-        value = getattr(subagent_contracts, name)
-        if isinstance(value, type) and value.__module__ == subagent_contracts.__name__:
+    for name in dir(collaboration_contracts):
+        value = getattr(collaboration_contracts, name)
+        if isinstance(value, type) and value.__module__ == collaboration_contracts.__name__:
             try:
                 names = _field_names(value)
             except TypeError:

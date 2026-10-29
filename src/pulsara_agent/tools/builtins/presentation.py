@@ -5,7 +5,6 @@ import re
 from urllib.parse import urlsplit
 
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.identity import is_valid_id
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
 
@@ -21,10 +20,9 @@ class OpenInPulsaraTool(WorkspaceTool):
             raise ValueError("目标必须是对象")
         if "kind" in target and not isinstance(target["kind"], str):
             raise ValueError("不支持的目标类型")
-        task = target.get("type") == "task"
-        tag = "type" if task else "kind"
-        kind = "task" if task else {"PATH": "file", "URL": "browser", "PROCESS": "terminal", "MCP_SERVER": "mcp", "PANEL": "panel"}.get(target.get("kind"))
-        fields = {"file": "path", "browser": "url", "task": "task_id", "terminal": "process_id", "mcp": "runtime_server_id", "panel": "name"}
+        tag = "kind"
+        kind = {"PATH": "file", "URL": "browser", "PROCESS": "terminal", "MCP_SERVER": "mcp", "PANEL": "panel"}.get(target.get("kind"))
+        fields = {"file": "path", "browser": "url", "terminal": "process_id", "mcp": "runtime_server_id", "panel": "name"}
         if not isinstance(kind, str) or kind not in fields:
             raise ValueError("不支持的目标类型")
         field = fields[kind]
@@ -52,16 +50,11 @@ class OpenInPulsaraTool(WorkspaceTool):
             except ValueError:
                 # Never echo a supplied URL: rejected input may contain credentials.
                 raise ValueError("请输入不含凭据的完整 HTTP(S) 地址") from None
-        elif kind == "task":
-            if not is_valid_id(value, "task"):
-                raise ValueError("task_id 必须来自真实子代理任务")
         elif kind == "panel":
-            if value not in {"capabilities", "tasks", "background", "browser"}:
-                raise ValueError("入口名称只支持 capabilities、tasks、background、browser")
+            if value not in {"capabilities", "background", "browser"}:
+                raise ValueError("入口名称只支持 capabilities、background、browser")
         else:
             result["host_session_id"] = self.host_session_id
-        if task:
-            return result
         public = {"target": {"kind": target["kind"], field: result[field]}}
         if "host_session_id" in result:
             public["host_session_id"] = result["host_session_id"]

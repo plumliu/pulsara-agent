@@ -48,7 +48,6 @@ class BuiltinCompositionState(StrEnum):
 @dataclass(frozen=True, slots=True)
 class SealedBuiltinCapabilitySnapshot:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     source_snapshot: FrozenCapabilitySourceSnapshot
     executor_bindings: tuple["ProductionBuiltinExecutorBinding", ...] = field(
         repr=False
@@ -60,7 +59,6 @@ class SealedBuiltinCapabilitySnapshot:
 @dataclass(frozen=True, slots=True)
 class PreparedMcpCapabilitySourceSnapshotSet:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...]
     catalog_snapshot: "McpCatalogSnapshot" = field(repr=False)
     inspection_inputs: tuple["PreparedMcpInspectionInput", ...] = field(repr=False)
@@ -80,7 +78,6 @@ class PreparedMcpInspectionInput:
 @dataclass(frozen=True, slots=True)
 class PreparedSkillCatalogSourceSnapshot:
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     source_snapshot: FrozenCapabilitySourceSnapshot
     inspection: EffectiveSkillCatalogInspection = field(repr=False)
     owner_authenticity: object = field(repr=False, compare=False)
@@ -90,14 +87,12 @@ class PreparedSkillCatalogSourceSnapshot:
 def issue_sealed_builtin_capability_snapshot(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     source_snapshot: FrozenCapabilitySourceSnapshot,
     executor_bindings: tuple["ProductionBuiltinExecutorBinding", ...],
     builtin_composition_seal: object,
 ) -> SealedBuiltinCapabilitySnapshot:
     return SealedBuiltinCapabilitySnapshot(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=source_snapshot,
         executor_bindings=executor_bindings,
         builtin_composition_seal=builtin_composition_seal,
@@ -108,7 +103,6 @@ def issue_sealed_builtin_capability_snapshot(
 def issue_mcp_capability_source_snapshot_set(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     source_snapshots: tuple[FrozenCapabilitySourceSnapshot, ...],
     catalog_snapshot: "McpCatalogSnapshot",
     inspection_inputs: tuple[PreparedMcpInspectionInput, ...],
@@ -117,7 +111,6 @@ def issue_mcp_capability_source_snapshot_set(
 ) -> PreparedMcpCapabilitySourceSnapshotSet:
     return PreparedMcpCapabilitySourceSnapshotSet(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshots=source_snapshots,
         catalog_snapshot=catalog_snapshot,
         inspection_inputs=inspection_inputs,
@@ -130,14 +123,12 @@ def issue_mcp_capability_source_snapshot_set(
 def issue_skill_catalog_source_snapshot(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     source_snapshot: FrozenCapabilitySourceSnapshot,
     inspection: EffectiveSkillCatalogInspection,
     owner_authenticity: object,
 ) -> PreparedSkillCatalogSourceSnapshot:
     return PreparedSkillCatalogSourceSnapshot(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=source_snapshot,
         inspection=inspection,
         owner_authenticity=owner_authenticity,
@@ -163,12 +154,9 @@ def freeze_capability_registry_from_owner_snapshots(
     ):
         raise TypeError("capability owner snapshot authenticity conflicts")
     scope = builtin.conversation_scope_kind
-    task_id = builtin.scope_subagent_task_id
     if (
         mcp.conversation_scope_kind is not scope
         or skills.conversation_scope_kind is not scope
-        or mcp.scope_subagent_task_id != task_id
-        or skills.scope_subagent_task_id != task_id
     ):
         raise ValueError("capability owner snapshot scopes conflict")
     builtin_snapshot = builtin.source_snapshot
@@ -189,7 +177,6 @@ def freeze_capability_registry_from_owner_snapshots(
 
     registrations = freeze_capability_registration_set(
         conversation_scope_kind=scope,
-        scope_subagent_task_id=task_id,
         builtin_registration=builtin_snapshot.registration,
         mcp_registrations=tuple(item.registration for item in mcp.source_snapshots),
         local_skill_catalog_registration=skill_snapshot.registration,

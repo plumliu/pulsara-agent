@@ -290,20 +290,15 @@ def test_http_search_rejects_invalid_fields_origins_and_reports_timeout(tmp_path
     asyncio.run(run())
 
 
-def test_subagent_internal_text_and_tool_result_are_not_search_documents(
+def test_session_search_excludes_internal_native_tool_result(
     repo, search_context
 ):
     from tests.test_round5_long_horizon_postgres import (
         _runner,
         _text_stream,
         _tool_stream,
-        _round10_subagent_runtime,
     )
     from tests.support.round3 import ScriptedKernelModel
-    from tests.support.subagents import (
-        accept_active_subagent_fixture,
-        run_admitted_subagent_fixture,
-    )
     from tests.support.model_config import (
         frozen_test_prompt,
         test_model_binding as model_binding,
@@ -336,24 +331,6 @@ def test_subagent_internal_text_and_tool_result_are_not_search_documents(
     tool_text = bytes(tool_rows[0]["inline_content"]).decode()
     assert search(tool_text) == ([], None)
     assert len(search("root-visible-final")[0]) == 1
-    parent_turn, _, _ = turn(repo, lease.guard, "parent-question", finish=False)
-    child = accept_active_subagent_fixture(
-        repo, lease, parent_turn_id=parent_turn, objective="excluded-child-objective"
-    )
-    model = ScriptedKernelModel(
-        [_text_stream("excluded-child-answer", block_id="child-answer")]
-    )
-    runner = _runner(
-        repo,
-        lease,
-        model,
-        subagent_runtime=_round10_subagent_runtime(repo, lease, child),
-    )
-    result = asyncio.run(run_admitted_subagent_fixture(runner, child))
-    assert result.final_text == "excluded-child-answer"
-    assert search("excluded-child-answer") == ([], None)
-    assert search("excluded-child-objective") == ([], None)
-
 
 def test_annotation_comment_is_searchable_without_duplicating_quoted_sources(
     repo, search_context

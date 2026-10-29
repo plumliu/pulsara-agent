@@ -55,6 +55,7 @@ class ToolResultDeliveryRequirement(StrEnum):
 
 
 class ToolResultFullDeliveryReason(StrEnum):
+    CODE_MODE_OUTPUT_PAGE = "CODE_MODE_OUTPUT_PAGE"
     ARTIFACT_PAGE = "ARTIFACT_PAGE"
     ARTIFACT_EXPORT_LOCATION = "ARTIFACT_EXPORT_LOCATION"
     MCP_DIRECTORY_PAGE = "MCP_DIRECTORY_PAGE"
@@ -114,6 +115,8 @@ def classify_tool_result_delivery(
 
     if result_state != "SUCCESS":
         return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+    if tool_name in {"exec", "wait_exec", "stop_exec"}:
+        return full_required_tool_result_delivery(ToolResultFullDeliveryReason.CODE_MODE_OUTPUT_PAGE)
     if tool_name == "view_image":
         return full_required_tool_result_delivery(
             ToolResultFullDeliveryReason.IMAGE_ATTACHMENT

@@ -16,8 +16,6 @@ from .locking import lock_session_admission
 IDLE_SESSION_SQL = """
 NOT EXISTS (SELECT 1 FROM pulsara_v3.turns t WHERE t.session_id=s.id AND t.status='RUNNING')
 AND NOT EXISTS (SELECT 1 FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING')
-AND NOT EXISTS (SELECT 1 FROM pulsara_v3.subagent_tasks t WHERE t.session_id=s.id
-                AND t.status IN ('PENDING_START','WAITING_DEPENDENCY','ACTIVE'))
 AND NOT EXISTS (SELECT 1 FROM pulsara_v3.plan_workflows p WHERE p.session_id=s.id AND p.status='ACTIVE')
 AND NOT EXISTS (SELECT 1 FROM pulsara_v3.plan_interactions p WHERE p.session_id=s.id AND p.status='OPEN')
 AND NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_execution_attempts a WHERE a.session_id=s.id

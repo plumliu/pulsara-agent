@@ -21,9 +21,7 @@ from pulsara_agent.primitives.permission import (
 
 class RunPermissionAdmissionSource(StrEnum):
     USER_SUBMISSION = "USER_SUBMISSION"
-    SUBAGENT_COMPLETION_COMMAND = "SUBAGENT_COMPLETION_COMMAND"
     TERMINAL_OBSERVATION = "TERMINAL_OBSERVATION"
-    SUBAGENT_INHERITANCE = "SUBAGENT_INHERITANCE"
     RUNTIME_PLAN_CONTINUATION = "RUNTIME_PLAN_CONTINUATION"
 
 
@@ -78,10 +76,7 @@ class FrozenRunPermissionSnapshot:
             raise ValueError(
                 "permission without an overlay cannot change the requested mode"
             )
-        if self.admission_source is RunPermissionAdmissionSource.SUBAGENT_INHERITANCE:
-            if self.inherited_from_turn_id is None or plan_bound:
-                raise ValueError("subagent permission inheritance is invalid")
-        elif self.admission_source in {
+        if self.admission_source in {
             RunPermissionAdmissionSource.RUNTIME_PLAN_CONTINUATION,
             RunPermissionAdmissionSource.TERMINAL_OBSERVATION,
         }:

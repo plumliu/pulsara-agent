@@ -1030,8 +1030,8 @@ def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp
         try:
             child = prepare_test_direct_tool_surface(
                 port,
-                conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id='task:u52c5g24amk35q7qgadbaquelq',
+                conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
+
             )
             assert SESSION_QUERY_TOOL_NAMES.isdisjoint(
                 s.name for s in child.model_surface.tool_specs

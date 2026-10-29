@@ -16,7 +16,6 @@ from tests.test_conversation_fork import (
     repo as repo, new_session, turn, rows, fork, compact, final,
 )
 from tests.test_turn_interruption_history import stop, snapshot
-from tests.support.subagents import accept_active_subagent_fixture
 from pulsara_agent.identity import random_id
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 
@@ -219,40 +218,6 @@ def test_imported_history_zero_event_cut_and_no_invented_tasks(repo):
         window(reader, child.child_session_id, anchor_entry_id=answer)
 
 
-def test_subagent_only_tail_has_real_parent_and_forward_creator_batch_without_body_reads(repo, monkeypatch):
-    lease = new_session(repo)
-    session = lease.guard.session_id
-    parent, _, _ = turn(repo, lease.guard, "delegate", finish=False)
-    task = accept_active_subagent_fixture(repo, lease, parent_turn_id=parent, objective="inspect")
-    child_entry = random_id("entry")
-    child_turn = random_id("turn")
-    repo.start_subagent_turn(
-        lease.guard, task_id=task, turn_id=child_turn, entry_id=child_entry,
-        context_binding_revision_id=random_id("binding"),
-        task_start_event_id=task.launch.task_start.event_id,
-        expected_parent_permission_snapshot=task.launch.parent_permission_snapshot,
-        content=InlineContent.from_bytes(b"inspect"), occurred_at=datetime.now(timezone.utc),
-        actor_id="subagent:test", deadline_monotonic=monotonic() + 30,
-    )
-    reader = CanonicalProtocolReader(repo.connection_provider)
-    tail = snapshot(reader, session, maximum_entries=1)
-    assert tail.entries[0].entry_id == child_entry
-    creator = rows(repo, "SELECT assistant_entry_id FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s", (session,))[0]["assistant_entry_id"]
-    monkeypatch.setattr(reader, "_entry", lambda *_: pytest.fail("context must not reread body/content references"))
-    value = context(reader, session, [child_entry])
-    assert value["entry_contexts"][0]["root_owner_id"] == parent
-    assert value["entry_contexts"][0]["parent_turn_id"] == parent
-    assert value["tasks"][0]["task_id"] == task
-    assert value["tasks"][0]["parent_turn_id"] == parent
-    assert value["batches"] == []  # A batch ID is not invertible creator evidence.
-    creator_context = context(reader, session, [creator])
-    assert creator_context["tasks"] == []
-    assert creator_context["batches"] == [{
-        "batch_id": value["tasks"][0]["batch_id"], "parent_turn_id": parent,
-        "creator_entry_id": creator,
-        "creator_tool_call_id": rows(repo, "SELECT tool_call_id FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s", (session,))[0]["tool_call_id"],
-        "task_count": "1",
-    }]
 
 
 def test_json_budgets_include_envelopes_and_context_is_never_truncated(repo):

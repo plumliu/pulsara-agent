@@ -13,6 +13,7 @@ from pulsara_agent.hooks.contracts import (
     HookDiagnostic,
     HookDiagnosticSeverity,
     HookEventType,
+    HookScopePolicy,
 )
 from pulsara_agent.hooks.matcher import compile_matcher
 
@@ -37,6 +38,7 @@ _HANDLER_FIELDS = frozenset(
         "statusMessage",
         "additionalContextLimit",
         "async",
+        "scope_policy",
     }
 )
 _MATCHER_IGNORED_EVENTS = {
@@ -48,7 +50,6 @@ _CONTEXT_EVENTS = {
     HookEventType.USER_PROMPT_SUBMIT_EVENT,
     HookEventType.PRE_TOOL_USE_EVENT,
     HookEventType.POST_TOOL_USE_EVENT,
-    HookEventType.SUBAGENT_START_EVENT,
 }
 
 
@@ -296,6 +297,11 @@ def _parse_handler(
         "additionalContextLimit", DEFAULT_ADDITIONAL_CONTEXT_LIMIT
     )
     asynchronous = value.get("async", False)
+    try:
+        scope_policy = HookScopePolicy(value.get("scope_policy", "ROOT"))
+    except (TypeError, ValueError):
+        diagnostics.append(_diag("HOOK_CONFIG_INVALID_SCOPE_POLICY", label, event_type))
+        return None
     valid = isinstance(command, str) and bool(command)
     valid = valid and len(command.encode("utf-8")) <= MAXIMUM_COMMAND_UTF8_BYTES
     valid = valid and (
@@ -370,6 +376,7 @@ def _parse_handler(
         asynchronous=asynchronous,
         status_message=status,
         additional_context_limit=context_limit,
+        scope_policy=scope_policy,
     )
 
 

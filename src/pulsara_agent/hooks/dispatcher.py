@@ -326,7 +326,7 @@ class KernelHookDispatcher:
         selected = tuple(
             (source_ordinal, definition)
             for source_ordinal, definition in envelope.definition_view.selected_definitions(
-                event_type
+                event_type, envelope.scope.kind
             )
             if definition_matches(definition, matcher_subject)
         )
@@ -541,7 +541,6 @@ def _aggregate(
         return ObserveOutcome(diagnostics)
     if event_type in {
         HookEventType.POST_TOOL_USE_EVENT,
-        HookEventType.SUBAGENT_START_EVENT,
     }:
         return ContextOutcome(contexts, diagnostics)
     if event_type is HookEventType.PERMISSION_REQUEST_EVENT:
@@ -557,7 +556,6 @@ def _aggregate(
                 )
         return PermissionOutcome(diagnostics=diagnostics)
     if event_type in {
-        HookEventType.SUBAGENT_STOP_EVENT,
         HookEventType.STOP_EVENT,
     }:
         vetoes = tuple(item for item in valid if item.explicit_terminalize)
@@ -611,7 +609,10 @@ def _aggregate(
             contexts,
             diagnostics,
         )
-    return GateOutcome(context_entries=contexts, diagnostics=diagnostics)
+    # Every handler receives the same original input. The last declared complete
+    # replacement wins deterministically; deny still prevents any dispatch.
+    updated = next((item.updated_input for item in reversed(valid) if item.updated_input is not None), None)
+    return GateOutcome(context_entries=contexts, diagnostics=diagnostics, updated_input=updated)
 
 
 async def _acquire_lock_before_deadline(

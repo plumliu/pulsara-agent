@@ -59,7 +59,6 @@ from pulsara_agent.conversation_kernel.input_continuity import (
     FrozenProviderInputEpochView,
     HostProviderInputContinuityOwner,
     ProcessLocalProviderInputInstallAuthority,
-    _issue_new_subagent_lease_source,
     _issue_root_bootstrap_lease_source,
 )
 from pulsara_agent.conversation_kernel.contracts import (
@@ -74,30 +73,13 @@ from pulsara_agent.conversation_kernel.context_sources import (
     ContextSourceRegistry,
     FrozenNonTriggerContextSources,
 )
-from pulsara_agent.conversation_kernel.cold_epoch import (
-    SubagentInitialSeed,
-    build_subagent_initial_seed,
-)
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    FrozenSubagentParentContextSelection,
-    SubagentContextMode,
-    SubagentProfileKind,
-    SubagentResultSource,
-    build_parent_context_call_subject,
-    build_parent_context_selection,
-    build_subagent_result_public_fact,
-    build_subagent_task_start,
-)
-from pulsara_agent.conversation_kernel.subagents.runtime_port import (
-    PreparedExplicitSubagentCompletion,
-    PreparedInferredSubagentCompletion,
-)
 from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorization,
     KernelToolAuthorizationKind,
     KernelToolInvocationContext,
     KernelToolResult,
     PreparedPermissionRequest,
+    PreparedResolvedToolInvocation,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
     BuiltinExecutionPolicyRef,
@@ -161,7 +143,7 @@ from tests.support.model_config import test_model_runtime
 
 
 def new_test_provider_input_continuity_owner(
-    session_id: str = 'session:336wrfwkamrr3up6kjtsgvgcte',
+    session_id: str = "session:336wrfwkamrr3up6kjtsgvgcte",
 ) -> HostProviderInputContinuityOwner:
     """Build a unit-test Host owner from an exact synthetic session genesis."""
 
@@ -176,36 +158,6 @@ def new_test_provider_input_continuity_owner(
     )
     return HostProviderInputContinuityOwner(
         root_lease_source=_issue_root_bootstrap_lease_source(writer_lease),
-    )
-
-
-def new_test_subagent_lease_source(*, session_id: str, task_id: str):
-    guard = HostWriterGuard(
-        session_id=session_id,
-        writer_generation=1,
-        writer_owner_id=derive_id("host", "test-fixture", session_id),
-    )
-    task_start = build_subagent_task_start(
-        session_id=session_id,
-        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
-        writer_generation=guard.writer_generation,
-        task_id=task_id,
-        parent_turn_id='turn:6acqdceiba6xlpjigpxo5o2jui',
-        objective="test objective",
-        profile=SubagentProfileKind.GENERAL_WORKER,
-        parent_context=FrozenSubagentParentContextSelection(
-            SubagentContextMode.NONE,
-            None,
-            (),
-            None,
-        ),
-        dependency_context=None,
-        occurred_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
-        actor_id="test",
-    )
-    return _issue_new_subagent_lease_source(
-        writer_guard=guard,
-        durable_runnable_task_fact=task_start,
     )
 
 
@@ -547,7 +499,6 @@ class StaticContextSourceCollector:
         self,
         *,
         conversation_scope_kind,
-        scope_subagent_task_id,
         deadline_monotonic=None,
     ):
         del deadline_monotonic
@@ -564,7 +515,6 @@ class StaticContextSourceCollector:
         snapshot = freeze_capability_source_snapshot(
             registration=registration,
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
             facts=(),
         )
@@ -574,7 +524,6 @@ class StaticContextSourceCollector:
         ).prepare_root_policy(Path.cwd())
         return issue_skill_catalog_source_snapshot(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
             inspection=CompleteEffectiveSkillCatalogInspection(
                 root_policy=root_policy,
@@ -723,27 +672,12 @@ class StaticContextSourceCollector:
             ContextSourceKind.SKILL_CATALOG: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceKind.MCP_CATALOG: ContextSourceAbsenceKind.NOT_APPLICABLE,
             ContextSourceKind.ACTIVE_SKILL: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
-            ContextSourceKind.PREVIOUS_TURN_OUTCOME: (
-                ContextSourceAbsenceKind.EXPLICIT_EMPTY
-            ),
-            ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: (
-                ContextSourceAbsenceKind.NOT_APPLICABLE
-            ),
-            ContextSourceKind.MEMORY_RECALL: (ContextSourceAbsenceKind.NOT_APPLICABLE),
-            ContextSourceKind.MEMORY_WRITE_HINT: (
-                ContextSourceAbsenceKind.NOT_APPLICABLE
-            ),
-            ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: (
-                ContextSourceAbsenceKind.NOT_APPLICABLE
-            ),
-            ContextSourceKind.RETAINED_SKILL_CONTEXT: (
-                ContextSourceAbsenceKind.EXPLICIT_EMPTY
-            ),
-            ContextSourceKind.PARENT_CONTEXT: (ContextSourceAbsenceKind.NOT_APPLICABLE),
-            ContextSourceKind.DEPENDENCY_RESULTS: (
-                ContextSourceAbsenceKind.NOT_APPLICABLE
-            ),
-            ContextSourceKind.TERMINAL_MATERIAL: ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceKind.PREVIOUS_TURN_OUTCOME: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD: ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceKind.MEMORY_RECALL: ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceKind.MEMORY_WRITE_HINT: ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceKind.COMPACTION_RUNTIME_HANDOFF: ContextSourceAbsenceKind.NOT_APPLICABLE,
+            ContextSourceKind.RETAINED_SKILL_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
             ContextSourceKind.HOOK_CONTEXT: ContextSourceAbsenceKind.EXPLICIT_EMPTY,
         }
         absent = tuple(
@@ -886,7 +820,7 @@ def static_canonical_compile_facts(
     """Build the final no-Plan compile fact for isolated adapter tests."""
 
     permission = build_run_permission_snapshot(
-        snapshot_id='permission:53mvfpeaityebpvslz3hltgfuy',
+        snapshot_id="permission:53mvfpeaityebpvslz3hltgfuy",
         requested_mode=DEFAULT_PERMISSION_MODE,
         effective_mode=DEFAULT_PERMISSION_MODE,
         admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -918,10 +852,9 @@ def static_canonical_compile_facts(
     object.__setattr__(provisional, "approved_plan_materialization_fact", None)
     freshness = build_tool_observation_freshness_fact(
         session_id=canonical_input.identity.session_id,
-        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+        workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau",
         current_turn_id=canonical_input.identity.turn_id,
         current_scope_kind=canonical_input.identity.conversation_scope_kind,
-        scope_subagent_task_id=canonical_input.identity.scope_subagent_task_id,
         current_initial_entry_sequence=1,
         immediate_predecessor_turn_id=None,
     )
@@ -977,11 +910,16 @@ class StructuredToolPort:
             for scope in ModelInputScopeKind
         }
 
-    async def prepare_visualizations(self, body: str, *, io, workspace_id: str, deadline_monotonic: float):
+    async def prepare_visualizations(
+        self, body: str, *, io, workspace_id: str, deadline_monotonic: float
+    ):
         return ()
 
     def sealed_builtin_capability_snapshot(
-        self, *, conversation_scope_kind, scope_subagent_task_id
+        self,
+        *,
+        conversation_scope_kind,
+        effective_permission_mode,
     ):
         surface = self._surfaces[conversation_scope_kind]
         source = capability_source_ref(
@@ -1009,24 +947,23 @@ class StructuredToolPort:
         snapshot = freeze_capability_source_snapshot(
             registration=registration,
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
             facts=facts,
         )
         return issue_sealed_builtin_capability_snapshot(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             source_snapshot=snapshot,
             executor_bindings=(),
             builtin_composition_seal=self._authority,
         )
 
     def freeze_mcp_capability_source_snapshot_set(
-        self, *, conversation_scope_kind, scope_subagent_task_id
+        self,
+        *,
+        conversation_scope_kind,
     ):
         return issue_mcp_capability_source_snapshot_set(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             source_snapshots=(),
             catalog_snapshot=build_catalog_snapshot(
                 owner_epoch=1, catalog_revision=1, entries=()
@@ -1038,7 +975,6 @@ class StructuredToolPort:
     def freeze_mcp_capability_projection_input(self, owner):
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
-            scope_subagent_task_id=owner.scope_subagent_task_id,
             source_snapshots=owner.source_snapshots,
             catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
             inspectability_facts=(),
@@ -1049,7 +985,6 @@ class StructuredToolPort:
     ) -> PreparedKernelToolSurface:
         prepared = self.snapshot_tool_surface(
             conversation_scope_kind=plan.direct_tool_surface.conversation_scope_kind,
-            scope_subagent_task_id=builtin.scope_subagent_task_id,
         )
         if prepared.model_surface != plan.direct_tool_surface:
             raise RuntimeError("test planned surface drifted")
@@ -1064,7 +999,6 @@ class StructuredToolPort:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> PreparedKernelToolSurface:
         surface = self._surfaces[conversation_scope_kind]
         bindings = tuple(
@@ -1087,7 +1021,6 @@ class StructuredToolPort:
             owner_epoch=1,
             surface_generation=1,
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             _authority=self._authority,
         )
         return PreparedKernelToolSurface(
@@ -1154,8 +1087,6 @@ class StructuredToolPort:
         if (
             prepared_surface.access.conversation_scope_kind
             is not capability_dispatch_cut.conversation_scope_kind
-            or prepared_surface.access.scope_subagent_task_id
-            != capability_dispatch_cut.scope_subagent_task_id
         ):
             raise RuntimeError("test capability dispatch cut drifted")
         return _issue_capability_dispatch_observation(
@@ -1166,13 +1097,15 @@ class StructuredToolPort:
         )
 
     def assert_no_tool_surface_borrows(
-        self, *, scope_kind, scope_subagent_task_id
+        self,
+        *,
+        scope_kind,
     ) -> None:
         if any(
-            borrow.prepared.access.conversation_scope_kind is scope_kind
-            and borrow.prepared.access.scope_subagent_task_id
-            == scope_subagent_task_id
-            for borrow in self._borrow_owners.values()
+            (
+                borrow.prepared.access.conversation_scope_kind is scope_kind
+                for borrow in self._borrow_owners.values()
+            )
         ):
             raise RuntimeError("test tool surface borrow remains active")
 
@@ -1187,6 +1120,12 @@ class StructuredToolPort:
 
     async def freeze_compaction_runtime_handoff(self, **_kwargs: object):
         return None
+
+    def prepare_resolved_invocation(self, *, tool_name, arguments, surface_borrow):
+        surface_borrow.binding_fingerprint(tool_name)
+        return PreparedResolvedToolInvocation(
+            tool_name, tool_name, freeze_json(dict(arguments))
+        )
 
     async def authorize(self, **kwargs: object):
         kwargs.pop("surface_borrow")
@@ -1210,7 +1149,6 @@ class StructuredToolPort:
             tool_call_id=tool_call_id,
             turn_id=turn_id,
             scope_kind=access.conversation_scope_kind,
-            scope_subagent_task_id=access.scope_subagent_task_id,
             request_nonce=object(),
             pending_state_key=None,
             pending_admission=None,
@@ -1249,11 +1187,12 @@ class _EmptyTestMcpCapabilityOwner:
         )
 
     def freeze_capability_source_snapshot_set(
-        self, *, conversation_scope_kind, scope_subagent_task_id
+        self,
+        *,
+        conversation_scope_kind,
     ):
         return issue_mcp_capability_source_snapshot_set(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             source_snapshots=(),
             catalog_snapshot=self._catalog.for_scope(conversation_scope_kind),
             inspection_inputs=(),
@@ -1266,7 +1205,6 @@ class _EmptyTestMcpCapabilityOwner:
     def freeze_capability_projection_input(self, owner):
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
-            scope_subagent_task_id=owner.scope_subagent_task_id,
             source_snapshots=owner.source_snapshots,
             catalog_semantic_fingerprint=owner.catalog_snapshot.semantic_fingerprint,
             inspectability_facts=(),
@@ -1332,7 +1270,6 @@ def prepare_test_model_call(
             conversation_scope_kind=(
                 request.tool_surface.model_surface.conversation_scope_kind
             ),
-            scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
             wire_api=target.target.model_profile.route_wire_profile.wire_api,
             tool_facts=facts,
         )
@@ -1341,7 +1278,6 @@ def prepare_test_model_call(
             conversation_scope_kind=(
                 request.tool_surface.model_surface.conversation_scope_kind
             ),
-            scope_subagent_task_id=request.tool_surface.access.scope_subagent_task_id,
             wire_api=target.target.model_profile.route_wire_profile.wire_api,
             tool_versions=tuple(tool_capability_version_ref(item) for item in ordered),
             tool_specs=tuple(item.canonical_tool_spec for item in ordered),
@@ -1358,7 +1294,7 @@ def prepare_test_direct_tool_surface(
     port: DirectKernelToolPort,
     *,
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    scope_subagent_task_id: str | None = None,
+    effective_permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
     wire_api: str = "openai_chat_completions",
     predecessor=None,
 ) -> PreparedKernelToolSurface:
@@ -1391,11 +1327,10 @@ def prepare_test_direct_tool_surface(
 
     builtin = port.sealed_builtin_capability_snapshot(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
+        effective_permission_mode=effective_permission_mode,
     )
     mcp = port.freeze_mcp_capability_source_snapshot_set(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
     )
     skill_source = capability_source_ref(
         CapabilitySourceKind.LOCAL_SKILL_CATALOG,
@@ -1411,7 +1346,6 @@ def prepare_test_direct_tool_surface(
     skill_snapshot = freeze_capability_source_snapshot(
         registration=skill_registration,
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=(),
     )
@@ -1426,7 +1360,6 @@ def prepare_test_direct_tool_surface(
     )
     skill_owner = issue_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
         inspection=inspection,
         owner_authenticity=object(),
@@ -1438,11 +1371,17 @@ def prepare_test_direct_tool_surface(
     )
     native = freeze_openai_native_tool_eligibility(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         wire_api=wire_api,
         tool_facts=registry.tool_facts,
-        retained_direct_inputs=() if predecessor is None else tuple(zip(
-            predecessor.direct_projection_set.tool_versions, predecessor.tool_surface.tool_specs, strict=True)),
+        retained_direct_inputs=()
+        if predecessor is None
+        else tuple(
+            zip(
+                predecessor.direct_projection_set.tool_versions,
+                predecessor.tool_surface.tool_specs,
+                strict=True,
+            )
+        ),
     )
     mcp_input = port.freeze_mcp_capability_projection_input(mcp)
     tool_input = freeze_tool_planning_input(
@@ -1456,7 +1395,6 @@ def prepare_test_direct_tool_surface(
     )
     _parent, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         registry=registry,
         tools=tool_input,
         skills=skill_input,
@@ -1465,7 +1403,6 @@ def prepare_test_direct_tool_surface(
     selection = planner.select(view=tool_view)
     projection_set = materialize_openai_native_tool_projection_set(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         wire_api=wire_api,
         tool_versions=selection.direct_tool_versions,
         tool_specs=selection.direct_tool_surface.tool_specs,
@@ -1487,9 +1424,8 @@ def direct_tool_invocation_context(
     attempt_id: str,
     turn_id: str,
     assistant_entry_id: str,
-    workspace_id: str = 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+    workspace_id: str = "workspace:wdl6b3mtrkghwnvjo4an3ekbau",
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    scope_subagent_task_id: str | None = None,
     permission_snapshot: FrozenRunPermissionSnapshot | None = None,
     memory_context: FrozenModelCallMemoryContext | None = None,
 ) -> tuple[ProcessLocalToolSurfaceBorrow, KernelToolInvocationContext]:
@@ -1498,12 +1434,13 @@ def direct_tool_invocation_context(
     prepared = prepare_test_direct_tool_surface(
         port,
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
     )
     borrow = port.borrow_tool_surface(prepared)
     try:
         permission = permission_snapshot or build_run_permission_snapshot(
-            snapshot_id=derive_id("permission", "test-fixture", f"permission:{turn_id}"),
+            snapshot_id=derive_id(
+                "permission", "test-fixture", f"permission:{turn_id}"
+            ),
             requested_mode=DEFAULT_PERMISSION_MODE,
             effective_mode=DEFAULT_PERMISSION_MODE,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -1518,7 +1455,6 @@ def direct_tool_invocation_context(
             attempt_id=attempt_id,
             result_entry_id=derive_id("result", "test-fixture", f"result:{attempt_id}"),
             conversation_scope_kind=conversation_scope_kind.value,
-            scope_subagent_task_id=scope_subagent_task_id,
             host_owner_epoch=1,
             authorization_reference="test:authorized",
             effective_permission_mode=permission.effective_mode,
@@ -1532,178 +1468,6 @@ def direct_tool_invocation_context(
         raise
 
 
-class Round10TestSubagentRuntime:
-    """Exact sealed child seed/result seam for retained runner tests.
-
-    Production child execution is always owned by ``KernelSubagentManager``.
-    Older runner tests exercise admission/transport failure matrices directly,
-    so this test-only carrier supplies the same exact-object cold seed without
-    reintroducing the removed flat prompt path.
-    """
-
-    def __init__(
-        self,
-        *,
-        session_id: str,
-        task_id: str,
-        parent_turn_id: str,
-        objective: str,
-        profile_kind: SubagentProfileKind = SubagentProfileKind.GENERAL_WORKER,
-    ) -> None:
-        self._task_id = task_id
-        self._parent_turn_id = parent_turn_id
-        self._objective = objective
-        self._profile_kind = profile_kind
-        self._subject = build_parent_context_call_subject(
-            session_id=session_id,
-            caller_turn_id=parent_turn_id,
-            provider_input_cut_fingerprint="sha256:test-child-parent-cut",
-            continuity_epoch_nonce='epoch:yktqlhzwr6vcnsbytvq7tklb5y',
-            continuity_epoch_revision=0,
-            compiled_semantic_input_fingerprint="sha256:test-child-parent-semantic",
-            compiled_message_placements_fingerprint=(
-                "sha256:test-child-parent-placements"
-            ),
-            ordered_eligible_units=(),
-        )
-        self._selection = build_parent_context_selection(
-            self._subject,
-            mode=SubagentContextMode.NONE,
-            last_n_turns=None,
-        )
-
-    def profile_kind(self, *, task_id: str) -> SubagentProfileKind:
-        self._require_task(task_id)
-        return self._profile_kind
-
-    def initial_context_sources(self, *, task_id: str):
-        from pulsara_agent.conversation_kernel.cold_epoch import (
-            subagent_initial_material_absences,
-        )
-
-        return subagent_initial_material_absences()
-
-    def build_initial_seed(
-        self,
-        *,
-        task_id: str,
-        dispatch_read: FrozenCanonicalProviderDispatchRead,
-    ) -> SubagentInitialSeed:
-        self._require_task(task_id)
-        return build_subagent_initial_seed(
-            dispatch_read=dispatch_read,
-            task_id=task_id,
-            parent_turn_id=self._parent_turn_id,
-            profile_kind=self._profile_kind,
-            objective=self._objective,
-        )
-
-    async def consume_mailbox_safe_point(self, task_id: str) -> bool:
-        self._require_task(task_id)
-        return False
-
-    async def open_root_completion_delivery(self, turn_id: str) -> None:
-        del turn_id
-
-    async def seal_root_completion_delivery(self, turn_id: str) -> int:
-        del turn_id
-        return 0
-
-    async def set_root_completion_delivery_limit(self, turn_id: str, maximum_items: int) -> None:
-        del turn_id, maximum_items
-
-    async def root_completion_followup_possible(self, turn_id: str) -> bool:
-        del turn_id
-        return False
-
-    async def settle_root_completion_delivery(
-        self, turn_id: str, *, turn_completed: bool
-    ) -> None:
-        del turn_id, turn_completed
-
-    async def close_root_completion_delivery(self, turn_id: str) -> None:
-        del turn_id
-
-    async def snapshot_pending_root_completions(self, turn_id: str, *, for_delivery: bool = False) -> tuple[str, ...]:
-        del turn_id, for_delivery
-        return ()
-
-    async def retire_root_completion(self, task_id: str) -> bool:
-        self._require_task(task_id)
-        return False
-
-    async def notify_root_input_activity(self) -> None:
-        return None
-
-    async def prepare_inferred_completion(
-        self,
-        *,
-        task_id: str,
-        entry_id: str,
-        public_text: str,
-        model_id: str,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-    ):
-        del model_id, permission_snapshot
-        self._require_task(task_id)
-        digest = "sha256:" + sha256(public_text.encode("utf-8")).hexdigest()
-        result = build_subagent_result_public_fact(
-            task_id=task_id,
-            result_id=derive_id("agent-result", "completion", task_id, entry_id),
-            source=SubagentResultSource.INFERRED,
-            producer_entry_id=entry_id,
-            summary=public_text or "Task completed without public text.",
-            source_assistant_content_digest=digest,
-        )
-        return PreparedInferredSubagentCompletion(object(), result)
-
-    async def prepare_explicit_completion(
-        self,
-        *,
-        task_id: str,
-        result_entry_id: str,
-        arguments: dict[str, object],
-        last_assistant_message: str | None,
-        model_id: str,
-        permission_snapshot: FrozenRunPermissionSnapshot,
-    ):
-        del last_assistant_message, model_id, permission_snapshot
-        self._require_task(task_id)
-        summary = arguments.get("summary")
-        preview = arguments.get("output_preview")
-        diagnostics = arguments.get("diagnostics", [])
-        if not isinstance(summary, str) or not summary:
-            return None
-        result = build_subagent_result_public_fact(
-            task_id=task_id,
-            result_id=(
-                derive_id("agent-result", "completion", task_id, result_entry_id)
-            ),
-            source=SubagentResultSource.EXPLICIT,
-            producer_entry_id=result_entry_id,
-            summary=summary,
-            output_preview=preview if isinstance(preview, str) else None,
-            diagnostics=diagnostics if isinstance(diagnostics, list) else (),
-        )
-        acknowledgement = KernelToolResult(
-            state="SUCCESS",
-            content=json.dumps(
-                {"status": "accepted", "task_id": task_id},
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode(),
-        )
-        return PreparedExplicitSubagentCompletion(object(), result, acknowledgement)
-
-    async def finish_completion(self, _permit: object, *, committed: bool) -> None:
-        if not committed:
-            return
-
-    def _require_task(self, task_id: str) -> None:
-        if task_id != self._task_id:
-            raise ValueError("test subagent runtime received another task")
-
-
 async def invoke_direct_tool(
     port: DirectKernelToolPort,
     *,
@@ -1714,9 +1478,8 @@ async def invoke_direct_tool(
     attempt_id: str,
     turn_id: str,
     assistant_entry_id: str,
-    workspace_id: str = 'workspace:wdl6b3mtrkghwnvjo4an3ekbau',
+    workspace_id: str = "workspace:wdl6b3mtrkghwnvjo4an3ekbau",
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    scope_subagent_task_id: str | None = None,
     permission_snapshot: FrozenRunPermissionSnapshot | None = None,
     memory_context: FrozenModelCallMemoryContext | None = None,
     **kwargs: object,
@@ -1733,7 +1496,6 @@ async def invoke_direct_tool(
         assistant_entry_id=assistant_entry_id,
         workspace_id=workspace_id,
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         permission_snapshot=permission_snapshot,
         memory_context=memory_context,
     )
@@ -1762,7 +1524,6 @@ async def authorize_direct_tool(
     turn_id: str,
     assistant_entry_id: str,
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    scope_subagent_task_id: str | None = None,
     permission_snapshot: FrozenRunPermissionSnapshot | None = None,
     memory_context: FrozenModelCallMemoryContext | None = None,
 ):
@@ -1771,12 +1532,13 @@ async def authorize_direct_tool(
     prepared = prepare_test_direct_tool_surface(
         port,
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
     )
     borrow = port.borrow_tool_surface(prepared)
     try:
         permission = permission_snapshot or build_run_permission_snapshot(
-            snapshot_id=derive_id("permission", "test-fixture", f"permission:{turn_id}"),
+            snapshot_id=derive_id(
+                "permission", "test-fixture", f"permission:{turn_id}"
+            ),
             requested_mode=DEFAULT_PERMISSION_MODE,
             effective_mode=DEFAULT_PERMISSION_MODE,
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
@@ -1877,7 +1639,6 @@ def _candidate(
 
 
 __all__ = [
-    "Round10TestSubagentRuntime",
     "ScriptedKernelModel",
     "StaticContextSourceCollector",
     "StructuredToolPort",

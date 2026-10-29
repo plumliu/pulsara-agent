@@ -69,16 +69,11 @@ def _fingerprint(value: str, name: str) -> None:
 @dataclass(frozen=True, slots=True)
 class ProviderInputContinuityScope:
     session_id: str
-    scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
+    scope_kind: ModelInputScopeKind = field(compare=False)
 
     def __post_init__(self) -> None:
         if not self.session_id:
             raise ValueError("provider-input continuity session is empty")
-        if (self.scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("provider-input continuity scope union is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,7 +463,7 @@ class EmptyScopeColdStart:
 
     scope: ProviderInputContinuityScope
     destination: FrozenEpochModelCallTarget
-    seed: "CanonicalColdContinuationSeed | SubagentInitialSeed" = field(  # noqa: F821
+    seed: "CanonicalColdContinuationSeed" = field(  # noqa: F821
         repr=False
     )
     _preparation_basis: object = field(repr=False, compare=False)
@@ -478,7 +473,7 @@ class EmptyScopeColdStart:
         *,
         scope: ProviderInputContinuityScope,
         destination: FrozenEpochModelCallTarget,
-        seed: "CanonicalColdContinuationSeed | SubagentInitialSeed",  # noqa: F821
+        seed: "CanonicalColdContinuationSeed",  # noqa: F821
         preparation_basis: object,
         _seal: object,
     ) -> None:
@@ -563,7 +558,7 @@ def _issue_empty_scope_cold_start(
     *,
     scope: ProviderInputContinuityScope,
     destination: FrozenEpochModelCallTarget,
-    seed: "CanonicalColdContinuationSeed | SubagentInitialSeed",  # noqa: F821
+    seed: "CanonicalColdContinuationSeed",  # noqa: F821
     preparation_basis: object,
 ) -> EmptyScopeColdStart:
     return EmptyScopeColdStart(

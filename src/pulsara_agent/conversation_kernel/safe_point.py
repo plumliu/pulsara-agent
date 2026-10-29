@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from threading import RLock
 from typing import TYPE_CHECKING, Callable, Iterator, TypeVar
 
@@ -16,10 +15,8 @@ from pulsara_agent.conversation_kernel.steer import (
 )
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
-    AcceptedSubagentCompletion,
     ConversationKernelConflict,
     ConversationKernelRepository,
-    PreparedAutomaticSubagentCompletion,
 )
 from pulsara_agent.conversation_kernel.reader import (
     OwnerIssuedCanonicalDispatchObservation,
@@ -27,7 +24,6 @@ from pulsara_agent.conversation_kernel.reader import (
 from pulsara_agent.conversation_kernel.tool_surface import (
     OwnerIssuedCapabilityDispatchObservation,
 )
-from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.ports.terminal_observation import (
     PreparedInstallationTarget,
@@ -203,9 +199,7 @@ class ProviderSafePointCoordinator:
             if self._active_basis is not None:
                 raise RuntimeError("provider-input preparation basis is already active")
             canonical_read = canonical_observation.canonical_read
-            capability_dispatch_cut = (
-                capability_observation.capability_dispatch_cut
-            )
+            capability_dispatch_cut = capability_observation.capability_dispatch_cut
             surface_borrow = capability_observation.surface_borrow
             identity = canonical_read.compile_snapshot.canonical_input.identity
             if (
@@ -218,7 +212,9 @@ class ProviderSafePointCoordinator:
                 or call_target.session_id != handle.cut.session_id
                 or call_target.turn_id != handle.cut.turn_id
             ):
-                raise RuntimeError("provider-input preparation basis does not exact-join")
+                raise RuntimeError(
+                    "provider-input preparation basis does not exact-join"
+                )
             if canonical_observation.consume() is not canonical_read:
                 raise RuntimeError("canonical observation consumption drifted")
             consumed_cut, consumed_borrow = capability_observation.consume()
@@ -288,7 +284,6 @@ class ProviderSafePointCoordinator:
             scope = ProviderInputContinuityScope(
                 session_id=identity.session_id,
                 scope_kind=identity.conversation_scope_kind,
-                scope_subagent_task_id=identity.scope_subagent_task_id,
             )
             predecessor = continuity.current_cohort(scope)
             snapshot = getattr(candidate, "snapshot", None)
@@ -297,23 +292,31 @@ class ProviderSafePointCoordinator:
                 predecessor is None
                 or getattr(confirmation, "candidate", None) is not candidate
                 or handle.cut.session_id != identity.session_id
-                or handle.cut.turn_id != identity.turn_id
-                or handle.cut.context_binding_revision_id
-                != identity.context_binding_revision_id
-                or handle.cut.provider_input_through_sequence
-                != identity.provider_input_through_sequence
-                or getattr(attempt_token, "session_id", None) != identity.session_id
-                or getattr(attempt_token, "turn_id", None) != identity.turn_id
-                or getattr(attempt_token, "scope_kind", None)
-                is not identity.conversation_scope_kind
-                or getattr(attempt_token, "scope_subagent_task_id", None)
-                != identity.scope_subagent_task_id
-                or getattr(snapshot, "snapshot_id", None)
-                != binding.context_snapshot_id
-                or getattr(candidate_binding, "binding_revision_id", None)
-                != binding.binding_revision_id
-                or destination.session_id != identity.session_id
-                or destination.turn_id != (successor_turn_id or identity.turn_id)
+                or (handle.cut.turn_id != identity.turn_id)
+                or (
+                    handle.cut.context_binding_revision_id
+                    != identity.context_binding_revision_id
+                )
+                or (
+                    handle.cut.provider_input_through_sequence
+                    != identity.provider_input_through_sequence
+                )
+                or (getattr(attempt_token, "session_id", None) != identity.session_id)
+                or (getattr(attempt_token, "turn_id", None) != identity.turn_id)
+                or (
+                    getattr(attempt_token, "scope_kind", None)
+                    is not identity.conversation_scope_kind
+                )
+                or (
+                    getattr(snapshot, "snapshot_id", None)
+                    != binding.context_snapshot_id
+                )
+                or (
+                    getattr(candidate_binding, "binding_revision_id", None)
+                    != binding.binding_revision_id
+                )
+                or (destination.session_id != identity.session_id)
+                or (destination.turn_id != (successor_turn_id or identity.turn_id))
             ):
                 raise RuntimeError("adopted successor authority does not exact-join")
             return _issue_adopted_compaction_continuation_seed(
@@ -440,9 +443,7 @@ class ProviderSafePointCoordinator:
                 pending=pending,
                 confirmation=confirmation,
             )
-            revoked = continuity.revoke_empty_adoption_preparation_resources(
-                settling
-            )
+            revoked = continuity.revoke_empty_adoption_preparation_resources(settling)
             try:
                 dry_projection.close()
                 if self._active_handle is not None:
@@ -663,119 +664,6 @@ class ProviderSafePointCoordinator:
             handle._model_active = False
             self._active_handle = successor
             return successor
-
-    def accept_subagent_completion(
-        self,
-        *,
-        handle: PreparedProviderInputHandle | None = None,
-        provider_input_admission: (
-            PreparedActiveRootInputAdmission
-            | PreparedRootProviderInputAdmission
-            | None
-        ) = None,
-        turn_id: str,
-        new_context_binding_revision_id: str | None = None,
-        requested_permission_mode: PermissionMode | None = None,
-        task_id: str,
-        command_id: str,
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> AcceptedSubagentCompletion:
-        """Explicitly deliver one terminal task at the same cut boundary."""
-
-        with self._lock:
-            if provider_input_admission is not None:
-                if isinstance(
-                    provider_input_admission, PreparedActiveRootInputAdmission
-                ):
-                    if handle is None:
-                        raise ValueError(
-                            "active completion admission lacks its handle"
-                        )
-                    self._require_current(handle)
-                    if handle._model_active:
-                        raise ExternalSourceNotAtSafePoint(
-                            "provider model operation is active"
-                        )
-                    if (
-                        provider_input_admission.candidate.expected_provider_input_cut
-                        != handle.cut
-                    ):
-                        raise ConversationKernelConflict(
-                            "manual completion admission lost its exact input cut"
-                        )
-                elif handle is not None:
-                    raise ValueError(
-                        "new ROOT completion cannot use an active handle"
-                    )
-            elif self._active_handle is not None:
-                raise ExternalSourceNotAtSafePoint(
-                    "provider input/model operation is active"
-                )
-            if (
-                new_context_binding_revision_id is None
-                and provider_input_admission is None
-            ):
-                self._repository.require_provider_safe_turn(
-                    self._guard,
-                    turn_id=turn_id,
-                    deadline_monotonic=deadline_monotonic,
-                )
-            return self._repository.accept_subagent_completion_into_root(
-                self._guard,
-                turn_id=turn_id,
-                new_context_binding_revision_id=new_context_binding_revision_id,
-                requested_permission_mode=requested_permission_mode,
-                task_id=task_id,
-                command_id=command_id,
-                provider_input_admission=provider_input_admission,
-                occurred_at=datetime.now(timezone.utc),
-                actor_id=actor_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-
-    def accept_queued_subagent_completions(
-        self,
-        handle: PreparedProviderInputHandle,
-        *,
-        candidates: tuple[PreparedAutomaticSubagentCompletion, ...],
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> tuple[
-        PreparedProviderInputHandle,
-        tuple[AcceptedSubagentCompletion, ...],
-    ]:
-        """Atomically append and rotate one admitted automatic completion suffix."""
-
-        with self._lock:
-            self._require_current(handle)
-            if handle._model_active:
-                raise ExternalSourceNotAtSafePoint("provider model operation is active")
-            if (
-                not candidates
-                or candidates[0].expected_provider_input_cut != handle.cut
-            ):
-                raise ConversationKernelConflict(
-                    "automatic completion candidate lost its exact input cut"
-                )
-            accepted = self._repository.accept_automatic_subagent_completion_batch(
-                self._guard,
-                candidates=candidates,
-                occurred_at=datetime.now(timezone.utc),
-                actor_id=actor_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-            cut = self._repository.prepare_provider_input_cut(
-                self._guard,
-                turn_id=handle.cut.turn_id,
-                deadline_monotonic=deadline_monotonic,
-            )
-            self._generation += 1
-            successor = PreparedProviderInputHandle(cut, self, self._generation)
-            handle._closed = True
-            handle._model_active = False
-            self._active_handle = successor
-            return successor, accepted
 
     def prepare_terminal_observation_installation(
         self,

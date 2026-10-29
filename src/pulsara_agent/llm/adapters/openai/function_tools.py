@@ -385,7 +385,6 @@ def openai_native_function_tool_contract_fingerprint(wire_api: str) -> str:
 def freeze_openai_native_tool_eligibility(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     wire_api: str,
     tool_facts: tuple[FrozenToolCapabilityFact, ...],
     retained_direct_inputs: tuple[
@@ -485,7 +484,6 @@ def freeze_openai_native_tool_eligibility(
     )
     return FrozenNativeToolWireEligibilitySet(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         native_function_tool_wire_contract_fingerprint=contract,
         entries=ordered,
     )
@@ -494,7 +492,6 @@ def freeze_openai_native_tool_eligibility(
 def materialize_openai_native_tool_projection_set(
     *,
     conversation_scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     wire_api: str,
     tool_versions: tuple[ToolCapabilityVersionRef, ...],
     tool_specs: tuple[FrozenToolSpec, ...],
@@ -507,7 +504,6 @@ def materialize_openai_native_tool_projection_set(
     estimator = PulsaraHeuristicTokenEstimatorV3()
     if (
         eligibility.conversation_scope_kind is not conversation_scope_kind
-        or eligibility.scope_subagent_task_id != scope_subagent_task_id
         or eligibility.native_function_tool_wire_contract_fingerprint != contract
         or len(tool_versions) != len(tool_specs)
     ):
@@ -550,13 +546,11 @@ def materialize_openai_native_tool_projection_set(
     projection_tuple = tuple(projections)
     return FrozenNativeToolProjectionSet(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         native_function_tool_wire_contract_fingerprint=contract,
         tool_versions=tool_versions,
         projections=projection_tuple,
         projection_set_fingerprint=native_tool_projection_set_fingerprint(
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             native_function_tool_wire_contract_fingerprint=contract,
             tool_versions=tool_versions,
             projections=projection_tuple,

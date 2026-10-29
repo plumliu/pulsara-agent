@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:812aaf3157354f2ce2b0b2765ae07128c31a01579cadac3cf3ae4e3d08f80f42",
+  "observed_catalog_fingerprint": "sha256:42fede4ff3086eab18c48de42b774ee5cf9c710fea4eacb01120acb85303b029",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -32,6 +32,7 @@
     "assistant_message_blocks",
     "assistant_visualizations",
     "provider_assistant_replay_fragments",
+    "tool_invocations",
     "tool_execution_attempts",
     "tool_results",
     "prompt_queue_items",
@@ -40,9 +41,6 @@
     "interaction_decisions",
     "plan_workflows",
     "plan_interactions",
-    "subagent_tasks",
-    "subagent_task_dependencies",
-    "subagent_task_children",
     "memory_facts",
     "memory_relations",
     "memory_embeddings",
@@ -57,6 +55,7 @@
     "pulsara_v3.enforce_conversation_kernel_invariants",
     "pulsara_v3.enforce_imported_history_invariants",
     "pulsara_v3.enforce_memory_relation_endpoints",
+    "pulsara_v3.enforce_session_root",
     "pulsara_v3.seal_memory_fact",
     "pulsara_v3.seal_memory_relation"
   ]

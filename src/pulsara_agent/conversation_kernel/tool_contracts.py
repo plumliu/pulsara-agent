@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Mapping, Protocol, TYPE_CHECKING
+from typing import Mapping, Protocol, TYPE_CHECKING, Callable, Awaitable
 
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
@@ -23,6 +23,7 @@ from pulsara_agent.llm.input import (
 
 if TYPE_CHECKING:
     from .capability_management_execution import CapabilityManagementCall
+    from .tool_artifacts import PreparedToolOutputProjection
 
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedMcpCapabilitySourceSnapshotSet,
@@ -37,6 +38,7 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.conversation_kernel.memory.writes import PreparedMemoryMutation
 from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
+    CodeModeToolDirectory,
     ProcessLocalToolSurfaceBorrow,
 )
 from pulsara_agent.capability.contracts import (
@@ -53,13 +55,19 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import (
     ProcessLocalProviderInputInstallPermit,
 )
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    FrozenSubagentParentContextCallSubject,
+from pulsara_agent.conversation_kernel.agent_context import (
+    FrozenAgentInvocationSnapshot,
 )
 from pulsara_agent.ports.tool_execution import (
     ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
+    ToolOutputSourceFormatHint,
+)
+from .tool_invocations import (
+    ToolInvocationSource,
+    ToolInvocationSourceKind,
+    current_tool_invocation,
 )
 from pulsara_agent.ports.artifact import (
     ToolOutputArtifactDisposition,
@@ -98,8 +106,28 @@ class KernelToolResult:
     physical_observation: PhysicalToolObservationSupplement | None = None
     trusted_observation: TrustedToolObservationSupplement | None = None
     model_visible_memory_fact_ids: tuple[str, ...] = ()
+    public_format: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.TEXT
+    delivery_succeeded: Callable[[], None | Awaitable[None]] | None = field(default=None, repr=False, compare=False)
+    prepared_output_projection: PreparedToolOutputProjection | None = field(
+        default=None, repr=False, compare=False
+    )
+
+    def public_value(self) -> object:
+        """Decode only the format explicitly declared by the business owner."""
+        import json
+
+        if not isinstance(self.content, bytes):
+            raise TypeError("image content has no Code Mode business value")
+        text = self.content.decode("utf-8")
+        return (
+            json.loads(text)
+            if self.public_format is ToolOutputSourceFormatHint.JSON
+            else text
+        )
 
     def __post_init__(self) -> None:
+        if not isinstance(self.public_format, ToolOutputSourceFormatHint):
+            raise TypeError("public tool result format must be explicit TEXT or JSON")
         if isinstance(self.content, bytes):
             self.content.decode("utf-8")
         elif isinstance(self.content, FrozenPromptContent):
@@ -147,12 +175,11 @@ class KernelToolInvocationContext:
     session_id: str
     workspace_id: str
     turn_id: str
-    assistant_entry_id: str
+    assistant_entry_id: str | None
     tool_call_id: str
     attempt_id: str
     result_entry_id: str
     conversation_scope_kind: str
-    scope_subagent_task_id: str | None
     host_owner_epoch: int
     authorization_reference: str
     permission_snapshot_fingerprint: str
@@ -167,20 +194,35 @@ class KernelToolInvocationContext:
     capability_call: CapabilityManagementCall | None = field(
         default=None, repr=False, compare=False
     )
-    subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
-        field(default=None, repr=False)
+    agent_invocation_snapshot: FrozenAgentInvocationSnapshot | None = field(
+        default=None, repr=False
     )
     memory_context: FrozenModelCallMemoryContext = field(
         default_factory=FrozenModelCallMemoryContext, repr=False
     )
+    invocation_source: ToolInvocationSource | None = field(
+        default_factory=current_tool_invocation.get
+    )
+    code_cell_id: str | None = None
+    code_mode_snapshot: object | None = field(default=None, repr=False, compare=False)
+    agent_message_cursors: dict[str, int] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
+        if self.assistant_entry_id is None and (
+            self.invocation_source is None
+            or self.invocation_source.kind
+            is not ToolInvocationSourceKind.CODE_MODE_CALL
+        ):
+            raise ValueError(
+                "non-model tool invocation requires its actual code source"
+            )
         if not all(
             (
                 self.session_id,
                 self.workspace_id,
                 self.turn_id,
-                self.assistant_entry_id,
                 self.tool_call_id,
                 self.attempt_id,
                 self.result_entry_id,
@@ -190,14 +232,10 @@ class KernelToolInvocationContext:
             )
         ):
             raise ValueError("kernel tool invocation context is incomplete")
-        if self.conversation_scope_kind not in {"ROOT", "SUBAGENT_TASK"}:
+        if self.conversation_scope_kind not in {"ROOT", "SUBAGENT"}:
             raise ValueError("kernel tool invocation scope is invalid")
         if not isinstance(self.permission_confirmation_granted, bool):
             raise TypeError("kernel tool permission confirmation must be frozen")
-        if (self.conversation_scope_kind == "ROOT") != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("kernel tool invocation scope identity is invalid")
         if (
             self.attempt_permission_snapshot_fingerprint
             != self.permission_snapshot_fingerprint
@@ -213,19 +251,11 @@ class KernelToolInvocationContext:
         ):
             raise TypeError("tool invocation input modalities are invalid")
         access = self.surface_borrow.prepared.access
-        if (
-            access.conversation_scope_kind.value != self.conversation_scope_kind
-            or access.scope_subagent_task_id != self.scope_subagent_task_id
-        ):
+        if access.conversation_scope_kind.value != self.conversation_scope_kind:
             raise ValueError("kernel tool invocation scope access does not exact-join")
-        if (
-            self.conversation_scope_kind == "SUBAGENT_TASK"
-            and self.subagent_parent_context_subject is not None
-        ):
-            raise ValueError("kernel invocation parent-call subject union is invalid")
-        if self.subagent_parent_context_subject is not None and (
-            self.subagent_parent_context_subject.session_id != self.session_id
-            or self.subagent_parent_context_subject.caller_turn_id != self.turn_id
+        if self.agent_invocation_snapshot is not None and (
+            self.agent_invocation_snapshot.session_id != self.session_id
+            or self.agent_invocation_snapshot.turn_id != self.turn_id
         ):
             raise ValueError("kernel invocation parent-call subject identity drifted")
 
@@ -398,6 +428,19 @@ class PreparedResolvedToolInvocation:
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedToolExecutionCall:
+    """A real program submission, never an assistant message block."""
+
+    tool_call_id: str
+    tool_name: str
+    arguments: FrozenJsonObjectFact
+
+    def __post_init__(self) -> None:
+        if not self.tool_call_id or not self.tool_name or not isinstance(self.arguments, FrozenJsonObjectFact):
+            raise ValueError("tool execution call is incomplete")
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedToolPreparationRejection:
     requested_tool_name: str
     post_tool_name: str
@@ -430,7 +473,6 @@ class PreparedPermissionRequest:
     tool_call_id: str
     turn_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     request_nonce: object = field(repr=False, compare=False)
     pending_state_key: object | None = field(repr=False, compare=False)
     pending_admission: object | None = field(repr=False, compare=False)
@@ -441,8 +483,6 @@ class PreparedPermissionRequest:
         if (
             not self.tool_call_id
             or not self.turn_id
-            or (self.scope_kind is ModelInputScopeKind.ROOT)
-            != (self.scope_subagent_task_id is None)
             or (self.pending_state_key is None)
             != (self.pending_admission is None and self.pending_permit is None)
             or (
@@ -470,9 +510,8 @@ class FrozenToolResultPublicProjectionInput:
 @dataclass(frozen=True, slots=True)
 class AcceptedCanonicalToolResultSettlement:
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     turn_id: str
-    assistant_entry_id: str
+    assistant_entry_id: str | None
     call_ordinal: int
     tool_name: str
     tool_call_id: str
@@ -484,15 +523,15 @@ class AcceptedCanonicalToolResultSettlement:
     result_origin_kind: str
     public_projection: FrozenToolResultPublicProjectionInput
     canonical_content: FrozenPromptContent | None = field(default=None, repr=False)
+    invocation_source: ToolInvocationSource | None = field(
+        default_factory=current_tool_invocation.get
+    )
 
     def __post_init__(self) -> None:
         if (
-            (self.scope_kind is ModelInputScopeKind.ROOT)
-            != (self.scope_subagent_task_id is None)
-            or not all(
+            not all(
                 (
                     self.turn_id,
-                    self.assistant_entry_id,
                     self.tool_name,
                     self.tool_call_id,
                     self.result_id,
@@ -502,9 +541,11 @@ class AcceptedCanonicalToolResultSettlement:
             )
             or self.call_ordinal < 0
             or self.accepted_entry_sequence < 1
-            or self.result_origin_kind
-            not in {"PHYSICAL_ATTEMPT", "POLICY_NO_ATTEMPT", "PLAN_CONTROL"}
-            or not isinstance(self.public_arguments, FrozenJsonObjectFact)
+            or (
+                self.result_origin_kind
+                not in {"PHYSICAL_ATTEMPT", "POLICY_NO_ATTEMPT", "PLAN_CONTROL"}
+            )
+            or (not isinstance(self.public_arguments, FrozenJsonObjectFact))
         ):
             raise ValueError("accepted canonical ToolResult settlement is invalid")
         if self.canonical_content is not None:
@@ -523,9 +564,8 @@ def build_accepted_canonical_tool_result_settlement(
     *,
     session_id: str,
     scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     turn_id: str,
-    assistant_entry_id: str,
+    assistant_entry_id: str | None,
     call_ordinal: int,
     tool_name: str,
     tool_call_id: str,
@@ -577,7 +617,6 @@ def build_accepted_canonical_tool_result_settlement(
     )
     return AcceptedCanonicalToolResultSettlement(
         scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         turn_id=turn_id,
         assistant_entry_id=assistant_entry_id,
         call_ordinal=call_ordinal,
@@ -616,14 +655,13 @@ class ToolSurfacePlanningPort(Protocol):
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+        effective_permission_mode: PermissionMode,
     ) -> SealedBuiltinCapabilitySnapshot: ...
 
     def freeze_mcp_capability_source_snapshot_set(
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> PreparedMcpCapabilitySourceSnapshotSet: ...
 
     def freeze_mcp_capability_projection_input(
@@ -659,7 +697,6 @@ class ToolSurfacePlanningPort(Protocol):
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> None: ...
 
     def install_provider_input_tool_result_deliveries(
@@ -675,13 +712,15 @@ class ToolSurfacePlanningPort(Protocol):
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         maximum_utf8_bytes: int,
     ) -> FrozenCompactionRuntimeHandoff | None: ...
 
 
 class ToolInvocationPort(Protocol):
     def snapshot_workspace_root(self) -> Path: ...
+
+    def borrow_code_mode_surface(self, prepared: CodeModeToolDirectory, *, cell_id: str,
+                                tool_name: str | None = None) -> ProcessLocalToolSurfaceBorrow: ...
 
     def prepare_resolved_invocation(
         self,
@@ -775,6 +814,7 @@ __all__ = [
     "ProcessLocalEffectSettlementResult",
     "ProcessLocalEffectSettlementToken",
     "PreparedResolvedToolInvocation",
+    "PreparedToolExecutionCall",
     "PreparedPermissionRequest",
     "PreparedToolInvocation",
     "PreparedToolPreparationRejection",

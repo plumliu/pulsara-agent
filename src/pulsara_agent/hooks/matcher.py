@@ -76,15 +76,6 @@ def event_matcher_subject(
     if (
         event_type
         in {
-            HookEventType.SUBAGENT_START_EVENT,
-            HookEventType.SUBAGENT_STOP_EVENT,
-        }
-        and agent_type is not None
-    ):
-        return FrozenHookMatcherSubject(agent_type, ())
-    if (
-        event_type
-        in {
             HookEventType.PRE_TOOL_USE_EVENT,
             HookEventType.PERMISSION_REQUEST_EVENT,
             HookEventType.POST_TOOL_USE_EVENT,
@@ -105,7 +96,7 @@ def tool_matcher_subject(
         "read_file": ("Read",),
         "edit_file": ("apply_patch", "Edit"),
         "write_file": ("apply_patch", "Write"),
-        "spawn_agent": ("Agent",),
+        "run_agent": ("Agent",),
         "search_content": ("Grep",),
         "find_files": ("Glob",),
     }

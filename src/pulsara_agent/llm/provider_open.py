@@ -35,7 +35,6 @@ class CompactionSummaryPromotionAuthority:
 
     attempt_id: str
     scope_kind: object
-    scope_subagent_task_id: str | None
     phase: object
     semantic: object = field(repr=False)
     decision: object = field(repr=False)
@@ -48,7 +47,6 @@ class CompactionSummaryPromotionAuthority:
         *,
         attempt_id: str,
         scope_kind: object,
-        scope_subagent_task_id: str | None,
         phase: object,
         semantic: object,
         decision: object,
@@ -65,7 +63,6 @@ class CompactionSummaryPromotionAuthority:
             raise TypeError("summary promotion authority is runtime-owner-issued")
         self.attempt_id = attempt_id
         self.scope_kind = scope_kind
-        self.scope_subagent_task_id = scope_subagent_task_id
         self.phase = phase
         self.semantic = semantic
         self.decision = decision
@@ -96,7 +93,6 @@ def _issue_compaction_summary_promotion_authority(
     *,
     attempt_id: str,
     scope_kind: object,
-    scope_subagent_task_id: str | None,
     phase: object,
     semantic: object,
     decision: object,
@@ -105,7 +101,6 @@ def _issue_compaction_summary_promotion_authority(
     return CompactionSummaryPromotionAuthority(
         attempt_id=attempt_id,
         scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         phase=phase,
         semantic=semantic,
         decision=decision,
@@ -186,9 +181,7 @@ class CompactionSummaryProviderOpenPermit(_OneShotPermit):
             is not ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
             or successor_destination.purpose is not ModelCallPurpose.AGENT_MODEL_LOOP
             or not resolved_model_call_id
-            or not isinstance(
-                promotion_authority, CompactionSummaryPromotionAuthority
-            )
+            or not isinstance(promotion_authority, CompactionSummaryPromotionAuthority)
             or not promotion_authority._consumed
         ):
             raise TypeError("compaction summary permit is owner-issued")
@@ -358,9 +351,7 @@ def _issue_compaction_summary_provider_open_permit(
     semantic: object,
     decision: object,
 ) -> CompactionSummaryProviderOpenPermit:
-    if not isinstance(
-        promotion_authority, CompactionSummaryPromotionAuthority
-    ):
+    if not isinstance(promotion_authority, CompactionSummaryPromotionAuthority):
         raise TypeError("summary promotion authority is not owner-issued")
     promotion_authority._consume_for(
         semantic=semantic,

@@ -39,6 +39,8 @@ CREATE TABLE pulsara_v3.workspaces (
 
 CREATE TABLE pulsara_v3.sessions (
     id text CHECK (id ~ '^session:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
+    root_session_id text REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
+    idle_since timestamptz,
     workspace_id text NOT NULL,
     memory_domain_id text NOT NULL CHECK (
         memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
@@ -71,6 +73,27 @@ CREATE TABLE pulsara_v3.sessions (
 );
 CREATE INDEX idx_pulsara_v3_sessions_workspace_fk
     ON pulsara_v3.sessions (memory_domain_id, workspace_id);
+
+CREATE INDEX idx_pulsara_v3_sessions_root ON pulsara_v3.sessions(root_session_id);
+CREATE FUNCTION pulsara_v3.enforce_session_root() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'UPDATE' AND OLD.root_session_id IS DISTINCT FROM NEW.root_session_id THEN
+        RAISE EXCEPTION 'session ownership is immutable' USING ERRCODE='23514';
+    END IF;
+    IF NEW.root_session_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM pulsara_v3.sessions WHERE id=NEW.root_session_id
+            AND root_session_id IS NULL AND memory_domain_id=NEW.memory_domain_id
+            AND workspace_id=NEW.workspace_id
+    ) THEN
+        RAISE EXCEPTION 'agent must belong to a root in its workspace and memory domain' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION pulsara_v3.enforce_session_root() FROM PUBLIC;
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_session_root
+AFTER INSERT OR UPDATE ON pulsara_v3.sessions DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_session_root();
 
 CREATE TABLE pulsara_v3.blobs (
     id text CHECK (id ~ '^(blob|image):[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
@@ -111,112 +134,10 @@ CREATE TABLE pulsara_v3.context_snapshots (
     CHECK (inline_content IS NULL OR octet_length(inline_content) = content_size)
 );
 
-CREATE TABLE pulsara_v3.subagent_tasks (
-    id text CHECK (id ~ '^task:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
-    session_id text NOT NULL,
-    workspace_id text NOT NULL,
-    parent_turn_id text NOT NULL,
-    batch_id text CHECK (batch_id ~ '^batch:[a-z2-7]{25}[aeimquy4]$'),
-    task_key text,
-    label text,
-    profile_kind text NOT NULL CHECK (profile_kind IN (
-        'general_worker', 'research_worker', 'review_worker',
-        'verification_worker', 'synthesizer'
-    )),
-    display_role text,
-    model_call_binding jsonb NOT NULL,
-    model_target_fact jsonb NOT NULL,
-    context_mode text NOT NULL CHECK (context_mode IN ('NONE', 'LAST_N', 'WORKER_HISTORY')),
-    context_last_n_turns integer,
-    history_source_task_id text,
-    history_cut_sequence bigint,
-    history_context_binding_revision_id text,
-    parent_context_body text,
-    dependency_context_body text,
-    terminal_material_body text,
-    material_refs jsonb NOT NULL DEFAULT '[]'::jsonb,
-    objective text NOT NULL,
-    status text NOT NULL CHECK (status IN (
-        'PENDING_START', 'WAITING_DEPENDENCY', 'ACTIVE', 'COMPLETED',
-        'FAILED', 'INTERRUPTED', 'CANCELLED', 'BLOCKED_DEPENDENCY_FAILED'
-    )),
-    execution_writer_generation bigint NOT NULL CHECK (execution_writer_generation >= 1),
-    pending_reason text,
-    terminal_reason text,
-    terminal_public_detail text,
-    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    terminal_at timestamptz,
-    UNIQUE (session_id, id),
-    UNIQUE (session_id, parent_turn_id, batch_id, task_key),
-    FOREIGN KEY (session_id, workspace_id)
-        REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, history_source_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    CHECK (octet_length(objective) BETWEEN 1 AND 65536),
-    CHECK (task_key IS NULL OR task_key ~ '^[A-Za-z][A-Za-z0-9_-]{0,63}$'),
-    CHECK (label IS NULL OR octet_length(label) BETWEEN 1 AND 256),
-    CHECK (display_role IS NULL OR octet_length(display_role) BETWEEN 1 AND 256),
-    CHECK (jsonb_typeof(model_call_binding) = 'object'
-        AND model_call_binding ? 'connection_id' AND model_call_binding ? 'reasoning'
-        AND model_call_binding - ARRAY['connection_id', 'reasoning']::text[] = '{}'::jsonb
-        AND jsonb_typeof(model_call_binding->'connection_id') = 'string'),
-    CHECK (jsonb_typeof(model_target_fact) = 'object'
-        AND model_target_fact->>'contract_version' = 'resolved-model-target:v9'),
-    CHECK (
-        (context_mode = 'NONE' AND context_last_n_turns IS NULL AND history_source_task_id IS NULL AND history_cut_sequence IS NULL AND history_context_binding_revision_id IS NULL) OR
-        (context_mode = 'LAST_N' AND context_last_n_turns BETWEEN 1 AND 3 AND history_source_task_id IS NULL AND history_cut_sequence IS NULL AND history_context_binding_revision_id IS NULL) OR
-        (context_mode = 'WORKER_HISTORY' AND context_last_n_turns IS NULL AND history_source_task_id IS NOT NULL AND history_cut_sequence >= 1 AND history_context_binding_revision_id IS NOT NULL)
-    ),
-    CHECK (jsonb_typeof(material_refs) = 'array' AND jsonb_array_length(material_refs) <= 16),
-    CHECK ((status IN (
-        'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
-        'BLOCKED_DEPENDENCY_FAILED'
-    )) = (terminal_at IS NOT NULL)),
-    CHECK ((status IN ('PENDING_START', 'WAITING_DEPENDENCY')) =
-           (pending_reason IS NOT NULL)),
-    CHECK (status IN ('PENDING_START', 'WAITING_DEPENDENCY') OR
-           pending_reason IS NULL),
-    CHECK (
-        (status IN ('FAILED', 'INTERRUPTED', 'CANCELLED',
-                    'BLOCKED_DEPENDENCY_FAILED')) =
-        (terminal_reason IS NOT NULL AND terminal_public_detail IS NOT NULL)
-    ),
-    CHECK (
-        terminal_reason IS NULL OR terminal_reason IN (
-            'DEPENDENCY_FAILED', 'DEPENDENCY_RESULT_INVARIANT',
-            'CHILD_START_FAILED', 'CHILD_EXECUTION_FAILED',
-            'HOOK_COMPACTION_BLOCKED', 'HOST_CLOSING', 'HOST_TAKEOVER',
-            'USER_CANCELLED'
-        )
-    ),
-    CHECK (
-        terminal_public_detail IS NULL OR
-        octet_length(terminal_public_detail) BETWEEN 1 AND 16384
-    )
-);
-
-CREATE TABLE pulsara_v3.subagent_task_dependencies (
-    session_id text NOT NULL,
-    task_id text NOT NULL,
-    dependency_task_id text NOT NULL,
-    dependency_ordinal integer NOT NULL CHECK (dependency_ordinal >= 0),
-    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (session_id, task_id, dependency_task_id),
-    UNIQUE (session_id, task_id, dependency_ordinal),
-    FOREIGN KEY (session_id, task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, dependency_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    CHECK (task_id <> dependency_task_id),
-    CHECK (dependency_ordinal < 16)
-);
-
 CREATE TABLE pulsara_v3.turns (
     id text CHECK (id ~ '^turn:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
-    conversation_scope_kind text NOT NULL CHECK (conversation_scope_kind IN ('ROOT', 'SUBAGENT_TASK')),
-    scope_subagent_task_id text,
     model_call_binding jsonb NOT NULL,
     status text NOT NULL CHECK (status IN ('RUNNING', 'COMPLETED', 'INTERRUPTED')),
     initial_entry_id text NOT NULL,
@@ -230,8 +151,8 @@ CREATE TABLE pulsara_v3.turns (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
     permission_admission_source text NOT NULL CHECK (permission_admission_source IN (
-        'USER_SUBMISSION', 'SUBAGENT_COMPLETION_COMMAND', 'TERMINAL_OBSERVATION',
-        'SUBAGENT_INHERITANCE', 'RUNTIME_PLAN_CONTINUATION'
+        'USER_SUBMISSION', 'TERMINAL_OBSERVATION',
+        'RUNTIME_PLAN_CONTINUATION'
     )),
     permission_overlay text NOT NULL CHECK (permission_overlay IN ('NONE', 'PLAN_READ_ONLY')),
     permission_plan_context_ordinal bigint NOT NULL CHECK (permission_plan_context_ordinal >= 0),
@@ -254,9 +175,6 @@ CREATE TABLE pulsara_v3.turns (
     UNIQUE (session_id, id),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, scope_subagent_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    CHECK ((conversation_scope_kind = 'ROOT') = (scope_subagent_task_id IS NULL)),
     CHECK (
         jsonb_typeof(model_call_binding) = 'object'
         AND model_call_binding ? 'connection_id'
@@ -271,36 +189,21 @@ CREATE TABLE pulsara_v3.turns (
             AND permission_plan_workflow_id IS NULL
             AND permission_plan_revision_at_admission IS NULL) OR
         (permission_overlay = 'PLAN_READ_ONLY'
-            AND conversation_scope_kind = 'ROOT'
             AND effective_permission_mode = 'read-only'
             AND permission_plan_context_ordinal >= 1
             AND permission_plan_workflow_id IS NOT NULL
             AND permission_plan_revision_at_admission >= 1)
     ),
     CHECK (
-        (permission_admission_source = 'SUBAGENT_INHERITANCE'
-            AND conversation_scope_kind = 'SUBAGENT_TASK'
-            AND permission_overlay = 'NONE'
-            AND permission_inherited_from_turn_id IS NOT NULL) OR
         (permission_admission_source IN (
                 'RUNTIME_PLAN_CONTINUATION', 'TERMINAL_OBSERVATION'
             )
-            AND conversation_scope_kind = 'ROOT'
             AND permission_inherited_from_turn_id IS NOT NULL) OR
         (permission_admission_source NOT IN (
-                'SUBAGENT_INHERITANCE', 'RUNTIME_PLAN_CONTINUATION',
+                'RUNTIME_PLAN_CONTINUATION',
                 'TERMINAL_OBSERVATION'
-            ) AND conversation_scope_kind = 'ROOT'
+            )
             AND permission_inherited_from_turn_id IS NULL)
-    ),
-    CHECK (
-        (conversation_scope_kind = 'SUBAGENT_TASK'
-            AND requested_permission_mode = effective_permission_mode
-            AND permission_admission_source = 'SUBAGENT_INHERITANCE'
-            AND permission_overlay = 'NONE'
-            AND permission_plan_workflow_id IS NULL
-            AND permission_plan_revision_at_admission IS NULL) OR
-        conversation_scope_kind = 'ROOT'
     )
 );
 
@@ -370,14 +273,8 @@ CREATE INDEX ix_pulsara_v3_provider_call_usage_session_observed
     );
 
 CREATE UNIQUE INDEX uq_pulsara_v3_running_root_turn
-    ON pulsara_v3.turns (session_id) WHERE status = 'RUNNING' AND conversation_scope_kind = 'ROOT';
-CREATE UNIQUE INDEX uq_pulsara_v3_running_task_turn
-    ON pulsara_v3.turns (session_id, scope_subagent_task_id)
-    WHERE status = 'RUNNING' AND conversation_scope_kind = 'SUBAGENT_TASK';
+    ON pulsara_v3.turns (session_id) WHERE status = 'RUNNING';
 
-ALTER TABLE pulsara_v3.subagent_tasks ADD CONSTRAINT subagent_tasks_parent_turn_fk
-    FOREIGN KEY (session_id, parent_turn_id)
-    REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.turn_context_binding_revisions (
     id text CHECK (id ~ '^binding:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
@@ -396,10 +293,6 @@ CREATE TABLE pulsara_v3.turn_context_binding_revisions (
         REFERENCES pulsara_v3.context_snapshots (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((base_kind = 'FULL_HISTORY') = (context_snapshot_id IS NULL))
 );
-ALTER TABLE pulsara_v3.subagent_tasks ADD CONSTRAINT subagent_history_revision_fk
-    FOREIGN KEY (session_id, history_context_binding_revision_id)
-    REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id)
-    ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 ALTER TABLE pulsara_v3.turns ADD CONSTRAINT turns_current_context_revision_fk
     FOREIGN KEY (session_id, current_context_binding_revision_id)
     REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
@@ -409,7 +302,7 @@ CREATE TABLE pulsara_v3.session_commands (
     command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
     command_kind text NOT NULL CHECK (command_kind IN (
         'SUBMIT_PROMPT', 'STEER', 'QUEUE_PROMPT', 'RUN_SCHEDULED_TASK', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT',
-        'RESOLVE_INTERACTION', 'ACCEPT_SUBAGENT_COMPLETION',
+        'RESOLVE_INTERACTION',
         'ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN',
         'RESOLVE_PLAN_INTERACTION', 'COMPACT_CONTEXT'
     )),
@@ -446,7 +339,6 @@ CREATE TABLE pulsara_v3.session_commands (
         (command_kind = 'STEER' AND target_kind = 'ENTRY') OR
         (command_kind IN ('QUEUE_PROMPT', 'RUN_SCHEDULED_TASK', 'CANCEL_PROMPT', 'STEER_QUEUED_PROMPT') AND target_kind = 'QUEUE_ITEM') OR
         (command_kind = 'RESOLVE_INTERACTION' AND target_kind = 'INTERACTION_DECISION') OR
-        (command_kind = 'ACCEPT_SUBAGENT_COMPLETION' AND target_kind = 'ENTRY') OR
         (command_kind IN ('ENTER_PLAN', 'CANCEL_PLAN', 'FORCE_EXIT_PLAN')
             AND target_kind = 'PLAN_WORKFLOW') OR
         (command_kind = 'RESOLVE_PLAN_INTERACTION'
@@ -480,26 +372,22 @@ CREATE TABLE pulsara_v3.transcript_entries (
     imported_history_group_id text,
     entry_sequence bigint NOT NULL CHECK (entry_sequence >= 1),
     scheduled_input jsonb,
-    CHECK (scheduled_input IS NULL OR (entry_kind = 'USER_MESSAGE' AND conversation_scope_kind = 'ROOT' AND jsonb_typeof(scheduled_input) = 'object')),
+    input_origin text CHECK (input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER','SCHEDULED_TASK','AGENT_INSTRUCTION','AGENT_PROFILE','AGENT_MATERIAL','AGENT_MESSAGE')),
+    CHECK (scheduled_input IS NULL OR (entry_kind = 'USER_MESSAGE' AND jsonb_typeof(scheduled_input) = 'object')),
     entry_kind text NOT NULL CHECK (entry_kind IN (
         'USER_MESSAGE', 'USER_STEER', 'ASSISTANT_MESSAGE',
         'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT', 'TERMINAL_OBSERVATION',
         'USER_CONTROL_FEEDBACK',
-        'PLAN_CONTINUATION', 'INTER_AGENT_MESSAGE'
+        'PLAN_CONTINUATION'
     )),
-    conversation_scope_kind text NOT NULL CHECK (conversation_scope_kind IN ('ROOT', 'SUBAGENT_TASK')),
-    scope_subagent_task_id text,
     context_binding_revision_id text,
     provider_input_through_sequence bigint,
-    source_subagent_task_id text,
-    source_inter_agent_tool_attempt_id text,
     source_plan_workflow_id text,
     source_plan_interaction_id text,
     source_plan_handoff_kind text CHECK (source_plan_handoff_kind IN (
         'ENTERED_PLAN', 'EXITED_PLAN', 'REVISION_REQUESTED', 'APPROVED_PLAN',
         'CANCELLED_PLAN', 'FORCE_EXITED_PLAN'
     )),
-    imported_source_subagent_task_id text,
     imported_source_plan_workflow_id text,
     imported_source_plan_interaction_id text,
     imported_source_plan_handoff_kind text CHECK (imported_source_plan_handoff_kind IN (
@@ -524,25 +412,19 @@ CREATE TABLE pulsara_v3.transcript_entries (
         REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, imported_history_group_id)
         REFERENCES pulsara_v3.imported_history_groups (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, scope_subagent_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, context_binding_revision_id)
         REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
-    CHECK ((conversation_scope_kind = 'ROOT') = (scope_subagent_task_id IS NULL)),
     CONSTRAINT ck_entry_owner_exact CHECK (
         (entry_owner_kind = 'EXECUTED_TURN' AND turn_id IS NOT NULL
             AND imported_history_group_id IS NULL
-            AND num_nonnulls(imported_source_subagent_task_id,
-                imported_source_plan_workflow_id, imported_source_plan_interaction_id,
+            AND num_nonnulls(imported_source_plan_workflow_id, imported_source_plan_interaction_id,
                 imported_source_plan_handoff_kind) = 0)
         OR
         (entry_owner_kind = 'IMPORTED_HISTORY' AND turn_id IS NULL
             AND imported_history_group_id IS NOT NULL
-            AND conversation_scope_kind = 'ROOT' AND scope_subagent_task_id IS NULL
-            AND num_nonnulls(source_subagent_task_id, source_inter_agent_tool_attempt_id,
-                source_plan_workflow_id, source_plan_interaction_id, source_plan_handoff_kind) = 0)
+            AND num_nonnulls(source_plan_workflow_id, source_plan_interaction_id, source_plan_handoff_kind) = 0)
     ),
     CHECK ((inline_content IS NULL) <> (blob_id IS NULL)),
     CONSTRAINT transcript_entries_tool_result_inline_ck CHECK (
@@ -563,31 +445,16 @@ CREATE TABLE pulsara_v3.transcript_entries (
             AND provider_input_through_sequence IS NULL)
     ),
     CHECK (
-        entry_owner_kind = 'IMPORTED_HISTORY' OR (entry_kind = 'INTER_AGENT_MESSAGE'
-            AND conversation_scope_kind = 'SUBAGENT_TASK'
-            AND source_inter_agent_tool_attempt_id IS NOT NULL
-            AND source_subagent_task_id IS NULL) OR
-        (entry_kind = 'INTER_AGENT_MESSAGE'
-            AND conversation_scope_kind = 'ROOT'
-            AND source_inter_agent_tool_attempt_id IS NULL
-            AND source_subagent_task_id IS NOT NULL) OR
-        (entry_kind <> 'INTER_AGENT_MESSAGE'
-            AND source_inter_agent_tool_attempt_id IS NULL
-            AND source_subagent_task_id IS NULL)
-    ),
-    CHECK (
         (entry_kind = 'PLAN_CONTINUATION'
-            AND conversation_scope_kind = 'ROOT'
             AND source_plan_workflow_id IS NOT NULL
             AND source_plan_handoff_kind IN (
                 'ENTERED_PLAN', 'EXITED_PLAN', 'APPROVED_PLAN'
             )
-            AND source_subagent_task_id IS NULL) OR
+) OR
         (entry_kind = 'USER_MESSAGE'
             AND source_plan_workflow_id IS NOT NULL
-            AND conversation_scope_kind = 'ROOT'
             AND source_plan_handoff_kind IN ('CANCELLED_PLAN', 'FORCE_EXITED_PLAN', 'REVISION_REQUESTED')
-            AND source_subagent_task_id IS NULL) OR
+) OR
         (source_plan_workflow_id IS NULL
             AND source_plan_interaction_id IS NULL
             AND source_plan_handoff_kind IS NULL)
@@ -602,9 +469,7 @@ CREATE TABLE pulsara_v3.transcript_entries (
     ),
     CONSTRAINT ck_imported_source_exact CHECK (
         entry_owner_kind = 'EXECUTED_TURN' OR ((
-            ((entry_kind = 'INTER_AGENT_MESSAGE' AND imported_source_subagent_task_id IS NOT NULL)
-                OR (entry_kind <> 'INTER_AGENT_MESSAGE' AND imported_source_subagent_task_id IS NULL))
-            AND (
+            (
                 (entry_kind = 'PLAN_CONTINUATION' AND imported_source_plan_workflow_id IS NOT NULL
                     AND imported_source_plan_handoff_kind IN ('ENTERED_PLAN', 'EXITED_PLAN', 'APPROVED_PLAN'))
                 OR (entry_kind = 'USER_MESSAGE' AND imported_source_plan_workflow_id IS NOT NULL
@@ -618,15 +483,6 @@ CREATE TABLE pulsara_v3.transcript_entries (
         ) IS TRUE)
     )
 );
-CREATE UNIQUE INDEX uq_pulsara_v3_entry_source_subagent
-    ON pulsara_v3.transcript_entries (session_id, source_subagent_task_id)
-    WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_subagent_task_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_pulsara_v3_entry_source_attempt
-    ON pulsara_v3.transcript_entries (session_id, source_inter_agent_tool_attempt_id)
-    WHERE entry_owner_kind = 'EXECUTED_TURN' AND source_inter_agent_tool_attempt_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_pulsara_v3_imported_source_subagent
-    ON pulsara_v3.transcript_entries (session_id, imported_source_subagent_task_id)
-    WHERE entry_owner_kind = 'IMPORTED_HISTORY' AND imported_source_subagent_task_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_pulsara_v3_imported_plan_without_interaction
     ON pulsara_v3.transcript_entries (session_id, imported_source_plan_workflow_id, imported_source_plan_handoff_kind)
     WHERE entry_owner_kind = 'IMPORTED_HISTORY' AND imported_source_plan_workflow_id IS NOT NULL
@@ -764,10 +620,37 @@ CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
     CHECK (fragment_fingerprint ~ '^sha256:[0-9a-f]{64}$')
 );
 
+CREATE TABLE pulsara_v3.tool_invocations (
+    id text PRIMARY KEY,
+    session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
+    turn_id text NOT NULL,
+    source_kind text NOT NULL CHECK (source_kind IN ('MODEL_TOOL_CALL','CODE_MODE_CALL')),
+    assistant_entry_id text,
+    tool_call_id text,
+    source_exec_attempt_id text,
+    call_sequence bigint CHECK (call_sequence >= 1),
+    tool_name text,
+    original_arguments jsonb,
+    UNIQUE (session_id,id),
+    UNIQUE (session_id,assistant_entry_id,tool_call_id),
+    UNIQUE (session_id,source_exec_attempt_id,call_sequence),
+    FOREIGN KEY (session_id,turn_id) REFERENCES pulsara_v3.turns(session_id,id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id,assistant_entry_id,tool_call_id)
+        REFERENCES pulsara_v3.assistant_message_blocks(session_id,assistant_entry_id,tool_call_id) ON DELETE CASCADE,
+    CHECK (
+        (source_kind='MODEL_TOOL_CALL' AND assistant_entry_id IS NOT NULL AND tool_call_id IS NOT NULL
+            AND source_exec_attempt_id IS NULL AND call_sequence IS NULL AND tool_name IS NULL AND original_arguments IS NULL)
+        OR (source_kind='CODE_MODE_CALL' AND assistant_entry_id IS NULL AND tool_call_id IS NULL
+            AND source_exec_attempt_id IS NOT NULL AND call_sequence IS NOT NULL AND tool_name IS NOT NULL
+            AND jsonb_typeof(original_arguments)='object')
+    )
+);
+
 CREATE TABLE pulsara_v3.tool_execution_attempts (
     id text CHECK (id ~ '^attempt:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
-    assistant_entry_id text NOT NULL,
+    invocation_id text NOT NULL,
+    assistant_entry_id text,
     tool_call_id text NOT NULL,
     authorization_kind text NOT NULL,
     authorization_reference text NOT NULL,
@@ -779,6 +662,21 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
     remote_idempotency_key text,
     remote_identity text,
     retry_of_attempt_id text,
+    code_source_inline_content bytea,
+    code_source_blob_id text REFERENCES pulsara_v3.blobs(id) ON DELETE RESTRICT,
+    code_source_content_digest text CHECK (code_source_content_digest ~ '^sha256:[0-9a-f]{64}$'),
+    code_source_content_size bigint CHECK (code_source_content_size >= 0),
+    code_source_content_media_type text,
+    code_source_content_codec text,
+    CHECK (
+        (num_nonnulls(code_source_inline_content,code_source_blob_id,code_source_content_digest,
+            code_source_content_size,code_source_content_media_type,code_source_content_codec)=0)
+        OR ((code_source_inline_content IS NULL) <> (code_source_blob_id IS NULL)
+            AND num_nonnulls(code_source_content_digest,code_source_content_size,code_source_content_media_type,code_source_content_codec)=4
+            AND (code_source_inline_content IS NULL OR octet_length(code_source_inline_content)=code_source_content_size))
+    ),
+    FOREIGN KEY (session_id,invocation_id) REFERENCES pulsara_v3.tool_invocations(session_id,id) ON DELETE CASCADE,
+    UNIQUE (session_id,invocation_id),
     started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     remote_identity_published_at timestamptz,
     UNIQUE (session_id, id),
@@ -791,11 +689,16 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
     CHECK ((remote_identity IS NULL) = (remote_identity_published_at IS NULL))
 );
 
+ALTER TABLE pulsara_v3.tool_invocations ADD CONSTRAINT invocation_source_exec_fk
+FOREIGN KEY (session_id,source_exec_attempt_id) REFERENCES pulsara_v3.tool_execution_attempts(session_id,id)
+ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
+
 CREATE TABLE pulsara_v3.tool_results (
     id text CHECK (id ~ '^result:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL,
     workspace_id text NOT NULL,
-    tool_call_entry_id text NOT NULL,
+    invocation_id text,
+    tool_call_entry_id text,
     tool_call_id text NOT NULL,
     attempt_id text,
     result_record_kind text NOT NULL CHECK (result_record_kind IN ('EXECUTED', 'IMPORTED_HISTORY')),
@@ -848,6 +751,9 @@ CREATE TABLE pulsara_v3.tool_results (
     UNIQUE (session_id, id),
     UNIQUE (session_id, tool_call_entry_id, tool_call_id),
     UNIQUE (session_id, result_entry_id),
+    FOREIGN KEY (session_id,invocation_id) REFERENCES pulsara_v3.tool_invocations(session_id,id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
+    UNIQUE (session_id,invocation_id),
+    CHECK ((result_record_kind='EXECUTED') = (invocation_id IS NOT NULL)),
     FOREIGN KEY (session_id, workspace_id)
         REFERENCES pulsara_v3.sessions (id, workspace_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, tool_call_entry_id, tool_call_id)
@@ -976,10 +882,22 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     session_id text NOT NULL,
     workspace_id text NOT NULL,
     queue_sequence bigint NOT NULL CHECK (queue_sequence >= 1),
-    command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
-    client_submission_id text CHECK (client_submission_id ~ '^command:[a-z2-7]{25}[aeimquy4]$') NOT NULL,
+    command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$'),
+    client_submission_id text CHECK (client_submission_id ~ '^command:[a-z2-7]{25}[aeimquy4]$'),
     delivery_mode text NOT NULL CHECK (delivery_mode IN ('NEW_TURN', 'STEER_ACTIVE_TURN')),
-    input_origin text NOT NULL CHECK (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'SCHEDULED_TASK')),
+    input_origin text NOT NULL CHECK (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'SCHEDULED_TASK', 'AGENT_INSTRUCTION', 'AGENT_MESSAGE', 'AGENT_MATERIAL')),
+    source_session_id text,
+    source_work_id text,
+    source_turn_id text,
+    source_tool_attempt_id text,
+    effective_profile text CHECK (effective_profile IN ('general_worker','research_worker','review_worker','verification_worker','synthesizer')),
+    profile_text text,
+    initial_context jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(initial_context)='array'),
+    input_materials jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(input_materials)='array'),
+    waiting_on jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(waiting_on)='array'),
+    CHECK ((input_origin IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL')) = (command_id IS NULL AND client_submission_id IS NULL)),
+    CHECK ((input_origin = 'AGENT_INSTRUCTION') = (effective_profile IS NOT NULL AND profile_text IS NOT NULL)),
+    CHECK (input_origin NOT IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL') OR source_session_id IS NOT NULL),
     scheduled_task_id text,
     scheduled_task_revision bigint,
     scheduled_due_at timestamptz,
@@ -988,9 +906,9 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
         (input_origin = 'SCHEDULED_TASK' AND delivery_mode = 'NEW_TURN'
          AND scheduled_task_id IS NOT NULL AND scheduled_task_revision >= 1 AND scheduled_due_at IS NOT NULL
          AND scheduled_trigger_source IS NOT NULL AND scheduled_trigger_source IN ('TIMER', 'RUN_ONCE')) OR
-        (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER') AND scheduled_task_id IS NULL
+        (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'AGENT_INSTRUCTION', 'AGENT_MESSAGE', 'AGENT_MATERIAL') AND scheduled_task_id IS NULL
          AND scheduled_task_revision IS NULL AND scheduled_due_at IS NULL AND scheduled_trigger_source IS NULL
-         AND input_origin = CASE delivery_mode WHEN 'NEW_TURN' THEN 'HUMAN_MESSAGE' ELSE 'HUMAN_STEER' END)
+         AND ((input_origin = 'AGENT_INSTRUCTION' AND delivery_mode = 'NEW_TURN') OR (input_origin IN ('AGENT_MESSAGE','AGENT_MATERIAL') AND delivery_mode = 'STEER_ACTIVE_TURN') OR input_origin = CASE delivery_mode WHEN 'NEW_TURN' THEN 'HUMAN_MESSAGE' ELSE 'HUMAN_STEER' END))
     ),
     model_call_binding jsonb,
     target_turn_id text,
@@ -1002,8 +920,8 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
         'read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'
     )),
     permission_admission_source text CHECK (permission_admission_source IN (
-        'USER_SUBMISSION', 'SUBAGENT_COMPLETION_COMMAND', 'TERMINAL_OBSERVATION',
-        'SUBAGENT_INHERITANCE', 'RUNTIME_PLAN_CONTINUATION'
+        'USER_SUBMISSION', 'TERMINAL_OBSERVATION',
+        'RUNTIME_PLAN_CONTINUATION'
     )),
     permission_overlay text CHECK (permission_overlay IN ('NONE', 'PLAN_READ_ONLY')),
     permission_plan_context_ordinal bigint CHECK (permission_plan_context_ordinal >= 0),
@@ -1085,11 +1003,11 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND permission_contract_id IS NULL
             AND permission_contract_fingerprint IS NULL
             AND permission_snapshot_fingerprint IS NULL) OR
-        (input_origin = 'SCHEDULED_TASK'
+        (input_origin IN ('SCHEDULED_TASK','AGENT_INSTRUCTION')
             AND permission_snapshot_id IS NOT NULL
             AND requested_permission_mode IS NOT NULL
             AND effective_permission_mode IS NOT NULL
-            AND permission_admission_source = 'USER_SUBMISSION'
+            AND permission_admission_source IN ('USER_SUBMISSION','RUNTIME_PLAN_CONTINUATION','TERMINAL_OBSERVATION')
             AND permission_overlay IS NOT NULL
             AND permission_plan_context_ordinal IS NOT NULL
             AND permission_contract_id IS NOT NULL
@@ -1238,6 +1156,7 @@ CREATE TABLE pulsara_v3.interaction_decisions (
     session_id text NOT NULL,
     command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$'),
     subject_kind text NOT NULL CHECK (subject_kind IN ('TOOL_CALL', 'MCP_INPUT')),
+    subject_invocation_id text,
     subject_tool_call_entry_id text,
     subject_tool_call_id text,
     subject_turn_id text,
@@ -1253,6 +1172,7 @@ CREATE TABLE pulsara_v3.interaction_decisions (
     ),
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (session_id, id),
+    FOREIGN KEY (session_id,subject_invocation_id) REFERENCES pulsara_v3.tool_invocations(session_id,id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id) REFERENCES pulsara_v3.sessions (id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, command_id)
         REFERENCES pulsara_v3.session_commands (session_id, command_id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
@@ -1263,9 +1183,9 @@ CREATE TABLE pulsara_v3.interaction_decisions (
     FOREIGN KEY (session_id, subject_turn_id)
         REFERENCES pulsara_v3.turns (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     CHECK ((subject_tool_call_entry_id IS NULL) = (subject_tool_call_id IS NULL)),
-    CHECK (num_nonnulls(subject_tool_call_entry_id, subject_turn_id) = 1),
+    CHECK (num_nonnulls(subject_invocation_id, subject_turn_id) = 1),
     CHECK (
-        (subject_kind = 'TOOL_CALL' AND subject_tool_call_entry_id IS NOT NULL) OR
+        (subject_kind = 'TOOL_CALL' AND subject_invocation_id IS NOT NULL) OR
         (subject_kind = 'MCP_INPUT' AND subject_turn_id IS NOT NULL)
     ),
     CHECK (
@@ -1278,11 +1198,11 @@ CREATE TABLE pulsara_v3.interaction_decisions (
 );
 CREATE UNIQUE INDEX uq_pulsara_v3_tool_call_machine_decision
     ON pulsara_v3.interaction_decisions (
-        session_id, subject_tool_call_entry_id, subject_tool_call_id
+        session_id, subject_invocation_id
     ) WHERE subject_kind = 'TOOL_CALL' AND actor_kind = 'machine';
 CREATE UNIQUE INDEX uq_pulsara_v3_tool_call_human_decision
     ON pulsara_v3.interaction_decisions (
-        session_id, subject_tool_call_entry_id, subject_tool_call_id
+        session_id, subject_invocation_id
     ) WHERE subject_kind = 'TOOL_CALL' AND actor_kind = 'human';
 
 CREATE TABLE pulsara_v3.plan_workflows (
@@ -1478,56 +1398,7 @@ ALTER TABLE pulsara_v3.prompt_queue_items ADD CONSTRAINT queue_handoff_plan_inte
     FOREIGN KEY (session_id, pending_plan_handoff_interaction_id)
     REFERENCES pulsara_v3.plan_interactions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
-CREATE TABLE pulsara_v3.subagent_task_children (
-    id text CHECK (id ~ '^(agent-result|agent-message):[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
-    session_id text NOT NULL,
-    task_id text NOT NULL,
-    child_kind text NOT NULL CHECK (child_kind IN ('MESSAGE', 'RESULT')),
-    CHECK ((child_kind = 'MESSAGE' AND id ~ '^agent-message:[a-z2-7]{25}[aeimquy4]$')
-        OR (child_kind = 'RESULT' AND id ~ '^agent-result:[a-z2-7]{25}[aeimquy4]$')),
-    child_ordinal integer NOT NULL CHECK (child_ordinal >= 0),
-    entry_id text NOT NULL,
-    result_source text CHECK (result_source IN ('EXPLICIT', 'INFERRED')),
-    summary text,
-    data jsonb,
-    output_preview text,
-    diagnostics jsonb,
-    result_fingerprint text,
-    accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (session_id, id),
-    UNIQUE (session_id, id, child_kind),
-    UNIQUE (task_id, child_ordinal),
-    FOREIGN KEY (session_id, task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE CASCADE,
-    FOREIGN KEY (session_id, entry_id)
-        REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    CHECK (
-        (child_kind = 'MESSAGE' AND result_source IS NULL AND summary IS NULL AND data IS NULL
-            AND output_preview IS NULL AND diagnostics IS NULL
-            AND result_fingerprint IS NULL) OR
-        (child_kind = 'RESULT' AND result_source IS NOT NULL
-            AND summary IS NOT NULL AND octet_length(summary) BETWEEN 1 AND 16384
-            AND (data IS NULL OR jsonb_typeof(data) = 'object')
-            AND (output_preview IS NULL OR octet_length(output_preview) <= 32768)
-            AND diagnostics IS NOT NULL AND jsonb_typeof(diagnostics) = 'array'
-            AND jsonb_array_length(diagnostics) <= 32
-            AND octet_length(diagnostics::text) <= 65536
-            AND result_fingerprint ~ '^sha256:[0-9a-f]{64}$')
-    )
-);
 
-CREATE UNIQUE INDEX uq_pulsara_v3_subagent_task_terminal_result
-    ON pulsara_v3.subagent_task_children (session_id, task_id)
-    WHERE child_kind = 'RESULT';
-
-ALTER TABLE pulsara_v3.transcript_entries ADD CONSTRAINT transcript_entries_source_subagent_task_fk
-    FOREIGN KEY (session_id, source_subagent_task_id)
-    REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
-
-ALTER TABLE pulsara_v3.transcript_entries
-ADD CONSTRAINT transcript_entries_source_inter_agent_attempt_fk
-    FOREIGN KEY (session_id, source_inter_agent_tool_attempt_id)
-    REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED;
 
 CREATE TABLE pulsara_v3.memory_facts (
     id text CHECK (id ~ '^memory:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
@@ -1739,9 +1610,7 @@ CREATE TABLE pulsara_v3.agent_events (
         'ToolResultAccepted', 'TurnCompleted', 'TurnInterrupted', 'UserSteerAccepted',
         'CapabilityDecisionAccepted', 'InteractionDecisionAccepted', 'ToolAttemptAccepted',
         'ToolRemoteIdentityPublished', 'PromptQueued', 'PromptConsumed', 'PromptCancelled',
-        'PromptRejected', 'CompactionAdopted', 'SubagentTaskAccepted',
-        'SubagentTaskStatusAccepted', 'SubagentMessageAccepted', 'SubagentResultAccepted',
-        'InterAgentMessageAccepted',
+        'PromptRejected', 'CompactionAdopted',
         'TerminalObservationAccepted', 'UserControlFeedbackAccepted',
         'PlanWorkflowEntered',
         'PlanQuestionAsked', 'PlanQuestionAnswered', 'PlanDraftSubmitted',
@@ -1763,12 +1632,6 @@ CREATE TABLE pulsara_v3.agent_events (
     subject_queue_item_id text,
     subject_interaction_decision_id text,
     subject_context_binding_revision_id text,
-    subject_subagent_task_id text,
-    subject_subagent_message_id text,
-    subject_subagent_result_id text,
-    subject_subagent_child_kind text CHECK (
-        subject_subagent_child_kind IN ('MESSAGE', 'RESULT')
-    ),
     subject_plan_workflow_id text,
     subject_plan_interaction_id text,
     UNIQUE (session_id, event_sequence),
@@ -1786,12 +1649,6 @@ CREATE TABLE pulsara_v3.agent_events (
         REFERENCES pulsara_v3.interaction_decisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_context_binding_revision_id)
         REFERENCES pulsara_v3.turn_context_binding_revisions (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, subject_subagent_task_id)
-        REFERENCES pulsara_v3.subagent_tasks (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, subject_subagent_message_id, subject_subagent_child_kind)
-        REFERENCES pulsara_v3.subagent_task_children (session_id, id, child_kind) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (session_id, subject_subagent_result_id, subject_subagent_child_kind)
-        REFERENCES pulsara_v3.subagent_task_children (session_id, id, child_kind) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_plan_workflow_id)
         REFERENCES pulsara_v3.plan_workflows (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, subject_plan_interaction_id)
@@ -1799,21 +1656,13 @@ CREATE TABLE pulsara_v3.agent_events (
     CHECK (num_nonnulls(
         subject_turn_id, subject_entry_id, subject_tool_attempt_id,
         subject_queue_item_id, subject_interaction_decision_id,
-        subject_context_binding_revision_id, subject_subagent_task_id,
-        subject_subagent_message_id, subject_subagent_result_id,
+        subject_context_binding_revision_id,
         subject_plan_workflow_id, subject_plan_interaction_id
     ) = 1),
     CHECK (
-        (subject_subagent_message_id IS NOT NULL AND subject_subagent_child_kind = 'MESSAGE') OR
-        (subject_subagent_result_id IS NOT NULL AND subject_subagent_child_kind = 'RESULT') OR
-        (subject_subagent_message_id IS NULL AND subject_subagent_result_id IS NULL
-            AND subject_subagent_child_kind IS NULL)
-    ),
-    CHECK (
         (event_type IN ('UserMessageAccepted', 'AssistantMessageAccepted',
             'AssistantToolRequestAccepted', 'ToolResultAccepted', 'UserSteerAccepted',
-            'TerminalObservationAccepted', 'UserControlFeedbackAccepted',
-            'InterAgentMessageAccepted')
+            'TerminalObservationAccepted', 'UserControlFeedbackAccepted')
             AND subject_entry_id IS NOT NULL) OR
         (event_type IN ('TurnCompleted', 'TurnInterrupted') AND subject_turn_id IS NOT NULL) OR
         (event_type IN ('CapabilityDecisionAccepted', 'InteractionDecisionAccepted')
@@ -1823,10 +1672,6 @@ CREATE TABLE pulsara_v3.agent_events (
         (event_type IN ('PromptQueued', 'PromptConsumed', 'PromptCancelled', 'PromptRejected')
             AND subject_queue_item_id IS NOT NULL) OR
         (event_type = 'CompactionAdopted' AND subject_context_binding_revision_id IS NOT NULL) OR
-        (event_type IN ('SubagentTaskAccepted', 'SubagentTaskStatusAccepted')
-            AND subject_subagent_task_id IS NOT NULL) OR
-        (event_type = 'SubagentMessageAccepted' AND subject_subagent_message_id IS NOT NULL) OR
-        (event_type = 'SubagentResultAccepted' AND subject_subagent_result_id IS NOT NULL) OR
         (event_type IN ('PlanWorkflowEntered', 'PlanWorkflowExited')
             AND subject_plan_workflow_id IS NOT NULL)
         OR (event_type IN ('PlanQuestionAsked', 'PlanQuestionAnswered',
@@ -1875,99 +1720,25 @@ DECLARE
     observed_count bigint;
     observed_workspace_id text;
 BEGIN
-    IF TG_TABLE_NAME = 'subagent_tasks' THEN
-        IF TG_OP = 'UPDATE' AND (
-            OLD.id IS DISTINCT FROM NEW.id OR
-            OLD.session_id IS DISTINCT FROM NEW.session_id OR
-            OLD.workspace_id IS DISTINCT FROM NEW.workspace_id OR
-            OLD.parent_turn_id IS DISTINCT FROM NEW.parent_turn_id OR
-            OLD.batch_id IS DISTINCT FROM NEW.batch_id OR
-            OLD.task_key IS DISTINCT FROM NEW.task_key OR
-            OLD.label IS DISTINCT FROM NEW.label OR
-            OLD.profile_kind IS DISTINCT FROM NEW.profile_kind OR
-            OLD.display_role IS DISTINCT FROM NEW.display_role OR
-            OLD.context_mode IS DISTINCT FROM NEW.context_mode OR
-            OLD.context_last_n_turns IS DISTINCT FROM NEW.context_last_n_turns OR
-            OLD.model_call_binding IS DISTINCT FROM NEW.model_call_binding OR
-            OLD.model_target_fact IS DISTINCT FROM NEW.model_target_fact OR
-            OLD.material_refs IS DISTINCT FROM NEW.material_refs OR
-            OLD.history_source_task_id IS DISTINCT FROM NEW.history_source_task_id OR
-            OLD.history_cut_sequence IS DISTINCT FROM NEW.history_cut_sequence OR
-            OLD.history_context_binding_revision_id IS DISTINCT FROM NEW.history_context_binding_revision_id OR
-            OLD.parent_context_body IS DISTINCT FROM NEW.parent_context_body OR
-            ((OLD.dependency_context_body IS DISTINCT FROM NEW.dependency_context_body OR
-              OLD.terminal_material_body IS DISTINCT FROM NEW.terminal_material_body)
-             AND NOT (OLD.status = 'PENDING_START' AND NEW.status = 'ACTIVE')) OR
-            OLD.objective IS DISTINCT FROM NEW.objective OR
-            OLD.execution_writer_generation IS DISTINCT FROM
-                NEW.execution_writer_generation OR
-            OLD.accepted_at IS DISTINCT FROM NEW.accepted_at OR
-            OLD.status IN (
-                'COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED',
-                'BLOCKED_DEPENDENCY_FAILED'
-            )
+    IF TG_TABLE_NAME = 'tool_invocations' THEN
+        IF NEW.source_kind='MODEL_TOOL_CALL' AND NOT EXISTS (
+            SELECT 1 FROM pulsara_v3.assistant_message_blocks b JOIN pulsara_v3.transcript_entries e
+              ON e.session_id=b.session_id AND e.id=b.assistant_entry_id
+            WHERE b.session_id=NEW.session_id AND b.assistant_entry_id=NEW.assistant_entry_id
+              AND b.tool_call_id=NEW.tool_call_id AND b.block_kind='TOOL_CALL'
+              AND e.entry_owner_kind='EXECUTED_TURN' AND e.turn_id=NEW.turn_id
         ) THEN
-            RAISE EXCEPTION 'subagent task immutable identity or lifecycle changed'
-                USING ERRCODE = '23514';
+            RAISE EXCEPTION 'model invocation requires its exact executed tool call' USING ERRCODE='23514';
         END IF;
-        SELECT conversation_scope_kind, workspace_id, effective_permission_mode
-          INTO observed_scope, observed_workspace_id, observed_permission_mode
-        FROM pulsara_v3.turns
-        WHERE session_id = NEW.session_id AND id = NEW.parent_turn_id;
-        IF observed_scope IS DISTINCT FROM 'ROOT'
-           OR observed_workspace_id IS DISTINCT FROM NEW.workspace_id
-           OR observed_permission_mode IS DISTINCT FROM 'bypass-permissions' THEN
-            RAISE EXCEPTION 'subagent task parent must be exact bypass ROOT turn'
-                USING ERRCODE = '23514';
-        END IF;
-        IF NEW.status = 'COMPLETED' THEN
-            SELECT count(*) INTO observed_count
-            FROM pulsara_v3.subagent_task_children
-            WHERE session_id = NEW.session_id
-              AND task_id = NEW.id
-              AND child_kind = 'RESULT';
-            IF observed_count IS DISTINCT FROM 1 THEN
-                RAISE EXCEPTION 'completed subagent task requires one exact result'
-                    USING ERRCODE = '23514';
-            END IF;
-        END IF;
-        RETURN NEW;
-    END IF;
-
-    IF TG_TABLE_NAME = 'subagent_task_dependencies' THEN
-        SELECT task.workspace_id
-          INTO observed_workspace_id
-        FROM pulsara_v3.subagent_tasks AS task
-        JOIN pulsara_v3.subagent_tasks AS dependency
-          ON dependency.session_id = task.session_id
-         AND dependency.id = NEW.dependency_task_id
-        WHERE task.session_id = NEW.session_id
-          AND task.id = NEW.task_id
-          AND task.workspace_id = dependency.workspace_id;
-        IF observed_workspace_id IS NULL THEN
-            RAISE EXCEPTION 'subagent dependency crosses task authority'
-                USING ERRCODE = '23514';
-        END IF;
-        SELECT count(*) INTO observed_count
-        FROM pulsara_v3.subagent_task_dependencies
-        WHERE session_id = NEW.session_id AND task_id = NEW.task_id;
-        IF observed_count > 16 THEN
-            RAISE EXCEPTION 'subagent dependency count exceeds bound'
-                USING ERRCODE = '23514';
-        END IF;
-        IF EXISTS (
-            WITH RECURSIVE upstream(task_id) AS (
-                SELECT NEW.dependency_task_id
-                UNION
-                SELECT edge.dependency_task_id
-                FROM pulsara_v3.subagent_task_dependencies AS edge
-                JOIN upstream ON upstream.task_id = edge.task_id
-                WHERE edge.session_id = NEW.session_id
-            )
-            SELECT 1 FROM upstream WHERE task_id = NEW.task_id
+        IF NEW.source_kind='CODE_MODE_CALL' AND NOT EXISTS (
+            SELECT 1 FROM pulsara_v3.tool_execution_attempts a
+            JOIN pulsara_v3.tool_invocations source ON source.session_id=a.session_id AND source.id=a.invocation_id
+            JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=source.session_id
+              AND b.assistant_entry_id=source.assistant_entry_id AND b.tool_call_id=source.tool_call_id
+            WHERE a.session_id=NEW.session_id AND a.id=NEW.source_exec_attempt_id
+              AND source.source_kind='MODEL_TOOL_CALL' AND source.turn_id=NEW.turn_id AND b.tool_name='exec'
         ) THEN
-            RAISE EXCEPTION 'subagent dependency graph contains a cycle'
-                USING ERRCODE = '23514';
+            RAISE EXCEPTION 'code invocation requires its source exec attempt' USING ERRCODE='23514';
         END IF;
         RETURN NEW;
     END IF;
@@ -1990,25 +1761,15 @@ BEGIN
             RAISE EXCEPTION 'turn permission snapshot is immutable'
                 USING ERRCODE = '23514';
         END IF;
-        SELECT entry_kind, turn_id, conversation_scope_kind,
-               scope_subagent_task_id
-          INTO observed_kind, observed_turn_id, observed_scope, observed_task_id
+        SELECT entry_kind, turn_id INTO observed_kind, observed_turn_id
         FROM pulsara_v3.transcript_entries
         WHERE session_id = NEW.session_id AND id = NEW.initial_entry_id
           AND entry_owner_kind = 'EXECUTED_TURN';
-        IF observed_turn_id IS DISTINCT FROM NEW.id
-           OR observed_scope IS DISTINCT FROM NEW.conversation_scope_kind
-           OR observed_task_id IS DISTINCT FROM NEW.scope_subagent_task_id THEN
+        IF observed_turn_id IS DISTINCT FROM NEW.id THEN
             RAISE EXCEPTION 'turn initial entry must belong to its exact turn and scope'
                 USING ERRCODE = '23514';
         END IF;
-        IF (NEW.conversation_scope_kind = 'ROOT'
-                AND observed_kind NOT IN (
-                    'USER_MESSAGE', 'TERMINAL_OBSERVATION', 'PLAN_CONTINUATION',
-                    'INTER_AGENT_MESSAGE'
-                ))
-           OR (NEW.conversation_scope_kind = 'SUBAGENT_TASK'
-                AND observed_kind IS DISTINCT FROM 'USER_MESSAGE') THEN
+        IF observed_kind NOT IN ('USER_MESSAGE','TERMINAL_OBSERVATION','PLAN_CONTINUATION') THEN
             RAISE EXCEPTION 'turn initial entry kind is invalid for its scope'
                 USING ERRCODE = '23514';
         END IF;
@@ -2017,8 +1778,7 @@ BEGIN
             WHERE session_id = NEW.session_id AND id = NEW.final_entry_id
               AND entry_owner_kind = 'EXECUTED_TURN' AND turn_id = NEW.id
               AND workspace_id = NEW.workspace_id
-              AND conversation_scope_kind = NEW.conversation_scope_kind
-              AND scope_subagent_task_id IS NOT DISTINCT FROM NEW.scope_subagent_task_id
+
         ) THEN
             RAISE EXCEPTION 'turn final entry must belong to its exact executed turn'
                 USING ERRCODE = '23514';
@@ -2033,19 +1793,6 @@ BEGIN
                OR observed_revision IS NULL
                OR observed_revision < NEW.permission_plan_revision_at_admission THEN
                 RAISE EXCEPTION 'turn Plan permission cut does not exact-join workflow'
-                    USING ERRCODE = '23514';
-            END IF;
-        END IF;
-        IF NEW.permission_admission_source = 'SUBAGENT_INHERITANCE' THEN
-            SELECT effective_permission_mode, permission_plan_context_ordinal
-              INTO observed_permission_mode, observed_ordinal
-            FROM pulsara_v3.turns
-            WHERE session_id = NEW.session_id
-              AND id = NEW.permission_inherited_from_turn_id;
-            IF observed_permission_mode IS DISTINCT FROM NEW.requested_permission_mode
-               OR observed_permission_mode IS DISTINCT FROM NEW.effective_permission_mode
-               OR observed_ordinal IS DISTINCT FROM NEW.permission_plan_context_ordinal THEN
-                RAISE EXCEPTION 'subagent permission must exact-inherit parent cut'
                     USING ERRCODE = '23514';
             END IF;
         END IF;
@@ -2079,48 +1826,9 @@ BEGIN
         PERFORM 1 FROM pulsara_v3.turns AS t
         WHERE t.session_id = NEW.session_id AND t.id = NEW.turn_id
           AND t.workspace_id = NEW.workspace_id
-          AND t.conversation_scope_kind = NEW.conversation_scope_kind
-          AND t.scope_subagent_task_id IS NOT DISTINCT FROM NEW.scope_subagent_task_id;
+;
         IF NOT FOUND OR NEW.entry_owner_kind <> 'EXECUTED_TURN' THEN
             RAISE EXCEPTION 'executed entry must exact-join its turn scope' USING ERRCODE = '23514';
-        END IF;
-        IF NEW.source_inter_agent_tool_attempt_id IS NOT NULL THEN
-            SELECT b.tool_name, e.conversation_scope_kind,
-                   b.tool_arguments ->> 'task_id',
-                   b.tool_arguments ->> 'message'
-              INTO observed_tool_name, observed_scope,
-                   observed_task_id, observed_message
-            FROM pulsara_v3.tool_execution_attempts AS a
-            JOIN pulsara_v3.assistant_message_blocks AS b
-              ON b.session_id = a.session_id
-             AND b.assistant_entry_id = a.assistant_entry_id
-             AND b.tool_call_id = a.tool_call_id
-            JOIN pulsara_v3.transcript_entries AS e
-              ON e.session_id = b.session_id AND e.id = b.assistant_entry_id
-            WHERE a.session_id = NEW.session_id
-              AND a.id = NEW.source_inter_agent_tool_attempt_id;
-            IF NEW.entry_kind IS DISTINCT FROM 'INTER_AGENT_MESSAGE'
-               OR NEW.conversation_scope_kind IS DISTINCT FROM 'SUBAGENT_TASK'
-               OR observed_tool_name IS DISTINCT FROM 'send_agent_message'
-               OR observed_scope IS DISTINCT FROM 'ROOT'
-               OR observed_task_id IS DISTINCT FROM NEW.scope_subagent_task_id
-               OR observed_message IS DISTINCT FROM convert_from(NEW.inline_content, 'UTF8')
-               THEN
-                RAISE EXCEPTION 'inter-agent message lineage is invalid'
-                    USING ERRCODE = '23514';
-            END IF;
-        END IF;
-        IF NEW.source_subagent_task_id IS NOT NULL THEN
-            SELECT status INTO observed_status
-            FROM pulsara_v3.subagent_tasks
-            WHERE session_id = NEW.session_id AND id = NEW.source_subagent_task_id;
-            IF observed_status NOT IN (
-                'COMPLETED', 'FAILED', 'INTERRUPTED', 'CANCELLED',
-                'BLOCKED_DEPENDENCY_FAILED'
-            ) THEN
-                RAISE EXCEPTION 'conversation subagent source must be a terminal task'
-                USING ERRCODE = '23514';
-            END IF;
         END IF;
         IF NEW.source_plan_workflow_id IS NOT NULL THEN
             SELECT w.status, i.status
@@ -2205,7 +1913,7 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
         IF NEW.entered_by = 'AGENT' THEN
-            SELECT e.turn_id, e.conversation_scope_kind, b.tool_name
+            SELECT e.turn_id, CASE WHEN (SELECT root_session_id FROM pulsara_v3.sessions WHERE id=e.session_id) IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END, b.tool_name
               INTO observed_turn_id, observed_scope, observed_tool_name
             FROM pulsara_v3.assistant_message_blocks AS b
             JOIN pulsara_v3.transcript_entries AS e
@@ -2276,7 +1984,7 @@ BEGIN
             RAISE EXCEPTION 'Plan interaction immutable identity or lifecycle changed'
                 USING ERRCODE = '23514';
         END IF;
-        SELECT e.turn_id, e.conversation_scope_kind, b.tool_name, t.status
+        SELECT e.turn_id, CASE WHEN (SELECT root_session_id FROM pulsara_v3.sessions WHERE id=e.session_id) IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END, b.tool_name, t.status
           INTO observed_turn_id, observed_scope, observed_tool_name, observed_status
         FROM pulsara_v3.assistant_message_blocks AS b
         JOIN pulsara_v3.transcript_entries AS e
@@ -2379,14 +2087,15 @@ BEGIN
                 USING ERRCODE = '23514';
         END IF;
         PERFORM 1
-        FROM pulsara_v3.transcript_entries AS call_entry
+        FROM pulsara_v3.tool_invocations AS invocation
         JOIN pulsara_v3.turns AS target_turn
-          ON target_turn.session_id = call_entry.session_id
-         AND target_turn.id = call_entry.turn_id
-        WHERE call_entry.session_id = NEW.session_id
-          AND call_entry.entry_owner_kind = 'EXECUTED_TURN'
-          AND call_entry.id = NEW.tool_call_entry_id
-          AND call_entry.turn_id = observed_turn_id
+          ON target_turn.session_id = invocation.session_id AND target_turn.id = invocation.turn_id
+        WHERE invocation.session_id = NEW.session_id AND invocation.id = NEW.invocation_id
+          AND invocation.turn_id = observed_turn_id
+          AND invocation.assistant_entry_id IS NOT DISTINCT FROM NEW.tool_call_entry_id
+          AND (invocation.source_kind='CODE_MODE_CALL' OR invocation.tool_call_id=NEW.tool_call_id)
+          AND (NEW.attempt_id IS NULL OR EXISTS (SELECT 1 FROM pulsara_v3.tool_execution_attempts a
+              WHERE a.session_id=NEW.session_id AND a.id=NEW.attempt_id AND a.invocation_id=NEW.invocation_id))
           AND target_turn.permission_snapshot_fingerprint
               = NEW.permission_snapshot_fingerprint;
         IF NOT FOUND THEN
@@ -2450,10 +2159,10 @@ BEGIN
         -- target.  Terminal queue rows retain that immutable target as
         -- historical attribution after the turn itself becomes terminal.
         IF NEW.status = 'PENDING' AND NEW.target_turn_id IS NOT NULL THEN
-            SELECT conversation_scope_kind, status INTO observed_scope, observed_status
-            FROM pulsara_v3.turns
-            WHERE session_id = NEW.session_id AND id = NEW.target_turn_id;
-            IF observed_scope IS DISTINCT FROM 'ROOT' OR observed_status IS DISTINCT FROM 'RUNNING' THEN
+            SELECT CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END, t.status INTO observed_scope, observed_status
+            FROM pulsara_v3.turns t JOIN pulsara_v3.sessions s ON s.id=t.session_id
+            WHERE t.session_id = NEW.session_id AND t.id = NEW.target_turn_id;
+            IF observed_status IS DISTINCT FROM 'RUNNING' THEN
                 RAISE EXCEPTION 'steer target must be a RUNNING ROOT turn'
                     USING ERRCODE = '23514';
             END IF;
@@ -2529,70 +2238,10 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    IF TG_TABLE_NAME = 'subagent_task_children' THEN
-        SELECT conversation_scope_kind, scope_subagent_task_id
-          INTO observed_scope, observed_task_id
-        FROM pulsara_v3.transcript_entries
-        WHERE session_id = NEW.session_id AND id = NEW.entry_id
-          AND entry_owner_kind = 'EXECUTED_TURN';
-        IF observed_scope IS DISTINCT FROM 'SUBAGENT_TASK'
-           OR observed_task_id IS DISTINCT FROM NEW.task_id THEN
-            RAISE EXCEPTION 'subagent child entry must belong to its exact task scope'
-                USING ERRCODE = '23514';
-        END IF;
-        IF NEW.child_kind = 'RESULT' THEN
-            SELECT status INTO observed_status
-            FROM pulsara_v3.subagent_tasks
-            WHERE session_id = NEW.session_id AND id = NEW.task_id;
-            SELECT entry.turn_id, turn.status, turn.final_entry_id
-              INTO observed_turn_id, observed_kind, observed_task_id
-            FROM pulsara_v3.transcript_entries AS entry
-            JOIN pulsara_v3.turns AS turn
-              ON turn.session_id = entry.session_id AND turn.id = entry.turn_id
-            WHERE entry.session_id = NEW.session_id AND entry.id = NEW.entry_id
-              AND entry.entry_owner_kind = 'EXECUTED_TURN';
-            IF observed_status IS DISTINCT FROM 'COMPLETED'
-               OR observed_kind IS DISTINCT FROM 'COMPLETED'
-               OR observed_task_id IS DISTINCT FROM NEW.entry_id THEN
-                RAISE EXCEPTION 'subagent result must terminalize its exact task and turn'
-                    USING ERRCODE = '23514';
-            END IF;
-            IF NEW.result_source = 'EXPLICIT' THEN
-                SELECT tr.result_entry_id, b.tool_name
-                  INTO observed_turn_id, observed_tool_name
-                FROM pulsara_v3.tool_results AS tr
-                JOIN pulsara_v3.tool_execution_attempts AS a
-                  ON a.session_id = tr.session_id AND a.id = tr.attempt_id
-                JOIN pulsara_v3.assistant_message_blocks AS b
-                  ON b.session_id = a.session_id
-                 AND b.assistant_entry_id = a.assistant_entry_id
-                 AND b.tool_call_id = a.tool_call_id
-                WHERE tr.session_id = NEW.session_id
-                  AND tr.result_entry_id = NEW.entry_id;
-                IF observed_turn_id IS DISTINCT FROM NEW.entry_id
-                   OR observed_tool_name IS DISTINCT FROM 'report_agent_result' THEN
-                    RAISE EXCEPTION 'explicit subagent result lacks exact acknowledgement'
-                        USING ERRCODE = '23514';
-                END IF;
-            ELSIF NEW.result_source = 'INFERRED' THEN
-                SELECT entry_kind INTO observed_kind
-                FROM pulsara_v3.transcript_entries
-                WHERE session_id = NEW.session_id AND id = NEW.entry_id;
-                IF observed_kind IS DISTINCT FROM 'ASSISTANT_MESSAGE' THEN
-                    RAISE EXCEPTION 'inferred subagent result must cite final assistant'
-                        USING ERRCODE = '23514';
-                END IF;
-            END IF;
-        END IF;
-        RETURN NEW;
-    END IF;
-
     RETURN NEW;
 END;
 $$;
-
-REVOKE ALL ON FUNCTION pulsara_v3.enforce_conversation_kernel_invariants()
-    FROM PUBLIC;
+REVOKE ALL ON FUNCTION pulsara_v3.enforce_conversation_kernel_invariants() FROM PUBLIC;
 
 CREATE FUNCTION pulsara_v3.enforce_imported_history_invariants()
 RETURNS trigger LANGUAGE plpgsql AS $$
@@ -2602,7 +2251,6 @@ DECLARE
     execution_entry text;
     execution_session text;
 BEGIN
-    -- Occurrence and admission targets cannot point at a copied history row.
     execution_session := NULL;
     IF TG_TABLE_NAME = 'agent_events' THEN
         execution_entry := NEW.subject_entry_id;
@@ -2664,11 +2312,27 @@ BEGIN
             RAISE EXCEPTION 'imported closure requires an imported call without a visible result' USING ERRCODE = '23514';
         END IF;
     ELSIF TG_TABLE_NAME = 'tool_execution_attempts' THEN
-        IF NOT EXISTS (SELECT 1 FROM pulsara_v3.transcript_entries AS e
-            JOIN pulsara_v3.turns AS t ON t.session_id = e.session_id AND t.id = e.turn_id
-            WHERE e.session_id = NEW.session_id AND e.id = NEW.assistant_entry_id
-            AND e.entry_owner_kind = 'EXECUTED_TURN'
-            AND t.permission_snapshot_fingerprint = NEW.permission_snapshot_fingerprint) THEN
+        IF TG_OP='UPDATE' AND OLD.code_source_content_digest IS NOT NULL AND (
+            ROW(OLD.code_source_inline_content,OLD.code_source_blob_id,OLD.code_source_content_digest,
+                OLD.code_source_content_size,OLD.code_source_content_media_type,OLD.code_source_content_codec)
+            IS DISTINCT FROM ROW(NEW.code_source_inline_content,NEW.code_source_blob_id,NEW.code_source_content_digest,
+                NEW.code_source_content_size,NEW.code_source_content_media_type,NEW.code_source_content_codec)
+        ) THEN
+            RAISE EXCEPTION 'frozen code source is immutable' USING ERRCODE='23514';
+        END IF;
+        IF NEW.code_source_content_digest IS NOT NULL AND NOT EXISTS (
+            SELECT 1 FROM pulsara_v3.tool_invocations i JOIN pulsara_v3.assistant_message_blocks b
+              ON b.session_id=i.session_id AND b.assistant_entry_id=i.assistant_entry_id AND b.tool_call_id=i.tool_call_id
+            WHERE i.session_id=NEW.session_id AND i.id=NEW.invocation_id AND i.source_kind='MODEL_TOOL_CALL' AND b.tool_name='exec'
+        ) THEN
+            RAISE EXCEPTION 'frozen code source belongs to an exec attempt' USING ERRCODE='23514';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM pulsara_v3.tool_invocations AS i
+            JOIN pulsara_v3.turns AS t ON t.session_id=i.session_id AND t.id=i.turn_id
+            WHERE i.session_id=NEW.session_id AND i.id=NEW.invocation_id
+            AND i.assistant_entry_id IS NOT DISTINCT FROM NEW.assistant_entry_id
+            AND (i.source_kind='CODE_MODE_CALL' OR i.tool_call_id=NEW.tool_call_id)
+            AND t.permission_snapshot_fingerprint=NEW.permission_snapshot_fingerprint) THEN
             RAISE EXCEPTION 'physical attempt requires an executed call and permission' USING ERRCODE = '23514';
         END IF;
     END IF;
@@ -2687,7 +2351,7 @@ CREATE CONSTRAINT TRIGGER trg_pulsara_v3_imported_closure_integrity
 AFTER INSERT ON pulsara_v3.imported_tool_call_closures DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_attempt_execution_owner
-AFTER INSERT ON pulsara_v3.tool_execution_attempts DEFERRABLE INITIALLY DEFERRED
+AFTER INSERT OR UPDATE ON pulsara_v3.tool_execution_attempts DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_imported_history_invariants();
 
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_event_execution_owner
@@ -2714,6 +2378,10 @@ AFTER INSERT ON pulsara_v3.assistant_message_blocks
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 
+CREATE CONSTRAINT TRIGGER trg_pulsara_v3_tool_invocation_integrity
+AFTER INSERT ON pulsara_v3.tool_invocations DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
+
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_tool_result_integrity
 AFTER INSERT ON pulsara_v3.tool_results
 DEFERRABLE INITIALLY DEFERRED
@@ -2724,20 +2392,8 @@ AFTER INSERT OR UPDATE ON pulsara_v3.prompt_queue_items
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 
-CREATE CONSTRAINT TRIGGER trg_pulsara_v3_subagent_child_integrity
-AFTER INSERT ON pulsara_v3.subagent_task_children
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 
-CREATE CONSTRAINT TRIGGER trg_pulsara_v3_subagent_task_integrity
-AFTER INSERT OR UPDATE ON pulsara_v3.subagent_tasks
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 
-CREATE CONSTRAINT TRIGGER trg_pulsara_v3_subagent_dependency_integrity
-AFTER INSERT ON pulsara_v3.subagent_task_dependencies
-DEFERRABLE INITIALLY DEFERRED
-FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 
 CREATE CONSTRAINT TRIGGER trg_pulsara_v3_plan_workflow_integrity
 AFTER INSERT OR UPDATE ON pulsara_v3.plan_workflows
@@ -2750,7 +2406,7 @@ DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_conversation_kernel_invariants();
 
 CREATE INDEX idx_pulsara_v3_entries_session_scope_sequence
-    ON pulsara_v3.transcript_entries (session_id, conversation_scope_kind, scope_subagent_task_id, entry_sequence);
+    ON pulsara_v3.transcript_entries (session_id, entry_sequence);
 CREATE INDEX idx_pulsara_v3_events_session_sequence
     ON pulsara_v3.agent_events (session_id, event_sequence);
 CREATE INDEX idx_pulsara_v3_queue_pending

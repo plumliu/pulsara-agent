@@ -7,7 +7,7 @@ import { LocalMemoryApi } from '../../frontend/lib/memory-api';
 
 import { RuntimeApiError } from '../../frontend/lib/runtime-adapter';
 import type { CommandReceipt, BackgroundProcessLog, BackgroundProcessPage, ForkOutcome, RuntimeAdapter, RuntimeBootstrap, ModelCatalogReadModel, RuntimeConnection, RuntimeInteractionContent, RuntimeInteractionSummary, RuntimeProjection, UserControlQueryResult, UserControlCommandRef, CanonicalPromptContent, CanonicalPromptImagePart, EditablePromptContent, ModelCallBindingPayload } from '../../frontend/lib/runtime-adapter';
-import type { AgentTask, CapabilitySnapshot, SessionSummary, SessionWorkspaceSelection, UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
+import type { CapabilitySnapshot, SessionSummary, SessionWorkspaceSelection, UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
 import { WELCOME_TYPEWRITER_PHRASES } from '../../frontend/components/welcome-typewriter';
 
 const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
@@ -276,7 +276,6 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
     activeTurnId: 'turn-1',
     control: {},
     liveControl: {},
-    agentTasks: [],
     todo: {
       id: 'todo-root',
       items: [
@@ -294,8 +293,6 @@ function projection(body = '我已经开始检查。'): RuntimeProjection {
 
 class FakeConnection implements RuntimeConnection {
   readonly availability = {path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null};
-  readSubagentCapacity = vi.fn(async () => ({ target: 4, occupied: 0 }));
-  setSubagentCapacity = vi.fn(async (target: number) => ({ target, occupied: 0 }));
   readonly filePreview = {
     open: vi.fn(async () => { throw new Error('No preview fixture'); }),
     page: vi.fn(async () => { throw new Error('No page fixture'); }),
@@ -399,10 +396,6 @@ class FakeConnection implements RuntimeConnection {
     return { commandId: 'command-3', status: 'succeeded' };
   }
 
-  async cancelSubagentTask(): Promise<CommandReceipt> {
-    return { commandId: 'command-cancel-task', status: 'succeeded' };
-  }
-
   async terminateBackgroundProcess(): Promise<CommandReceipt> {
     return { commandId: 'command-terminate-process', status: 'succeeded' };
   }
@@ -455,10 +448,6 @@ class FakeConnection implements RuntimeConnection {
   async compactContext(): Promise<CommandReceipt> {
     return { commandId: 'command-4', status: 'succeeded' };
   }
-
-  acceptSubagentCompletion = vi.fn(async (): Promise<CommandReceipt> => {
-    return { commandId: 'command-result', status: 'succeeded' };
-  });
 
   enterPlan = vi.fn(async (): Promise<CommandReceipt> => {
     return { commandId: 'command-5', status: 'succeeded' };
@@ -562,7 +551,6 @@ class FakeAdapter implements RuntimeAdapter {
   memory = new LocalMemoryApi();
   sessions = [initialSession];
   modelConfigurations = [...bootstrap.model_configurations];
-  taskInventory: AgentTask[] = [];
   lastConnection?: FakeConnection;
   connectionValue?: RuntimeProjection;
   interactionContent?: RuntimeInteractionContent;
@@ -690,61 +678,6 @@ class FakeAdapter implements RuntimeAdapter {
   }
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));
-
-  listSessionTaskGroups = vi.fn<RuntimeAdapter['listSessionTaskGroups']>(async () => {
-    const batches = new Map<string, typeof this.taskInventory>();
-    for (const task of this.taskInventory) {
-      if (!task.batchId) continue;
-      batches.set(task.batchId, [...(batches.get(task.batchId) ?? []), task]);
-    }
-    return {
-      groups: [...batches].map(([id, tasks]) => ({
-        id,
-        parentTurnId: tasks[0]?.parentId ?? '',
-        firstAcceptedAt: tasks[0]?.acceptedAt ?? '',
-        taskCount: tasks.length,
-        statusCounts: {
-          pending: 0,
-          active: tasks.filter((task) => task.status === 'running').length,
-          waiting: tasks.filter((task) => task.status === 'waiting').length,
-          completed: tasks.filter((task) => task.status === 'completed').length,
-          cancelled: tasks.filter((task) => task.status === 'cancelled').length,
-          failed: tasks.filter((task) => task.status === 'failed').length,
-          interrupted: tasks.filter((task) => task.status === 'interrupted').length,
-          blocked: tasks.filter((task) => task.status === 'blocked').length,
-        },
-        singleTaskLabel: tasks.length === 1 ? tasks[0]?.label : undefined,
-      })),
-      totalCount: batches.size,
-      readEventSequence: 1,
-      remainingCount: 0,
-    };
-  });
-
-  listSessionTasks = vi.fn(async (_sessionId: string, _cursor?: string, batchId?: string) => {
-    const tasks = this.taskInventory.filter((task) => !batchId || task.batchId === batchId);
-    return {
-      tasks: tasks.map((task) => ({ ...task })),
-      totalCount: tasks.length,
-      readEventSequence: 1,
-      remainingCount: 0,
-    };
-  });
-
-  readSessionTask = vi.fn(async (_sessionId: string, taskId: string) => {
-    const task = this.taskInventory.find((item) => item.id === taskId);
-    if (!task) throw new Error('task not found');
-    return { task: { ...task }, readEventSequence: 1 };
-  });
-
-  readSessionTaskGroup = vi.fn(async (_sessionId: string, groupId: string) => {
-    const groups = await this.listSessionTaskGroups(_sessionId);
-    const group = groups.groups.find((item) => item.id === groupId);
-    if (!group) throw new Error('group not found');
-    return { group, readEventSequence: 1, totalCount: groups.totalCount };
-  });
-
-  listSessionTaskActivities = vi.fn(async () => ({ activities: [] }));
 
   inspectCapabilities = vi.fn(async (sessionId: string) => ({
     ...capabilitySnapshot,

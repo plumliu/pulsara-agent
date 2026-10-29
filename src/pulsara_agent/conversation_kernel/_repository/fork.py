@@ -242,8 +242,8 @@ class _ForkOperations:
                         ],
                         entry_sequence=sequence_map[source_id],
                         entry_kind=entry["entry_kind"],
+                        input_origin=entry['input_origin'],
                         scheduled_input=None if entry["scheduled_input"] is None else Jsonb(entry["scheduled_input"]),
-                        conversation_scope_kind="ROOT",
                         accepted_at=entry["accepted_at"],
                     )
                     source_prefix = (
@@ -252,7 +252,6 @@ class _ForkOperations:
                         else "imported_source_"
                     )
                     for name in (
-                        "subagent_task_id",
                         "plan_workflow_id",
                         "plan_interaction_id",
                         "plan_handoff_kind",

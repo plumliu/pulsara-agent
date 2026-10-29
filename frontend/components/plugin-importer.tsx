@@ -16,9 +16,10 @@ export function PluginImporter({onClose, onPreview, onInstall}: {
   const preview = selected?.preview;
   const [classifications, setClassifications] = useState<Record<string, string>>({});
   const [values, setValues] = useState<Record<string, string>>({});
+  const [scopePolicies, setScopePolicies] = useState<Record<string, 'ROOT_ONLY' | 'ROOT_AND_SUBAGENTS'>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const reset = () => { setDiscovery(undefined); setFormat(undefined); setClassifications({}); setValues({}); setError(''); };
+  const reset = () => { setDiscovery(undefined); setFormat(undefined); setClassifications({}); setValues({}); setScopePolicies({}); setError(''); };
   const fields = preview?.mcp.flatMap((server) => server.fields.map((field) => ({...field, key: `${server.server_id}.${field.target}`}))) ?? [];
   const category = (field: typeof fields[number]) => field.private ? 'private' : field.target === 'endpoint' || field.target.startsWith('oauth:') ? 'public' : classifications[field.key];
   const variables = new Map<string, {private: boolean; hasDefault: boolean; file: boolean}>();
@@ -50,6 +51,7 @@ export function PluginImporter({onClose, onPreview, onInstall}: {
     try {
       if (await onInstall(path.trim(), {
         source_format: format, classifications, public_values: publicValues,
+        mcp_scope_policies: Object.fromEntries(preview!.mcp.map(server => [server.server_id, scopePolicies[server.server_id] ?? 'ROOT_ONLY'])),
       })) onClose();
       else setError('插件尚未安装，请检查提示并保留此表单重试。');
     } catch (cause) { setError(cause instanceof Error ? cause.message : '安装失败。'); }
@@ -66,7 +68,7 @@ export function PluginImporter({onClose, onPreview, onInstall}: {
         <p>各版本可能包含不同组件，只安装所选版本，不合并。</p>
         {discovery.candidates.map((candidate) => <div className="plugin-distribution-card" key={candidate.source_format}>
           <label className="plugin-distribution-option">
-            <input type="radio" name="plugin-distribution" aria-label={formatLabels[candidate.source_format]} disabled={busy || !candidate.preview} checked={format === candidate.source_format} onChange={() => {setFormat(candidate.source_format); setClassifications({}); setValues({}); setError('');}} />
+            <input type="radio" name="plugin-distribution" aria-label={formatLabels[candidate.source_format]} disabled={busy || !candidate.preview} checked={format === candidate.source_format} onChange={() => {setFormat(candidate.source_format); setClassifications({}); setValues({}); setScopePolicies({}); setError('');}} />
             <span className="plugin-distribution-copy"><strong>{formatLabels[candidate.source_format]}</strong><small>{candidate.manifest}</small>
               {candidate.preview ? <span>{candidate.preview.skills.length} 个技能 · {candidate.preview.mcp.length} 个 MCP 服务 · {candidate.preview.hooks.length} 类 Hook</span> : <span className="capability-inline-error">{candidate.error}</span>}
             </span>
@@ -80,6 +82,7 @@ export function PluginImporter({onClose, onPreview, onInstall}: {
         <p>{preview.skills.length} 个技能 · {preview.mcp.length} 个 MCP 服务 · {preview.hooks.length} 类 Hook</p>
         {preview.skills.length > 0 && <p>技能：{preview.skills.join('、')}</p>}
         {preview.mcp.length > 0 && <p>MCP：{preview.mcp.map((server) => server.server_id).join('、')}</p>}
+        {preview.mcp.map(server => <label className="capability-check" key={`scope:${server.server_id}`}><input type="checkbox" aria-label={`${server.server_id} 为子代理也提供`} disabled={busy} checked={scopePolicies[server.server_id] === 'ROOT_AND_SUBAGENTS'} onChange={event => setScopePolicies(current => ({...current, [server.server_id]: event.target.checked ? 'ROOT_AND_SUBAGENTS' : 'ROOT_ONLY'}))} />{server.server_id} 为子代理也提供</label>)}
         {preview.notices.length > 0 && <details className="capability-disclosure"><summary>导入说明</summary>{preview.notices.map((notice, index) => <p key={index}>{notice}</p>)}</details>}
         {fields.filter(field => field.variables.length > 0 || field.private || !(field.target === 'endpoint' || field.target.startsWith('oauth:'))).map((field) => <label className="capability-field" key={field.key}><span>{field.key}</span>
           {field.private ? <small>密钥不进入安装包；安装后在插件的连接设置中填写。</small> : field.target === 'endpoint' || field.target.startsWith('oauth:') ? <small>普通连接参数，请勿填写密钥。</small> :

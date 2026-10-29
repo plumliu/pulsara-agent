@@ -1,5 +1,5 @@
 const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
-const hookEvents: Record<string, string> = {SessionStart: '对话开始时', SessionEnd: '对话结束时', UserPromptSubmit: '发送消息时', PreToolUse: '工具调用前', PermissionRequest: '请求工具权限时', PostToolUse: '工具调用完成后', PreCompact: '压缩上下文前', PostCompact: '压缩上下文后', SubagentStart: '任务开始时', SubagentStop: '任务结束时', Stop: '模型准备结束时'};
+const hookEvents: Record<string, string> = {SessionStart: '对话开始时', SessionEnd: '对话结束时', UserPromptSubmit: '发送消息时', PreToolUse: '工具调用前', PermissionRequest: '请求工具权限时', PostToolUse: '工具调用完成后', PreCompact: '压缩上下文前', PostCompact: '压缩上下文后', Stop: '模型准备结束时'};
 
 export function HookSourceReview({hook}: {hook: Record<string, unknown>}) {
   return <>

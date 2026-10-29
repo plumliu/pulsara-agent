@@ -47,7 +47,7 @@ def search_history(
     visible = _visible_history_identities(connection, scope) if automatic else []
     # All eligibility and copy folding precede LIMIT. QA/QAQ use one scoring
     # index and mutually exclusive branches; excluded Q2 never contributes.
-    eligible = """e.session_id=d.session_id AND e.conversation_scope_kind='ROOT'
+    eligible = """e.session_id=d.session_id
         AND (e.session_id<>%s OR (e.entry_sequence<=%s AND e.id IS DISTINCT FROM %s))"""
     params = [*lexical_parameters(query), scope.memory_domain_id, include_tools]
     filters = ["s.memory_domain_id=%s", "d.include_tools=%s"]
@@ -155,15 +155,25 @@ def _visible_history_identities(connection, scope):
         for entry in entries:
             message = canonical_history_message(connection, entry)
             if message is not None:
-                visible.append({
-                    "origin": message["origin_entry_id"], "role": message["role"],
-                    "label": message["label"], "text": message["text"],
-                })
+                visible.append(
+                    {
+                        "origin": message["origin_entry_id"],
+                        "role": message["role"],
+                        "label": message["label"],
+                        "text": message["text"],
+                    }
+                )
     return visible
 
 
 def _history_document_is_readable(
-    connection, *, session_id, document, variant, scope, automatic,
+    connection,
+    *,
+    session_id,
+    document,
+    variant,
+    scope,
+    automatic,
 ):
     """Current admission, independent of the candidate's immutable source cut.
 
@@ -183,23 +193,28 @@ def _history_document_is_readable(
         return False
     if automatic and (
         target["workspace_kind"] != caller["workspace_kind"]
-        or (caller["workspace_kind"] != "transient"
-            and target["workspace_id"] != caller["workspace_id"])
+        or (
+            caller["workspace_kind"] != "transient"
+            and target["workspace_id"] != caller["workspace_id"]
+        )
     ):
         return False
     visible = _visible_history_identities(connection, scope) if automatic else []
 
     def readable(message):
         if message["entry_id"] in scope.visible_entry_ids or (
-            session_id == scope.session_id and (
+            session_id == scope.session_id
+            and (
                 message["sequence"] > scope.current_range.through_sequence
                 or message["entry_id"] == scope.current_range.excluded_entry_id
             )
         ):
             return False
         return {
-            "origin": message["origin_entry_id"], "role": message["role"],
-            "label": message["label"], "text": message["text"],
+            "origin": message["origin_entry_id"],
+            "role": message["role"],
+            "label": message["label"],
+            "text": message["text"],
         } not in visible
 
     if not all(readable(message) for message in document["messages"]):
@@ -209,7 +224,7 @@ def _history_document_is_readable(
     q2_readable = False
     if document["q2_entry_id"] is not None:
         entry = connection.execute(
-            "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s AND conversation_scope_kind='ROOT'",
+            "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",
             (session_id, document["q2_entry_id"]),
         ).fetchone()
         if entry is not None:
@@ -222,7 +237,12 @@ def _history_document_is_readable(
 
 
 def refetch_history(
-    connection, row, *, scope, include_tools=False, automatic=False,
+    connection,
+    row,
+    *,
+    scope,
+    include_tools=False,
+    automatic=False,
 ):
     if row["include_tools"] != include_tools:
         return None
@@ -240,8 +260,12 @@ def refetch_history(
     ):
         return None
     if not _history_document_is_readable(
-        connection, session_id=row["session_id"], document=canonical,
-        variant=row["variant"], scope=scope, automatic=automatic,
+        connection,
+        session_id=row["session_id"],
+        document=canonical,
+        variant=row["variant"],
+        scope=scope,
+        automatic=automatic,
     ):
         return None
     excerpt = excerpt_history(
@@ -281,9 +305,15 @@ class PostgresHistoryQuery:
             return tuple(
                 candidate
                 for row in rows
-                if (candidate := refetch_history(
-                    connection, row, scope=scope, automatic=True,
-                )) is not None
+                if (
+                    candidate := refetch_history(
+                        connection,
+                        row,
+                        scope=scope,
+                        automatic=True,
+                    )
+                )
+                is not None
             )
 
     def canonical_refetch(self, *, scope, candidates, deadline_monotonic):
@@ -304,8 +334,12 @@ class PostgresHistoryQuery:
                     variant=candidate.variant,
                 )
                 if canonical == candidate.document and _history_document_is_readable(
-                    connection, session_id=candidate.session_id, document=canonical,
-                    variant=candidate.variant, scope=scope, automatic=True,
+                    connection,
+                    session_id=candidate.session_id,
+                    document=canonical,
+                    variant=candidate.variant,
+                    scope=scope,
+                    automatic=True,
                 ):
                     result.append(candidate)
         return tuple(result)

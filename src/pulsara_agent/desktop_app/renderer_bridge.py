@@ -669,7 +669,6 @@ class RendererBridge:
             "plan_reason",
             "target_turn_id",
             "target_queue_item_id",
-            "subagent_task_id",
             "requested_permission_mode",
             "target_plan_workflow_id",
             "expected_plan_workflow_revision",
@@ -678,6 +677,7 @@ class RendererBridge:
             "expected_host_session_id",
             "control_admission_deadline_ms",
             "target_process_id",
+            "target_cell_id",
             "prompt_content",
         }
         if set(body) - allowed_fields:
@@ -691,16 +691,15 @@ class RendererBridge:
                 "SUBMIT_PROMPT",
                 "STEER_ACTIVE_TURN",
                 "STOP_ACTIVE_TURN",
+                "STOP_CODE_MODE_CELL",
                 "DETACH",
                 "CLOSE_SESSION",
                 "CANCEL_QUEUED_PROMPT",
                 "STEER_QUEUED_PROMPT",
-                "ACCEPT_SUBAGENT_COMPLETION",
                 "ENTER_PLAN",
                 "CANCEL_PLAN",
                 "FORCE_EXIT_PLAN",
                 "COMPACT_CONTEXT",
-                "CANCEL_SUBAGENT_TASK",
                 "TERMINATE_BACKGROUND_PROCESS",
             },
         )
@@ -727,7 +726,7 @@ class RendererBridge:
                     if kind_name
                     in {
                         "STOP_ACTIVE_TURN",
-                        "CANCEL_SUBAGENT_TASK",
+                        "STOP_CODE_MODE_CELL",
                         "TERMINATE_BACKGROUND_PROCESS",
                     }
                     else command_id,
@@ -736,7 +735,6 @@ class RendererBridge:
             plan_reason=str(body.get("plan_reason", "")),
             target_turn_id=str(body.get("target_turn_id", "")),
             target_queue_item_id=str(body.get("target_queue_item_id", "")),
-            subagent_task_id=str(body.get("subagent_task_id", "")),
             requested_permission_mode=permission,
             target_plan_workflow_id=str(body.get("target_plan_workflow_id", "")),
             expected_plan_workflow_revision=_uint(
@@ -747,6 +745,7 @@ class RendererBridge:
             expected_session_id=str(body.get("expected_session_id", "")),
             expected_host_session_id=str(body.get("expected_host_session_id", "")),
             target_process_id=str(body.get("target_process_id", "")),
+            target_cell_id=str(body.get("target_cell_id", "")),
             control_admission_deadline_ms=_uint(
                 body.get("control_admission_deadline_ms", 0),
                 "control_admission_deadline_ms",
@@ -773,7 +772,7 @@ class RendererBridge:
                 _required_string(expected, "operation"),
                 allowed={
                     "USER_CONTROL_STOP_ACTIVE_TURN",
-                    "USER_CONTROL_CANCEL_SUBAGENT_TASK",
+                    "USER_CONTROL_STOP_CODE_MODE_CELL",
                     "USER_CONTROL_TERMINATE_BACKGROUND_PROCESS",
                 },
             )
@@ -781,7 +780,7 @@ class RendererBridge:
                 _required_string(expected, "target_kind"),
                 allowed={
                     "USER_CONTROL_ROOT_TURN",
-                    "USER_CONTROL_SUBAGENT_TASK",
+                    "USER_CONTROL_CODE_MODE_CELL",
                     "USER_CONTROL_BACKGROUND_PROCESS",
                 },
             )
@@ -800,6 +799,12 @@ class RendererBridge:
         return protobuf_json(
             await connection.controller.request("query_command", request)
         )
+
+    async def code_mode_cells(self, connection_id: str, body: dict[str, object]) -> dict[str, object]:
+        if body:
+            raise ValueError("code mode cell inspection takes no arguments")
+        connection = await self._connection(connection_id)
+        return protobuf_json(await connection.observer.request("code_mode_cells", wire.CodeModeCellsRequest()))
 
     async def subagent_capacity(
         self, connection_id: str, body: dict[str, object]

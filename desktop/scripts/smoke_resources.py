@@ -143,7 +143,29 @@ with sync_playwright() as playwright:
     page.set_content('<title>Relocated Pulsara</title><p>desktop</p>')
     assert page.title() == 'Relocated Pulsara'
     browser.close()
-print('Python application import and relocated Chromium passed')
+import asyncio
+from pulsara_agent.code_mode import CodeModeHost
+async def check_vm():
+    owner=CodeModeHost()
+    async def no_tool(_):
+        raise AssertionError('unexpected tool dispatch')
+    try:
+        cell=await owner.start(source="return 'relocated QuickJS';", source_exec_attempt_id='smoke',
+            turn_id='smoke', snapshot=None, tool_catalog={}, invoke=no_tool)
+        records=[]
+        async with asyncio.timeout(10):
+            while True:
+                page=await owner.observe(cell,100)
+                records.extend(page.output)
+                await owner.acknowledge(page)
+                if page.state in {'completed','failed','terminated'} and not page.pending_calls and not page.has_more:
+                    assert page.state=='completed',page.error
+                    break
+        assert records==[{'kind':'return','text':'relocated QuickJS'}]
+    finally:
+        await owner.aclose()
+asyncio.run(check_vm())
+print('Python application, offline Node/QuickJS and relocated Chromium passed')
 """
         print(
             run(

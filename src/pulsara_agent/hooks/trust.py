@@ -110,6 +110,7 @@ def normalized_definition_digest(
                 "async": item.asynchronous,
                 "statusMessage": item.status_message,
                 "additionalContextLimit": item.additional_context_limit,
+                "scope_policy": item.scope_policy.value,
             }
             for item in definitions
         ],

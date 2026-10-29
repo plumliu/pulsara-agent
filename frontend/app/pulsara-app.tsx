@@ -36,7 +36,6 @@ import {
   projectRootStatus,
   type WorkspaceAvailability,
   createUserControlCommandRef,
-  mergeRuntimeTaskInventory,
   RuntimeApiError,
   type RuntimeAdapter,
   type RuntimeBootstrap,
@@ -46,7 +45,6 @@ import {
   type RuntimeInteractionSummary,
   type RuntimeProjection,
   type HistoryResidence,
-  type AgentTaskGroup,
   type LocalPromptSubmission,
   type QueuedPrompt,
   type QueuedPromptAction,
@@ -58,7 +56,6 @@ import {
 import { promptContentTextProjection } from '../lib/prompt-content';
 import type {
   PluginImportOptions,
-  AgentTask,
   ArchivedSessionDeletionItem,
   AppView,
   CapabilitySnapshot,
@@ -116,7 +113,6 @@ const emptyProjection: RuntimeProjection = {
   planMode: false,
   control: {},
   liveControl: {},
-  agentTasks: [],
   eventSequence: 0,
   liveOwnerEpoch: 0,
   liveRevision: 0,
@@ -221,7 +217,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     if (startupSettled) onStartupSettled?.();
   }, [startupSettled, onStartupSettled]);
   const workspaceControl = useRef<WorkspaceControl | null>(null);
-  const taskCancelReferences = useRef(new Map<string, UserControlCommandRef>());
   const [promptDraftStore] = useState(() => new PromptDraftStore());
   const [suggestionCache] = useState(() => new SessionSuggestionCache());
   const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
@@ -269,27 +264,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   // Selection feedback is local UI state; only a connected runtime becomes active.
   const [openingSessionId, setOpeningSessionId] = useState('');
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
-  const [taskInventory, setTaskInventory] = useState<AgentTask[]>([]);
-  const [taskGroups, setTaskGroups] = useState<AgentTaskGroup[]>([]);
-  const [taskGroupCursor, setTaskGroupCursor] = useState<string>();
-  const [taskGroupTotal, setTaskGroupTotal] = useState(0);
-  const [loadedTaskGroups, setLoadedTaskGroups] = useState<ReadonlySet<string>>(new Set());
-  const taskRowWatermarks = useRef(new Map<string, number>());
-  const taskGroupWatermarks = useRef(new Map<string, number>());
-  const taskTotalWatermark = useRef(-1);
-  const taskPageWatermark = useRef(-1);
-  const taskInventoryRef = useRef(taskInventory);
-  taskInventoryRef.current = taskInventory;
-  const [taskInventorySessionId, setTaskInventorySessionId] = useState('');
-  const [taskInventoryLoading, setTaskInventoryLoading] = useState(false);
-  const [taskInventoryError, setTaskInventoryError] = useState<string>();
-  const taskInventoryAttempt = useRef(0);
-  const taskReadOwner = useRef({});
-  const taskLastPageCursor = useRef<string | undefined>(undefined);
-  const taskPageRequest = useRef<object | undefined>(undefined);
-  const openTaskGroups = useRef(new Set<string>());
-  const taskGroupsRef = useRef(taskGroups);
-  taskGroupsRef.current = taskGroups;
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>();
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const [capabilityError, setCapabilityError] = useState<string>();
@@ -407,14 +381,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     && activeSessionIdRef.current === expected.sessionId
     && connectionRef.current.generation === expected.generation
   ), []);
-
-  const readSubagentCapacity = useCallback(async () => {
-    const active = connectionRef.current;
-    if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
-    const value = await active.readSubagentCapacity();
-    if (!ownsConnection(active)) throw new RuntimeApiError('OWNER_CHANGED', '运行时连接已经改变。', true);
-    return value;
-  }, [ownsConnection]);
 
   const notify = useCallback((
     title: string,
@@ -592,98 +558,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     });
   }, [ownsConnection, publishProjection]);
 
-  const mergeTaskTotal = useCallback((total: number, sequence: number) => {
-    if (sequence < taskTotalWatermark.current) return;
-    taskTotalWatermark.current = sequence;
-    setTaskGroupTotal(total);
-  }, []);
-
-  const loadSessionTasks = useCallback(async (sessionId: string) => {
-    const attempt = ++taskInventoryAttempt.current;
-    const owner = taskReadOwner.current;
-    setTaskInventoryLoading(true);
-    setTaskInventoryError(undefined);
-    try {
-      const cursor = taskLastPageCursor.current;
-      const page = await adapter.listSessionTaskGroups(sessionId, cursor);
-      if (owner !== taskReadOwner.current || attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
-      setTaskGroups((current) => {
-        const byId = new Map(current.map((group) => [group.id, group]));
-        for (const group of page.groups) {
-          if (page.readEventSequence < (taskGroupWatermarks.current.get(group.id) ?? -1)) continue;
-          taskGroupWatermarks.current.set(group.id, page.readEventSequence);
-          byId.set(group.id, group);
-        }
-        return [...byId.values()];
-      });
-      if (cursor === taskLastPageCursor.current && page.readEventSequence >= taskPageWatermark.current) {
-        taskPageWatermark.current = page.readEventSequence;
-        setTaskGroupCursor(page.nextCursor);
-      }
-      mergeTaskTotal(page.totalCount, page.readEventSequence);
-      setTaskInventorySessionId(sessionId);
-      setTaskInventoryLoading(false);
-    } catch (error) {
-      if (owner !== taskReadOwner.current || attempt !== taskInventoryAttempt.current || activeSessionIdRef.current !== sessionId) return;
-      setTaskInventoryError(productMessage(
-        error instanceof Error ? error.message : undefined,
-        '任务清单暂时无法读取。',
-      ));
-      setTaskInventoryLoading(false);
-    }
-  }, [adapter, mergeTaskTotal]);
-
-  const mergeTaskRows = useCallback((tasks: AgentTask[], readEventSequence: number) => {
-    setTaskInventory((current) => {
-      const byId = new Map(current.map((task) => [task.id, task]));
-      for (const task of tasks) {
-        if (readEventSequence < (taskRowWatermarks.current.get(task.id) ?? -1)) continue;
-        taskRowWatermarks.current.set(task.id, readEventSequence);
-        byId.set(task.id, task);
-      }
-      return [...byId.values()];
-    });
-  }, []);
-
-  const loadTask = useCallback(async (taskId: string) => {
-    const sessionId = activeSessionIdRef.current;
-    const owner = taskReadOwner.current;
-    if (!sessionId) throw new RuntimeApiError('TASK_OWNER_CHANGED', '当前没有活动会话。', true);
-    const { task } = await adapter.readSessionTask(sessionId, taskId);
-    if (activeSessionIdRef.current !== sessionId || taskReadOwner.current !== owner) {
-      throw new RuntimeApiError('TASK_OWNER_CHANGED', '任务所属的会话已经改变。', true);
-    }
-    return task;
-  }, [adapter]);
-
-  const loadTaskActivities = useCallback(async (taskId: string, cursor?: string) => {
-    const sessionId = activeSessionIdRef.current;
-    const active = connectionRef.current ?? historyRef.current;
-    if (!sessionId || !active || active.sessionId !== sessionId) throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
-    const page = await adapter.listSessionTaskActivities(sessionId, taskId, cursor);
-    if (activeSessionIdRef.current !== sessionId || !ownsHistoryReader(active)) {
-      throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
-    }
-    const activities = [];
-    for (const activity of page.activities) {
-      if (activity.body !== undefined || activity.contentSize === 0) {
-        activities.push({ ...activity, body: activity.body ?? '' });
-        continue;
-      }
-      const body = await active.readCanonicalEntryContent(
-        activity.entryId,
-        activity.contentDigest,
-        activity.contentSize,
-      );
-      if (!ownsHistoryReader(active)) {
-        throw new RuntimeApiError('TASK_ACTIVITY_OWNER_CHANGED', '任务活动所属的会话已经改变。', true);
-      }
-      activities.push({ ...activity, body });
-    }
-    return { ...page, activities };
-  }, [adapter, ownsHistoryReader]);
-
-  const loadTaskBackgroundProcesses = useCallback(async (cursor?: string) => {
+  const loadBackgroundProcesses = useCallback(async (cursor?: string) => {
     const active = connectionRef.current;
     if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
     const host = active.current().hostSessionId;
@@ -692,54 +567,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     if (!ownsConnection(active) || active.current().hostSessionId !== host) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
     return page;
   }, [ownsConnection]);
-
-  const loadTaskGroup = useCallback(async (groupId: string) => {
-    const sessionId = activeSessionIdRef.current;
-    if (!sessionId) return;
-    openTaskGroups.current.add(groupId);
-    const owner = taskReadOwner.current;
-    const page = await adapter.listSessionTasks(sessionId, undefined, groupId);
-    if (owner !== taskReadOwner.current || !openTaskGroups.current.has(groupId) || activeSessionIdRef.current !== sessionId) return;
-    if (page.nextCursor) throw new RuntimeApiError('TASK_GROUP_PAGE_INCOMPLETE', '任务组超过单次接纳边界。', true);
-    mergeTaskRows(page.tasks, page.readEventSequence);
-    setLoadedTaskGroups((current) => new Set(current).add(groupId));
-  }, [adapter, mergeTaskRows]);
-
-  const unloadTaskGroup = useCallback((groupId: string) => {
-    openTaskGroups.current.delete(groupId);
-    setTaskInventory(current => current.filter(task => task.batchId !== groupId));
-    setLoadedTaskGroups(current => new Set([...current].filter(id => id !== groupId)));
-  }, []);
-
-  const loadMoreTaskGroups = useCallback(async () => {
-    const sessionId = activeSessionIdRef.current;
-    const cursor = taskGroupCursor;
-    if (!sessionId || !cursor || taskPageRequest.current) return;
-    const request = {};
-    taskPageRequest.current = request;
-    const owner = taskReadOwner.current;
-    try {
-    const page = await adapter.listSessionTaskGroups(sessionId, cursor);
-    if (owner !== taskReadOwner.current || activeSessionIdRef.current !== sessionId) return;
-    taskLastPageCursor.current = cursor;
-    taskPageWatermark.current = page.readEventSequence;
-    taskInventoryAttempt.current += 1;
-    setTaskInventoryLoading(false);
-    setTaskGroups((current) => {
-      const byId = new Map(current.map((group) => [group.id, group]));
-      for (const group of page.groups) {
-        if (page.readEventSequence < (taskGroupWatermarks.current.get(group.id) ?? -1)) continue;
-        taskGroupWatermarks.current.set(group.id, page.readEventSequence);
-        byId.set(group.id, group);
-      }
-      return [...byId.values()];
-    });
-    setTaskGroupCursor(page.nextCursor);
-    mergeTaskTotal(page.totalCount, page.readEventSequence);
-    } finally {
-      if (taskPageRequest.current === request) taskPageRequest.current = undefined;
-    }
-  }, [adapter, taskGroupCursor, mergeTaskTotal]);
 
   const loadCapabilities = useCallback(async (sessionId: string) => {
     // A mutation may settle after the user has already moved to another
@@ -874,7 +701,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     delete remainingVisibility[sessionId];
     inspectorVisibilityRef.current = remainingVisibility;
     setInspectorVisibility(remainingVisibility);
-    for (const [key, reference] of taskCancelReferences.current) if (reference.sessionId === sessionId) taskCancelReferences.current.delete(key);
     changeSessionList(current => current.filter(s => s.id !== sessionId));
     promptDraftStore.removeSession(sessionId);
     setLocalSubmissions(current => current.filter(item => item.sessionId !== sessionId));
@@ -895,11 +721,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     historyRef.current = undefined;
     if (previousHistory) void previousHistory.close();
     connectionAttempt.current += 1;
-    taskInventoryAttempt.current += 1;
-    taskReadOwner.current = {};
-    taskPageRequest.current = undefined;
-    taskLastPageCursor.current = undefined;
-    openTaskGroups.current.clear();
     capabilityAttempt.current += 1;
     connectionRef.current = undefined;
     activeSessionIdRef.current = '';
@@ -908,18 +729,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setActiveSessionId('');
     setOpeningSessionId('');
     setProjection(emptyProjection);
-    setTaskInventory([]);
-    setTaskGroups([]);
-    setTaskGroupCursor(undefined);
-    setTaskGroupTotal(0);
-    setLoadedTaskGroups(new Set());
-    taskRowWatermarks.current.clear();
-    taskGroupWatermarks.current.clear();
-    taskTotalWatermark.current = -1;
-    taskPageWatermark.current = -1;
-    setTaskInventorySessionId('');
-    setTaskInventoryLoading(false);
-    setTaskInventoryError(undefined);
     setCapabilities(undefined);
     setCapabilityLoading(false);
     setCapabilityError(undefined);
@@ -1068,24 +877,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     historyReadAbort.current = new AbortController();
     const attempt = ++connectionAttempt.current;
     setOpeningSessionId(current => current === sessionId ? current : '');
-    taskInventoryAttempt.current += 1;
-    taskReadOwner.current = {};
-    taskPageRequest.current = undefined;
-    taskLastPageCursor.current = undefined;
-    openTaskGroups.current.clear();
     capabilityAttempt.current += 1;
-    setTaskInventory([]);
-    setTaskGroups([]);
-    setTaskGroupCursor(undefined);
-    setTaskGroupTotal(0);
-    setLoadedTaskGroups(new Set());
-    taskRowWatermarks.current.clear();
-    taskGroupWatermarks.current.clear();
-    taskTotalWatermark.current = -1;
-    taskPageWatermark.current = -1;
-    setTaskInventorySessionId('');
-    setTaskInventoryError(undefined);
-    setTaskInventoryLoading(Boolean(sessionId));
     setCapabilities(undefined);
     setCapabilityError(undefined);
     setCapabilityLoading(Boolean(sessionId));
@@ -1122,7 +914,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         setWorkspaceObservation({sessionId, value: next.availability});
         publishProjection(next.current());
         setRuntimeStatus('online');
-        setTaskInventoryLoading(false);
         setCapabilityLoading(false);
         return undefined;
       }
@@ -1172,7 +963,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           }
         }).catch(() => {});
       }
-      setTaskInventoryLoading(false);
       setCapabilityLoading(false);
       return undefined;
     }
@@ -1552,64 +1342,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     readConsumedInput,
   ]);
 
-  const refreshTaskGroups = useCallback(async (sessionId: string, ids: readonly string[]) => {
-    const owner = taskReadOwner.current;
-    const visibleIds = new Set(taskGroupsRef.current.map(group => group.id));
-    const visible = [...new Set(ids)].filter(id => visibleIds.has(id));
-    const rows = await Promise.all(visible.map(id => adapter.readSessionTaskGroup(sessionId, id)));
-    if (owner !== taskReadOwner.current || activeSessionIdRef.current !== sessionId) return;
-    for (const row of rows) {
-      mergeTaskTotal(row.totalCount, row.readEventSequence);
-      setTaskGroups(current => {
-        if (row.readEventSequence < (taskGroupWatermarks.current.get(row.group.id) ?? -1)) return current;
-        taskGroupWatermarks.current.set(row.group.id, row.readEventSequence);
-        return current.map(group => group.id === row.group.id ? row.group : group);
-      });
-    }
-    // Unknown batches affect the overview count, not the full task cache.
-    if (ids.some(id => !visibleIds.has(id))) await loadSessionTasks(sessionId);
-  }, [adapter, loadSessionTasks, mergeTaskTotal]);
-
-  useEffect(() => {
-    const reader = connection ?? historyRef.current;
-    if (!activeSessionId || !reader || reader.sessionId !== activeSessionId) return;
-    taskReadOwner.current = {};
-    taskPageRequest.current = undefined;
-    taskRowWatermarks.current.clear();
-    taskGroupWatermarks.current.clear();
-    taskTotalWatermark.current = -1;
-    taskPageWatermark.current = -1;
-    const groupIds = [...openTaskGroups.current];
-    const visibleIds = taskGroupsRef.current.map(group => group.id);
-    const frame = window.requestAnimationFrame(() => {
-      void Promise.all([
-        loadSessionTasks(activeSessionId),
-        refreshTaskGroups(activeSessionId, visibleIds),
-        ...groupIds.map(loadTaskGroup),
-      ]).catch(error => setTaskInventoryError(productMessage(error instanceof Error ? error.message : undefined, '任务清单暂时无法读取。')));
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [activeSessionId, connection, runtimeStatus, projection.taskSnapshotRevision, loadSessionTasks, refreshTaskGroups, loadTaskGroup]);
-
-  const taskGroupInvalidationKey = (projection.taskGroupInvalidations ?? []).join('|');
-  const taskInvalidationKey = (projection.taskInvalidations ?? []).join('|');
-  useEffect(() => {
-    if (!activeSessionId || !connection || connection.sessionId !== activeSessionId || !taskGroupInvalidationKey) return;
-    const owner = taskReadOwner.current;
-    const ids = [...new Set(taskGroupInvalidationKey.split('|'))];
-    const groupIds = [...openTaskGroups.current];
-    const changedTasks = new Set(taskInvalidationKey.split('|'));
-    const dependencyChanged = taskInventoryRef.current.some(task => task.dependencyIds.some(id => changedTasks.has(id)));
-    void Promise.all([
-      refreshTaskGroups(activeSessionId, ids),
-      ...groupIds.filter(groupId => ids.includes(groupId) || dependencyChanged).map(loadTaskGroup),
-    ]).catch(error => {
-      if (owner === taskReadOwner.current && activeSessionIdRef.current === activeSessionId) setTaskInventoryError(productMessage(
-        error instanceof Error ? error.message : undefined, '任务变化暂时无法读取。',
-      ));
-    });
-  }, [activeSessionId, connection, refreshTaskGroups, loadTaskGroup, taskGroupInvalidationKey, taskInvalidationKey, projection.eventSequence]);
-
   useEffect(() => {
     if (!activeSessionId || !connection || connection.sessionId !== activeSessionId) return;
     const frame = window.requestAnimationFrame(() => {
@@ -1780,24 +1512,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const isObserver = connection?.role === 'observer';
   const workspaceAvailability = workspaceObservation?.sessionId === activeSessionId ? workspaceObservation.value : undefined;
   const canControl = connection?.role === 'controller' && workspaceAvailability?.outcome === 'AVAILABLE' && runtimeStatus === 'online';
-  const mergedProjection = useMemo(() => mergeRuntimeTaskInventory(
-    projection,
-    taskInventorySessionId === activeSessionId ? taskInventory : [],
-  ), [activeSessionId, projection, taskInventory, taskInventorySessionId]);
-  const taskActivities = useMemo(() => {
-    const activities = new Map<string, NonNullable<(typeof mergedProjection.messages)[number]['subagentRuns']>[number]['activities']>();
-    // Exact task-ID observations also serve a dependency opened on demand.
-    // Its canonical task row governs terminal filtering in TaskGraphDialog.
-    for (const run of projection.subagentRuns ?? []) activities.set(run.id, run.activities);
-    for (const message of mergedProjection.messages) {
-      for (const run of message.subagentRuns ?? []) {
-        const byId = new Map((activities.get(run.id) ?? []).map((item) => [item.id, item]));
-        for (const item of run.activities) byId.set(item.id, item);
-        activities.set(run.id, [...byId.values()]);
-      }
-    }
-    return activities;
-  }, [mergedProjection, projection.subagentRuns]);
+  const mergedProjection = projection;
   const renderedMessages = mergedProjection.messages;
 
   useEffect(() => {
@@ -2351,83 +2066,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       const recovered = await recoverConnectionAfterOperation(error, active);
       if (!recovered || !ownsConnection(recovered)) return;
       notify('上下文整理失败', productMessage(error instanceof Error ? error.message : undefined, '请稍后重试。'), 'warning');
-    }
-  };
-
-  const cancelTask = async (task: AgentTask): Promise<void> => {
-    const active = connectionRef.current;
-    if (!active || active.role !== 'controller') return;
-    if (!projection.hostSessionId || !projection.controlAdmissionDeadlineMs) {
-      notify('暂时无法取消', '当前 Host 的控制身份尚未确认，请等待刷新后重试。', 'warning');
-      return;
-    }
-    const cancellationKey = JSON.stringify([active.sessionId, task.id]);
-    const previous = taskCancelReferences.current.get(cancellationKey);
-    if (previous) {
-      const query = await active.queryControlCommand(previous);
-      if (!ownsConnection(active)) return;
-      notify('取消状态', query.receipt?.publicMessage || (query.status === 'OWNER_UNAVAILABLE' ? '原运行实例已失效，未重新发送取消。' : query.receipt?.status === 'pending' ? '原取消仍在处理中。' : '已按原操作身份查询。'), 'neutral');
-      return;
-    }
-    const reference = createUserControlCommandRef(
-      projection,
-      active.sessionId,
-      'CANCEL_SUBAGENT_TASK',
-      'SUBAGENT_TASK',
-      task.id,
-    );
-    try {
-      taskCancelReferences.current.set(cancellationKey, reference);
-      const receipt = await active.cancelSubagentTask(reference);
-      if (!ownsConnection(active)) return;
-      if (receipt.status === 'rejected') {
-        notify(
-          '无法取消这项任务',
-          productMessage(receipt.publicMessage, '任务身份或当前 Host 已经改变。'),
-          'warning',
-        );
-        return;
-      }
-      notify(
-        receipt.status === 'pending' ? '正在取消任务' : '任务状态已更新',
-        receipt.publicMessage || (receipt.status === 'pending'
-          ? '已由当前 Host 接管；任务仍可能正在完成已启动操作的收尾。'
-          : '已保留任务的真实终态和依赖结果。'),
-        receipt.status === 'failed' ? 'warning' : 'success',
-      );
-      void loadSessionTasks(active.sessionId);
-    } catch (error) {
-      const recovered = await recoverConnectionAfterOperation(error, active);
-      if (!recovered || !ownsConnection(recovered)) return;
-      try {
-        const query = await recovered.queryControlCommand(reference);
-        if (!ownsConnection(recovered)) return;
-        const receipt = query.receipt;
-        if (query.status === 'FOUND' && receipt) {
-          notify(
-            receipt.status === 'pending' ? '正在取消任务' : '任务状态已确认',
-            receipt.publicMessage || '已按原操作身份恢复精确状态。',
-            receipt.status === 'failed' || receipt.status === 'rejected' ? 'warning' : 'success',
-          );
-          void loadSessionTasks(recovered.sessionId);
-          return;
-        }
-        notify(
-          query.status === 'OWNER_UNAVAILABLE' ? '原会话已不可控制' : '取消结果不可确认',
-          query.status === 'OWNER_UNAVAILABLE'
-            ? '原 Host 已失效；Pulsara 不会把这次取消改投新的 Host。'
-            : `${productMessage(error instanceof Error ? error.message : undefined, '当前无法取得这次操作的结果。')} 未查到原操作结果；Pulsara 不会自动重发。`,
-          'warning',
-        );
-        return;
-      } catch {
-        if (!ownsConnection(recovered)) return;
-      }
-      notify(
-        '取消结果待确认',
-        productMessage(error instanceof Error ? error.message : undefined, '重新连接后可按原操作身份查询；Pulsara 不会自动重发。'),
-        'warning',
-      );
     }
   };
 
@@ -3062,7 +2700,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     <McpAuthorizationContext.Provider value={mcpAuthorizationStatuses}>
     <DesktopWorkspaceProvider visible={activeView === 'workbench' && !databaseBlocked && !loadingSession} onBrowserShortcut={command => flushSync(() => { if (command === 'search') setSearchOpen(value => !value); else if (canCreateSession) setNewSessionOpen(true); })} controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
     <FilePreviewProvider sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
-    <PresentationProvider readTask={loadTask} onCloseTaskGroup={unloadTaskGroup} connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen}>
+    <PresentationProvider connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main data-platform={desktopHost()?.platform} className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>
       <DesktopTitlebar workbench={activeView === "workbench"} title={activeView === "workbench" ? activeSession.title : "Pulsara"} onToggleSidebar={() => setSidebarOpen(value => !value)} onToggleWorkspace={() => setInspectorOpen(value => !value)} />
@@ -3174,9 +2812,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           skills={(capabilities?.skills.items ?? []).filter(
             (skill) => skill.enabled && skill.effective,
           )}
-          focusTaskId={undefined}
-          focusTaskRevision={0}
-          focusTaskHighlighted={false}
           onReconnect={reconnect}
           onTakeControl={() => activeSessionId && void openRuntimeSession(activeSessionId, true, true)}
           onNewSession={openNewSession}
@@ -3226,35 +2861,19 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           }}
           session={activeSession}
           isOpen={inspectorOpen}
-          agentTasks={mergedProjection.agentTasks}
           modelConfigurations={bootstrap?.model_configurations ?? []}
-          taskGroups={taskGroups}
-          loadedTaskGroups={loadedTaskGroups}
-          taskGroupTotal={taskGroupTotal}
-          onLoadTask={loadTask}
-          onLoadTaskGroup={loadTaskGroup}
-          onUnloadTaskGroup={unloadTaskGroup}
-          onLoadMoreTaskGroups={loadMoreTaskGroups}
-          onReadSubagentCapacity={readSubagentCapacity}
-          taskActivities={taskActivities}
-          taskArtifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
           onReadToolArtifact={readToolArtifact}
           onReadPromptImage={readPromptImage}
           onReadVisualization={readVisualization} onReadVisualizationThumbnail={readVisualizationThumbnail}
-          onLoadTaskActivities={loadTaskActivities}
-          loading={taskInventoryLoading}
           canControl={canControl}
           capabilities={capabilities}
           capabilityLoading={capabilityLoading}
           capabilityError={capabilityError}
           capabilityBusy={capabilityBusy}
-          error={taskInventoryError}
-          onRetry={() => activeSessionId && void loadSessionTasks(activeSessionId)}
-          onCancelTask={cancelTask}
           backgroundOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}:${projection.hostSessionId ?? ''}`}
           backgroundHostSessionId={projection.hostSessionId}
           backgroundControlAdmissionDeadlineMs={projection.controlAdmissionDeadlineMs}
-          onLoadBackgroundProcesses={loadTaskBackgroundProcesses}
+          onLoadBackgroundProcesses={loadBackgroundProcesses}
           onReadBackgroundProcessLog={async (processId, cursor) => {
             const active = connectionRef.current;
             if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
@@ -3370,7 +2989,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           adapter={adapter}
           onThemeChange={setTheme}
           onConfigurationChanged={refreshConfiguration}
-          onDatabaseReset={() => { globalReads.configuration = { databaseReady: false }; invalidateSessionList(); workspaceControl.current?.clear(); taskCancelReferences.current.clear(); for (const session of sessionList) forgetSession(session.id); }}
+          onDatabaseReset={() => { globalReads.configuration = { databaseReady: false }; invalidateSessionList(); workspaceControl.current?.clear(); for (const session of sessionList) forgetSession(session.id); }}
           onNotify={notify}
         />
       )}

@@ -1,6 +1,9 @@
 """Exact canonical-cut to provider-open planning coordinator."""
 
 from __future__ import annotations
+from pulsara_agent.conversation_kernel.agent_context import (
+    FrozenAgentInvocationSnapshot,
+)
 
 from pulsara_agent.identity import derive_id, random_id
 
@@ -26,7 +29,6 @@ from pulsara_agent.conversation_kernel.context_sources import (
     replace_compaction_context_sources,
     replace_frozen_compaction_context_sources,
     replace_frozen_hook_context_source,
-    replace_frozen_subagent_context_sources,
     replace_hook_context_source,
     replace_memory_context_sources,
 )
@@ -50,11 +52,6 @@ from pulsara_agent.conversation_kernel.cold_epoch import (
     FrozenColdConversationSeed,
     KernelColdEpochInputAssembler,
     PreparedColdEpochSemanticAssembly,
-    SubagentInitialSeed,
-)
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    project_subagent_completion_for_provider,
-    SubagentProfileKind,
 )
 from pulsara_agent.conversation_kernel.direct_model import (
     KernelModelExecutionRequest,
@@ -124,9 +121,6 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
 )
-from pulsara_agent.conversation_kernel.limits import (
-    ROOT_COMPLETION_SUFFIX_BATCH_ITEMS,
-)
 from pulsara_agent.conversation_kernel.memory.contracts import (
     AutomaticMemoryTriggerDisposition,
     FrozenModelCallMemoryContext,
@@ -137,15 +131,10 @@ from pulsara_agent.conversation_kernel.memory.dispatch import MemoryDispatchSupp
 from pulsara_agent.conversation_kernel.tool_contracts import (
     ToolSurfacePlanningPort,
 )
-from pulsara_agent.conversation_kernel.subagents.runtime_port import (
-    SubagentRuntimePort,
-)
 from pulsara_agent.conversation_kernel.workspace import SessionWorkspaceResolver
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelConflict,
     ConversationKernelRepository,
-    PreparedAutomaticSubagentCompletion,
-    SubagentCompletionDisposition,
 )
 from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
@@ -244,7 +233,7 @@ from pulsara_agent.model_input.provider_replay import (
     freeze_provider_replay_manifest_cut,
 )
 
-from pulsara_agent.primitives.model_call import ModelCallPurpose, ResolvedModelTargetFact
+from pulsara_agent.primitives.model_call import ModelCallPurpose
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.context import (
     context_fingerprint,
@@ -253,13 +242,6 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     ProcessLocalToolSurfaceBorrow,
 )
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    FrozenRootConversationContextUnitFact,
-    FrozenSubagentParentContextCallSubject,
-    build_parent_context_call_subject,
-    build_root_context_unit,
-)
-from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
 
 
 class KernelModelPort(Protocol):
@@ -293,7 +275,6 @@ class KernelModelPort(Protocol):
         *,
         prepared_target: PreparedKernelModelTarget,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         tool_facts: tuple,
         retained_direct_inputs: tuple = (),
         deadline_monotonic: float | None = None,
@@ -304,7 +285,6 @@ class KernelModelPort(Protocol):
         *,
         prepared_target: PreparedKernelModelTarget,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         tool_versions: tuple,
         tool_specs: tuple,
         eligibility: FrozenNativeToolWireEligibilitySet,
@@ -511,20 +491,28 @@ def _remaining_invalidation_input_tokens(
     """Reserve only while the stale head remains in the installed epoch."""
     from pulsara_agent.model_input.continuity import SourceObservationPresence
 
-    if isinstance(candidate, PreparedProviderWireCandidate) and candidate.cold_semantic is not None:
+    if (
+        isinstance(candidate, PreparedProviderWireCandidate)
+        and candidate.cold_semantic is not None
+    ):
         return 0
     heads = (
-        {} if not isinstance(candidate, PreparedProviderWireCandidate)
+        {}
+        if not isinstance(candidate, PreparedProviderWireCandidate)
         or candidate.append_result is None
         else {head.source_kind: head for head in candidate.append_result.source_heads}
     )
     resolved_values = (
-        {} if not isinstance(candidate, PreparedProviderWireCandidate)
+        {}
+        if not isinstance(candidate, PreparedProviderWireCandidate)
         or candidate.sources is None
         else {
-            source.source_kind: MemoryDispatchSupport._memory_source_occurrence_fingerprint(source)
+            source.source_kind: MemoryDispatchSupport._memory_source_occurrence_fingerprint(
+                source
+            )
             for source in candidate.sources.candidates
-            if source.source_kind in {
+            if source.source_kind
+            in {
                 ContextSourceKind.MEMORY_RECALL,
                 ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
             }
@@ -535,8 +523,10 @@ def _remaining_invalidation_input_tokens(
         for reservation in reservations
         if reservation.source_kind not in heads
         or (
-            heads[reservation.source_kind].presence not in {
-                SourceObservationPresence.CLEARED, SourceObservationPresence.UNAVAILABLE,
+            heads[reservation.source_kind].presence
+            not in {
+                SourceObservationPresence.CLEARED,
+                SourceObservationPresence.UNAVAILABLE,
             }
             and heads[reservation.source_kind].semantic_fingerprint
             == reservation.prior_semantic_fingerprint
@@ -548,7 +538,6 @@ def _remaining_invalidation_input_tokens(
             != resolved_values.get(reservation.source_kind)
         )
     )
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -564,8 +553,7 @@ class PreparedWireMeasurementDecision:
     def __post_init__(self) -> None:
         candidate = self.candidate
         admitted = (
-            self.quote.budget_input_tokens
-            <= self.quote.effective_input_budget_tokens
+            self.quote.budget_input_tokens <= self.quote.effective_input_budget_tokens
             and self.quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
             and _provider_candidate_meets_input_resource_headroom(candidate)
         )
@@ -1230,17 +1218,21 @@ class PreparedProspectiveRootCandidateFamily:
             self._surface_borrow is None
             or self.prepared_call.call is not self.prepared_target.call
             or self.prepared_call.session_id != identity.session_id
-            or self.prepared_call.turn_id != identity.turn_id
-            or self.planning_basis.scope.session_id != identity.session_id
-            or self.planning_basis.scope.scope_kind is not ModelInputScopeKind.ROOT
-            or self.planning_basis.scope.scope_subagent_task_id is not None
-            or self.tool_view.parent_dispatch_cut is not self.capability_dispatch_cut
-            or self.skill_view.parent_dispatch_cut is not self.capability_dispatch_cut
-            or self.tool_exposure_plan.dispatch_view is not self.tool_view
-            or self.non_trigger_sources.tool_exposure_plan != self.tool_exposure_plan
-            or self.non_trigger_sources.skill_dispatch_view != self.skill_view
-            or (self.preference_source is None) != (self.trigger_disposition is None)
-            or (self._resolved_sources is None) != (self.preference_source is not None)
+            or (self.prepared_call.turn_id != identity.turn_id)
+            or (self.planning_basis.scope.session_id != identity.session_id)
+            or (
+                self.planning_basis.scope.scope_kind
+                is not identity.conversation_scope_kind
+            )
+            or (self.tool_view.parent_dispatch_cut is not self.capability_dispatch_cut)
+            or (self.skill_view.parent_dispatch_cut is not self.capability_dispatch_cut)
+            or (self.tool_exposure_plan.dispatch_view is not self.tool_view)
+            or (self.non_trigger_sources.tool_exposure_plan != self.tool_exposure_plan)
+            or (self.non_trigger_sources.skill_dispatch_view != self.skill_view)
+            or ((self.preference_source is None) != (self.trigger_disposition is None))
+            or (
+                (self._resolved_sources is None) != (self.preference_source is not None)
+            )
             or (self.write_hint and self.preference_source is None)
         ):
             raise ValueError("prospective ROOT candidate family does not exact-join")
@@ -1402,9 +1394,7 @@ class PreparedCompactionCandidateFamily:
         AdoptedCompactionContinuationSeed
         | CanonicalColdContinuationSeed
         | CompactionDryProjectionSeed
-    ) = (
-        dataclass_field(repr=False)
-    )
+    ) = dataclass_field(repr=False)
     model_call_index: int
     planning_basis: FrozenProviderInputAppendPlanningInput = dataclass_field(repr=False)
     prepared_call: PreparedKernelModelCall = dataclass_field(repr=False)
@@ -1427,18 +1417,18 @@ class PreparedCompactionCandidateFamily:
             self._resource_authority is None
             or self.model_call_index < 1
             or self.seed.dispatch_read != self.first_candidate_read
-            or self.prepared_call.session_id != identity.session_id
-            or self.prepared_call.turn_id != identity.turn_id
-            or self.planning_basis.scope.session_id != identity.session_id
-            or self.planning_basis.scope.scope_kind
-            is not identity.conversation_scope_kind
-            or self.planning_basis.scope.scope_subagent_task_id
-            != identity.scope_subagent_task_id
-            or self.tool_view.parent_dispatch_cut is not self.capability_dispatch_cut
-            or self.skill_view.parent_dispatch_cut is not self.capability_dispatch_cut
-            or self.tool_exposure_plan.dispatch_view is not self.tool_view
-            or self.non_trigger_sources.tool_exposure_plan != self.tool_exposure_plan
-            or self.non_trigger_sources.skill_dispatch_view != self.skill_view
+            or (self.prepared_call.session_id != identity.session_id)
+            or (self.prepared_call.turn_id != identity.turn_id)
+            or (self.planning_basis.scope.session_id != identity.session_id)
+            or (
+                self.planning_basis.scope.scope_kind
+                is not identity.conversation_scope_kind
+            )
+            or (self.tool_view.parent_dispatch_cut is not self.capability_dispatch_cut)
+            or (self.skill_view.parent_dispatch_cut is not self.capability_dispatch_cut)
+            or (self.tool_exposure_plan.dispatch_view is not self.tool_view)
+            or (self.non_trigger_sources.tool_exposure_plan != self.tool_exposure_plan)
+            or (self.non_trigger_sources.skill_dispatch_view != self.skill_view)
         ):
             raise ValueError("compaction candidate family does not exact-join")
 
@@ -1526,8 +1516,6 @@ class CompactionDryProjectionBasis:
             or self.destination.turn_id != identity.turn_id
             or self.capability_dispatch_cut.conversation_scope_kind
             is not identity.conversation_scope_kind
-            or self.capability_dispatch_cut.scope_subagent_task_id
-            != identity.scope_subagent_task_id
         ):
             raise ValueError("compaction dry basis does not exact-join")
 
@@ -1749,8 +1737,8 @@ class InstalledProviderOpen:
     execution: PreparedKernelModelExecution = dataclass_field(repr=False)
     permit: ProcessLocalProviderInputInstallPermit = dataclass_field(repr=False)
     append_candidate: PreparedProviderInputAppendCandidate = dataclass_field(repr=False)
-    subagent_parent_context_subject: FrozenSubagentParentContextCallSubject | None = (
-        dataclass_field(default=None, repr=False)
+    agent_invocation_snapshot: FrozenAgentInvocationSnapshot | None = dataclass_field(
+        default=None, repr=False
     )
 
 
@@ -1778,9 +1766,10 @@ class ProviderDispatchCoordinator:
         maximum_input_tokens_per_call: int | None,
         workspace_resolver: SessionWorkspaceResolver,
         compaction_owner: HostCompactionRuntimeOwner | None,
-        subagent_runtime: SubagentRuntimePort | None,
-        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]] | None = None,
-        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]] | None = None,
+        capability_change_reader: Callable[[], Awaitable[FrozenCapabilityChange | None]]
+        | None = None,
+        capability_change_installed: Callable[[FrozenCapabilityChange], Awaitable[None]]
+        | None = None,
     ) -> None:
         self._repository = repository
         self._writer_lease = writer_lease
@@ -1806,7 +1795,6 @@ class ProviderDispatchCoordinator:
             deadline_factory=deadline_factory,
         )
         self._compaction_owner = compaction_owner
-        self._subagent_runtime = subagent_runtime
         self._capability_change_reader = capability_change_reader
         self._capability_change_installed = capability_change_installed
 
@@ -1858,135 +1846,13 @@ class ProviderDispatchCoordinator:
         # Ordinary compaction preserves the turn's selected reasoning. Only
         # the summary call chooses default reasoning through its existing owner.
         target = self._model.model_runtime.resolve_frozen_target_bundle(
-            source, binding=binding, timeout_policy=self._model.transport_timeout_policy,
+            source,
+            binding=binding,
+            timeout_policy=self._model.transport_timeout_policy,
         )
-        return self._model.prepare_resolved_target(request, target=target, binding=binding)
-
-    async def _prepare_root_completion_suffix(
-        self,
-        handle: PreparedProviderInputHandle,
-        canonical_read: FrozenCanonicalProviderDispatchRead,
-        *,
-        deadline: float,
-    ) -> tuple[
-        FrozenCanonicalProviderDispatchRead,
-        tuple[PreparedAutomaticSubagentCompletion, ...],
-    ]:
-        """Freeze one FIFO completion suffix without mutating canonical state."""
-
-        runtime = self._subagent_runtime
-        identity = canonical_read.compile_snapshot.canonical_input.identity
-        if (
-            runtime is None
-            or identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
-        ):
-            return canonical_read, ()
-        # Human steer is the first lane of the single ROOT pending-input
-        # coordinator.  The read is only an optimization: the canonical writer
-        # repeats this check in its exact-cut transaction, so a concurrent steer
-        # still wins and makes the completion plan stale.
-        pending_steer = await self._io.run(
-            self._repository.read_pending_prompt_steer_facts,
-            session_id=identity.session_id,
-            target_turn_id=identity.turn_id,
-            maximum_items=1,
-            deadline_monotonic=deadline,
+        return self._model.prepare_resolved_target(
+            request, target=target, binding=binding
         )
-        if pending_steer:
-            return canonical_read, ()
-        pending_cut = await runtime.snapshot_pending_root_completions(identity.turn_id, for_delivery=True)
-        candidates: list[PreparedAutomaticSubagentCompletion] = []
-        items: list[FrozenProviderInputItem] = []
-        canonical_bytes = 0
-        expected_cut = handle.cut
-        for task_id in pending_cut[:ROOT_COMPLETION_SUFFIX_BATCH_ITEMS]:
-            prepared = await self._io.run(
-                self._repository.prepare_automatic_subagent_completion,
-                self._writer_lease.guard,
-                expected_provider_input_cut=expected_cut,
-                task_id=task_id,
-                deadline_monotonic=deadline,
-            )
-            if not isinstance(prepared, PreparedAutomaticSubagentCompletion):
-                if (
-                    prepared.disposition
-                    is SubagentCompletionDisposition.ALREADY_DELIVERED
-                ):
-                    await runtime.retire_root_completion(task_id)
-                    continue
-                break
-            projected = project_subagent_completion_for_provider(
-                prepared.storage_body,
-                source_task_id=prepared.task_id,
-            )
-            item = FrozenProviderInputItem(
-                item_kind=FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
-                source_entry_id=prepared.entry_id,
-                source_entry_sequence=prepared.entry_sequence,
-                source_turn_id=prepared.target_turn_id,
-                content=(LLMTextPart(projected),),
-                input_origin=CanonicalInputOriginKind.INTER_AGENT_MESSAGE,
-            )
-            candidates.append(prepared)
-            items.append(item)
-            canonical_bytes += len(projected.encode("utf-8"))
-            expected_cut = PreparedProviderInputCut(
-                session_id=expected_cut.session_id,
-                turn_id=expected_cut.turn_id,
-                context_binding_revision_id=(expected_cut.context_binding_revision_id),
-                provider_input_through_sequence=prepared.entry_sequence,
-            )
-        if not candidates:
-            return canonical_read, ()
-        prospective = _prospective_provider_input_suffix_compile_snapshot(
-            canonical_read.compile_snapshot,
-            appended=tuple(items),
-            canonical_expanded_bytes=canonical_bytes,
-            deadline_monotonic=deadline,
-        )
-        return (
-            _prospective_provider_input_suffix_dispatch_read(
-                canonical_read,
-                prospective,
-            ),
-            tuple(candidates),
-        )
-
-    async def _accept_prepared_root_completion_suffix(
-        self,
-        handle: PreparedProviderInputHandle,
-        *,
-        candidates: tuple[PreparedAutomaticSubagentCompletion, ...],
-        expected_read: FrozenCanonicalProviderDispatchRead,
-        deadline: float,
-    ) -> tuple[PreparedProviderInputHandle, FrozenCanonicalProviderDispatchRead]:
-        """Publish one fully admitted completion suffix and prove its exact read."""
-
-        runtime = self._subagent_runtime
-        if runtime is None or not candidates:
-            raise ValueError("automatic completion settlement is incomplete")
-        handle, outcomes = await self._io.run(
-            self._safe_point.accept_queued_subagent_completions,
-            handle,
-            candidates=candidates,
-            actor_id=self._writer_lease.guard.writer_owner_id,
-            deadline_monotonic=deadline,
-        )
-        if len(outcomes) != len(candidates) or any(
-            outcome.disposition is not SubagentCompletionDisposition.CREATED
-            for outcome in outcomes
-        ):
-            raise ConversationKernelConflict(
-                "prepared completion suffix did not publish atomically"
-            )
-        for candidate in candidates:
-            await runtime.retire_root_completion(candidate.task_id)
-        actual_read = await self.read_dispatch_read(handle.cut, deadline=deadline)
-        if actual_read != expected_read:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-            )
-        return handle, actual_read
 
     async def _prepare_scope_target(
         self,
@@ -1995,7 +1861,6 @@ class ProviderDispatchCoordinator:
         model_call_index: int,
         binding: ModelCallBinding,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         deadline: float,
     ) -> PreparedKernelModelTarget:
         request = KernelModelTargetPreparationRequest(
@@ -2006,26 +1871,7 @@ class ProviderDispatchCoordinator:
             maximum_input_tokens=self._maximum_input_tokens_per_call,
             binding=binding,
         )
-        if scope_kind is not ModelInputScopeKind.SUBAGENT_TASK or model_call_index != 1:
-            return self._model.prepare_target(request)
-        accepted_binding, accepted_fact = await self._io.run(
-            self._repository.read_subagent_task_model_target,
-            self._writer_lease.guard,
-            task_id=scope_subagent_task_id,
-            deadline_monotonic=deadline,
-        )
-        if accepted_binding != binding:
-            raise ValueError("child first provider binding drifted from accepted task")
-        target = self._model.model_runtime.resolve_target(
-            binding,
-            timeout_policy=self._model.transport_timeout_policy,
-            frozen_target_fact=ResolvedModelTargetFact.model_validate(
-                accepted_fact.model_dump(exclude={"reasoning_contract"})
-            ),
-        )
-        if FrozenSubagentModelTarget.freeze(target.fact, target.contract.reasoning) != accepted_fact:
-            raise ValueError("child first provider target drifted from accepted task")
-        return self._model.prepare_resolved_target(request, target=target, binding=binding)
+        return self._model.prepare_target(request)
 
     async def prepare_headroom_admission(
         self,
@@ -2059,7 +1905,6 @@ class ProviderDispatchCoordinator:
                 model_call_index=model_call_index,
                 binding=binding,
                 scope_kind=preflight.scope_kind,
-                scope_subagent_task_id=preflight.scope_subagent_task_id,
                 deadline=deadline,
             )
             _require_dispatch_planning_deadline(deadline)
@@ -2457,14 +2302,7 @@ class ProviderDispatchCoordinator:
                 maximum_items=1,
                 deadline_monotonic=deadline,
             )
-            pending_completions = (
-                ()
-                if pending_steers or self._subagent_runtime is None
-                else await self._subagent_runtime.snapshot_pending_root_completions(
-                    candidate.exact_turn_id
-                )
-            )
-            if pending_steers or pending_completions:
+            if pending_steers:
                 # The ROOT writer made these suffix producers addressable only
                 # after the direct candidate was measured.  Re-enter the one
                 # ordinary Runner prepare loop so its prospective wire gate and
@@ -2684,7 +2522,7 @@ class ProviderDispatchCoordinator:
             )
         borrow: ProcessLocalToolSurfaceBorrow | None = None
         hook_context_reservation: HookContextReservation | None = None
-        completion_candidates: tuple[PreparedAutomaticSubagentCompletion, ...] = ()
+
         planning: FrozenProviderInputAppendPlanningInput | None = None
         try:
             workspace_id = await self._resolved_workspace_id(deadline=deadline)
@@ -2730,23 +2568,6 @@ class ProviderDispatchCoordinator:
                         prospective_root_candidate,
                         deadline_monotonic=deadline,
                     )
-            if (
-                allow_steers
-                and not allow_terminal_compaction
-                and canonical_read_override is None
-                and not _compaction_source_projection
-            ):
-                (
-                    observed_read,
-                    completion_candidates,
-                ) = await self._prepare_root_completion_suffix(
-                    handle, observed_read, deadline=deadline
-                )
-                if completion_candidates:
-                    # The metadata preflight names the still-unmodified cut.
-                    # The complete prospective suffix is checked by the normal
-                    # compiler/materializer below instead of reusing that quote.
-                    headroom_preflight = None
             if canonical_read_override is not None:
                 if (
                     expected_source_read is None
@@ -2777,38 +2598,8 @@ class ProviderDispatchCoordinator:
             scope = ProviderInputContinuityScope(
                 session_id=identity.session_id,
                 scope_kind=identity.conversation_scope_kind,
-                scope_subagent_task_id=identity.scope_subagent_task_id,
             )
             current_epoch = self._continuity.current_view(scope)
-            subagent_seed: SubagentInitialSeed | None = None
-            subagent_profile_kind: SubagentProfileKind | None = None
-            subagent_source_replacements: tuple[
-                ContextSourceCandidate | ContextSourceAbsentFact, ...
-            ] = ()
-            if identity.conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK:
-                task_id = identity.scope_subagent_task_id
-                if self._subagent_runtime is None or task_id is None:
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                    )
-                try:
-                    subagent_profile_kind = self._subagent_runtime.profile_kind(
-                        task_id=task_id
-                    )
-                    subagent_source_replacements = (
-                        self._subagent_runtime.initial_context_sources(task_id=task_id)
-                    )
-                    # Installed child epochs append to their existing input;
-                    # compaction may already have summarized the initial objective.
-                    if cold_seed_override is None and current_epoch is None:
-                        subagent_seed = self._subagent_runtime.build_initial_seed(
-                            task_id=task_id,
-                            dispatch_read=base_read,
-                        )
-                except Exception as exc:
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                    ) from exc
             base_frontier = canonical_frontier(base_input, base_facts)
             context_base_changed = (
                 current_epoch is not None
@@ -2847,18 +2638,16 @@ class ProviderDispatchCoordinator:
             try:
                 builtin_owner = self._tools.sealed_builtin_capability_snapshot(
                     conversation_scope_kind=identity.conversation_scope_kind,
-                    scope_subagent_task_id=identity.scope_subagent_task_id,
+                    effective_permission_mode=base_facts.run_permission_snapshot.effective_mode,
                 )
                 _require_dispatch_planning_deadline(deadline)
                 mcp_owner = self._tools.freeze_mcp_capability_source_snapshot_set(
                     conversation_scope_kind=identity.conversation_scope_kind,
-                    scope_subagent_task_id=identity.scope_subagent_task_id,
                 )
                 _require_dispatch_planning_deadline(deadline)
                 skill_owner = await self._io.run(
                     self._context_source_collector.freeze_skill_capability_source_snapshot,
                     conversation_scope_kind=identity.conversation_scope_kind,
-                    scope_subagent_task_id=identity.scope_subagent_task_id,
                     deadline_monotonic=deadline,
                 )
                 registry = freeze_capability_registry_from_owner_snapshots(
@@ -2885,7 +2674,6 @@ class ProviderDispatchCoordinator:
                         model_call_index=model_call_index,
                         binding=turn_binding,
                         scope_kind=identity.conversation_scope_kind,
-                        scope_subagent_task_id=identity.scope_subagent_task_id,
                         deadline=deadline,
                     )
                 elif (
@@ -2945,7 +2733,6 @@ class ProviderDispatchCoordinator:
                 native_eligibility = self._model.freeze_native_tool_eligibility(
                     prepared_target=prepared_target,
                     conversation_scope_kind=identity.conversation_scope_kind,
-                    scope_subagent_task_id=identity.scope_subagent_task_id,
                     tool_facts=registry.tool_facts,
                     retained_direct_inputs=retained_direct_inputs,
                     deadline_monotonic=deadline,
@@ -2965,7 +2752,6 @@ class ProviderDispatchCoordinator:
                 capability_dispatch_cut, tool_view, skill_view = (
                     freeze_capability_dispatch_cut_and_views(
                         conversation_scope_kind=identity.conversation_scope_kind,
-                        scope_subagent_task_id=identity.scope_subagent_task_id,
                         registry=registry,
                         tools=tool_planning_input,
                         skills=skill_projection_input,
@@ -2978,7 +2764,6 @@ class ProviderDispatchCoordinator:
                         self._model.materialize_native_tool_projection_set(
                             prepared_target=prepared_target,
                             conversation_scope_kind=(identity.conversation_scope_kind),
-                            scope_subagent_task_id=(identity.scope_subagent_task_id),
                             tool_versions=tool_selection.direct_tool_versions,
                             tool_specs=(tool_selection.direct_tool_surface.tool_specs),
                             eligibility=native_eligibility,
@@ -3052,7 +2837,6 @@ class ProviderDispatchCoordinator:
                 capability_change = (
                     await self._capability_change_reader()
                     if self._capability_change_reader is not None
-                    and base_facts.canonical_input.identity.conversation_scope_kind is ModelInputScopeKind.ROOT
                     else None
                 )
                 frozen_sources = await self._io.run(
@@ -3082,16 +2866,6 @@ class ProviderDispatchCoordinator:
                 if compaction_source_replacements:
                     frozen_sources = replace_frozen_compaction_context_sources(
                         frozen_sources, compaction_source_replacements
-                    )
-                if subagent_source_replacements:
-                    if subagent_profile_kind is None:
-                        raise StructuredModelInputCompileError(
-                            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
-                        )
-                    frozen_sources = replace_frozen_subagent_context_sources(
-                        frozen_sources,
-                        subagent_source_replacements,
-                        profile_kind=subagent_profile_kind.value,
                     )
             except StructuredModelInputCompileError:
                 raise
@@ -3214,12 +2988,7 @@ class ProviderDispatchCoordinator:
 
             pending = (
                 ()
-                if (
-                    completion_candidates
-                    or allow_terminal_compaction
-                    or not allow_steers
-                    or identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
-                )
+                if (allow_terminal_compaction or not allow_steers)
                 else await self._io.run(
                     self._repository.read_pending_prompt_steer_facts,
                     session_id=identity.session_id,
@@ -3500,18 +3269,13 @@ class ProviderDispatchCoordinator:
                         )
                         if item is not None
                     )
-                    if (
-                        provider_input_logical_bytes(
-                            system_prompt=append.compiled_input.system_prompt,
-                            tools=append.compiled_input.tools,
-                            messages=append.compiled_input.messages,
-                        )
-                        + sum(
-                            item.invalidation_epoch_bytes_ceiling
-                            for item in reservations
-                        )
-                        > (64 << 20)
-                    ):
+                    if provider_input_logical_bytes(
+                        system_prompt=append.compiled_input.system_prompt,
+                        tools=append.compiled_input.tools,
+                        messages=append.compiled_input.messages,
+                    ) + sum(
+                        item.invalidation_epoch_bytes_ceiling for item in reservations
+                    ) > (64 << 20):
                         self._continuity.abort_planning(planning)
                         continue
                     quote = build_steer_suffix_quote(
@@ -3664,7 +3428,9 @@ class ProviderDispatchCoordinator:
                     if (
                         trial_wire.wire_input_plan is None
                         or trial_wire.quote.budget_input_tokens
-                        + _remaining_invalidation_input_tokens(trial_wire.candidate, reservations)
+                        + _remaining_invalidation_input_tokens(
+                            trial_wire.candidate, reservations
+                        )
                         > trial_wire.quote.effective_input_budget_tokens
                     ):
                         self._continuity.abort_planning(planning)
@@ -3978,11 +3744,7 @@ class ProviderDispatchCoordinator:
             if cold_seed is None and (
                 planning.predecessor_view is None or model_switch_requested
             ):
-                cold_seed = (
-                    subagent_seed
-                    if subagent_seed is not None and planning.predecessor_view is None
-                    else CanonicalColdContinuationSeed(base_read)
-                )
+                cold_seed = CanonicalColdContinuationSeed(base_read)
             if _compaction_source_projection:
                 projection_sources = base_sources
                 if preference_source is not None and trigger_disposition is not None:
@@ -4035,7 +3797,9 @@ class ProviderDispatchCoordinator:
                     and planning.predecessor_view is not None
                     and not context_base_changed
                 ):
-                    source_anchor = self._continuity.current_usage_anchor(planning.scope)
+                    source_anchor = self._continuity.current_usage_anchor(
+                        planning.scope
+                    )
                 wire_measurement = await self._freeze_candidate_wire_measurement(
                     wire_candidate,
                     deadline=deadline,
@@ -4220,46 +3984,6 @@ class ProviderDispatchCoordinator:
                 memory_use_policy=memory_use_policy,
             )
             assert handle is not None
-            if completion_candidates:
-                completion_wire_candidate = PreparedProviderWireCandidate(
-                    canonical_read=base_read,
-                    compile_request=replace(compile_request, sources=final_sources),
-                    semantic_input=append.compiled_input,
-                    prepared_call=prepared_call,
-                    native_projection_set=prepared_call.native_projection_set,
-                    planning=planning,
-                    append_result=append,
-                    cold_semantic=cold_semantic,
-                    sources=final_sources,
-                    tool_exposure_plan=tool_exposure_plan,
-                    memory_context=memory_snapshot,
-                )
-                completion_wire = await self.measure_prepared_wire_candidate(
-                    completion_wire_candidate,
-                    deadline=deadline,
-                )
-                append = completion_wire.candidate.append_result
-                cold_semantic = completion_wire.candidate.cold_semantic
-                final_sources = completion_wire.candidate.sources
-                if completion_wire.wire_input_plan is None:
-                    kind = (
-                        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-                        if completion_wire.quote.budget_input_tokens
-                        > completion_wire.quote.effective_input_budget_tokens
-                        else ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
-                    )
-                    raise StructuredModelInputCompileError(kind)
-                (
-                    handle,
-                    actual_completion_read,
-                ) = await self._accept_prepared_root_completion_suffix(
-                    handle,
-                    candidates=completion_candidates,
-                    expected_read=base_read,
-                    deadline=deadline,
-                )
-                base_read = actual_completion_read
-                base_facts = actual_completion_read.compile_snapshot
             (
                 canonical_observation,
                 capability_observation,
@@ -4346,8 +4070,11 @@ class ProviderDispatchCoordinator:
             )
         try:
             return await self._compile_prospective_root_candidate(
-                family, candidate=candidate, canonical_read=canonical_read,
-                deadline=deadline, recall_task=recall_task,
+                family,
+                candidate=candidate,
+                canonical_read=canonical_read,
+                deadline=deadline,
+                recall_task=recall_task,
             )
         finally:
             if recall_task is not None:
@@ -4925,7 +4652,7 @@ class ProviderDispatchCoordinator:
         replacement, reservation = (
             self._context_source_collector.freeze_hook_context_source(
                 scope_kind=identity.conversation_scope_kind.value,
-                child_task_id=identity.scope_subagent_task_id,
+                session_id=identity.session_id,
                 estimator=base.prepared_call.compile_binding.estimator,
             )
         )
@@ -5220,8 +4947,13 @@ class ProviderDispatchCoordinator:
         invalidation_reservations: tuple[MemorySourceInvalidationReservation, ...] = (),
     ) -> PreparedWireMeasurementDecision:
         usage_anchor = None
-        if isinstance(candidate, PreparedProviderWireCandidate) and candidate.planning is not None:
-            usage_anchor = self._continuity.current_usage_anchor(candidate.planning.scope)
+        if (
+            isinstance(candidate, PreparedProviderWireCandidate)
+            and candidate.planning is not None
+        ):
+            usage_anchor = self._continuity.current_usage_anchor(
+                candidate.planning.scope
+            )
             # Cold successors never borrow their predecessor's input calibration.
             if candidate.cold_semantic is not None:
                 usage_anchor = None
@@ -5243,7 +4975,10 @@ class ProviderDispatchCoordinator:
             memory_fallbacks = None
             fallback_basis = candidate
             while (
-                measurement.quote.budget_input_tokens + _remaining_invalidation_input_tokens(candidate, invalidation_reservations)
+                measurement.quote.budget_input_tokens
+                + _remaining_invalidation_input_tokens(
+                    candidate, invalidation_reservations
+                )
                 > measurement.quote.effective_input_budget_tokens
                 or measurement.quote.final_wire_utf8_bytes
                 > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
@@ -5261,7 +4996,9 @@ class ProviderDispatchCoordinator:
                     deadline_monotonic=deadline,
                     request=candidate.compile_request,
                     compiled=candidate.append_result.compiled_input,
-                    planning=(candidate.planning if candidate.cold_semantic is None else None),
+                    planning=(
+                        candidate.planning if candidate.cold_semantic is None else None
+                    ),
                     source_floors=source_floors,
                     tool_floors=tool_floors,
                 )
@@ -5275,30 +5012,45 @@ class ProviderDispatchCoordinator:
                             and fallback_basis.planning is not None
                             and fallback_basis.sources is not None
                             and fallback_basis.append_result is not None
-                            and any(item.source_kind in {
-                                ContextSourceKind.MEMORY_RECALL,
-                                ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
-                            } for item in fallback_basis.sources.candidates)
+                            and any(
+                                item.source_kind
+                                in {
+                                    ContextSourceKind.MEMORY_RECALL,
+                                    ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,
+                                }
+                                for item in fallback_basis.sources.candidates
+                            )
                         ):
-                            memory_sources = {item.source_kind: item for item in (
-                                *fallback_basis.sources.candidates, *fallback_basis.sources.absent_facts
-                            )}
-                            preference = memory_sources.get(ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD)
+                            memory_sources = {
+                                item.source_kind: item
+                                for item in (
+                                    *fallback_basis.sources.candidates,
+                                    *fallback_basis.sources.absent_facts,
+                                )
+                            }
+                            preference = memory_sources.get(
+                                ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD
+                            )
                             recall = memory_sources.get(ContextSourceKind.MEMORY_RECALL)
                             if preference is not None and recall is not None:
-                                recall_reservation, preference_reservation = self._memory_support.planning_reservations(
-                                    planning=fallback_basis.planning,
-                                    prepared_preference=preference,
-                                    recall_desired=recall,
-                                    prepared_call=fallback_basis.prepared_call,
-                                    new_epoch=fallback_basis.cold_semantic is not None,
+                                recall_reservation, preference_reservation = (
+                                    self._memory_support.planning_reservations(
+                                        planning=fallback_basis.planning,
+                                        prepared_preference=preference,
+                                        recall_desired=recall,
+                                        prepared_call=fallback_basis.prepared_call,
+                                        new_epoch=fallback_basis.cold_semantic
+                                        is not None,
+                                    )
                                 )
-                                memory_fallbacks = iter(self._memory_support.optional_value_fallbacks(
-                                    sources=fallback_basis.sources,
-                                    preference_source=preference,
-                                    recall_reservation=recall_reservation,
-                                    preference_reservation=preference_reservation,
-                                ))
+                                memory_fallbacks = iter(
+                                    self._memory_support.optional_value_fallbacks(
+                                        sources=fallback_basis.sources,
+                                        preference_source=preference,
+                                        recall_reservation=recall_reservation,
+                                        preference_reservation=preference_reservation,
+                                    )
+                                )
                     fallback = next(memory_fallbacks, None)
                     while fallback is not None and fallback == candidate.sources:
                         fallback = next(memory_fallbacks, None)
@@ -5309,7 +5061,11 @@ class ProviderDispatchCoordinator:
                     # their floors, without reusing an incompatible wire selection.
                     value_kinds = {item.source_kind for item in fallback.candidates}
                     next_floors = (
-                        tuple((kind, mode) for kind, mode in source_floors if kind in value_kinds),
+                        tuple(
+                            (kind, mode)
+                            for kind, mode in source_floors
+                            if kind in value_kinds
+                        ),
                         tool_floors,
                     )
                     wire_selection = None
@@ -5339,7 +5095,11 @@ class ProviderDispatchCoordinator:
                         tool_render_floors=next_floors[1],
                         wire_selection=wire_selection,
                     )
-                    cold = replace(candidate.cold_semantic, compile_request=request, compiled_result=append)
+                    cold = replace(
+                        candidate.cold_semantic,
+                        compile_request=request,
+                        compiled_result=append,
+                    )
                 candidate = replace(
                     candidate,
                     compile_request=request,
@@ -5355,8 +5115,7 @@ class ProviderDispatchCoordinator:
             _require_dispatch_planning_deadline(deadline)
             quote = measurement.quote
             admitted = (
-                quote.budget_input_tokens
-                <= quote.effective_input_budget_tokens
+                quote.budget_input_tokens <= quote.effective_input_budget_tokens
                 and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
                 and _provider_candidate_meets_input_resource_headroom(candidate)
             )
@@ -5599,7 +5358,7 @@ class ProviderDispatchCoordinator:
             raise ValueError("prepared wire selection lost its dispatch join")
         _require_dispatch_planning_deadline(deadline)
         parent_context_projection = (
-            _prepare_subagent_parent_context_call_subject(
+            _prepare_agent_invocation_snapshot(
                 dispatch=dispatch,
                 compiled_input=selected.append_result.compiled_input,
             )
@@ -5661,10 +5420,14 @@ class ProviderDispatchCoordinator:
             )
             installed = True
             change = dispatch.sources.capability_change
-            if change is not None and self._capability_change_installed is not None and any(
-                decision.source_kind is ContextSourceKind.CAPABILITY_CHANGE
-                and decision.selected_mode is ContextRenderMode.FULL
-                for decision in compiled_input.source_decisions
+            if (
+                change is not None
+                and self._capability_change_installed is not None
+                and any(
+                    decision.source_kind is ContextSourceKind.CAPABILITY_CHANGE
+                    and decision.selected_mode is ContextRenderMode.FULL
+                    for decision in compiled_input.source_decisions
+                )
             ):
                 # Join this tiny process-local update even if transport is cancelled.
                 # No delivery acknowledgement or durable notification job is created.
@@ -5686,8 +5449,8 @@ class ProviderDispatchCoordinator:
                 execution=execution,
                 permit=permit,
                 append_candidate=append_candidate,
-                subagent_parent_context_subject=(
-                    parent_context_projection.bind(permit)
+                agent_invocation_snapshot=(
+                    parent_context_projection
                     if parent_context_projection is not None
                     else None
                 ),
@@ -5718,17 +5481,10 @@ class ProviderDispatchCoordinator:
         )
 
 
-
-
 def _activation_subject_for_anchor(
     canonical_input: CanonicalModelInputSnapshot,
     anchor: NewTriggerAnchor | NoNewTriggerAnchor,
 ) -> tuple[CapabilityActivationSubjectKind | None, str]:
-    if (
-        canonical_input.identity.conversation_scope_kind
-        is ModelInputScopeKind.SUBAGENT_TASK
-    ):
-        return CapabilityActivationSubjectKind.SUBAGENT_OBJECTIVE, ""
     if isinstance(anchor, NewTriggerAnchor):
         matches = tuple(
             item
@@ -5935,49 +5691,39 @@ def _require_compaction_family_candidate_read(
     if (
         seed.dispatch_read != canonical_read
         or _compaction_seed_with_dispatch_read(seed, first_read) != family.seed
-        or not replay_cut_matches
+        or (not replay_cut_matches)
         or (
-            identity.session_id,
-            identity.turn_id,
-            identity.initial_entry_id,
-            identity.context_binding_revision_id,
-            identity.conversation_scope_kind,
-            identity.scope_subagent_task_id,
+            (
+                binding.binding_revision_id,
+                binding.revision_ordinal,
+                binding.base_kind,
+                binding.context_snapshot_id,
+                binding.source_through_sequence,
+            )
+            != (
+                first_binding.binding_revision_id,
+                first_binding.revision_ordinal,
+                first_binding.base_kind,
+                first_binding.context_snapshot_id,
+                first_binding.source_through_sequence,
+            )
         )
-        != (
-            first_identity.session_id,
-            first_identity.turn_id,
-            first_identity.initial_entry_id,
-            first_identity.context_binding_revision_id,
-            first_identity.conversation_scope_kind,
-            first_identity.scope_subagent_task_id,
-        )
+        or (canonical_input.closures != first_input.closures)
+        or (canonical_input.late_outcomes != first_input.late_outcomes)
+        or (not canonical_input.items)
+        or (not (same_window_variant or appended_suffix_variant))
+        or (facts.run_permission_snapshot != first_facts.run_permission_snapshot)
+        or (facts.plan_workflow_fact != first_facts.plan_workflow_fact)
+        or (facts.plan_handoff_fact != first_facts.plan_handoff_fact)
         or (
-            binding.binding_revision_id,
-            binding.revision_ordinal,
-            binding.base_kind,
-            binding.context_snapshot_id,
-            binding.source_through_sequence,
+            facts.approved_plan_materialization_fact
+            != first_facts.approved_plan_materialization_fact
         )
-        != (
-            first_binding.binding_revision_id,
-            first_binding.revision_ordinal,
-            first_binding.base_kind,
-            first_binding.context_snapshot_id,
-            first_binding.source_through_sequence,
+        or (facts.previous_turn_outcome_fact != first_facts.previous_turn_outcome_fact)
+        or (
+            facts.tool_observation_freshness_fact
+            != first_facts.tool_observation_freshness_fact
         )
-        or canonical_input.closures != first_input.closures
-        or canonical_input.late_outcomes != first_input.late_outcomes
-        or not canonical_input.items
-        or not (same_window_variant or appended_suffix_variant)
-        or facts.run_permission_snapshot != first_facts.run_permission_snapshot
-        or facts.plan_workflow_fact != first_facts.plan_workflow_fact
-        or facts.plan_handoff_fact != first_facts.plan_handoff_fact
-        or facts.approved_plan_materialization_fact
-        != first_facts.approved_plan_materialization_fact
-        or facts.previous_turn_outcome_fact != first_facts.previous_turn_outcome_fact
-        or facts.tool_observation_freshness_fact
-        != first_facts.tool_observation_freshness_fact
     ):
         raise StructuredModelInputCompileError(
             ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
@@ -6060,30 +5806,12 @@ def _require_prospective_root_family_candidate(
     if (
         not candidate_is_family_variant
         or not suffix_matches
-        or not same_read_variant
-        or (
-            identity.session_id,
-            identity.turn_id,
-            identity.initial_entry_id,
-            identity.context_binding_revision_id,
-            identity.provider_input_through_sequence,
-            identity.conversation_scope_kind,
-            identity.scope_subagent_task_id,
-        )
-        != (
-            candidate.session_id,
-            candidate.exact_turn_id,
-            candidate.exact_initial_entry_id,
-            candidate.exact_context_binding_revision_id,
-            candidate.exact_initial_entry_sequence,
-            ModelInputScopeKind.ROOT,
-            None,
-        )
-        or binding.binding_revision_id != candidate.exact_context_binding_revision_id
-        or binding.base_kind is not candidate.context_base_kind
-        or binding.context_snapshot_id != candidate.context_snapshot_id
-        or binding.source_through_sequence != candidate.source_through_sequence
-        or facts.run_permission_snapshot != candidate.permission_snapshot
+        or (not same_read_variant)
+        or (binding.binding_revision_id != candidate.exact_context_binding_revision_id)
+        or (binding.base_kind is not candidate.context_base_kind)
+        or (binding.context_snapshot_id != candidate.context_snapshot_id)
+        or (binding.source_through_sequence != candidate.source_through_sequence)
+        or (facts.run_permission_snapshot != candidate.permission_snapshot)
     ):
         raise StructuredModelInputCompileError(
             ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
@@ -6171,11 +5899,7 @@ def _root_dispatch_read_has_only_later_head(
 
     before = prepared.compile_snapshot.canonical_input.identity
     after = actual.compile_snapshot.canonical_input.identity
-    if (
-        before.conversation_scope_kind is not ModelInputScopeKind.ROOT
-        or after.provider_input_through_sequence
-        <= before.provider_input_through_sequence
-    ):
+    if after.provider_input_through_sequence <= before.provider_input_through_sequence:
         return False
     try:
         identity = replace(
@@ -6224,8 +5948,6 @@ def _prospective_steer_compile_snapshot(
         raise ValueError("prospective steer suffix cardinality is invalid")
     canonical = base.canonical_input
     identity = canonical.identity
-    if identity.conversation_scope_kind is not ModelInputScopeKind.ROOT:
-        raise ValueError("prospective steer suffix requires ROOT scope")
     start_sequence = identity.provider_input_through_sequence
     appended: list[FrozenProviderInputItem] = []
     for index, (fact, prompt) in enumerate(zip(facts, prompts, strict=True), start=1):
@@ -6240,11 +5962,13 @@ def _prospective_steer_compile_snapshot(
         appended.append(
             FrozenProviderInputItem(
                 item_kind=FrozenProviderInputItemKind.USER,
-                source_entry_id=derive_id('entry', 'steer', fact.session_id, fact.queue_item_id),
+                source_entry_id=derive_id(
+                    "entry", "steer", fact.session_id, fact.queue_item_id
+                ),
                 source_entry_sequence=start_sequence + index,
                 source_turn_id=identity.turn_id,
                 content=prompt.content.parts,
-                input_origin=CanonicalInputOriginKind.HUMAN_STEER,
+                input_origin=fact.input_origin,
             )
         )
     return _prospective_provider_input_suffix_compile_snapshot(
@@ -6284,7 +6008,6 @@ def _prospective_provider_input_suffix_compile_snapshot(
         "context_binding_revision_id": identity.context_binding_revision_id,
         "provider_input_through_sequence": through,
         "conversation_scope_kind": identity.conversation_scope_kind,
-        "scope_subagent_task_id": identity.scope_subagent_task_id,
     }
     successor_identity = CanonicalModelInputIdentity(
         **identity_values,
@@ -6411,12 +6134,18 @@ def _prospective_provider_input_suffix_dispatch_read(
         identity.session_id != base_identity.session_id
         or identity.turn_id != base_identity.turn_id
         or identity.initial_entry_id != base_identity.initial_entry_id
-        or identity.context_binding_revision_id
-        != base_identity.context_binding_revision_id
-        or identity.provider_input_through_sequence
-        <= base_identity.provider_input_through_sequence
-        or identity.conversation_scope_kind is not base_identity.conversation_scope_kind
-        or identity.scope_subagent_task_id != base_identity.scope_subagent_task_id
+        or (
+            identity.context_binding_revision_id
+            != base_identity.context_binding_revision_id
+        )
+        or (
+            identity.provider_input_through_sequence
+            <= base_identity.provider_input_through_sequence
+        )
+        or (
+            identity.conversation_scope_kind
+            is not base_identity.conversation_scope_kind
+        )
     ):
         raise ValueError("prospective steer dispatch does not extend its base cut")
     old_manifest = base.replay_manifest_cut
@@ -6454,10 +6183,10 @@ def _prospective_active_root_dispatch_read(
         identity.session_id != cut.session_id
         or identity.turn_id != cut.turn_id
         or identity.context_binding_revision_id != cut.context_binding_revision_id
-        or identity.provider_input_through_sequence
-        != cut.provider_input_through_sequence
-        or identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
-        or identity.scope_subagent_task_id is not None
+        or (
+            identity.provider_input_through_sequence
+            != cut.provider_input_through_sequence
+        )
     ):
         raise ValueError("prospective active ROOT suffix base does not exact-join")
     prospective = _prospective_provider_input_suffix_compile_snapshot(
@@ -6482,7 +6211,6 @@ def _dispatch_anchor(
             item
             for item in delta
             if item.source_entry_id == snapshot.identity.initial_entry_id
-            and item.item_kind is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
         )
     else:
         candidates = ()
@@ -6621,36 +6349,6 @@ def _semantic_projection_from_compiled(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _PreparedSubagentParentContextCallSubject:
-    session_id: str
-    caller_turn_id: str
-    provider_input_cut_fingerprint: str
-    compiled_semantic_input_fingerprint: str
-    compiled_message_placements_fingerprint: str
-    ordered_eligible_units: tuple[FrozenRootConversationContextUnitFact, ...]
-
-    def bind(
-        self, permit: ProcessLocalProviderInputInstallPermit
-    ) -> FrozenSubagentParentContextCallSubject:
-        """Bind an already validated projection to the installed epoch."""
-
-        return build_parent_context_call_subject(
-            session_id=self.session_id,
-            caller_turn_id=self.caller_turn_id,
-            provider_input_cut_fingerprint=self.provider_input_cut_fingerprint,
-            continuity_epoch_nonce=permit.epoch_nonce,
-            continuity_epoch_revision=permit.epoch_revision,
-            compiled_semantic_input_fingerprint=(
-                self.compiled_semantic_input_fingerprint
-            ),
-            compiled_message_placements_fingerprint=(
-                self.compiled_message_placements_fingerprint
-            ),
-            ordered_eligible_units=self.ordered_eligible_units,
-        )
-
-
 def _parent_context_user_projection(
     parts: tuple[LLMContentPart, ...],
 ) -> str:
@@ -6670,11 +6368,11 @@ def _parent_context_user_projection(
     return "".join(rendered)
 
 
-def _prepare_subagent_parent_context_call_subject(
+def _prepare_agent_invocation_snapshot(
     *,
     dispatch: PreparedProviderDispatch,
     compiled_input: FrozenCompiledModelInput,
-) -> _PreparedSubagentParentContextCallSubject:
+) -> FrozenAgentInvocationSnapshot:
     """Validate and project the bounded ROOT tail before continuity install.
 
     Placements are the join between compiled messages and canonical entry
@@ -6728,11 +6426,19 @@ def _prepare_subagent_parent_context_call_subject(
             # preceding one.  Canonical turn ids therefore cannot be used as
             # the grouping key.
             if (
-                item.input_origin in {CanonicalInputOriginKind.HUMAN_MESSAGE, CanonicalInputOriginKind.SCHEDULED_TASK}
+                item.input_origin
+                in {
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    CanonicalInputOriginKind.SCHEDULED_TASK,
+                }
                 and current_has_assistant
             ):
                 finish_current_unit()
-            rendered = ("SCHEDULED REQUEST: " if item.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK else "USER: ") + _parent_context_user_projection(message.content)
+            rendered = (
+                "SCHEDULED REQUEST: "
+                if item.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK
+                else "USER: "
+            ) + _parent_context_user_projection(message.content)
         elif (
             message.role is MessageRole.ASSISTANT
             and item.item_kind
@@ -6751,31 +6457,14 @@ def _prepare_subagent_parent_context_call_subject(
             current_entries.append(entry_id)
         current_has_assistant = current_has_assistant or is_assistant
     finish_current_unit()
-    units = tuple(
-        build_root_context_unit(
-            ordered_entry_ids=entry_ids,
-            ordered_public_items=public_items,
-        )
-        for entry_ids, public_items in units_buffer[-3:]
-    )
-    cut = dispatch.cut
-    return _PreparedSubagentParentContextCallSubject(
-        session_id=cut.session_id,
-        caller_turn_id=cut.turn_id,
-        provider_input_cut_fingerprint=context_fingerprint(
-            "pulsara:round10:provider-input-cut:v1",
-            {
-                "session": cut.session_id,
-                "turn": cut.turn_id,
-                "binding": cut.context_binding_revision_id,
-                "through": cut.provider_input_through_sequence,
-            },
+    return FrozenAgentInvocationSnapshot(
+        session_id=dispatch.cut.session_id,
+        turn_id=dispatch.cut.turn_id,
+        model_call_binding=dispatch.prepared_call.call.binding,
+        permission_snapshot=dispatch.canonical_facts.run_permission_snapshot,
+        initial_context_units=tuple(
+            "\n".join(public_items) for _, public_items in units_buffer[-3:]
         ),
-        compiled_semantic_input_fingerprint=compiled.compiled_semantic_fingerprint,
-        compiled_message_placements_fingerprint=(
-            compiled_message_placements_fingerprint(compiled.message_placements)
-        ),
-        ordered_eligible_units=units,
     )
 
 

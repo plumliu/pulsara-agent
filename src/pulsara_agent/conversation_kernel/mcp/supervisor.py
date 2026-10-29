@@ -272,7 +272,6 @@ class McpDispatchAdmissionPermit:
     permit_id: str
     session_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     turn_id: str
     tool_call_id: str
     descriptor_fingerprint: str
@@ -526,7 +525,6 @@ class McpConnectionSlot:
         lease: McpSlotLease,
         session_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         turn_id: str,
         tool_call_id: str,
         descriptor_fingerprint: str,
@@ -547,7 +545,6 @@ class McpConnectionSlot:
                 permit_id=permit_id,
                 session_id=session_id,
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
                 turn_id=turn_id,
                 tool_call_id=tool_call_id,
                 descriptor_fingerprint=descriptor_fingerprint,
@@ -655,7 +652,6 @@ class McpBoundToolExecutor:
         *,
         session_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         turn_id: str,
         tool_call_id: str,
     ) -> McpDispatchAdmissionPermit:
@@ -663,7 +659,6 @@ class McpBoundToolExecutor:
             lease=self.lease,
             session_id=session_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             turn_id=turn_id,
             tool_call_id=tool_call_id,
             descriptor_fingerprint=self.semantic.descriptor_fingerprint,
@@ -974,7 +969,6 @@ class McpInstalledRuntimeGeneration:
         descriptor_fingerprint: str,
         session_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         turn_id: str,
         tool_call_id: str,
     ) -> McpDispatchAdmissionPermit | None:
@@ -997,7 +991,6 @@ class McpInstalledRuntimeGeneration:
             lease=runtime_lease,
             session_id=session_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             turn_id=turn_id,
             tool_call_id=tool_call_id,
             descriptor_fingerprint=descriptor_fingerprint,
@@ -2210,7 +2203,7 @@ class McpHostSupervisor:
                 candidates, ModelInputScopeKind.ROOT
             )
             child, child_collisions = _aggregate_provider_projection(
-                candidates, ModelInputScopeKind.SUBAGENT_TASK
+                candidates, ModelInputScopeKind.SUBAGENT
             )
             execution_semantics = tuple(
                 sorted(
@@ -2247,7 +2240,7 @@ class McpHostSupervisor:
             runtime_generation = self._runtime_generation
             catalog = self._catalog_locked(ModelInputScopeKind.ROOT)
             subagent_catalog = self._catalog_locked(
-                ModelInputScopeKind.SUBAGENT_TASK
+                ModelInputScopeKind.SUBAGENT
             )
         policy_by_target = {
             (policy.server_id, policy.remote_tool_name): policy
@@ -2429,14 +2422,9 @@ class McpHostSupervisor:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> PreparedMcpCapabilitySourceSnapshotSet:
         """Freeze every enabled config source under the supervisor lock."""
 
-        if (conversation_scope_kind is ModelInputScopeKind.ROOT) != (
-            scope_subagent_task_id is None
-        ):
-            raise ValueError("MCP capability scope identity is invalid")
         with self._lock:
             if self._closed:
                 raise RuntimeError("MCP supervisor is closed")
@@ -2453,7 +2441,7 @@ class McpHostSupervisor:
                 if not config.enabled:
                     continue
                 if (
-                    conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK
+                    conversation_scope_kind is ModelInputScopeKind.SUBAGENT
                     and config.scope_policy is not McpScopePolicy.ROOT_AND_SUBAGENTS
                 ):
                     continue
@@ -2508,7 +2496,6 @@ class McpHostSupervisor:
                 source_snapshot = freeze_capability_source_snapshot(
                         registration=registration,
                         conversation_scope_kind=conversation_scope_kind,
-                        scope_subagent_task_id=scope_subagent_task_id,
                         disposition=disposition,
                         facts=facts,
                     )
@@ -2557,7 +2544,6 @@ class McpHostSupervisor:
             catalog = self._catalog_locked(conversation_scope_kind)
             return issue_mcp_capability_source_snapshot_set(
                 conversation_scope_kind=conversation_scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
                 source_snapshots=ordered,
                 catalog_snapshot=catalog,
                 inspection_inputs=tuple(
@@ -2639,7 +2625,6 @@ class McpHostSupervisor:
         )
         return FrozenMcpCapabilityProjectionInput(
             conversation_scope_kind=owner.conversation_scope_kind,
-            scope_subagent_task_id=owner.scope_subagent_task_id,
             source_snapshots=owner.source_snapshots,
             catalog_semantic_fingerprint=catalog.semantic_fingerprint,
             inspectability_facts=ordered_inspectability,
@@ -2670,7 +2655,7 @@ class McpHostSupervisor:
         }
         for config in self.configs:
             if (
-                scope is ModelInputScopeKind.SUBAGENT_TASK
+                scope is ModelInputScopeKind.SUBAGENT
                 and config.scope_policy is not McpScopePolicy.ROOT_AND_SUBAGENTS
             ):
                 continue

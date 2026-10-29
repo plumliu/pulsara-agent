@@ -31,7 +31,7 @@ describe('Plugin connection editor', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  it('does not expose executable or policy mutations through the connection editor', async () => {
+  it('does not expose executable or effect policy mutations through the connection editor', async () => {
     const save = vi.fn(async () => true);
     const stdio = {...connection, config: {transport: {type: 'stdio', command: 'npx', args: ['-y', 'fixture'], cwd: '.', env: {}}, auth: {type: 'none'}}, overlay: null};
     render(<PluginConnectionEditor plugin={plugin} connection={{...stdio, defaults: stdio.config}} onSave={save} onClose={vi.fn()} onAuthorization={vi.fn()} />);
@@ -42,8 +42,19 @@ describe('Plugin connection editor', () => {
     fireEvent.change(screen.getByLabelText('普通环境变量（JSON 对象，不填写密钥）'), {target: {value: '{"REGION":"west"}'}});
     fireEvent.click(screen.getByRole('button', {name: '保存连接'}));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({overlay: {
-      local_server_id: 'search', transport_kind: 'stdio', endpoint: null,
+      local_server_id: 'search', transport_kind: 'stdio', scope_policy: 'ROOT_ONLY', endpoint: null,
       public_headers: {}, environment: {REGION: 'west'}, secret_environment: {}, auth: {type: 'none'},
     }})));
   });
+});
+
+
+it('uses the common MCP scope toggle and saves its selected policy', async () => {
+  const save = vi.fn(async () => true);
+  render(<PluginConnectionEditor plugin={plugin} connection={{...connection, config: {...connection.config, scope_policy: 'ROOT_ONLY'}}} onSave={save} onClose={vi.fn()} />);
+  const scope = screen.getByRole('checkbox', {name: '也向委派 Agent 提供'});
+  expect((scope as HTMLInputElement).checked).toBe(false);
+  fireEvent.click(scope);
+  fireEvent.click(screen.getByRole('button', {name: '保存连接'}));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({overlay: expect.objectContaining({scope_policy: 'ROOT_AND_SUBAGENTS'})})));
 });

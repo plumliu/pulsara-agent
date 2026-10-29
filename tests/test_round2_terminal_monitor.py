@@ -583,7 +583,7 @@ def test_round2_monitor_completion_coalesces_pending_progress_and_cursor_advance
     registry.release_owner(owner, timeout_seconds=3)
 
 
-def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
+def test_round2_terminal_monitor_tool_shared_work_scope_and_root_settlement(
     tmp_path: Path,
 ) -> None:
     async def scenario() -> None:
@@ -651,28 +651,31 @@ def test_round2_terminal_monitor_tool_root_settlement_and_subagent_rejection(
                 mismatch_borrow.close()
         assert port.terminal_monitor_coordinator.list_current() == ()
 
-        child_surface = prepare_test_direct_tool_surface(
-            port,
-            conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
-        )
-        assert "terminal_monitor" not in {
-            spec.name for spec in child_surface.model_surface.tool_specs
-        }
-        with pytest.raises(RuntimeError, match="not advertised"):
-            await invoke_direct_tool(
-                port,
-                session_id=session_id,
-                workspace_id='workspace:n6yg6xfimeb4eiul4gaa43wgmu',
-                tool_name="terminal_monitor",
-                arguments={"action": "register", "target": process_target},
-                tool_call_id="call:SUBAGENT_TASK",
-                attempt_id='attempt:scc6tomtfah2vnphmqnf4npzjy',
-                turn_id='turn:evue3iiyois6caa2g3in2f7rnu',
-                assistant_entry_id='entry:magflyy6cksxnaojtolyvzzpcu',
-                conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-                scope_subagent_task_id='task:t2ptfli5koch6nfrihpkwl3kvi',
-            )
+        child_session = random_id("session")
+        child_turn = random_id("turn")
+        child_port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id=random_id("host"),
+            session_id=child_session, live_bus=live_bus,
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy(), shared_terminal_owner=port)
+        child_surface = prepare_test_direct_tool_surface(child_port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
+        assert "terminal_monitor" in {spec.name for spec in child_surface.model_surface.tool_specs}
+
+        async def invoke_child(label, arguments):
+            return await invoke_direct_tool(child_port, session_id=child_session,
+                tool_name="terminal_monitor", arguments=arguments, tool_call_id=f"call:child-{label}",
+                attempt_id=random_id("attempt"), turn_id=child_turn, assistant_entry_id=random_id("entry"),
+                conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
+
+        child_registered = await invoke_child("register", {"action": "register", "target": process_target})
+        assert child_registered.state == "SUCCESS"
+        await child_port.settle_process_local_effect(child_registered.process_local_settlement,
+            ProcessLocalEffectSettlementDisposition.COMMITTED)
+        child_body = json.loads(child_registered.content)
+        assert port.terminal_monitor_coordinator.registration_scope(child_body["target"]["monitor_id"]) == (child_session, child_session, child_turn)
+        assert len(json.loads((await invoke_child("list", {"action": "list"})).content)["monitors"]) == 1
+        child_cancelled = await invoke_child("cancel", {"action": "cancel", "target": child_body["target"]})
+        assert json.loads(child_cancelled.content)["status"] == "CANCELLED"
+        await child_port.aclose(timeout_seconds=3)
+        assert port.terminal_monitor_coordinator.list_current() == ()
 
         registered = await invoke_root(
             "ROOT",
@@ -826,8 +829,7 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
             attempt_id='attempt:bvznwpxsjqpdc7yav4lgfvvbkq',
             turn_id='turn:yndpt43qq5exwddahqtsuhjxd4',
             assistant_entry_id='entry:cbgpjjjc35xgohf2jvhwqnrvoa',
-            conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id='task:twul7hv3qpuxipu3qslwr755ci',
+            conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
         )
         assert json.loads(started.content)["status"] == "running"
 
@@ -851,8 +853,8 @@ def test_round2_subagent_terminal_completion_preserves_exact_process_origin(
                 await asyncio.sleep(0.01)
 
         assert completion.turn_id == 'turn:yndpt43qq5exwddahqtsuhjxd4'
-        assert completion.scope_kind == "SUBAGENT_TASK"
-        assert completion.scope_subagent_task_id == 'task:twul7hv3qpuxipu3qslwr755ci'
+        assert completion.scope_kind == "SUBAGENT"
+        assert completion.session_id == 'session:p4dfhpwhrtwwusdq4xpm5xludi'
         await port.aclose(timeout_seconds=3)
 
     asyncio.run(scenario())

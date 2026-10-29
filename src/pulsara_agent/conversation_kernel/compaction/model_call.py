@@ -288,9 +288,7 @@ class PreparedCompactionSummarySemantic:
             projection_ordinal = proof.projection_message_ordinal
             active_ordinal = proof.active_request_message_ordinal
             summary_ordinal = (
-                projection_ordinal + 1
-                if active_ordinal is None
-                else active_ordinal + 1
+                projection_ordinal + 1 if active_ordinal is None else active_ordinal + 1
             )
             current_messages, current_placements, active_placement = (
                 _destination_source_messages_and_active_placement(
@@ -302,9 +300,7 @@ class PreparedCompactionSummarySemantic:
                 message_ordinal=summary_ordinal,
                 role=MessageRole.USER,
                 domain="destination-request",
-                identity={
-                    "prompt": summary_request_fingerprint(self.summary_request)
-                },
+                identity={"prompt": summary_request_fingerprint(self.summary_request)},
             )
             if (
                 self.call.target.fact != proof.target_fact
@@ -457,12 +453,11 @@ class PreparedCompactionSummaryCall:
                 self._semantic.canonical_read.compile_snapshot.canonical_input.identity.turn_id
             ),
             live_bus=_NullLiveBus(),  # type: ignore[arg-type]
-            proposed_entry_id=derive_id("entry", "compaction-summary", self.request_fingerprint),
+            proposed_entry_id=derive_id(
+                "entry", "compaction-summary", self.request_fingerprint
+            ),
             conversation_scope_kind=(
                 self._semantic.canonical_read.compile_snapshot.canonical_input.identity.conversation_scope_kind.value
-            ),
-            scope_subagent_task_id=(
-                self._semantic.canonical_read.compile_snapshot.canonical_input.identity.scope_subagent_task_id
             ),
         )
         terminal: ProviderStreamTerminal | None = None
@@ -525,7 +520,9 @@ class PreparedCompactionSummaryCall:
                 if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
                     with self._lock:
                         self._state = _SummaryCallState.DISCARDED
-                    raise RuntimeError("summary provider physical operation did not exit")
+                    raise RuntimeError(
+                        "summary provider physical operation did not exit"
+                    )
             finally:
                 borrowed.close()
         assert response is not None
@@ -738,8 +735,7 @@ def prepare_destination_projection_summary_semantic(
             raise ValueError("destination projection summary inputs do not exact-join")
     elif (
         canonical_source.turn_status != "RUNNING"
-        or active_request.location
-        is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
+        or active_request.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
         or active_request.content is None
         or active_request.entry_id != identity.initial_entry_id
         or active_request_placement is None

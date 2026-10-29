@@ -76,7 +76,6 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     freeze_compaction_runtime_handoff,
-    freeze_subagent_task_board_fact,
 )
 from pulsara_agent.conversation_kernel.compaction.retained_skill import (
     FrozenRetainedSkillContextItem,
@@ -194,6 +193,8 @@ def _wire_quote(
 
 def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> None:
     host = object.__new__(KernelHostSession)
+    host._session_scope_kind = ModelInputScopeKind.ROOT
+    host._root_session_id = None
     host._writer_renewal_failure = None
     host._scheduled_tasks = None
     host._manual_compaction_command_attempts = {}
@@ -210,21 +211,19 @@ def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> N
 
     host._settle_manual_compaction_command_worker = settle
     exact = build_prepared_manual_compaction_command(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        command_id='command:u5fuuol2z2xsyv3uxg27btghta',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+        command_id="command:u5fuuol2z2xsyv3uxg27btghta",
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        target_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
-        expected_active_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        target_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
+        expected_active_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         force=True,
     )
     conflict = build_prepared_manual_compaction_command(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        command_id='command:u5fuuol2z2xsyv3uxg27btghta',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+        command_id="command:u5fuuol2z2xsyv3uxg27btghta",
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        target_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
-        expected_active_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        target_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
+        expected_active_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         force=False,
     )
 
@@ -249,20 +248,19 @@ def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> N
 def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
     item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.USER,
-        source_entry_id='entry:y6jkowpgiqxwej33rrbobhtonm',
+        source_entry_id="entry:y6jkowpgiqxwej33rrbobhtonm",
         source_entry_sequence=1,
-        source_turn_id='turn:b565wrncq4ezfqthehjqni5ilm',
+        source_turn_id="turn:b565wrncq4ezfqthehjqni5ilm",
         content=(LLMTextPart("root exact-scope history"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
     identity_values = {
-        "session_id": 'session:336wrfwkamrr3up6kjtsgvgcte',
-        "turn_id": 'turn:b565wrncq4ezfqthehjqni5ilm',
-        "initial_entry_id": 'entry:y6jkowpgiqxwej33rrbobhtonm',
-        "context_binding_revision_id": 'binding:w57vea2u34hotx7v45jzzidtdi',
+        "session_id": "session:336wrfwkamrr3up6kjtsgvgcte",
+        "turn_id": "turn:b565wrncq4ezfqthehjqni5ilm",
+        "initial_entry_id": "entry:y6jkowpgiqxwej33rrbobhtonm",
+        "context_binding_revision_id": "binding:w57vea2u34hotx7v45jzzidtdi",
         "provider_input_through_sequence": 1,
         "conversation_scope_kind": ModelInputScopeKind.ROOT,
-        "scope_subagent_task_id": None,
     }
     identity = CanonicalModelInputIdentity(
         **identity_values,
@@ -289,7 +287,6 @@ def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
         scope=ProviderInputContinuityScope(
             session_id=identity.session_id,
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         ),
         context_binding_revision_id=identity.context_binding_revision_id,
         provider_input_through_sequence=1,
@@ -346,7 +343,7 @@ def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
 def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> None:
     units = (
         RecentDialogueUnit(
-            'turn:uyenyjpuysm57ziiygjzxjhcum',
+            "turn:uyenyjpuysm57ziiygjzxjhcum",
             (1, 2),
             (
                 DestinationDialogueEntry(
@@ -364,7 +361,7 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
             ),
         ),
         RecentDialogueUnit(
-            'turn:tgnq76so2tupmonbxpxhivfuya',
+            "turn:tgnq76so2tupmonbxpxhivfuya",
             (3, 4),
             (
                 DestinationDialogueEntry(
@@ -384,25 +381,25 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
     )
     plan = DestinationDialogueProjectionPlan(
         units,
+        (
+            "prior handover",
             (
-                "prior handover",
-                (
-                    FrozenRetainedHistoricalRequest(
-                        FrozenProviderInputItemKind.USER,
-                        CanonicalInputOriginKind.HUMAN_MESSAGE,
-                        FrozenPromptContent.text("quoted request"),
-                    ),
+                FrozenRetainedHistoricalRequest(
+                    FrozenProviderInputItemKind.USER,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    FrozenPromptContent.text("quoted request"),
                 ),
+            ),
             (
                 FrozenRetainedHistoricalRequest(
                     FrozenProviderInputItemKind.USER,
                     CanonicalInputOriginKind.HUMAN_MESSAGE,
                     FrozenPromptContent.text("first retained request"),
                 ),
-                    FrozenRetainedHistoricalRequest(
-                        FrozenProviderInputItemKind.USER,
-                        CanonicalInputOriginKind.HUMAN_MESSAGE,
-                        FrozenPromptContent.text("second retained request"),
+                FrozenRetainedHistoricalRequest(
+                    FrozenProviderInputItemKind.USER,
+                    CanonicalInputOriginKind.HUMAN_MESSAGE,
+                    FrozenPromptContent.text("second retained request"),
                 ),
             ),
         ),
@@ -425,7 +422,7 @@ def test_model_switch_destination_projection_enumerates_every_safe_suffix() -> N
 
 def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> None:
     timing_values = {
-        "source_turn_ref": 'turn:26orapncpvxkk3y5pgostrckxy',
+        "source_turn_ref": "turn:26orapncpvxkk3y5pgostrckxy",
         "observed_at_utc": "2026-09-05T01:02:03.000000Z",
         "observation_duration_microseconds": 1_000,
         "duration_disposition": ToolObservationDurationDisposition.MEASURED,
@@ -461,10 +458,10 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             FrozenProviderInputItemKind.TOOL_RESULT,
             entry_id,
             sequence,
-            'turn:26orapncpvxkk3y5pgostrckxy',
+            "turn:26orapncpvxkk3y5pgostrckxy",
             content.parts,
             tool_call_id=call_id,
-            tool_request_entry_id='entry:r5xcztujvbd5zdxa7dypuwlfu4',
+            tool_request_entry_id="entry:r5xcztujvbd5zdxa7dypuwlfu4",
             tool_result_context=ProviderToolResultContextMetadata(
                 result_id=derive_id("result", "test-fixture", f"result:{entry_id}"),
                 result_state="SUCCESS",
@@ -478,13 +475,13 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
                 timing=timing,
             ),
             tool_result_body_text=(
-                frozen_tool_result_public_text(content)
-                if image is not None
-                else body
+                frozen_tool_result_public_text(content) if image is not None else body
             ),
             tool_call_ordinal=call_ordinal if image is not None else None,
             tool_call_arguments=(
-                freeze_json({"target": {"kind": "PATH", "path": f"/tmp/{call_ordinal}.png"}})
+                freeze_json(
+                    {"target": {"kind": "PATH", "path": f"/tmp/{call_ordinal}.png"}}
+                )
                 if image is not None
                 else None
             ),
@@ -500,24 +497,24 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     items = (
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
-            'entry:f3pvwz6qx7l3kikeem44hseak4',
+            "entry:f3pvwz6qx7l3kikeem44hseak4",
             1,
-            'turn:26orapncpvxkk3y5pgostrckxy',
+            "turn:26orapncpvxkk3y5pgostrckxy",
             (LLMTextPart(exact_user), user_image),
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         ),
-            FrozenProviderInputItem(
-                FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
-                'entry:rzpgakg2p7mvgv7qynfvsvkinu',
-                2,
-                'turn:26orapncpvxkk3y5pgostrckxy',
-                (LLMTextPart(json.dumps({"output": terminal_marker})),),
+        FrozenProviderInputItem(
+            FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+            "entry:rzpgakg2p7mvgv7qynfvsvkinu",
+            2,
+            "turn:26orapncpvxkk3y5pgostrckxy",
+            (LLMTextPart(json.dumps({"output": terminal_marker})),),
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-            'entry:r5xcztujvbd5zdxa7dypuwlfu4',
+            "entry:r5xcztujvbd5zdxa7dypuwlfu4",
             3,
-            'turn:26orapncpvxkk3y5pgostrckxy',
+            "turn:26orapncpvxkk3y5pgostrckxy",
             (LLMTextPart("I will inspect both files."),),
             tool_calls=(
                 ProviderToolCall(
@@ -533,7 +530,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             ),
         ),
         result(
-            entry_id='entry:ggqh5fieaduz3z5is2njchsrpi',
+            entry_id="entry:ggqh5fieaduz3z5is2njchsrpi",
             sequence=4,
             call_id="call:secret:first",
             body=first_result,
@@ -541,7 +538,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             image=tool_image,
         ),
         result(
-            entry_id='entry:lgy3loopx5sx3ptibkj4fnpmle',
+            entry_id="entry:lgy3loopx5sx3ptibkj4fnpmle",
             sequence=5,
             call_id="call:secret:second",
             body=second_result,
@@ -549,37 +546,37 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT,
-            'entry:6jyinxr36yzqhbny3v6wk2htbi',
+            "entry:6jyinxr36yzqhbny3v6wk2htbi",
             6,
-            'turn:26orapncpvxkk3y5pgostrckxy',
+            "turn:26orapncpvxkk3y5pgostrckxy",
             (LLMTextPart(exact_assistant),),
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
-            'entry:bgpio3mnsfdvaubijrvpei74qi',
+            "entry:bgpio3mnsfdvaubijrvpei74qi",
             7,
-            'turn:5nteonvxe3oicaacfo2f2jzdua',
+            "turn:5nteonvxe3oicaacfo2f2jzdua",
             (LLMTextPart("recent question"),),
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT,
-            'entry:t4sn2lv7lyysqarycypmbyble4',
+            "entry:t4sn2lv7lyysqarycypmbyble4",
             8,
-            'turn:5nteonvxe3oicaacfo2f2jzdua',
+            "turn:5nteonvxe3oicaacfo2f2jzdua",
             (LLMTextPart("recent answer"),),
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.USER,
-            'entry:rca7nuj2wtwmiyjrlmtwk4lume',
+            "entry:rca7nuj2wtwmiyjrlmtwk4lume",
             9,
-            'turn:kezb35l4prynpikloa5x3helji',
+            "turn:kezb35l4prynpikloa5x3helji",
             (LLMTextPart("active request is carried separately"),),
             input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
         ),
     )
     canonical = SimpleNamespace(
-        identity=SimpleNamespace(initial_entry_id='entry:rca7nuj2wtwmiyjrlmtwk4lume'),
+        identity=SimpleNamespace(initial_entry_id="entry:rca7nuj2wtwmiyjrlmtwk4lume"),
         items=items,
     )
     canonical_read = SimpleNamespace(
@@ -591,7 +588,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
         snapshot_carrier=None,
     )
     active = FrozenCompactionActiveRequest(
-        entry_id='entry:rca7nuj2wtwmiyjrlmtwk4lume',
+        entry_id="entry:rca7nuj2wtwmiyjrlmtwk4lume",
         entry_sequence=9,
         location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
         item_kind=FrozenProviderInputItemKind.USER,
@@ -621,10 +618,18 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
     assert first_result not in rendered
     assert second_result not in rendered
     user_reference = canonical_json_bytes(
-        {"pulsara_image": {"target": {"kind": "IMAGE_REF", "image_ref": user_image.image_ref}}}
+        {
+            "pulsara_image": {
+                "target": {"kind": "IMAGE_REF", "image_ref": user_image.image_ref}
+            }
+        }
     ).decode("utf-8")
     tool_reference = canonical_json_bytes(
-        {"pulsara_image": {"target": {"kind": "IMAGE_REF", "image_ref": tool_image.image_ref}}}
+        {
+            "pulsara_image": {
+                "target": {"kind": "IMAGE_REF", "image_ref": tool_image.image_ref}
+            }
+        }
     ).decode("utf-8")
     assert rendered.count(user_reference) == 1
     assert tool_reference not in rendered
@@ -644,18 +649,14 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
 
     first_evidence = plan.units[0].entries[2].requested_tools[0]
     assert first_evidence.result_content is not None
-    assert any(
-        isinstance(part, LLMImagePart) for part in first_evidence.result_content
-    )
+    assert any(isinstance(part, LLMImagePart) for part in first_evidence.result_content)
     tier3_plan = project_destination_dialogue_plan_for_text_only_handover(plan)
     tier3_projection = enumerate_destination_backbone_projections(tier3_plan)[0]
     tier3_retained = retain_destination_tool_evidence(
         tier3_projection,
         tier3_projection.eligible_evidence[0],
     )
-    assert not any(
-        isinstance(part, LLMImagePart) for part in tier3_retained.content
-    )
+    assert not any(isinstance(part, LLMImagePart) for part in tier3_retained.content)
     tier3_text = join_text_content(tier3_retained.content)
     assert tier3_text.count("[历史图片引用；此处未包含图像内容]") == 2
     assert user_reference not in tier3_text
@@ -668,22 +669,19 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
     """The revision-zero marker is an exact row identity, not a range floor."""
 
     scope = CompactionScope(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
-        turn_id='turn:w624bqpw6wyxzym723etffdr5y',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+        workspace_id="workspace:wdl6b3mtrkghwnvjo4an3ekbau",
+        turn_id="turn:w624bqpw6wyxzym723etffdr5y",
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
 
     def prepare(base_kind: str, context_snapshot_id: str | None) -> object:
         carrier = build_compaction_snapshot_carrier(
-            summary=freeze_compaction_summary_output(
-                "summary", maximum_utf8_bytes=100
-            ),
+            summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=100),
             recent_human_requests=(),
             continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
             active_request=FrozenCompactionActiveRequest(
-                entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
+                entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
                 entry_sequence=40,
                 location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
                 item_kind=FrozenProviderInputItemKind.USER,
@@ -697,7 +695,7 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
                 target_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
                 expected_turn_status="RUNNING",
                 predecessor=ExpectedCompactionPredecessorRevision(
-                    binding_revision_id='binding:uxgaw7g2yop65mac4zugxv3zam',
+                    binding_revision_id="binding:uxgaw7g2yop65mac4zugxv3zam",
                     revision_ordinal=0,
                     base_kind=base_kind,
                     context_snapshot_id=context_snapshot_id,
@@ -705,9 +703,9 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
                     # the earliest protected same-scope history boundary.
                     source_through_sequence=100,
                 ),
-                snapshot_id='snapshot:f5xvdwgxrgbnnhk5jqa2gb37lm',
-                binding_revision_id='binding:4lrucnacio3qflnu3cc4kx54by',
-                event_id='event:nw6p5jbn5mqijikb3g3vpelwva',
+                snapshot_id="snapshot:f5xvdwgxrgbnnhk5jqa2gb37lm",
+                binding_revision_id="binding:4lrucnacio3qflnu3cc4kx54by",
+                event_id="event:nw6p5jbn5mqijikb3g3vpelwva",
                 source_through_sequence=40,
                 source_digest="sha256:" + "a" * 64,
                 snapshot_content=InlineContent.from_bytes(
@@ -730,7 +728,7 @@ def test_round5b_first_full_history_adoption_uses_zero_effective_floor() -> None
     assert candidate.snapshot.source_through_sequence == 40
 
     with pytest.raises(ValueError, match="factory input"):
-        prepare("SNAPSHOT", 'snapshot:sevw3qto7escj6b4f5pl3xsjei')
+        prepare("SNAPSHOT", "snapshot:sevw3qto7escj6b4f5pl3xsjei")
 
 
 @pytest.mark.parametrize(
@@ -827,7 +825,7 @@ def test_round5b_summary_normalizer_and_snapshot_carrier_are_bounded() -> None:
         ),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request=FrozenCompactionActiveRequest(
-            entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
+            entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
             entry_sequence=7,
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
             item_kind=FrozenProviderInputItemKind.USER,
@@ -882,9 +880,7 @@ def test_snapshot_lowering_labels_active_recent_and_historical_images_once() -> 
     recent_image = bound_test_image("image/png", b"recent-image", 5, 4)
     historical_image = bound_test_image("image/png", b"historical-image", 6, 5)
     carrier = build_compaction_snapshot_carrier(
-        summary=freeze_compaction_summary_output(
-            "summary", maximum_utf8_bytes=100
-        ),
+        summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=100),
         recent_human_requests=(
             FrozenRetainedHistoricalRequest(
                 FrozenProviderInputItemKind.USER,
@@ -894,7 +890,7 @@ def test_snapshot_lowering_labels_active_recent_and_historical_images_once() -> 
         ),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request=FrozenCompactionActiveRequest(
-            entry_id='entry:e2obsvliqi2ydhazbnahh7j4ji',
+            entry_id="entry:e2obsvliqi2ydhazbnahh7j4ji",
             entry_sequence=7,
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
             item_kind=FrozenProviderInputItemKind.USER,
@@ -905,9 +901,7 @@ def test_snapshot_lowering_labels_active_recent_and_historical_images_once() -> 
             FrozenRetainedHistoricalRequest(
                 FrozenProviderInputItemKind.USER,
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
-                FrozenPromptContent(
-                    (LLMTextPart("historical"), historical_image)
-                ),
+                FrozenPromptContent((LLMTextPart("historical"), historical_image)),
             ),
         ),
     )
@@ -919,15 +913,18 @@ def test_snapshot_lowering_labels_active_recent_and_historical_images_once() -> 
         if not isinstance(part, LLMImagePart):
             continue
         expected = canonical_json_bytes(
-            {"pulsara_image": {"target": {"kind": "IMAGE_REF", "image_ref": part.image_ref}}}
+            {
+                "pulsara_image": {
+                    "target": {"kind": "IMAGE_REF", "image_ref": part.image_ref}
+                }
+            }
         ).decode("utf-8")
         assert index > 0
         assert lowered[index - 1] == LLMTextPart(expected)
     labels = tuple(
         part.text
         for part in lowered
-        if isinstance(part, LLMTextPart)
-        and part.text.startswith('{"pulsara_image"')
+        if isinstance(part, LLMTextPart) and part.text.startswith('{"pulsara_image"')
     )
     assert len(labels) == len(images) == 3
 
@@ -939,7 +936,7 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
         recent_human_requests=(),
         continuation_mode=CompactionContinuationMode.RESUME_ACTIVE_TURN,
         active_request=FrozenCompactionActiveRequest(
-            entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
+            entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
             entry_sequence=4,
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
             item_kind=FrozenProviderInputItemKind.USER,
@@ -960,13 +957,13 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
             compile_snapshot=SimpleNamespace(
                 canonical_input=SimpleNamespace(
                     identity=SimpleNamespace(
-                        initial_entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
+                        initial_entry_id="entry:2b6xhmrsvzz7q4sgugd5cuq34a",
                         provider_input_through_sequence=12,
                     ),
                     items=(snapshot_item,),
                 )
             )
-        )
+        ),
     )
 
     mode, active = freeze_compaction_continuation(
@@ -977,7 +974,7 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
 
     assert mode is CompactionContinuationMode.RESUME_ACTIVE_TURN
     assert active is not None
-    assert active.entry_id == 'entry:2b6xhmrsvzz7q4sgugd5cuq34a'
+    assert active.entry_id == "entry:2b6xhmrsvzz7q4sgugd5cuq34a"
     assert active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
     assert active.content is not None
     assert join_text_content(active.content.parts) == "exact active request"
@@ -986,9 +983,9 @@ def test_round5b_repeated_compaction_carries_runtime_owned_active_request() -> N
 def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> None:
     plan_item = FrozenProviderInputItem(
         item_kind=FrozenProviderInputItemKind.PLAN_CONTINUATION,
-        source_entry_id='entry:3l5haylzxbxjrbtnkybkafoypm',
+        source_entry_id="entry:3l5haylzxbxjrbtnkybkafoypm",
         source_entry_sequence=9,
-        source_turn_id='turn:lm5ibydqxua377vt3bxuuqgvvu',
+        source_turn_id="turn:lm5ibydqxua377vt3bxuuqgvvu",
         content=(LLMTextPart('{"plan_continuation":"resume approved plan"}'),),
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
@@ -997,7 +994,7 @@ def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> Non
             compile_snapshot=SimpleNamespace(
                 canonical_input=SimpleNamespace(
                     identity=SimpleNamespace(
-                        initial_entry_id='entry:3l5haylzxbxjrbtnkybkafoypm',
+                        initial_entry_id="entry:3l5haylzxbxjrbtnkybkafoypm",
                         provider_input_through_sequence=9,
                     ),
                     items=(plan_item,),
@@ -1016,7 +1013,9 @@ def test_round5b_non_human_initial_activation_is_mechanically_resumable() -> Non
     assert active is not None
     assert active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
     assert active.content is not None
-    assert join_text_content(active.content.parts) == provider_input_item_text(plan_item)
+    assert join_text_content(active.content.parts) == provider_input_item_text(
+        plan_item
+    )
 
 
 @pytest.mark.parametrize(
@@ -1130,7 +1129,9 @@ def test_round5b_has_no_presummary_successor_lower_bound_gate() -> None:
     assert "estimate_unavoidable_compaction_successor_tokens" not in coordinator
 
 
-def test_final_wire_successor_deadline_starts_after_snapshot_descriptor_freeze() -> None:
+def test_final_wire_successor_deadline_starts_after_snapshot_descriptor_freeze() -> (
+    None
+):
     coordinator = (
         ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
     ).read_text(encoding="utf-8")
@@ -1373,10 +1374,9 @@ def test_model_switch_wire_transition_uses_destination_trigger_and_exact_binding
     )
     destination_binding = SimpleNamespace(connection_id="destination")
     identity = SimpleNamespace(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+        turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     canonical_read = SimpleNamespace(
         compile_snapshot=SimpleNamespace(
@@ -1573,17 +1573,15 @@ def test_compaction_wire_transition_joins_authority_before_numeric_reclaim(
     successor_estimator_fingerprint = successor_estimator.fact.estimator_fingerprint
     successor_budget = 900 if drift == "budget" else 1_000
     source_identity = SimpleNamespace(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+        turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     successor_identity = (
         SimpleNamespace(
-            session_id='session:sjiboxs4asbh5n6mg6cpdgcsqu',
-            turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
+            session_id="session:sjiboxs4asbh5n6mg6cpdgcsqu",
+            turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         if drift == "cut"
         else source_identity
@@ -1764,7 +1762,7 @@ def test_compaction_fenced_restarts_are_stack_free_and_keep_one_attempt_token(
         return compaction_coordinator.CompactionExecutionResult(
             CompactionOutcome(
                 CompactionDisposition.NOT_NEEDED,
-                'turn:ldd7xlgxy5egfgaw2np63qgzbm',
+                "turn:ldd7xlgxy5egfgaw2np63qgzbm",
                 None,
                 None,
                 "BELOW_TRIGGER",
@@ -1777,11 +1775,10 @@ def test_compaction_fenced_restarts_are_stack_free_and_keep_one_attempt_token(
         execute_once,
     )
     scope = CompactionScope(
-        session_id='session:pkw5hgtkk2wnpyobou3jt3qmma',
-        workspace_id='workspace:brxvemeudj3jkn6e5xavqdozwm',
-        turn_id='turn:ldd7xlgxy5egfgaw2np63qgzbm',
+        session_id="session:pkw5hgtkk2wnpyobou3jt3qmma",
+        workspace_id="workspace:brxvemeudj3jkn6e5xavqdozwm",
+        turn_id="turn:ldd7xlgxy5egfgaw2np63qgzbm",
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
 
     result = asyncio.run(
@@ -1793,7 +1790,7 @@ def test_compaction_fenced_restarts_are_stack_free_and_keep_one_attempt_token(
             force=True,
             expected_scope=scope,
             post_adoption_branch=CompactionTargetBranch.ACTIVE_INSTALLATION,
-            stable_command_id='command:x5feqkqcalgjffrsha4bbnnwwy',
+            stable_command_id="command:x5feqkqcalgjffrsha4bbnnwwy",
             maximum_retained_tool_groups=1,
         )
     )
@@ -1810,57 +1807,53 @@ def test_compaction_fenced_restarts_are_stack_free_and_keep_one_attempt_token(
 
 def test_compaction_cut_lineage_uses_full_history_materialization_floor() -> None:
     source_identity = SimpleNamespace(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
-        initial_entry_id='entry:rr2ne2czv4jfrf36c7eqrhgjzi',
-        context_binding_revision_id='binding:u42k3gmsbuqoivhx4enn5zyow4',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+        turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
+        initial_entry_id="entry:rr2ne2czv4jfrf36c7eqrhgjzi",
+        context_binding_revision_id="binding:u42k3gmsbuqoivhx4enn5zyow4",
         provider_input_through_sequence=49,
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     successor_identity = SimpleNamespace(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
-        turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
-        initial_entry_id='entry:rr2ne2czv4jfrf36c7eqrhgjzi',
-        context_binding_revision_id='binding:zyrx4hb466fxa5s5wnvtewcd6u',
+        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+        turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
+        initial_entry_id="entry:rr2ne2czv4jfrf36c7eqrhgjzi",
+        context_binding_revision_id="binding:zyrx4hb466fxa5s5wnvtewcd6u",
         provider_input_through_sequence=49,
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     source_binding = SimpleNamespace(
-        binding_revision_id='binding:u42k3gmsbuqoivhx4enn5zyow4',
+        binding_revision_id="binding:u42k3gmsbuqoivhx4enn5zyow4",
         revision_ordinal=0,
         base_kind=ContextBindingBaseKind.FULL_HISTORY,
         context_snapshot_id=None,
         source_through_sequence=48,
     )
     successor_binding = SimpleNamespace(
-        binding_revision_id='binding:zyrx4hb466fxa5s5wnvtewcd6u',
+        binding_revision_id="binding:zyrx4hb466fxa5s5wnvtewcd6u",
         revision_ordinal=1,
         base_kind=ContextBindingBaseKind.SNAPSHOT,
-        context_snapshot_id='snapshot:utq7x4hsfyf57wmay7ezztmgwi',
+        context_snapshot_id="snapshot:utq7x4hsfyf57wmay7ezztmgwi",
         source_through_sequence=11,
     )
     source_prefix = FrozenProviderInputItem(
         FrozenProviderInputItemKind.USER,
-        'entry:txe7vioxfysajgwrt5dwbmisxy',
+        "entry:txe7vioxfysajgwrt5dwbmisxy",
         11,
-        'turn:26orapncpvxkk3y5pgostrckxy',
+        "turn:26orapncpvxkk3y5pgostrckxy",
         (LLMTextPart("old prefix"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
     retained_suffix = FrozenProviderInputItem(
         FrozenProviderInputItemKind.USER,
-        'entry:rr2ne2czv4jfrf36c7eqrhgjzi',
+        "entry:rr2ne2czv4jfrf36c7eqrhgjzi",
         49,
-        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
         (LLMTextPart("current request"),),
         input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
     )
     snapshot_carrier = build_compaction_snapshot_carrier(
-        summary=freeze_compaction_summary_output(
-            "summary", maximum_utf8_bytes=100
-        ),
+        summary=freeze_compaction_summary_output("summary", maximum_utf8_bytes=100),
         recent_human_requests=(),
         continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
         active_request=None,
@@ -1940,9 +1933,7 @@ def test_round5b_resource_headroom_exact_boundaries() -> None:
     assert not crosses_compaction_resource_headroom(
         selected_item_count=bounds.soft_canonical_item_limit - 1,
         selected_canonical_expanded_bytes=bounds.soft_canonical_expanded_byte_limit - 1,
-        continuity_epoch_logical_bytes=(
-            bounds.soft_epoch_logical_byte_limit - 1
-        ),
+        continuity_epoch_logical_bytes=(bounds.soft_epoch_logical_byte_limit - 1),
     )
     assert crosses_compaction_resource_headroom(
         selected_item_count=bounds.soft_canonical_item_limit,
@@ -1957,8 +1948,12 @@ def test_round5b_resource_headroom_exact_boundaries() -> None:
 
 
 @pytest.mark.parametrize("force", [False, True])
-def test_round5b_empty_session_manual_compaction_never_starts_summary(force: bool) -> None:
+def test_round5b_empty_session_manual_compaction_never_starts_summary(
+    force: bool,
+) -> None:
     host = object.__new__(KernelHostSession)
+    host._session_scope_kind = ModelInputScopeKind.ROOT
+    host._root_session_id = None
     host._writer_renewal_failure = None
     host._scheduled_tasks = None
     host._lock = asyncio.Lock()
@@ -1970,12 +1965,18 @@ def test_round5b_empty_session_manual_compaction_never_starts_summary(force: boo
     host._lease = SimpleNamespace(guard=object())
     read_terminal = Mock(return_value=None)
     host.repository = SimpleNamespace(read_latest_terminal_scope_turn_id=read_terminal)
-    host._io = SimpleNamespace(run=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs)))
+    host._io = SimpleNamespace(
+        run=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs))
+    )
     host._settle_manual_compaction_command = AsyncMock()
     host._runner = SimpleNamespace(compact_idle_turn=AsyncMock())
     host._compaction = SimpleNamespace(request_manual=AsyncMock())
 
-    outcome = asyncio.run(host.compact_context(command_id='command:riky2xot32nm3mkqbgvkblreh4', force=force))
+    outcome = asyncio.run(
+        host.compact_context(
+            command_id="command:riky2xot32nm3mkqbgvkblreh4", force=force
+        )
+    )
 
     assert outcome.disposition is CompactionDisposition.NOT_NEEDED
     assert outcome.public_code == "NO_TERMINAL_TURN"
@@ -1990,17 +1991,19 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
         policy=ResolvedCompactionPolicy(automatic_enabled=False)
     )
     host = object.__new__(KernelHostSession)
+    host._session_scope_kind = ModelInputScopeKind.ROOT
+    host._root_session_id = None
     host._writer_renewal_failure = None
     host._scheduled_tasks = None
-    host.session_id = 'session:336wrfwkamrr3up6kjtsgvgcte'
+    host.session_id = "session:336wrfwkamrr3up6kjtsgvgcte"
     host._ephemeral = SimpleNamespace(invalidate=lambda: None)
     host._lock = asyncio.Lock()
     host._closing = False
     host._pending_root_successor = None
     host._user_control_attempts = {}
-    host._active_turn_id = 'turn:vmlprtvcqs6oi7vfc6vmq2kihm'
+    host._active_turn_id = "turn:vmlprtvcqs6oi7vfc6vmq2kihm"
     host._active_cancellation_intent = None
-    host._active_command_id = 'command:7mamexfpd2cwpaabzipvhuaqyi'
+    host._active_command_id = "command:7mamexfpd2cwpaabzipvhuaqyi"
     host._active_root_phase = object()
     host._queue_wake = asyncio.Event()
     host._monitor_wake = asyncio.Event()
@@ -2015,7 +2018,7 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
             return CompactionOutcome(
                 CompactionDisposition.COMPACTED,
                 turn_id,
-                'snapshot:utq7x4hsfyf57wmay7ezztmgwi',
+                "snapshot:utq7x4hsfyf57wmay7ezztmgwi",
                 1,
                 "COMPACTED",
             )
@@ -2036,7 +2039,7 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
         offer_todo_installation=lambda _installation: None,
         todo_owner=SimpleNamespace(
             mark_root_idle=lambda *, exact_turn_id: idle_marks.append(exact_turn_id)
-        )
+        ),
     )
 
     async def no_command(_command_id: str):
@@ -2067,13 +2070,14 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
         host._active_task = active_task
         await provider_started.wait()
         compact = asyncio.create_task(
-            host.compact_context(command_id='command:u5fuuol2z2xsyv3uxg27btghta', force=True)
+            host.compact_context(
+                command_id="command:u5fuuol2z2xsyv3uxg27btghta", force=True
+            )
         )
         while (
             await owner.find_manual(
-                command_id='command:u5fuuol2z2xsyv3uxg27btghta',
+                command_id="command:u5fuuol2z2xsyv3uxg27btghta",
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
             )
             is None
         ):
@@ -2087,8 +2091,10 @@ def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
     outcome = asyncio.run(exercise())
 
     assert outcome.disposition is CompactionDisposition.COMPACTED
-    assert idle_calls == [('turn:vmlprtvcqs6oi7vfc6vmq2kihm', 'command:u5fuuol2z2xsyv3uxg27btghta', True)]
-    assert idle_marks == ['turn:vmlprtvcqs6oi7vfc6vmq2kihm']
+    assert idle_calls == [
+        ("turn:vmlprtvcqs6oi7vfc6vmq2kihm", "command:u5fuuol2z2xsyv3uxg27btghta", True)
+    ]
+    assert idle_marks == ["turn:vmlprtvcqs6oi7vfc6vmq2kihm"]
     assert host._active_task is None
 
 
@@ -2096,13 +2102,13 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
     handoff = freeze_compaction_runtime_handoff(
         terminal_processes=(
             FrozenTerminalProcessHandoffFact(
-                process_id='process:nihhtj3io4t4xhypmulh24ebgm',
+                process_id="process:nihhtj3io4t4xhypmulh24ebgm",
                 status="running",
                 command_preview="build",
                 cwd="/workspace",
             ),
             FrozenTerminalProcessHandoffFact(
-                process_id='process:nfei6gwtp3dcs62w3tvew5w34i',
+                process_id="process:nfei6gwtp3dcs62w3tvew5w34i",
                 status="running",
                 command_preview="test",
                 cwd="/workspace",
@@ -2110,32 +2116,26 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
         ),
         terminal_monitors=(
             FrozenTerminalMonitorHandoffFact(
-                monitor_id='monitor:3d3bq2eakczykk4u53umgmejge',
-                process_id='process:nfei6gwtp3dcs62w3tvew5w34i',
+                monitor_id="monitor:3d3bq2eakczykk4u53umgmejge",
+                process_id="process:nfei6gwtp3dcs62w3tvew5w34i",
                 state="active",
                 pending_observation=True,
             ),
         ),
         todo=None,
-        subagent_tasks=(
-            freeze_subagent_task_board_fact(
-                task_id='task:itnsbirlmxzeu74pn7keq6zuzi',
-                task_key="inspect",
-                label="Inspect",
-                status="ACTIVE",
-                objective_preview="inspect",
-                dependency_total=0,
-                dependency_remaining=0,
-                pending_message_count=0,
-                accepted_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-            ),
+        agent_work_index=(
+            {
+                "agent_id": "session:itnsbirlmxzeu74pn7keq6zuzi",
+                "work_id": "queue:itnsbirlmxzeu74pn7keq6zuzi",
+                "status": "running",
+            },
         ),
     )
     assert handoff is not None
     payload = json.loads(handoff.full_text)
     assert [item["target"]["process_id"] for item in payload["terminal_processes"]] == [
-        'process:nfei6gwtp3dcs62w3tvew5w34i',
-        'process:nihhtj3io4t4xhypmulh24ebgm',
+        "process:nfei6gwtp3dcs62w3tvew5w34i",
+        "process:nihhtj3io4t4xhypmulh24ebgm",
     ]
     assert "output" not in handoff.full_text
     assert "result" not in handoff.full_text
@@ -2146,7 +2146,7 @@ def test_round5b_runtime_handoff_never_drops_actionable_identity() -> None:
         freeze_compaction_runtime_handoff(
             terminal_processes=(
                 FrozenTerminalProcessHandoffFact(
-                    process_id='process:72qov6ocdngiw5hv6gjo4g2o7i',
+                    process_id="process:72qov6ocdngiw5hv6gjo4g2o7i",
                     status="running",
                     command_preview="x" * 500,
                     cwd="/" + "x" * 500,
@@ -2154,7 +2154,6 @@ def test_round5b_runtime_handoff_never_drops_actionable_identity() -> None:
             ),
             terminal_monitors=(),
             todo=None,
-            subagent_tasks=(),
             maximum_utf8_bytes=32,
         )
 
@@ -2166,18 +2165,16 @@ def test_round5b_global_lane_installs_only_one_scope_fence() -> None:
         release = asyncio.Event()
         second_entered = asyncio.Event()
         first = CompactionScope(
-            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
-            workspace_id='workspace:tx722zsrfsrhp7m363cs7ve6ii',
-            turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            session_id="session:cbauiajfisf4gvpdotrq4qgxhq",
+            workspace_id="workspace:tx722zsrfsrhp7m363cs7ve6ii",
+            turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         second = CompactionScope(
-            session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
-            workspace_id='workspace:tx722zsrfsrhp7m363cs7ve6ii',
-            turn_id='turn:u7jrb7ntdvxsawfkehwcc4rhu4',
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id='task:r464bjh2j4nauh7bhw7gjnegqa',
+            session_id="session:cbauiajfisf4gvpdotrq4qgxhq",
+            workspace_id="workspace:tx722zsrfsrhp7m363cs7ve6ii",
+            turn_id="turn:u7jrb7ntdvxsawfkehwcc4rhu4",
+            scope_kind=ModelInputScopeKind.SUBAGENT,
         )
 
         async def first_operation() -> str:
@@ -2209,8 +2206,7 @@ def test_round5b_global_lane_installs_only_one_scope_fence() -> None:
         await asyncio.sleep(0)
         assert not second_entered.is_set()
         assert not owner.is_fenced(
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id='task:r464bjh2j4nauh7bhw7gjnegqa',
+            scope_kind=ModelInputScopeKind.SUBAGENT,
         )
         release.set()
         assert await first_task == "first"
@@ -2255,32 +2251,29 @@ def test_round5b_manual_candidate_is_idempotent_and_conflict_closed() -> None:
     async def exercise() -> None:
         owner = HostCompactionRuntimeOwner()
         request, future = await owner.request_manual(
-            command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
+            command_id="command:3mkyvtvppfglbmqedm6zqizjvy",
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-            expected_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            expected_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
             force=False,
         )
         duplicate, same_future = await owner.request_manual(
-            command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
+            command_id="command:3mkyvtvppfglbmqedm6zqizjvy",
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-            expected_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+            expected_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
             force=False,
         )
         assert duplicate == request
         assert same_future is future
         with pytest.raises(RuntimeError, match="pending"):
             await owner.request_manual(
-                command_id='command:wpqnljdtvxcoaudexasizwddny',
+                command_id="command:wpqnljdtvxcoaudexasizwddny",
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
-                expected_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
+                expected_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
                 force=True,
             )
         outcome = CompactionOutcome(
             CompactionDisposition.NOT_NEEDED,
-            'turn:nzc36cttgo7xxki7bcjc7ops7a',
+            "turn:nzc36cttgo7xxki7bcjc7ops7a",
             None,
             None,
             "NO_COMPACTABLE_PREFIX",
@@ -2350,9 +2343,11 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
     assert reduced.estimated_tokens == 0
 
 
-def test_round5b_retained_skill_proves_older_full_from_installed_message(tmp_path) -> None:
+def test_round5b_retained_skill_proves_older_full_from_installed_message(
+    tmp_path,
+) -> None:
     timing_values = {
-        "source_turn_ref": 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        "source_turn_ref": "turn:klmmazz67vfgsfsvg6ceqgdsfu",
         "observed_at_utc": "2026-08-21T01:02:03.000000Z",
         "observation_duration_microseconds": 1_000,
         "duration_disposition": ToolObservationDurationDisposition.MEASURED,
@@ -2371,14 +2366,14 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(tmp_pat
     )
     item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.TOOL_RESULT,
-        'entry:fgbpydhlta3t4jtrmeidxygpai',
+        "entry:fgbpydhlta3t4jtrmeidxygpai",
         4,
-        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
         (LLMTextPart('{"status":"ok","content":"1|body"}'),),
         tool_call_id="call:read",
-        tool_request_entry_id='entry:4dly6mqjthelonrh44jyrwniti',
+        tool_request_entry_id="entry:4dly6mqjthelonrh44jyrwniti",
         tool_result_context=ProviderToolResultContextMetadata(
-            result_id='result:srq6zeb76vfd3te2ocypgokzby',
+            result_id="result:srq6zeb76vfd3te2ocypgokzby",
             result_state="SUCCESS",
             display_kind=ToolResultDisplayKind.COMPLETE,
             artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
@@ -2502,12 +2497,12 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(tmp_pat
     )
     exact_item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.TOOL_RESULT,
-        'entry:lywgk7aaab6b5jp7xuyq4x2pre',
+        "entry:lywgk7aaab6b5jp7xuyq4x2pre",
         5,
-        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
         (LLMTextPart(exact_body),),
         tool_call_id="call:exact-read",
-        tool_request_entry_id='entry:dvjipqudfovu34c5uscjf225oy',
+        tool_request_entry_id="entry:dvjipqudfovu34c5uscjf225oy",
         tool_result_context=item.tool_result_context,
         tool_result_body_text=exact_body,
     )
@@ -2520,23 +2515,47 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(tmp_pat
         == "Retained body"
     )
 
-
     # Exercise the real producer contract, including its required content_revision.
     from dataclasses import replace
     from pulsara_agent.tools.builtins.filesystem import ReadFileTool
     from pulsara_agent.ports.tool_execution import ToolCall
+
     skill_path = tmp_path / "inspect" / "SKILL.md"
     skill_path.parent.mkdir()
     skill_path.write_text(document)
-    actual = ReadFileTool(tmp_path / "workspace").execute(ToolCall(
-        "read:actual", "read_file", {"target": {"kind": "PATH", "path": str(skill_path)}}
-    ))
-    actual_item = replace(exact_item, content=(LLMTextPart(actual.output),), tool_result_body_text=actual.output)
+    actual = ReadFileTool(tmp_path / "workspace").execute(
+        ToolCall(
+            "read:actual",
+            "read_file",
+            {"target": {"kind": "PATH", "path": str(skill_path)}},
+        )
+    )
+    actual_item = replace(
+        exact_item,
+        content=(LLMTextPart(actual.output),),
+        tool_result_body_text=actual.output,
+    )
     actual_row = {**row, "location": str(skill_path)}
-    assert _exact_historical_read(actual_item, catalog_row=actual_row, root_policy=SimpleNamespace(roots=())) == "Retained body"
+    assert (
+        _exact_historical_read(
+            actual_item, catalog_row=actual_row, root_policy=SimpleNamespace(roots=())
+        )
+        == "Retained body"
+    )
     malformed = json.loads(actual.output)
     malformed["content_revision"] = "invalid"
-    assert _exact_historical_read(replace(actual_item, content=(LLMTextPart(json.dumps(malformed)),), tool_result_body_text=json.dumps(malformed)), catalog_row=actual_row, root_policy=SimpleNamespace(roots=())) is None
+    assert (
+        _exact_historical_read(
+            replace(
+                actual_item,
+                content=(LLMTextPart(json.dumps(malformed)),),
+                tool_result_body_text=json.dumps(malformed),
+            ),
+            catalog_row=actual_row,
+            root_policy=SimpleNamespace(roots=()),
+        )
+        is None
+    )
 
 
 def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -> None:
@@ -2563,7 +2582,7 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
         source_kind=ContextSourceKind.RETAINED_SKILL_CONTEXT,
         presence=SourceObservationPresence.VALUE,
         installed_observation_fingerprint=(_installed_observation_fingerprint(message)),
-        last_emitted_turn_id='turn:h2sohp3g7igptige7qc72g72y4',
+        last_emitted_turn_id="turn:h2sohp3g7igptige7qc72g72y4",
     )
     predecessor = SimpleNamespace(
         source_heads=(head,),
@@ -2572,7 +2591,7 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
 
     inherited = _installed_retained_items(
         predecessor,
-        target_turn_id='turn:h2sohp3g7igptige7qc72g72y4',
+        target_turn_id="turn:h2sohp3g7igptige7qc72g72y4",
     )
 
     assert tuple((item.name, item.body) for item in inherited) == (
@@ -2581,7 +2600,7 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
     assert (
         _installed_retained_items(
             predecessor,
-            target_turn_id='turn:csq5cy5euchursiopxdvtebl6e',
+            target_turn_id="turn:csq5cy5euchursiopxdvtebl6e",
         )
         == ()
     )
@@ -2589,7 +2608,7 @@ def test_round5b_installed_retained_skill_is_inherited_only_within_same_turn() -
 
 def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
     timing_values = {
-        "source_turn_ref": 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        "source_turn_ref": "turn:klmmazz67vfgsfsvg6ceqgdsfu",
         "observed_at_utc": "2026-08-21T01:02:03.000000Z",
         "observation_duration_microseconds": 1_000,
         "duration_disposition": ToolObservationDurationDisposition.MEASURED,
@@ -2613,7 +2632,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
             FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
             entry_id,
             sequence,
-            'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+            "turn:klmmazz67vfgsfsvg6ceqgdsfu",
             (LLMTextPart(""),),
             tool_calls=(ProviderToolCall("call:reused", "read_file", arguments),),
         )
@@ -2626,7 +2645,7 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
             FrozenProviderInputItemKind.TOOL_RESULT,
             entry_id,
             sequence,
-            'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+            "turn:klmmazz67vfgsfsvg6ceqgdsfu",
             (LLMTextPart(body),),
             tool_call_id="call:reused",
             tool_request_entry_id=request_entry_id,
@@ -2646,10 +2665,14 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
         )
 
     items = (
-        request('entry:i42ugnnh33h5zqcbhagf7wa7je', 1),
-        result('entry:unb7qglgbi4ykyppevynu264wa', 'entry:i42ugnnh33h5zqcbhagf7wa7je', 2),
-        request('entry:e6jbb4wd5k3kct36fgjph5pjne', 3),
-        result('entry:xdjoiiy5ropotxjnypezmj2cvy', 'entry:e6jbb4wd5k3kct36fgjph5pjne', 4),
+        request("entry:i42ugnnh33h5zqcbhagf7wa7je", 1),
+        result(
+            "entry:unb7qglgbi4ykyppevynu264wa", "entry:i42ugnnh33h5zqcbhagf7wa7je", 2
+        ),
+        request("entry:e6jbb4wd5k3kct36fgjph5pjne", 3),
+        result(
+            "entry:xdjoiiy5ropotxjnypezmj2cvy", "entry:e6jbb4wd5k3kct36fgjph5pjne", 4
+        ),
     )
     canonical_read = SimpleNamespace(
         dispatch_read=SimpleNamespace(
@@ -2662,17 +2685,17 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
     groups = enumerate_complete_tool_groups(canonical_read)
 
     assert tuple(group.assistant_entry_id for group in groups) == (
-        'entry:i42ugnnh33h5zqcbhagf7wa7je',
-        'entry:e6jbb4wd5k3kct36fgjph5pjne',
+        "entry:i42ugnnh33h5zqcbhagf7wa7je",
+        "entry:e6jbb4wd5k3kct36fgjph5pjne",
     )
 
 
 def test_round5b_architecture_and_oracle_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LIVE_EVENT_TYPES) == 24
-    assert len(SUBJECT_SLOTS) == 11
+    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
+    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(SUBJECT_SLOTS) == 8
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
     assert "canonical_image_refs" in CONVERSATION_KERNEL_RELATIONS
     assert not {
         "durable_jobs",
@@ -2831,15 +2854,18 @@ def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> No
     ordered_prepares = sorted(family_prepares, key=lambda call: call.lineno)
     ordered_candidates = sorted(family_candidates, key=lambda call: call.lineno)
     bind = family_binds[0]
-    assert len(
-        tuple(
-            candidate
-            for candidate in ordered_candidates
-            if ordered_prepares[0].lineno
-            < candidate.lineno
-            < ordered_prepares[1].lineno
+    assert (
+        len(
+            tuple(
+                candidate
+                for candidate in ordered_candidates
+                if ordered_prepares[0].lineno
+                < candidate.lineno
+                < ordered_prepares[1].lineno
+            )
         )
-    ) == 2
+        == 2
+    )
     for prepare in ordered_prepares[1:]:
         candidates = tuple(
             candidate
@@ -2847,7 +2873,9 @@ def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> No
             if prepare.lineno < candidate.lineno < bind.lineno
         )
         assert len(candidates) == 2
-        family = next(keyword.value for keyword in bind.keywords if keyword.arg == "family")
+        family = next(
+            keyword.value for keyword in bind.keywords if keyword.arg == "family"
+        )
         assert isinstance(family, ast.Name)
         assert all(
             isinstance(candidate.args[0], ast.Name)
@@ -2855,7 +2883,7 @@ def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> No
             for candidate in candidates
         )
     assert "SessionStartCompactPort" in source
-    assert "child compaction received a ROOT start port" in source
+    assert "SubagentInitialSeed" not in source
     for forbidden in (
         "installed_base_augmentation",
         "revoke_successor",

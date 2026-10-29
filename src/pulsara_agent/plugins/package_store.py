@@ -387,6 +387,7 @@ class ManagedPluginStore:
         scrub_set: ProcessCredentialScrubSet,
         current: PluginInstanceState | None,
         secret_resolver,
+        mcp_scope_policies=(),
     ) -> StoreInstallOutcome:
         identity = self.identity(
             scope=scope,
@@ -450,7 +451,15 @@ class ManagedPluginStore:
                     )
                 else:
                     retained.append(overlay)
-            state = replace(state, mcp_connection_overlays=tuple(retained))
+            from .mcp_connection import PluginMcpConnectionOverlay
+            selected = dict(mcp_scope_policies)
+            by_server = {item.local_server_id: item for item in retained}
+            for server_id, policy in selected.items():
+                server = servers[server_id]
+                overlay = by_server.get(server_id) or PluginMcpConnectionOverlay(
+                    server_id, "streamable_http" if server.kind.value == "streamable-http" else server.kind.value)
+                by_server[server_id] = replace(overlay, scope_policy=policy)
+            state = replace(state, mcp_connection_overlays=tuple(by_server[name] for name in sorted(by_server)))
             package_lock = layout.package_lock_path(package_install_id)
             with self._exclusive_lock(
                 package_lock,

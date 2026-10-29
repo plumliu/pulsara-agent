@@ -20,12 +20,6 @@ from pulsara_agent.conversation_kernel.contracts import (
     TurnStatus,
     WriterLease,
 )
-from pulsara_agent.conversation_kernel.subagents.contracts import (
-    PreparedSubagentTaskStart,
-    FrozenSubagentParentContextCallSubject,
-)
-from pulsara_agent.llm.model_connections import ModelCallBinding
-from pulsara_agent.conversation_kernel.subagents.model_target import FrozenSubagentModelTarget
 from pulsara_agent.model_input.continuity import (
     AdoptedCompactionSuccessor,
     EmptyScopeColdStart,
@@ -51,7 +45,10 @@ from pulsara_agent.model_input.continuity import (
 from pulsara_agent.llm.frozen_target import FrozenEpochModelCallTarget
 from pulsara_agent.model_input.contracts import FrozenModelInputSemanticProjection
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayFragment
-from pulsara_agent.llm.request import FrozenProviderWireInputPlan, ProviderInputUsageAnchor
+from pulsara_agent.llm.request import (
+    FrozenProviderWireInputPlan,
+    ProviderInputUsageAnchor,
+)
 from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     PreparedProviderInputCut,
@@ -107,35 +104,6 @@ class FreshHostRootLeaseSource:
 
 
 @dataclass(frozen=True, slots=True, init=False)
-class NewSubagentLeaseSource:
-    writer_guard: HostWriterGuard
-    durable_runnable_task_fact: object
-
-    def __init__(
-        self,
-        *,
-        writer_guard: HostWriterGuard,
-        durable_runnable_task_fact: object,
-        _seal: object,
-    ) -> None:
-        if (
-            _seal is not _BOOTSTRAP_LEASE_SOURCE_SEAL
-            or not isinstance(durable_runnable_task_fact, PreparedSubagentTaskStart)
-            or getattr(durable_runnable_task_fact, "session_id", None)
-            != writer_guard.session_id
-            or getattr(durable_runnable_task_fact, "writer_generation", None)
-            != writer_guard.writer_generation
-            or not getattr(durable_runnable_task_fact, "task_id", "")
-            or not getattr(durable_runnable_task_fact, "event_id", "")
-        ):
-            raise TypeError("subagent lease source requires the durable runnable fact")
-        object.__setattr__(self, "writer_guard", writer_guard)
-        object.__setattr__(
-            self, "durable_runnable_task_fact", durable_runnable_task_fact
-        )
-
-
-@dataclass(frozen=True, slots=True, init=False)
 class AdoptedBaseLeaseSource:
     writer_guard: HostWriterGuard
     adoption_confirmation: object
@@ -166,10 +134,7 @@ class AdoptedBaseLeaseSource:
 
 
 BootstrapLeaseSource = (
-    NewSessionRootLeaseSource
-    | FreshHostRootLeaseSource
-    | NewSubagentLeaseSource
-    | AdoptedBaseLeaseSource
+    NewSessionRootLeaseSource | FreshHostRootLeaseSource | AdoptedBaseLeaseSource
 )
 
 
@@ -187,16 +152,6 @@ def _issue_root_bootstrap_lease_source(
             _seal=_BOOTSTRAP_LEASE_SOURCE_SEAL,
         )
     raise TypeError("continuity ROOT requires session genesis or takeover FULL")
-
-
-def _issue_new_subagent_lease_source(
-    *, writer_guard: HostWriterGuard, durable_runnable_task_fact: object
-) -> NewSubagentLeaseSource:
-    return NewSubagentLeaseSource(
-        writer_guard=writer_guard,
-        durable_runnable_task_fact=durable_runnable_task_fact,
-        _seal=_BOOTSTRAP_LEASE_SOURCE_SEAL,
-    )
 
 
 class ProcessLocalProviderInputInstallAuthority:
@@ -248,7 +203,6 @@ class ProcessLocalProviderInputInstallAuthority:
         )
 
 
-MAXIMUM_ROOT_SCOPES = 1
 MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = 64 << 20
 MAXIMUM_HOST_INSTALLED_BYTES = 320 << 20
 MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES = 640 << 20
@@ -310,7 +264,6 @@ class AuthorizedEmptyBootstrapLease:
             (
                 NewSessionRootLeaseSource,
                 FreshHostRootLeaseSource,
-                NewSubagentLeaseSource,
                 AdoptedBaseLeaseSource,
             ),
         ):
@@ -320,24 +273,7 @@ class AuthorizedEmptyBootstrapLease:
             if isinstance(source, (NewSessionRootLeaseSource, FreshHostRootLeaseSource))
             else source.writer_guard
         )
-        if (
-            not lease_nonce
-            or source_guard.session_id != scope.session_id
-            or (
-                isinstance(
-                    source, (NewSessionRootLeaseSource, FreshHostRootLeaseSource)
-                )
-                and scope.scope_kind is not ModelInputScopeKind.ROOT
-            )
-            or (
-                isinstance(source, NewSubagentLeaseSource)
-                and (
-                    scope.scope_kind is not ModelInputScopeKind.SUBAGENT_TASK
-                    or source.durable_runnable_task_fact.task_id
-                    != scope.scope_subagent_task_id
-                )
-            )
-        ):
+        if not lease_nonce or source_guard.session_id != scope.session_id:
             raise TypeError("empty bootstrap lease is continuity-owned")
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "lease_nonce", lease_nonce)
@@ -401,37 +337,46 @@ class NoContinuationAdmissionFence:
         if (
             _seal is not _NO_CONTINUATION_FENCE_SEAL
             or not turn_id
-            or not adopted_snapshot_id
-            or not adopted_binding_revision_id
-            or not fence_nonce
-            or getattr(getattr(confirmation, "kind", None), "value", None) != "FULL"
-            or not isinstance(confirmation, CompactionAdoptionConfirmation)
-            or getattr(confirmation, "candidate", None) is not candidate
-            or getattr(getattr(candidate, "scope", None), "session_id", None)
-            != scope.session_id
-            or getattr(getattr(candidate, "scope", None), "turn_id", None)
-            != turn_id
-            or getattr(getattr(candidate, "scope", None), "scope_kind", None)
-            is not scope.scope_kind
-            or getattr(getattr(candidate, "scope", None), "scope_subagent_task_id", None)
-            != scope.scope_subagent_task_id
-            or getattr(getattr(candidate, "snapshot", None), "snapshot_id", None)
-            != adopted_snapshot_id
-            or getattr(getattr(candidate, "binding", None), "binding_revision_id", None)
-            != adopted_binding_revision_id
-            or getattr(attempt_token, "session_id", None) != scope.session_id
-            or getattr(attempt_token, "turn_id", None) != turn_id
-            or getattr(attempt_token, "scope_kind", None) is not scope.scope_kind
-            or getattr(attempt_token, "scope_subagent_task_id", None)
-            != scope.scope_subagent_task_id
-            or cut.session_id != scope.session_id
-            or cut.turn_id != turn_id
-            or cut.context_binding_revision_id
-            != candidate.predecessor.binding_revision_id
-            or cut.provider_input_through_sequence
-            != candidate.snapshot.source_through_sequence
-            or destination.session_id != scope.session_id
-            or destination.turn_id != turn_id
+            or (not adopted_snapshot_id)
+            or (not adopted_binding_revision_id)
+            or (not fence_nonce)
+            or (getattr(getattr(confirmation, "kind", None), "value", None) != "FULL")
+            or (not isinstance(confirmation, CompactionAdoptionConfirmation))
+            or (getattr(confirmation, "candidate", None) is not candidate)
+            or (
+                getattr(getattr(candidate, "scope", None), "session_id", None)
+                != scope.session_id
+            )
+            or (getattr(getattr(candidate, "scope", None), "turn_id", None) != turn_id)
+            or (
+                getattr(getattr(candidate, "scope", None), "scope_kind", None)
+                is not scope.scope_kind
+            )
+            or (
+                getattr(getattr(candidate, "snapshot", None), "snapshot_id", None)
+                != adopted_snapshot_id
+            )
+            or (
+                getattr(
+                    getattr(candidate, "binding", None), "binding_revision_id", None
+                )
+                != adopted_binding_revision_id
+            )
+            or (getattr(attempt_token, "session_id", None) != scope.session_id)
+            or (getattr(attempt_token, "turn_id", None) != turn_id)
+            or (getattr(attempt_token, "scope_kind", None) is not scope.scope_kind)
+            or (cut.session_id != scope.session_id)
+            or (cut.turn_id != turn_id)
+            or (
+                cut.context_binding_revision_id
+                != candidate.predecessor.binding_revision_id
+            )
+            or (
+                cut.provider_input_through_sequence
+                != candidate.snapshot.source_through_sequence
+            )
+            or (destination.session_id != scope.session_id)
+            or (destination.turn_id != turn_id)
         ):
             raise TypeError("no-continuation fence is compaction-owner issued")
         object.__setattr__(self, "scope", scope)
@@ -749,12 +694,13 @@ class _IssuedProviderInputInstallPermit:
 
 
 class HostProviderInputContinuityOwner:
-    """Own the ROOT and manager-authorized child prefix epochs for one Host."""
+    """Own the provider prefix epoch for one session on this Host."""
 
     def __init__(
         self,
         *,
         root_lease_source: NewSessionRootLeaseSource | FreshHostRootLeaseSource,
+        session_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     ) -> None:
         if not isinstance(
             root_lease_source,
@@ -777,8 +723,7 @@ class HostProviderInputContinuityOwner:
         self._closed = False
         root_scope = ProviderInputContinuityScope(
             session_id=session_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=session_kind,
         )
         self._slots[root_scope] = self._new_authorized_empty_slot(
             root_scope, source=root_lease_source
@@ -787,35 +732,6 @@ class HostProviderInputContinuityOwner:
     @property
     def install_authority(self) -> ProcessLocalProviderInputInstallAuthority:
         return self._install_authority
-
-    def authorize_new_subagent_scope(
-        self,
-        scope: ProviderInputContinuityScope,
-        *,
-        source: NewSubagentLeaseSource,
-    ) -> None:
-        """Publish the one lifecycle lease created by a successful child transaction."""
-
-        self._require_scope(scope)
-        if scope.scope_kind is not ModelInputScopeKind.SUBAGENT_TASK:
-            raise ProviderInputContinuityConflict(
-                "only a SUBAGENT_TASK scope may use child authorization"
-            )
-        task_fact = source.durable_runnable_task_fact
-        if (
-            source.writer_guard != self._writer_guard
-            or getattr(task_fact, "task_id", None) != scope.scope_subagent_task_id
-        ):
-            raise ProviderInputContinuityConflict(
-                "subagent lease source does not match the continuity scope"
-            )
-        with self._lock:
-            if self._closed or scope in self._slots:
-                raise ProviderInputContinuityConflict(
-                    "subagent continuity scope is unavailable"
-                )
-            self._admit_scope_capacity_locked(scope)
-            self._slots[scope] = self._new_authorized_empty_slot(scope, source=source)
 
     def abort_planning(self, planning: FrozenProviderInputAppendPlanningInput) -> None:
         """Return the exact Empty reservation; installed planning is a no-op."""
@@ -859,7 +775,6 @@ class HostProviderInputContinuityOwner:
         from pulsara_agent.conversation_kernel.cold_epoch import (
             AdoptedCompactionContinuationSeed,
             CanonicalColdContinuationSeed,
-            SubagentInitialSeed,
         )
 
         self._require_scope(planning.scope)
@@ -887,9 +802,7 @@ class HostProviderInputContinuityOwner:
                     slot.state is not _SlotState.PREPARING_EMPTY
                     or slot.empty_reservation is not reservation
                     or direct_switch_admission is not None
-                    or not isinstance(
-                        seed, (CanonicalColdContinuationSeed, SubagentInitialSeed)
-                    )
+                    or not isinstance(seed, CanonicalColdContinuationSeed)
                 ):
                     raise ProviderInputContinuityConflict(
                         "empty bootstrap preparation is stale"
@@ -1187,8 +1100,7 @@ class HostProviderInputContinuityOwner:
                     or candidate.expected_epoch_revision != 0
                     or candidate.planning.predecessor_view is not None
                     or transition.scope != candidate.scope
-                    or transition._preparation_basis
-                    is not candidate._preparation_basis
+                    or transition._preparation_basis is not candidate._preparation_basis
                 ):
                     raise ProviderInputContinuityConflict(
                         "empty cold candidate lacks its bound authority"
@@ -1356,7 +1268,10 @@ class HostProviderInputContinuityOwner:
                 ),
                 tool_result_decisions=compiled.tool_result_decisions,
             )
-            if slot.installed is None or slot.installed.view.epoch_nonce != view.epoch_nonce:
+            if (
+                slot.installed is None
+                or slot.installed.view.epoch_nonce != view.epoch_nonce
+            ):
                 slot.usage_anchor = None
             slot.installed = InstalledEpochRuntimeCohort(
                 view=view,
@@ -1620,34 +1535,58 @@ class HostProviderInputContinuityOwner:
             else:
                 slot.state = _SlotState.INSTALLED
 
-    def current_usage_anchor(self, scope: ProviderInputContinuityScope) -> ProviderInputUsageAnchor | None:
+    def current_usage_anchor(
+        self, scope: ProviderInputContinuityScope
+    ) -> ProviderInputUsageAnchor | None:
         self._require_scope(scope)
         with self._lock:
             slot = self._slots.get(scope)
             if slot is None or slot.installed is None:
                 return None
             anchor = slot.usage_anchor
-            return anchor if anchor is not None and anchor.epoch_nonce == slot.installed.view.epoch_nonce else None
+            return (
+                anchor
+                if anchor is not None
+                and anchor.epoch_nonce == slot.installed.view.epoch_nonce
+                else None
+            )
 
     def observe_usage_anchor(
-        self, scope: ProviderInputContinuityScope, *, epoch_nonce: str,
-        epoch_revision: int, reported_model_id: str | None,
+        self,
+        scope: ProviderInputContinuityScope,
+        *,
+        epoch_nonce: str,
+        epoch_revision: int,
+        reported_model_id: str | None,
         anchor: ProviderInputUsageAnchor | None,
     ) -> None:
         self._require_scope(scope)
         with self._lock:
             slot = self._slots.get(scope)
-            if slot is None or slot.installed is None or slot.installed.view.epoch_nonce != epoch_nonce:
+            if (
+                slot is None
+                or slot.installed is None
+                or slot.installed.view.epoch_nonce != epoch_nonce
+            ):
                 return
             if epoch_revision > slot.installed.view.epoch_revision:
-                raise ProviderInputContinuityConflict("usage belongs to an uninstalled revision")
+                raise ProviderInputContinuityConflict(
+                    "usage belongs to an uninstalled revision"
+                )
             previous = slot.usage_anchor
             if previous is not None and (
                 epoch_revision < previous.epoch_revision
-                or anchor is not None and len(anchor.materialization.ordered_input_items) < len(previous.materialization.ordered_input_items)
+                or anchor is not None
+                and len(anchor.materialization.ordered_input_items)
+                < len(previous.materialization.ordered_input_items)
             ):
                 return
-            if previous is not None and reported_model_id is not None and previous.reported_model_id is not None and reported_model_id != previous.reported_model_id:
+            if (
+                previous is not None
+                and reported_model_id is not None
+                and previous.reported_model_id is not None
+                and reported_model_id != previous.reported_model_id
+            ):
                 slot.usage_anchor = None
             if anchor is not None:
                 slot.usage_anchor = anchor
@@ -1662,26 +1601,6 @@ class HostProviderInputContinuityOwner:
                 None if slot is None or slot.installed is None else slot.installed.view
             )
 
-    def subagent_parent_target(
-        self, subject: FrozenSubagentParentContextCallSubject, binding: ModelCallBinding
-    ) -> FrozenSubagentModelTarget:
-        scope = ProviderInputContinuityScope(
-            session_id=subject.session_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-        )
-        cohort = self.current_cohort(scope)
-        if (
-            cohort is None
-            or cohort.view.epoch_nonce != subject.continuity_epoch_nonce
-            or cohort.view.epoch_revision < subject.continuity_epoch_revision
-            or cohort.target_bundle.connection.connection_id != binding.connection_id
-        ):
-            raise ProviderInputContinuityConflict("subagent parent epoch target is unavailable")
-        return FrozenSubagentModelTarget.freeze(
-            cohort.target_bundle.target_fact, cohort.target_bundle.reasoning_contract
-        )
-
     def current_cohort(
         self, scope: ProviderInputContinuityScope
     ) -> InstalledEpochRuntimeCohort | None:
@@ -1689,39 +1608,6 @@ class HostProviderInputContinuityOwner:
         with self._lock:
             slot = self._slots.get(scope)
             return None if slot is None else slot.installed
-
-    def retire_terminal_subagent_scope(
-        self, scope: ProviderInputContinuityScope
-    ) -> None:
-        self._require_scope(scope)
-        if scope.scope_kind is not ModelInputScopeKind.SUBAGENT_TASK:
-            raise ProviderInputContinuityConflict(
-                "only a terminal child scope may be retired"
-            )
-        with self._lock:
-            slot = self._slots.pop(scope, None)
-            if slot is None:
-                raise ProviderInputContinuityConflict(
-                    "terminal child continuity scope is absent"
-                )
-            slot.usage_anchor = None
-            slot.installed = None
-            slot.bootstrap_lease = None
-            slot.empty_reservation = None
-            slot.prepared = None
-            slot.replay_reservation = None
-            slot.no_continuation_fence = None
-            slot.no_continuation_closure = None
-            slot.no_continuation_revocation = None
-            slot.empty_adoption_pending = None
-            slot.empty_adoption_settling = None
-            slot.empty_adoption_revocation = None
-            slot.state = _SlotState.CLOSED
-            self._issued_permits = {
-                nonce: issued
-                for nonce, issued in self._issued_permits.items()
-                if issued.permit.scope != scope
-            }
 
     def install_no_continuation_admission_fence(
         self,
@@ -1790,7 +1676,11 @@ class HostProviderInputContinuityOwner:
             dry_source = getattr(dry_basis, "source", None)
             canonical_read = getattr(dry_basis, "canonical_read", None)
             identity = getattr(
-                getattr(getattr(canonical_read, "compile_snapshot", None), "canonical_input", None),
+                getattr(
+                    getattr(canonical_read, "compile_snapshot", None),
+                    "canonical_input",
+                    None,
+                ),
                 "identity",
                 None,
             )
@@ -1804,33 +1694,43 @@ class HostProviderInputContinuityOwner:
                 self._closed
                 or slot is None
                 or slot.state is not _SlotState.PREPARING_EMPTY
-                or slot.empty_reservation is not reservation
-                or getattr(dry_source, "reservation", None) is not reservation
-                or getattr(preparation_basis, "call_target", None)
-                is not getattr(dry_basis, "destination", None)
-                or getattr(attempt_token, "session_id", None) != scope.session_id
-                or getattr(attempt_token, "turn_id", None)
-                != getattr(adoption_scope, "turn_id", None)
-                or getattr(attempt_token, "scope_kind", None) is not scope.scope_kind
-                or getattr(attempt_token, "scope_subagent_task_id", None)
-                != scope.scope_subagent_task_id
-                or getattr(adoption_scope, "session_id", None) != scope.session_id
-                or getattr(adoption_scope, "scope_kind", None) is not scope.scope_kind
-                or getattr(adoption_scope, "scope_subagent_task_id", None)
-                != scope.scope_subagent_task_id
-                or getattr(adoption_scope, "turn_id", None)
-                != getattr(identity, "turn_id", None)
-                or getattr(candidate, "snapshot", None) is None
-                or candidate.snapshot.snapshot_id
-                != getattr(binding, "context_snapshot_id", None)
-                or candidate.binding.binding_revision_id
-                != getattr(binding, "binding_revision_id", None)
-                or getattr(dry_basis.destination, "session_id", None)
-                != scope.session_id
-                or getattr(dry_basis.destination, "turn_id", None)
-                != getattr(adoption_scope, "turn_id", None)
-                or slot.prepared is not None
-                or slot.replay_reservation is not None
+                or (slot.empty_reservation is not reservation)
+                or (getattr(dry_source, "reservation", None) is not reservation)
+                or (
+                    getattr(preparation_basis, "call_target", None)
+                    is not getattr(dry_basis, "destination", None)
+                )
+                or (getattr(attempt_token, "session_id", None) != scope.session_id)
+                or (
+                    getattr(attempt_token, "turn_id", None)
+                    != getattr(adoption_scope, "turn_id", None)
+                )
+                or (getattr(attempt_token, "scope_kind", None) is not scope.scope_kind)
+                or (getattr(adoption_scope, "session_id", None) != scope.session_id)
+                or (getattr(adoption_scope, "scope_kind", None) is not scope.scope_kind)
+                or (
+                    getattr(adoption_scope, "turn_id", None)
+                    != getattr(identity, "turn_id", None)
+                )
+                or (getattr(candidate, "snapshot", None) is None)
+                or (
+                    candidate.snapshot.snapshot_id
+                    != getattr(binding, "context_snapshot_id", None)
+                )
+                or (
+                    candidate.binding.binding_revision_id
+                    != getattr(binding, "binding_revision_id", None)
+                )
+                or (
+                    getattr(dry_basis.destination, "session_id", None)
+                    != scope.session_id
+                )
+                or (
+                    getattr(dry_basis.destination, "turn_id", None)
+                    != getattr(adoption_scope, "turn_id", None)
+                )
+                or (slot.prepared is not None)
+                or (slot.replay_reservation is not None)
             ):
                 raise ProviderInputContinuityConflict(
                     "empty adoption does not exact-join current preparation"
@@ -1897,8 +1797,7 @@ class HostProviderInputContinuityOwner:
                 or slot.empty_reservation is not pending.reservation
                 or slot.empty_adoption_revocation is not None
                 or getattr(confirmation, "candidate", None) is not pending.candidate
-                or getattr(getattr(confirmation, "kind", None), "value", None)
-                != "NONE"
+                or getattr(getattr(confirmation, "kind", None), "value", None) != "NONE"
             ):
                 raise ProviderInputContinuityConflict(
                     "empty adoption NONE settlement is stale"
@@ -2201,10 +2100,9 @@ class HostProviderInputContinuityOwner:
             )
 
     def _admit_scope_capacity_locked(self, scope: ProviderInputContinuityScope) -> None:
-        root_count = sum(item.scope_kind.value == "ROOT" for item in self._slots)
-        if scope.scope_kind.value == "ROOT" and root_count >= MAXIMUM_ROOT_SCOPES:
+        if self._slots:
             raise ProviderInputContinuityConflict(
-                "ROOT continuity scope already exists"
+                "session continuity scope already exists"
             )
 
     @staticmethod
@@ -2306,7 +2204,6 @@ __all__ = [
     "MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES",
     "MAXIMUM_HOST_INSTALLED_BYTES",
     "MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES",
-    "MAXIMUM_ROOT_SCOPES",
     "ProviderInputContinuityConflict",
     "ProcessLocalAssistantReplayFragmentReservation",
     "ProcessLocalProviderInputInstallAuthority",

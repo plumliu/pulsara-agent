@@ -23,6 +23,11 @@ class McpToolRefCapacityExceeded(RuntimeError):
     """The exact scope/epoch reached its closed process-local ref bound."""
 
 
+class McpToolRefConsumerKind(StrEnum):
+    MODEL_EPOCH = "MODEL_EPOCH"
+    CODE_CELL = "CODE_CELL"
+
+
 class NewMcpToolRefState(StrEnum):
     PREPARED = "PREPARED"
     DORMANT = "DORMANT"
@@ -33,19 +38,22 @@ class NewMcpToolRefState(StrEnum):
 class NewMcpToolRef:
     opaque_token: str
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
+    session_id: str
     continuity_epoch_nonce: str
     capability_identity_fingerprint: str
     tool_semantic_fingerprint: str
     mcp_execution_policy_fingerprint: str
     tool_route_fingerprint: str
     issued_by_host_authority: object = field(repr=False, compare=False)
+    consumer_kind: McpToolRefConsumerKind = McpToolRefConsumerKind.MODEL_EPOCH
+    consumer_id: str | None = None
+    runtime_generation: int | None = None
 
     def __post_init__(self) -> None:
-        if (self.conversation_scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("new MCP ref scope identity is invalid")
+        if (self.consumer_kind is McpToolRefConsumerKind.CODE_CELL) != (self.consumer_id is not None):
+            raise ValueError("MCP ref consumer identity is invalid")
+        if not self.session_id:
+            raise ValueError("new MCP ref session identity is missing")
         if (
             not self.opaque_token.startswith("mcpref_")
             or not self.continuity_epoch_nonce
@@ -91,17 +99,23 @@ class ProcessLocalNewMcpToolRefOwner:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+        session_id: str,
         continuity_epoch_nonce: str,
         capability_identity_fingerprint: str,
         tool_semantic_fingerprint: str,
         mcp_execution_policy_fingerprint: str,
         tool_route_fingerprint: str,
         result_entry_id: str,
+        consumer_kind: McpToolRefConsumerKind = McpToolRefConsumerKind.MODEL_EPOCH,
+        consumer_id: str | None = None,
+        runtime_generation: int | None = None,
     ) -> PreparedNewMcpToolRefSettlement:
         semantic = {
             "scope": conversation_scope_kind.value,
-            "scope_subagent_task_id": scope_subagent_task_id,
+            "consumer_kind": consumer_kind.value,
+            "consumer_id": consumer_id,
+            "runtime_generation": runtime_generation,
+            "session_id": session_id,
             "epoch_nonce": continuity_epoch_nonce,
             "capability_identity": capability_identity_fingerprint,
             "tool_semantic": tool_semantic_fingerprint,
@@ -117,13 +131,16 @@ class ProcessLocalNewMcpToolRefOwner:
         ref = NewMcpToolRef(
             opaque_token=token,
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
+            session_id=session_id,
             continuity_epoch_nonce=continuity_epoch_nonce,
             capability_identity_fingerprint=capability_identity_fingerprint,
             tool_semantic_fingerprint=tool_semantic_fingerprint,
             mcp_execution_policy_fingerprint=mcp_execution_policy_fingerprint,
             tool_route_fingerprint=tool_route_fingerprint,
             issued_by_host_authority=self._authority,
+            consumer_kind=consumer_kind,
+            consumer_id=consumer_id,
+            runtime_generation=runtime_generation,
         )
         with self._lock:
             if self._closed:
@@ -135,11 +152,14 @@ class ProcessLocalNewMcpToolRefOwner:
             if record is None:
                 epoch_count = sum(
                     item.ref.conversation_scope_kind is conversation_scope_kind
-                    and item.ref.scope_subagent_task_id == scope_subagent_task_id
+                    and item.ref.session_id == session_id
                     and item.ref.continuity_epoch_nonce == continuity_epoch_nonce
+                    and item.ref.consumer_kind is consumer_kind
+                    and item.ref.consumer_id == consumer_id
                     for item in self._refs.values()
                 )
-                if epoch_count >= MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH:
+                if (consumer_kind is McpToolRefConsumerKind.MODEL_EPOCH
+                        and epoch_count >= MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH):
                     raise McpToolRefCapacityExceeded(
                         "MCP_REF_CAPACITY_EXCEEDED"
                     )
@@ -177,7 +197,8 @@ class ProcessLocalNewMcpToolRefOwner:
             if record is not prepared.record:
                 return  # A newer inspect with the same deterministic token owns its own result IDs.
             if committed:
-                record.committed_result_entry_ids.add(prepared.result_entry_id)
+                if record.state is not NewMcpToolRefState.CALLABLE:
+                    record.committed_result_entry_ids.add(prepared.result_entry_id)
                 if record.state is NewMcpToolRefState.PREPARED:
                     record.state = NewMcpToolRefState.DORMANT
             elif (
@@ -195,8 +216,10 @@ class ProcessLocalNewMcpToolRefOwner:
         *,
         result_entry_id: str,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+        session_id: str,
         continuity_epoch_nonce: str,
+        consumer_kind: McpToolRefConsumerKind = McpToolRefConsumerKind.MODEL_EPOCH,
+        consumer_id: str | None = None,
     ) -> bool:
         installed = False
         with self._lock:
@@ -205,10 +228,13 @@ class ProcessLocalNewMcpToolRefOwner:
                 if (
                     result_entry_id in record.committed_result_entry_ids
                     and ref.conversation_scope_kind is conversation_scope_kind
-                    and ref.scope_subagent_task_id == scope_subagent_task_id
+                    and ref.session_id == session_id
                     and ref.continuity_epoch_nonce == continuity_epoch_nonce
+                    and ref.consumer_kind is consumer_kind
+                    and ref.consumer_id == consumer_id
                 ):
                     record.state = NewMcpToolRefState.CALLABLE
+                    record.committed_result_entry_ids.clear()
                     installed = True
         return installed
 
@@ -217,8 +243,10 @@ class ProcessLocalNewMcpToolRefOwner:
         token: str,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+        session_id: str,
         continuity_epoch_nonce: str,
+        consumer_kind: McpToolRefConsumerKind = McpToolRefConsumerKind.MODEL_EPOCH,
+        consumer_id: str | None = None,
     ) -> NewMcpToolRef:
         with self._lock:
             record = self._refs.get(token)
@@ -229,15 +257,18 @@ class ProcessLocalNewMcpToolRefOwner:
                 record.state is not NewMcpToolRefState.CALLABLE
                 or ref.issued_by_host_authority is not self._authority
                 or ref.conversation_scope_kind is not conversation_scope_kind
-                or ref.scope_subagent_task_id != scope_subagent_task_id
+                or ref.session_id != session_id
                 or ref.continuity_epoch_nonce != continuity_epoch_nonce
+                or ref.consumer_kind is not consumer_kind
+                or ref.consumer_id != consumer_id
             ):
                 raise LookupError("MCP_TOOL_REF_STALE_OR_DORMANT")
             return ref
 
     def retire_unroutable(
-        self, *, conversation_scope_kind, scope_subagent_task_id,
+        self, *, conversation_scope_kind, session_id,
         continuity_epoch_nonce, allowed,
+        consumer_kind=McpToolRefConsumerKind.MODEL_EPOCH, consumer_id=None,
     ) -> None:
         """Retire obsolete records, not their already admitted physical operations.
 
@@ -250,10 +281,12 @@ class ProcessLocalNewMcpToolRefOwner:
             for token, record in self._refs.items():
                 ref = record.ref
                 key = (ref.capability_identity_fingerprint, ref.tool_semantic_fingerprint,
-                       ref.mcp_execution_policy_fingerprint, ref.tool_route_fingerprint)
+                       ref.mcp_execution_policy_fingerprint, ref.tool_route_fingerprint, ref.runtime_generation)
                 if (ref.conversation_scope_kind is conversation_scope_kind
-                        and ref.scope_subagent_task_id == scope_subagent_task_id
+                        and ref.session_id == session_id
                         and ref.continuity_epoch_nonce == continuity_epoch_nonce
+                        and ref.consumer_kind is consumer_kind
+                        and ref.consumer_id == consumer_id
                         and key not in allowed):
                     stale.add(token)
             for token in stale:
@@ -266,15 +299,16 @@ class ProcessLocalNewMcpToolRefOwner:
         self,
         *,
         conversation_scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
+        session_id: str,
         continuity_epoch_nonce: str,
     ) -> None:
         with self._lock:
             stale = tuple(
                 token
                 for token, record in self._refs.items()
-                if record.ref.conversation_scope_kind is conversation_scope_kind
-                and record.ref.scope_subagent_task_id == scope_subagent_task_id
+                if record.ref.consumer_kind is McpToolRefConsumerKind.MODEL_EPOCH
+                and record.ref.conversation_scope_kind is conversation_scope_kind
+                and record.ref.session_id == session_id
                 and record.ref.continuity_epoch_nonce != continuity_epoch_nonce
             )
             for token in stale:
@@ -287,6 +321,18 @@ class ProcessLocalNewMcpToolRefOwner:
             for token_id in stale_settlements:
                 self._prepared.pop(token_id, None)
 
+    def retire_consumer(self, *, consumer_kind: McpToolRefConsumerKind, consumer_id: str) -> None:
+        """Release one live consumer without disturbing accepted physical calls."""
+        with self._lock:
+            stale = {token for token, record in self._refs.items()
+                     if record.ref.consumer_kind is consumer_kind
+                     and record.ref.consumer_id == consumer_id}
+            for token in stale:
+                self._refs.pop(token)
+            for token, prepared in tuple(self._prepared.items()):
+                if prepared.ref.opaque_token in stale:
+                    self._prepared.pop(token)
+
     def close(self) -> None:
         with self._lock:
             self._closed = True
@@ -298,6 +344,7 @@ __all__ = [
     "MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH",
     "McpToolRefCapacityExceeded",
     "NewMcpToolRef",
+    "McpToolRefConsumerKind",
     "NewMcpToolRefState",
     "PreparedNewMcpToolRefSettlement",
     "ProcessLocalNewMcpToolRefOwner",

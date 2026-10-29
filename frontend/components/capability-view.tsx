@@ -349,13 +349,33 @@ export function CapabilityView({
               {transport.type === 'stdio' && <small>{JSON.stringify(transport.args ?? [])} · {String(transport.cwd ?? '默认工作目录')}</small>}
               <small>认证：{mcpAuthLabels[String((connection.config.auth as Record<string, unknown> | undefined)?.type ?? 'none')] ?? '未指定'}</small>
               {credentials.map((item) => <small key={item.name}>{item.name}：{item.present ? '已配置' : '待配置'}</small>)}
+              <label className="capability-check"><input type="checkbox" aria-label={`${connection.serverId} 为子代理也提供`} disabled={Boolean(busyKey)} checked={connection.config.scope_policy === 'ROOT_AND_SUBAGENTS'} onChange={event => {
+                const policy = event.target.checked ? 'ROOT_AND_SUBAGENTS' : 'ROOT_ONLY';
+                setEnableCandidate({...enableCandidate,
+                  mcpConnections: enableCandidate.mcpConnections?.map(item => item.serverId === connection.serverId ? {...item, config: {...item.config, scope_policy: policy}} : item),
+                  connectionReview: enableCandidate.connectionReview?.map(item => item.overlay.local_server_id === connection.serverId ? {...item, overlay: {...item.overlay, scope_policy: policy}} : item),
+                });
+              }} />为子代理也提供</label>
             </div>;
           })}
           </div>
           <footer><button className="secondary-action" disabled={Boolean(busyKey)} onClick={() => setEnableCandidate(undefined)}>取消</button>
             <button className="capability-primary" disabled={Boolean(busyKey)} onClick={() => void (async () => {
               setBusyKey(`plugin:${enableCandidate.id}`);
-              try { if (await onTogglePlugin(enableCandidate, true)) setEnableCandidate(undefined); }
+              try {
+                let reviewed = enableCandidate;
+                for (const connection of reviewed.mcpConnections ?? []) {
+                  const policy = connection.config.scope_policy ?? 'ROOT_ONLY';
+                  if (policy === (connection.overlay?.scope_policy ?? 'ROOT_ONLY')) continue;
+                  const transport = connection.config.transport as Record<string, unknown>;
+                  const overlay = {...(connection.overlay ?? {local_server_id: connection.serverId, transport_kind: transport.type,
+                    endpoint: null, public_headers: {}, environment: {}, secret_environment: {}, auth: {type: 'none'}}), scope_policy: policy};
+                  if (!await onEditPluginConnection(reviewed, connection, {overlay, secretChanges: []})) return;
+                  reviewed = {...reviewed, mcpConnections: reviewed.mcpConnections?.map(item => item.serverId === connection.serverId ? {...item, overlay} : item)};
+                  setEnableCandidate(reviewed);
+                }
+                if (await onTogglePlugin(reviewed, true)) setEnableCandidate(undefined);
+              }
               finally { setBusyKey(undefined); }
             })()}>确认启用</button></footer>
         </section>

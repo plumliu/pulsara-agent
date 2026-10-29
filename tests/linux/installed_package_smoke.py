@@ -26,6 +26,7 @@ from pulsara_agent.plugins.management import PluginManagementService
 from pulsara_agent.ports.tool_execution import ToolCall
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.ripgrep import private_ripgrep
+from pulsara_agent.code_mode import CodeModeHost
 from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.terminal_process.environment import TerminalEnvironmentOwner, TerminalEnvConfig
 from pulsara_agent.tool_permission import preset_to_policy
@@ -62,6 +63,26 @@ async def exercise(root: Path) -> None:
         assert subprocess.check_output(['/bin/sh', '-c', 'rg --version'], env=env.values, cwd=root).startswith(b'ripgrep 15.2.0')
     finally:
         owner.close(timeout_seconds=1)
+    code_mode = CodeModeHost()
+    async def never_called(_):
+        raise AssertionError("Offline VM smoke must not dispatch tools")
+    try:
+        cell_id = await code_mode.start(source="console.log('offline QuickJS');return 42;",
+            source_exec_attempt_id="installed-smoke-attempt", turn_id="installed-smoke-turn",
+            snapshot=None, tool_catalog={}, invoke=never_called)
+        records = []
+        async with asyncio.timeout(10):
+            while True:
+                page = await code_mode.observe(cell_id, 100)
+                records.extend(page.output)
+                await code_mode.acknowledge(page)
+                if page.state in {"completed", "failed", "terminated"} and not page.pending_calls and not page.has_more:
+                    assert page.state == "completed", page.error
+                    break
+        assert records == [{"kind": "log", "text": "offline QuickJS"}, {"kind": "return", "text": "42"}]
+        assert code_mode._node.resolve().is_relative_to(package.parent)
+    finally:
+        await code_mode.aclose()
     home = root / 'home'
     os.environ['PULSARA_HOME'] = str(home)
     skill = root / 'portable-skill'
@@ -107,7 +128,7 @@ async def exercise(root: Path) -> None:
     finally:
         await application.aclose()
     assert application._runtime_directory is None
-    print('Installed wheel: launcher, assets, search, terminal rg, Skill/Plugin publication, HTTP startup/shutdown passed.')
+    print('Installed wheel: launcher, assets, search, terminal rg, offline Node/QuickJS, Skill/Plugin publication, HTTP startup/shutdown passed.')
 
 
 if __name__ == '__main__':

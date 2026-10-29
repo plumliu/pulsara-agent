@@ -49,8 +49,9 @@ def _prompt_steer_row_matches_candidate(
     return bool(
         str(row["id"]) == candidate.queue_item_id
         and int(row["queue_sequence"]) == candidate.queue_sequence
-        and str(row["command_id"]) == candidate.command_id
+        and row["command_id"] == candidate.command_id
         and str(row["delivery_mode"]) == PromptDeliveryMode.STEER_ACTIVE_TURN.value
+        and row['input_origin'] == candidate.input_origin.value
         and str(row["target_turn_id"]) == candidate.exact_target_turn_id
         and str(row["content_digest"]) == content.digest
         and int(row["content_size"]) == content.size
@@ -76,7 +77,7 @@ def _prompt_steer_row_matches_resource_rejection(
         and str(row["workspace_id"]) == candidate.workspace_id
         and str(row["id"]) == candidate.queue_item_id
         and int(row["queue_sequence"]) == candidate.queue_sequence
-        and str(row["command_id"]) == candidate.command_id
+        and row["command_id"] == candidate.command_id
         and str(row["target_turn_id"]) == candidate.exact_target_turn_id
         and content == candidate.content
     )
@@ -102,8 +103,7 @@ def _accepted_steer_entry_matches(
         and str(row["turn_id"]) == candidate.exact_target_turn_id
         and int(row["entry_sequence"]) == candidate.expected_entry_sequence
         and str(row["entry_kind"]) == EntryKind.USER_STEER.value
-        and str(row["conversation_scope_kind"]) == ConversationScopeKind.ROOT.value
-        and row["scope_subagent_task_id"] is None
+        and row['input_origin'] == candidate.input_origin.value
         and str(row["content_digest"]) == content.digest
         and int(row["content_size"]) == content.size
         and str(row["content_media_type"]) == content.media_type
@@ -125,11 +125,6 @@ def _event_row_matches_draft(
             if slot is not draft.subject.slot
         )
     )
-    expected_child_kind: str | None = None
-    if draft.subject.slot is SubjectSlot.SUBAGENT_MESSAGE:
-        expected_child_kind = "MESSAGE"
-    elif draft.subject.slot is SubjectSlot.SUBAGENT_RESULT:
-        expected_child_kind = "RESULT"
     return bool(
         str(row["event_id"]) == draft.event_id
         and str(row["event_type"]) == draft.event_type.value
@@ -140,7 +135,6 @@ def _event_row_matches_draft(
         and str(row["projection_profile"]) == draft.projection_profile
         and dict(row["payload"]) == dict(draft.payload)
         and subject_matches
-        and row.get("subject_subagent_child_kind") == expected_child_kind
     )
 
 

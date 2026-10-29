@@ -7,6 +7,7 @@ from typing import Mapping
 
 from pulsara_agent.mcp_config import (
     McpAuthConfig,
+    McpScopePolicy,
     NoAuth,
     StdioTransportConfig,
     _parse_server,
@@ -132,8 +133,11 @@ class PluginMcpConnectionOverlay:
     environment: tuple[tuple[str, str], ...] = ()
     secret_environment: tuple[tuple[str, McpSecretInput], ...] = ()
     auth: McpAuthConfig = NoAuth()
+    scope_policy: McpScopePolicy = McpScopePolicy.ROOT_ONLY
 
     def __post_init__(self):
+        if not isinstance(self.scope_policy, McpScopePolicy):
+            raise ValueError("Plugin MCP scope policy is invalid")
         if self.transport_kind not in {"stdio", "streamable_http", "sse"}:
             raise ValueError("Plugin connection transport is invalid")
         if not self.local_server_id or len(self.local_server_id.encode()) > 128:
@@ -184,6 +188,7 @@ class PluginMcpConnectionOverlay:
             }
         return {
             "transport": transport,
+            "scope_policy": self.scope_policy.value,
             "public_headers": dict(self.public_headers),
             "auth": auth_to_entry(self.auth),
         }
@@ -202,6 +207,7 @@ def overlay_to_dict(overlay: PluginMcpConnectionOverlay) -> dict:
             key: secret_to_dict(ref) for key, ref in overlay.secret_environment
         },
         "auth": auth_to_entry(overlay.auth),
+        "scope_policy": overlay.scope_policy.value,
     }
 
 
@@ -217,6 +223,7 @@ def overlay_from_dict(value: object) -> PluginMcpConnectionOverlay:
         "environment",
         "secret_environment",
         "auth",
+        "scope_policy",
     }:
         raise ValueError("Plugin connection overlay has an invalid shape")
     if not isinstance(value["local_server_id"], str) or not isinstance(
@@ -244,6 +251,7 @@ def overlay_from_dict(value: object) -> PluginMcpConnectionOverlay:
         ),
         tuple(sorted((key, secret_from_dict(ref)) for key, ref in secret_env.items())),
         _parse_auth(value["auth"]),
+        McpScopePolicy(value["scope_policy"]),
     )
 
 
@@ -302,7 +310,10 @@ def resolve_connection_overlay(server, overlay, *, owner):
                 "Plugin input reference no longer belongs to its immutable definition"
             )
     if not server.connection_inputs.targets:
-        return overlay
+        return overlay or PluginMcpConnectionOverlay(
+            server.local_server_id,
+            "streamable_http" if server.kind.value == "streamable-http" else server.kind.value,
+        )
     defaults = connection_input_defaults(
         server.connection_inputs,
         owner=owner,
@@ -400,4 +411,5 @@ def connection_editor_definition(server, overlay, *, owner):
         "transport": transport,
         "public_headers": dict(public_headers.values()),
         "auth": auth_to_entry(overlay.auth),
+        "scope_policy": overlay.scope_policy.value,
     }

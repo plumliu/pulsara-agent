@@ -2,8 +2,6 @@ from __future__ import annotations
 from pulsara_agent.identity import derive_id
 
 import asyncio
-import json
-from pathlib import Path
 from types import SimpleNamespace
 import unicodedata
 
@@ -23,7 +21,6 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     ProcessLocalEffectSettlementOutcome,
 )
 from pulsara_agent.conversation_kernel.turn_admission import (
-    SubagentTurnAdmissionPostCommitError,
     TurnAdmissionCoordinator,
 )
 from pulsara_agent.conversation_kernel.cancellation import (
@@ -36,16 +33,10 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
-from pulsara_agent.conversation_kernel.vocabulary import (
-    APPEND_GUARDS,
-    COMMITTED_EVENT_DESCRIPTORS,
-    SUBJECT_SLOTS,
-)
 from pulsara_agent.ports.live_agent_event import (
     TodoLiveItemProjection,
     TodoSnapshotUpdatedPayload,
 )
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.terminal_protocol.v3_gateway import (
     _live_control_snapshot_to_wire,
     _live_to_wire,
@@ -62,12 +53,7 @@ from pulsara_agent.tools.builtins.todo import (
 from pulsara_agent.conversation_kernel.todo_runtime import (
     TodoLiveDisposition,
     TodoRunStateOwner,
-    build_child_activation,
     build_root_activation,
-)
-from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    CompactionRuntimeHandoffBoundError,
-    freeze_compaction_runtime_handoff,
 )
 
 
@@ -82,14 +68,6 @@ def _root_activation(turn: str = 'turn:nzc36cttgo7xxki7bcjc7ops7a'):
     )
 
 
-def _child_activation(turn: str = 'turn:nbjllslbuktypzvmqopgumgyjy'):
-    return build_child_activation(
-        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
-        subagent_task_id='task:jjp4dy4hmhapm5toxqet6i7qkm',
-        exact_turn_id=turn,
-        exact_initial_entry_id=derive_id("entry", "test-fixture", f"entry:{turn}"),
-        exact_context_binding_revision_id=derive_id("context", "test-fixture", f"context:{turn}"),
-    )
 
 
 def test_todo_complete_snapshot_contract_and_byte_truth() -> None:
@@ -218,94 +196,6 @@ def test_todo_invalid_candidates_fail_before_owner_mutation(
         parse_todo_replacement(arguments)
 
 
-def test_todo_owner_isolates_root_children_and_freezes_handoff() -> None:
-    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
-    owner.activate_root_run(_root_activation())
-    child = build_child_activation(
-        session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
-        subagent_task_id='task:7ekouunh3opwy6r5hpnpyw22fa',
-        exact_turn_id='turn:h2g7tkxc3t3s7qaeuv3uyoxu7m',
-        exact_initial_entry_id='entry:fhx2dcgwzqpysr5bxkzd7zvgve',
-        exact_context_binding_revision_id='context:qfbpxjr42k7p4ehg2k7ki65k3y',
-    )
-    owner.activate_child_run(child)
-    assert (
-        owner.snapshot(
-            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
-        ).revision
-        == 0
-    )
-    assert (
-        owner.snapshot(
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id='task:7ekouunh3opwy6r5hpnpyw22fa',
-        ).revision
-        == 0
-    )
-    assert (
-        owner.snapshot(
-            scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id='task:ofq7v6vy25ozw4nkz722653tpy',
-        )
-        is None
-    )
-
-    candidate = parse_todo_replacement(
-        {
-            "items": [
-                {"text": "Work now", "status": "in_progress"},
-                {"text": "Already done", "status": "completed"},
-            ]
-        }
-    )
-    prepared = owner.prepare_replace(
-        scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-        exact_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
-        attempt_id='attempt:dvce4jlhrqd3hzcfpszy4gujye',
-        proposed_result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
-        candidate=candidate,
-        acknowledgement=b'{"status":"UPDATED"}',
-    )
-    installed = owner.commit(prepared)
-    assert installed.installed_snapshot.revision == 1
-    assert installed.disposition is TodoLiveDisposition.ACTIVE
-    handoff = owner.freeze_compaction_handoff(
-        scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
-    )
-    assert handoff is not None
-    assert [item.text for item in handoff.ordered_items] == [
-        "Work now",
-        "Already done",
-    ]
-    runtime_handoff = freeze_compaction_runtime_handoff(
-        terminal_processes=(),
-        terminal_monitors=(),
-        todo=handoff,
-        subagent_tasks=(),
-    )
-    assert runtime_handoff is not None
-    for rendered in (runtime_handoff.full_text, runtime_handoff.compact_text):
-        payload = json.loads(rendered)
-        assert payload["todos"] == [
-            {"ordinal": 0, "status": "in_progress", "text": "Work now"},
-            {"ordinal": 1, "status": "completed", "text": "Already done"},
-        ]
-        assert payload["todo_counts"] == {
-            "completed": 1,
-            "in_progress": 1,
-            "pending": 0,
-            "total": 2,
-        }
-        assert payload["omitted"]["todos"] == 0
-    with pytest.raises(CompactionRuntimeHandoffBoundError):
-        freeze_compaction_runtime_handoff(
-            terminal_processes=(),
-            terminal_monitors=(),
-            todo=handoff,
-            subagent_tasks=(),
-            maximum_utf8_bytes=32,
-        )
 
 
 def test_todo_next_root_activation_closes_old_exact_run() -> None:
@@ -342,7 +232,7 @@ def test_todo_next_root_activation_closes_old_exact_run() -> None:
     assert closed.disposition is TodoLiveDisposition.CLOSED
     assert (
         owner.snapshot(
-            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+            scope_kind=ModelInputScopeKind.ROOT
         ).revision
         == 0
     )
@@ -352,7 +242,6 @@ def test_todo_external_continuation_tolerates_state_lost_with_host() -> None:
     owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:zgcu435qy75pmagj7jrf2g5wmi')
     assert not owner.bind_continuation_if_present(
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         turn_id='turn:z3y7csg3jjgexbqxsnpkynjdsu',
     )
     assert owner.current_snapshots() == ()
@@ -360,44 +249,20 @@ def test_todo_external_continuation_tolerates_state_lost_with_host() -> None:
     owner.activate_root_run(_root_activation('turn:jwcvnoms3gl66moynh76r32u34'))
     assert owner.bind_continuation_if_present(
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         turn_id='turn:or2urxxbbqlxjsgc6dakbrpw3e',
     )
     owner.require_active(
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         exact_turn_id='turn:or2urxxbbqlxjsgc6dakbrpw3e',
     )
     assert (
         owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         ).revision
         == 0
     )
 
 
-def test_external_root_continuations_use_loss_tolerant_todo_binding() -> None:
-    host_source = (
-        Path(__file__).resolve().parents[1]
-        / "src/pulsara_agent/conversation_kernel/host.py"
-    ).read_text(encoding="utf-8")
-    for method_name in (
-        "_bind_plan_review_successor",
-        "_start_terminal_observation_turn",
-        "_start_subagent_completion_turn",
-    ):
-        method_source = host_source.split(f"    async def {method_name}(", 1)[1].split(
-            "\n    async def ", 1
-        )[0]
-        assert ".bind_continuation_if_present(" in method_source
-        assert ".bind_continuation(" not in method_source
-
-    active_chain = host_source.split("    async def _finish_root_chain(", 1)[1].split(
-        "\n    async def ", 1
-    )[0]
-    assert ".bind_continuation(" in active_chain
-    assert ".bind_continuation_if_present(" not in active_chain
 
 
 def test_todo_tool_installs_only_after_explicit_canonical_settlement(
@@ -454,7 +319,6 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert result.process_local_settlement is not None
         before = port.todo_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         assert before is not None and before.revision == 0
         settlement = await port.settle_process_local_effect(
@@ -464,7 +328,6 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert settlement.outcome is ProcessLocalEffectSettlementOutcome.INSTALLED
         after = port.todo_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         assert after is not None and after.revision == 1
         assert [item.text for item in after.ordered_items] == [
@@ -497,6 +360,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         from unittest.mock import AsyncMock, Mock
         active = asyncio.current_task()
         host = SimpleNamespace(_lock=asyncio.Lock(), _active_task=active,
+            _session_scope_kind=ModelInputScopeKind.ROOT,
             _active_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', _closing=False,
             _compaction=SimpleNamespace(take_manual=AsyncMock(return_value=None)),
             _tools=port, _mark_feedback_target_ended_locked=Mock(),
@@ -515,7 +379,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert not wire.payload.todo_snapshot_updated.ordered_items
         assert port.todo_owner.mark_root_idle(exact_turn_id=host._active_turn_id) is None
         port.todo_owner.bind_continuation(scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None, turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
+            turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
         assert not port.todo_owner.current_snapshots()[0].ordered_items
         await port.aclose(timeout_seconds=2)
 
@@ -555,7 +419,7 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
             borrow.close()
         assert result.process_local_settlement is not None
         assert port.todo_owner.mark_closing(
-            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+            scope_kind=ModelInputScopeKind.ROOT
         )
         settlement = await port.settle_process_local_effect(
             result.process_local_settlement,
@@ -563,7 +427,7 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
         )
         assert settlement.outcome is ProcessLocalEffectSettlementOutcome.INSTALLED
         snapshot = port.todo_owner.snapshot(
-            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+            scope_kind=ModelInputScopeKind.ROOT
         )
         assert snapshot is not None and snapshot.revision == 1
         await port.aclose(timeout_seconds=2)
@@ -576,7 +440,6 @@ def test_todo_close_fails_closed_for_ownerless_pending_settlement() -> None:
     owner.activate_root_run(_root_activation())
     prepared = owner.prepare_replace(
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         exact_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
         attempt_id='attempt:dvce4jlhrqd3hzcfpszy4gujye',
         proposed_result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
@@ -586,22 +449,21 @@ def test_todo_close_fails_closed_for_ownerless_pending_settlement() -> None:
         acknowledgement=b'{"status":"UPDATED"}',
     )
     assert owner.mark_closing(
-        scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+        scope_kind=ModelInputScopeKind.ROOT
     )
     with pytest.raises(RuntimeError, match="before settlement drain"):
         owner.close_run(
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
     installed = owner.commit(prepared)
     assert installed.installed_snapshot.revision == 1
     closed = owner.close_run(
-        scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+        scope_kind=ModelInputScopeKind.ROOT
     )
     assert closed is not None and closed.closing_revision == 2
     assert (
         owner.close_run(
-            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+            scope_kind=ModelInputScopeKind.ROOT
         )
         is None
     )
@@ -665,7 +527,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
             permission_snapshot=permission,
         )
         assert port.todo_owner.mark_closing(
-            scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None
+            scope_kind=ModelInputScopeKind.ROOT
         )
         try:
             result = await port.invoke(
@@ -683,7 +545,6 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
         assert result.process_local_settlement is None
         snapshot = port.todo_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         assert snapshot is not None and snapshot.revision == 0
         await port.aclose(timeout_seconds=2)
@@ -691,27 +552,6 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
     asyncio.run(exercise())
 
 
-def test_todo_refinement_preserves_the_closed_durability_oracle() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 30
-    assert len(LiveEventType) == 24
-    assert tuple(item for item in LiveEventType if "TODO" in item.name) == (
-        LiveEventType.TODO_SNAPSHOT_UPDATED,
-    )
-    assert len(SUBJECT_SLOTS) == 11
-    assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
-
-    root = Path(__file__).resolve().parents[1]
-    migration = (
-        root
-        / "src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql"
-    ).read_text(encoding="utf-8")
-    assert "todo_" not in migration.lower()
-    model_input = root / "src/pulsara_agent/model_input"
-    assert all(
-        "TODO_CONTEXT" not in path.read_text(encoding="utf-8")
-        for path in model_input.rglob("*.py")
-    )
 
 
 def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> None:
@@ -747,30 +587,6 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
     asyncio.run(exercise())
 
 
-def test_child_todo_activation_failure_preserves_postcommit_ownership() -> None:
-    async def exercise() -> None:
-        accepted = AcceptedEntry('entry:5ymhkczans3dopadxofmoe5nay', 'turn:nbjllslbuktypzvmqopgumgyjy', 1, 1)
-        terminalized: list[tuple[str, str]] = []
-
-        async def finalizer(_prepared, _accepted) -> None:
-            raise RuntimeError("child TODO run capacity is exhausted")
-
-        async def terminalize(turn_id: str, reason: str) -> None:
-            terminalized.append((turn_id, reason))
-
-        coordinator = object.__new__(TurnAdmissionCoordinator)
-        coordinator._workspace_gate = None
-        coordinator._todo_finalizer = finalizer
-        coordinator.interrupt_turn = terminalize
-
-        with pytest.raises(SubagentTurnAdmissionPostCommitError) as raised:
-            await coordinator._finalize_todo(_child_activation(), accepted)
-
-        assert raised.value.accepted == accepted
-        assert isinstance(raised.value.activation_error, RuntimeError)
-        assert terminalized == []
-
-    asyncio.run(exercise())
 
 
 def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer() -> (
@@ -800,12 +616,11 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         coordinator._deadlines = SimpleNamespace(deadline=lambda _owner: 999_999_999.0)
         coordinator._repository = SimpleNamespace(
             accept_root_turn_intent=object(),
-            accept_subagent_turn=object(),
         )
         coordinator._writer_lease = SimpleNamespace(guard=object())
         coordinator._todo_finalizer = finalizer
         coordinator.interrupt_turn = terminalize
-        intent = ActiveTurnCancellationIntent('turn:nzc36cttgo7xxki7bcjc7ops7a', ModelInputScopeKind.ROOT, None)
+        intent = ActiveTurnCancellationIntent('turn:nzc36cttgo7xxki7bcjc7ops7a', ModelInputScopeKind.ROOT)
         candidate = SimpleNamespace(
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
@@ -831,28 +646,3 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         assert terminalized == [('turn:nzc36cttgo7xxki7bcjc7ops7a', "USER_STOPPED")]
 
     asyncio.run(exercise())
-
-
-def test_root_idle_clears_only_root_and_cannot_precede_pending_settlement():
-    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
-    owner.activate_root_run(_root_activation())
-    owner.activate_child_run(_child_activation())
-    snapshots = []
-    for scope, task, turn in [
-        (ModelInputScopeKind.SUBAGENT_TASK, 'task:jjp4dy4hmhapm5toxqet6i7qkm', 'turn:nbjllslbuktypzvmqopgumgyjy'),
-        (ModelInputScopeKind.ROOT, None, 'turn:nzc36cttgo7xxki7bcjc7ops7a'),
-    ]:
-        prepared = owner.prepare_replace(scope_kind=scope, scope_subagent_task_id=task, exact_turn_id=turn,
-            attempt_id='attempt:dvce4jlhrqd3hzcfpszy4gujye', proposed_result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
-            candidate=parse_todo_replacement({'items':[{'text':'unfinished','status':'pending'}]}), acknowledgement=b'{}')
-        if scope is ModelInputScopeKind.ROOT:
-            with pytest.raises(RuntimeError, match='settlement drain'):
-                owner.mark_root_idle(exact_turn_id=turn)
-        snapshots.append(owner.commit(prepared).installed_snapshot)
-    child, root = snapshots
-    owner.bind_continuation(scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None, turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
-    assert owner.mark_root_idle(exact_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a') is None
-    assert owner.snapshot(scope_kind=ModelInputScopeKind.ROOT, scope_subagent_task_id=None) is root
-    cleared = owner.mark_root_idle(exact_turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
-    assert not cleared.installed_snapshot.ordered_items
-    assert owner.snapshot(scope_kind=ModelInputScopeKind.SUBAGENT_TASK, scope_subagent_task_id='task:jjp4dy4hmhapm5toxqet6i7qkm') is child

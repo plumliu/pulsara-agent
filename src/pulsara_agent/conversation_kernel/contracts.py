@@ -53,7 +53,7 @@ class HostWriterAcquisitionKind(StrEnum):
 
 class ConversationScopeKind(StrEnum):
     ROOT = "ROOT"
-    SUBAGENT_TASK = "SUBAGENT_TASK"
+    SUBAGENT = "SUBAGENT"
 
 
 class EntryKind(StrEnum):
@@ -65,7 +65,6 @@ class EntryKind(StrEnum):
     ASSISTANT_TOOL_REQUEST = "ASSISTANT_TOOL_REQUEST"
     TOOL_RESULT = "TOOL_RESULT"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
-    INTER_AGENT_MESSAGE = "INTER_AGENT_MESSAGE"
 
 
 class AssistantBlockKind(StrEnum):

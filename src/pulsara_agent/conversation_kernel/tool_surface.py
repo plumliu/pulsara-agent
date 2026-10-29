@@ -182,8 +182,8 @@ class ProcessLocalToolSurfaceAccess:
     owner_epoch: int
     surface_generation: int
     conversation_scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     _authority: object = field(repr=False)
+    session_id: str | None = None
 
     def exactly_joins(self, other: ProcessLocalToolSurfaceAccess) -> bool:
         return self is other
@@ -202,8 +202,6 @@ class PreparedKernelToolSurface:
         if (
             self.access.conversation_scope_kind
             is not self.model_surface.conversation_scope_kind
-            or (self.access.conversation_scope_kind is ModelInputScopeKind.ROOT)
-            != (self.access.scope_subagent_task_id is None)
         ):
             raise ValueError("prepared surface access scope does not exact-join")
         names = tuple(item.tool_name for item in self.execution_bindings)
@@ -236,9 +234,43 @@ class PreparedKernelToolSurface:
         return self is other
 
 
+CODE_MODE_SHARED_TOOL_NAMES = frozenset({
+    "read_file", "write_file", "edit_file", "find_files", "search_content",
+    "terminal", "terminal_process", "artifact_read", "artifact_export",
+    "search_sessions", "search_session_content", "read_session_content",
+    "list_capabilities", "inspect_capability", "use_new_mcp_tool", "read_mcp_resource",
+    "get_mcp_prompt", "run_agent", "list_agents", "inspect_agent", "send_agent_message",
+    "wait_agent", "stop_agent",
+})
+
+
+@dataclass(frozen=True, slots=True)
+class CodeModeToolDirectory:
+    """Frozen call signatures and owner access, without a provider prefix lease."""
+
+    tool_specs: tuple[FrozenToolSpec, ...]
+    execution_bindings: tuple[DirectToolAccessLeaf, ...]
+    access: ProcessLocalToolSurfaceAccess = field(repr=False)
+    capability_exposure_plan: None = field(default=None, init=False)
+
+    def binding(self, tool_name: str) -> DirectToolAccessLeaf:
+        for binding in self.execution_bindings:
+            if binding.tool_name == tool_name:
+                return binding
+        raise KeyError(tool_name)
+
+    @classmethod
+    def freeze(cls, prepared: PreparedKernelToolSurface):
+        specs = tuple(spec for spec in prepared.model_surface.tool_specs
+            if spec.name in CODE_MODE_SHARED_TOOL_NAMES or (
+                isinstance(prepared.binding(spec.name), PreparedToolExecutionBinding)
+                and isinstance(prepared.binding(spec.name).execution_policy, McpToolExecutionPolicyFact)))
+        return cls(specs, tuple(prepared.binding(spec.name) for spec in specs), prepared.access)
+
+
 @dataclass(slots=True)
 class ProcessLocalToolSurfaceBorrow:
-    prepared: PreparedKernelToolSurface
+    prepared: PreparedKernelToolSurface | CodeModeToolDirectory
     borrow_id: str
     _authority: object = field(repr=False)
     _validate: Callable[
@@ -246,6 +278,12 @@ class ProcessLocalToolSurfaceBorrow:
     ] = field(repr=False)
     _release: Callable[["ProcessLocalToolSurfaceBorrow"], None] = field(repr=False)
     _closed: bool = False
+    code_cell_id: str | None = None
+    internal_binding: PreparedToolExecutionBinding | None = field(default=None, repr=False)
+
+    @property
+    def tool_specs(self) -> tuple[FrozenToolSpec, ...]:
+        return self.prepared.tool_specs if isinstance(self.prepared, CodeModeToolDirectory) else self.prepared.model_surface.tool_specs
 
     def exactly_joins(self, prepared: PreparedKernelToolSurface) -> bool:
         return (

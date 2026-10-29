@@ -75,3 +75,7 @@ blob-report/
 src/pulsara_agent/_vendor/ripgrep/
 
 papers/
+
+# Explicitly prepared offline Code Mode dependency payload
+src/pulsara_agent/_vendor/code_mode/
+tools/code_mode_node/node_modules/

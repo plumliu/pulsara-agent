@@ -87,7 +87,6 @@ class ProviderStreamAssembler:
         live_bus: LiveAgentEventBus,
         proposed_entry_id: str,
         conversation_scope_kind: str = "ROOT",
-        scope_subagent_task_id: str | None = None,
         maximum_completed_bytes: int = MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
     ) -> None:
         if maximum_completed_bytes < 1:
@@ -103,9 +102,6 @@ class ProviderStreamAssembler:
         # commit unconditionally retires the matching draft in every reader.
         self._draft_identity = proposed_entry_id
         self._scope_kind = conversation_scope_kind
-        self._scope_subagent_task_id = scope_subagent_task_id
-        if (conversation_scope_kind == "ROOT") != (scope_subagent_task_id is None):
-            raise ValueError("provider live scope union is invalid")
         self._open: dict[str, _OpenBlock] = {}
         self._seen: set[str] = set()
         # Completion order is not semantic order. Providers may interleave
@@ -226,10 +222,12 @@ class ProviderStreamAssembler:
         if identity in self._seen:
             raise RuntimeError("provider block identity was reused")
         canonical_id = _canonical_block_id(self._draft_identity, kind, identity)
-        if any(block.canonical_block_id == canonical_id for block in self._open.values()) or any(
-            block.block_id == canonical_id for block in self._completed.values()
-        ):
-            raise RuntimeError("IDENTITY_CONFLICT: assistant block identity is occupied")
+        if any(
+            block.canonical_block_id == canonical_id for block in self._open.values()
+        ) or any(block.block_id == canonical_id for block in self._completed.values()):
+            raise RuntimeError(
+                "IDENTITY_CONFLICT: assistant block identity is occupied"
+            )
         self._seen.add(identity)
         block = _OpenBlock(
             kind,
@@ -392,7 +390,6 @@ class ProviderStreamAssembler:
             draft_identity=self._draft_identity,
             payload=payload,
             scope_kind=self._scope_kind,
-            scope_subagent_task_id=self._scope_subagent_task_id,
             channel_kind=LiveChannelKind.MODEL_OUTPUT,
             generation_id=derive_id("generation", "draft", self._draft_identity),
             proposed_entry_id=self._draft_identity,

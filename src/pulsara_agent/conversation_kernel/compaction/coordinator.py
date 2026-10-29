@@ -264,8 +264,6 @@ from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
 from pulsara_agent.hooks.matcher import event_matcher_subject
 
 
-
-
 def _target_is_known_text_only(target: PreparedKernelModelTarget) -> bool:
     modalities = target.target.fact.input_modalities
     return modalities is not None and "text" in modalities and "image" not in modalities
@@ -313,41 +311,61 @@ def validate_compaction_wire_transition(
         phase not in {"PRE_FULL", "POST_FULL"}
         or source_candidate.canonical_read != source_view.canonical_dispatch_read
         or source_call.target.fact != successor_call.target.fact
-        or source_binding.target_fact != source_call.target.fact
-        or successor_binding.target_fact != successor_call.target.fact
-        or source_call.target.model_profile.route_wire_profile
-        != successor_call.target.model_profile.route_wire_profile
-        or type(source_binding.estimator) is not type(successor_binding.estimator)
-        or source_binding.estimator.fact != successor_binding.estimator.fact
-        or source_quote.wire_api != successor_quote.wire_api
-        or source_quote.wire_api
-        != source_call.target.model_profile.route_wire_profile.wire_api
-        or successor_quote.wire_api
-        != successor_call.target.model_profile.route_wire_profile.wire_api
-        or source_binding.estimator_fingerprint != source_quote.estimator_fingerprint
-        or successor_binding.estimator_fingerprint
-        != successor_quote.estimator_fingerprint
-        or source_quote.estimator_fingerprint != successor_quote.estimator_fingerprint
-        or source_binding.effective_input_budget_tokens
-        != source_quote.effective_input_budget_tokens
-        or successor_binding.effective_input_budget_tokens
-        != successor_quote.effective_input_budget_tokens
-        or source_quote.effective_input_budget_tokens
-        != successor_quote.effective_input_budget_tokens
-        or source_identity.session_id != successor_identity.session_id
-        or source_identity.turn_id != successor_identity.turn_id
-        or source_identity.conversation_scope_kind
-        is not successor_identity.conversation_scope_kind
-        or source_identity.scope_subagent_task_id
-        != successor_identity.scope_subagent_task_id
-        or source_identity
-        != source_candidate.canonical_read.compile_snapshot.canonical_input.identity
-        or successor_candidate.semantic_input.canonical_input_identity
-        != successor_candidate.canonical_read.compile_snapshot.canonical_input.identity
-        or not _compaction_cut_lineage_exactly_joins(
-            source_candidate=source_candidate,
-            successor_candidate=successor_candidate,
-            phase=phase,
+        or (source_binding.target_fact != source_call.target.fact)
+        or (successor_binding.target_fact != successor_call.target.fact)
+        or (
+            source_call.target.model_profile.route_wire_profile
+            != successor_call.target.model_profile.route_wire_profile
+        )
+        or (type(source_binding.estimator) is not type(successor_binding.estimator))
+        or (source_binding.estimator.fact != successor_binding.estimator.fact)
+        or (source_quote.wire_api != successor_quote.wire_api)
+        or (
+            source_quote.wire_api
+            != source_call.target.model_profile.route_wire_profile.wire_api
+        )
+        or (
+            successor_quote.wire_api
+            != successor_call.target.model_profile.route_wire_profile.wire_api
+        )
+        or (source_binding.estimator_fingerprint != source_quote.estimator_fingerprint)
+        or (
+            successor_binding.estimator_fingerprint
+            != successor_quote.estimator_fingerprint
+        )
+        or (source_quote.estimator_fingerprint != successor_quote.estimator_fingerprint)
+        or (
+            source_binding.effective_input_budget_tokens
+            != source_quote.effective_input_budget_tokens
+        )
+        or (
+            successor_binding.effective_input_budget_tokens
+            != successor_quote.effective_input_budget_tokens
+        )
+        or (
+            source_quote.effective_input_budget_tokens
+            != successor_quote.effective_input_budget_tokens
+        )
+        or (source_identity.session_id != successor_identity.session_id)
+        or (source_identity.turn_id != successor_identity.turn_id)
+        or (
+            source_identity.conversation_scope_kind
+            is not successor_identity.conversation_scope_kind
+        )
+        or (
+            source_identity
+            != source_candidate.canonical_read.compile_snapshot.canonical_input.identity
+        )
+        or (
+            successor_candidate.semantic_input.canonical_input_identity
+            != successor_candidate.canonical_read.compile_snapshot.canonical_input.identity
+        )
+        or (
+            not _compaction_cut_lineage_exactly_joins(
+                source_candidate=source_candidate,
+                successor_candidate=successor_candidate,
+                phase=phase,
+            )
         )
     ):
         raise CompactionWireTransitionDrift(
@@ -426,42 +444,58 @@ def validate_model_switch_wire_transition(
         or source_candidate.canonical_read != source_view.canonical_dispatch_read
         or source_identity
         != source_candidate.canonical_read.compile_snapshot.canonical_input.identity
-        or source_binding != source_view_binding
-        or type(source_binding.estimator) is not type(source_view_binding.estimator)
-        or source_binding.estimator.fact != source_view_binding.estimator.fact
-        or source_semantic.compile_binding_fingerprint
-        != source_view_binding.binding_fingerprint
-        or source_semantic.system_prompt != source_view.materialized_system_prompt()
-        or source_semantic.messages != source_view.materialized_messages()
-        or source_semantic.tools != source_view_binding.tool_surface.tool_specs
-        or source_call.target.fact != source_view_binding.target_fact
-        or source_quote.wire_api
-        != source_call.target.model_profile.route_wire_profile.wire_api
-        or source_quote.estimator_fingerprint
-        != source_view_binding.estimator_fingerprint
-        or source_quote.effective_input_budget_tokens
-        != source_view_binding.effective_input_budget_tokens
-        or successor_call.target is not destination_target.target
-        or successor_call.target.fact != destination_target.target.fact
-        or successor_call.binding != destination_target.call.binding
-        or successor_binding.target_fact != destination_target.target.fact
-        or successor_binding.estimator.fact
-        != destination_target.target.token_estimator.fact
-        or quote.estimator_fingerprint != successor_binding.estimator_fingerprint
-        or quote.effective_input_budget_tokens
-        != successor_binding.effective_input_budget_tokens
-        or quote.wire_api
-        != destination_target.target.model_profile.route_wire_profile.wire_api
-        or source_identity.session_id != successor_identity.session_id
-        or source_identity.turn_id != successor_identity.turn_id
-        or source_identity.conversation_scope_kind
-        is not successor_identity.conversation_scope_kind
-        or source_identity.scope_subagent_task_id
-        != successor_identity.scope_subagent_task_id
-        or not _compaction_cut_lineage_exactly_joins(
-            source_candidate=source_candidate,
-            successor_candidate=successor_candidate,
-            phase=phase,
+        or (source_binding != source_view_binding)
+        or (type(source_binding.estimator) is not type(source_view_binding.estimator))
+        or (source_binding.estimator.fact != source_view_binding.estimator.fact)
+        or (
+            source_semantic.compile_binding_fingerprint
+            != source_view_binding.binding_fingerprint
+        )
+        or (source_semantic.system_prompt != source_view.materialized_system_prompt())
+        or (source_semantic.messages != source_view.materialized_messages())
+        or (source_semantic.tools != source_view_binding.tool_surface.tool_specs)
+        or (source_call.target.fact != source_view_binding.target_fact)
+        or (
+            source_quote.wire_api
+            != source_call.target.model_profile.route_wire_profile.wire_api
+        )
+        or (
+            source_quote.estimator_fingerprint
+            != source_view_binding.estimator_fingerprint
+        )
+        or (
+            source_quote.effective_input_budget_tokens
+            != source_view_binding.effective_input_budget_tokens
+        )
+        or (successor_call.target is not destination_target.target)
+        or (successor_call.target.fact != destination_target.target.fact)
+        or (successor_call.binding != destination_target.call.binding)
+        or (successor_binding.target_fact != destination_target.target.fact)
+        or (
+            successor_binding.estimator.fact
+            != destination_target.target.token_estimator.fact
+        )
+        or (quote.estimator_fingerprint != successor_binding.estimator_fingerprint)
+        or (
+            quote.effective_input_budget_tokens
+            != successor_binding.effective_input_budget_tokens
+        )
+        or (
+            quote.wire_api
+            != destination_target.target.model_profile.route_wire_profile.wire_api
+        )
+        or (source_identity.session_id != successor_identity.session_id)
+        or (source_identity.turn_id != successor_identity.turn_id)
+        or (
+            source_identity.conversation_scope_kind
+            is not successor_identity.conversation_scope_kind
+        )
+        or (
+            not _compaction_cut_lineage_exactly_joins(
+                source_candidate=source_candidate,
+                successor_candidate=successor_candidate,
+                phase=phase,
+            )
         )
     ):
         raise CompactionWireTransitionDrift(
@@ -514,20 +548,26 @@ def _compaction_cut_lineage_exactly_joins(
         successor_binding.base_kind is not ContextBindingBaseKind.SNAPSHOT
         or successor_binding.context_snapshot_id is None
         or successor_binding.revision_ordinal != source_binding.revision_ordinal + 1
-        or not source_lineage_floor
-        <= boundary
-        <= source_identity.provider_input_through_sequence
-        or successor_identity.session_id != source_identity.session_id
-        or successor_identity.turn_id != source_identity.turn_id
-        or successor_identity.initial_entry_id != source_identity.initial_entry_id
-        or successor_identity.conversation_scope_kind
-        is not source_identity.conversation_scope_kind
-        or successor_identity.scope_subagent_task_id
-        != source_identity.scope_subagent_task_id
-        or successor_identity.context_binding_revision_id
-        != successor_binding.binding_revision_id
-        or successor_identity.provider_input_through_sequence
-        < source_identity.provider_input_through_sequence
+        or (
+            not source_lineage_floor
+            <= boundary
+            <= source_identity.provider_input_through_sequence
+        )
+        or (successor_identity.session_id != source_identity.session_id)
+        or (successor_identity.turn_id != source_identity.turn_id)
+        or (successor_identity.initial_entry_id != source_identity.initial_entry_id)
+        or (
+            successor_identity.conversation_scope_kind
+            is not source_identity.conversation_scope_kind
+        )
+        or (
+            successor_identity.context_binding_revision_id
+            != successor_binding.binding_revision_id
+        )
+        or (
+            successor_identity.provider_input_through_sequence
+            < source_identity.provider_input_through_sequence
+        )
         or (
             phase == "PRE_FULL"
             and successor_identity.provider_input_through_sequence
@@ -663,10 +703,10 @@ def _rebase_pending_active_candidate(
     if (
         identity.session_id != source.session_id
         or identity.turn_id != source.turn_id
-        or identity.conversation_scope_kind is not ModelInputScopeKind.ROOT
-        or identity.scope_subagent_task_id is not None
-        or identity.provider_input_through_sequence
-        != source.provider_input_through_sequence
+        or (
+            identity.provider_input_through_sequence
+            != source.provider_input_through_sequence
+        )
     ):
         raise StructuredModelInputCompileError(
             ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
@@ -827,7 +867,6 @@ class CompactionAttemptToken:
     session_id: str
     turn_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     trigger: CompactionTrigger
 
     def __init__(
@@ -837,7 +876,6 @@ class CompactionAttemptToken:
         session_id: str,
         turn_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         trigger: CompactionTrigger,
         _seal: object,
     ) -> None:
@@ -847,7 +885,6 @@ class CompactionAttemptToken:
         object.__setattr__(self, "session_id", session_id)
         object.__setattr__(self, "turn_id", turn_id)
         object.__setattr__(self, "scope_kind", scope_kind)
-        object.__setattr__(self, "scope_subagent_task_id", scope_subagent_task_id)
         object.__setattr__(self, "trigger", trigger)
 
 
@@ -856,7 +893,6 @@ def _new_compaction_attempt_token(
     session_id: str,
     turn_id: str,
     scope_kind: ModelInputScopeKind,
-    scope_subagent_task_id: str | None,
     trigger: CompactionTrigger,
 ) -> CompactionAttemptToken:
     return CompactionAttemptToken(
@@ -864,7 +900,6 @@ def _new_compaction_attempt_token(
         session_id=session_id,
         turn_id=turn_id,
         scope_kind=scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         trigger=trigger,
         _seal=_COMPACTION_ATTEMPT_TOKEN_SEAL,
     )
@@ -883,18 +918,15 @@ class PreparedCompactSessionStartFacts:
 
     def __post_init__(self) -> None:
         if (
-            self.scope.scope_kind is not ModelInputScopeKind.ROOT
-            or self.scope.scope_subagent_task_id is not None
-            or self.scope.turn_id != self.turn_id
+            self.scope.turn_id != self.turn_id
             or self.attempt_token.session_id != self.scope.session_id
-            or self.attempt_token.turn_id != self.turn_id
-            or self.attempt_token.scope_kind is not ModelInputScopeKind.ROOT
-            or self.attempt_token.scope_subagent_task_id is not None
-            or not self.adopted_snapshot_id
-            or not self.adopted_binding_revision_id
-            or not self.model_id
-            or not self.permission_snapshot.snapshot_id
-            or self.deadline_monotonic <= 0
+            or (self.attempt_token.turn_id != self.turn_id)
+            or (self.attempt_token.scope_kind is not self.scope.scope_kind)
+            or (not self.adopted_snapshot_id)
+            or (not self.adopted_binding_revision_id)
+            or (not self.model_id)
+            or (not self.permission_snapshot.snapshot_id)
+            or (self.deadline_monotonic <= 0)
         ):
             raise ValueError("compact SessionStart facts do not exact-join")
 
@@ -943,7 +975,9 @@ class ModelSwitchDirectPrecompileDecision:
     """Attempt Tier 1; admission still measures the complete final dispatch."""
 
     ordinary_admission: PreparedProviderHeadroomAdmission = dataclass_field(repr=False)
-    switch_candidate: ModelSwitchCompactionTriggerCandidate = dataclass_field(repr=False)
+    switch_candidate: ModelSwitchCompactionTriggerCandidate = dataclass_field(
+        repr=False
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1001,8 +1035,10 @@ class CompactionCoordinator:
         hook_dispatcher: KernelHookDispatcher | None = None,
         hook_root_scope: HookDispatchScopeRef | None = None,
         workspace_gate: WorkspaceExecutionGate | None = None,
+        session_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     ) -> None:
         self._workspace_gate = workspace_gate
+        self._session_scope_kind = session_kind
         self._compaction_owner = owner
         self._repository = repository
         self._writer_lease = writer_lease
@@ -1027,7 +1063,6 @@ class CompactionCoordinator:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         turn_id: str,
     ) -> ManualCompactionRequest | None:
         if (
@@ -1038,7 +1073,6 @@ class CompactionCoordinator:
             return None
         return await self._compaction_owner.take_manual(
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             turn_id=turn_id,
         )
 
@@ -1059,7 +1093,6 @@ class CompactionCoordinator:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> bool:
         return (
             self._compaction_owner is not None
@@ -1068,7 +1101,6 @@ class CompactionCoordinator:
             and (
                 self._compaction_owner.automatic_allowed(
                     scope_kind=scope_kind,
-                    scope_subagent_task_id=scope_subagent_task_id,
                 )
             )
         )
@@ -1077,13 +1109,9 @@ class CompactionCoordinator:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         allow_model_switch: bool,
     ) -> bool:
-        if self.automatic_allowed(
-            scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
-        ):
+        if self.automatic_allowed(scope_kind=scope_kind):
             return True
         if not allow_model_switch:
             return False
@@ -1095,14 +1123,12 @@ class CompactionCoordinator:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         destination: PreparedKernelModelTarget,
     ) -> bool:
         source = self._provider_dispatch.installed_source_target(
             scope=ProviderInputContinuityScope(
                 session_id=self._writer_lease.guard.session_id,
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
             ),
             destination=destination,
         )
@@ -1111,13 +1137,18 @@ class CompactionCoordinator:
         target_fact = destination.epoch_call_target.target_bundle.target_fact
         # Only the user allowance can grant a later-call handover. Physical
         # limits, identity, reasoning, projection and estimator must still match.
-        return replace(
-            source,
-            target_fact=source.target_fact.model_copy(update={
-                "context_window_tokens": target_fact.context_window_tokens,
-                "context_budget": target_fact.context_budget,
-            }),
-        ) == destination.epoch_call_target.target_bundle
+        return (
+            replace(
+                source,
+                target_fact=source.target_fact.model_copy(
+                    update={
+                        "context_window_tokens": target_fact.context_window_tokens,
+                        "context_budget": target_fact.context_budget,
+                    }
+                ),
+            )
+            == destination.epoch_call_target.target_bundle
+        )
 
     def prospective_root_crosses_automatic_threshold(
         self,
@@ -1126,8 +1157,7 @@ class CompactionCoordinator:
         """Apply the existing soft trigger to one exact unpublished ROOT input."""
 
         if not self.automatic_allowed(
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         ):
             return False
         admission = prepared.admission
@@ -1173,6 +1203,8 @@ class CompactionCoordinator:
             return True, None
         trigger_name = self._hook_trigger(trigger)
         public_input = PreCompactInput(
+            session_kind=scope.kind.value,
+            input_origin=None,
             session_id=self._writer_lease.guard.session_id,
             cwd=str(self._tools.snapshot_workspace_root()),
             model=dispatch.prepared_call.call.target.fact.model_id,
@@ -1215,6 +1247,8 @@ class CompactionCoordinator:
             return True, None
         trigger_name = self._hook_trigger(trigger)
         public_input = PostCompactInput(
+            session_kind=scope.kind.value,
+            input_origin=None,
             session_id=self._writer_lease.guard.session_id,
             cwd=cwd,
             model=model_id,
@@ -1249,7 +1283,6 @@ class CompactionCoordinator:
         force: bool,
         manual_request: ManualCompactionRequest | None,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_compact_port: SessionStartCompactPort | None = None,
         session_start_boundary_port: SessionStartCompactBoundaryPort | None = None,
@@ -1262,7 +1295,6 @@ class CompactionCoordinator:
             force=force,
             manual_request=manual_request,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             hook_scope=hook_scope,
             session_start_compact_port=session_start_compact_port,
             session_start_boundary_port=session_start_boundary_port,
@@ -1299,8 +1331,7 @@ class CompactionCoordinator:
             trigger=CompactionTrigger.AUTO_ACTIVE_CONTEXT,
             force=True,
             manual_request=None,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
             hook_scope=hook_scope,
             session_start_compact_port=session_start_compact_port,
             session_start_boundary_port=session_start_boundary_port,
@@ -1325,7 +1356,6 @@ class CompactionCoordinator:
         inherited_memory_use_policy: MemoryUsePolicy,
         candidate: ModelSwitchCompactionTriggerCandidate,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         hook_scope: HookDispatchScopeRef | None = None,
         session_start_compact_port: SessionStartCompactPort | None = None,
         session_start_boundary_port: SessionStartCompactBoundaryPort | None = None,
@@ -1340,13 +1370,11 @@ class CompactionCoordinator:
             workspace_id=await self._resolved_workspace_id(),
             turn_id=turn_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
         token = _new_compaction_attempt_token(
             session_id=scope.session_id,
             turn_id=turn_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             trigger=CompactionTrigger.MODEL_SWITCH_HANDOVER,
         )
 
@@ -1362,11 +1390,7 @@ class CompactionCoordinator:
                 stable_command_id=None,
                 attempt_token=token,
                 hook_scope=(
-                    hook_scope
-                    if hook_scope is not None
-                    else self._hook_root_scope
-                    if scope_kind is ModelInputScopeKind.ROOT
-                    else None
+                    hook_scope if hook_scope is not None else self._hook_root_scope
                 ),
                 session_start_compact_port=session_start_compact_port,
                 session_start_boundary_port=session_start_boundary_port,
@@ -1409,8 +1433,7 @@ class CompactionCoordinator:
             return None
         scope = ProviderInputContinuityScope(
             session_id=prepared.admission.candidate.session_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         )
         source = self._provider_dispatch.installed_source_target(
             scope=scope,
@@ -1439,8 +1462,7 @@ class CompactionCoordinator:
             raise failure
         scope = ProviderInputContinuityScope(
             session_id=candidate.session_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         )
         source = self._provider_dispatch.installed_source_target(
             scope=scope,
@@ -1527,7 +1549,6 @@ class CompactionCoordinator:
             self._repository.read_latest_terminal_scope_turn_id,
             self._writer_lease.guard,
             scope_kind=ConversationScopeKind.ROOT,
-            scope_subagent_task_id=None,
             deadline_monotonic=(monotonic() + owner.policy.planning_attempt_seconds),
         )
         if terminal_turn_id is None:
@@ -1547,8 +1568,7 @@ class CompactionCoordinator:
             session_id=candidate.session_id,
             workspace_id=candidate.workspace_id,
             turn_id=terminal_turn_id,
-            scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            scope_kind=self._session_scope_kind,
         )
         trigger = (
             CompactionTrigger.MODEL_SWITCH_HANDOVER
@@ -1559,7 +1579,6 @@ class CompactionCoordinator:
             session_id=scope.session_id,
             turn_id=terminal_turn_id,
             scope_kind=scope.scope_kind,
-            scope_subagent_task_id=scope.scope_subagent_task_id,
             trigger=trigger,
         )
 
@@ -1610,7 +1629,6 @@ class CompactionCoordinator:
         inherited_memory_use_policy: MemoryUsePolicy,
         trigger: CompactionTrigger,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         headroom_admission: PreparedProviderHeadroomAdmission,
         deadline: float,
         allow_model_switch: bool = False,
@@ -1625,7 +1643,6 @@ class CompactionCoordinator:
                 workspace_id=await self._resolved_workspace_id(deadline=deadline),
                 turn_id=turn_id,
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
             )
         except BaseException:
             headroom_admission.close()
@@ -1642,7 +1659,6 @@ class CompactionCoordinator:
                     scope=ProviderInputContinuityScope(
                         session_id=scope.session_id,
                         scope_kind=scope.scope_kind,
-                        scope_subagent_task_id=scope.scope_subagent_task_id,
                     ),
                     destination=prepared_target,
                 )
@@ -1810,7 +1826,6 @@ class CompactionCoordinator:
                 raise
             owner.record_automatic_failure(
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
             )
             return None
         except BaseException:
@@ -1822,7 +1837,6 @@ class CompactionCoordinator:
                 raise
             owner.record_automatic_failure(
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
             )
             return None
 
@@ -1836,7 +1850,6 @@ class CompactionCoordinator:
         force: bool,
         manual_request: ManualCompactionRequest | None,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         hook_scope: HookDispatchScopeRef | None,
         session_start_compact_port: SessionStartCompactPort | None,
         session_start_boundary_port: SessionStartCompactBoundaryPort | None,
@@ -1854,17 +1867,12 @@ class CompactionCoordinator:
                     "COMPACTION_DISABLED",
                 )
             )
-        if manual_request is not None and (
-            manual_request.scope_kind is not scope_kind
-            or manual_request.scope_subagent_task_id != scope_subagent_task_id
-        ):
+        if manual_request is not None and manual_request.scope_kind is not scope_kind:
             raise RuntimeError("manual compaction belongs to another scope")
-        scope_task_id = scope_subagent_task_id
         attempt_token = _new_compaction_attempt_token(
             session_id=self._writer_lease.guard.session_id,
             turn_id=turn_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             trigger=trigger,
         )
         try:
@@ -1873,7 +1881,6 @@ class CompactionCoordinator:
                 workspace_id=await self._resolved_workspace_id(),
                 turn_id=turn_id,
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_task_id,
             )
         except BaseException:
             raise
@@ -1893,11 +1900,7 @@ class CompactionCoordinator:
                 attempt_token=attempt_token,
                 pre_compact_dispatched=False,
                 hook_scope=(
-                    hook_scope
-                    if hook_scope is not None
-                    else self._hook_root_scope
-                    if scope_kind is ModelInputScopeKind.ROOT
-                    else None
+                    hook_scope if hook_scope is not None else self._hook_root_scope
                 ),
                 session_start_compact_port=session_start_compact_port,
                 session_start_boundary_port=session_start_boundary_port,
@@ -1968,7 +1971,6 @@ class CompactionCoordinator:
         ).startswith("HOOK_PRE_COMPACT_BLOCKED"):
             owner.record_automatic_failure(
                 scope_kind=scope_kind,
-                scope_subagent_task_id=scope_task_id,
             )
         return execution
 
@@ -1996,7 +1998,10 @@ class CompactionCoordinator:
             owner is not None
             and decision.wire_input_plan is not None
             and decision.quote.budget_input_tokens
-            < int(decision.quote.effective_input_budget_tokens * owner.policy.auto_trigger_ratio)
+            < int(
+                decision.quote.effective_input_budget_tokens
+                * owner.policy.auto_trigger_ratio
+            )
         )
 
     def wire_decision_crosses_automatic_threshold(
@@ -2018,9 +2023,7 @@ class CompactionCoordinator:
         compiled = dispatch.append_result.compiled_input
         quote = decision.quote
         budget = quote.effective_input_budget_tokens
-        if quote.budget_input_tokens >= int(
-            budget * owner.policy.auto_trigger_ratio
-        ):
+        if quote.budget_input_tokens >= int(budget * owner.policy.auto_trigger_ratio):
             return True
         canonical = dispatch.canonical_facts.canonical_input
         preflight = dispatch.compaction_headroom_preflight
@@ -2031,10 +2034,11 @@ class CompactionCoordinator:
                 or preflight.turn_id != identity.turn_id
                 or preflight.context_binding_revision_id
                 != identity.context_binding_revision_id
-                or preflight.provider_input_through_sequence
-                != identity.provider_input_through_sequence
-                or preflight.scope_kind is not identity.conversation_scope_kind
-                or preflight.scope_subagent_task_id != identity.scope_subagent_task_id
+                or (
+                    preflight.provider_input_through_sequence
+                    != identity.provider_input_through_sequence
+                )
+                or (preflight.scope_kind is not identity.conversation_scope_kind)
             ):
                 raise RuntimeError(
                     "compaction headroom preflight differs from provider cut"
@@ -2058,7 +2062,6 @@ class CompactionCoordinator:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         maximum_utf8_bytes: int,
         deadline: float,
     ) -> tuple[
@@ -2071,7 +2074,6 @@ class CompactionCoordinator:
         handoff = await asyncio.wait_for(
             self._tools.freeze_compaction_runtime_handoff(
                 conversation_scope_kind=scope_kind,
-                scope_subagent_task_id=scope_subagent_task_id,
                 maximum_utf8_bytes=maximum_utf8_bytes,
             ),
             timeout=remaining,
@@ -2441,7 +2443,6 @@ class CompactionCoordinator:
                 session_id=expected_scope.session_id,
                 turn_id=turn_id,
                 scope_kind=expected_scope.scope_kind,
-                scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                 trigger=trigger,
             )
         current_maximum = maximum_retained_tool_groups
@@ -2525,11 +2526,11 @@ class CompactionCoordinator:
         if pending_active_candidate is not None and (
             post_adoption_branch is not CompactionTargetBranch.ACTIVE_INSTALLATION
             or pending_root_candidate is not None
-            or expected_scope.scope_kind is not ModelInputScopeKind.ROOT
-            or expected_scope.scope_subagent_task_id is not None
-            or pending_active_candidate.expected_provider_input_cut.turn_id != turn_id
-            or pending_active_candidate.expected_provider_input_cut.session_id
-            != expected_scope.session_id
+            or (pending_active_candidate.expected_provider_input_cut.turn_id != turn_id)
+            or (
+                pending_active_candidate.expected_provider_input_cut.session_id
+                != expected_scope.session_id
+            )
         ):
             raise ValueError("pending active ROOT candidate target is invalid")
         text_only_handover = (
@@ -2598,9 +2599,6 @@ class CompactionCoordinator:
                             scope=ProviderInputContinuityScope(
                                 session_id=expected_scope.session_id,
                                 scope_kind=expected_scope.scope_kind,
-                                scope_subagent_task_id=(
-                                    expected_scope.scope_subagent_task_id
-                                ),
                             ),
                             source=model_switch_candidate.source_target,
                             turn_id=turn_id,
@@ -2615,7 +2613,6 @@ class CompactionCoordinator:
                 scope = ProviderInputContinuityScope(
                     session_id=expected_scope.session_id,
                     scope_kind=expected_scope.scope_kind,
-                    scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                 )
                 cohort = self._continuity.current_cohort(scope)
                 if cohort is not None:
@@ -2625,12 +2622,14 @@ class CompactionCoordinator:
                         turn_id=turn_id,
                         deadline_monotonic=deadline,
                     )
-                    source_target_override = self._provider_dispatch.prepare_installed_source_target(
-                        scope=scope,
-                        source=cohort.target_bundle,
-                        turn_id=turn_id,
-                        model_call_index=model_call_index,
-                        binding_override=binding,
+                    source_target_override = (
+                        self._provider_dispatch.prepare_installed_source_target(
+                            scope=scope,
+                            source=cohort.target_bundle,
+                            turn_id=turn_id,
+                            model_call_index=model_call_index,
+                            binding_override=binding,
+                        )
                     )
             try:
                 dispatch = await self._provider_dispatch.prepare_compaction_source(
@@ -2844,7 +2843,6 @@ class CompactionCoordinator:
             )
             owner.advance_phase(
                 scope_kind=expected_scope.scope_kind,
-                scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                 phase=CompactionAttemptPhase.STREAMING,
             )
             # The provider transport owns connect/write/read-idle watchdogs.
@@ -2866,7 +2864,6 @@ class CompactionCoordinator:
                 # to the exact first request rather than replaying that request.
                 owner.advance_phase(
                     scope_kind=expected_scope.scope_kind,
-                    scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                     phase=CompactionAttemptPhase.REPAIRING,
                 )
                 repair_deadline = monotonic() + owner.policy.planning_attempt_seconds
@@ -2940,17 +2937,8 @@ class CompactionCoordinator:
                 raise
             owner.advance_phase(
                 scope_kind=expected_scope.scope_kind,
-                scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                 phase=CompactionAttemptPhase.VALIDATED,
             )
-            root_image_candidates = (
-                expected_scope.scope_kind is ModelInputScopeKind.ROOT
-            )
-            if model_switch_candidate is not None and not root_image_candidates:
-                if text_only_handover and (
-                    model_switch_tier == 3 or recent_human_window_has_image(recent)
-                ):
-                    recent = ()
             retained_historical_requests = (
                 ()
                 if summary_includes_previous_base
@@ -2962,8 +2950,7 @@ class CompactionCoordinator:
             )
             recent_windows = (
                 _ordinary_recent_suffixes(tuple(recent))
-                if model_switch_candidate is None
-                or (root_image_candidates and text_only_handover)
+                if model_switch_candidate is None or text_only_handover
                 else (tuple(recent),)
             )
             # Only representations are enumerated here; image/text candidates are
@@ -2973,10 +2960,9 @@ class CompactionCoordinator:
                 for window in recent_windows
                 for offload in (
                     (True,)
-                    if root_image_candidates and text_only_handover
+                    if text_only_handover
                     else (False, True)
-                    if root_image_candidates
-                    and model_switch_candidate is None
+                    if model_switch_candidate is None
                     and (
                         recent_human_window_has_image(window)
                         or any(
@@ -3056,7 +3042,14 @@ class CompactionCoordinator:
                     command_id=stable_command_id,
                 )
                 if stable_command_id is not None
-                else derive_id('snapshot', 'compact', expected_scope.session_id, expected_scope.turn_id, trigger.value, source_digest)
+                else derive_id(
+                    "snapshot",
+                    "compact",
+                    expected_scope.session_id,
+                    expected_scope.turn_id,
+                    trigger.value,
+                    source_digest,
+                )
             )
             lineage = compaction_read.lineage_base
             preconditions = CompactionCanonicalWritePreconditions(
@@ -3070,13 +3063,11 @@ class CompactionCoordinator:
                 _runtime_handoff,
             ) = await self._freeze_compaction_runtime_source(
                 scope_kind=expected_scope.scope_kind,
-                scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                 maximum_utf8_bytes=(owner.policy.maximum_runtime_handoff_utf8_bytes),
                 deadline=successor_deadline,
             )
             owner.advance_phase(
                 scope_kind=expected_scope.scope_kind,
-                scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                 phase=CompactionAttemptPhase.ADOPTION_PREPARED,
             )
             next_handle = dispatch.take_handle()
@@ -3119,8 +3110,26 @@ class CompactionCoordinator:
                                 ),
                             ),
                             snapshot_id=snapshot_id,
-                            binding_revision_id=derive_id("binding", "revision", expected_scope.turn_id, str(lineage.binding_revision_ordinal + 1)),
-                            event_id=derive_id("event", "accepted", expected_scope.session_id, "COMPACTION_ADOPTED", "CONTEXT_BINDING_REVISION", derive_id("binding", "revision", expected_scope.turn_id, str(lineage.binding_revision_ordinal + 1)), ""),
+                            binding_revision_id=derive_id(
+                                "binding",
+                                "revision",
+                                expected_scope.turn_id,
+                                str(lineage.binding_revision_ordinal + 1),
+                            ),
+                            event_id=derive_id(
+                                "event",
+                                "accepted",
+                                expected_scope.session_id,
+                                "COMPACTION_ADOPTED",
+                                "CONTEXT_BINDING_REVISION",
+                                derive_id(
+                                    "binding",
+                                    "revision",
+                                    expected_scope.turn_id,
+                                    str(lineage.binding_revision_ordinal + 1),
+                                ),
+                                "",
+                            ),
                             source_through_sequence=prefix.source_through_sequence,
                             source_digest=source_digest,
                             snapshot_content=content,
@@ -3380,7 +3389,6 @@ class CompactionCoordinator:
                 next_handle = None
             owner.advance_phase(
                 scope_kind=expected_scope.scope_kind,
-                scope_subagent_task_id=expected_scope.scope_subagent_task_id,
                 phase=CompactionAttemptPhase.SETTLING,
             )
             settlement_dispatch = dry_dispatch
@@ -3499,7 +3507,6 @@ class CompactionCoordinator:
         continuity_scope = ProviderInputContinuityScope(
             session_id=expected_scope.session_id,
             scope_kind=expected_scope.scope_kind,
-            scope_subagent_task_id=expected_scope.scope_subagent_task_id,
         )
         successor_dispatch: PreparedProviderDispatch | None = None
         prospective_active_input: PreparedProspectiveActiveRootInput | None = None
@@ -3592,12 +3599,12 @@ class CompactionCoordinator:
                 rebased_candidate = pre_full_root.admission.candidate
                 pre_full_root.close()
                 if dry_dispatch is None:
-                    raise RuntimeError("post-FULL prospective ROOT lost its dry dispatch")
+                    raise RuntimeError(
+                        "post-FULL prospective ROOT lost its dry dispatch"
+                    )
                 dry_dispatch.close()
                 dry_dispatch = None
-                post_full_deadline = (
-                    monotonic() + owner.policy.planning_attempt_seconds
-                )
+                post_full_deadline = monotonic() + owner.policy.planning_attempt_seconds
                 adopted_handle = await self._io.run(
                     self._safe_point.freeze_compaction_input,
                     turn_id=turn_id,
@@ -3608,21 +3615,25 @@ class CompactionCoordinator:
                     adopted_read = await self._provider_dispatch.read_dispatch_read(
                         adopted_handle.cut, deadline=post_full_deadline
                     )
-                    destination = self._provider_dispatch.prepare_prospective_root_target(
-                        rebased_candidate
-                    ).epoch_call_target
-                    prospective_seed = self._safe_point.issue_adopted_compaction_continuation_seed(
-                        handle=adopted_handle,
-                        continuity=self._continuity,
-                        confirmation=confirmation,
-                        candidate=candidate,
-                        attempt_token=attempt_token,
-                        dispatch_read=adopted_read,
-                        destination=destination,
-                        protected_tail_selection_fingerprint=(
-                            protected_tail_selection_fingerprint
-                        ),
-                        successor_turn_id=rebased_candidate.exact_turn_id,
+                    destination = (
+                        self._provider_dispatch.prepare_prospective_root_target(
+                            rebased_candidate
+                        ).epoch_call_target
+                    )
+                    prospective_seed = (
+                        self._safe_point.issue_adopted_compaction_continuation_seed(
+                            handle=adopted_handle,
+                            continuity=self._continuity,
+                            confirmation=confirmation,
+                            candidate=candidate,
+                            attempt_token=attempt_token,
+                            dispatch_read=adopted_read,
+                            destination=destination,
+                            protected_tail_selection_fingerprint=(
+                                protected_tail_selection_fingerprint
+                            ),
+                            successor_turn_id=rebased_candidate.exact_turn_id,
+                        )
                     )
                 finally:
                     adopted_handle.close()
@@ -3637,7 +3648,9 @@ class CompactionCoordinator:
                     inherited_memory_use_policy=inherited_memory_use_policy,
                     deadline=post_full_deadline,
                     canonical_read_override=prospective_read,
-                    compaction_seed=prospective_seed._with_dispatch_read(prospective_read),
+                    compaction_seed=prospective_seed._with_dispatch_read(
+                        prospective_read
+                    ),
                 )
                 try:
                     if post_full_family.prepared_call.epoch_call_target != destination:
@@ -3669,10 +3682,7 @@ class CompactionCoordinator:
                     else "COMPACTED_POST_ADOPTION_FAILURE"
                 ),
             )
-            if (
-                expected_scope.scope_kind is ModelInputScopeKind.ROOT
-                and session_start_boundary_port is not None
-            ):
+            if session_start_boundary_port is not None:
                 await session_start_boundary_port.arm_compact_boundary(
                     attempt_token=attempt_token,
                     adopted_snapshot_id=candidate.snapshot.snapshot_id,
@@ -3716,7 +3726,6 @@ class CompactionCoordinator:
                         )
                     owner.reset_automatic_failures(
                         scope_kind=expected_scope.scope_kind,
-                        scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                     )
                     return CompactionExecutionResult(
                         CompactionOutcome(
@@ -3747,7 +3756,6 @@ class CompactionCoordinator:
                         )
                     owner.reset_automatic_failures(
                         scope_kind=expected_scope.scope_kind,
-                        scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                     )
                     return CompactionExecutionResult(
                         CompactionOutcome(
@@ -3823,12 +3831,12 @@ class CompactionCoordinator:
                         actual_identity.turn_id != turn_id
                         or actual_identity.conversation_scope_kind
                         is not expected_scope.scope_kind
-                        or actual_identity.scope_subagent_task_id
-                        != expected_scope.scope_subagent_task_id
                         or actual_binding.binding_revision_id
                         != candidate.binding.binding_revision_id
-                        or actual_binding.context_snapshot_id
-                        != candidate.snapshot.snapshot_id
+                        or (
+                            actual_binding.context_snapshot_id
+                            != candidate.snapshot.snapshot_id
+                        )
                     ):
                         raise ConversationKernelConflict(
                             "post-adoption cut does not name the adopted compaction winner"
@@ -3838,7 +3846,6 @@ class CompactionCoordinator:
                         _current_runtime_handoff,
                     ) = await self._freeze_compaction_runtime_source(
                         scope_kind=expected_scope.scope_kind,
-                        scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                         maximum_utf8_bytes=(
                             owner.policy.maximum_runtime_handoff_utf8_bytes
                         ),
@@ -3993,7 +4000,7 @@ class CompactionCoordinator:
                     raise RuntimeError("final compaction base is not installable")
                 dry_dispatch = prepared_base
                 compact_start: PreparedCompactSessionStart | None = None
-                if expected_scope.scope_kind is ModelInputScopeKind.ROOT:
+                if session_start_compact_port is not None:
                     if session_start_compact_port is not None:
                         compact_start = await session_start_compact_port(
                             PreparedCompactSessionStartFacts(
@@ -4034,7 +4041,6 @@ class CompactionCoordinator:
                             )
                             owner.reset_automatic_failures(
                                 scope_kind=expected_scope.scope_kind,
-                                scope_subagent_task_id=None,
                             )
                             return CompactionExecutionResult(
                                 CompactionOutcome(
@@ -4049,8 +4055,6 @@ class CompactionCoordinator:
                                     or "compact SessionStart Hook blocked continuation"
                                 ),
                             )
-                elif session_start_compact_port is not None:
-                    raise RuntimeError("child compaction received a ROOT start port")
                 pending_start = (
                     None if compact_start is None else compact_start.reservation
                 )
@@ -4166,7 +4170,6 @@ class CompactionCoordinator:
                     dry_dispatch = None
                     owner.advance_phase(
                         scope_kind=expected_scope.scope_kind,
-                        scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                         phase=CompactionAttemptPhase.ACTIVE_EPOCH_INSTALLED,
                     )
                 else:
@@ -4206,12 +4209,10 @@ class CompactionCoordinator:
                         )
                 owner.advance_phase(
                     scope_kind=expected_scope.scope_kind,
-                    scope_subagent_task_id=(expected_scope.scope_subagent_task_id),
                     phase=CompactionAttemptPhase.IDLE_BASE_ADOPTED,
                 )
             owner.reset_automatic_failures(
                 scope_kind=expected_scope.scope_kind,
-                scope_subagent_task_id=expected_scope.scope_subagent_task_id,
             )
             result = CompactionExecutionResult(
                 CompactionOutcome(
@@ -4281,7 +4282,6 @@ class CompactionCoordinator:
         command_id: str,
         force: bool,
         scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-        scope_subagent_task_id: str | None = None,
         session_start_boundary_port: SessionStartCompactBoundaryPort | None = None,
     ) -> CompactionOutcome:
         """Compact the latest terminal exact-scope turn without a runner epoch."""
@@ -4300,13 +4300,11 @@ class CompactionCoordinator:
             workspace_id=await self._resolved_workspace_id(),
             turn_id=turn_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
         attempt_token = _new_compaction_attempt_token(
             session_id=scope.session_id,
             turn_id=turn_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             trigger=CompactionTrigger.MANUAL,
         )
 
@@ -4320,11 +4318,7 @@ class CompactionCoordinator:
                 expected_scope=scope,
                 post_adoption_branch=CompactionTargetBranch.IDLE_BASE_ONLY,
                 stable_command_id=command_id,
-                hook_scope=(
-                    self._hook_root_scope
-                    if scope_kind is ModelInputScopeKind.ROOT
-                    else None
-                ),
+                hook_scope=(self._hook_root_scope),
                 session_start_boundary_port=session_start_boundary_port,
                 attempt_token=attempt_token,
             )
@@ -4431,10 +4425,10 @@ class CompactionCoordinator:
             adopted_snapshot_id=candidate.snapshot.snapshot_id,
             adopted_binding_revision_id=candidate.binding.binding_revision_id,
         )
+
         def verify_physical_release() -> None:
             self._tools.assert_no_tool_surface_borrows(
                 scope_kind=scope.scope_kind,
-                scope_subagent_task_id=scope.scope_subagent_task_id,
             )
             self._model.model_runtime.assert_no_provider_borrows(
                 session_id=scope.session_id,

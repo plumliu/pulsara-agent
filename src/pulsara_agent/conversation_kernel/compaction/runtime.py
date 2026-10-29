@@ -38,13 +38,6 @@ class CompactionWriteReservation:
     """Exact process-local owner of one canonical writer/compaction exclusion."""
 
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
-
-    def __post_init__(self) -> None:
-        if (self.scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("compaction write reservation scope union is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,17 +45,12 @@ class ManualCompactionRequest:
     request_id: str
     command_id: str
     scope_kind: ModelInputScopeKind
-    scope_subagent_task_id: str | None
     expected_turn_id: str | None
     force: bool
 
     def __post_init__(self) -> None:
         if not self.request_id or not self.command_id:
             raise ValueError("manual compaction identity is incomplete")
-        if (self.scope_kind is ModelInputScopeKind.ROOT) != (
-            self.scope_subagent_task_id is None
-        ):
-            raise ValueError("manual compaction scope union is invalid")
 
 
 @dataclass(slots=True)
@@ -80,36 +68,36 @@ class HostCompactionRuntimeOwner:
         self._summary_lane = asyncio.Lock()
         self._state_lock = asyncio.Lock()
         self._fenced_scopes: dict[
-            tuple[ModelInputScopeKind, str | None],
+            ModelInputScopeKind,
             tuple[str, CompactionTrigger, CompactionAttemptPhase],
         ] = {}
-        self._manual: dict[
-            tuple[ModelInputScopeKind, str | None], _ManualWaiter
-        ] = {}
+        self._manual: dict[ModelInputScopeKind, _ManualWaiter] = {}
         self._manual_outcomes: OrderedDict[
             str, tuple[ManualCompactionRequest, CompactionOutcome]
         ] = OrderedDict()
         self._active_tasks: set[asyncio.Task[object]] = set()
         self._owned_tasks: set[asyncio.Task[object]] = set()
         self._settlement_tasks: set[asyncio.Task[object]] = set()
-        self._auto_failures: dict[
-            tuple[ModelInputScopeKind, str | None], int
-        ] = {}
+        self._auto_failures: dict[ModelInputScopeKind, int] = {}
         self._closing = False
-        self._host_install_fence: Callable[
-            [
-                CompactionScope,
-                CompactionTrigger,
-                str,
-                asyncio.Task[object],
-                CompactionWriteReservation | None,
-                str | None,
-            ],
-            Awaitable[None],
-        ] | None = None
-        self._host_remove_fence: Callable[
-            [CompactionScope, str, asyncio.Task[object]], Awaitable[None]
-        ] | None = None
+        self._host_install_fence: (
+            Callable[
+                [
+                    CompactionScope,
+                    CompactionTrigger,
+                    str,
+                    asyncio.Task[object],
+                    CompactionWriteReservation | None,
+                    str | None,
+                ],
+                Awaitable[None],
+            ]
+            | None
+        ) = None
+        self._host_remove_fence: (
+            Callable[[CompactionScope, str, asyncio.Task[object]], Awaitable[None]]
+            | None
+        ) = None
 
     def bind_host_fence_callbacks(
         self,
@@ -125,18 +113,14 @@ class HostCompactionRuntimeOwner:
             ],
             Awaitable[None],
         ],
-        remove: Callable[
-            [CompactionScope, str, asyncio.Task[object]], Awaitable[None]
-        ],
+        remove: Callable[[CompactionScope, str, asyncio.Task[object]], Awaitable[None]],
     ) -> None:
         if self._host_install_fence is not None or self._host_remove_fence is not None:
             raise RuntimeError("compaction Host fence callbacks are already bound")
         self._host_install_fence = install
         self._host_remove_fence = remove
 
-    def start_owned(
-        self, operation: Awaitable[_T], *, name: str
-    ) -> asyncio.Task[_T]:
+    def start_owned(self, operation: Awaitable[_T], *, name: str) -> asyncio.Task[_T]:
         """Install one Host-owned settlement task before its first await."""
 
         if self._closing:
@@ -178,7 +162,7 @@ class HostCompactionRuntimeOwner:
     ) -> None:
         """Install only while the composing Host's canonical lock is held."""
 
-        key = self.scope_key(scope.scope_kind, scope.scope_subagent_task_id)
+        key = self.scope_key(scope.scope_kind)
         if self._closing:
             raise RuntimeError("compaction owner is closing")
         if key in self._fenced_scopes:
@@ -197,7 +181,7 @@ class HostCompactionRuntimeOwner:
         attempt_id: str,
         owner_task: asyncio.Task[object],
     ) -> None:
-        key = self.scope_key(scope.scope_kind, scope.scope_subagent_task_id)
+        key = self.scope_key(scope.scope_kind)
         current = self._fenced_scopes.get(key)
         if current is not None and current[0] == attempt_id:
             self._fenced_scopes.pop(key, None)
@@ -205,29 +189,23 @@ class HostCompactionRuntimeOwner:
 
     @staticmethod
     def scope_key(
-        scope_kind: ModelInputScopeKind, scope_subagent_task_id: str | None
-    ) -> tuple[ModelInputScopeKind, str | None]:
-        if (scope_kind is ModelInputScopeKind.ROOT) != (
-            scope_subagent_task_id is None
-        ):
-            raise ValueError("compaction runtime scope union is invalid")
-        return scope_kind, scope_subagent_task_id
+        scope_kind: ModelInputScopeKind,
+    ) -> ModelInputScopeKind:
+        return scope_kind
 
     async def request_manual(
         self,
         *,
         command_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         expected_turn_id: str | None,
         force: bool,
     ) -> tuple[ManualCompactionRequest, asyncio.Future[CompactionOutcome]]:
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         request = ManualCompactionRequest(
             request_id=random_id("request"),
             command_id=command_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             expected_turn_id=expected_turn_id,
             force=force,
         )
@@ -239,7 +217,6 @@ class HostCompactionRuntimeOwner:
                 previous, outcome = completed
                 if (
                     previous.scope_kind is not scope_kind
-                    or previous.scope_subagent_task_id != scope_subagent_task_id
                     or previous.expected_turn_id != expected_turn_id
                     or previous.force != force
                 ):
@@ -265,11 +242,10 @@ class HostCompactionRuntimeOwner:
         *,
         command_id: str,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> asyncio.Future[CompactionOutcome] | None:
         """Return only an existing process-local attempt/outcome; never create."""
 
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         async with self._state_lock:
             waiter = self._manual.get(key)
             if waiter is not None and waiter.request.command_id == command_id:
@@ -282,10 +258,8 @@ class HostCompactionRuntimeOwner:
             future.set_result(outcome)
             return future
 
-    async def claim_manual_execution(
-        self, request: ManualCompactionRequest
-    ) -> bool:
-        key = self.scope_key(request.scope_kind, request.scope_subagent_task_id)
+    async def claim_manual_execution(self, request: ManualCompactionRequest) -> bool:
+        key = self.scope_key(request.scope_kind)
         async with self._state_lock:
             waiter = self._manual.get(key)
             if (
@@ -301,10 +275,9 @@ class HostCompactionRuntimeOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         turn_id: str,
     ) -> ManualCompactionRequest | None:
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         async with self._state_lock:
             waiter = self._manual.get(key)
             if waiter is None:
@@ -337,9 +310,7 @@ class HostCompactionRuntimeOwner:
     async def settle_manual(
         self, request: ManualCompactionRequest, outcome: CompactionOutcome
     ) -> None:
-        key = self.scope_key(
-            request.scope_kind, request.scope_subagent_task_id
-        )
+        key = self.scope_key(request.scope_kind)
         async with self._state_lock:
             waiter = self._manual.get(key)
             if waiter is None or waiter.request.request_id != request.request_id:
@@ -408,9 +379,8 @@ class HostCompactionRuntimeOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> bool:
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         return key in self._fenced_scopes
 
     def has_active_work(self) -> bool:
@@ -425,12 +395,11 @@ class HostCompactionRuntimeOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
         phase: CompactionAttemptPhase,
     ) -> None:
         """Advance the bounded public phase for the exact fenced scope."""
 
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         current = self._fenced_scopes.get(key)
         if current is None:
             raise RuntimeError("compaction phase scope is not fenced")
@@ -449,10 +418,7 @@ class HostCompactionRuntimeOwner:
         """Authorize one exact summary promotion from the current fenced phase."""
 
         scope_kind = getattr(attempt_token, "scope_kind", None)
-        scope_subagent_task_id = getattr(
-            attempt_token, "scope_subagent_task_id", None
-        )
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         current = self._fenced_scopes.get(key)
         if current != (
             getattr(attempt_token, "attempt_id", None),
@@ -463,7 +429,6 @@ class HostCompactionRuntimeOwner:
         return _issue_compaction_summary_promotion_authority(
             attempt_id=attempt_token.attempt_id,
             scope_kind=scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
             phase=required_phase,
             semantic=semantic,
             decision=decision,
@@ -475,7 +440,6 @@ class HostCompactionRuntimeOwner:
 
         key = self.scope_key(
             getattr(attempt_token, "scope_kind", None),
-            getattr(attempt_token, "scope_subagent_task_id", None),
         )
         current = self._fenced_scopes.get(key)
         if (
@@ -505,18 +469,19 @@ class HostCompactionRuntimeOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> bool:
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
-        return self._auto_failures.get(key, 0) < self.policy.maximum_consecutive_auto_failures
+        key = self.scope_key(scope_kind)
+        return (
+            self._auto_failures.get(key, 0)
+            < self.policy.maximum_consecutive_auto_failures
+        )
 
     def record_automatic_failure(
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> None:
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         self._auto_failures[key] = min(
             self.policy.maximum_consecutive_auto_failures,
             self._auto_failures.get(key, 0) + 1,
@@ -526,9 +491,8 @@ class HostCompactionRuntimeOwner:
         self,
         *,
         scope_kind: ModelInputScopeKind,
-        scope_subagent_task_id: str | None,
     ) -> None:
-        key = self.scope_key(scope_kind, scope_subagent_task_id)
+        key = self.scope_key(scope_kind)
         self._auto_failures.pop(key, None)
 
     async def aclose(self) -> None:

@@ -195,9 +195,7 @@ def compaction_effective_history_has_image(
 ) -> bool:
     """Return whether the effective history, excluding the exact active request, has images."""
 
-    return provider_dispatch_effective_history_has_image(
-        canonical_read.dispatch_read
-    )
+    return provider_dispatch_effective_history_has_image(canonical_read.dispatch_read)
 
 
 def provider_dispatch_effective_history_has_image(
@@ -480,7 +478,13 @@ def project_compaction_read_for_text_only_handover(
         lineage_base=canonical_read.lineage_base,
         safe_head_range=projected_range,
         source_interruption=canonical_read.source_interruption,
-        imported_interruptions=tuple(n for n in canonical_read.imported_interruptions if projected_range.effective_materialization_lineage_floor < n.display_after_entry_sequence <= projected_range.source_through_sequence),
+        imported_interruptions=tuple(
+            n
+            for n in canonical_read.imported_interruptions
+            if projected_range.effective_materialization_lineage_floor
+            < n.display_after_entry_sequence
+            <= projected_range.source_through_sequence
+        ),
     )
 
 
@@ -557,12 +561,7 @@ def freeze_destination_dialogue_projection_plan(
     turn_order: list[str] = []
     for item in canonical_read.safe_head_range.ordered_items:
         if (
-            (
-                active_entry_id is not None
-                and item.source_entry_id == active_entry_id
-                and item.item_kind
-                is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
-            )
+            (active_entry_id is not None and item.source_entry_id == active_entry_id)
             or item.item_kind
             in {
                 FrozenProviderInputItemKind.TOOL_RESULT,
@@ -582,8 +581,6 @@ def freeze_destination_dialogue_projection_plan(
         FrozenProviderInputItemKind.USER,
         FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
         FrozenProviderInputItemKind.PLAN_CONTINUATION,
-        FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
-        FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL,
     }
     request_ordinal = 0
     for turn_id in turn_order:
@@ -742,9 +739,7 @@ def _render_destination_projection(
         if metadata:
             value.update(metadata)
         rendered_parts.append(
-            LLMTextPart(
-                "\n[PULSARA_RETAINED_CONTENT " + display_json(value) + "]\n"
-            )
+            LLMTextPart("\n[PULSARA_RETAINED_CONTENT " + display_json(value) + "]\n")
         )
         for part in content:
             if isinstance(part, LLMTextPart):
@@ -900,7 +895,6 @@ def build_synthetic_compaction_dispatch_read(
             old_identity.provider_input_through_sequence
         ),
         "conversation_scope_kind": old_identity.conversation_scope_kind,
-        "scope_subagent_task_id": old_identity.scope_subagent_task_id,
     }
     identity = CanonicalModelInputIdentity(
         **identity_values,
@@ -1044,7 +1038,6 @@ def rebase_compaction_dispatch_read_through_sequence(
         "context_binding_revision_id": old_identity.context_binding_revision_id,
         "provider_input_through_sequence": provider_input_through_sequence,
         "conversation_scope_kind": old_identity.conversation_scope_kind,
-        "scope_subagent_task_id": old_identity.scope_subagent_task_id,
     }
     identity = CanonicalModelInputIdentity(
         **identity_values,
@@ -1432,8 +1425,7 @@ def _safe_summary_boundaries(
         attachment = getattr(placement, "tool_attachment_source", None)
         if attachment is not None:
             values = tuple(
-                member.source.source_entry_sequence
-                for member in attachment.members
+                member.source.source_entry_sequence for member in attachment.members
             )
             if any(value is None for value in values):
                 raise CompactionPlanningError(
@@ -1664,10 +1656,7 @@ def freeze_compaction_continuation(
         raise ValueError("compaction continuation boundary is out of range")
     active_entry_id = canonical.identity.initial_entry_id
     matches = tuple(
-        item
-        for item in canonical.items
-        if item.source_entry_id == active_entry_id
-        and item.item_kind is not FrozenProviderInputItemKind.INITIAL_CONTEXT_MATERIAL
+        item for item in canonical.items if item.source_entry_id == active_entry_id
     )
     if len(matches) > 1:
         raise CompactionPlanningError("active request attribution is duplicated")
@@ -1679,10 +1668,9 @@ def freeze_compaction_continuation(
             in {
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
                 CanonicalInputOriginKind.SCHEDULED_TASK,
-                CanonicalInputOriginKind.SUBAGENT_OBJECTIVE,
+                CanonicalInputOriginKind.AGENT_INSTRUCTION,
             }
         ) or item.item_kind in {
-            FrozenProviderInputItemKind.INTER_AGENT_MESSAGE,
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
             FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
         }
@@ -1733,7 +1721,7 @@ def freeze_compaction_continuation(
             location=CompactionActiveRequestLocation.SNAPSHOT_EXACT,
             item_kind=active.item_kind,
             input_origin=active.input_origin,
-                    scheduled_input=active.scheduled_input,
+            scheduled_input=active.scheduled_input,
             content=active.content,
         ),
     )
@@ -1753,12 +1741,8 @@ def should_trigger_compaction(
     working = source_view.physical_working_set
     headroom_trigger = crosses_compaction_resource_headroom(
         selected_item_count=working.selected_item_count,
-        selected_canonical_expanded_bytes=(
-            working.selected_canonical_expanded_bytes
-        ),
-        continuity_epoch_logical_bytes=(
-            working.continuity_epoch_logical_bytes
-        ),
+        selected_canonical_expanded_bytes=(working.selected_canonical_expanded_bytes),
+        continuity_epoch_logical_bytes=(working.continuity_epoch_logical_bytes),
     )
     return token_trigger or headroom_trigger
 
@@ -1774,8 +1758,7 @@ def crosses_compaction_resource_headroom(
         selected_item_count >= bounds.soft_canonical_item_limit
         or selected_canonical_expanded_bytes
         >= bounds.soft_canonical_expanded_byte_limit
-        or continuity_epoch_logical_bytes
-        >= bounds.soft_epoch_logical_byte_limit
+        or continuity_epoch_logical_bytes >= bounds.soft_epoch_logical_byte_limit
     )
 
 

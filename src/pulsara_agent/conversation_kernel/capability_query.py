@@ -21,7 +21,6 @@ from pulsara_agent.capability.source_query import (
 )
 from pulsara_agent.capability.local_skill_publisher import LocalSkillInstallScope
 from pulsara_agent.capability.mcp_management import LocalMcpTarget
-from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.mcp_config import (
     LocalConfiguredMcpRuntimeSource,
     ManagedPackageMcpRuntimeSource,
@@ -62,7 +61,8 @@ def transport_summary(transport):
 
 
 class CapabilitySourceQuery:
-    def __init__(self, service, *, runtime, plan, scope):
+    def __init__(self, service, *, runtime, plan, scope, code_direct_specs=None):
+        self.code_direct_specs = code_direct_specs
         self.service, self.runtime, self.plan, self.scope = (
             service,
             runtime,
@@ -809,16 +809,14 @@ class CapabilitySourceQuery:
 
     async def execute(self, arguments, *, inspect=False):
         self.runtime_rows, self.runtime_details, runtime_diagnostics = runtime_rows(
-            self.runtime, self.plan, self.scope
+            self.runtime, self.plan, self.scope, code_direct_specs=self.code_direct_specs
         )
         self.exact_plugin = None
         try:
             target = arguments.get("target" if inspect else "parent")
             kind = target["kind"] if inspect else arguments.get("kind")
-            root = self.scope is ModelInputScopeKind.ROOT
             if (
-                root
-                and self.service is not None
+                self.service is not None
                 and arguments.get("scope") == "WORKSPACE"
             ):
                 self._root("WORKSPACE")
@@ -833,7 +831,7 @@ class CapabilitySourceQuery:
                 }
             if inspect and kind == "SKILL":
                 return await self._inspect_skill(target)
-            need_sources = root and not (
+            need_sources = not (
                 kind in CHILD_KINDS or (target and "runtime_server_id" in target)
             )
             if (
@@ -1087,7 +1085,7 @@ class CapabilitySourceQuery:
             projected = dict(row)
             projected["source"] = (
                 (linked_sources.get(server_id) or self._runtime_source(server_id))
-                if self.scope is ModelInputScopeKind.ROOT
+                if self.service is not None
                 else None
             )
             if projected["source"] is None:
@@ -1115,7 +1113,7 @@ class CapabilitySourceQuery:
 
     def _runtime_detail(self, server_id, target, source):
         detail = {**self.runtime_details[("MCP_SERVER", server_id)], "source": source}
-        if self.scope is ModelInputScopeKind.ROOT:
+        if self.service is not None:
             config = frozen_runtime_config(self.runtime, server_id)
             if config is not None:
                 detail["connection"] = transport_summary(config.transport)
@@ -1201,7 +1199,7 @@ class CapabilitySourceQuery:
         }
 
     async def _scrub(self, value):
-        if self.service is None or self.scope is not ModelInputScopeKind.ROOT:
+        if self.service is None:
             return value
         scrub = await self._native(
             self.service.plugins._capture_scrub_set,

@@ -66,7 +66,7 @@ function Demo() {
     queuedCount:queue.length,queuedPrompts:queue,localSubmissions:[],queueActions:[],
     onQueueAction:async(item,kind)=>{setQueue(previous=>previous.filter(value=>value.queueItemId!==item.queueItemId));if(kind==='edit')store.restoreIfEmpty(`follow-demo-${version}`,{parts:[{type:'text',text:promptContentTextProjection(item.content)}]});},
     onQueueActionHandled:noop,runtimeStatus:'online',canCreateSession:false,modelConfigurations:[model],modelCallBinding:{connection_id:'demo',reasoning:null},
-    canControl:true,isObserver:false,permission:'read-only',skills:[],focusTaskRevision:0,focusTaskHighlighted:false,
+    canControl:true,isObserver:false,permission:'read-only',skills:[],
     onFork:async()=>{},onReconnect:noop,onTakeControl:noop,onNewSession:reset,onToggleInspector:noop,onOpenModelSettings:noop,
     onModelCallBindingChange:async()=>{},onSend:async(content)=>{
       if(running)setQueue(previous=>[...previous,{queueItemId:crypto.randomUUID(),commandId:crypto.randomUUID(),sequence:previous.length+1,status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:promptContentTextProjection(content)}]},permission:'read-only'}]);
