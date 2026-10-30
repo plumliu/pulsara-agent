@@ -7,6 +7,9 @@ persisted and it never performs provider requests on the model-dispatch path.
 from __future__ import annotations
 
 import asyncio
+import logging
+import socket
+import ssl
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -222,6 +225,41 @@ class ModelCatalogUnavailable(RuntimeError):
 
 class ModelCatalogInvalid(ValueError):
     pass
+
+
+def catalog_error_diagnostic(
+    exc: BaseException, *, scrub: Callable[[str], str] | None = None
+) -> dict[str, object]:
+    """Classify actual exception evidence without exposing proxy credentials."""
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and all(current is not item for item in chain):
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    status = next((item.response.status_code for item in chain if isinstance(item, httpx.HTTPStatusError)), None)
+    if status is not None:
+        kind = "http_status"
+    elif any(isinstance(item, httpx.ProxyError) for item in chain):
+        kind = "proxy"
+    elif any(isinstance(item, ssl.SSLError) for item in chain):
+        kind = "tls"
+    elif any(isinstance(item, httpx.ConnectTimeout) for item in chain):
+        kind = "connect_timeout"
+    elif any(isinstance(item, (httpx.TimeoutException, TimeoutError)) for item in chain):
+        kind = "timeout"
+    elif any(isinstance(item, socket.gaierror) for item in chain):
+        kind = "dns"
+    elif any(isinstance(item, (httpx.ConnectError, ConnectionError, OSError)) for item in chain):
+        kind = "connection"
+    elif any(isinstance(item, (ModelCatalogInvalid, ValueError, TypeError)) for item in chain):
+        kind = "invalid"
+    else:
+        kind = "unknown"
+    error_numbers = [item.errno for item in chain if isinstance(item, OSError) and isinstance(item.errno, int)]
+    diagnostic: dict[str, object] = {"kind": kind, "status_code": status, "error_types": [type(item).__name__ for item in chain], "error_numbers": error_numbers}
+    if scrub is not None:
+        diagnostic["details"] = [scrub(str(item)) for item in chain if str(item)]
+    return diagnostic
 
 
 def selectable_model(entry: ModelCatalogEntry) -> bool:
@@ -625,10 +663,19 @@ class ModelsDevCatalogClient:
 
 
 @dataclass(slots=True)
+class _CatalogFetch:
+    task: asyncio.Task[ModelCatalogSnapshot]
+    waiters: int = 0
+
+
+@dataclass(slots=True)
 class ModelCatalogOwner:
     client: ModelsDevCatalogClient
     _snapshot: ModelCatalogSnapshot | None = None
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _inflight: _CatalogFetch | None = field(default=None, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
+    last_error: dict[str, object] | None = field(default=None, init=False)
+    diagnostic_scrubber: Callable[[], Callable[[str], str]] | None = field(default=None, repr=False)
 
     @property
     def snapshot(self) -> ModelCatalogSnapshot | None:
@@ -638,10 +685,78 @@ class ModelCatalogOwner:
         return None if self._snapshot is None else selectable_catalog(self._snapshot)
 
     async def refresh(self) -> ModelCatalogSnapshot:
-        async with self._lock:
+        while True:
+            if self._closed:
+                raise RuntimeError("model catalog owner is closed")
+            flight = self._inflight
+            if flight is None or not flight.task.cancelling() or flight.task.done():
+                break
+            try:
+                await asyncio.shield(flight.task)
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                pass
+        if flight is None or flight.task.done():
+            task = asyncio.create_task(self._fetch(), name="model-catalog-fetch")
+            flight = _CatalogFetch(task)
+            self._inflight = flight
+            # A disconnected waiter must not leave an unobserved task exception.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        task = flight.task
+        flight.waiters += 1
+        released = False
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            flight.waiters -= 1
+            released = True
+            if flight.waiters == 0 and not task.done():
+                if not task.cancelling():
+                    task.cancel()
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+            raise
+        finally:
+            # A cancelled waiter relinquishes its count above, before deciding
+            # whether it owns the last physical operation.
+            if not released:
+                flight.waiters -= 1
+
+    async def _fetch(self) -> ModelCatalogSnapshot:
+        try:
             snapshot = await self.client.fetch()
-            self._snapshot = snapshot
-            return snapshot
+        except Exception as exc:
+            scrub = None
+            if self.diagnostic_scrubber is not None:
+                try:
+                    scrub = self.diagnostic_scrubber()
+                except Exception:
+                    pass  # Do not expose details if credential discovery failed.
+            self.last_error = catalog_error_diagnostic(exc, scrub=scrub)
+            logging.getLogger(__name__).warning(
+                "Model catalog fetch failed endpoint=%s diagnostic=%s",
+                MODELS_DEV_CATALOG_URL, self.last_error,
+            )
+            raise
+        self._snapshot = snapshot
+        self.last_error = None
+        return snapshot
+
+    async def aclose(self) -> None:
+        self._closed = True
+        task = self._inflight.task if self._inflight is not None else None
+        if task is not None and not task.done() and not task.cancelling():
+            task.cancel()
+        if task is not None:
+            with suppress(asyncio.CancelledError, Exception):
+                await task
 
 
 __all__ = [

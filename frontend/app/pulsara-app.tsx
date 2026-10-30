@@ -1183,7 +1183,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [refreshConfiguration]);
 
   useEffect(() => {
-    if (!startupSettled || !bootstrap?.model_catalog_loading || userServiceStatus !== 'online') return;
+    if (!startupSettled || !(bootstrap?.model_catalog_loading || bootstrap?.model_catalog_recovering) || userServiceStatus !== 'online') return;
     // The local shell is usable while its one initial remote catalog attempt
     // runs. Observe through the ordinary configuration owner until it settles;
     // a successful service reconnect resumes observation even if loading stayed
@@ -1196,11 +1196,11 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       } catch {
         return; // The ordinary configuration owner published the read failure.
       }
-      if (!disposed) timer = window.setTimeout(() => { void observe(); }, 250);
+      if (!disposed) timer = window.setTimeout(() => { void observe(); }, bootstrap.model_catalog_loading ? 250 : 2000);
     };
-    timer = window.setTimeout(() => { void observe(); }, 250);
+    timer = window.setTimeout(() => { void observe(); }, bootstrap.model_catalog_loading ? 250 : 2000);
     return () => { disposed = true; window.clearTimeout(timer); };
-  }, [bootstrap?.model_catalog_loading, startupSettled, refreshConfiguration, userServiceStatus]);
+  }, [bootstrap?.model_catalog_loading, bootstrap?.model_catalog_recovering, startupSettled, refreshConfiguration, userServiceStatus]);
 
   useEffect(() => {
     let disposed = false;

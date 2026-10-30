@@ -395,3 +395,99 @@ def test_output_modalities_are_display_facts_independent_of_input(output: object
         ("text", "image", "audio", "future-output")
         if output == ["text", "image", "audio", "future-output"] else None
     )
+
+
+def test_concurrent_refresh_joins_one_fetch_despite_cancelled_waiter() -> None:
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+        calls = 0
+        snapshot = parse_models_dev_catalog(catalog_fixture())
+
+        class Client:
+            async def fetch(self):
+                nonlocal calls
+                calls += 1
+                entered.set()
+                await release.wait()
+                return snapshot
+
+        owner = ModelCatalogOwner(Client())
+        first = asyncio.create_task(owner.refresh())
+        await entered.wait()
+        second = asyncio.create_task(owner.refresh())
+        await asyncio.sleep(0)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert calls == 1
+        release.set()
+        assert await second is snapshot
+        assert owner.snapshot is snapshot
+        await owner.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_catalog_diagnostics_classify_without_disclosing_exception_text() -> None:
+    import httpx
+    import socket
+    import ssl
+    from pulsara_agent.llm.model_catalog import catalog_error_diagnostic
+
+    secret = "proxy-password-must-not-appear"
+    cases = [
+        (httpx.ConnectTimeout(secret), "connect_timeout"),
+        (httpx.ReadTimeout(secret), "timeout"),
+        (httpx.ProxyError(secret), "proxy"),
+        (httpx.ConnectError(secret), "connection"),
+        (socket.gaierror(-2, secret), "dns"),
+        (ssl.SSLError(secret), "tls"),
+        (ValueError(secret), "invalid"),
+        (RuntimeError(secret), "unknown"),
+    ]
+    for error, expected in cases:
+        diagnostic = catalog_error_diagnostic(error)
+        assert diagnostic["kind"] == expected
+        assert secret not in str(diagnostic)
+    response = httpx.Response(503, request=httpx.Request("GET", "https://models.dev/api.json"))
+    diagnostic = catalog_error_diagnostic(httpx.HTTPStatusError(secret, request=response.request, response=response))
+    assert diagnostic["kind"] == "http_status"
+    assert diagnostic["status_code"] == 503
+
+
+def test_refresh_waits_for_cancelled_fetch_cleanup_before_new_fetch() -> None:
+    async def exercise():
+        entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        snapshot = parse_models_dev_catalog(catalog_fixture())
+
+        class Client:
+            calls = 0
+
+            async def fetch(self):
+                self.calls += 1
+                if self.calls == 1:
+                    entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cleaning.set()
+                        await release.wait()
+                return snapshot
+
+        client = Client()
+        owner = ModelCatalogOwner(client)
+        first = asyncio.create_task(owner.refresh())
+        await entered.wait()
+        first.cancel()
+        await cleaning.wait()
+        second = asyncio.create_task(owner.refresh())
+        await asyncio.sleep(0)
+        assert client.calls == 1
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert await second is snapshot
+        assert client.calls == 2
+        await owner.aclose()
+
+    asyncio.run(exercise())

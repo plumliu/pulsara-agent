@@ -8,10 +8,14 @@ from enum import StrEnum
 from importlib import import_module
 import logging
 import os
+import random
+import re
 from pathlib import Path
 import shutil
 import tempfile
 from typing import Awaitable, Callable
+from urllib.parse import unquote, urlsplit
+from urllib.request import getproxies
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.model_catalog import (
@@ -84,6 +88,7 @@ class DesktopApplication:
             raise ValueError("desktop HTTP port is out of bounds")
         self.settings = settings or LocalSettingsStore()
         self.catalog = catalog or ModelCatalogOwner(ModelsDevCatalogClient())
+        self.catalog.diagnostic_scrubber = self._catalog_diagnostic_scrubber
         self.model_runtime = model_runtime or ModelRuntime.production(
             settings=self.settings,
             catalog=self.catalog,
@@ -122,6 +127,8 @@ class DesktopApplication:
         self._close_task: asyncio.Task[None] | None = None
         self._initial_catalog_task: asyncio.Task[None] | None = None
         self._initial_catalog_settled = False
+        self._catalog_retry_task: asyncio.Task[None] | None = None
+        self._catalog_retry_wake = asyncio.Event()
         self._sdk_warmup_task: asyncio.Task[None] | None = None
 
     @property
@@ -185,6 +192,8 @@ class DesktopApplication:
                     refresh_database_state=self.refresh_database_state,
                     reset_postgres=self.reset_postgres,
                     model_catalog_loading=lambda: self.model_catalog_loading,
+                    model_catalog_recovering=lambda: self.catalog.snapshot is None and self._initial_catalog_settled and not self.draining,
+                    refresh_model_catalog=self.refresh_model_catalog,
                     host=self.host,
                     ssl_context=self.tls_identity.context if self.tls_identity is not None else None,
                     workspace_directories=self.workspace_directories,
@@ -238,11 +247,61 @@ class DesktopApplication:
         try:
             await self.catalog.refresh()
         except Exception:
-            pass  # A failed initial attempt settles; manual refresh remains available.
+            if not self.draining:
+                self._catalog_retry_task = asyncio.create_task(
+                    self._retry_catalog(), name="desktop-model-catalog-recovery",
+                )
         finally:
             self._initial_catalog_settled = True
         async with self._database_lock:
             await self._start_scheduler_if_prepared()
+
+    def _catalog_diagnostic_scrubber(self) -> Callable[[str], str]:
+        scrub = self.settings.read().credential_scrub_set()
+        for proxy in getproxies().values():
+            if not isinstance(proxy, str) or "://" not in proxy:
+                continue
+            parsed = urlsplit(proxy)
+            for value in (parsed.username, parsed.password):
+                if value:
+                    scrub.observe(value)
+                    scrub.observe(unquote(value))
+
+        def clean(text: str) -> str:
+            # Unknown URL credentials are removed even if proxy settings changed
+            # while a request was in flight.
+            text = re.sub(r"(https?://)[^\s/@]+@", r"\1[REDACTED]@", text)
+            return scrub.scrub_text(text)
+
+        return clean
+
+    async def refresh_model_catalog(self):
+        try:
+            return await self.catalog.refresh()
+        finally:
+            # A manual attempt has already run; wake the retry owner to observe
+            # its result and start a fresh delay, without issuing a second fetch.
+            self._catalog_retry_wake.set()
+
+    async def _retry_catalog(self) -> None:
+        delay = 2.0
+        while not self.draining and self.catalog.snapshot is None:
+            self._catalog_retry_wake.clear()
+            if await self._wait_catalog_retry(delay * random.uniform(0.8, 1.0)):
+                continue
+            if self.draining or self.catalog.snapshot is not None:
+                return
+            try:
+                await self.catalog.refresh()
+            except Exception:
+                delay = min(delay * 2, 60.0)
+
+    async def _wait_catalog_retry(self, delay: float) -> bool:
+        try:
+            await asyncio.wait_for(self._catalog_retry_wake.wait(), delay)
+        except TimeoutError:
+            return False
+        return True
 
     @staticmethod
     def _observe_initial_catalog_completion(task: asyncio.Task[None]) -> None:
@@ -262,12 +321,16 @@ class DesktopApplication:
             await self.scheduled_tasks.start()
 
     async def _close_initial_catalog(self) -> None:
-        task = self._initial_catalog_task
-        if task is not None:
-            if not task.done():
-                task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        tasks = (self._initial_catalog_task, self._catalog_retry_task)
+        if self._catalog_retry_task is not None and not self._catalog_retry_task.done():
+            self._catalog_retry_task.cancel()
+        await self.catalog.aclose()
+        if self._initial_catalog_task is not None and not self._initial_catalog_task.done():
+            self._initial_catalog_task.cancel()
+        for task in tasks:
+            if task is not None:
+                with suppress(asyncio.CancelledError):
+                    await task
 
     async def refresh_database_state(self) -> DatabaseDataPlaneState:
         async with self._database_lock:

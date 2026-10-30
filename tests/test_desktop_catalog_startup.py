@@ -190,3 +190,116 @@ def test_unexpected_scheduler_failure_is_observed_and_close_still_joins(tmp_path
         assert app.protocol_server is None
 
     asyncio.run(exercise())
+
+
+def test_failed_initial_catalog_recovers_without_restart(tmp_path, monkeypatch):
+    async def exercise():
+        class Client:
+            calls = 0
+
+            async def fetch(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError("temporary failure")
+                return snapshot
+
+        client = Client()
+        app, snapshot = _application(tmp_path, monkeypatch, client)
+        monkeypatch.setattr("pulsara_agent.desktop_app.application.random.uniform", lambda *_: 0)
+        try:
+            await app.start()
+            await asyncio.wait_for(app._initial_catalog_task, 1)
+            await asyncio.wait_for(app._catalog_retry_task, 1)
+            result = await _bootstrap(app)
+            assert client.calls == 2
+            assert result["model_catalog_recovering"] is False
+            assert result["model_catalog_error"] is None
+            assert result["model_configurations"][0]["status"] == "ready"
+            app.scheduled_tasks.start.assert_awaited_once()
+        finally:
+            await app.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_manual_catalog_refresh_recovers_during_backoff(tmp_path, monkeypatch):
+    async def exercise():
+        class Client:
+            calls = 0
+
+            async def fetch(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError("temporary failure")
+                return snapshot
+
+        client = Client()
+        app, snapshot = _application(tmp_path, monkeypatch, client)
+        try:
+            await app.start()
+            await app._initial_catalog_task
+            failed = await _bootstrap(app)
+            assert failed["model_catalog_recovering"] is True
+            assert failed["model_catalog_error"]["kind"] == "connection"
+            await app.refresh_model_catalog()
+            await asyncio.wait_for(app._catalog_retry_task, 1)
+            assert client.calls == 2
+            assert (await _bootstrap(app))["model_configurations"][0]["status"] == "ready"
+        finally:
+            await app.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_catalog_diagnostics_preserve_context_without_proxy_credentials(tmp_path, monkeypatch):
+    async def exercise():
+        class Client:
+            async def fetch(self):
+                raise OSError("connection failed via http://person:proxy-secret@localhost:8080")
+
+        monkeypatch.setenv("HTTPS_PROXY", "http://person:proxy-secret@localhost:8080")
+        app, _ = _application(tmp_path, monkeypatch, Client())
+        try:
+            await app.start()
+            await app._initial_catalog_task
+            error = (await _bootstrap(app))["model_catalog_error"]
+            assert "connection failed" in str(error)
+            assert "proxy-secret" not in str(error)
+        finally:
+            await app.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_catalog_recovery_keeps_retrying_with_bounded_backoff(tmp_path, monkeypatch):
+    async def exercise():
+        class Client:
+            calls = 0
+
+            async def fetch(self):
+                self.calls += 1
+                if self.calls < 10:
+                    raise OSError("temporary failure")
+                return snapshot
+
+        client = Client()
+        app, snapshot = _application(tmp_path, monkeypatch, client)
+        delays = []
+
+        async def no_wait(delay):
+            delays.append(delay)
+            return False
+
+        monkeypatch.setattr(app, "_wait_catalog_retry", no_wait)
+        monkeypatch.setattr("pulsara_agent.desktop_app.application.random.uniform", lambda *_: 1)
+        try:
+            await app.start()
+            await app._initial_catalog_task
+            await asyncio.wait_for(app._catalog_retry_task, 1)
+            assert client.calls == 10
+            assert delays == [2, 4, 8, 16, 32, 60, 60, 60, 60]
+            assert app.catalog.snapshot is snapshot
+        finally:
+            await app.aclose()
+
+    asyncio.run(exercise())

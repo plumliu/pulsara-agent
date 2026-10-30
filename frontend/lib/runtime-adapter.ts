@@ -62,6 +62,8 @@ export interface RuntimeBootstrap {
   local_settings: LocalSettingsSummary;
   model_configurations: ModelConfigurationSummary[];
   model_catalog_loading: boolean;
+  model_catalog_recovering: boolean;
+  model_catalog_error: {kind: string; status_code: number | null; error_types: string[]} | null;
   database_state: DatabaseDataPlaneState;
 }
 
@@ -133,6 +135,7 @@ export interface ModelConfigurationSummary {
   model_id: string;
   base_url: string;
   status: 'ready' | 'unavailable';
+  unavailable_reason?: string;
   authentication: 'bearer_api_key' | 'none';
   credential_configured: boolean;
   route_name?: string;

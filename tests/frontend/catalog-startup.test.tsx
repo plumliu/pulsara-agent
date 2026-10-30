@@ -60,6 +60,18 @@ describe('initial model catalog observation', () => {
     expect(adapter.lastConnection?.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('observes background recovery and enables the model without a restart', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = { ...projection(), isRunning: false, activeTurnId: undefined };
+    const recovering = { ...loadingBootstrap(), model_catalog_loading: false, model_catalog_recovering: true };
+    const read = vi.spyOn(adapter, 'bootstrap').mockResolvedValueOnce(recovering).mockResolvedValue(bootstrap);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByLabelText('发送给 Pulsara');
+    await typeComposer('恢复后发送');
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2), { timeout: 3500 });
+    await waitFor(() => expect((screen.getByRole('button', { name: '发送', exact: true }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it('resumes catalog observation after a failed poll and successful service reconnect', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = { ...projection(), isRunning: false, activeTurnId: undefined };

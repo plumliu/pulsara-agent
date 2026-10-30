@@ -71,6 +71,8 @@ const bootstrap: RuntimeBootstrap = {
   runtime: { status: 'ready', origin: 'http://localhost', database_state: 'ready' },
   database_state: 'ready',
   model_catalog_loading: false,
+  model_catalog_recovering: false,
+  model_catalog_error: null,
   local_settings: { input_suggestions_enabled: true, pulsara_home: '/Users/test/custom-pulsara-home',
     state: 'ready',
     postgres: { runtime_dsn: 'postgresql://pulsara@localhost/pulsara', admin_dsn: null },

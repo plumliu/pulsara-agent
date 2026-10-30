@@ -115,6 +115,33 @@ from pulsara_agent.storage.migrations.errors import (
 LOOPBACK_HOST = "127.0.0.1"
 
 
+def _catalog_error_message(diagnostic: dict[str, object] | None) -> str:
+    kind = (diagnostic or {}).get("kind")
+    labels = {
+        "connect_timeout": "连接超时", "timeout": "请求超时", "proxy": "代理连接失败",
+        "tls": "TLS 连接失败", "dns": "域名解析失败", "connection": "网络连接失败",
+        "invalid": "目录内容无法识别", "unknown": "发生未知错误",
+    }
+    if kind == "http_status":
+        detail = f"HTTP {(diagnostic or {}).get('status_code')}"
+    else:
+        detail = labels.get(kind, "暂时不可用")
+    return f"models.dev 模型目录加载失败：{detail}。"
+
+
+def _model_unavailable_reason(connection, catalog, exc: BaseException) -> str:
+    if connection.user_declared is None and catalog is None:
+        return "模型目录尚未加载"
+    if connection.user_declared is None and connection.target.catalog_key not in catalog.entries:
+        return "模型不在当前可选目录中"
+    message = str(exc)
+    if "limit" in message or "budget" in message:
+        return "模型目录中的上下文或能力限制不满足"
+    if "reasoning" in message or "route/wire" in message:
+        return "模型的协议或推理配置与当前目录不兼容"
+    return "模型配置与当前能力不兼容"
+
+
 def _reasoning_payload(value) -> dict[str, object]:
     if isinstance(value, ReasoningSelectableControls):
         return {
@@ -322,6 +349,8 @@ class LocalHttpServer:
         reset_postgres: Callable[[LocalPostgresConfig], Awaitable[dict[str, object]]],
         scheduled_tasks=None,
         model_catalog_loading: Callable[[], bool] = lambda: False,
+        model_catalog_recovering: Callable[[], bool] = lambda: False,
+        refresh_model_catalog: Callable[[], Awaitable[object]] | None = None,
         host: dict[str, str] | None = None,
         ssl_context: ssl.SSLContext | None = None,
         workspace_directories=None,
@@ -337,6 +366,8 @@ class LocalHttpServer:
         self.catalog = catalog
         self.model_runtime = model_runtime
         self._model_catalog_loading = model_catalog_loading
+        self._model_catalog_recovering = model_catalog_recovering
+        self._refresh_model_catalog_owner = refresh_model_catalog or catalog.refresh
         self._host = host
         self._ssl_context = ssl_context
         self._workspace_directories = workspace_directories
@@ -787,7 +818,7 @@ class LocalHttpServer:
         except ModelCatalogUnavailable:
             return self._error_response(
                 "model_catalog_unavailable",
-                "models.dev 模型目录当前不可用，请稍后重试。",
+                _catalog_error_message(self.catalog.last_error),
                 status=503,
                 retryable=True,
             )
@@ -961,6 +992,8 @@ class LocalHttpServer:
         payload = self.sessions.bootstrap_payload()
         payload.update(await self._settings_read_model())
         payload["model_catalog_loading"] = catalog_loading
+        payload["model_catalog_recovering"] = self._model_catalog_recovering()
+        payload["model_catalog_error"] = self.catalog.last_error
         payload["runtime"] = {
             "status": "ready" if self._is_ready() else "starting",
             "origin": self.origin,
@@ -995,7 +1028,7 @@ class LocalHttpServer:
         )
 
     async def _refresh_model_catalog(self, _request: web.Request) -> web.Response:
-        await self.catalog.refresh()
+        await self._refresh_model_catalog_owner()
         return await self._model_catalog(_request)
 
     async def _model_configurations(self, _request: web.Request) -> web.Response:
@@ -1530,11 +1563,12 @@ class LocalHttpServer:
                 connection=connection,
                 route_wires=self.model_runtime.route_wires,
             )
-        except (KeyError, ValueError, ModelRuntimeUnavailable):
+        except (KeyError, ValueError, ModelRuntimeUnavailable) as exc:
             payload.update(
                 status="unavailable",
                 credential_configured=connection.requires_api_key,
                 reasoning={"kind": "unavailable"},
+                unavailable_reason=_model_unavailable_reason(connection, catalog, exc),
             )
             return payload
         catalog_entry = (

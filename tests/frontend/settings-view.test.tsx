@@ -55,10 +55,11 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     settings = { ...settings, local_settings: { ...settings.local_settings, input_suggestions_enabled: enabled } };
     return { enabled };
   });
+  const modelCatalog = vi.fn(async (_refresh?: boolean) => catalog);
   const adapter = {
     setInputSuggestionsEnabled: setInputSuggestions,
     localSettings: async () => settings,
-    modelCatalog: async () => catalog,
+    modelCatalog,
     resetPostgres: reset,
     checkPostgres: check,
     deleteModelConfiguration: deleteModel,
@@ -69,8 +70,17 @@ function setup(configurations: ModelConfigurationSummary[] = [], detail?: ModelC
     discoverModels,
   } as unknown as RuntimeAdapter;
   render(<SettingsView adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={() => {}} onConfigurationChanged={refresh} onNotify={notify} sessionRevision={0} onSessionsChanged={refresh} onDeleteSession={() => {}} />);
-  return { setInputSuggestions, reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel, discoverModels };
+  return { setInputSuggestions, reset, refresh, notify, check, deleteModel, addModel, readModel, updateModel, probeModel, discoverModels, modelCatalog };
 }
+
+it('refreshes the directory and global configuration directly from the models page', async () => {
+  const { modelCatalog, refresh, notify } = setup([modelConfiguration(1)]);
+  fireEvent.click(screen.getByRole('button', { name: '模型' }));
+  fireEvent.click(await screen.findByRole('button', { name: '刷新目录' }));
+  await waitFor(() => expect(notify).toHaveBeenCalledWith('模型目录已刷新', expect.any(String), 'success'));
+  expect(modelCatalog).toHaveBeenCalledWith(true);
+  expect(refresh).toHaveBeenCalled();
+});
 
 function customDetail(inputModalities: string[] | null = null): ModelConfigurationDetail {
   return {

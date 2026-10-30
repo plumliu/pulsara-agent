@@ -120,9 +120,6 @@ class _Sessions:
     def __init__(self) -> None:
         self.create_model_bindings: list[object] = []
         self.create_model_error: Exception | None = None
-        self.task_page_calls: list[tuple[str, int, str | None, str | None]] = []
-        self.task_group_calls: list[tuple[str, int, str | None]] = []
-        self.task_activity_calls: list[tuple[str, str, int, str | None]] = []
         self.reconnect_calls: list[tuple[str, str]] = []
         self.install_calls: list[tuple[str, str]] = []
         self.project_skill_toggle_calls: list[tuple[str, str, bool]] = []
@@ -158,58 +155,6 @@ class _Sessions:
         if self.create_model_error is not None:
             raise self.create_model_error
         return SimpleNamespace(session_id='session:bwpogagzox7onyn52iumyctnkq')
-
-    async def list_session_tasks(
-        self,
-        session_id: str,
-        *,
-        maximum_items: int,
-        cursor: str | None,
-        batch_id: str | None,
-    ) -> dict[str, object]:
-        assert session_id == "session:bwpogagzox7onyn52iumyctnkq"
-        assert maximum_items == 17
-        assert cursor == "next-page"
-        self.task_page_calls.append((session_id, maximum_items, cursor, batch_id))
-        return {
-            "session_id": session_id,
-            "tasks": [{"id": "task-1", "status": "ACTIVE"}],
-            "total_count": 1,
-            "page_count": 1,
-            "remaining_count": 0,
-            "next_cursor": None,
-        }
-
-    async def list_session_task_groups(
-        self,
-        session_id: str,
-        *,
-        maximum_items: int,
-        cursor: str | None,
-    ) -> dict[str, object]:
-        self.task_group_calls.append((session_id, maximum_items, cursor))
-        return {
-            "session_id": session_id,
-            "groups": [{"group_id": 'batch:74urk6dg3qulsypr3wftaay3dm', "task_count": 1}],
-            "next_cursor": None,
-        }
-
-    async def list_session_task_activities(
-        self,
-        session_id: str,
-        task_id: str,
-        *,
-        maximum_items: int,
-        cursor: str | None,
-    ) -> dict[str, object]:
-        self.task_activity_calls.append((session_id, task_id, maximum_items, cursor))
-        return {
-            "session_id": session_id,
-            "task_id": task_id,
-            "objective": "inspect exact activity",
-            "activities": [{"entry_id": 'entry:jfasfwsw2puygc3hrueckpvgba', "kind": "ASSISTANT_MESSAGE"}],
-            "next_cursor": None,
-        }
 
     async def inspect_session_capabilities(self, session_id: str) -> dict[str, object]:
         return _capabilities(session_id)
@@ -1240,52 +1185,6 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
                 assert response.status == 400
 
             async with client.get(
-                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/tasks",
-                params={"limit": "17", "cursor": "next-page"},
-            ) as response:
-                assert response.status == 200
-                payload = await response.json()
-                assert payload["tasks"] == [{"id": "task-1", "status": "ACTIVE"}]
-
-            async with client.get(
-                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/tasks",
-                params={
-                    "limit": "17",
-                    "cursor": "next-page",
-                    "batch_id": 'batch:74urk6dg3qulsypr3wftaay3dm',
-                },
-            ) as response:
-                assert response.status == 200
-            assert sessions.task_page_calls[-1] == (
-                "session:bwpogagzox7onyn52iumyctnkq",
-                17,
-                "next-page",
-                'batch:74urk6dg3qulsypr3wftaay3dm',
-            )
-
-            async with client.get(
-                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/task-groups",
-                params={"limit": "9", "cursor": "group:next"},
-            ) as response:
-                assert response.status == 200
-                assert (await response.json())["groups"] == [
-                    {"group_id": 'batch:74urk6dg3qulsypr3wftaay3dm', "task_count": 1}
-                ]
-            assert sessions.task_group_calls == [("session:bwpogagzox7onyn52iumyctnkq", 9, "group:next")]
-
-            async with client.get(
-                f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/tasks/task-1/activities",
-                params={"limit": "11", "cursor": "activity:next"},
-            ) as response:
-                assert response.status == 200
-                activity_page = await response.json()
-                assert activity_page["objective"] == "inspect exact activity"
-                assert activity_page["activities"][0]["entry_id"] == 'entry:jfasfwsw2puygc3hrueckpvgba'
-            assert sessions.task_activity_calls == [
-                ("session:bwpogagzox7onyn52iumyctnkq", "task-1", 11, "activity:next")
-            ]
-
-            async with client.get(
                 f"{server.origin}/api/sessions/session:bwpogagzox7onyn52iumyctnkq/capabilities"
             ) as response:
                 assert response.status == 200
@@ -1990,6 +1889,16 @@ def test_memory_settings_http_errors_are_specific_and_confirmation_is_atomic(tmp
     asyncio.run(exercise())
 
 
+def _schedule_values():
+    return {
+        "name": "Daily report",
+        "prompt": "Prepare a report.",
+        "schedule": {"contract": "scheduled-rule:v1", "kind": "daily", "start_date": "2026-10-13", "time": "09:00"},
+        "timezone": "Asia/Shanghai",
+        "permission_mode": "read-only",
+    }
+
+
 def test_scheduled_http_filters_active_session_and_returns_activation_conflicts(
     tmp_path,
 ):
@@ -2043,20 +1952,28 @@ def test_scheduled_http_filters_active_session_and_returns_activation_conflicts(
                     json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": {}, "status": "ACTIVE"},
                     headers={"Origin": server.origin},
                 ) as response:
+                    assert response.status == 400
+                tasks.create.assert_not_awaited()
+                values = _schedule_values()
+                async with client.post(
+                    url,
+                    json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": values, "status": "ACTIVE"},
+                    headers={"Origin": server.origin},
+                ) as response:
                     assert response.status == 409
                     value = await response.json()
                     assert value["error"]["code"] == "ACTIVE_TASK_CONFLICT"
                     assert "先暂停或取消" in value["error"]["message"]
-                tasks.create.assert_awaited_once_with(session_id='session:qlp745d22i4ns5hrvdxtssrowu', values={}, status="ACTIVE")
+                tasks.create.assert_awaited_once_with(session_id='session:qlp745d22i4ns5hrvdxtssrowu', values=values, status="ACTIVE")
                 tasks.create.side_effect = None
                 tasks.create.return_value = {"status": "PAUSED", "next_run_at": None}
                 for status_fields in ({}, {"status": None}, {"status": "PAUSED"}):
-                    async with client.post(url, json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": {}, **status_fields}, headers={"Origin": server.origin}) as response:
+                    async with client.post(url, json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": values, **status_fields}, headers={"Origin": server.origin}) as response:
                         assert response.status == 201, await response.text()
-                    tasks.create.assert_awaited_with(session_id='session:qlp745d22i4ns5hrvdxtssrowu', values={}, **status_fields)
+                    tasks.create.assert_awaited_with(session_id='session:qlp745d22i4ns5hrvdxtssrowu', values=values, **status_fields)
                 accepted = tasks.create.await_count
                 for invalid in ("", "active", False, 0, [], {}):
-                    async with client.post(url, json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": {}, "status": invalid}, headers={"Origin": server.origin}) as response:
+                    async with client.post(url, json={"session_id": 'session:qlp745d22i4ns5hrvdxtssrowu', "values": values, "status": invalid}, headers={"Origin": server.origin}) as response:
                         assert response.status == 400
                 assert tasks.create.await_count == accepted
         finally:
@@ -2129,7 +2046,7 @@ def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path)
                 tasks.switch.assert_awaited_once_with(
                     task_id=task_id, expected_revision=1, replacement=target
                 )
-                replacement = {"kind": "create", "values": {"name": "new"}}
+                replacement = {"kind": "create", "values": _schedule_values()}
                 async with client.post(
                     url + "/switch",
                     json={"expected_revision": 3, "replacement": replacement},

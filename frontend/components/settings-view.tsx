@@ -88,6 +88,15 @@ function connectionCredentialLabel(connection: ModelConfigurationSummary): strin
   return connection.credential_configured ? '密钥已配置' : '密钥未配置';
 }
 
+function catalogErrorLabel(error: NonNullable<RuntimeBootstrap['model_catalog_error']>): string {
+  const labels: Record<string, string> = {
+    connect_timeout: '连接超时', timeout: '请求超时', proxy: '代理连接失败',
+    tls: 'TLS 连接失败', dns: '域名解析失败', connection: '网络连接失败',
+    invalid: '目录内容无法识别', unknown: '未知错误',
+  };
+  return error.kind === 'http_status' ? `HTTP ${error.status_code}` : labels[error.kind] ?? '未知错误';
+}
+
 function parseEffortValues(value: string): string[] {
   return [...new Set(value.split(/[,，]/).map((item) => item.trim()).filter(Boolean))];
 }
@@ -265,7 +274,11 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
         if (active) setLoading(false);
       });
     return () => { active = false; };
-  }, [adapter, bootstrap?.model_catalog_loading]);
+  }, [adapter, bootstrap?.model_catalog_loading, bootstrap?.model_catalog_recovering]);
+
+  useEffect(() => {
+    if (bootstrap) setSettings(current => current ? { ...current, model_configurations: bootstrap.model_configurations } : current);
+  }, [bootstrap]);
 
   const selectableRoutes = useMemo(() => [...(catalog?.routes ?? [])].sort((left, right) => (
     alphabeticalCollator.compare(left.display_name, right.display_name)
@@ -378,8 +391,16 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
 
   const refreshCatalog = async () => {
     setCatalogRefreshing(true);
-    try { setCatalog(await adapter.modelCatalog(true)); onNotify('模型目录已刷新', '选择器已经使用最新的 models.dev 快照。', 'success'); }
-    catch (refreshError) { onNotify('模型目录未刷新', refreshError instanceof Error ? refreshError.message : '请稍后重试。', 'warning'); }
+    try {
+      setCatalog(await adapter.modelCatalog(true));
+      await load();
+      await onConfigurationChanged();
+      onNotify('模型目录已刷新', '选择器已经使用最新的 models.dev 快照。', 'success');
+    }
+    catch (refreshError) {
+      await onConfigurationChanged().catch(() => {});
+      onNotify('模型目录未刷新', refreshError instanceof Error ? refreshError.message : '请稍后重试。', 'warning');
+    }
     finally { setCatalogRefreshing(false); }
   };
 
@@ -550,13 +571,14 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
           <CliSettings />
         </section></>}
         {section === 'models' && <>
-          <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" disabled={Boolean(loadingModelId) || savingModel || testingModel} onClick={() => { if (adding) closeModelForm(); else { resetModelDraft(); setEditingConfiguration(undefined); setAdding(true); } }}><Plus size={13} />添加配置</button></header>
+          <section className="settings-group model-settings-group"><header><Bot size={16} /><div><h2>模型配置</h2><p>每张卡片是一条可在会话中选择的独立连接。</p></div><button className="settings-header-action" disabled={catalogRefreshing} onClick={() => void refreshCatalog()}><RefreshCw size={13} />{catalogRefreshing ? '正在刷新目录…' : '刷新目录'}</button><button className="settings-header-action" disabled={Boolean(loadingModelId) || savingModel || testingModel} onClick={() => { if (adding) closeModelForm(); else { resetModelDraft(); setEditingConfiguration(undefined); setAdding(true); } }}><Plus size={13} />添加配置</button></header>
+            {bootstrap?.model_catalog_error && <p className="inline-warning">模型目录加载失败：{catalogErrorLabel(bootstrap.model_catalog_error)}{bootstrap.model_catalog_recovering ? '，正在后台重试。' : '；继续使用已加载的目录（如有）。'}</p>}
             {modelConfigurations.length ? <>
               <div className="model-card-list">{visibleModelConfigurations.map((connection) => <article className="model-config-card" key={connection.id}>
                 <span className="model-config-card__icon"><Bot size={15} /></span>
                 <span><strong title={connectionTitle(connection)}>{connectionTitle(connection)}</strong><small>{wireLabel(connection.wire_api)} · {formatTokens(connection.context_window_tokens ?? connection.context_tokens)} 上下文</small><code title={connection.model_id}>{connection.model_id}</code></span>
                 <div className="model-config-card__actions">
-                  <span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : bootstrap?.model_catalog_loading && connection.source === 'models_dev' ? '模型目录正在载入' : '配置不可用'}</span>
+                  <span className={`credential-state credential-state--${connection.status === 'ready' ? 'present' : 'missing'}`}><i />{connection.status === 'ready' ? connectionCredentialLabel(connection) : bootstrap?.model_catalog_loading && connection.source === 'models_dev' ? '模型目录正在载入' : connection.unavailable_reason ?? '配置不可用'}</span>
                   {deleteCandidateId === connection.id ? <div className="model-delete-confirmation"><button disabled={deletingModelId === connection.id} onClick={() => setDeleteCandidateId(undefined)}>取消</button><button className="subtle-danger" disabled={deletingModelId === connection.id} onClick={() => void deleteModel(connection)}>{deletingModelId === connection.id ? <LoaderCircle size={13} /> : <Trash2 size={13} />}确认删除</button></div> : <div className="model-config-card__buttons"><button className="model-edit-trigger" aria-label={`修改模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => void editModel(connection)}>{loadingModelId === connection.id ? <LoaderCircle size={13} /> : <Pencil size={13} />}修改</button><button className="model-delete-trigger subtle-danger" aria-label={`删除模型配置 ${connectionTitle(connection)}`} disabled={Boolean(deletingModelId || loadingModelId) || savingModel || testingModel} onClick={() => setDeleteCandidateId(connection.id)}><Trash2 size={13} />删除</button></div>}
                 </div>
               </article>)}</div>
