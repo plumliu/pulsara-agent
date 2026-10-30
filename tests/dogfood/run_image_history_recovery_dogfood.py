@@ -236,7 +236,7 @@ async def run(args, report, saved):
                 coordinator.validate_compaction_wire_transition = observe
                 try:
                     result = await session.compact_context(
-                        command_id=random_id("command"), force=True
+                        command_id=random_id("command")
                     )
                 finally:
                     coordinator.validate_compaction_wire_transition = validate

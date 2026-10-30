@@ -34,7 +34,6 @@ from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.compaction.coordinator import (
-    _can_enter_model_switch_tier_three,
     _can_retry_compaction_with_smaller_recent,
     _ordinary_recent_suffixes,
     _target_is_known_text_only,
@@ -519,7 +518,6 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
                 "attempt:mugciis47zjypnfgrl2sal7gpi",
                 owner_task,
                 foreign,
-                "turn:tgnq76so2tupmonbxpxhivfuya",
             )
         with pytest.raises(RuntimeError, match="admitted writer"):
             await host._install_compaction_fence(
@@ -528,7 +526,6 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
                 "attempt:gnqzrpqgvczqquxswffamywiry",
                 owner_task,
                 None,
-                "turn:tgnq76so2tupmonbxpxhivfuya",
             )
 
         await host._install_compaction_fence(
@@ -537,7 +534,6 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
             "attempt:oh4vvsmff4tb6jdshwwn5zqms4",
             owner_task,
             exact,
-            "turn:tgnq76so2tupmonbxpxhivfuya",
         )
         assert host._compaction.is_fenced(
             scope_kind=ModelInputScopeKind.ROOT,
@@ -547,40 +543,46 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
         )
         await host._release_compaction_write_reservation(exact)
 
+        with pytest.raises(RuntimeError, match="idle ROOT admission is busy"):
+            await host._install_compaction_fence(
+                scope,
+                CompactionTrigger.AUTO_ACTIVE_CONTEXT,
+                "attempt:gnqzrpqgvczqquxswffamywiry",
+                owner_task,
+                None,
+            )
         host._external_new_turn_accepting = False
         host._active_task = owner_task
         host._active_turn_id = "turn:tgnq76so2tupmonbxpxhivfuya"
-        with pytest.raises(RuntimeError, match="does not exact-join"):
+        with pytest.raises(RuntimeError, match="active ROOT target changed"):
             await host._install_compaction_fence(
                 scope,
                 CompactionTrigger.AUTO_ACTIVE_CONTEXT,
                 "attempt:6rcxsrhn2han2cskeg5wb63sym",
                 owner_task,
                 None,
-                "turn:c3fxjnnljiejzzrzacfi4f3jkq",
             )
 
         not_owner = asyncio.create_task(asyncio.sleep(0))
         host._active_task = not_owner
-        with pytest.raises(RuntimeError, match="does not exact-join"):
+        with pytest.raises(RuntimeError, match="ROOT task ownership changed"):
             await host._install_compaction_fence(
                 scope,
                 CompactionTrigger.AUTO_ACTIVE_CONTEXT,
                 "attempt:rrsveftdohjcpbj432s43cknma",
                 owner_task,
                 None,
-                "turn:tgnq76so2tupmonbxpxhivfuya",
             )
         await not_owner
 
         host._active_task = owner_task
+        host._active_turn_id = scope.turn_id
         await host._install_compaction_fence(
             scope,
             CompactionTrigger.AUTO_ACTIVE_CONTEXT,
             "attempt:jjqdmoccleuuxdthym5doct3f4",
             owner_task,
             None,
-            "turn:tgnq76so2tupmonbxpxhivfuya",
         )
         await host._remove_compaction_fence(
             scope, "attempt:jjqdmoccleuuxdthym5doct3f4", owner_task
@@ -863,7 +865,6 @@ def test_dry_wire_measurement_closes_text_only_target_before_adoption() -> None:
     mismatch = ModelTargetCapabilityMismatch(
         "model target does not declare image input"
     )
-    assert _can_enter_model_switch_tier_three(mismatch)
     assert not _can_retry_compaction_with_smaller_recent(mismatch)
 
 
@@ -1011,6 +1012,62 @@ def test_history_and_recent_image_checks_exclude_only_the_exact_active_request()
     )
     assert not recent_human_window_has_image(
         (_recent("entry:wfczofkrpmbtqknslywdqqqeri", 3, LLMTextPart("text")),)
+    )
+
+
+def test_target_projection_image_history_excludes_the_complete_first_call_group() -> None:
+    current_turn = derive_id("turn", "image-projection-test", "current")
+
+    def item(label, sequence, origin, *parts):
+        return FrozenProviderInputItem(
+            item_kind=FrozenProviderInputItemKind.USER,
+            source_entry_id=derive_id("entry", "image-projection-test", label),
+            source_entry_sequence=sequence,
+            source_turn_id=current_turn,
+            content=parts,
+            input_origin=origin,
+        )
+
+    profile = item(
+        "profile", 2, CanonicalInputOriginKind.AGENT_PROFILE, _image(b"profile")
+    )
+    instruction = item(
+        "instruction", 3, CanonicalInputOriginKind.AGENT_INSTRUCTION,
+        LLMTextPart("KEEP_CURRENT_REQUEST"),
+    )
+    material = item(
+        "material", 4, CanonicalInputOriginKind.AGENT_MATERIAL, _image(b"material")
+    )
+    group = (profile, instruction, material)
+
+    def read(items):
+        return SimpleNamespace(
+            dispatch_read=SimpleNamespace(
+                compile_snapshot=SimpleNamespace(
+                    canonical_input=SimpleNamespace(
+                        identity=SimpleNamespace(
+                            initial_entry_id=instruction.source_entry_id
+                        ),
+                        items=items,
+                    )
+                )
+            )
+        )
+
+    # These images remain exact current input; a text-only destination cannot
+    # treat them as historical references merely because instruction is text.
+    assert compaction_effective_history_has_image(read(group))
+    assert not compaction_effective_history_has_image(
+        read(group), first_call_history_through_sequence=1
+    )
+    historical_image = replace(
+        material,
+        source_entry_id=derive_id("entry", "image-projection-test", "history"),
+        source_entry_sequence=1,
+        source_turn_id=derive_id("turn", "image-projection-test", "previous"),
+    )
+    assert compaction_effective_history_has_image(
+        read((historical_image, *group)), first_call_history_through_sequence=1
     )
 
 

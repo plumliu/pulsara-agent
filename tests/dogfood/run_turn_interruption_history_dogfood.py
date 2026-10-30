@@ -59,7 +59,7 @@ async def run():
             await catalog.refresh()
             delegate = ModelRuntime.production(settings=settings, catalog=catalog)
             calls = []
-            runtime = _RecordingModelRuntime(delegate, calls, None)
+            runtime = _RecordingModelRuntime(delegate, calls)
             core = KernelHostCore.production(model_runtime=runtime)
             try:
                 session = await core.open_session(

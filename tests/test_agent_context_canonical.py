@@ -40,7 +40,7 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
         instruction="Continue critically.",
     )
     admit(second)
-    prospective = repository.prepare_prompt_head_consumption(
+    prepared_start = repository.prepare_prompt_head_consumption(
         session_id=first.agent_id,
         occurred_at=now(),
         actor_id="test",
@@ -50,22 +50,31 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
         repository.connection_provider,
         blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
     )
-    prepared_read = reader.read_prospective_root_dispatch(
-        prospective.provider_input_candidate, deadline_monotonic=deadline()
-    )
+    assert prepared_start is not None
     lease, accepted = start(repository, second)
+    confirmed = repository.confirm_prepared_prompt_head_consumption(
+        candidate=accepted, deadline_monotonic=deadline()
+    )
+    assert confirmed.kind.value == "FULL" and confirmed.accepted is not None
+    group = confirmed.accepted.started_input_group
+    assert accepted.queue_item_id == prepared_start.queue_item_id
     cut = repository.prepare_provider_input_cut(
         lease.guard, turn_id=accepted.exact_turn_id, deadline_monotonic=deadline()
     )
     actual = reader.read_frozen_dispatch(cut, deadline_monotonic=deadline())
-    assert actual == prepared_read
     canonical = actual.compile_snapshot.canonical_input
     assert canonical.identity.conversation_scope_kind is ModelInputScopeKind.SUBAGENT
     assert canonical.identity.initial_entry_id == accepted.exact_initial_entry_id
     assert (
         canonical.identity.provider_input_through_sequence
-        == accepted.provider_input_candidate.resulting_provider_input_through_sequence
+        == group.ordered_items[-1].source_entry_sequence
     )
+    assert tuple(item for item in canonical.items if item.source_turn_id == accepted.exact_turn_id) == group.ordered_items
+    binding = actual.compile_snapshot.context_binding_fact
+    assert binding.binding_revision_id == group.initial_context_binding_revision_id
+    assert binding.base_kind is group.initial_base_kind
+    assert binding.context_snapshot_id == group.initial_context_snapshot_id
+    assert binding.source_through_sequence == group.initial_source_through_sequence
     assert [item.input_origin for item in canonical.items if item.input_origin] == [
         CanonicalInputOriginKind.AGENT_PROFILE,
         CanonicalInputOriginKind.AGENT_INSTRUCTION,

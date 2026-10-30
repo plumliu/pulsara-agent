@@ -16,7 +16,7 @@ from pulsara_agent.conversation_kernel.interruption import (
     read_imported_notices,
 )
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 import json
@@ -37,9 +37,6 @@ from pulsara_agent.ports.user_control_feedback import (
 from pulsara_agent.conversation_kernel.prompt_content import (
     PROMPT_BODY_MEDIA_TYPE,
     canonical_prompt_body_bytes,
-)
-from pulsara_agent.conversation_kernel.steer import (
-    PreparedRootProviderInputCandidate,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
     hydrate_canonical_prompt_owner,
@@ -630,6 +627,16 @@ class CanonicalProviderInputReader:
                     if item.source_entry_sequence is not None
                 ),
             )
+            executed_history_endings = read_executed_notices(
+                connection,
+                session_id=cut.session_id,
+                event_cut=event_cut,
+                entry_sequences=tuple(
+                    item.source_entry_sequence
+                    for item in canonical_range.ordered_items
+                    if item.source_entry_sequence is not None
+                ),
+            )
             return freeze_compaction_canonical_read(
                 scope=scope,
                 turn_status=str(row["status"]),
@@ -638,30 +645,13 @@ class CanonicalProviderInputReader:
                 safe_head_range=canonical_range,
                 source_interruption=endings[0] if endings else None,
                 imported_interruptions=imported_endings,
+                executed_history_interruptions=tuple(
+                    ending
+                    for ending in executed_history_endings
+                    if ending.owner_id != cut.turn_id
+                ),
             )
 
-    def read_prospective_root_dispatch(
-        self,
-        candidate: PreparedRootProviderInputCandidate,
-        *,
-        deadline_monotonic: float,
-    ) -> FrozenCanonicalProviderDispatchRead:
-        """Hydrate the current ROOT source plus one still-unpublished prompt."""
-
-        return self.read_frozen_dispatch(
-            PreparedProviderInputCut(
-                session_id=candidate.session_id,
-                turn_id=candidate.exact_turn_id,
-                context_binding_revision_id=(
-                    candidate.exact_context_binding_revision_id
-                ),
-                provider_input_through_sequence=(
-                    candidate.resulting_provider_input_through_sequence
-                ),
-            ),
-            deadline_monotonic=deadline_monotonic,
-            _prospective_root_candidate=candidate,
-        )
 
     def read_frozen_dispatch(
         self,
@@ -669,7 +659,6 @@ class CanonicalProviderInputReader:
         *,
         deadline_monotonic: float,
         _connection: object | None = None,
-        _prospective_root_candidate: PreparedRootProviderInputCandidate | None = None,
         _historical_scope: bool = False,
         _canonical_byte_budget: int | None = None,
     ) -> FrozenCanonicalProviderDispatchRead:
@@ -686,99 +675,47 @@ class CanonicalProviderInputReader:
             else nullcontext(_connection)
         )
         with manager as connection:
-            if _prospective_root_candidate is None:
-                binding = connection.execute(
-                    """
-                SELECT t.workspace_id, CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind,
-                       t.initial_entry_id,
-                       t.status AS turn_status,
-                       t.current_context_binding_revision_id,
-                       t.permission_snapshot_id,
-                       t.requested_permission_mode,
-                       t.effective_permission_mode,
-                       t.permission_admission_source,
-                       t.permission_overlay,
-                       t.permission_plan_context_ordinal,
-                       t.permission_plan_workflow_id,
-                       t.permission_plan_revision_at_admission,
-                       t.permission_inherited_from_turn_id,
-                       t.permission_contract_id,
-                       t.permission_contract_fingerprint,
-                       t.permission_snapshot_fingerprint,
-                       r.revision_ordinal, r.base_kind,
-                       r.context_snapshot_id, r.source_through_sequence,
-                       s.latest_entry_sequence,
-                       initial_entry.entry_sequence AS current_initial_entry_sequence
-                FROM pulsara_v3.turns AS t
-                JOIN pulsara_v3.turn_context_binding_revisions AS r
-                  ON r.session_id = t.session_id
-                 AND r.id = %s
-                 AND r.turn_id = t.id
-                JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
-                JOIN pulsara_v3.transcript_entries AS initial_entry
-                  ON initial_entry.entry_owner_kind = 'EXECUTED_TURN'
-                 AND initial_entry.session_id = t.session_id
-                 AND initial_entry.id = t.initial_entry_id
-                 AND initial_entry.turn_id = t.id
-                WHERE t.session_id = %s AND t.id = %s
-                    """,
-                    (
-                        cut.context_binding_revision_id,
-                        cut.session_id,
-                        cut.turn_id,
-                    ),
-                ).fetchone()
-            else:
-                candidate = _prospective_root_candidate
-                permission = candidate.permission_snapshot
-                if (
-                    cut.session_id != candidate.session_id
-                    or cut.turn_id != candidate.exact_turn_id
-                    or cut.context_binding_revision_id
-                    != candidate.exact_context_binding_revision_id
-                    or cut.provider_input_through_sequence
-                    != candidate.resulting_provider_input_through_sequence
-                ):
-                    raise ValueError("prospective ROOT read cut is invalid")
-                binding = {
-                    "workspace_id": candidate.workspace_id,
-                    "conversation_scope_kind": _session_scope_kind(
-                        connection, candidate.session_id
-                    ).value,
-                    "initial_entry_id": candidate.exact_initial_entry_id,
-                    "turn_status": "RUNNING",
-                    "current_context_binding_revision_id": (
-                        candidate.exact_context_binding_revision_id
-                    ),
-                    "permission_snapshot_id": permission.snapshot_id,
-                    "requested_permission_mode": permission.requested_mode.value,
-                    "effective_permission_mode": permission.effective_mode.value,
-                    "permission_admission_source": permission.admission_source.value,
-                    "permission_overlay": permission.overlay.value,
-                    "permission_plan_context_ordinal": (
-                        permission.plan_context_ordinal_at_admission
-                    ),
-                    "permission_plan_workflow_id": permission.plan_workflow_id,
-                    "permission_plan_revision_at_admission": (
-                        permission.plan_workflow_revision_at_admission
-                    ),
-                    "permission_inherited_from_turn_id": (
-                        permission.inherited_from_turn_id
-                    ),
-                    "permission_contract_id": permission.permission_contract_id,
-                    "permission_contract_fingerprint": (
-                        permission.permission_contract_fingerprint
-                    ),
-                    "permission_snapshot_fingerprint": (
-                        permission.snapshot_fingerprint
-                    ),
-                    "revision_ordinal": 0,
-                    "base_kind": candidate.context_base_kind.value,
-                    "context_snapshot_id": candidate.context_snapshot_id,
-                    "source_through_sequence": candidate.source_through_sequence,
-                    "latest_entry_sequence": candidate.resulting_provider_input_through_sequence,
-                    "current_initial_entry_sequence": candidate.exact_initial_entry_sequence,
-                }
+            binding = connection.execute(
+                """
+            SELECT t.workspace_id, CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS conversation_scope_kind,
+                   t.initial_entry_id,
+                   t.status AS turn_status,
+                   t.current_context_binding_revision_id,
+                   t.permission_snapshot_id,
+                   t.requested_permission_mode,
+                   t.effective_permission_mode,
+                   t.permission_admission_source,
+                   t.permission_overlay,
+                   t.permission_plan_context_ordinal,
+                   t.permission_plan_workflow_id,
+                   t.permission_plan_revision_at_admission,
+                   t.permission_inherited_from_turn_id,
+                   t.permission_contract_id,
+                   t.permission_contract_fingerprint,
+                   t.permission_snapshot_fingerprint,
+                   r.revision_ordinal, r.base_kind,
+                   r.context_snapshot_id, r.source_through_sequence,
+                   s.latest_entry_sequence,
+                   initial_entry.entry_sequence AS current_initial_entry_sequence
+            FROM pulsara_v3.turns AS t
+            JOIN pulsara_v3.turn_context_binding_revisions AS r
+              ON r.session_id = t.session_id
+             AND r.id = %s
+             AND r.turn_id = t.id
+            JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
+            JOIN pulsara_v3.transcript_entries AS initial_entry
+              ON initial_entry.entry_owner_kind = 'EXECUTED_TURN'
+             AND initial_entry.session_id = t.session_id
+             AND initial_entry.id = t.initial_entry_id
+             AND initial_entry.turn_id = t.id
+            WHERE t.session_id = %s AND t.id = %s
+                """,
+                (
+                    cut.context_binding_revision_id,
+                    cut.session_id,
+                    cut.turn_id,
+                ),
+            ).fetchone()
             if binding is None:
                 raise ConversationKernelConflict("provider binding is absent")
             if (
@@ -802,14 +739,6 @@ class CanonicalProviderInputReader:
                 scope_kind=ModelInputScopeKind(scope_kind),
                 current_initial_entry_sequence=int(
                     binding["current_initial_entry_sequence"]
-                ),
-                prospective_completed_predecessor_turn_id=(
-                    None
-                    if _prospective_root_candidate is None
-                    or _prospective_root_candidate.unpublished_plan_handoff_fact is None
-                    or _prospective_root_candidate.unpublished_plan_handoff_fact.handoff_kind
-                    not in {PlanHandoffKind.ENTERED_PLAN, PlanHandoffKind.EXITED_PLAN}
-                    else _prospective_root_candidate.permission_snapshot.inherited_from_turn_id
                 ),
             )
             source_floor = 0
@@ -877,11 +806,7 @@ class CanonicalProviderInputReader:
                 ),
             )
 
-            stored_through_sequence = (
-                cut.provider_input_through_sequence
-                if _prospective_root_candidate is None
-                else _prospective_root_candidate.expected_latest_entry_sequence
-            )
+            stored_through_sequence = cut.provider_input_through_sequence
             entries = connection.execute(
                 """
                 SELECT e.id, e.session_id, e.workspace_id,
@@ -1001,26 +926,6 @@ class CanonicalProviderInputReader:
             closures: list[ProviderToolResultClosure] = []
             late: list[LateToolOutcomeObservation] = []
             late_items: list[tuple[int, ProviderInputItem]] = []
-            prospective_tool_results: dict[
-                tuple[str, str], FrozenProviderInputItem
-            ] = {}
-            if _prospective_root_candidate is not None:
-                for prospective_item in _prospective_root_candidate.unpublished_items:
-                    if (
-                        prospective_item.item_kind
-                        is FrozenProviderInputItemKind.TOOL_RESULT
-                    ):
-                        assert prospective_item.tool_request_entry_id is not None
-                        assert prospective_item.tool_call_id is not None
-                        key = (
-                            prospective_item.tool_request_entry_id,
-                            prospective_item.tool_call_id,
-                        )
-                        if key in prospective_tool_results:
-                            raise ConversationKernelConflict(
-                                "prospective ROOT result identity is duplicated"
-                            )
-                        prospective_tool_results[key] = prospective_item
 
             for stored_row in entries:
                 row = historical_source_attribution(stored_row)
@@ -1236,17 +1141,10 @@ class CanonicalProviderInputReader:
                 for call_ordinal, call in enumerate(calls):
                     state = tool_state.get((entry_id, call.tool_call_id), {})
                     result = state.get("result")
-                    prospective_result = prospective_tool_results.get(
-                        (entry_id, call.tool_call_id)
-                    )
                     result_sequence = (
                         None if result is None else int(result["entry_sequence"])
                     )
                     if result is not None and result_sequence <= target_cut:
-                        if prospective_result is not None:
-                            raise ConversationKernelConflict(
-                                "prospective ROOT result already exists"
-                            )
                         if state.get("imported_closure_kind") is not None:
                             raise ConversationKernelConflict(
                                 "imported call has both visible result and closure"
@@ -1309,16 +1207,6 @@ class CanonicalProviderInputReader:
                                 tool_call_arguments=call.arguments,
                             )
                         )
-                        continue
-                    if prospective_result is not None:
-                        items.append(
-                            replace(
-                                prospective_result,
-                                tool_call_ordinal=call_ordinal,
-                                tool_call_arguments=call.arguments,
-                            )
-                        )
-                        del prospective_tool_results[(entry_id, call.tool_call_id)]
                         continue
                     closure_kind = historical_tool_closure_kind(
                         state,
@@ -1451,22 +1339,6 @@ class CanonicalProviderInputReader:
                             )
                         )
 
-            if _prospective_root_candidate is not None:
-                if prospective_tool_results:
-                    raise ConversationKernelConflict(
-                        "prospective ROOT result has no canonical request"
-                    )
-                remaining_bytes.consume(
-                    _prospective_root_candidate.unpublished_canonical_expanded_bytes
-                )
-                canonical_bytes += (
-                    _prospective_root_candidate.unpublished_canonical_expanded_bytes
-                )
-                items.extend(
-                    item
-                    for item in _prospective_root_candidate.unpublished_items
-                    if item.item_kind is not FrozenProviderInputItemKind.TOOL_RESULT
-                )
 
             # Late outcomes retain their real canonical sequence but never
             # replace the closure paired with the historical request.
@@ -1531,14 +1403,12 @@ class CanonicalProviderInputReader:
                 cut=cut,
                 binding=binding,
                 permission=permission,
-                prospective_root_candidate=_prospective_root_candidate,
             )
             handoff_fact, approved_fact = _plan_handoff_compile_facts(
                 connection,
                 cut=cut,
                 binding=binding,
                 items=frozen_items,
-                prospective_root_candidate=_prospective_root_candidate,
             )
             provisional = FrozenCanonicalCompileSnapshot.__new__(
                 FrozenCanonicalCompileSnapshot
@@ -1921,13 +1791,7 @@ def _plan_workflow_compile_fact(
     cut: PreparedProviderInputCut,
     binding: Mapping[str, object],
     permission: FrozenRunPermissionSnapshot,
-    prospective_root_candidate: PreparedRootProviderInputCandidate | None = None,
 ) -> FrozenPlanWorkflowCompileFact | None:
-    if (
-        prospective_root_candidate is not None
-        and prospective_root_candidate.unpublished_plan_workflow_fact is not None
-    ):
-        return prospective_root_candidate.unpublished_plan_workflow_fact
     if permission.overlay is RunPermissionOverlay.NONE:
         return None
     row = connection.execute(
@@ -1970,165 +1834,86 @@ def _plan_handoff_compile_facts(
     cut: PreparedProviderInputCut,
     binding: Mapping[str, object],
     items: tuple[FrozenProviderInputItem, ...],
-    prospective_root_candidate: PreparedRootProviderInputCandidate | None = None,
 ) -> tuple[
     FrozenPlanHandoffCompileFact | None,
     ApprovedPlanMaterializationFact | None,
 ]:
-    prospective_handoff = (
-        None
-        if prospective_root_candidate is None
-        else prospective_root_candidate.unpublished_plan_handoff_fact
-    )
-    if prospective_handoff is not None and (
-        prospective_handoff.handoff_kind is not PlanHandoffKind.APPROVED_PLAN
-        or prospective_root_candidate.unpublished_approved_plan_fact is not None
-    ):
-        return (
-            prospective_handoff,
-            prospective_root_candidate.unpublished_approved_plan_fact,
-        )
-    if prospective_root_candidate is None:
-        row = connection.execute(
-            """
-        SELECT e.id AS carrier_entry_id, e.entry_sequence,
-               e.source_plan_handoff_kind, e.source_plan_interaction_id,
-               t.permission_plan_revision_at_admission,
-               w.*, i.assistant_entry_id, i.tool_call_id,
-               i.request_contract_id, i.request_contract_version,
-               i.request_contract_fingerprint, i.request_semantic_digest,
-               b.tool_arguments
-        FROM pulsara_v3.transcript_entries AS e
-        JOIN pulsara_v3.turns AS t
-          ON t.session_id = e.session_id AND t.id = e.turn_id
-        JOIN pulsara_v3.plan_workflows AS w
-          ON w.session_id = e.session_id AND w.id = e.source_plan_workflow_id
-        LEFT JOIN pulsara_v3.plan_interactions AS i
-          ON i.session_id = e.session_id AND i.id = e.source_plan_interaction_id
-        LEFT JOIN pulsara_v3.assistant_message_blocks AS b
-          ON b.session_id = i.session_id
-         AND b.assistant_entry_id = i.assistant_entry_id
-         AND b.tool_call_id = i.tool_call_id
-        WHERE e.session_id = %s AND e.turn_id = %s
-          AND e.entry_owner_kind = 'EXECUTED_TURN'
-          AND e.source_plan_handoff_kind IS NOT NULL
-          AND e.entry_sequence <= %s
-        ORDER BY e.entry_sequence DESC LIMIT 1
-            """,
-            (cut.session_id, cut.turn_id, cut.provider_input_through_sequence),
-        ).fetchone()
-    elif prospective_root_candidate.pending_plan_handoff_workflow_id is None:
-        row = None
-    else:
-        row = connection.execute(
-            """
-            SELECT w.*, i.assistant_entry_id, i.tool_call_id,
-                   i.request_contract_id, i.request_contract_version,
-                   i.request_contract_fingerprint, i.request_semantic_digest,
-                   b.tool_arguments
-            FROM pulsara_v3.plan_workflows AS w
-            LEFT JOIN pulsara_v3.plan_interactions AS i
-              ON i.session_id = w.session_id AND i.plan_workflow_id = w.id
-             AND i.id IS NOT DISTINCT FROM %s
-            LEFT JOIN pulsara_v3.assistant_message_blocks AS b
-              ON b.session_id = i.session_id
-             AND b.assistant_entry_id = i.assistant_entry_id
-             AND b.tool_call_id = i.tool_call_id
-            WHERE w.session_id = %s AND w.id = %s
-            """,
-            (
-                prospective_root_candidate.pending_plan_handoff_interaction_id,
-                cut.session_id,
-                prospective_root_candidate.pending_plan_handoff_workflow_id,
-            ),
-        ).fetchone()
-        if row is not None:
-            row = dict(row)
-            row.update(
-                {
-                    "carrier_entry_id": (
-                        prospective_root_candidate.exact_initial_entry_id
-                    ),
-                    "entry_sequence": (
-                        prospective_root_candidate.resulting_provider_input_through_sequence
-                    ),
-                    "source_plan_handoff_kind": (
-                        prospective_root_candidate.pending_plan_handoff_kind
-                    ),
-                    "source_plan_interaction_id": (
-                        prospective_root_candidate.pending_plan_handoff_interaction_id
-                    ),
-                    "permission_plan_revision_at_admission": (
-                        prospective_root_candidate.permission_snapshot.plan_workflow_revision_at_admission
-                    ),
-                }
-            )
+    row = connection.execute(
+        """
+    SELECT e.id AS carrier_entry_id, e.entry_sequence,
+           e.source_plan_handoff_kind, e.source_plan_interaction_id,
+           t.permission_plan_revision_at_admission,
+           w.*, i.assistant_entry_id, i.tool_call_id,
+           i.request_contract_id, i.request_contract_version,
+           i.request_contract_fingerprint, i.request_semantic_digest,
+           b.tool_arguments
+    FROM pulsara_v3.transcript_entries AS e
+    JOIN pulsara_v3.turns AS t
+      ON t.session_id = e.session_id AND t.id = e.turn_id
+    JOIN pulsara_v3.plan_workflows AS w
+      ON w.session_id = e.session_id AND w.id = e.source_plan_workflow_id
+    LEFT JOIN pulsara_v3.plan_interactions AS i
+      ON i.session_id = e.session_id AND i.id = e.source_plan_interaction_id
+    LEFT JOIN pulsara_v3.assistant_message_blocks AS b
+      ON b.session_id = i.session_id
+     AND b.assistant_entry_id = i.assistant_entry_id
+     AND b.tool_call_id = i.tool_call_id
+    WHERE e.session_id = %s AND e.turn_id = %s
+      AND e.entry_owner_kind = 'EXECUTED_TURN'
+      AND e.source_plan_handoff_kind IS NOT NULL
+      AND e.entry_sequence <= %s
+    ORDER BY e.entry_sequence DESC LIMIT 1
+        """,
+        (cut.session_id, cut.turn_id, cut.provider_input_through_sequence),
+    ).fetchone()
     if row is None:
         return None, None
-    if prospective_handoff is None:
-        kind = PlanHandoffKind(str(row["source_plan_handoff_kind"]))
-        interaction_id = (
-            None
-            if row["source_plan_interaction_id"] is None
-            else str(row["source_plan_interaction_id"])
-        )
-        transition_revision = (
-            int(row["permission_plan_revision_at_admission"])
-            if row["permission_plan_revision_at_admission"] is not None
-            else int(row["workflow_revision"])
-        )
-        transition_digest = context_fingerprint(
-            "pulsara:plan-transition:v1",
-            {
-                "workflow_id": str(row["id"]),
-                "workflow_revision": transition_revision,
-                "interaction_id": interaction_id,
-                "handoff_kind": kind.value,
-                "workflow_status": str(row["status"]),
-            },
-        )
-        values = {
-            "session_id": cut.session_id,
-            "workspace_id": str(binding["workspace_id"]),
-            "target_turn_id": cut.turn_id,
-            "carrier_entry_id": str(row["carrier_entry_id"]),
-            "carrier_entry_sequence": int(row["entry_sequence"]),
+    kind = PlanHandoffKind(str(row["source_plan_handoff_kind"]))
+    interaction_id = (
+        None
+        if row["source_plan_interaction_id"] is None
+        else str(row["source_plan_interaction_id"])
+    )
+    transition_revision = (
+        int(row["permission_plan_revision_at_admission"])
+        if row["permission_plan_revision_at_admission"] is not None
+        else int(row["workflow_revision"])
+    )
+    transition_digest = context_fingerprint(
+        "pulsara:plan-transition:v1",
+        {
             "workflow_id": str(row["id"]),
-            "workflow_ordinal": int(row["workflow_ordinal"]),
-            "workflow_revision_at_transition": transition_revision,
+            "workflow_revision": transition_revision,
             "interaction_id": interaction_id,
-            "handoff_kind": kind,
-            "workflow_status": PlanWorkflowStatus(str(row["status"])),
-            "resume_permission_mode": PermissionMode(
-                str(row["resume_permission_mode"])
-            ),
-            "transition_semantic_digest": transition_digest,
-        }
-        provisional = FrozenPlanHandoffCompileFact.__new__(FrozenPlanHandoffCompileFact)
-        for name, value in values.items():
-            object.__setattr__(provisional, name, value)
-        object.__setattr__(provisional, "fact_fingerprint", "")
-        handoff = FrozenPlanHandoffCompileFact(
-            **values,
-            fact_fingerprint=plan_handoff_compile_fact_fingerprint(provisional),
-        )
-    else:
-        handoff = prospective_handoff
-        kind = handoff.handoff_kind
-        interaction_id = handoff.interaction_id
-        if (
-            str(row["id"]) != handoff.workflow_id
-            or interaction_id
-            != prospective_root_candidate.pending_plan_handoff_interaction_id
-            or int(row["workflow_ordinal"]) != handoff.workflow_ordinal
-            or int(row["workflow_revision"]) + 1
-            != handoff.workflow_revision_at_transition
-            or PermissionMode(str(row["resume_permission_mode"]))
-            is not handoff.resume_permission_mode
-        ):
-            raise ConversationKernelConflict(
-                "prospective approved Plan handoff source changed"
-            )
+            "handoff_kind": kind.value,
+            "workflow_status": str(row["status"]),
+        },
+    )
+    values = {
+        "session_id": cut.session_id,
+        "workspace_id": str(binding["workspace_id"]),
+        "target_turn_id": cut.turn_id,
+        "carrier_entry_id": str(row["carrier_entry_id"]),
+        "carrier_entry_sequence": int(row["entry_sequence"]),
+        "workflow_id": str(row["id"]),
+        "workflow_ordinal": int(row["workflow_ordinal"]),
+        "workflow_revision_at_transition": transition_revision,
+        "interaction_id": interaction_id,
+        "handoff_kind": kind,
+        "workflow_status": PlanWorkflowStatus(str(row["status"])),
+        "resume_permission_mode": PermissionMode(
+            str(row["resume_permission_mode"])
+        ),
+        "transition_semantic_digest": transition_digest,
+    }
+    provisional = FrozenPlanHandoffCompileFact.__new__(FrozenPlanHandoffCompileFact)
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    object.__setattr__(provisional, "fact_fingerprint", "")
+    handoff = FrozenPlanHandoffCompileFact(
+        **values,
+        fact_fingerprint=plan_handoff_compile_fact_fingerprint(provisional),
+    )
     if kind is not PlanHandoffKind.APPROVED_PLAN:
         return handoff, None
     if (
@@ -2223,296 +2008,7 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         return self._read_content(row, deadline_monotonic=deadline_monotonic,
                                   connection=connection).decode(content.codec)
 
-    def build_prospective_root_dispatch_sibling_from_snapshot(
-        self,
-        candidate: PreparedRootProviderInputCandidate,
-        *,
-        first_candidate: PreparedRootProviderInputCandidate,
-        first_dispatch: FrozenCanonicalProviderDispatchRead,
-        snapshot_dispatch: FrozenCanonicalProviderDispatchRead,
-        deadline_monotonic: float,
-    ) -> FrozenCanonicalProviderDispatchRead:
-        """Build a recent-window sibling from one frozen new-ROOT fact basis."""
 
-        if (
-            candidate.context_base_kind is not ContextBindingBaseKind.SNAPSHOT
-            or first_candidate.context_base_kind is not ContextBindingBaseKind.SNAPSHOT
-            or replace(
-                candidate,
-                context_base_kind=first_candidate.context_base_kind,
-                context_snapshot_id=first_candidate.context_snapshot_id,
-                source_through_sequence=first_candidate.source_through_sequence,
-            )
-            != first_candidate
-        ):
-            raise ConversationKernelConflict(
-                "prospective ROOT candidate is not a recent-window sibling"
-            )
-        return self.build_prospective_root_dispatch_from_snapshot(
-            candidate,
-            snapshot_dispatch=snapshot_dispatch,
-            deadline_monotonic=deadline_monotonic,
-            _shared_fact_basis=first_dispatch,
-        )
-
-    def build_prospective_root_dispatch_from_snapshot(
-        self,
-        candidate: PreparedRootProviderInputCandidate,
-        *,
-        snapshot_dispatch: FrozenCanonicalProviderDispatchRead,
-        deadline_monotonic: float,
-        _shared_fact_basis: FrozenCanonicalProviderDispatchRead | None = None,
-    ) -> FrozenCanonicalProviderDispatchRead:
-        """Append an unpublished ROOT prompt to one exact dry snapshot cut."""
-
-        if monotonic() >= deadline_monotonic:
-            raise TimeoutError("prospective ROOT snapshot deadline expired")
-        base_facts = snapshot_dispatch.compile_snapshot
-        base_input = base_facts.canonical_input
-        base_binding = base_facts.context_binding_fact
-        if (
-            base_input.identity.session_id != candidate.session_id
-            or base_input.identity.provider_input_through_sequence
-            != candidate.expected_latest_entry_sequence
-            or (candidate.context_base_kind is not ContextBindingBaseKind.SNAPSHOT)
-            or (candidate.context_snapshot_id != base_binding.context_snapshot_id)
-            or (
-                candidate.source_through_sequence
-                != base_binding.source_through_sequence
-            )
-            or (base_binding.base_kind is not ContextBindingBaseKind.SNAPSHOT)
-        ):
-            raise ConversationKernelConflict(
-                "prospective ROOT snapshot base does not exact-join"
-            )
-        prospective_results = {
-            (item.tool_request_entry_id, item.tool_call_id): item
-            for item in candidate.unpublished_items
-            if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
-        }
-        consumed_results: set[tuple[str | None, str | None]] = set()
-        replaced_closure_bytes = 0
-        items_list: list[FrozenProviderInputItem] = []
-        for item in base_input.items:
-            key = (item.tool_request_entry_id, item.tool_call_id)
-            replacement = (
-                prospective_results.get(key)
-                if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT_CLOSURE
-                else None
-            )
-            if replacement is None:
-                items_list.append(item)
-                continue
-            if any(not isinstance(part, LLMTextPart) for part in item.content):
-                raise ConversationKernelConflict(
-                    "prospective ROOT closure content is invalid"
-                )
-            replaced_closure_bytes += sum(
-                len(part.text.encode("utf-8")) for part in item.content
-            )
-            items_list.append(
-                replace(
-                    replacement,
-                    tool_call_ordinal=item.tool_call_ordinal,
-                    tool_call_arguments=item.tool_call_arguments,
-                )
-            )
-            consumed_results.add(key)
-        if consumed_results != set(prospective_results):
-            raise ConversationKernelConflict(
-                "prospective ROOT result has no snapshot closure"
-            )
-        items_list.extend(
-            item
-            for item in candidate.unpublished_items
-            if item.item_kind is not FrozenProviderInputItemKind.TOOL_RESULT
-        )
-        canonical_bytes = (
-            base_input.canonical_expanded_bytes
-            - replaced_closure_bytes
-            + candidate.unpublished_canonical_expanded_bytes
-        )
-        items = tuple(items_list)
-        if len(items) > self._maximum_items:
-            raise ConversationKernelConflict("provider input item bound exceeded")
-        if canonical_bytes > self._maximum_canonical_bytes:
-            raise ConversationKernelConflict("provider input byte bound exceeded")
-        cut = PreparedProviderInputCut(
-            session_id=candidate.session_id,
-            turn_id=candidate.exact_turn_id,
-            context_binding_revision_id=(candidate.exact_context_binding_revision_id),
-            provider_input_through_sequence=(
-                candidate.resulting_provider_input_through_sequence
-            ),
-        )
-        identity_values = {
-            "session_id": candidate.session_id,
-            "turn_id": candidate.exact_turn_id,
-            "initial_entry_id": candidate.exact_initial_entry_id,
-            "context_binding_revision_id": candidate.exact_context_binding_revision_id,
-            "provider_input_through_sequence": candidate.resulting_provider_input_through_sequence,
-            "conversation_scope_kind": base_input.identity.conversation_scope_kind,
-        }
-        identity = CanonicalModelInputIdentity(
-            **identity_values,
-            identity_fingerprint=canonical_model_input_identity_fingerprint(
-                **identity_values
-            ),
-        )
-        frozen_items = items
-        frozen_closures = tuple(
-            closure
-            for closure in base_input.closures
-            if (closure.assistant_entry_id, closure.tool_call_id)
-            not in prospective_results
-        )
-        canonical_input = CanonicalModelInputSnapshot(
-            identity=identity,
-            items=frozen_items,
-            canonical_expanded_bytes=canonical_bytes,
-            snapshot_fingerprint=canonical_model_input_snapshot_fingerprint(
-                identity=identity,
-                items=frozen_items,
-                canonical_expanded_bytes=canonical_bytes,
-                closures=frozen_closures,
-                late_outcomes=base_input.late_outcomes,
-            ),
-            closures=frozen_closures,
-            late_outcomes=base_input.late_outcomes,
-        )
-        binding_values = {
-            "binding_revision_id": candidate.exact_context_binding_revision_id,
-            "revision_ordinal": 0,
-            "base_kind": ContextBindingBaseKind.SNAPSHOT,
-            "context_snapshot_id": candidate.context_snapshot_id,
-            "source_through_sequence": candidate.source_through_sequence,
-            "context_base_semantic_identity": (
-                base_binding.context_base_semantic_identity
-            ),
-        }
-        provisional_binding = FrozenContextBindingCompileFact.__new__(
-            FrozenContextBindingCompileFact
-        )
-        for name, value in binding_values.items():
-            object.__setattr__(provisional_binding, name, value)
-        object.__setattr__(provisional_binding, "fact_fingerprint", "")
-        binding_fact = FrozenContextBindingCompileFact(
-            **binding_values,
-            fact_fingerprint=context_binding_compile_fact_fingerprint(
-                provisional_binding
-            ),
-        )
-        binding_row = {
-            "initial_entry_id": candidate.exact_initial_entry_id,
-            "workspace_id": candidate.workspace_id,
-        }
-        if _shared_fact_basis is None:
-            with self._provider.connection(
-                lane=PostgresConnectionLane.INSPECTOR,
-                row_factory=dict_row,
-                isolation_level=IsolationLevel.REPEATABLE_READ,
-                deadline_monotonic=deadline_monotonic,
-            ) as connection:
-                connection.execute("SET TRANSACTION READ ONLY")
-                workflow_fact = _plan_workflow_compile_fact(
-                    connection,
-                    cut=cut,
-                    binding=binding_row,
-                    permission=candidate.permission_snapshot,
-                    prospective_root_candidate=candidate,
-                )
-                handoff_fact, approved_fact = _plan_handoff_compile_facts(
-                    connection,
-                    cut=cut,
-                    binding=binding_row,
-                    items=frozen_items,
-                    prospective_root_candidate=candidate,
-                )
-                previous, freshness = self._load_round7_scope_facts(
-                    connection,
-                    cut=cut,
-                    workspace_id=candidate.workspace_id,
-                    scope_kind=base_input.identity.conversation_scope_kind,
-                    current_initial_entry_sequence=(
-                        candidate.exact_initial_entry_sequence
-                    ),
-                )
-        else:
-            basis_facts = _shared_fact_basis.compile_snapshot
-            basis_input = basis_facts.canonical_input
-            basis_identity = basis_input.identity
-            same_snapshot_variant = (
-                len(frozen_items) == len(basis_input.items)
-                and bool(frozen_items)
-                and frozen_items[1:] == basis_input.items[1:]
-                and replace(frozen_items[0], content=basis_input.items[0].content)
-                == basis_input.items[0]
-            )
-            if (
-                not same_snapshot_variant
-                or basis_identity.session_id != candidate.session_id
-                or basis_identity.turn_id != candidate.exact_turn_id
-                or basis_identity.initial_entry_id != candidate.exact_initial_entry_id
-                or basis_identity.context_binding_revision_id
-                != candidate.exact_context_binding_revision_id
-                or basis_identity.provider_input_through_sequence
-                != candidate.resulting_provider_input_through_sequence
-                or basis_identity.conversation_scope_kind
-                is not base_input.identity.conversation_scope_kind
-                or basis_facts.run_permission_snapshot != candidate.permission_snapshot
-            ):
-                raise ConversationKernelConflict(
-                    "prospective ROOT snapshot fact basis does not exact-join"
-                )
-            workflow_fact = basis_facts.plan_workflow_fact
-            handoff_fact = basis_facts.plan_handoff_fact
-            approved_fact = basis_facts.approved_plan_materialization_fact
-            previous = basis_facts.previous_turn_outcome_fact
-            freshness = basis_facts.tool_observation_freshness_fact
-        fact_values = {
-            "canonical_input": canonical_input,
-            "context_binding_fact": binding_fact,
-            "run_permission_snapshot": candidate.permission_snapshot,
-            "plan_workflow_fact": workflow_fact,
-            "plan_handoff_fact": handoff_fact,
-            "approved_plan_materialization_fact": approved_fact,
-            "previous_turn_outcome_fact": previous,
-            "tool_observation_freshness_fact": freshness,
-        }
-        provisional = FrozenCanonicalCompileSnapshot.__new__(
-            FrozenCanonicalCompileSnapshot
-        )
-        for name, value in fact_values.items():
-            object.__setattr__(provisional, name, value)
-        object.__setattr__(provisional, "canonical_read_cut_fingerprint", "")
-        facts = FrozenCanonicalCompileSnapshot(
-            **fact_values,
-            canonical_read_cut_fingerprint=canonical_compile_snapshot_fingerprint(
-                provisional
-            ),
-        )
-        replay_scope = ProviderInputContinuityScope(
-            session_id=candidate.session_id,
-            scope_kind=base_input.identity.conversation_scope_kind,
-        )
-        replay_cut = freeze_provider_replay_manifest_cut(
-            session_id=candidate.session_id,
-            scope=replay_scope,
-            context_binding_revision_id=candidate.exact_context_binding_revision_id,
-            provider_input_through_sequence=candidate.resulting_provider_input_through_sequence,
-            manifests=snapshot_dispatch.replay_manifest_cut.manifests,
-        )
-        return FrozenCanonicalProviderDispatchRead(
-            compile_snapshot=facts,
-            replay_manifest_cut=replay_cut,
-            composite_fingerprint=context_fingerprint(
-                "pulsara.canonical-provider-dispatch-read:v1",
-                {
-                    "compile": facts.canonical_read_cut_fingerprint,
-                    "replay_manifest_cut": replay_cut.cut_fingerprint,
-                },
-            ),
-        )
 
     def _load_round7_scope_facts(
         self,
@@ -2522,7 +2018,6 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         workspace_id: str,
         scope_kind: ModelInputScopeKind,
         current_initial_entry_sequence: int,
-        prospective_completed_predecessor_turn_id: str | None = None,
     ) -> tuple[
         FrozenPreviousTurnOutcomeCompileFact | None,
         FrozenToolObservationFreshnessCompileFact,
@@ -2582,25 +2077,11 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             ),
         )
         if predecessor is None:
-            if prospective_completed_predecessor_turn_id is not None:
-                raise ConversationKernelConflict(
-                    "prospective completed predecessor is absent"
-                )
             return None, freshness
         if str(predecessor["workspace_id"]) != workspace_id:
             raise ConversationKernelConflict("previous-turn scope identity drifted")
         status = str(predecessor["status"])
         raw_reason = str(predecessor["terminal_reason"] or "")
-        if prospective_completed_predecessor_turn_id is not None:
-            if (
-                predecessor_turn_id != prospective_completed_predecessor_turn_id
-                or status != "RUNNING"
-                or predecessor["terminal_at"] is not None
-            ):
-                raise ConversationKernelConflict(
-                    "prospective completed predecessor does not exact-join"
-                )
-            return None, freshness
         if status == "COMPLETED" or raw_reason.startswith("PLAN_FORCE_EXIT:"):
             return None, freshness
         if status != "INTERRUPTED" or predecessor["terminal_at"] is None:
@@ -3378,16 +2859,3 @@ __all__ = [
     "ProviderToolResultClosure",
     "ProviderToolResultClosureKind",
 ]
-
-
-def _session_scope_kind(connection, session_id: str) -> ModelInputScopeKind:
-    row = connection.execute(
-        "SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s", (session_id,)
-    ).fetchone()
-    if row is None:
-        raise ConversationKernelConflict("session is absent")
-    return (
-        ModelInputScopeKind.ROOT
-        if row["root_session_id"] is None
-        else ModelInputScopeKind.SUBAGENT
-    )

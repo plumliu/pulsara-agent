@@ -39,7 +39,6 @@ from pulsara_agent.conversation_kernel.repository import (
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
 )
-from pulsara_agent.conversation_kernel.repository_errors import PreparedRootInputHeadStale
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
     ForegroundCancellationCause,
@@ -162,7 +161,7 @@ class _RootNoneThenFullRepository(ConversationKernelRepository):
     def accept_root_turn_intent(self, *args, **kwargs):
         self.calls += 1
         if self.calls == 1:
-            raise OSError("injected pre-commit ROOT failure")
+            raise ConnectionError("injected pre-commit ROOT failure")
         return super().accept_root_turn_intent(*args, **kwargs)
 
 
@@ -195,7 +194,7 @@ class _CancelledRootAdmissionRepository(ConversationKernelRepository):
         if not self.release.wait(5):
             raise TimeoutError("test did not release ROOT admission")
         if accepted is None:
-            raise OSError("injected pre-commit ROOT admission failure")
+            raise ConnectionError("injected pre-commit ROOT admission failure")
         return accepted
 
 
@@ -204,10 +203,14 @@ class _FlakyCancelledRootConfirmationRepository(_CancelledRootAdmissionRepositor
         super().__init__(provider, commit_before_block=True)
         self.confirmation_calls = 0
 
+    def accept_root_turn_intent(self, *args, **kwargs):
+        super().accept_root_turn_intent(*args, **kwargs)
+        raise ConnectionError("injected lost committed start acknowledgement")
+
     def confirm_root_turn_intent(self, **kwargs):
         self.confirmation_calls += 1
         if self.confirmation_calls <= 2:
-            raise OSError("injected transient ROOT confirmation failure")
+            raise ConnectionError("injected transient ROOT confirmation failure")
         return super().confirm_root_turn_intent(**kwargs)
 
 
@@ -496,9 +499,9 @@ def test_round5_each_operation_gets_a_fresh_owner_deadline_without_turn_budget(
     )
 
     assert result.final_text == "done"
-    # The first ROOT call has three additional K3 planning owners before the
-    # ordinary per-call owner: prospective freeze, Hook sibling, and activation.
-    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 4
+    # Real start and its confirmation use canonical I/O; the first provider
+    # input has one per-operation planning owner after start.
+    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 1
     assert deadlines.owners.count(KernelWatchdogOwner.FOREGROUND_CANONICAL) >= 4
 
 
@@ -601,7 +604,7 @@ def test_round5_exact_tool_return_is_shielded_through_canonical_settlement(
         ).fetchone() == ("INTERRUPTED",)
 
 
-def test_root_stale_head_cancellation_during_confirmation_never_readmits(
+def test_root_unknown_start_cancellation_during_confirmation_never_readmits(
     stage2_migrated_postgres_database,
 ) -> None:
     class BlockedConfirmationRepository(ConversationKernelRepository):
@@ -609,7 +612,7 @@ def test_root_stale_head_cancellation_during_confirmation_never_readmits(
 
         def accept_root_turn_intent(self, *args, **kwargs):
             self.calls += 1
-            raise PreparedRootInputHeadStale("ROOT provider input head changed")
+            raise ConnectionError("injected pre-commit start acknowledgement failure")
 
         def confirm_root_turn_intent(self, **kwargs):
             started.set()
@@ -733,9 +736,9 @@ def test_round5_busy_steer_after_call_twenty_four_is_absorbed_as_a_suffix(
 
     assert result.model_call_count == 64
     assert result.tool_call_count == 63
-    # Sixty-four ordinary call owners plus the first ROOT prospective freeze,
-    # optional Hook sibling, and activation owners.
-    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 67
+    # Each ordinary call receives a fresh planning deadline; request start
+    # does not manufacture provider preparation or a total turn budget.
+    assert deadlines.owners.count(KernelWatchdogOwner.PROVIDER_DISPATCH_PLANNING) == 64
     assert result.final_text == "after-steer"
     appended = model.requests[25].compiled_input.messages
     assert any(
@@ -832,69 +835,75 @@ def test_round5_root_turn_admission_full_none_conflict_matrix(
     assert repository.calls == expected_calls if hasattr(repository, "calls") else True
 
 
-@pytest.mark.parametrize("after_unknown", (False, True))
-def test_root_stale_head_reprepares_same_intent_without_rebuilding_prefix(
+@pytest.mark.parametrize("failure_count", (1, 2))
+def test_root_start_io_retry_keeps_one_intent_and_prepares_only_after_start(
     stage2_migrated_postgres_database,
-    after_unknown: bool,
+    failure_count: int,
 ) -> None:
-    class StaleHeadRepository(ConversationKernelRepository):
-        stale_attempts = []
-        armed = False
-        unknown_raised = False
+    class TransientStartRepository(ConversationKernelRepository):
+        remaining_failures = 0
+
+        def __init__(self, provider):
+            super().__init__(provider)
+            self.attempts = []
 
         def accept_root_turn_intent(self, *args, **kwargs):
-            if self.armed:
-                self.stale_attempts.append(kwargs["intent"])
-                if after_unknown and not self.unknown_raised:
-                    self.unknown_raised = True
-                    raise OSError("lost pre-commit acknowledgement")
-                self.armed = False
-                raise PreparedRootInputHeadStale("ROOT provider input head changed")
+            self.attempts.append(kwargs["intent"])
+            if self.remaining_failures:
+                self.remaining_failures -= 1
+                raise ConnectionError("injected pre-commit start acknowledgement failure")
             return super().accept_root_turn_intent(*args, **kwargs)
 
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = StaleHeadRepository(provider)
-    _, _, lease = _lease(repository)
+    repository = TransientStartRepository(provider)
+    session_id, _, lease = _lease(repository)
     model = ScriptedKernelModel([
         _text_stream("first", block_id="first"),
         _text_stream("second", block_id="second"),
     ])
     runner = _runner(repository, lease, model)
-    prepare = runner.prepare_prospective_root_input
-    preparations = []
+    prepare = runner._provider_dispatch.prepare
+    prepared_turns = []
 
     async def tracked_prepare(*args, **kwargs):
-        if preparations:
-            assert not preparations[-1].owns_resources
-        prepared = await prepare(*args, **kwargs)
-        preparations.append(prepared)
-        return prepared
+        turn_id = kwargs["turn_id"]
+        # Even a fresh retry uses a real accepted turn before the first
+        # potentially expensive canonical input/capability compilation.
+        assert repository.read_turn_status(
+            session_id=session_id, turn_id=turn_id,
+            deadline_monotonic=monotonic() + 10,
+        ).value == "RUNNING"
+        prepared_turns.append(turn_id)
+        return await prepare(*args, **kwargs)
 
-    runner.prepare_prospective_root_input = tracked_prepare
+    runner._provider_dispatch.prepare = tracked_prepare
 
     async def scenario():
         await runner.run_turn(frozen_test_prompt("first"))
         original = model.requests[0].compiled_input
-        repository.armed = True
+        repository.remaining_failures = failure_count
         command = _name("command")
         result = await runner.run_turn(frozen_test_prompt("second"), command_id=command)
+        attempts = [item for item in repository.attempts if item.command_id == command]
+        assert len(attempts) == failure_count + 1
+        assert all(item is attempts[0] for item in attempts)
         assert result.final_text == "second"
-        assert len(preparations) == 3
-        assert all(item.command_id == command for item in repository.stale_attempts)
-        assert all(
-            item is repository.stale_attempts[0] for item in repository.stale_attempts
-        )
-        assert preparations[1].admission.candidate.exact_turn_id == result.turn_id
-        assert preparations[2].admission.candidate.exact_turn_id == result.turn_id
+        assert prepared_turns.count(result.turn_id) == 1
         current = model.requests[1].compiled_input
         assert current.system_prompt == original.system_prompt
         assert current.tools == original.tools
         assert current.messages[: len(original.messages)] == original.messages
-        assert all(not item.owns_resources for item in preparations)
-
+        with provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                                 deadline_monotonic=monotonic() + 10) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM pulsara_v3.turns WHERE session_id=%s",
+                (session_id,),
+            ).fetchone() == (2,)
+            assert connection.execute(
+                "SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id=%s AND turn_id=%s AND entry_kind='USER_MESSAGE'",
+                (session_id, result.turn_id),
+            ).fetchone() == (1,)
     asyncio.run(scenario())
-
-
 
 
 @pytest.mark.parametrize("commit_before_block", (False, True))

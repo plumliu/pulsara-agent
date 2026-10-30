@@ -3,8 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from time import monotonic
-from types import SimpleNamespace
-from typing import cast
 
 import pytest
 from psycopg.rows import dict_row
@@ -20,7 +18,6 @@ from pulsara_agent.conversation_kernel.queued_prompt_actions import (
     QueuedPromptActionRejected,
 )
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
-from pulsara_agent.conversation_kernel.steer import PreparedRootProviderInputAdmission
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_stage2_conversation_kernel_postgres import (
@@ -331,10 +328,6 @@ def test_fifo_consumption_wins_over_both_queue_actions(queue_case):
     repository.consume_prepared_prompt_head(
         guard,
         candidate=candidate,
-        provider_input_admission=cast(
-            PreparedRootProviderInputAdmission,
-            SimpleNamespace(candidate=candidate.provider_input_candidate),
-        ),
         deadline_monotonic=monotonic() + 30,
     )
     before = rows(queue_case)

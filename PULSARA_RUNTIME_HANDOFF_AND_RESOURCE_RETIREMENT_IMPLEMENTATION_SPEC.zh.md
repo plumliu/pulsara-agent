@@ -425,7 +425,7 @@ SYSTEM 中删除关于 omitted task counts 的旧说法，改为准确的状态�
 
 沿用户既有实验偏好，用保存配置中的 DeepSeek `deepseek-flash`，主模型 reasoning effort `max`，通过两种 OpenAI API 协议各完成一个聚焦场景：读取压缩后的活动对象状态，使用既有 query 查当前仍保留的对象，并正确理解 Monitor 的 unavailable/not_found 提示。允许模型正常查询、纠错，不设零误调用门槛，也不重跑全部旧工具组合。
 
-独立 `context_compaction_summary` 沿现有 summary owner 的默认 `high`，不为本轮修改摘要路由；主模型的 `max` 与摘要调用分别记录。
+独立 `context_compaction_summary` 沿用所属请求的完整 binding／reasoning 与合法准备得到的目标；本场景与主模型共同使用所选 `max`，并分别记录实际调用。手动 idle 压缩使用操作接纳时的 session 选择，配置与输入安全点遵守 [压缩配置实施规格](PULSARA_COMPACTION_MODEL_CONFIGURATION_AND_MANUAL_IDLE_ONLY_IMPLEMENTATION_SPEC.zh.md)。
 
 模型连接、凭据与 PostgreSQL 按 `LocalSettingsStore`／`require_pulsara_home()` 及现行生产注入 owner 读取；隔离时复用只读设置注入和已核实的本地可丢弃数据库，不修改保存设置，不导出秘密。真实提示、响应、参数、业务结果、原失败与修正轮保留，仅精确移除实际凭据。
 
@@ -442,7 +442,7 @@ Monitor 在 Work 结束后仍先确认旧 immutable attempt 再安全删除，UN
 验收结果：
 
 - [真实 Host 集成](output/runtime-handoff-retirement-20261030/INTEGRATION.zh.md)：ROOT 混合对象／合法大 TODO、仅 TODO、全空、Plan及 Subagent 当前真实 Work，双协议共10项通过；实际采用 successor并发送serializer source，完整输入／PMCA分别计量，原对象与前缀连续。
-- [真实 provider](output/runtime-handoff-retirement-20261030/provider/REPORT.zh.md)：主模型 max、独立 summary high，两协议33次HTTP200、27对同epoch精确前缀，PMCA各283；实际查询与连续执行通过，原harness和transport失败保留。
+- [真实 provider](output/runtime-handoff-retirement-20261030/provider/REPORT.zh.md)：两协议33次HTTP200、27对同epoch精确前缀，PMCA各283；实际查询与连续执行通过，实际模型参数及原harness和transport失败保留在报告中。
 - Monitor／Process／Agent／Cell owner、普通环境和受影响回归分别见总报告链接；ROOT亲审发现的读取／关闭竞态、callback误杀和本地新轮启动失败reservation泄漏均已在原owner边界修复并验证。没有新增schema表列或durable oracle类别。
 - 独占本地测试／实验数据库与fixture资源已清理，未知／remote PostgreSQL在创建前拒绝；统一33个修改Python文件ruff及全工作树diff检查通过。
 

@@ -69,7 +69,7 @@ async def run(destination: Path):
             catalog = ModelCatalogOwner(ModelsDevCatalogClient())
             await catalog.refresh()
             delegate = ModelRuntime.production(settings=settings, catalog=catalog)
-            runtime = _RecordingModelRuntime(delegate, evidence["calls"], None)
+            runtime = _RecordingModelRuntime(delegate, evidence["calls"])
             core = KernelHostCore.production(model_runtime=runtime)
             sessions = LocalSessionController(
                 core=core,

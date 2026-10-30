@@ -86,7 +86,7 @@ def test_usage_keyset_pages_same_timestamp_and_cold_queries(repo, stage2_migrate
             break
         cursor = dict(after_observed_at=current.next_observed_at, after_resolved_model_call_id=current.next_resolved_model_call_id)
     assert actual == sorted(item.resolved_model_call_id for item in values)
-    assert page(repo, lease.guard.session_id, conversation_scope_kind='SUBAGENT_TASK').usages == ()
+    assert page(repo, lease.guard.session_id, conversation_scope_kind='SUBAGENT').usages == ()
     assert page(repo, lease.guard.session_id, maximum_rows=1024).has_more is False
     with pytest.raises(ValueError):
         page(repo, lease.guard.session_id, maximum_rows=1025)
@@ -197,7 +197,7 @@ def test_real_host_three_calls_use_old_input_anchor_across_missing_usage(tmp_pat
                 maximum_recent_human_messages=1, maximum_recent_human_text_utf8_bytes=8192)
             await _seed_completed_history(session, segments=3, repetitions=1000)
             before_compaction_preview = await session.read_context_usage()
-            outcome = await session.compact_context(command_id=derive_id("command", "test-fixture", 'command:tz45pyeg2cm2fw6qdkje2gupse'+uuid4().hex), force=True)
+            outcome = await session.compact_context(command_id=derive_id("command", "test-fixture", 'command:tz45pyeg2cm2fw6qdkje2gupse'+uuid4().hex))
             assert outcome.disposition is CompactionDisposition.COMPACTED, outcome
             assert all(slot.usage_anchor is None for slot in session._input_continuity._slots.values())
             after_compaction_preview = await session.read_context_usage()

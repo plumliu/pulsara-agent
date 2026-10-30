@@ -149,6 +149,7 @@ interface WorkbenchViewProps {
   activePlanMode: boolean;
   isRunning: boolean;
   activeTurnId?: string;
+  manualCompactionCommandId?: string;
   inspectorOpen: boolean;
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
@@ -1788,6 +1789,7 @@ export function WorkbenchView({
   activePlanMode,
   isRunning,
   activeTurnId,
+  manualCompactionCommandId,
   inspectorOpen,
   queuedCount,
   queuedPrompts,
@@ -2972,7 +2974,7 @@ export function WorkbenchView({
                 </div>}
               </div>
               <div className="composer-submit">
-                {isRunning && !draft.hasContent ? (
+                {(isRunning || Boolean(manualCompactionCommandId)) && !draft.hasContent ? (
                   <button
                     className="send-button is-stop"
                     onClick={onStop}

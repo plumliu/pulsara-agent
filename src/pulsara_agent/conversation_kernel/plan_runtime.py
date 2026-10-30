@@ -286,6 +286,13 @@ class ContinuationAdmissionOwner:
         if current is not None and current.task is task:
             self._attempts.pop(attempt_id, None)
 
+    def owned_task_for_turn(self, turn_id: str) -> asyncio.Task[object] | None:
+        """Observe the existing writer owner during an unbound successor start."""
+        return next((
+            attempt.task for attempt in self._attempts.values()
+            if attempt.turn_id == turn_id and not attempt.task.done()
+        ), None)
+
     async def drain(self) -> None:
         """Join the currently admitted finite operations without closing admission."""
 

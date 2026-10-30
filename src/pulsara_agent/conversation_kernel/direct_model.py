@@ -51,7 +51,7 @@ from pulsara_agent.llm.frozen_target import (
     FrozenEpochModelTargetBundle,
     _freeze_provider_physical_call_target,
 )
-from pulsara_agent.llm.model_target import default_reasoning_selection
+from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.llm.provider_open import (
     _issue_epoch_agent_loop_provider_open_permit,
@@ -691,6 +691,23 @@ class DirectKernelModelPort:
             binding=request.binding,
         )
 
+    def prepare_target_from_snapshot(
+        self,
+        request: KernelModelTargetPreparationRequest,
+        *,
+        resolution_snapshot: FrozenModelResolutionSnapshot,
+    ) -> PreparedKernelModelTarget:
+        """Prepare the exact selection captured for a manual idle operation."""
+
+        target = self._model_runtime.resolve_snapshot_target(
+            request.binding,
+            resolution_snapshot=resolution_snapshot,
+            timeout_policy=self._transport_timeout,
+        )
+        return self.prepare_resolved_target(
+            request, target=target, binding=request.binding
+        )
+
     @property
     def model_runtime(self) -> ModelRuntime:
         return self._model_runtime
@@ -767,11 +784,8 @@ class DirectKernelModelPort:
     ) -> PreparedKernelModelTarget:
         """Reborrow a physical target only after exact bundle reproduction."""
 
-        binding = ModelCallBinding(
-            bundle.connection.connection_id,
-            default_reasoning_selection(bundle.reasoning_contract),
-        )
-        if request.binding != binding:
+        binding = request.binding
+        if binding.connection_id != bundle.connection.connection_id:
             raise ValueError("frozen epoch source binding drifted")
         target = self._model_runtime.resolve_frozen_target_bundle(
             bundle,
@@ -791,18 +805,11 @@ class DirectKernelModelPort:
             PreparedKernelModelCall | PreparedKernelSemanticModelCall | None
         ) = None,
     ) -> ResolvedModelCall:
-        """Resolve the current primary target once for a sealed summary call."""
+        """Preserve the owning request target and complete reasoning selection."""
 
         if active_prepared_call is not None:
             target = active_prepared_call.call.target
-            binding = ModelCallBinding(
-                active_prepared_call.call.binding.connection_id,
-                None,
-            )
-            binding = ModelCallBinding(
-                binding.connection_id,
-                default_reasoning_selection(target.contract.reasoning),
-            )
+            binding = active_prepared_call.call.binding
         else:
             raise ValueError("compaction summary requires an origin model call")
         return resolve_model_call(

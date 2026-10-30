@@ -40,7 +40,6 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
 )
 from pulsara_agent.model_input.contracts import (
-    ApprovedPlanMaterializationFact,
     CanonicalInputOriginKind,
     ContextBindingBaseKind,
     ContextSourceKind,
@@ -48,7 +47,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenCompiledModelInput,
     FrozenContextBindingCompileFact,
     FrozenPlanWorkflowCompileFact,
-    FrozenPlanHandoffCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     PreparedProviderInputCut,
@@ -61,7 +59,6 @@ from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.primitives.plan_workflow import PlanWorkflowStatus
 
 
 MAXIMUM_STEER_ITEMS_PER_SAFE_POINT = 128
@@ -80,225 +77,63 @@ class PreparedRootTurnIdentity:
 
 
 @dataclass(frozen=True, slots=True)
-class PreparedRootProviderInputCandidate:
-    """Exact future ROOT canonical cut frozen before its writer mutation.
-
-    PostgreSQL still owns every durable fact.  This value carries the complete
-    row-derived basis needed by the canonical reader and lets the writer prove
-    that the input measured before admission is still the input it will create.
-    """
+class StartedTurnInputGroup:
+    """The immutable canonical inputs and inherited base of one started request."""
 
     session_id: str
-    workspace_id: str
-    exact_turn_id: str
-    exact_initial_entry_id: str
-    exact_context_binding_revision_id: str
-    unpublished_items: tuple[FrozenProviderInputItem, ...] = field(repr=False)
-    unpublished_item_canonical_expanded_bytes: tuple[int, ...]
-    permission_snapshot: FrozenRunPermissionSnapshot
-    model_call_binding: ModelCallBinding
-    expected_latest_entry_sequence: int
-    context_base_kind: ContextBindingBaseKind
-    context_snapshot_id: str | None
-    source_through_sequence: int
-    pending_plan_handoff_workflow_id: str | None
-    pending_plan_handoff_interaction_id: str | None
-    pending_plan_handoff_kind: str | None
-    unpublished_plan_workflow_fact: FrozenPlanWorkflowCompileFact | None
-    unpublished_plan_handoff_fact: FrozenPlanHandoffCompileFact | None
-    unpublished_approved_plan_fact: ApprovedPlanMaterializationFact | None
+    turn_id: str
+    instruction_entry_id: str
+    ordered_items: tuple[FrozenProviderInputItem, ...] = field(repr=False)
+    predecessor_through_sequence: int
+    initial_context_binding_revision_id: str
+    initial_base_kind: ContextBindingBaseKind
+    initial_context_snapshot_id: str | None
+    initial_source_through_sequence: int
 
     def __post_init__(self) -> None:
-        if not all(
-            (
-                self.session_id,
-                self.workspace_id,
-                self.exact_turn_id,
-                self.exact_initial_entry_id,
-                self.exact_context_binding_revision_id,
-            )
-        ):
-            raise ValueError("prospective ROOT input identity is incomplete")
-        if self.expected_latest_entry_sequence < 0:
-            raise ValueError("prospective ROOT input head is invalid")
         if (
-            not self.unpublished_items
-            or any(
-                not isinstance(item, FrozenProviderInputItem)
-                for item in self.unpublished_items
-            )
-            or len(self.unpublished_items)
-            != len(self.unpublished_item_canonical_expanded_bytes)
-            or any(
-                charge < 1 for charge in self.unpublished_item_canonical_expanded_bytes
-            )
+            not self.session_id
+            or not self.turn_id
+            or not self.instruction_entry_id
+            or not self.initial_context_binding_revision_id
+            or not self.ordered_items
+            or self.predecessor_through_sequence < 0
+            or self.initial_source_through_sequence < 0
+            or self.initial_source_through_sequence > self.predecessor_through_sequence
+            or (self.initial_base_kind is ContextBindingBaseKind.FULL_HISTORY
+                and self.initial_source_through_sequence != self.predecessor_through_sequence)
+            or (self.initial_base_kind is ContextBindingBaseKind.FULL_HISTORY)
+            != (self.initial_context_snapshot_id is None)
         ):
-            raise ValueError("prospective ROOT unpublished suffix is invalid")
-        expected_sequences = tuple(
-            range(
-                self.expected_latest_entry_sequence + 1,
-                self.expected_latest_entry_sequence + 1 + len(self.unpublished_items),
-            )
-        )
+            raise ValueError("started turn input group is invalid")
         if (
-            tuple(item.source_entry_sequence for item in self.unpublished_items)
-            != expected_sequences
-        ):
-            raise ValueError("prospective ROOT unpublished suffix is not contiguous")
-        item = next(
-            (
-                item
-                for item in self.unpublished_items
-                if item.source_entry_id == self.exact_initial_entry_id
-            ),
-            None,
-        )
-        if item is None:
-            raise ValueError("prospective input has no instruction entry")
-        if (
-            item.source_entry_id != self.exact_initial_entry_id
-            or item.source_entry_sequence != self.exact_initial_entry_sequence
-            or item.source_turn_id != self.exact_turn_id
-            or (item.item_kind, item.input_origin)
-            not in {
-                (
-                    FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.HUMAN_MESSAGE,
-                ),
-                (
-                    FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.SCHEDULED_TASK,
-                ),
-                (
-                    FrozenProviderInputItemKind.USER,
-                    CanonicalInputOriginKind.AGENT_INSTRUCTION,
-                ),
-                (),
-                (
-                    FrozenProviderInputItemKind.PLAN_CONTINUATION,
-                    CanonicalInputOriginKind.PLAN_CONTINUATION,
-                ),
-                (FrozenProviderInputItemKind.TERMINAL_OBSERVATION, None),
+            tuple(item.source_entry_sequence for item in self.ordered_items)
+            != tuple(range(self.predecessor_through_sequence + 1,
+                           self.predecessor_through_sequence + 1 + len(self.ordered_items)))
+            or any(item.source_turn_id != self.turn_id for item in self.ordered_items)
+            or any(item.item_kind not in {
+                FrozenProviderInputItemKind.USER,
+                FrozenProviderInputItemKind.PLAN_CONTINUATION,
+                FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
+            } for item in self.ordered_items)
+            or len({item.source_entry_id for item in self.ordered_items}) != len(self.ordered_items)
+            or self.instruction_entry_id not in {
+                item.source_entry_id for item in self.ordered_items
             }
         ):
-            raise ValueError("prospective ROOT initial item does not exact-join")
-        if not isinstance(self.model_call_binding, ModelCallBinding):
-            raise TypeError("prospective ROOT input lacks a model binding")
-        snapshot = self.context_base_kind is ContextBindingBaseKind.SNAPSHOT
-        if snapshot != (self.context_snapshot_id is not None):
-            raise ValueError("prospective ROOT context base union is invalid")
-        if snapshot:
-            if self.source_through_sequence < 0:
-                raise ValueError("prospective ROOT snapshot source cut is invalid")
-        elif self.source_through_sequence != self.expected_latest_entry_sequence:
-            raise ValueError(
-                "prospective ROOT full-history cut does not precede its initial entry"
-            )
-        handoff_values = (
-            self.pending_plan_handoff_workflow_id,
-            self.pending_plan_handoff_interaction_id,
-            self.pending_plan_handoff_kind,
-        )
-        workflow_id, interaction_id, handoff_kind = handoff_values
-        if (workflow_id is None) != (handoff_kind is None) or (
-            interaction_id is not None and workflow_id is None
-        ):
-            raise ValueError("prospective ROOT Plan handoff union is invalid")
-        workflow_fact = self.unpublished_plan_workflow_fact
-        handoff_fact = self.unpublished_plan_handoff_fact
-        approved_fact = self.unpublished_approved_plan_fact
-        if workflow_fact is not None and (
-            workflow_fact.session_id != self.session_id
-            or workflow_fact.workspace_id != self.workspace_id
-            or workflow_fact.turn_id != self.exact_turn_id
-            or workflow_fact.permission_snapshot_id
-            != self.permission_snapshot.snapshot_id
-            or workflow_fact.permission_snapshot_fingerprint
-            != self.permission_snapshot.snapshot_fingerprint
-        ):
-            raise ValueError("prospective ROOT Plan workflow fact does not exact-join")
-        if handoff_fact is not None and (
-            handoff_fact.session_id != self.session_id
-            or handoff_fact.workspace_id != self.workspace_id
-            or handoff_fact.target_turn_id != self.exact_turn_id
-            or handoff_fact.carrier_entry_id != self.exact_initial_entry_id
-            or handoff_fact.carrier_entry_sequence != self.exact_initial_entry_sequence
-            or handoff_fact.workflow_id
-            != (
-                workflow_fact.workflow_id
-                if workflow_fact is not None
-                else self.pending_plan_handoff_workflow_id
-            )
-        ):
-            raise ValueError("prospective ROOT Plan handoff fact does not exact-join")
-        if approved_fact is not None and (
-            handoff_fact is None
-            or approved_fact.session_id != self.session_id
-            or approved_fact.workspace_id != self.workspace_id
-            or approved_fact.target_turn_id != self.exact_turn_id
-            or approved_fact.workflow_id != handoff_fact.workflow_id
-            or approved_fact.interaction_id != handoff_fact.interaction_id
-        ):
-            raise ValueError("prospective ROOT approved Plan fact does not exact-join")
-        if handoff_fact is None:
-            if workflow_fact is not None:
-                raise ValueError(
-                    "prospective ROOT unpublished Plan facts are incomplete"
-                )
-        elif handoff_fact.workflow_status is PlanWorkflowStatus.ACTIVE:
-            if workflow_fact is None:
-                raise ValueError("prospective ROOT active Plan facts are incomplete")
-        elif workflow_fact is not None:
-            raise ValueError(
-                "prospective ROOT terminal Plan handoff has an active workflow fact"
-            )
+            raise ValueError("started turn input group does not exact-join")
 
     @property
-    def exact_initial_entry_sequence(self) -> int:
-        sequence = next(
-            item.source_entry_sequence
-            for item in self.unpublished_items
-            if item.source_entry_id == self.exact_initial_entry_id
-        )
-        assert sequence is not None
-        return sequence
+    def initial_revision_ordinal(self) -> int:
+        return 0
 
     @property
-    def resulting_provider_input_through_sequence(self) -> int:
-        sequence = self.unpublished_items[-1].source_entry_sequence
-        assert sequence is not None
-        return sequence
-
-    @property
-    def unpublished_canonical_expanded_bytes(self) -> int:
-        return sum(self.unpublished_item_canonical_expanded_bytes)
+    def provider_input_through_sequence(self) -> int:
+        return self.ordered_items[-1].source_entry_sequence
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedRootProviderInputAdmission:
-    """A fully compiled and materialized future ROOT input, before publication."""
 
-    candidate: PreparedRootProviderInputCandidate = field(repr=False)
-    canonical_read: FrozenCanonicalProviderDispatchRead = field(repr=False)
-    semantic_input: ProviderWireSemanticInput = field(repr=False)
-    wire_quote: FrozenProviderWireInputQuote
 
-    def __post_init__(self) -> None:
-        identity = self.canonical_read.compile_snapshot.canonical_input.identity
-        if (
-            identity.session_id != self.candidate.session_id
-            or identity.turn_id != self.candidate.exact_turn_id
-            or identity.initial_entry_id != self.candidate.exact_initial_entry_id
-            or identity.context_binding_revision_id
-            != self.candidate.exact_context_binding_revision_id
-            or identity.provider_input_through_sequence
-            != self.candidate.resulting_provider_input_through_sequence
-            or self.semantic_input.canonical_input_identity != identity
-            or self.wire_quote.final_wire_utf8_bytes > (64 << 20)
-            or self.wire_quote.budget_input_tokens
-            > self.wire_quote.effective_input_budget_tokens
-        ):
-            raise ValueError("prospective ROOT provider admission does not exact-join")
 
 
 @dataclass(frozen=True, slots=True)
@@ -603,7 +438,6 @@ class PreparedQueuedRootTurnAdmission:
     canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
     permission_snapshot: FrozenRunPermissionSnapshot
     model_call_binding: ModelCallBinding
-    provider_input_candidate: PreparedRootProviderInputCandidate = field(repr=False)
     pending_plan_handoff_workflow_id: str | None
     pending_plan_handoff_interaction_id: str | None
     pending_plan_handoff_kind: str | None
@@ -643,48 +477,12 @@ class PreparedQueuedRootTurnAdmission:
             raise ValueError("human queue admission lacks submission identity")
         if not isinstance(self.model_call_binding, ModelCallBinding):
             raise ValueError("queued ROOT admission lacks a model binding")
-        prospective = self.provider_input_candidate
+        entries = self.ordered_input_entries
         if (
-            prospective.session_id != self.session_id
-            or prospective.workspace_id != self.workspace_id
-            or prospective.exact_turn_id != self.exact_turn_id
-            or prospective.exact_initial_entry_id != self.exact_initial_entry_id
-            or prospective.exact_context_binding_revision_id
-            != self.exact_context_binding_revision_id
-            or prospective.unpublished_items
-            != tuple(
-                FrozenProviderInputItem(
-                    item_kind=FrozenProviderInputItemKind.USER,
-                    source_entry_id=entry.entry_id,
-                    source_entry_sequence=prospective.expected_latest_entry_sequence
-                    + index
-                    + 1,
-                    source_turn_id=self.exact_turn_id,
-                    content=entry.canonical_prompt.content.parts,
-                    input_origin=entry.input_origin,
-                    scheduled_input=self.scheduled_input
-                    if entry.entry_id == self.exact_initial_entry_id
-                    else None,
-                )
-                for index, entry in enumerate(self.ordered_input_entries)
-            )
-            or prospective.unpublished_item_canonical_expanded_bytes
-            != tuple(
-                entry.canonical_prompt.resource_quote.canonical_expanded_bytes
-                for entry in self.ordered_input_entries
-            )
-            or prospective.permission_snapshot != self.permission_snapshot
-            or prospective.model_call_binding != self.model_call_binding
-            or prospective.pending_plan_handoff_workflow_id
-            != self.pending_plan_handoff_workflow_id
-            or prospective.pending_plan_handoff_interaction_id
-            != self.pending_plan_handoff_interaction_id
-            or prospective.pending_plan_handoff_kind != self.pending_plan_handoff_kind
-            or prospective.unpublished_plan_workflow_fact is not None
-            or prospective.unpublished_plan_handoff_fact is not None
-            or prospective.unpublished_approved_plan_fact is not None
+            len({entry.entry_id for entry in entries}) != len(entries)
+            or not any(entry.entry_id == self.exact_initial_entry_id for entry in entries)
         ):
-            raise ValueError("queued ROOT provider candidate does not exact-join")
+            raise ValueError("queued ROOT initial input group is invalid")
         handoff_values = (
             self.pending_plan_handoff_workflow_id,
             self.pending_plan_handoff_interaction_id,
@@ -720,7 +518,6 @@ def build_queued_root_turn_admission(
     canonical_prompt: FrozenCanonicalPrompt,
     permission_snapshot: FrozenRunPermissionSnapshot,
     model_call_binding: ModelCallBinding,
-    provider_input_candidate: PreparedRootProviderInputCandidate,
     pending_plan_handoff_workflow_id: str | None,
     pending_plan_handoff_interaction_id: str | None,
     pending_plan_handoff_kind: str | None,
@@ -795,7 +592,6 @@ def build_queued_root_turn_admission(
         canonical_prompt=canonical_prompt,
         permission_snapshot=permission_snapshot,
         model_call_binding=model_call_binding,
-        provider_input_candidate=provider_input_candidate,
         pending_plan_handoff_workflow_id=pending_plan_handoff_workflow_id,
         pending_plan_handoff_interaction_id=pending_plan_handoff_interaction_id,
         pending_plan_handoff_kind=pending_plan_handoff_kind,
@@ -821,6 +617,7 @@ class QueuedRootTurnAdmissionAccepted:
     turn_id: str
     entry_sequence: int
     event_sequence: int
+    started_input_group: StartedTurnInputGroup
 
 
 @dataclass(frozen=True, slots=True)
@@ -1611,6 +1408,7 @@ def build_accepted_steer_dispatch_batch(
 
 
 __all__ = [
+    "StartedTurnInputGroup",
     "AcceptedSteerDispatchBatch",
     "AcceptedSteerDispatchEntry",
     "MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES",
@@ -1622,8 +1420,6 @@ __all__ = [
     "PreparedQueuedRootTurnAdmission",
     "PreparedActiveRootInputAdmission",
     "PreparedActiveRootInputCandidate",
-    "PreparedRootProviderInputAdmission",
-    "PreparedRootProviderInputCandidate",
     "PreparedRootTurnIdentity",
     "PreparedSteerCanonicalBaseFence",
     "PreparedSteerConsumptionCandidate",

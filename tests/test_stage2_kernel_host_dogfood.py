@@ -668,7 +668,7 @@ def test_k2_public_host_consumes_typed_image_steer_at_provider_safe_point(
     assert (ref[0], ref[1], bytes(ref[2])) == ("USER_STEER", 0, image_bytes)
 
 
-def test_k3_queued_root_resource_failure_rejects_before_consumption(
+def test_k3_queued_root_resource_failure_interrupts_consumed_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migrated_postgres_database,
@@ -749,8 +749,8 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
             queue_item_id = queued.prompt_delivery.queue_item_id
 
             # This exact multipart exceeds C even as the only user input after G.
-            # Compaction is explicitly unavailable, so delivery must settle the
-            # existing queue owner rather than publish a USER entry first.
+            # Compaction is unavailable. The request still starts canonically,
+            # then settles the same consumed request before provider open.
             active_bounds[0] = constrained_bounds
             session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
                 enabled=False,
@@ -771,7 +771,7 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
             assert outcome.status == "REJECTED"
             assert (
                 outcome.public_code
-                == "PROVIDER_INPUT_RESOURCE_EXHAUSTED_BEFORE_DELIVERY"
+                == "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
             )
             return session.session_id, queue_item_id
         finally:
@@ -797,12 +797,17 @@ def test_k3_queued_root_resource_failure_rejects_before_consumption(
             " WHERE session_id=%s AND queue_item_id=%s)",
             (session_id, session_id, session_id, queue_item_id),
         ).fetchone()
-    assert queue == (
-        "REJECTED",
-        "PROVIDER_INPUT_RESOURCE_EXHAUSTED_BEFORE_DELIVERY",
-        None,
-    )
-    assert counts == (1, 2, 1)
+        failed_turn = connection.execute(
+            "SELECT t.status, t.terminal_reason, t.initial_entry_id "
+            "FROM pulsara_v3.turns t JOIN pulsara_v3.transcript_entries e "
+            "ON e.session_id=t.session_id AND e.id=t.initial_entry_id "
+            "WHERE t.session_id=%s ORDER BY e.entry_sequence DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+    assert queue[:2] == ("CONSUMED", "CONSUMED")
+    assert queue[2] is not None
+    assert failed_turn == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED", queue[2])
+    assert counts == (2, 3, 1)
 
 
 def _exercise_host_steer(

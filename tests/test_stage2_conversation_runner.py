@@ -44,7 +44,10 @@ from pulsara_agent.conversation_kernel.cold_epoch import (
     CanonicalColdContinuationSeed,
     AdoptedCompactionContinuationSeed,
 )
-from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
+from pulsara_agent.conversation_kernel.direct_model import (
+    DirectKernelModelPort,
+    KernelModelTargetPreparationRequest,
+)
 import pulsara_agent.conversation_kernel.input_continuity as input_continuity
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -56,9 +59,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionTrigger,
     ResolvedCompactionHeadroomBounds,
     ResolvedCompactionPolicy,
-)
-from pulsara_agent.conversation_kernel.compaction.coordinator import (
-    AutomaticCompactionTriggerCandidate,
 )
 from pulsara_agent.conversation_kernel.provider_dispatch import (
     PreparedWireMeasurementDecision,
@@ -159,6 +159,7 @@ from pulsara_agent.model_input.continuity import (
     decode_runtime_observation,
 )
 from pulsara_agent.ports.provider_stream import (
+    ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
     ProviderNormalizedTerminalKind,
     ProviderOutputIncompleteReason,
@@ -552,6 +553,47 @@ class _LimitedCompactionScriptedModel(_CompactionScriptedModel):
         # The scripted model and its preparer share the same physical target.
         # Frozen-source reborrows must validate the limits actually dispatched.
         self._model_runtime = self._preparer.model_runtime
+
+
+async def _compact_idle(runner, *, turn_id, command_id):
+    """Invoke the real idle summary path with one frozen model selection."""
+    model = runner._provider_dispatch._model
+    port = model if isinstance(model, DirectKernelModelPort) else model._preparer
+    binding = runner._repository.read_session_model_call_binding(
+        runner._writer_lease.guard,
+        deadline_monotonic=monotonic() + 30,
+    )
+    target = port.prepare_target_from_snapshot(
+        KernelModelTargetPreparationRequest(
+            session_id=runner._writer_lease.guard.session_id,
+            turn_id=turn_id,
+            model_call_index=1,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+            maximum_input_tokens=None,
+            binding=binding,
+        ),
+        resolution_snapshot=port.model_runtime.freeze_resolution_snapshot(),
+    )
+    return await runner.compaction.compact_idle_turn(
+        turn_id=turn_id,
+        command_id=command_id,
+        prepared_target=target,
+    )
+
+
+def _record_automatic_compaction(runner):
+    owner = runner.compaction._compaction_owner
+    owner.policy = replace(owner.policy, automatic_enabled=True)
+    outcomes = []
+    execute = runner.compaction.execute_active
+
+    async def record(**kwargs):
+        result = await execute(**kwargs)
+        outcomes.append(result.outcome)
+        return result
+
+    runner.compaction.execute_active = record
+    return outcomes
 
 
 def _context_snapshot_payload(request) -> dict[str, object]:
@@ -1250,14 +1292,12 @@ class _HeadroomOrderingReader(CanonicalProviderInputReader):
         *,
         deadline_monotonic: float,
         _connection=None,
-        _prospective_root_candidate=None,
     ):
         self.operations.append("dispatch")
         return super().read_frozen_dispatch(
             cut,
             deadline_monotonic=deadline_monotonic,
             _connection=_connection,
-            _prospective_root_candidate=_prospective_root_candidate,
         )
 
 
@@ -1378,11 +1418,6 @@ class _FailingPostConsumptionReader:
             cut, deadline_monotonic=deadline_monotonic
         )
 
-    def read_prospective_root_dispatch(self, candidate, *, deadline_monotonic):
-        return self._delegate.read_prospective_root_dispatch(
-            candidate, deadline_monotonic=deadline_monotonic
-        )
-
     def read_frozen_dispatch(self, cut, *, deadline_monotonic):
         self.calls += 1
         # Post-writer activation and steer preparation account for the first
@@ -1424,12 +1459,6 @@ class _RecordingReplayHydrationReader:
     def read_compaction_headroom_preflight(self, cut, *, deadline_monotonic):
         return self._delegate.read_compaction_headroom_preflight(
             cut, deadline_monotonic=deadline_monotonic
-        )
-
-    def read_prospective_root_dispatch(self, candidate, *, deadline_monotonic):
-        self.dispatch_deadlines.append(deadline_monotonic)
-        return self._delegate.read_prospective_root_dispatch(
-            candidate, deadline_monotonic=deadline_monotonic
         )
 
     def read_frozen_dispatch(self, cut, *, deadline_monotonic):
@@ -2498,7 +2527,7 @@ def test_round5b_ordinary_fresh_open_uses_only_neutral_cold_assembler(
         (False, True, True),
     ),
 )
-def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
+def test_automatic_compaction_adopts_started_request_and_continues_same_run(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
     lose_adoption_ack: bool,
@@ -2536,6 +2565,8 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
             minimum_reclaim_tokens=1,
         )
     )
@@ -2607,17 +2638,11 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
             first_prompt = frozen_test_prompt("first question")
         first = await runner.run_turn(first_prompt)
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, outcome = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
+        automatic_outcomes = _record_automatic_compaction(runner)
         second = await runner.run_turn(
             frozen_test_prompt("second question"), command_id=command_id
         )
-        compacted = await outcome
+        compacted = automatic_outcomes[-1]
         await owner.aclose()
         return first, second, compacted
 
@@ -2628,9 +2653,10 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
     assert compacted.disposition is CompactionDisposition.COMPACTED
     assert compacted.snapshot_id is not None
     assert len(model.summary_transport.contexts) == 1
-    # Initial/follow-up provider work and PRE/POST compaction own five source
-    # freezes in this scenario. The injected second recent candidate adds none.
-    assert freeze_non_trigger_calls == 5
+    # The two ordinary preparations, proactive source observation, summary
+    # source, dry successor and adopted family own six freezes. Candidate
+    # shrinking and the common post-adoption safe point reuse those sources.
+    assert freeze_non_trigger_calls == 6
     if retry_recent:
         assert pre_full_attempts == 2
     summary_context = model.summary_transport.contexts[0]
@@ -2655,8 +2681,25 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
         )
     successor_snapshot = _context_snapshot_payload(model.requests[1])
     assert successor_snapshot["continuation"]["mode"] == "RESUME_ACTIVE_TURN"
-    assert successor_snapshot["continuation"]["active_request"]["text"] == (
+    assert successor_snapshot["continuation"]["active_request"] is None
+    second_input = model.requests[1].compiled_input
+    exact_current = [
+        message
+        for message, placement in zip(
+            second_input.messages, second_input.message_placements, strict=True
+        )
+        if placement.origin_entry_id
+        == second_input.canonical_input_identity.initial_entry_id
+    ]
+    assert [join_text_content(message.content) for message in exact_current] == [
         "second question"
+    ]
+    assert all(
+        "second question"
+        not in "\n".join(
+            part.text for part in message.content if isinstance(part, LLMTextPart)
+        )
+        for message in summary_context.messages
     )
     assert model.requests[0].compiled_input.system_prompt == (
         model.requests[1].compiled_input.system_prompt
@@ -2698,95 +2741,29 @@ def test_round5b_active_manual_compaction_adopts_and_continues_same_run(
 
 
 @pytest.mark.parametrize(
-    ("history", "summaries", "expected_tier", "expected_summary_models"),
+    ("history", "summaries", "expected_summary_models"),
     (
-        ("brief history", "unused summary", None, ()),
+        ("brief history", "unused summary", ()),
         (
             "large history:" + "h" * 50_000,
-            "small source-model handover",
-            2,
-            ("source-model",),
+            "small destination-model handover",
+            ("destination-model",),
         ),
         (
             "large history:" + "h" * 50_000,
             [
-                "oversized source-model handover:" + "a" * 50_000,
-                "small destination-model handover",
-            ],
-            3,
-            ("source-model", "destination-model"),
-        ),
-        (
-            "large history:" + "h" * 50_000,
-            [
-                [
-                    ProviderStreamTerminal(
-                        terminal_kind=(
-                            ProviderNormalizedTerminalKind.OUTPUT_INCOMPLETE
-                        ),
-                        usage=TransportUsageReport(usage_status="missing", usage=None),
-                        incomplete_reason=(
-                            ProviderOutputIncompleteReason.UNKNOWN_PROVIDER_INCOMPLETE
-                        ),
-                    )
-                ],
-                "small destination-model handover after source failure",
-            ],
-            3,
-            ("source-model", "destination-model"),
-        ),
-        (
-            "large history:" + "h" * 50_000,
-            [
-                [
-                    ProviderStreamTerminal(
-                        terminal_kind=(ProviderNormalizedTerminalKind.PROVIDER_ERROR),
-                        usage=TransportUsageReport(usage_status="missing", usage=None),
-                        error=sanitize_provider_failure(
-                            message="source provider quota exhausted",
-                            code_hint="429",
-                        ),
-                    )
-                ],
-                "small destination-model handover after source provider error",
-            ],
-            3,
-            ("source-model", "destination-model"),
-        ),
-        (
-            "large history:" + "h" * 50_000,
-            [
-                [
-                    ProviderStreamTerminal(
-                        terminal_kind=(ProviderNormalizedTerminalKind.PROVIDER_ERROR),
-                        usage=TransportUsageReport(usage_status="missing", usage=None),
-                        error=sanitize_provider_failure(
-                            message="source provider quota exhausted",
-                            code_hint="429",
-                        ),
-                    )
-                ],
                 _summary_tool_stream("destination-summary-call:1"),
-                "small destination-model handover after denied tool call",
+                "repaired destination handover",
             ],
-            3,
-            ("source-model", "destination-model", "destination-model"),
+            ("destination-model", "destination-model"),
         ),
     ),
-    ids=(
-        "tier-1",
-        "tier-2",
-        "tier-3-nonfit",
-        "tier-3-source-incomplete",
-        "tier-3-source-provider-error",
-        "tier-3-destination-summary-tool-repair",
-    ),
+    ids=("direct-switch", "destination-summary", "destination-summary-repair"),
 )
-def test_model_switch_uses_exact_three_tier_handover_path(
+def test_model_switch_uses_direct_or_destination_summary_path(
     stage2_migrated_postgres_database,
     history: str,
     summaries: str | list[list[object] | str],
-    expected_tier: int | None,
     expected_summary_models: tuple[str, ...],
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -2849,14 +2826,14 @@ def test_model_switch_uses_exact_three_tier_handover_path(
         presentation_notice_sink=presentation_notices.append,
     )
     switch_results: list[object] = []
-    execute_switch = runner.compaction.recover_pending_root_input
+    execute_switch = runner.compaction.execute_model_switch_active
 
     async def record_switch(**kwargs):
         result = await execute_switch(**kwargs)
         switch_results.append(result)
         return result
 
-    runner.compaction.recover_pending_root_input = record_switch
+    runner.compaction.execute_model_switch_active = record_switch
 
     async def exercise():
         first = await runner.run_turn(frozen_test_prompt("source request"))
@@ -2885,12 +2862,12 @@ def test_model_switch_uses_exact_three_tier_handover_path(
         "source-model",
         "destination-model",
     ]
-    assert len(switch_results) == (0 if expected_tier is None else 1)
-    if expected_tier is not None:
-        assert switch_results[0].model_switch_tier == expected_tier
+    assert len(switch_results) == (1 if expected_summary_models else 0)
+    if expected_summary_models:
+        assert switch_results[0].outcome.disposition is CompactionDisposition.COMPACTED
     assert presentation_notices == (
         ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
-        if expected_tier == 3
+        if expected_summary_models
         else []
     )
     with provider.connection(
@@ -2906,11 +2883,11 @@ def test_model_switch_uses_exact_three_tier_handover_path(
             (session_id, session_id),
         ).fetchone()
     assert (snapshot_count, event_count) == (
-        (0, 0) if expected_tier is None else (1, 1)
+        (1, 1) if expected_summary_models else (0, 0)
     )
 
 
-def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
+def test_text_only_destination_summary_projects_valid_image_history(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -2965,14 +2942,14 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
         workspace_id=workspace_id,
     )
     switch_results: list[object] = []
-    execute_switch = runner.compaction.recover_pending_root_input
+    execute_switch = runner.compaction.execute_model_switch_active
 
     async def record_switch(**kwargs):
         result = await execute_switch(**kwargs)
         switch_results.append(result)
         return result
 
-    runner.compaction.recover_pending_root_input = record_switch
+    runner.compaction.execute_model_switch_active = record_switch
     image_output = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
     image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
@@ -2999,11 +2976,11 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
     assert first.final_text == "source answer"
     assert second.final_text == "destination answer"
     assert len(switch_results) == 1
-    assert switch_results[0].model_switch_tier == 2
+    assert switch_results[0].outcome.disposition is CompactionDisposition.COMPACTED
     assert [call.target.fact.model_id for call in model.summary_transport.calls] == [
-        "source-vision-model"
+        "destination-text-model"
     ]
-    assert any(
+    assert not any(
         isinstance(part, LLMImagePart)
         for message in model.summary_transport.contexts[0].messages
         for part in message.content
@@ -3028,7 +3005,7 @@ def test_k3_text_only_model_switch_uses_tier_two_for_valid_image_history(
     )
 
 
-def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
+def test_text_only_destination_projection_keeps_recent_text_and_image_attribution(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -3089,14 +3066,14 @@ def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
         workspace_id=workspace_id,
     )
     switch_results: list[object] = []
-    execute_switch = runner.compaction.recover_pending_root_input
+    execute_switch = runner.compaction.execute_model_switch_active
 
     async def record_switch(**kwargs):
         result = await execute_switch(**kwargs)
         switch_results.append(result)
         return result
 
-    runner.compaction.recover_pending_root_input = record_switch
+    runner.compaction.execute_model_switch_active = record_switch
     image_output = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
     image_prompt = freeze_canonical_prompt(
@@ -3129,8 +3106,8 @@ def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
 
     assert result.final_text == "destination answer"
     assert len(switch_results) == 1
-    assert switch_results[0].model_switch_tier == 2
-    assert any(
+    assert switch_results[0].outcome.disposition is CompactionDisposition.COMPACTED
+    assert not any(
         isinstance(part, LLMImagePart)
         for message in model.summary_transport.contexts[0].messages
         for part in message.content
@@ -3153,7 +3130,7 @@ def test_k3_text_only_tier_two_keeps_text_recent_when_older_history_has_image(
     )
 
 
-def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
+def test_cold_text_only_handover_uses_one_destination_projection(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -3256,14 +3233,14 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
         presentation_notice_sink=notices.append,
     )
     switch_results: list[object] = []
-    execute_switch = destination_runner.compaction.recover_pending_root_input
+    execute_switch = destination_runner.compaction.execute_model_switch_active
 
     async def record_switch(**kwargs):
         result = await execute_switch(**kwargs)
         switch_results.append(result)
         return result
 
-    destination_runner.compaction.recover_pending_root_input = record_switch
+    destination_runner.compaction.execute_model_switch_active = record_switch
 
     async def exercise_destination():
         result = await destination_runner.run_turn(
@@ -3276,7 +3253,7 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
 
     assert second.final_text == "destination answer"
     assert len(switch_results) == 1
-    assert switch_results[0].model_switch_tier == 3
+    assert switch_results[0].outcome.disposition is CompactionDisposition.COMPACTED
     assert [
         call.target.fact.model_id for call in destination_model.summary_transport.calls
     ] == ["destination-text-model"]
@@ -3316,7 +3293,7 @@ def test_k3_cold_text_only_handover_uses_one_tier_three_projection_p(
     assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
 
 
-def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
+def test_destination_summary_failure_never_calls_source_fallback(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -3348,7 +3325,7 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
             terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
             usage=TransportUsageReport(usage_status="missing", usage=None),
             error=sanitize_provider_failure(
-                message="source provider is unavailable",
+                message="destination provider is unavailable",
                 code_hint="503",
             ),
         )
@@ -3356,7 +3333,7 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
     active_runtime = [source_runtime]
     model = _CompactionScriptedModel(
         [_text_stream("source answer"), _text_stream("destination answer")],
-        [source_failure, "destination summary after image omission"],
+        [source_failure],
     )
     model._model_runtime = source_runtime
     model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
@@ -3383,14 +3360,14 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
         presentation_notice_sink=notices.append,
     )
     switch_results: list[object] = []
-    execute_switch = runner.compaction.recover_pending_root_input
+    execute_switch = runner.compaction.execute_model_switch_active
 
     async def record_switch(**kwargs):
         result = await execute_switch(**kwargs)
         switch_results.append(result)
         return result
 
-    runner.compaction.recover_pending_root_input = record_switch
+    runner.compaction.execute_model_switch_active = record_switch
     image_output = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
     image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
@@ -3416,57 +3393,39 @@ def test_k3_text_only_tier_three_projects_images_when_source_summary_fails(
             binding=test_model_binding(destination_runtime),
             deadline_monotonic=monotonic() + 30,
         )
-        second = await runner.run_turn(frozen_test_prompt("destination request"))
+        with pytest.raises(ProviderModelExecutionFailed):
+            await runner.run_turn(frozen_test_prompt("destination request"))
         await owner.aclose()
-        return first, second
+        return first
 
-    first, second = asyncio.run(exercise())
-
+    first = asyncio.run(exercise())
     assert first.final_text == "source answer"
-    assert second.final_text == "destination answer"
-    assert len(switch_results) == 1
-    assert switch_results[0].model_switch_tier == 3
     assert [call.target.fact.model_id for call in model.summary_transport.calls] == [
-        "source-vision-model",
-        "destination-text-model",
+        "destination-text-model"
     ]
-    destination_summary = model.summary_transport.contexts[1]
+    assert len(model.requests) == 1
     assert not any(
         isinstance(part, LLMImagePart)
-        for message in destination_summary.messages
+        for message in model.summary_transport.contexts[0].messages
         for part in message.content
     )
-    assert (
-        sum(
-            join_text_content(message.content).count(
-                "[历史图片引用；此处未包含图像内容]"
-            )
-            for message in destination_summary.messages
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=monotonic() + 10
+    ) as connection:
+        assert connection.execute(
+            "SELECT status FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at",
+            (session_id,),
+        ).fetchall() == [("COMPLETED",), ("INTERRUPTED",)]
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM pulsara_v3.context_snapshots WHERE session_id=%s",
+                (session_id,),
+            ).fetchone()[0]
+            == 0
         )
-        == 2
-    )
-    assert not any(
-        isinstance(part, LLMImagePart)
-        for message in model.requests[-1].compiled_input.messages
-        for part in message.content
-    )
-    successor = _context_snapshot_payload(model.requests[-1])
-    recent_sections = [
-        section
-        for section in successor["sections"]
-        if section["metadata"].get("section") == "recent"
-    ]
-    assert recent_sections
-    assert bind_prompt_images(FrozenPromptContent((image,)), workspace_id).parts[
-        0
-    ].image_ref in json.dumps(recent_sections, ensure_ascii=False)
-    assert "[历史图片引用；此处未包含图像内容]" in json.dumps(
-        recent_sections, ensure_ascii=False
-    )
-    assert notices == ["模型已切换。由于上下文长度变化，接下来的回答可能不如之前连贯。"]
 
 
-def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
+def test_visual_destination_projection_preserves_selected_image_history_and_recent(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -3502,16 +3461,6 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
         input_modalities=("text", "image"),
     )
     include_test_runtime_connections(destination_runtime, source_runtime)
-    source_failure = [
-        ProviderStreamTerminal(
-            terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
-            usage=TransportUsageReport(usage_status="missing", usage=None),
-            error=sanitize_provider_failure(
-                message="source provider is unavailable",
-                code_hint="503",
-            ),
-        )
-    ]
     active_runtime = [source_runtime]
     model = _CompactionScriptedModel(
         [
@@ -3519,7 +3468,7 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
             _text_stream("recent visual answer"),
             _text_stream("destination answer"),
         ],
-        [source_failure, "destination summary preserving recent visual context"],
+        "destination summary preserving recent visual context",
     )
     model._model_runtime = source_runtime
     model._preparer = DirectKernelModelPort(model_runtime=source_runtime)
@@ -3544,14 +3493,14 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
         workspace_id=workspace_id,
     )
     switch_results: list[object] = []
-    execute_switch = runner.compaction.recover_pending_root_input
+    execute_switch = runner.compaction.execute_model_switch_active
 
     async def record_switch(**kwargs):
         result = await execute_switch(**kwargs)
         switch_results.append(result)
         return result
 
-    runner.compaction.recover_pending_root_input = record_switch
+    runner.compaction.execute_model_switch_active = record_switch
     image_output = BytesIO()
     Image.new("RGB", (7, 5), (11, 23, 41)).save(image_output, "PNG")
     image = LLMImagePart("image/png", image_output.getvalue(), 7, 5)
@@ -3580,17 +3529,12 @@ def test_k3_visual_tier_three_preserves_selected_image_history_and_recent(
 
     assert result.final_text == "destination answer"
     assert len(switch_results) == 1
-    assert switch_results[0].model_switch_tier == 3
+    assert switch_results[0].outcome.disposition is CompactionDisposition.COMPACTED
     assert [call.target.fact.model_id for call in model.summary_transport.calls] == [
-        "source-vision-model",
         "destination-vision-model",
     ]
-    destination_summary = model.summary_transport.contexts[1]
-    source_quote = model.summary_transport.contexts[0].provider_wire_input_plan.quote
+    destination_summary = model.summary_transport.contexts[0]
     destination_quote = destination_summary.provider_wire_input_plan.quote
-    assert source_quote.raw_final_wire_estimated_input_tokens > (
-        destination_quote.effective_input_budget_tokens
-    )
     assert destination_quote.raw_final_wire_estimated_input_tokens < int(
         destination_quote.effective_input_budget_tokens
         * owner.policy.auto_trigger_ratio
@@ -3708,9 +3652,10 @@ def test_k3_multipart_input_keeps_exact_canonical_service_headroom_before_open(
             ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
         )
         assert model.requests == []
-        assert not repository.rehydrate_session(
+        rows = repository.rehydrate_session(
             session_id=session_id, deadline_monotonic=monotonic() + 30
         )
+        assert [row["entry_kind"] for row in rows] == ["USER_MESSAGE"]
         with provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             deadline_monotonic=monotonic() + 30,
@@ -3721,10 +3666,15 @@ def test_k3_multipart_input_keeps_exact_canonical_service_headroom_before_open(
                 "(SELECT count(*) FROM pulsara_v3.session_commands WHERE session_id = %s), "
                 "(SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id = %s)",
                 (session_id, session_id, session_id),
-            ).fetchone() == (0, 0, 0)
+            ).fetchone() == (1, 1, 1)
+
+            assert connection.execute(
+                "SELECT status, terminal_reason FROM pulsara_v3.turns WHERE session_id=%s",
+                (session_id,),
+            ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
 
 
-def test_model_switch_connection_identity_forces_tier_one_cold_epoch(
+def test_model_switch_connection_identity_uses_direct_cold_epoch(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -4059,10 +4009,10 @@ def test_final_wire_compaction_trigger_and_adoption_ignore_provider_usage(
 
     async def exercise():
         first = await runner.run_turn(frozen_test_prompt("identical source question"))
-        outcome = await runner.compaction.compact_idle_turn(
+        outcome = await _compact_idle(
+            runner,
             turn_id=first.turn_id,
             command_id="command:ys2zzcmvpztzxnzeufrjro5tly",
-            force=True,
         )
         await owner.aclose()
         return outcome
@@ -4137,6 +4087,9 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
         scripts=(
             _large_native_replay_script(api, ordinal=1, opaque_chars=100_000),
             _large_native_replay_script(api, ordinal=2, opaque_chars=100_000),
+            _round5a1_chat_scripts()[1]
+            if api == "openai_chat_completions"
+            else _round5a1_responses_scripts()[1],
         ),
         summary="A concise checkpoint after exact final-wire prefix admission.",
     )
@@ -4175,11 +4128,20 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
         second = await runner.run_turn(
             frozen_test_prompt("second replay-bearing answer")
         )
-        outcome = await runner.compaction.compact_idle_turn(
-            turn_id=second.turn_id,
-            command_id="command:burnfnbq5ov4cka232v3r5vl5m",
-            force=True,
+        # Native replay in the retained historical suffix must fit the
+        # proactive target as well as the full final-wire hard bound.
+        owner.policy = replace(
+            owner.policy,
+            automatic_enabled=True,
+            auto_trigger_ratio=0.85,
+            post_compaction_target_ratio=0.80,
         )
+        outcomes = _record_automatic_compaction(runner)
+        await runner.run_turn(
+            frozen_test_prompt("continue after replay-bearing history")
+        )
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
         await owner.aclose()
         return first, second, outcome
 
@@ -4390,11 +4352,13 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
             " WHERE session_id = %s)",
             (session_id, session_id, session_id),
         ).fetchone()
+    # Real request start preserves its exact image reference even if a later
+    # physical input boundary rejects provider preparation.
     expected_count = 1 if expected_disposition is CompactionDisposition.COMPACTED else 0
     assert (snapshot_count, adoption_count, image_ref_count) == (
         expected_count,
         expected_count,
-        expected_count,
+        1,
     )
     if expected_disposition is CompactionDisposition.COMPACTED:
         assert failure is None
@@ -4411,8 +4375,11 @@ def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
     else:
         assert result is None
         assert failure is not None
+        # Recovery cannot admit this full mandatory input. The shared started
+        # request path then rejects its original complete required context;
+        # its accepted entry/image remains canonical and no illegal wire opens.
         assert (
-            failure.kind is ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
+            failure.kind is ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
         )
         assert len(model.requests) == 2
 
@@ -4463,6 +4430,7 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
         scripts=(
             _large_native_replay_script("openai_chat_completions", ordinal=1),
             _round5a1_chat_scripts()[1],
+            _round5a1_chat_scripts()[1],
         ),
         summary="A concise checkpoint from a wire-fit summary carrier.",
     )
@@ -4507,14 +4475,17 @@ def test_final_wire_compaction_summary_promotes_semantic_overbudget_replay_fit(
         await runner.run_turn(
             frozen_test_prompt("create a replay-bearing assistant answer")
         )
-        second = await runner.run_turn(
-            frozen_test_prompt("freeze an ordinary replay input")
+        await runner.run_turn(frozen_test_prompt("freeze an ordinary replay input"))
+        owner.policy = replace(
+            owner.policy,
+            automatic_enabled=True,
+            auto_trigger_ratio=0.20,
+            post_compaction_target_ratio=0.10,
         )
-        outcome = await runner.compaction.compact_idle_turn(
-            turn_id=second.turn_id,
-            command_id="command:ptcvf7lv75uwii4lyualddx5au",
-            force=True,
-        )
+        outcomes = _record_automatic_compaction(runner)
+        await runner.run_turn(frozen_test_prompt("continue after wire admission"))
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
         await owner.aclose()
         return outcome
 
@@ -4614,10 +4585,10 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     async def exercise():
         first = await runner.run_turn(frozen_test_prompt("first input"))
         if trigger == "manual":
-            outcome = await runner.compaction.compact_idle_turn(
+            outcome = await _compact_idle(
+                runner,
                 turn_id=first.turn_id,
                 command_id="command:q5ve2k6fcmf7xmpditfsnzrjru",
-                force=True,
             )
             second_text = None
         else:
@@ -4632,7 +4603,11 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     outcome, second_text = asyncio.run(exercise())
 
     assert outcome.disposition is CompactionDisposition.FAILED
-    assert outcome.public_code == "NO_EXECUTABLE_SUMMARY_PREFIX"
+    assert outcome.public_code == (
+        "NO_EXECUTABLE_DESTINATION_PROJECTION"
+        if trigger == "manual"
+        else "NO_EXECUTABLE_SUMMARY_PREFIX"
+    )
     assert model.summary_transport.contexts == []
     assert second_text == (None if trigger == "manual" else "chat final")
     assert len(automatic_executions) == (0 if trigger == "manual" else 1)
@@ -4651,9 +4626,7 @@ def test_final_wire_compaction_no_executable_summary_prefix_is_not_already_compa
     assert (snapshot_count, event_count) == (0, 0)
 
 
-@pytest.mark.parametrize("idle", (False, True), ids=("active", "idle"))
-def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
-    idle: bool,
+def test_automatic_candidate_shrink_search_reuses_summary_and_sources(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4674,8 +4647,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
         _tool_stream(),
         _text_stream("tool turn complete"),
     ]
-    if not idle:
-        normal_calls.append(_text_stream("active turn continued"))
+    normal_calls.append(_text_stream("active turn continued"))
     model = _CompactionScriptedModel(
         normal_calls,
         [
@@ -4763,7 +4735,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     async def exercise():
         nonlocal runner, dispatch_pre_compact, measure_wire
         await runner.run_turn(frozen_test_prompt("historical question"))
-        tool_turn = await runner.run_turn(
+        await runner.run_turn(
             frozen_test_prompt("create one complete tool group")
         )
         # Exercise the candidate-shrink algorithm after a real cold Host
@@ -4804,27 +4776,19 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
             "measure_prepared_wire_candidate",
             reject_first_successor_wire,
         )
-        if idle:
-            outcome = await runner.compaction.compact_idle_turn(
-                turn_id=tool_turn.turn_id,
-                command_id=random_id("command"),
-                force=True,
-            )
-            final_text = None
-        else:
-            command_id = _name("command")
-            turn_id = derive_id("turn", "command", session_id, command_id)
-            _request, waiter = await owner.request_manual(
-                command_id=random_id("command"),
-                scope_kind=ModelInputScopeKind.ROOT,
-                expected_turn_id=turn_id,
-                force=True,
-            )
-            active_turn = await runner.run_turn(
-                frozen_test_prompt("continue actively"), command_id=command_id
-            )
-            outcome = await waiter
-            final_text = active_turn.final_text
+        command_id = _name("command")
+        owner.policy = replace(
+            owner.policy,
+            automatic_enabled=True,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
+        )
+        automatic_outcomes = _record_automatic_compaction(runner)
+        active_turn = await runner.run_turn(
+            frozen_test_prompt("continue actively"), command_id=command_id
+        )
+        outcome = automatic_outcomes[-1]
+        final_text = active_turn.final_text
         await owner.aclose()
         return outcome, final_text
 
@@ -4840,7 +4804,7 @@ def test_round5b_manual_candidate_shrink_search_is_lifecycle_neutral(
     assert {
         context.messages[-1].content for context in model.summary_transport.contexts
     } == {(LLMTextPart(compaction_summary_request()),)}
-    assert final_text == (None if idle else "active turn continued")
+    assert final_text == "active turn continued"
     assert pre_compact_calls == 1
     assert runner._safe_point._active_handle is None  # noqa: SLF001
     assert tools._active == set()  # noqa: SLF001
@@ -4887,6 +4851,8 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
             minimum_reclaim_tokens=1,
             maximum_retained_tool_groups=max(1, retained_group_count),
         )
@@ -4958,17 +4924,11 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
                 frozen_test_prompt("create one complete retained tool group")
             )
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, waiter = await owner.request_manual(
-            command_id=random_id("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
+        automatic_outcomes = _record_automatic_compaction(runner)
         result = await runner.run_turn(
             frozen_test_prompt("continue actively"), command_id=command_id
         )
-        outcome = await waiter
+        outcome = automatic_outcomes[-1]
         await owner.aclose()
         return result, outcome
 
@@ -4993,7 +4953,7 @@ def test_final_wire_pre_full_drift_replans_fresh_without_shrinking_tail(
     assert all(count == 1 for count in tools.release_calls)
 
 
-def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
+def test_automatic_non_reclaim_keeps_legal_original_turn_running(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -5018,6 +4978,8 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
             minimum_reclaim_tokens=1,
         )
     )
@@ -5036,17 +4998,11 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
     async def exercise():
         await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, waiter = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
+        automatic_outcomes = _record_automatic_compaction(runner)
         second = await runner.run_turn(
             frozen_test_prompt("second question"), command_id=command_id
         )
-        outcome = await waiter
+        outcome = automatic_outcomes[-1]
         await owner.aclose()
         return second, outcome
 
@@ -5066,110 +5022,6 @@ def test_round5b_active_manual_non_reclaim_is_not_needed_and_turn_continues(
             (session_id,),
         ).fetchone()[0]
     assert snapshot_count == 0
-
-
-def test_round5b_back_to_back_manual_request_cannot_overwrite_successor(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    workspace_id = _name("workspace")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=workspace_id,
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    model = _CompactionScriptedModel(
-        [
-            _text_stream("historical answer " + "x" * 80_000),
-            _text_stream("successor was consumed exactly once"),
-        ],
-        "A concise handoff for the first manual compaction.",
-    )
-    owner = HostCompactionRuntimeOwner(
-        policy=ResolvedCompactionPolicy(
-            automatic_enabled=False,
-            minimum_reclaim_tokens=1,
-        )
-    )
-    installed_provider_inputs: list[object] = []
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        compaction_owner=owner,
-        workspace_id=workspace_id,
-        provider_input_installed_observer=installed_provider_inputs.append,
-    )
-    captured_successors: list[object] = []
-    second_waiters: list[asyncio.Future[object]] = []
-
-    async def exercise():
-        await runner.run_turn(frozen_test_prompt("first question"))
-        command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        first_request, first_waiter = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
-        execute_active = runner.compaction.execute_active
-
-        async def inject_second_after_first_settlement(**kwargs):
-            execution = await execute_active(**kwargs)
-            manual_request = kwargs["manual_request"]
-            if (
-                manual_request is not None
-                and manual_request.request_id == first_request.request_id
-            ):
-                assert execution.successor_dispatch is not None
-                captured_successors.append(execution.successor_dispatch)
-                _second_request, second_waiter = await owner.request_manual(
-                    command_id=_name("command"),
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    expected_turn_id=turn_id,
-                    force=True,
-                )
-                second_waiters.append(second_waiter)
-            return execution
-
-        runner.compaction.execute_active = inject_second_after_first_settlement
-        try:
-            result = await runner.run_turn(
-                frozen_test_prompt("second question"), command_id=command_id
-            )
-            first_outcome = await first_waiter
-            assert len(second_waiters) == 1
-            assert not second_waiters[0].done()
-        finally:
-            await owner.aclose()
-        deferred_outcome = await second_waiters[0]
-        return result, first_outcome, deferred_outcome
-
-    result, first_outcome, deferred_outcome = asyncio.run(exercise())
-
-    assert result.final_text == "successor was consumed exactly once"
-    assert first_outcome.disposition is CompactionDisposition.COMPACTED
-    assert deferred_outcome.public_code == "HOST_CLOSING"
-    assert len(model.summary_transport.contexts) == 1
-    assert len(model.requests) == 2
-    assert installed_provider_inputs == model.requests
-    assert len(captured_successors) == 1
-    captured = captured_successors[0]
-    assert not captured.owns_execution_authority
-    with pytest.raises(RuntimeError, match="authority is consumed"):
-        captured.take_execution_authority()
-    with pytest.raises(RuntimeError, match="authority is consumed"):
-        captured.close()
 
 
 def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
@@ -5215,19 +5067,15 @@ def test_round5b_summary_tool_call_gets_one_ephemeral_repair_and_no_dispatch(
     )
 
     async def exercise():
-        await runner.run_turn(frozen_test_prompt("first question"))
+        first = await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, outcome = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
+        outcome = await _compact_idle(
+            runner, turn_id=first.turn_id, command_id=random_id("command")
         )
         result = await runner.run_turn(
             frozen_test_prompt("second question"), command_id=command_id
         )
-        compacted = await outcome
+        compacted = outcome
         await owner.aclose()
         return result, compacted
 
@@ -5304,19 +5152,15 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
     )
 
     async def exercise():
-        await runner.run_turn(frozen_test_prompt("first question"))
+        first = await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, outcome = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
+        outcome = await _compact_idle(
+            runner, turn_id=first.turn_id, command_id=random_id("command")
         )
         result = await runner.run_turn(
             frozen_test_prompt("second question"), command_id=command_id
         )
-        failed = await outcome
+        failed = outcome
         await owner.aclose()
         return result, failed
 
@@ -5342,7 +5186,7 @@ def test_round5b_second_summary_tool_call_discards_without_canonical_effect(
     assert attempt_count == 0
 
 
-def test_round5b_cancelled_manual_summary_settles_detached_waiter(
+def test_cancelled_automatic_summary_settles_started_request(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -5365,7 +5209,9 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
     model.summary_transport = blocking
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
-            automatic_enabled=False,
+            automatic_enabled=True,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
             minimum_reclaim_tokens=1,
         )
     )
@@ -5385,12 +5231,6 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
         await runner.run_turn(frozen_test_prompt("first question"))
         command_id = _name("command")
         turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, outcome = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
         task = asyncio.create_task(
             runner.run_turn(
                 frozen_test_prompt("second question"), command_id=command_id
@@ -5400,15 +5240,20 @@ def test_round5b_cancelled_manual_summary_settles_detached_waiter(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        compacted = await asyncio.wait_for(outcome, timeout=1)
         blocking.release.set()
         await owner.aclose()
-        return compacted
+        return turn_id
 
-    compacted = asyncio.run(exercise())
+    turn_id = asyncio.run(exercise())
 
-    assert compacted.disposition is CompactionDisposition.FAILED
-    assert compacted.public_code == "COMPACTION_CANCELLED"
+    assert (
+        repository.read_turn_status(
+            session_id=session_id, turn_id=turn_id, deadline_monotonic=monotonic() + 10
+        ).value
+        == "INTERRUPTED"
+    )
+    assert len(model.requests) == 1
+    assert runner._safe_point._active_handle is None
 
 
 def test_round5b_mid_turn_tool_followup_compacts_then_finishes(
@@ -5670,6 +5515,7 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
     assert write_attempts == (0,)
     assert not (tmp_path / "must-not-exist.txt").exists()
 
+
 def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization(
     stage2_migrated_postgres_database,
 ) -> None:
@@ -5753,9 +5599,10 @@ def test_final_wire_below_trigger_compaction_precheck_reuses_one_materialization
     assert result.final_text == "ordinary final-wire dispatch"
     assert measurements == 1
     assert hydrations == 1
-    # A valid unpublished ROOT candidate already carries the exact measured
-    # successor.  The below-trigger case must not reopen the compaction source.
-    assert source_preparations == 0
+    # The started request prechecks one semantic source and reuses its exact
+    # below-trigger wire observation for ordinary dispatch without a second
+    # materialization or replay hydration.
+    assert source_preparations == 1
     assert installs == 1
     assert fences == 0
     assert len(model.requests) == 1
@@ -5923,6 +5770,8 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
             minimum_reclaim_tokens=1,
         )
     )
@@ -5968,17 +5817,11 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
         runner._provider_dispatch.bind_selected_provider_dispatch = record_transfer
         runner._provider_dispatch.install_provider_open = record_install
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, waiter = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
+        automatic_outcomes = _record_automatic_compaction(runner)
         result = await runner.run_turn(
             frozen_test_prompt("second question"), command_id=command_id
         )
-        outcome = await waiter
+        outcome = automatic_outcomes[-1]
         await owner.aclose()
         return result, outcome
 
@@ -5987,13 +5830,13 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
     assert result.final_text == "final after Hook sibling"
     assert outcome.disposition is CompactionDisposition.COMPACTED
     assert _hook_context_bodies(model.requests[-1]) == (hook_text,)
-    # The unpublished direct admission, PRE_FULL source proof, summary call,
-    # post-FULL no-Hook base, and optional Hook sibling each own one exact
-    # candidate measurement.
+    # Source, summary, dry successor, post-FULL base and the selected Hook
+    # variant are measured without consuming transition authority. The shared
+    # final input boundary owns the final measurement and installation deadline.
     assert len(measured_deadlines) == 5
     assert measured_deadlines == sorted(measured_deadlines)
     assert len(install_deadlines) == 1
-    assert install_deadlines[0] > measured_deadlines[-1]
+    assert install_deadlines == [measured_deadlines[-1]]
     assert len(transferred_bases) == 1
     base = transferred_bases[0]
     assert not base.owns_execution_authority
@@ -6001,10 +5844,9 @@ def test_final_wire_post_full_hook_sibling_wins_with_one_authority_transfer(
         base.take_execution_authority()
     with pytest.raises(RuntimeError, match="authority is consumed"):
         base.close()
-    # SessionStart on the first ROOT, the compacted source dispatch, and the
-    # post-adoption Hook sibling each freeze one one-shot reservation.  The
-    # selected sibling transfers authority once and every phase retires once.
-    assert tuple(item.retire_calls for item in collector.reservations) == (1, 1, 1)
+    # Only the post-adoption input safe point freezes this fixture's Hook;
+    # summary source preparation never consumes the current request's context.
+    assert tuple(item.retire_calls for item in collector.reservations) == (1,)
     assert len(model.requests) == 2
 
 
@@ -6036,6 +5878,8 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
             minimum_reclaim_tokens=1,
         )
     )
@@ -6093,17 +5937,11 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
         runner._provider_dispatch.bind_selected_provider_dispatch = record_bind
         runner._provider_dispatch.install_provider_open = record_install
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, waiter = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
+        automatic_outcomes = _record_automatic_compaction(runner)
         result = await runner.run_turn(
             frozen_test_prompt("second question"), command_id=command_id
         )
-        outcome = await waiter
+        outcome = automatic_outcomes[-1]
         await owner.aclose()
         return result, outcome
 
@@ -6116,7 +5954,7 @@ def test_final_wire_post_full_hook_timeout_falls_back_with_fresh_install_deadlin
     assert install_deadline is not None
     assert install_deadline > hook_deadline
     assert bind_calls == 0
-    assert tuple(item.retire_calls for item in collector.reservations) == (1, 1, 1)
+    assert tuple(item.retire_calls for item in collector.reservations) == (1,)
     assert len(model.requests) == 2
 
 
@@ -6147,6 +5985,8 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
             automatic_enabled=False,
+            auto_trigger_ratio=0.05,
+            post_compaction_target_ratio=0.04,
             minimum_reclaim_tokens=1,
         )
     )
@@ -6183,38 +6023,21 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
 
             runner._provider_dispatch.bind_selected_provider_dispatch = fail_hook_bind
         command_id = _name("command")
-        turn_id = derive_id("turn", "command", session_id, command_id)
-        _request, waiter = await owner.request_manual(
-            command_id=_name("command"),
-            scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id=turn_id,
-            force=True,
-        )
+        owner.policy = replace(owner.policy, automatic_enabled=True)
         with pytest.raises(RuntimeError, match="injected"):
             await runner.run_turn(
                 frozen_test_prompt("second question"), command_id=command_id
             )
-        outcome = await waiter
         await owner.aclose()
-        return outcome
 
-    outcome = asyncio.run(exercise())
-
-    assert outcome.disposition is CompactionDisposition.COMPACTED
+    asyncio.run(exercise())
     assert runner._safe_point._active_handle is None  # noqa: SLF001
     assert len(model.requests) == 1
-    if failure_site == "hook_bind":
-        # The first ROOT, compaction source, and failing post-adoption sibling
-        # each relinquish their exact one-shot reservation.
-        assert tuple(item.retire_calls for item in collector.reservations) == (
-            1,
-            1,
-            1,
-        )
-    else:
-        # The rotated read fails before the post-adoption sibling is frozen;
-        # the first ROOT and compaction source reservations are still retired.
-        assert tuple(item.retire_calls for item in collector.reservations) == (1, 1)
+    # A rotated-read failure precedes any Hook reservation; a selected Hook
+    # bind failure must retire exactly its one post-adoption reservation.
+    assert tuple(item.retire_calls for item in collector.reservations) == (
+        (1,) if failure_site == "hook_bind" else ()
+    )
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -6224,18 +6047,19 @@ def test_final_wire_post_full_failure_closes_unique_handle_and_hook_reservation(
             (session_id,),
         ).fetchone()[0]
     assert snapshot_count == 1
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at",
+            (session_id,),
+        ).fetchall() == [("COMPLETED",), ("INTERRUPTED",)]
 
 
-@pytest.mark.parametrize("retry_recent", (False, True))
-def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
+def test_proactive_auto_compaction_starts_request_before_summary_and_preserves_input(
     stage2_migrated_postgres_database,
-    monkeypatch: pytest.MonkeyPatch,
-    retry_recent: bool,
 ) -> None:
-    from pulsara_agent.conversation_kernel.compaction import (
-        coordinator as compaction_coordinator,
-    )
-
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
     session_id = _name("session")
@@ -6248,17 +6072,12 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    summary = "A concise free-form handoff for the pending manual request."
     model = _LimitedCompactionScriptedModel(
         [
-            # The v3 final-wire estimator traverses ASCII JSON at four bytes
-            # per token.  Keep the combined source over budget while allowing the
-            # historical prefix and the post-compaction active request to fit
-            # independently.
             _text_stream("historical " + "x" * 120_000),
             _text_stream("automatic compaction final"),
         ],
-        summary,
+        "A concise checkpoint of the predecessor history.",
     )
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
@@ -6267,31 +6086,6 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
             minimum_reclaim_tokens=1,
         )
     )
-    source_collector = StaticContextSourceCollector()
-    pending_root_freezes = 0
-    second_command_id = _name("command")
-    second_turn_id = derive_id("turn", "command", session_id, second_command_id)
-    freeze_non_trigger_sources = source_collector.freeze_non_trigger_sources
-
-    def record_non_trigger_freeze(*args, **kwargs):
-        nonlocal pending_root_freezes
-        facts = kwargs["canonical_facts"]
-        if facts.canonical_input.identity.turn_id == second_turn_id:
-            pending_root_freezes += 1
-        return freeze_non_trigger_sources(*args, **kwargs)
-
-    monkeypatch.setattr(
-        source_collector,
-        "freeze_non_trigger_sources",
-        record_non_trigger_freeze,
-    )
-    if retry_recent:
-        monkeypatch.setattr(
-            compaction_coordinator,
-            "_ordinary_recent_suffixes",
-            lambda recent: (recent, ()),
-        )
-    memory_projection = _PolicyMemoryProjection()
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
@@ -6299,149 +6093,86 @@ def test_round5b_proactive_auto_compaction_runs_before_next_provider_open(
         model=model,
         tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
         live_bus=LiveAgentEventBus(),
-        context_source_collector=source_collector,
+        context_source_collector=StaticContextSourceCollector(),
         compaction_owner=owner,
         workspace_id=workspace_id,
-        memory_projection=memory_projection,
     )
-    input_reader = _HeadroomOrderingReader(
-        provider,
-        blob_reader=runner._provider_dispatch._input_reader._blob_reader,
-    )
-    runner._provider_dispatch._input_reader = input_reader
-    runner.compaction._input_reader = input_reader
-    prospective_family_calls = 0
-    prospective_candidate_calls = 0
-    prepare_family = runner._provider_dispatch.prepare_prospective_root_candidate_family
-    prepare_candidate = runner._provider_dispatch.prepare_prospective_root_candidate
-
-    async def record_prospective_family(**kwargs):
-        nonlocal prospective_family_calls
-        if kwargs["candidate"].exact_turn_id == second_turn_id:
-            prospective_family_calls += 1
-        return await prepare_family(**kwargs)
-
-    async def record_prospective_candidate(family, **kwargs):
-        nonlocal prospective_candidate_calls
-        if kwargs["candidate"].exact_turn_id == second_turn_id:
-            prospective_candidate_calls += 1
-        selected = await prepare_candidate(family, **kwargs)
-        if (
-            retry_recent
-            and kwargs["candidate"].exact_turn_id == second_turn_id
-            and prospective_candidate_calls == 2
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
-            )
-        return selected
-
-    runner._provider_dispatch.prepare_prospective_root_candidate_family = (
-        record_prospective_family
-    )
-    runner._provider_dispatch.prepare_prospective_root_candidate = (
-        record_prospective_candidate
-    )
-    triggers: list[object] = []
-    trigger_candidates: list[AutomaticCompactionTriggerCandidate] = []
-    source_wire_quotes: list[tuple[int, int]] = []
-    prepare_precompile = runner.compaction.prepare_precompile
-
-    async def record_precompile(**kwargs):
-        decision = await prepare_precompile(**kwargs)
-        if isinstance(decision, AutomaticCompactionTriggerCandidate):
-            trigger_candidates.append(decision)
-        return decision
-
-    runner.compaction.prepare_precompile = record_precompile
+    command_id = _name("command")
+    second_turn_id = derive_id("turn", "command", session_id, command_id)
+    instruction = "y" * 80_000
+    triggers = []
     execute = runner.compaction.execute_active
 
-    async def record_trigger(**kwargs):
+    async def record_started_request(**kwargs):
         triggers.append(kwargs["trigger"])
+        assert kwargs["turn_id"] == second_turn_id
+        assert len(model.requests) == 1
+        with provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 30,
+        ) as connection:
+            state = connection.execute(
+                "SELECT t.status, r.revision_ordinal, e.entry_sequence, e.id "
+                "FROM pulsara_v3.turns t JOIN pulsara_v3.turn_context_binding_revisions r "
+                "ON r.session_id=t.session_id AND r.id=t.current_context_binding_revision_id "
+                "JOIN pulsara_v3.transcript_entries e "
+                "ON e.session_id=t.session_id AND e.id=t.initial_entry_id "
+                "WHERE t.session_id=%s AND t.id=%s",
+                (session_id, second_turn_id),
+            ).fetchone()
+            assert state is not None
+            assert state[:2] == ("RUNNING", 0)
+            assert kwargs["first_call_history_through_sequence"] == state[2] - 1
         return await execute(**kwargs)
 
-    runner.compaction.execute_active = record_trigger
-    recover_pending_root = runner.compaction.recover_pending_root_input
-
-    async def record_pending_root_recovery(**kwargs):
-        triggers.append(CompactionTrigger.AUTO_ACTIVE_CONTEXT)
-        return await recover_pending_root(**kwargs)
-
-    runner.compaction.recover_pending_root_input = record_pending_root_recovery
-    automatic_order: list[str] = []
-    prepare_source = runner._provider_dispatch.prepare_compaction_source
-    run_fenced = owner.run_fenced
-
-    async def record_source(**kwargs):
-        automatic_order.append("source")
-        prepared = await prepare_source(**kwargs)
-        source_wire_quotes.append(
-            (
-                prepared.wire_quote.raw_final_wire_estimated_input_tokens,
-                prepared.wire_quote.effective_input_budget_tokens,
-            )
-        )
-        return prepared
-
-    async def record_fence(*args, **kwargs):
-        automatic_order.append("fence")
-        return await run_fenced(*args, **kwargs)
-
-    runner._provider_dispatch.prepare_compaction_source = record_source
-    owner.run_fenced = record_fence
+    runner.compaction.execute_active = record_started_request
 
     async def exercise():
         first = await runner.run_turn(frozen_test_prompt("first"))
-        automatic_order.clear()
-        source_wire_quotes.clear()
-        input_reader.operations.clear()
         second = await runner.run_turn(
-            frozen_test_prompt("y" * 80_000),
-            command_id=second_command_id,
+            frozen_test_prompt(instruction),
+            command_id=command_id,
         )
         await owner.aclose()
         return first, second
 
     first, second = asyncio.run(exercise())
-
     assert first.final_text.startswith("historical")
     assert second.final_text == "automatic compaction final"
     assert triggers == [CompactionTrigger.AUTO_ACTIVE_CONTEXT]
-    assert automatic_order == ["fence", "source"]
-    # The unpublished next ROOT request now reaches the same compaction owner
-    # before its writer, so it does not first become an active auto-trigger.
-    assert trigger_candidates == []
-    # One pre-compaction prospective attempt discovers the hard pressure.  The
-    # compaction retry loop freezes one dry family; after FULL it discards that
-    # authority and freezes/measures a fresh adopted successor family.
-    # Removing another recent item adds one authority-free dry compilation.
-    assert prospective_family_calls == 3
-    assert prospective_candidate_calls == (4 if retry_recent else 3)
-    assert pending_root_freezes == 3
-    assert memory_projection.preference_calls == 5
-    assert memory_projection.recall_calls == 3
-    # The predecessor remains executable by itself; the exact predecessor plus
-    # unpublished next request is the candidate that crosses the hard budget.
-    assert source_wire_quotes[0][0] <= source_wire_quotes[0][1]
     assert len(model.summary_transport.contexts) == 1
-    assert (
-        model.summary_transport.contexts[
-            0
-        ].provider_wire_input_plan.quote.budget_input_tokens
-        <= (source_wire_quotes[0][1])
+    assert not any(
+        instruction in part.text
+        for message in model.summary_transport.contexts[0].messages
+        for part in message.content
+        if isinstance(part, LLMTextPart)
     )
     assert len(model.requests) == 2
-    successor_snapshot = _context_snapshot_payload(model.requests[1])
-    assert successor_snapshot["continuation"]["mode"] == "AWAIT_NEXT_USER"
-    assert successor_snapshot["continuation"]["active_request"] is None
     assert (
         sum(
-            message.content == (LLMTextPart("y" * 80_000),)
+            message.content == (LLMTextPart(instruction),)
             for message in model.requests[1].compiled_input.messages
         )
         == 1
     )
-    assert input_reader.operations.count("dispatch") >= 2
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT t.status, r.revision_ordinal FROM pulsara_v3.turns t "
+            "JOIN pulsara_v3.turn_context_binding_revisions r "
+            "ON r.session_id=t.session_id AND r.id=t.current_context_binding_revision_id "
+            "WHERE t.session_id=%s AND t.id=%s",
+            (session_id, second_turn_id),
+        ).fetchone() == ("COMPLETED", 1)
+        assert connection.execute(
+            "SELECT r.revision_ordinal FROM pulsara_v3.turns t "
+            "JOIN pulsara_v3.turn_context_binding_revisions r "
+            "ON r.session_id=t.session_id AND r.id=t.current_context_binding_revision_id "
+            "WHERE t.session_id=%s AND t.id=%s",
+            (session_id, first.turn_id),
+        ).fetchone() == (0,)
 
 
 def test_round5b_idle_manual_compaction_adopts_without_successor_open(
@@ -6483,10 +6214,10 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
 
     async def exercise():
         first = await runner.run_turn(frozen_test_prompt("question"))
-        outcome = await runner.compaction.compact_idle_turn(
+        outcome = await _compact_idle(
+            runner,
             turn_id=first.turn_id,
             command_id=random_id("command"),
-            force=True,
         )
         await owner.aclose()
         return first, outcome
@@ -6556,8 +6287,14 @@ def test_round5b_idle_manual_compaction_adopts_without_successor_open(
     )
 
 
-def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
+@pytest.mark.parametrize(
+    "summary_characters",
+    (100_000, 1_200_000),
+    ids=("fits-despite-growth", "hard-budget-failure"),
+)
+def test_idle_manual_summary_uses_actual_budget_even_when_history_is_short(
     stage2_migrated_postgres_database,
+    summary_characters: int,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -6573,7 +6310,7 @@ def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
     )
     model = _CompactionScriptedModel(
         [_text_stream("brief idle answer")],
-        "oversized handoff " + "x" * 100_000,
+        "selected-model handoff " + "x" * summary_characters,
     )
     owner = HostCompactionRuntimeOwner(
         policy=ResolvedCompactionPolicy(
@@ -6595,19 +6332,22 @@ def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
 
     async def exercise():
         first = await runner.run_turn(frozen_test_prompt("question"))
-        outcome = await runner.compaction.compact_idle_turn(
+        outcome = await _compact_idle(
+            runner,
             turn_id=first.turn_id,
             command_id=random_id("command"),
-            force=True,
         )
         await owner.aclose()
         return outcome
 
     outcome = asyncio.run(exercise())
 
-    assert outcome.disposition is CompactionDisposition.NOT_NEEDED
-    assert outcome.public_code == "CONTEXT_ALREADY_COMPACT"
-    assert outcome.snapshot_id is None
+    succeeds = summary_characters == 100_000
+    assert outcome.disposition is (
+        CompactionDisposition.COMPACTED if succeeds else CompactionDisposition.FAILED
+    )
+    assert outcome.public_code == ("COMPACTED" if succeeds else "COMPACTION_FAILED")
+    assert (outcome.snapshot_id is not None) is succeeds
     assert len(model.summary_transport.contexts) == 1
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -6617,7 +6357,7 @@ def test_round5b_idle_manual_non_reclaim_matches_active_not_needed(
             "SELECT count(*) FROM pulsara_v3.context_snapshots WHERE session_id = %s",
             (session_id,),
         ).fetchone()[0]
-    assert snapshot_count == 0
+    assert snapshot_count == int(succeeds)
 
 
 def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
@@ -6673,8 +6413,7 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
         )
         # The direct prompt has passed its writer gate and now owns the first
         # provider safe point.  Steers that become addressable in this interval
-        # must still enter that first exact input through the ordinary steer
-        # prospective-admission owner.
+        # enter that first exact input through the common steer safe point.
         assert await asyncio.to_thread(pending_read_started.wait, 5)
         for index, text in enumerate(("steer one", "steer two"), start=1):
             steer_command = _name("command")
@@ -6700,7 +6439,7 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
     result = asyncio.run(exercise())
     assert result.final_text == "one call"
     assert len(model.requests) == 1
-    assert pending_read_calls >= 2
+    assert pending_read_calls == 1
     user_messages = [
         text_part_values(message.content)[0]
         for message in model.requests[0].compiled_input.messages
@@ -6709,6 +6448,21 @@ def test_round3_1_empty_epoch_absorbs_pre_first_call_steers_once(
         and "pulsara_runtime_observation" not in join_text_content(message.content)
     ]
     assert user_messages == ["initial", "steer one", "steer two"]
+
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 10,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status, count(*) FROM pulsara_v3.prompt_queue_items "
+            "WHERE session_id=%s AND target_turn_id=%s GROUP BY status",
+            (session_id, turn_id),
+        ).fetchall() == [("CONSUMED", 2)]
+        assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.transcript_entries "
+            "WHERE session_id=%s AND turn_id=%s AND entry_kind='USER_STEER'",
+            (session_id, turn_id),
+        ).fetchone() == (2,)
 
 
 def test_memory_bad_citation_settles_and_model_can_reply_then_continue(
@@ -7599,8 +7353,9 @@ def test_round3_1_future_lane_does_not_block_active_steer_batch(
         return await task
 
     asyncio.run(exercise())
-    assert collector.freeze_calls == 2
-    assert collector.complete_calls == 2
+    # The RUNNING request and its steer share one frozen preparation basis.
+    assert collector.freeze_calls == 1
+    assert collector.complete_calls == 1
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
@@ -7767,8 +7522,9 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
 
     asyncio.run(exercise())
     assert reader.calls == 3
-    assert collector.freeze_calls == 2
-    assert collector.complete_calls == 2
+    # The RUNNING request and its steer share one frozen preparation basis.
+    assert collector.freeze_calls == 1
+    assert collector.complete_calls == 1
     assert model.requests == []
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -7779,11 +7535,12 @@ def test_round3_1_post_consumption_read_failure_interrupts_without_open_or_recom
             "WHERE session_id = %s AND id = %s",
             (session_id, steer_queue_item_id),
         ).fetchone() == ("CONSUMED",)
+        # This injected generic reader error has no typed prefix-conflict kind.
         assert connection.execute(
             "SELECT status, terminal_reason FROM pulsara_v3.turns "
             "WHERE session_id = %s AND id = %s",
             (session_id, turn_id),
-        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_PLAN_CONFLICT")
+        ).fetchone() == ("INTERRUPTED", "FOREGROUND_EXECUTION_INTERRUPTED")
 
 
 def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_entry(
@@ -7874,7 +7631,7 @@ def test_round3_1_pre_consumption_stale_plan_discards_and_replans_without_steer_
         ).fetchone() == (0,)
 
 
-def test_k3_direct_input_failure_rejects_before_user_acceptance_and_provider_open(
+def test_k3_direct_input_failure_interrupts_started_turn_before_provider_open(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -7900,7 +7657,7 @@ def test_k3_direct_input_failure_rejects_before_user_acceptance_and_provider_ope
         maximum_input_tokens_per_call=4,
     )
     with pytest.raises(StructuredModelInputCompileError) as failure:
-        asyncio.run(runner.run_turn(frozen_test_prompt("reject before acceptance")))
+        asyncio.run(runner.run_turn(frozen_test_prompt("retain exact started request")))
     assert failure.value.kind is (
         ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET
     )
@@ -7909,7 +7666,7 @@ def test_k3_direct_input_failure_rejects_before_user_acceptance_and_provider_ope
     rows = repository.rehydrate_session(
         session_id=session_id, deadline_monotonic=monotonic() + 30
     )
-    assert not rows
+    assert [row["entry_kind"] for row in rows] == ["USER_MESSAGE"]
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 30,
@@ -7921,15 +7678,25 @@ def test_k3_direct_input_failure_rejects_before_user_acceptance_and_provider_ope
             "(SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id = %s)",
             (session_id, session_id, session_id),
         ).fetchone()
-        assert counts == (0, 0, 0)
+        assert counts == (1, 1, 1)
         assert connection.execute(
             "SELECT latest_entry_sequence FROM pulsara_v3.sessions WHERE id = %s",
             (session_id,),
-        ).fetchone() == (0,)
+        ).fetchone() == (1,)
+
+        assert connection.execute(
+            "SELECT status, terminal_reason, initial_entry_id FROM pulsara_v3.turns "
+            "WHERE session_id=%s",
+            (session_id,),
+        ).fetchone() == (
+            "INTERRUPTED",
+            "PROVIDER_INPUT_RESOURCE_EXHAUSTED",
+            rows[0]["id"],
+        )
 
 
 @pytest.mark.parametrize("failure_type", (TimeoutError, asyncio.CancelledError))
-def test_k3_soft_trigger_recovery_failure_closes_unpublished_prepared_input(
+def test_k3_soft_trigger_failure_closes_prepared_input_and_interrupts_started_turn(
     failure_type: type[BaseException],
     stage2_migrated_postgres_database,
 ) -> None:
@@ -7963,18 +7730,18 @@ def test_k3_soft_trigger_recovery_failure_closes_unpublished_prepared_input(
         compaction_owner=owner,
         workspace_id=workspace_id,
     )
-    runner.compaction.prospective_root_crosses_automatic_threshold = lambda _prepared: (
-        True
+    runner.compaction.wire_decision_crosses_automatic_threshold = (
+        lambda _dispatch, _decision: True
     )
 
     async def fail_recovery(**_kwargs):
-        raise failure_type("injected prospective compaction failure")
+        raise failure_type("injected active compaction failure")
 
-    runner.compaction.recover_pending_root_input = fail_recovery
+    runner.compaction.execute_active = fail_recovery
 
     async def exercise() -> None:
-        with pytest.raises(failure_type, match="injected prospective compaction"):
-            await runner.run_turn(frozen_test_prompt("unpublished input"))
+        with pytest.raises(failure_type, match="injected active compaction"):
+            await runner.run_turn(frozen_test_prompt("started input"))
         await owner.aclose()
 
     asyncio.run(exercise())
@@ -7983,12 +7750,18 @@ def test_k3_soft_trigger_recovery_failure_closes_unpublished_prepared_input(
     assert tools._active == set()  # noqa: SLF001
     assert tools.release_calls == [1]
     assert model.requests == []
-    assert (
-        repository.rehydrate_session(
-            session_id=session_id, deadline_monotonic=monotonic() + 30
-        )
-        == ()
+    rows = repository.rehydrate_session(
+        session_id=session_id, deadline_monotonic=monotonic() + 30
     )
+    assert [row["entry_kind"] for row in rows] == ["USER_MESSAGE"]
+    with provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        assert connection.execute(
+            "SELECT status, initial_entry_id FROM pulsara_v3.turns WHERE session_id=%s",
+            (session_id,),
+        ).fetchone() == ("INTERRUPTED", rows[0]["id"])
 
 
 def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
@@ -8036,11 +7809,16 @@ def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.turns WHERE session_id = %s",
             (session_id,),
-        ).fetchone() == (0,)
+        ).fetchone() == (1,)
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.transcript_entries WHERE session_id = %s",
             (session_id,),
-        ).fetchone() == (0,)
+        ).fetchone() == (1,)
+
+        assert connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.turns WHERE session_id=%s",
+            (session_id,),
+        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
 
 
 def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_open(
@@ -8105,22 +7883,16 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
             "FROM pulsara_v3.tool_results WHERE session_id = %s AND id = %s",
             (session_id, result_id),
         ).fetchone() == ("SUCCESS", 50)
-        assert (
-            connection.execute(
-                "SELECT status, terminal_reason FROM pulsara_v3.turns "
-                "WHERE session_id = %s AND id = %s",
-                (session_id, derive_id("turn", "command", session_id, command_id)),
-            ).fetchone()
-            is None
-        )
-        assert (
-            connection.execute(
-                "SELECT 1 FROM pulsara_v3.session_commands "
-                "WHERE session_id = %s AND command_id = %s",
-                (session_id, command_id),
-            ).fetchone()
-            is None
-        )
+        assert connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.turns "
+            "WHERE session_id = %s AND id = %s",
+            (session_id, derive_id("turn", "command", session_id, command_id)),
+        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+        assert connection.execute(
+            "SELECT 1 FROM pulsara_v3.session_commands "
+            "WHERE session_id = %s AND command_id = %s",
+            (session_id, command_id),
+        ).fetchone() == (1,)
 
 
 def test_round3_compile_failure_observer_cannot_block_turn_interruption(
@@ -8160,7 +7932,11 @@ def test_round3_compile_failure_observer_cannot_block_turn_interruption(
             "SELECT count(*) FROM pulsara_v3.turns WHERE session_id = %s",
             (session_id,),
         ).fetchone()[0]
-    assert turn_count == 0
+        assert connection.execute(
+            "SELECT status, terminal_reason FROM pulsara_v3.turns WHERE session_id=%s",
+            (session_id,),
+        ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
+    assert turn_count == 1
 
 
 def test_round3_source_registry_drift_interrupts_with_zero_provider_open(
@@ -9655,15 +9431,11 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
             ].wire_input_plan.provider_replay_hydration_fingerprint
             is not None
         )
-    assert len(reader.dispatch_deadlines) == (1 if fail_hydration else 3)
+    # The canonical base and Reader-issued owner observation use the same
+    # ordinary preparation deadline, including a later hydration failure.
+    assert len(reader.dispatch_deadlines) == 2
     assert len(reader.hydration_deadlines) == 1
-    assert reader.dispatch_deadlines[0] == reader.hydration_deadlines[0]
-    if not fail_hydration:
-        # Post-writer activation performs one exact canonical reread under its
-        # fresh safe-point deadline, then Reader itself issues the authority
-        # carrier from a second fresh read; neither rehydrates selected replay.
-        assert reader.dispatch_deadlines[1] >= reader.dispatch_deadlines[0]
-        assert reader.dispatch_deadlines[2] == reader.dispatch_deadlines[1]
+    assert reader.dispatch_deadlines == [reader.hydration_deadlines[0]] * 2
 
 
 def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(

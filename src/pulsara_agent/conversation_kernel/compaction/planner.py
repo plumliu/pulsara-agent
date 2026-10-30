@@ -3,7 +3,7 @@
 from __future__ import annotations
 from pulsara_agent.scheduling.contracts import ScheduledProvenance
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from time import monotonic
 
 from pulsara_agent.conversation_kernel.compaction.contracts import (
@@ -192,20 +192,33 @@ class DestinationDialogueProjection:
 
 def compaction_effective_history_has_image(
     canonical_read: FrozenCompactionCanonicalRead,
+    *,
+    first_call_history_through_sequence: int | None = None,
 ) -> bool:
     """Return whether the effective history, excluding the exact active request, has images."""
 
-    return provider_dispatch_effective_history_has_image(canonical_read.dispatch_read)
+    return provider_dispatch_effective_history_has_image(
+        canonical_read.dispatch_read,
+        first_call_history_through_sequence=first_call_history_through_sequence,
+    )
 
 
 def provider_dispatch_effective_history_has_image(
     dispatch_read: FrozenCanonicalProviderDispatchRead,
+    *,
+    first_call_history_through_sequence: int | None = None,
 ) -> bool:
     """Inspect typed history while excluding the current exact request."""
 
     canonical = dispatch_read.compile_snapshot.canonical_input
     active_entry_id = canonical.identity.initial_entry_id
     for item in canonical.items:
+        if (
+            first_call_history_through_sequence is not None
+            and item.source_entry_sequence is not None
+            and item.source_entry_sequence > first_call_history_through_sequence
+        ):
+            continue
         if item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT:
             carrier = item.content
             if not isinstance(carrier, CompactionSnapshotCarrier):
@@ -328,8 +341,10 @@ def project_destination_dialogue_plan_for_text_only_handover(
 
 def project_compaction_read_for_text_only_handover(
     canonical_read: FrozenCompactionCanonicalRead,
+    *,
+    first_call_history_through_sequence: int | None = None,
 ) -> FrozenCompactionCanonicalRead:
-    """Build the process-local Tier-3 P view of one authoritative canonical cut.
+    """Build the process-local destination history view of one authoritative canonical cut.
 
     The exact active request of a running turn remains untouched.  Every historical
     image occurrence becomes the ordinary text part required by D4.  A terminal
@@ -390,7 +405,11 @@ def project_compaction_read_for_text_only_handover(
                 raise TypeError("canonical snapshot item lacks its typed carrier")
             items.append(replace(item, content=project_carrier(carrier)))
             continue
-        if item.source_entry_id == active_entry_id:
+        if item.source_entry_id == active_entry_id or (
+            first_call_history_through_sequence is not None
+            and item.source_entry_sequence is not None
+            and item.source_entry_sequence > first_call_history_through_sequence
+        ):
             items.append(item)
             continue
         if isinstance(item.content, tuple) and content_has_image(item.content):
@@ -485,6 +504,7 @@ def project_compaction_read_for_text_only_handover(
             < n.display_after_entry_sequence
             <= projected_range.source_through_sequence
         ),
+        executed_history_interruptions=canonical_read.executed_history_interruptions,
     )
 
 
@@ -492,6 +512,7 @@ def freeze_destination_dialogue_projection_plan(
     *,
     canonical_read: FrozenCompactionCanonicalRead,
     active_request: FrozenCompactionActiveRequest | None,
+    source_through_sequence: int | None = None,
 ) -> DestinationDialogueProjectionPlan:
     """Freeze exact historical turn units from the current effective lineage."""
 
@@ -505,10 +526,20 @@ def freeze_destination_dialogue_projection_plan(
     else:
         if (
             canonical_read.turn_status != "RUNNING"
-            or active_request.location
-            is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
-            or active_request.content is None
             or active_request.entry_id != canonical.identity.initial_entry_id
+            or (
+                active_request.location
+                is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+                and active_request.content is None
+            )
+            or (
+                active_request.location
+                is CompactionActiveRequestLocation.CANONICAL_SUFFIX
+                and (
+                    source_through_sequence is None
+                    or active_request.entry_sequence <= source_through_sequence
+                )
+            )
         ):
             raise CompactionPlanningError(
                 "destination projection lacks one exact active request"
@@ -517,6 +548,12 @@ def freeze_destination_dialogue_projection_plan(
     outcome_by_call: dict[tuple[str, str], DestinationToolEvidence] = {}
     outcome_ordinal = 0
     for item in canonical_read.safe_head_range.ordered_items:
+        if (
+            source_through_sequence is not None
+            and item.source_entry_sequence is not None
+            and item.source_entry_sequence > source_through_sequence
+        ):
+            continue
         if item.item_kind not in {
             FrozenProviderInputItemKind.TOOL_RESULT,
             FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
@@ -542,6 +579,10 @@ def freeze_destination_dialogue_projection_plan(
             result_content=(item.content if isinstance(item.content, tuple) else None),
         )
     for closure in canonical_read.safe_head_range.closures:
+        if source_through_sequence is not None and (
+            closure.target_provider_input_through_sequence > source_through_sequence
+        ):
+            continue
         key = (closure.assistant_entry_id, closure.tool_call_id)
         if key in outcome_by_call:
             continue
@@ -560,6 +601,11 @@ def freeze_destination_dialogue_projection_plan(
     grouped: dict[str, list[FrozenProviderInputItem]] = {}
     turn_order: list[str] = []
     for item in canonical_read.safe_head_range.ordered_items:
+        if source_through_sequence is not None and (
+            item.source_entry_sequence is not None
+            and item.source_entry_sequence > source_through_sequence
+        ):
+            continue
         if (
             (active_entry_id is not None and item.source_entry_id == active_entry_id)
             or item.item_kind
@@ -1126,18 +1172,20 @@ def _synthetic_approved_plan_fact(
         if pinned is not None
         else PlanApprovedMaterializationDisposition.MATERIALIZE_REFERENCED_BLOCK
     )
-    provisional = replace(
-        fact,
+    values = {field.name: getattr(fact, field.name) for field in fields(fact)}
+    values.update(
         disposition=disposition,
         pinned_canonical_item_fingerprint=(
             None if pinned is None else provider_input_item_fingerprint(pinned)
         ),
         fact_fingerprint="",
     )
-    return replace(
-        provisional,
-        fact_fingerprint=approved_plan_materialization_fingerprint(provisional),
-    )
+    provisional = ApprovedPlanMaterializationFact.__new__(ApprovedPlanMaterializationFact)
+    for name, value in values.items():
+        object.__setattr__(provisional, name, value)
+    values["fact_fingerprint"] = approved_plan_materialization_fingerprint(provisional)
+    return ApprovedPlanMaterializationFact(**values)
+
 
 
 def freeze_compaction_source_view(
@@ -1419,6 +1467,12 @@ def _safe_summary_boundaries(
         for item in canonical.items
         if item.source_entry_id is not None and item.source_entry_sequence is not None
     }
+    snapshot_sequence_by_item = {
+        provider_input_item_fingerprint(item): item.source_entry_sequence
+        for item in canonical.items
+        if isinstance(item, FrozenProviderInputItem)
+        and item.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
+    }
     placements = source_projection.message_placements
 
     def placement_sequences(placement) -> tuple[int, ...]:
@@ -1433,7 +1487,10 @@ def _safe_summary_boundaries(
                 )
             return tuple(int(value) for value in values)
         if placement.origin_entry_id is None:
-            return ()
+            sequence = snapshot_sequence_by_item.get(
+                getattr(placement, "origin_item_fingerprint", None)
+            )
+            return () if sequence is None else (sequence,)
         sequence = sequence_by_entry.get(placement.origin_entry_id)
         return () if sequence is None else (sequence,)
 
@@ -1480,7 +1537,13 @@ def _safe_summary_boundaries(
             next_attachment = getattr(next_placement, "tool_attachment_source", None)
             if (
                 next_message.tool_call_id is not None
-                or next_placement.origin_entry_id == entry_id
+                or (entry_id is not None and next_placement.origin_entry_id == entry_id)
+                or (
+                    entry_id is None
+                    and getattr(placement, "origin_item_fingerprint", None) is not None
+                    and getattr(next_placement, "origin_item_fingerprint", None)
+                    == placement.origin_item_fingerprint
+                )
                 or (
                     entry_id is not None
                     and next_attachment is not None
@@ -1560,6 +1623,7 @@ def enumerate_safe_summary_prefixes(
     retained_group_count: int,
     source_projection: FrozenModelInputSemanticProjection,
     deadline_monotonic: float | None = None,
+    maximum_source_through_sequence: int | None = None,
 ) -> tuple[tuple[ProtectedTailSelectionFact, ProviderPrefixCutProof], ...]:
     """Return every complete safe prefix, longest first, without token pruning."""
 
@@ -1585,6 +1649,8 @@ def enumerate_safe_summary_prefixes(
             boundary=boundary,
         )
         for count, boundary in boundaries
+        if maximum_source_through_sequence is None
+        or boundary <= maximum_source_through_sequence
     )
 
 

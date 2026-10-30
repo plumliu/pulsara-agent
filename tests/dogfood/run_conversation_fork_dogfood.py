@@ -268,7 +268,7 @@ async def run(model_id, wire_api, report):
                     "uncompacted", anchor_a, "FORK_ALPHA_812", ["FUTURE_B_913"]
                 )
                 compacted = await parent.compact_context(
-                    command_id=random_id("command"), force=True
+                    command_id=random_id("command")
                 )
                 report["compaction"] = {
                     "disposition": compacted.disposition.value,

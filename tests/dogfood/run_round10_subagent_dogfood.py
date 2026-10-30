@@ -1,4 +1,7 @@
-"""Run the Round 10 real-provider orchestration activation dogfood.
+"""Historical Agent-task experiments with reusable observation helpers.
+
+These scenarios target the retired task API and are not acceptance evidence
+for the current Agent/Work or compaction contracts.
 
 The probe reads one exact saved model connection, owns an ephemeral clean-v0
 PostgreSQL database, and keeps the saved settings read-only. Raw prompts and
@@ -23,11 +26,7 @@ from tempfile import TemporaryDirectory
 from time import monotonic
 from uuid import uuid4
 
-import yaml
 
-from pulsara_agent.conversation_kernel.compaction.contracts import (
-    CompactionDisposition,
-)
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
@@ -36,12 +35,6 @@ from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.conversation_kernel.subagents import SubagentTaskStatus
-from pulsara_agent.mcp_config import load_mcp_server_configs
-from pulsara_agent.model_input.continuity import (
-    ProviderInputContinuityScope,
-    decode_runtime_observation,
-)
-from pulsara_agent.model_input.contracts import ContextSourceKind, ModelInputScopeKind
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.llm.runtime import ModelRuntime
@@ -61,7 +54,6 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
 )
 
 
-_MCP_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "round9_mcp_server.py"
 
 
 def _saved_connection(settings: LocalSettings, connection_id: str):
@@ -174,32 +166,6 @@ async def _wait_for_tasks_to_settle(
         await asyncio.sleep(0.05)
 
 
-async def _wait_for_capacity_frontier(
-    session, *, timeout_seconds: float
-) -> dict[str, str]:
-    expected_keys = {"cap0", "cap1", "cap2", "cap3", "mcp_queued"}
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    latest: dict[str, str] = {}
-    while True:
-        rows = await _task_rows(session)
-        latest = {
-            str(row["task_key"]): str(row["status"])
-            for row in rows
-            if row.get("task_key") in expected_keys
-        }
-        if (
-            set(latest) == expected_keys
-            and sum(value == "ACTIVE" for value in latest.values()) == 4
-            and latest["mcp_queued"] == "PENDING_START"
-        ):
-            return latest
-        if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError(
-                "four-worker capacity frontier was not observed: " + repr(latest)
-            )
-        await asyncio.sleep(0.01)
-
-
 async def _wait_for_root_tool(
     session,
     *,
@@ -304,103 +270,6 @@ def _seed_completed_history(session, *, segments: int = 5) -> None:
         )
 
 
-def _install_compaction_exception_probe(
-    session, failures: list[dict[str, str]]
-) -> None:
-    coordinator = session._runner.compaction  # noqa: SLF001
-    original = coordinator._execute_compaction_fenced  # noqa: SLF001
-
-    async def execute(**kwargs):
-        try:
-            return await original(**kwargs)
-        except BaseException as exc:
-            failures.append({"type": type(exc).__name__, "message": str(exc)[:1024]})
-            raise
-
-    coordinator._execute_compaction_fenced = execute  # noqa: SLF001
-
-
-def _write_child_mcp_config(workspace: Path) -> None:
-    raw = {
-        "servers": {
-            "child": {
-                "enabled": True,
-                "required": True,
-                "scope_policy": "ROOT_AND_SUBAGENTS",
-                "supports_parallel_tool_calls": False,
-                "catalog_refresh_interval_ms": "DISABLED",
-                "exposure_policy": {
-                    "include_tool_names": ["direct_echo"],
-                    "invalid_tool_policy": "FAIL_SERVER",
-                },
-                "transport": {
-                    "type": "stdio",
-                    "command": os.sys.executable,
-                    "args": [os.fspath(_MCP_FIXTURE)],
-                },
-            }
-        }
-    }
-    target = workspace / ".pulsara" / "mcp.yaml"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        yaml.safe_dump(raw, sort_keys=True, allow_unicode=True),
-        encoding="utf-8",
-    )
-
-
-def _isolated_mcp_configs(workspace: Path):
-    return load_mcp_server_configs(
-        workspace_root=workspace,
-        user_config_path=workspace / ".missing-user-mcp.yaml",
-        trust_workspace_config=True,
-    )
-
-
-def _root_runtime_handoff_probe(
-    session,
-) -> tuple[str | None, tuple[dict[str, object], ...]]:
-    scope = ProviderInputContinuityScope(
-        session_id=session.session_id,
-        scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
-    )
-    view = session._input_continuity.current_view(scope)  # noqa: SLF001
-    if view is None:
-        return None, ()
-    # Compaction is repeatable in one continuity scope.  The latest append-only
-    # observation is the effective handoff head; an earlier successful
-    # compaction may legitimately contain no task board for work created later.
-    observations: list[dict[str, object]] = []
-    effective_body: str | None = None
-    for message in view.messages:
-        try:
-            observation = decode_runtime_observation(message)
-        except ValueError:
-            continue
-        if observation.source_kind is ContextSourceKind.COMPACTION_RUNTIME_HANDOFF:
-            keys: tuple[str, ...] = ()
-            task_keys: tuple[str, ...] = ()
-            if observation.body:
-                value = json.loads(observation.body)
-                if isinstance(value, dict):
-                    keys = tuple(sorted(str(key) for key in value))
-                    tasks = value.get("subagent_tasks")
-                    if isinstance(tasks, list):
-                        task_keys = tuple(
-                            str(item.get("task_key"))
-                            for item in tasks
-                            if isinstance(item, dict)
-                        )
-            observations.append(
-                {
-                    "presence": observation.presence.value,
-                    "keys": keys,
-                    "task_keys": task_keys,
-                }
-            )
-            effective_body = observation.body
-    return effective_body, tuple(observations)
 
 
 def _read_child_tool_rows(
@@ -1030,162 +899,6 @@ async def _run_untargeted_completion_wait(
     }
 
 
-async def _run_capacity_mcp_compaction(session, workspace: Path) -> dict[str, object]:
-    _seed_completed_history(session)
-    compaction_failures: list[dict[str, str]] = []
-    _install_compaction_exception_probe(session, compaction_failures)
-    release_path = workspace / ".round10-capacity-release"
-    release_path.unlink(missing_ok=True)
-    hold_command = (
-        f"while [ ! -f {shlex.quote(os.fspath(release_path))} ]; "
-        "do sleep 0.1; done; echo CAPACITY_HOLD_DONE"
-    )
-    prompt = f"""Use create_agent_tasks exactly once to create five independent tasks in the order shown, then return immediately without list or wait.
-
-For cap0, cap1, cap2, and cap3, use general_worker, default context, and this objective: call exec_process once with command {hold_command!r}; after the terminal result call report_agent_result alone with summary CAPACITY_HOLD_OK.
-
-For the fifth task use key mcp_queued, general_worker, default context, and this objective: when you physically start, call native tool mcp__child__direct_echo exactly once with text PRESTART_MCP_MARKER; after its result call report_agent_result alone with a self-contained summary containing the exact remote result.
-
-The first four slow tasks must precede mcp_queued in the batch so the Host-global four-worker capacity leaves mcp_queued pending. Do not wait for any task."""
-    root_run = asyncio.create_task(
-        session.run_turn(
-            PromptContent.text(prompt),
-            command_id='command:ifb62klfvt2cd3svil4gid424q',
-            requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-        )
-    )
-    active_turn_id = await _active_root_turn_id(session, timeout_seconds=10)
-    queued = await _wait_for_task_key(
-        session, task_key="mcp_queued", timeout_seconds=60
-    )
-    status_at_install = await _wait_for_capacity_frontier(session, timeout_seconds=10)
-    compaction_task: asyncio.Task | None = None
-    try:
-        compaction_task = asyncio.create_task(
-            session.compact_context(
-                command_id='command:muksumlzty7a3h4x2y2y7a2z2i',
-                force=True,
-                expected_active_turn_id=active_turn_id,
-            )
-        )
-        _write_child_mcp_config(workspace)
-        installed = await session.reload_mcp_configs(
-            _isolated_mcp_configs(workspace),
-            deadline_monotonic=monotonic() + 30,
-        )
-        state = await session._mcp_supervisor.wait_for_server_settlement(  # noqa: SLF001
-            "child", timeout_seconds=20
-        )
-        spawn_result = await root_run
-        compaction = await compaction_task
-        handoff_body, handoff_observations = _root_runtime_handoff_probe(session)
-    finally:
-        # Keep the exact 4 ACTIVE + 1 PENDING_START frontier alive until the
-        # compaction successor has installed its runtime handoff, but never
-        # strand workers or a local compaction task when fixture setup fails.
-        release_path.touch()
-        pending_local_tasks = tuple(
-            task
-            for task in (root_run, compaction_task)
-            if task is not None and not task.done()
-        )
-        for task in pending_local_tasks:
-            task.cancel()
-        if pending_local_tasks:
-            await asyncio.gather(*pending_local_tasks, return_exceptions=True)
-
-    task_ids = tuple(str(row["id"]) for row in await _task_rows(session))
-    wait_result = await session.run_turn(
-        (
-            PromptContent.text("Call wait_agent exactly once for these exact task IDs with settle=all "
-            "and timeout_seconds=180. Its ToolResult is only a synchronization "
-            "outcome; summarize the task outcomes from the completion messages "
-            "that Pulsara delivers after the tool closes: " + json.dumps(task_ids))
-        ),
-        command_id='command:wfpdboh2akdqykp5jb76vp6y3u',
-        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-    )
-    final_rows = await _task_rows(session)
-    final_by_key = {str(row["task_key"]): row for row in final_rows}
-    mcp_task_id = str(queued["id"])
-    tool_rows = await session._io.run(  # noqa: SLF001
-        _read_child_tool_rows,
-        session.repository.connection_provider,
-        session_id=session.session_id,
-        task_id=mcp_task_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-    mcp_names = tuple(str(row["tool_name"]) for row in tool_rows)
-    mcp_summary = str(final_by_key["mcp_queued"].get("result_summary") or "")
-    handoff_value = json.loads(handoff_body) if handoff_body is not None else None
-    handoff_tasks = (
-        handoff_value.get("subagent_tasks") if isinstance(handoff_value, dict) else None
-    )
-    handoff_task_keys = (
-        tuple(
-            str(item.get("task_key"))
-            for item in handoff_tasks
-            if isinstance(item, dict)
-        )
-        if isinstance(handoff_tasks, list)
-        else ()
-    )
-    # Compaction freezes the *current* nonterminal task board after a real,
-    # potentially long summary call.  A worker that was PENDING_START at the
-    # earlier MCP-install frontier may have started or completed by then, so the
-    # handoff must prove a real task-board projection without requiring that
-    # particular transient status/key to survive until the later linearization.
-    expected_task_keys = {"cap0", "cap1", "cap2", "cap3", "mcp_queued"}
-    handoff_has_task_board = bool(
-        handoff_task_keys and set(handoff_task_keys) <= expected_task_keys
-    )
-    passed = (
-        set(status_at_install) == {"cap0", "cap1", "cap2", "cap3", "mcp_queued"}
-        and sum(value == "ACTIVE" for value in status_at_install.values()) == 4
-        and status_at_install["mcp_queued"] == "PENDING_START"
-        and "child" in installed
-        and state.value == "READY"
-        and compaction.disposition is CompactionDisposition.COMPACTED
-        and handoff_has_task_board
-        and all(str(row["status"]) == "COMPLETED" for row in final_rows[-5:])
-        and "mcp__child__direct_echo" in mcp_names
-        and "direct:PRESTART_MCP_MARKER" in mcp_summary
-    )
-    report = {
-        "passed": passed,
-        "status_at_mcp_install": status_at_install,
-        "mcp_reload_ids": tuple(sorted(installed)),
-        "mcp_state": state.value,
-        "spawn_model_calls": spawn_result.model_call_count,
-        "spawn_tool_calls": spawn_result.tool_call_count,
-        "spawn_final_text": spawn_result.final_text,
-        "compaction_disposition": compaction.disposition.value,
-        "compaction_public_code": compaction.public_code,
-        "compaction_snapshot_id": compaction.snapshot_id,
-        "compaction_internal_failures": tuple(compaction_failures),
-        "runtime_handoff_has_task_board": handoff_has_task_board,
-        "runtime_handoff_task_keys": handoff_task_keys,
-        "runtime_handoff_observations": handoff_observations,
-        "wait_model_calls": wait_result.model_call_count,
-        "wait_tool_calls": wait_result.tool_call_count,
-        "wait_final_text": wait_result.final_text,
-        "mcp_child_tool_names": mcp_names,
-        "mcp_child_result_summary": mcp_summary,
-        "final_tasks": tuple(
-            _public_task_row(row)
-            for row in final_rows
-            if row.get("task_key") in {"cap0", "cap1", "cap2", "cap3", "mcp_queued"}
-        ),
-    }
-    # The rows above are the frozen semantic observation.  This separate join
-    # exists only so a model-side wait failure cannot leak live workers into
-    # Host shutdown and mask the actual dogfood result.
-    await _wait_for_tasks_to_settle(
-        session,
-        task_ids=task_ids,
-        timeout_seconds=180,
-    )
-    return report
 
 
 def _count_inter_agent_entries(
@@ -1270,10 +983,6 @@ async def _run(
             results["untargeted_completion_wait"] = (
                 await _run_untargeted_completion_wait(session, workspace)
             )
-        if scenario in {"all", "capacity"}:
-            results["capacity_mcp_compaction"] = await _run_capacity_mcp_compaction(
-                session, workspace
-            )
         report: dict[str, object] = {
             "schema_version": "round10-subagent-dogfood.v1",
             "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -1305,7 +1014,6 @@ def main() -> int:
             "context",
             "wait-input",
             "untargeted",
-            "capacity",
             "enhanced",
         ),
         default="all",

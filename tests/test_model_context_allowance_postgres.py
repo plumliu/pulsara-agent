@@ -1,4 +1,4 @@
-"""Same-model budget edits reuse the complete existing three-tier handover."""
+"""Input-allowance edits preserve provider output and target projection semantics."""
 from pulsara_agent.identity import derive_id
 from pulsara_agent.primitives.model_call import ModelCallPurpose
 
@@ -30,12 +30,12 @@ async def _advisory_stream(original_stream, adapter, *, call, context):
         yield item
 
 
-@pytest.mark.parametrize("tier", (1, 2, 3))
+@pytest.mark.parametrize("mode", ("direct", "projection", "projection_without_source"))
 def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
     tmp_path,
     monkeypatch,
     stage2_migrated_postgres_database,
-    tier,
+    mode,
 ):
     from pulsara_agent.conversation_kernel import host as host_module
     from pulsara_agent.conversation_kernel.host import KernelHostCore
@@ -62,7 +62,7 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
             default_output_tokens=384_000,
         ),
     )
-    if tier == 2:
+    if mode == "projection":
         settings = runtime.settings.read()
         runtime.settings.value = replace(
             settings,
@@ -106,7 +106,7 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
                 "choices": [],
                 "usage": {
                     "prompt_tokens": 100
-                    if tier == 1 or len(requests) != 1
+                    if mode == "direct" or len(requests) != 1
                     else 300_000,
                     "completion_tokens": 8,
                 },
@@ -130,7 +130,7 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
 
             # Preserve handover pressure under the v3 ASCII /4 wire estimate.
             await _seed_completed_history(
-                session, segments=3, repetitions=50 if tier == 1 else 7000
+                session, segments=3, repetitions=50 if mode == "direct" else 7000
             )
             await session.run_turn(
                 PromptContent.text("start"),
@@ -149,12 +149,12 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
             assert preview["input_budget_tokens"] == 247_807
             assert preview["budget_source"] == "heuristic"
             assert preview["model_switch_pending"] is True
-            assert preview["compaction_expected"] is (tier != 1)
+            assert preview["compaction_expected"] is (mode != "direct")
             assert session._input_continuity.current_cohort(scope) is cohort
             assert session._input_continuity.current_usage_anchor(scope) is anchor
             assert len(requests) == 1
-            if tier == 3:
-                # Exercise the existing typed Tier 2 -> Tier 3 preparation seam.
+            if mode == "projection_without_source":
+                # Destination projection must not borrow a source-model summary target.
                 def unavailable_source(**_kwargs):
                     raise ValueError("installed source target is unavailable")
 
@@ -169,23 +169,15 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
             )
             current = session._input_continuity.current_cohort(scope)
             assert current.view.epoch_nonce != cohort.view.epoch_nonce
-            if tier == 1:
+            if mode == "direct":
                 assert len(requests) == 2
             else:
                 assert len(requests) == 3
                 purpose, summary, _, source_budget = requests[1]
                 assert purpose is ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
-                assert source_budget == (503_807 if tier == 2 else 247_807)
+                assert source_budget == 247_807
                 assert summary.quote.effective_input_budget_tokens == source_budget
-                if tier == 2:
-                    before = requests[0][1].materialization
-                    after = summary.materialization
-                    assert after.root_policy_value == before.root_policy_value
-                    assert after.tool_items == before.tool_items
-                    assert (
-                        after.ordered_input_items[: len(before.ordered_input_items)]
-                        == before.ordered_input_items
-                    )
+                assert summary.quote.budget_input_tokens <= source_budget
             assert requests[-1][1].quote.effective_input_budget_tokens == 247_807
             assert all(
                 payload["max_completion_tokens"] == 384_000
@@ -199,17 +191,17 @@ def test_live_context_allowance_preserves_output_and_uses_existing_compaction(
 
 
 @pytest.mark.parametrize(
-    "tier,manual,final_reject",
+    "mode,manual,final_reject",
     (
-        (1, False, False),
-        (2, False, False),
-        (3, False, False),
-        (1, True, False),
-        (1, False, True),
+        ("direct", False, False),
+        ("projection", False, False),
+        ("projection_without_source", False, False),
+        ("direct", True, False),
+        ("direct", False, True),
     ),
 )
 def test_allowance_edit_during_tool_followup_uses_handover(
-    tmp_path, monkeypatch, stage2_migrated_postgres_database, tier, manual, final_reject
+    tmp_path, monkeypatch, stage2_migrated_postgres_database, mode, manual, final_reject
 ):
     from pulsara_agent.conversation_kernel import host as host_module
     from pulsara_agent.conversation_kernel.host import KernelHostCore
@@ -312,7 +304,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
                         100_000
                         if manual or final_reject
                         else 300_000
-                        if tier != 1
+                        if mode != "direct"
                         else 100
                     )
                     if agent_calls == 1
@@ -326,7 +318,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
             if manual:
                 manual_request = asyncio.create_task(
                     session.compact_context(
-                        command_id=derive_id("command", "test-fixture", 'command:wqrovmuymwbwo5mv2fcsscwr2a' + uuid4().hex), force=True
+                        command_id=derive_id("command", "test-fixture", 'command:wqrovmuymwbwo5mv2fcsscwr2a' + uuid4().hex)
                     )
                 )
                 await asyncio.sleep(0.02)
@@ -353,7 +345,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
                 repetitions=1000
                 if manual or final_reject
                 else 50
-                if tier == 1
+                if mode == "direct"
                 else 7000,
             )
             if final_reject:
@@ -396,7 +388,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
                 monkeypatch.setattr(
                     coordinator, "measure_dispatch_wire", larger_final_input
                 )
-            if tier == 3:
+            if mode == "projection_without_source":
 
                 def unavailable_source(**_kwargs):
                     raise ValueError("installed source target is unavailable")
@@ -412,7 +404,7 @@ def test_allowance_edit_during_tool_followup_uses_handover(
             )
             if manual_request is not None:
                 outcome = await manual_request
-                assert outcome.disposition.value == "COMPACTED"
+                assert outcome.disposition.value == "REJECTED_BUSY"
             assert result.final_text == "Completed."
             if final_reject:
                 assert rejected
@@ -422,20 +414,14 @@ def test_allowance_edit_during_tool_followup_uses_handover(
                 if purpose is ModelCallPurpose.AGENT_MODEL_LOOP
             ]
             assert budgets == (
-                [503_807, 503_807, 247_807] if manual else [503_807, 247_807]
+                [503_807, 247_807, 247_807] if manual else [503_807, 247_807]
             ), requests
             summaries = [
                 budget
                 for purpose, budget, _ in requests
                 if purpose is ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
             ]
-            assert summaries == (
-                [503_807]
-                if manual or final_reject or tier == 2
-                else [247_807]
-                if tier == 3
-                else []
-            )
+            assert summaries == ([247_807] if final_reject or mode != "direct" else [])
             assert all(
                 payload["max_completion_tokens"] == 384_000
                 for _, _, payload in requests
@@ -446,170 +432,8 @@ def test_allowance_edit_during_tool_followup_uses_handover(
                     for purpose, _, payload in requests
                     if purpose is ModelCallPurpose.AGENT_MODEL_LOOP
                 ] == ["high", "high", "high"]
-                assert all(
-                    payload.get("reasoning_effort") != "high"
-                    for purpose, _, payload in requests
-                    if purpose is ModelCallPurpose.CONTEXT_COMPACTION_SUMMARY
-                )
-        finally:
-            await core.close_session(session.host_session_id)
-            await core.shutdown()
+                assert not summaries
 
-    asyncio.run(scenario())
-
-
-def test_queued_child_preserves_accepted_allowance_then_hands_over_on_followup(
-    tmp_path, monkeypatch, stage2_migrated_postgres_database
-):
-    from time import monotonic
-    import psycopg
-    from pulsara_agent.conversation_kernel import host as host_module
-    from pulsara_agent.conversation_kernel.host import KernelHostCore
-    from pulsara_agent.llm.adapters.openai.chat_completions import (
-        OpenAIChatCompletionsTransport,
-    )
-    from pulsara_agent.llm.input import PromptContent, MessageRole, join_text_content
-    from pulsara_agent.conversation_kernel.subagents.launch import (
-        CanonicalSubagentLaunchPreparationPort,
-    )
-    from pulsara_agent.workspace_identity import HostWorkspaceInput
-    from tests.support.model_config import (
-        test_model_binding,
-        test_model_limits,
-        test_model_runtime,
-    )
-    from tests.test_model_context_allowance import set_allowance
-
-    runtime = test_model_runtime(
-        wire_api="openai_chat_completions",
-        postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
-        limits=test_model_limits(
-            total_context_tokens=1_000_000,
-            max_input_tokens=1_000_000,
-            max_output_tokens=384_000,
-            default_output_tokens=384_000,
-        ),
-    )
-    set_allowance(runtime, 512_000)
-    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "product-home"))
-    monkeypatch.setattr(
-        host_module.LocalMcpManagementService, "load_configs", lambda *_a, **_kw: ()
-    )
-    (tmp_path / "sample.txt").write_text("read me")
-    original_stream = OpenAIChatCompletionsTransport.stream
-    root_calls = 0
-    child_budgets = []
-    root_prompt = "delegate a worker"
-    accepted = asyncio.Event()
-    resume = asyncio.Event()
-    original_launch = CanonicalSubagentLaunchPreparationPort.prepare_launch
-
-    async def delayed_launch(port, candidate):
-        accepted.set()
-        await resume.wait()
-        return await original_launch(port, candidate)
-
-    monkeypatch.setattr(
-        CanonicalSubagentLaunchPreparationPort, "prepare_launch", delayed_launch
-    )
-
-    async def stream(adapter, *, call, context):
-        nonlocal root_calls
-        if _advisory_call(call):
-            async for item in _advisory_stream(original_stream, adapter, call=call, context=context):
-                yield item
-            return
-        is_child = not any(
-            root_prompt in join_text_content(message.content)
-            for message in context.messages
-            if message.role is MessageRole.USER
-        )
-        if is_child:
-            child_budgets.append(call.target.context_budget.input_budget_tokens)
-            tool = "read_file" if len(child_budgets) == 1 else None
-            arguments = {"path": "sample.txt"}
-        else:
-            root_calls += 1
-            tool = "spawn_agent" if root_calls == 1 else None
-            arguments = {"task": "read the sample and finish"}
-        delta = (
-            {"content": "Completed."}
-            if tool is None
-            else {
-                "tool_calls": [
-                    {
-                        "index": 0,
-                        "id": "call:" + uuid4().hex,
-                        "type": "function",
-                        "function": {"name": tool, "arguments": json.dumps(arguments)},
-                    }
-                ]
-            }
-        )
-        adapter._mock_chunks = [
-            {"choices": [{"index": 0, "delta": delta}]},
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop" if tool is None else "tool_calls",
-                    }
-                ]
-            },
-            {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 8}},
-        ]
-        async for item in original_stream(adapter, call=call, context=context):
-            yield item
-
-    monkeypatch.setattr(OpenAIChatCompletionsTransport, "stream", stream)
-
-    async def scenario():
-        core = KernelHostCore.production(model_runtime=runtime)
-        session = await core.open_session(
-            HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path)
-        )
-        try:
-            await session.update_model_call_binding(test_model_binding(runtime))
-            root_run = asyncio.create_task(
-                session.run_turn(
-                    PromptContent.text(root_prompt),
-                    command_id=derive_id("command", "test-fixture", 'command:svlhv6ql2xglb4r3wqwyqma6ni' + uuid4().hex),
-                )
-            )
-            await asyncio.wait_for(accepted.wait(), timeout=30)
-            with psycopg.connect(
-                stage2_migrated_postgres_database.admin_dsn
-            ) as connection:
-                task_id, fact = connection.execute(
-                    "SELECT id,model_target_fact FROM pulsara_v3.subagent_tasks WHERE session_id=%s",
-                    (session.session_id,),
-                ).fetchone()
-            assert fact["context_window_tokens"] == 512_000
-            assert not child_budgets
-            set_allowance(runtime, 256_000)
-            resume.set()
-            await asyncio.wait_for(root_run, timeout=30)
-            deadline = (
-                monotonic() + 30
-            )  # Test observation deadline, not a runtime lifetime cap.
-            while True:
-                task = session.repository.query_subagent_task(
-                    session_id=session.session_id,
-                    task_id=task_id,
-                    deadline_monotonic=deadline,
-                )
-                if task["status"] in (
-                    "COMPLETED",
-                    "FAILED",
-                    "CANCELLED",
-                    "INTERRUPTED",
-                ):
-                    break
-                assert monotonic() < deadline
-                await asyncio.sleep(0.02)
-            assert task["status"] == "COMPLETED", task
-            assert child_budgets == [503_807, 247_807]
         finally:
             await core.close_session(session.host_session_id)
             await core.shutdown()

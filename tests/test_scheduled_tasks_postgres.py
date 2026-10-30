@@ -24,7 +24,6 @@ from tests.test_stage2_conversation_kernel_postgres import (
     _repository,
     _name,
     _two_connection_resolution_cut,
-    _root_provider_input_admission,
 )
 
 pytestmark = pytest.mark.postgres
@@ -394,9 +393,6 @@ def test_manual_merged_action_survives_consumption_and_task_deletion(owner):
     result = owner[0].consume_prepared_prompt_head(
         owner[1].guard,
         candidate=candidate,
-        provider_input_admission=_root_provider_input_admission(
-            candidate.provider_input_candidate
-        ),
         deadline_monotonic=monotonic() + 30,
     )
     assert result.kind is QueuedRootTurnAdmissionConfirmationKind.FULL
@@ -505,9 +501,6 @@ def test_management_vs_consumption_has_one_transaction_winner(owner, action):
             return repo.consume_prepared_prompt_head(
                 lease.guard,
                 candidate=candidate,
-                provider_input_admission=_root_provider_input_admission(
-                    candidate.provider_input_candidate
-                ),
                 deadline_monotonic=monotonic() + 30,
             )
         except ConversationKernelConflict:
@@ -997,7 +990,6 @@ def test_run_once_reuses_running_turn_and_reopens_after_settlement(owner, final_
     )
     repo.consume_prepared_prompt_head(
         lease.guard, candidate=candidate,
-        provider_input_admission=_root_provider_input_admission(candidate.provider_input_candidate),
         deadline_monotonic=monotonic() + 30,
     )
     current = read(owner, t['id'])

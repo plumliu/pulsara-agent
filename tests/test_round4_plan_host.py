@@ -89,6 +89,11 @@ class _PreflightModel:
     def prepare_target(self, request):
         return self._preparer.prepare_target(request)
 
+    def prepare_target_from_snapshot(self, request, *, resolution_snapshot):
+        return self._preparer.prepare_target_from_snapshot(
+            request, resolution_snapshot=resolution_snapshot,
+        )
+
     def freeze_native_tool_eligibility(self, **kwargs):
         return self._preparer.freeze_native_tool_eligibility(**kwargs)
 

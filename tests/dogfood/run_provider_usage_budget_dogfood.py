@@ -61,7 +61,7 @@ async def run() -> dict[str, object]:
             await catalog.refresh()
             delegate = ModelRuntime.production(settings=settings, catalog=catalog)
             records: list[dict[str, object]] = []
-            runtime = _RecordingModelRuntime(delegate, records, None)
+            runtime = _RecordingModelRuntime(delegate, records)
             core = KernelHostCore.production(model_runtime=runtime)
             results = []
             workspace_input = HostWorkspaceInput(workspace_kind='project', workspace_root=workspace, trust_workspace_mcp_config=False)
@@ -88,7 +88,7 @@ async def run() -> dict[str, object]:
                     assert len(page.usages) == 2, page.to_dict()
                     assert all(row['input_tokens'] is not None and row['input_tokens'] > 0 for row in page.usages)
                     source_start = len(source_quotes)
-                    compaction = await session.compact_context(command_id=derive_id("command", "test-fixture", 'command:usage-compact:'+uuid4().hex), force=True)
+                    compaction = await session.compact_context(command_id=derive_id("command", "test-fixture", 'command:usage-compact:'+uuid4().hex))
                     scoped_source_quotes = source_quotes[source_start:]
                     assert scoped_source_quotes and scoped_source_quotes[0]['budget_source'] == 'reported_input_anchor', scoped_source_quotes
                     assert len((await core.read_provider_call_usage_page(session_id=session.session_id)).usages) == 2  # summary purpose excluded

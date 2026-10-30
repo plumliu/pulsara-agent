@@ -3171,3 +3171,15 @@ it('cancels an unfinished historical process open on a reverse click and ignores
   expect(screen.queryByText('旧过程')).toBeNull();
   expect(view.container.querySelector('.conversation-run')?.getAttribute('data-process-expanded')).toBe('false');
 });
+
+it('uses the existing stop button for an idle manual operation and removes it when the owner ends', () => {
+  const onStop = vi.fn();
+  const view = render(<WorkbenchView {...props({
+    isRunning: false, activeTurnId: undefined,
+    manualCompactionCommandId: 'command:manual-original', onStop,
+  })} />);
+  fireEvent.click(screen.getByRole('button', {name: '停止本轮运行'}));
+  expect(onStop).toHaveBeenCalledTimes(1);
+  view.rerender(<WorkbenchView {...props({isRunning: false, activeTurnId: undefined, onStop})} />);
+  expect(screen.queryByRole('button', {name: '停止本轮运行'})).toBeNull();
+});

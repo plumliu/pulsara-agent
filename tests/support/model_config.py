@@ -48,7 +48,6 @@ from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.conversation_kernel.steer import build_prompt_ingress_command
-from pulsara_agent.conversation_kernel.steer import PreparedRootProviderInputAdmission
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.settings import LocalModelApiKey, LocalPostgresConfig, LocalSettings
 
@@ -464,21 +463,9 @@ def start_test_root_turn(
         actor_id=actor_id,
     )
     resolution_snapshot = test_model_resolution_snapshot()
-    candidate = repository.prepare_root_provider_input_candidate(
-        guard,
-        intent=intent,
-        model_resolution_snapshot=resolution_snapshot,
-        deadline_monotonic=deadline_monotonic,
-    )
-    # This helper seeds repository fixtures whose subject is downstream durable
-    # behavior.  Production ROOT admission is exercised through Runner/Host tests;
-    # here the exact candidate still crosses the hard-cut writer precondition.
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", candidate)
     return repository.accept_root_turn_intent(
         guard,
         intent=intent,
-        provider_input_admission=admission,
         model_resolution_snapshot=resolution_snapshot,
         deadline_monotonic=deadline_monotonic,
     ).accepted

@@ -19,6 +19,7 @@ from pulsara_agent.conversation_kernel.repository import ConversationKernelRepos
 from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
 from pulsara_agent.llm.input import PromptContent
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.ports.user_control_feedback import (
     WorkspaceRecreatedFeedbackContent,
@@ -317,9 +318,9 @@ def test_running_response_settles_but_accepted_queue_waits_for_directory(
                 assert monotonic() < deadline
                 await asyncio.sleep(0.01)
             assert len(model.requests) == 2
-            # Frozen prospective first request remains untouched; advisory may wait
-            # for a later ordinary barrier, exactly as the specification allows.
-            assert session._workspace_recreated_at is not None
+            assert "pulsara_user_control_feedback" in str(model.requests[1].compiled_input.messages)
+            assert str(root) in str(model.requests[1].compiled_input.messages)
+            assert session._workspace_recreated_at is None
         finally:
             await core.close_session(session.host_session_id)
             await core.shutdown()
@@ -425,7 +426,7 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_appends_at_ordinary_bar
                 if message.role is MessageRole.TOOL_RESULT
             )
             assert "TOOL_UNAVAILABLE" in str(tool_result.content)
-            assert "workspace_recreated" in str(second.messages)
+            assert "pulsara_user_control_feedback" in str(second.messages)
             assert session._workspace_recreated_at is None
         finally:
             await core.close_session(session.host_session_id)
@@ -464,19 +465,17 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                 asyncio.Event(),
             )
             self.root_calls, self.child_calls = 0, 0
+            self.root_id = None
             super().__init__(self._stream)
 
         async def _stream(self, request):
-            if (
-                request.compiled_input.canonical_input_identity.scope_subagent_task_id
-                is None
-            ):
+            if request.session_id == self.root_id:
                 self.root_calls += 1
                 if self.root_calls == 1:
                     payloads = _tool_call(
-                        "spawn_agent",
+                        "run_agent",
                         "call:spawn",
-                        {"task": "Run terminal once.", "task_name": "worker"},
+                        {"instruction": "Run terminal once."},
                     )
                 else:
                     self.root_ready.set()
@@ -507,11 +506,13 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=root)
         )
+        model.root_id = session.session_id
         run = None
         try:
             await session.update_model_call_binding(test_model_binding(runtime))
             run = asyncio.create_task(
-                session.run_turn(PromptContent.text("Spawn worker and wait."))
+                session.run_turn(PromptContent.text("Spawn worker and wait."),
+                    requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             )
             try:
                 await asyncio.wait_for(
@@ -523,7 +524,19 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                     str([request.compiled_input.messages for request in model.requests])
                 )
             root_turn = session._active_turn_id
-            child = next(iter(session._subagents._tasks.values()))
+            agents = session.repository.list_agent_sessions(
+                root_session_id=session.session_id, limit=10,
+                deadline_monotonic=monotonic() + 5,
+            )
+            assert len(agents) == 1
+            child_session_id = agents[0]["agent_id"]
+            child = core._live_agent_session(child_session_id)
+            child_turn = child.active_root_turn_id()
+            works = session.repository.list_agent_works(
+                root_session_id=session.session_id, agent_id=child_session_id,
+                limit=10, deadline_monotonic=monotonic() + 5,
+            )
+            assert len(works) == 1 and works[0]["status"] == "running"
             shutil.rmtree(root)
             model.release.set()
             reader = CanonicalProtocolReader(session.repository.connection_provider)
@@ -536,21 +549,21 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                     maximum_control_items=128,
                     deadline_monotonic=monotonic() + 5,
                 )
-                if (
-                    sum(
-                        entry.entry_kind == wire.TOOL_RESULT
-                        for entry in snapshot.entries
-                    )
-                    >= 3
-                ):
+                child_snapshot = await asyncio.to_thread(
+                    reader.snapshot, session_id=child_session_id,
+                    maximum_entries=256, maximum_control_items=128,
+                    deadline_monotonic=monotonic() + 5,
+                )
+                if (sum(entry.entry_kind == wire.TOOL_RESULT for entry in snapshot.entries) >= 2
+                    and any(entry.entry_kind == wire.TOOL_RESULT for entry in child_snapshot.entries)):
                     break
                 assert monotonic() < deadline
                 await asyncio.sleep(0.01)
             assert (model.root_calls, model.child_calls) == (2, 1)
             await asyncio.wait_for(core.close_session(session.host_session_id), 10)
-            for turn_id in (root_turn, child.cancellation_intent.turn_id):
+            for exact_session_id, turn_id in ((session.session_id, root_turn), (child_session_id, child_turn)):
                 outcome = session.repository.read_turn_terminal_outcome(
-                    session_id=session.session_id,
+                    session_id=exact_session_id,
                     turn_id=turn_id,
                     deadline_monotonic=monotonic() + 5,
                 )
@@ -558,14 +571,14 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                     outcome["status"] == "INTERRUPTED"
                     and outcome["terminal_reason"] == "SESSION_CLOSED"
                 )
-            task = session.repository.query_subagent_task(
-                session_id=session.session_id,
-                task_id=child.task_id,
+            task = session.repository.query_agent_work(
+                root_session_id=session.session_id,
+                work_id=works[0]["work_id"],
                 deadline_monotonic=monotonic() + 5,
             )
             assert (
-                task["status"] == "INTERRUPTED"
-                and task["terminal_reason"] == "HOST_CLOSING"
+                task["status"] == "stopped"
+                and task["terminal_reason"] == "SESSION_CLOSED"
             )
             assert not root.exists()
         finally:
@@ -590,18 +603,24 @@ def test_browser_write_gate_rejects_takeover_while_directory_read_is_pending(tmp
             return {"path": str(tmp_path), "outcome": "AVAILABLE"}
 
         sessions = SimpleNamespace(
-            workspace_availability=availability, _lock=asyncio.Lock(), _operations={}
+            workspace_availability=availability, _lock=asyncio.Lock(), _operations={},
+            host_writer_unavailable=lambda _host_session_id: False,
         )
         bridge = RendererBridge(sessions=sessions, protocol_server=object())
         a = SimpleNamespace(
-            session_id='session:5dofirezik2z5wyc4ouhsixn3i', role="controller", generation=1, is_open=True
+            session_id='session:5dofirezik2z5wyc4ouhsixn3i', role="controller", generation=1, is_open=True,
+            host_session_id=random_id("host"),
         )
         bridge._connections["a"] = a
         bridge._controller_by_session[a.session_id] = "a"
         pending = asyncio.create_task(
             bridge.require_chat_controller("a", 1, session_id='session:5dofirezik2z5wyc4ouhsixn3i')
         )
-        await entered.wait()
+        ingress = asyncio.create_task(entered.wait())
+        await asyncio.wait((pending, ingress), return_when=asyncio.FIRST_COMPLETED)
+        if pending.done():
+            await pending
+        await ingress
         bridge._controller_by_session[a.session_id] = "b"
         release.set()
         with pytest.raises(ProtocolBridgeError):
@@ -611,13 +630,12 @@ def test_browser_write_gate_rejects_takeover_while_directory_read_is_pending(tmp
 
 
 @pytest.mark.postgres
-def test_host_close_joins_prepared_queue_admission_blocked_by_directory(
+def test_host_close_joins_started_queue_request_blocked_by_directory(
     tmp_path,
     monkeypatch,
     stage2_migrated_postgres_database,
 ):
     from pulsara_agent.conversation_kernel import host as host_module
-    from pulsara_agent.conversation_kernel.contracts import PromptDeliveryMode
 
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(
@@ -649,14 +667,13 @@ def test_host_close_joins_prepared_queue_admission_blocked_by_directory(
                 asyncio.Event(),
                 asyncio.Event(),
             )
-            prepare = session._runner.prepare_prospective_root_input
+            run = session._runner.run_accepted_turn
             wait = session.workspace_gate.wait_available
 
             async def pause(*args, **kwargs):
-                dispatch = await prepare(*args, **kwargs)
                 prepared.set()
                 await release.wait()
-                return dispatch
+                return await run(*args, **kwargs)
 
             async def observe_wait():
                 if not root.exists():
@@ -664,7 +681,7 @@ def test_host_close_joins_prepared_queue_admission_blocked_by_directory(
                 await wait()
 
             monkeypatch.setattr(
-                session._runner, "prepare_prospective_root_input", pause
+                session._runner, "run_accepted_turn", pause
             )
             monkeypatch.setattr(session.workspace_gate, "wait_available", observe_wait)
             model.release.set()
@@ -675,12 +692,14 @@ def test_host_close_joins_prepared_queue_admission_blocked_by_directory(
             await asyncio.wait_for(blocked.wait(), 5)
             await asyncio.wait_for(core.close_session(session.host_session_id), 10)
             assert len(model.requests) == 1 and not root.exists()
-            assert (
-                session.repository.pending_prompt_head_mode(
-                    session_id=session.session_id, deadline_monotonic=monotonic() + 5
-                )
-                is PromptDeliveryMode.NEW_TURN
+            outcome = session.repository.query_command(
+                session_id=session.session_id,
+                command_id='command:7qtphtxhficyfqfpas3yp3543a',
+                deadline_monotonic=monotonic() + 5,
             )
+            assert outcome["queue_status"] == "CONSUMED"
+            assert outcome["request_execution"].status == "stopped"
+            assert outcome["request_execution"].terminal_reason == "SESSION_CLOSED"
         finally:
             model.release.set()
             await core.shutdown()

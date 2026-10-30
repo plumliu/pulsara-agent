@@ -7,14 +7,11 @@ import pytest
 
 from pulsara_agent.identity import derive_id
 from pulsara_agent.llm.input import (
-    FrozenPromptContent,
     LLMTextPart,
     LLMImagePart,
     MessageRole,
 )
-from pulsara_agent.llm.model_connections import ModelCallBinding
-from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
-from pulsara_agent.conversation_kernel.steer import PreparedRootProviderInputCandidate
+from pulsara_agent.conversation_kernel.steer import StartedTurnInputGroup
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionTargetBranch,
     provider_input_item_canonical_expanded_bytes,
@@ -38,7 +35,6 @@ from tests.test_round3_structured_model_input_compiler import (
     _snapshot,
     _sources,
     _prepared_request,
-    _permission_snapshot,
     _compile_and_install_append,
 )
 
@@ -111,45 +107,27 @@ def _snapshot_for(items, instruction):
     )
 
 
-def test_group_candidate_distinguishes_instruction_suffix_end_and_predecessor():
+def test_started_group_distinguishes_instruction_suffix_end_and_predecessor():
     items = _group(derive_id("turn", "agent-input-test", "candidate"), 11, image=True)
-    prompts = tuple(
-        freeze_canonical_prompt(FrozenPromptContent(x.content)) for x in items
-    )
-    candidate = PreparedRootProviderInputCandidate(
+    group = StartedTurnInputGroup(
         session_id="session:336wrfwkamrr3up6kjtsgvgcte",
-        workspace_id=derive_id("workspace", "agent-input-test"),
-        exact_turn_id=items[1].source_turn_id,
-        exact_initial_entry_id=items[1].source_entry_id,
-        exact_context_binding_revision_id=derive_id("binding", "agent-input-test"),
-        unpublished_items=items,
-        unpublished_item_canonical_expanded_bytes=tuple(
-            p.resource_quote.canonical_expanded_bytes for p in prompts
-        ),
-        permission_snapshot=_permission_snapshot(),
-        model_call_binding=ModelCallBinding(
-            derive_id("connection", "agent-input-test"), None
-        ),
-        expected_latest_entry_sequence=10,
-        context_base_kind=ContextBindingBaseKind.FULL_HISTORY,
-        context_snapshot_id=None,
-        source_through_sequence=10,
-        pending_plan_handoff_workflow_id=None,
-        pending_plan_handoff_interaction_id=None,
-        pending_plan_handoff_kind=None,
-        unpublished_plan_workflow_fact=None,
-        unpublished_plan_handoff_fact=None,
-        unpublished_approved_plan_fact=None,
+        turn_id=items[1].source_turn_id,
+        instruction_entry_id=items[1].source_entry_id,
+        ordered_items=items,
+        predecessor_through_sequence=10,
+        initial_context_binding_revision_id=derive_id("binding", "agent-input-test"),
+        initial_base_kind=ContextBindingBaseKind.FULL_HISTORY,
+        initial_context_snapshot_id=None,
+        initial_source_through_sequence=10,
     )
-    assert candidate.exact_initial_entry_sequence == 12
-    assert candidate.resulting_provider_input_through_sequence == 14
-    assert candidate.unpublished_canonical_expanded_bytes == sum(
-        p.resource_quote.canonical_expanded_bytes for p in prompts
-    )
-    with pytest.raises(ValueError, match="full-history cut"):
-        replace(candidate, source_through_sequence=11)
-    with pytest.raises(ValueError, match="no instruction entry"):
-        replace(candidate, exact_initial_entry_id=derive_id("entry", "missing"))
+    assert group.ordered_items[1].source_entry_sequence == 12
+    assert group.provider_input_through_sequence == 14
+    assert group.ordered_items == items
+    assert group.initial_revision_ordinal == 0
+    with pytest.raises(ValueError, match="started turn input group is invalid"):
+        replace(group, initial_source_through_sequence=11)
+    with pytest.raises(ValueError, match="started turn input group does not exact-join"):
+        replace(group, instruction_entry_id=derive_id("entry", "missing"))
 
 
 def test_agent_group_has_independent_ordered_user_messages_and_instruction_compaction():

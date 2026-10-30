@@ -35,6 +35,7 @@ from pulsara_agent.llm.normalized_transport import (
 from pulsara_agent.llm.resolution import (
     ResolvedModelTarget,
     resolve_model_target,
+    resolve_observed_model_target,
     with_call_output_cap,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall, resolve_model_call
@@ -191,6 +192,23 @@ class ModelRuntime:
             raise ModelRuntimeUnavailable("current runtime cannot reproduce the frozen model target")
         return target
 
+    def resolve_snapshot_target(
+        self,
+        binding: ModelCallBinding,
+        *,
+        resolution_snapshot: FrozenModelResolutionSnapshot,
+        timeout_policy: OpenAITransportTimeoutPolicy,
+    ) -> ResolvedModelTarget:
+        """Use one admission observation without resolving the catalog again."""
+
+        observed = resolution_snapshot.validate(binding)
+        return resolve_observed_model_target(
+            connection=observed.config,
+            binding=binding,
+            contract=observed.target,
+            registry=self.transport_registry(timeout_policy),
+        )
+
     def resolve_frozen_target_bundle(
         self,
         bundle: FrozenEpochModelTargetBundle,
@@ -202,7 +220,7 @@ class ModelRuntime:
 
         # The installed epoch owns its old allowance. Reproduce that complete
         # frozen policy while checking all current provider facts as before.
-        # A saved edit cannot change an in-flight call or its Tier 2 summary.
+        # A saved edit cannot change an in-flight call or its summary.
         target = self.resolve_target(
             binding,
             timeout_policy=timeout_policy,

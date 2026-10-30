@@ -1995,7 +1995,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const stopRun = async () => {
     const active = connectionRef.current;
     const targetTurnId = projection.activeTurnId;
-    if (!active || active.role !== 'controller' || !targetTurnId) return;
+    const manualCommandId = projection.manualCompactionCommandId;
+    if (!active || active.role !== 'controller' || (!targetTurnId && !manualCommandId)) return;
     if (!projection.hostSessionId || !projection.controlAdmissionDeadlineMs) {
       notify('暂时无法停止', '当前 Host 的控制身份尚未确认，请等待刷新后重试。', 'warning');
       return;
@@ -2003,12 +2004,12 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const reference = createUserControlCommandRef(
       projection,
       active.sessionId,
-      'STOP_ACTIVE_TURN',
-      'ROOT_TURN',
-      targetTurnId,
+      targetTurnId ? 'STOP_ACTIVE_TURN' : 'STOP_CONTEXT_COMPACTION',
+      targetTurnId ? 'ROOT_TURN' : 'MANUAL_COMPACTION',
+      targetTurnId ?? manualCommandId!,
     );
     try {
-      const receipt = await active.stopActiveTurn(reference);
+      const receipt = await (targetTurnId ? active.stopActiveTurn(reference) : active.stopContextCompaction(reference));
       if (!ownsConnection(active)) return;
       notify(
         receipt.status === 'rejected' ? '没有可停止的运行' : '停止请求已送达',
@@ -2050,7 +2051,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     if (!active || active.role !== 'controller') return;
     try {
       suggestionCache.invalidate(active.sessionId);
-      const receipt = await active.compactContext(projection.activeTurnId);
+      const receipt = await active.compactContext();
       if (!ownsConnection(active)) return;
       const alreadyCompact = receipt.status === 'succeeded' && receipt.publicCode === 'NOT_NEEDED';
       notify(
@@ -2774,6 +2775,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           activePlanMode={projection.planMode}
           isRunning={projection.isRunning}
           activeTurnId={projection.activeTurnId}
+          manualCompactionCommandId={projection.manualCompactionCommandId}
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}
           queuedPrompts={projection.queuedPrompts}

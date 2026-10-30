@@ -181,6 +181,10 @@ class ScriptedKernelModel:
         self.preparation_requests.append(request)  # type: ignore[arg-type]
         return self._preparer.prepare_target(request)
 
+    def prepare_target_from_snapshot(self, request, **kwargs):
+        self.preparation_requests.append(request)
+        return self._preparer.prepare_target_from_snapshot(request, **kwargs)
+
     def prepare_resolved_target(self, request, **kwargs):
         self.preparation_requests.append(request)
         return self._preparer.prepare_resolved_target(request, **kwargs)
@@ -264,6 +268,9 @@ class CallbackScriptedKernelModel:
 
     def prepare_target(self, request):
         return self._preparer.prepare_target(request)
+
+    def prepare_target_from_snapshot(self, request, **kwargs):
+        return self._preparer.prepare_target_from_snapshot(request, **kwargs)
 
     def prepare_resolved_target(self, request, **kwargs):
         return self._preparer.prepare_resolved_target(request, **kwargs)
@@ -728,6 +735,20 @@ class StaticContextSourceCollector:
         registry = self.registry_fingerprint
         if registry != frozen.registry_fingerprint:
             raise ValueError("context source registry changed after source freeze")
+        absent = frozen.absent_facts
+        if not any(
+            item.source_kind is ContextSourceKind.ACTIVE_SKILL
+            for item in (*frozen.candidates, *absent)
+        ):
+            # Like the production collector, completion owns the activation
+            # head after a continuation reopens it. This static catalog has no
+            # Skill bodies; it still supplies the required typed absence.
+            absent = (*absent, _absent_source(
+                ContextSourceKind.ACTIVE_SKILL,
+                ContextSourceAbsenceKind.NOT_APPLICABLE
+                if _kwargs.get("activation_subject") is None
+                else ContextSourceAbsenceKind.EXPLICIT_EMPTY,
+            ))
         collection = context_fingerprint(
             "collected-context-sources:v1",
             {
@@ -743,7 +764,7 @@ class StaticContextSourceCollector:
                         item.absence_kind.value,
                         item.domain_semantic_fingerprint,
                     )
-                    for item in frozen.absent_facts
+                    for item in absent
                 ),
             },
         )
@@ -752,7 +773,7 @@ class StaticContextSourceCollector:
             frozen.diagnostics,
             registry,
             collection,
-            frozen.absent_facts,
+            absent,
         )
 
     def freeze_compaction_active_skill_source(
@@ -1214,7 +1235,7 @@ def seal_test_direct_tool_port(
     class _EmptySubagentPort:
         tool_names = ()
 
-        async def freeze_compaction_handoff(self):
+        async def freeze_compaction_handoff(self, *, cursor=None):
             return ()
 
     port.bind_interaction_port(interaction if interaction is not None else object())  # type: ignore[arg-type]

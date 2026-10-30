@@ -816,11 +816,13 @@ describe('exact prompt projection', () => {
     }));
 
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-    await connection.compactContext('turn-1');
+    await connection.compactContext();
 
     expect(bodies.at(-1)).toMatchObject({
-      command_kind: 'COMPACT_CONTEXT', target_turn_id: 'turn-1', force: true,
+      command_kind: 'COMPACT_CONTEXT',
     });
+    expect(bodies.at(-1)).not.toHaveProperty('force');
+    expect(bodies.at(-1)).not.toHaveProperty('target_turn_id');
   });
 
   it('projects an adopted context boundary from canonical control after observation', async () => {
@@ -3032,4 +3034,74 @@ it('discovers custom model IDs with a cancellable user-level request', async () 
   expect(await adapter.discoverModels(input, controller.signal)).toEqual({model_ids: ['a', 'b']});
   expect(String(fetchMock.mock.calls[0][0])).toContain('/api/model-configurations/discover');
   expect(fetchMock.mock.calls[0][1]).toMatchObject({method: 'POST', body: JSON.stringify(input), signal: controller.signal});
+});
+
+it('stops an idle manual owner with its command identity and clears ended owner projection', async () => {
+  vi.stubGlobal('crypto', {
+    getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
+    randomUUID: () => '66666666-6666-4666-8666-666666666666',
+  });
+  const responses = [
+    connectPayload([], {}, [], {
+      host_session_id: 'host:one', control_admission_deadline_ms: '9000',
+      manual_compaction_command_id: 'command:manual-original',
+    }),
+    {command_outcome: {status: 'PENDING', target_id: 'command:manual-original'}},
+    {observation: {
+      through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '0',
+      live_control_owner_epoch: '1', through_live_control_revision: '0',
+      root_compaction_in_progress: false,
+    }},
+  ];
+  const bodies: Array<Record<string, unknown>> = [];
+  stubRuntimeFetch(vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.body) bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+    return new Response(JSON.stringify(responses.shift()), {status: 200, headers: {'Content-Type': 'application/json'}});
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current()).toMatchObject({isRunning: false, manualCompactionCommandId: 'command:manual-original'});
+  expect(connection.current().activeTurnId).toBeUndefined();
+  const reference = createUserControlCommandRef(connection.current(), 'session-1',
+    'STOP_CONTEXT_COMPACTION', 'MANUAL_COMPACTION', 'command:manual-original');
+  await connection.stopContextCompaction(reference);
+  expect(bodies.at(-1)).toMatchObject({
+    command_kind: 'STOP_CONTEXT_COMPACTION', target_compaction_command_id: 'command:manual-original',
+    expected_session_id: 'session-1', expected_host_session_id: 'host:one',
+    client_submission_id: '', control_admission_deadline_ms: 9000,
+  });
+  expect(bodies.at(-1)).not.toHaveProperty('target_turn_id');
+  expect(() => connection.stopActiveTurn(reference)).toThrow();
+  const ended = await connection.observe();
+  expect(ended.manualCompactionCommandId).toBeUndefined();
+  expect(ended.isRunning).toBe(false);
+});
+
+it('refreshes mutually exclusive ordinary and manual stop targets before streaming activity', async () => {
+  const responses = [
+    connectPayload([], {}, [], {
+      host_session_id: 'host:one', active_root_turn_id: 'turn:first-preparation',
+      control_admission_deadline_ms: '9000',
+    }),
+    {observation: {
+      through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '0',
+      live_control_owner_epoch: '1', through_live_control_revision: '0',
+      manual_compaction_command_id: 'command:manual-next', active_root_turn_id: '',
+    }},
+    {observation: {
+      through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '0',
+      live_control_owner_epoch: '1', through_live_control_revision: '0',
+      active_root_turn_id: 'turn:next-preparation', manual_compaction_command_id: '',
+    }},
+  ];
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+    status: 200, headers: {'Content-Type': 'application/json'},
+  })));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current()).toMatchObject({isRunning: true, activeTurnId: 'turn:first-preparation'});
+  const manual = await connection.observe();
+  expect(manual).toMatchObject({isRunning: false, manualCompactionCommandId: 'command:manual-next'});
+  expect(manual.activeTurnId).toBeUndefined();
+  const next = await connection.observe();
+  expect(next).toMatchObject({isRunning: true, activeTurnId: 'turn:next-preparation'});
+  expect(next.manualCompactionCommandId).toBeUndefined();
 });

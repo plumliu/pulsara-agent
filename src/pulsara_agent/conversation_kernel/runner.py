@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from pulsara_agent.conversation_kernel.repository_errors import (
     PlanControlSupersededBySteer,
-    PreparedRootInputHeadStale,
 )
 
 from pulsara_agent.capability.change_observation import FrozenCapabilityChange
@@ -23,6 +22,8 @@ from hashlib import sha256
 import json
 from time import monotonic
 from typing import Awaitable, Callable, Mapping, Protocol
+
+from psycopg import InterfaceError, OperationalError
 
 from pulsara_agent.conversation_kernel.assembler import (
     CompletedAssistantMessage,
@@ -84,6 +85,7 @@ from pulsara_agent.conversation_kernel.direct_model import (
     CompletedProviderModelExecution,
     KernelModelExecutionRequest,
     PreparedKernelModelCall,
+    PreparedKernelModelTarget,
     PreparedKernelModelExecution,
     ProviderFollowupWireResourceQuote,
     quote_provider_followup_wire_resources,
@@ -138,6 +140,7 @@ from pulsara_agent.conversation_kernel.turn_admission import (
     TodoRunAdmissionFinalizer,
     TurnAdmissionCoordinator,
     root_cancellation_terminal_reason,
+    _await_shielded,
 )
 from pulsara_agent.conversation_kernel.workspace import SessionWorkspaceResolver
 from pulsara_agent.conversation_kernel.extensions import (
@@ -180,6 +183,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelRepository,
     ConversationKernelConflict,
+    StaleHostWriter,
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
@@ -196,7 +200,6 @@ from pulsara_agent.conversation_kernel.provider_dispatch import (
     KernelModelPort,
     PreparedProviderDispatch,
     PreparedProspectiveActiveRootInput,
-    PreparedProspectiveRootDispatch,
     PreparedWireMeasurementDecision,
     ProviderDispatchCoordinator,
 )
@@ -208,7 +211,7 @@ from pulsara_agent.conversation_kernel.repository_errors import (
 )
 from pulsara_agent.conversation_kernel.steer import (
     PreparedActiveRootInputCandidate,
-    PreparedRootProviderInputCandidate,
+    StartedTurnInputGroup,
     build_direct_root_turn_identity,
 )
 from pulsara_agent.primitives.plan_workflow import (
@@ -827,6 +830,15 @@ class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Pr
     ) -> tuple[FrozenVisualizationOccurrence, ...]: ...
 
 
+class TerminalObservationStartedFailure(RuntimeError):
+    """A confirmed observation start failed after its canonical publication."""
+
+    def __init__(self, error: Exception, accepted: AcceptedEntry) -> None:
+        super().__init__(str(error))
+        self.original_error = error
+        self.accepted = accepted
+
+
 class ConversationKernelRunner:
     def __init__(
         self,
@@ -1101,12 +1113,12 @@ class ConversationKernelRunner:
         *,
         turn_id: str,
         command_id: str,
-        force: bool,
+        prepared_target: PreparedKernelModelTarget,
     ) -> CompactionOutcome:
         return await self.compaction.compact_idle_turn(
             turn_id=turn_id,
             command_id=command_id,
-            force=force,
+            prepared_target=prepared_target,
             session_start_boundary_port=self._session_start_boundary,
         )
 
@@ -1184,199 +1196,27 @@ class ConversationKernelRunner:
             turn_id=turn_id,
             scope_kind=self._session_scope_kind,
         )
-        prospective_dispatch: PreparedProspectiveRootDispatch | None = None
         try:
             if hook_context_reservation is not None:
                 hook_context_reservation.commit()
-            while True:
-                current_task = asyncio.current_task()
-                if intent.cause is not None or (
-                    current_task is not None and current_task.cancelling()
-                ):
-                    raise asyncio.CancelledError
-                prospective_candidate = await self._io.run(
-                    self._repository.prepare_root_provider_input_candidate,
-                    self._writer_lease.guard,
-                    intent=candidate,
-                    model_resolution_snapshot=frozen_model_resolution,
-                    deadline_monotonic=self._canonical_deadline(),
-                )
-                prospective_dispatch = await self.prepare_prospective_root_input(
-                    prospective_candidate,
-                    cancellation_intent=intent,
-                )
-                try:
-                    await self._turn_admission.accept_root_intent(
-                        candidate,
-                        provider_input_admission=prospective_dispatch.admission,
-                        model_resolution_snapshot=frozen_model_resolution,
-                        cancellation_intent=intent,
-                    )
-                except PreparedRootInputHeadStale:
-                    # No ROOT winner/input was installed. Retire only this dry
-                    # preparation; the continuity owner preserves its epoch.
-                    prospective_dispatch.close()
-                    prospective_dispatch = None
-                    continue
-                break
+            outcome = await self._turn_admission.accept_root_intent(
+                candidate,
+                model_resolution_snapshot=frozen_model_resolution,
+                cancellation_intent=intent,
+            )
         except BaseException:
-            if prospective_dispatch is not None:
-                prospective_dispatch.close()
             if hook_context_reservation is not None:
                 hook_context_reservation.retire()
             raise
-        return await self.run_accepted_turn(
-            turn_id,
-            cancellation_intent=intent,
-            prospective_root_dispatch=prospective_dispatch,
-        )
-
-    async def prepare_prospective_root_input(
-        self,
-        candidate: PreparedRootProviderInputCandidate,
-        *,
-        admitted_writer: CompactionWriteReservation | None = None,
-        cancellation_intent: ActiveTurnCancellationIntent | None = None,
-    ) -> PreparedProspectiveRootDispatch:
-        """Prepare one exact first ROOT input before its canonical writer runs."""
-
-        if (
-            admitted_writer is None
-            and self._root_control_preparation_barrier is not None
-        ):
-            await self._root_control_preparation_barrier(candidate.exact_turn_id)
-        if self._workspace_gate is not None:
-            await self._workspace_gate.wait_available()
-        if self._before_provider_preparation is not None:
-            await self._before_provider_preparation()
-        intent = cancellation_intent or ActiveTurnCancellationIntent(
-            candidate.exact_turn_id, self._session_scope_kind
-        )
-        intent.require_exact(
-            turn_id=candidate.exact_turn_id,
-            scope_kind=self._session_scope_kind,
-        )
         try:
-            prepared = await self._provider_dispatch.prepare_prospective_root_input(
-                candidate=candidate,
-                inherited_memory_use_policy=self._root_memory_use_policy,
-                deadline=self._planning_deadline(),
+            return await self.run_accepted_turn(
+                turn_id,
+                cancellation_intent=intent,
+                started_input_group=outcome.started_input_group,
             )
-        except (
-            StructuredModelInputCompileError,
-            ModelTargetCapabilityMismatch,
-        ) as failure:
-            recovered = await self.compaction.recover_pending_root_input(
-                candidate=candidate,
-                failure=failure,
-                inherited_memory_use_policy=self._root_memory_use_policy,
-                admitted_writer=admitted_writer,
-                session_start_boundary_port=self._session_start_boundary,
-            )
-            self._emit_pending_root_handover_notice(recovered)
-            return await self._attach_pending_root_hook_context(recovered, intent)
-        handover = self.compaction.prospective_root_model_switch_candidate(prepared)
-        if handover is None:
-            if not self.compaction.prospective_root_crosses_automatic_threshold(
-                prepared
-            ):
-                return await self._attach_pending_root_hook_context(prepared, intent)
-            soft_trigger = StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET
-            )
-            # The prospective family may own the only Empty-scope planning
-            # reservation.  Compaction must acquire its own exact source
-            # preparation, so retire the dry prospective authority first.
-            prepared.close()
-            try:
-                compacted = await self.compaction.recover_pending_root_input(
-                    candidate=candidate,
-                    failure=soft_trigger,
-                    inherited_memory_use_policy=self._root_memory_use_policy,
-                    admitted_writer=admitted_writer,
-                    session_start_boundary_port=self._session_start_boundary,
-                )
-            except BaseException as error:
-                if error is soft_trigger:
-                    retry = (
-                        await self._provider_dispatch.prepare_prospective_root_input(
-                            candidate=candidate,
-                            inherited_memory_use_policy=self._root_memory_use_policy,
-                            deadline=self._planning_deadline(),
-                        )
-                    )
-                    return await self._attach_pending_root_hook_context(retry, intent)
-                raise
-            self._emit_pending_root_handover_notice(compacted)
-            return await self._attach_pending_root_hook_context(compacted, intent)
-        prepared.close()
-        switched = await self.compaction.execute_pending_root_model_handover(
-            candidate=candidate,
-            inherited_memory_use_policy=self._root_memory_use_policy,
-            model_switch_candidate=handover,
-            admitted_writer=admitted_writer,
-            session_start_boundary_port=self._session_start_boundary,
-        )
-        self._emit_pending_root_handover_notice(switched)
-        return await self._attach_pending_root_hook_context(switched, intent)
-
-    async def _attach_pending_root_hook_context(
-        self,
-        prepared: PreparedProspectiveRootDispatch,
-        intent: ActiveTurnCancellationIntent,
-    ) -> PreparedProspectiveRootDispatch:
-        """Add pending Hook context to one already-frozen first-call basis."""
-
-        candidate = prepared.admission.candidate
-        intent.require_exact(
-            turn_id=candidate.exact_turn_id,
-            scope_kind=self._session_scope_kind,
-        )
-        deadline = self._planning_deadline()
-        session_start_context: PendingHookContextReservation | None = None
-        hook_sibling = None
-        try:
-            if self._session_start_boundary.has_pending:
-                session_start_context = await self._dispatch_initial_session_start(
-                    intent,
-                    permission_snapshot=candidate.permission_snapshot,
-                    model_id=prepared.prepared_target.target.fact.model_id,
-                    deadline_monotonic=deadline,
-                )
-            hook_sibling = await self._provider_dispatch.prepare_hook_context_sibling(
-                prepared,
-                model_call_index=1,
-                deadline=deadline,
-            )
-            if hook_sibling is None:
-                session_start_context = None
-                return prepared
-            decision = await self._provider_dispatch.measure_prepared_wire_candidate(
-                hook_sibling.candidate,
-                deadline=deadline,
-            )
-            if decision.wire_input_plan is None:
-                hook_sibling.retire()
-                hook_sibling = None
-                session_start_context = None
-                return prepared
-            hook_sibling.candidate = decision.candidate
-            selected = self._provider_dispatch.bind_selected_prospective_root_dispatch(
-                base=prepared,
-                sibling=hook_sibling,
-                decision=decision,
-            )
-            hook_sibling = None
-            session_start_context = None
-            return selected
-        except BaseException:
-            if hook_sibling is not None and hook_sibling.owns_reservation:
-                hook_sibling.retire()
-            if session_start_context is not None:
-                session_start_context.retire()
-            if prepared.owns_resources:
-                prepared.close()
-            raise
+        finally:
+            if hook_context_reservation is not None:
+                hook_context_reservation.retire()
 
     async def prepare_plan_question_resolution_input(
         self,
@@ -1394,19 +1234,6 @@ class ConversationKernelRunner:
             admitted_writer=admitted_writer,
         )
 
-    async def prepare_plan_review_continuation_input(
-        self,
-        candidate: PreparedRootProviderInputCandidate,
-        *,
-        admitted_writer: CompactionWriteReservation,
-    ) -> PreparedProspectiveRootDispatch:
-        """Prepare a user-resolved Plan successor under its admitted writer."""
-
-        return await self.prepare_prospective_root_input(
-            candidate,
-            admitted_writer=admitted_writer,
-        )
-
     async def confirm_published_active_root_input(
         self,
         prepared: PreparedProspectiveActiveRootInput,
@@ -1418,37 +1245,6 @@ class ConversationKernelRunner:
             prepared,
             publication_handle=publication_handle,
             deadline=deadline_monotonic,
-        )
-
-    async def prepare_plan_continuation_input(
-        self, candidate: PreparedRootProviderInputCandidate
-    ) -> PreparedProspectiveRootDispatch:
-        """Prepare a continuation already covered by the response output gate."""
-
-        if self._root_control_preparation_barrier is not None:
-            await self._root_control_preparation_barrier(candidate.exact_turn_id)
-        if self._workspace_gate is not None:
-            await self._workspace_gate.wait_available()
-        if self._before_provider_preparation is not None:
-            await self._before_provider_preparation()
-        prepared = await self._provider_dispatch.prepare_prospective_root_input(
-            candidate=candidate,
-            inherited_memory_use_policy=self._root_memory_use_policy,
-            deadline=self._planning_deadline(),
-        )
-        if (
-            self.compaction.prospective_root_model_switch_candidate(prepared)
-            is not None
-        ):
-            prepared.close()
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.MODEL_SWITCH_REQUIRES_COMPACTION
-            )
-        return await self._attach_pending_root_hook_context(
-            prepared,
-            ActiveTurnCancellationIntent(
-                candidate.exact_turn_id, self._session_scope_kind
-            ),
         )
 
     async def _prepare_active_root_input(
@@ -1489,21 +1285,12 @@ class ConversationKernelRunner:
                 admitted_writer=admitted_writer,
             )
 
-    def _emit_pending_root_handover_notice(
-        self, prepared: PreparedProspectiveRootDispatch
-    ) -> None:
-        if (
-            prepared.model_switch_tier == 3
-            and self._presentation_notice_sink is not None
-        ):
-            self._presentation_notice_sink(_MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE)
-
     async def run_accepted_turn(
         self,
         turn_id: str,
         *,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
-        prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
+        started_input_group: StartedTurnInputGroup | None = None,
     ) -> KernelRunResult:
         """Execute a ROOT/task turn whose user entry is already canonical."""
 
@@ -1515,9 +1302,18 @@ class ConversationKernelRunner:
         )
         intent.require_exact(
             turn_id=turn_id,
-            scope_kind=intent.scope_kind,
+            scope_kind=self._session_scope_kind,
         )
 
+        if started_input_group is not None and (
+            started_input_group.turn_id != turn_id
+            or started_input_group.session_id != self._writer_lease.guard.session_id
+        ):
+            raise ValueError("started input group belongs to another execution")
+        first_call_history_through_sequence = (
+            None if started_input_group is None
+            else started_input_group.predecessor_through_sequence
+        )
         model_call_count = 0
         tool_call_count = 0
         current_memory_use_policy = (
@@ -1528,82 +1324,33 @@ class ConversationKernelRunner:
         active_surface_borrow: ProcessLocalToolSurfaceBorrow | None = None
         successor_dispatch: PreparedProviderDispatch | None = None
         successor_wire_decision: PreparedWireMeasurementDecision | None = None
-        pending_prospective_root_dispatch = prospective_root_dispatch
         completed_tool_batch = False
         stop_continuation_used = False
         input_selection_in_progress = False
-        root_completion_phase_opened = False
         try:
+            await self._io.run(
+                self._repository.require_provider_safe_turn,
+                self._writer_lease.guard,
+                turn_id=turn_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            if intent.cause is not None:
+                raise asyncio.CancelledError
             while True:
                 if self._workspace_gate is not None:
                     await self._workspace_gate.wait_available()
                 if (
                     successor_dispatch is None
-                    and pending_prospective_root_dispatch is None
                     and self._root_control_preparation_barrier is not None
                 ):
                     await self._root_control_preparation_barrier(turn_id)
                 if (
                     successor_dispatch is None
-                    and pending_prospective_root_dispatch is None
                     and self._before_provider_preparation is not None
                 ):
-                    # No input/surface handle exists here. A transferred compaction
-                    # successor must be consumed untouched; edits wait for its next
-                    # ordinary preparation boundary instead of replanning it.
+                    # No input/surface handle exists here. A transferred base
+                    # keeps its frozen roots until the common suffix safe point.
                     await self._before_provider_preparation()
-                # A successful active compaction already owns the next exact
-                # provider dispatch.  Consume that immutable handoff before
-                # polling a later manual request; otherwise a back-to-back
-                # request can overwrite the only process-local owner of its
-                # installed handle and surface borrow.  A later request stays
-                # with HostCompactionRuntimeOwner until the next safe loop, or
-                # the Host hands it to idle settlement when this turn exits.
-                manual_request = None
-                if successor_dispatch is None:
-                    manual_request = await self.compaction.take_manual(
-                        scope_kind=intent.scope_kind,
-                        turn_id=turn_id,
-                    )
-                if manual_request is not None:
-                    if pending_prospective_root_dispatch is not None:
-                        pending_prospective_root_dispatch.close()
-                        pending_prospective_root_dispatch = None
-                    compaction = await self.compaction.execute_active(
-                        turn_id=turn_id,
-                        model_call_index=model_call_count + 1,
-                        inherited_memory_use_policy=current_memory_use_policy,
-                        trigger=CompactionTrigger.MANUAL,
-                        force=manual_request.force,
-                        manual_request=manual_request,
-                        scope_kind=intent.scope_kind,
-                        hook_scope=self._hook_scope,
-                        session_start_compact_port=(
-                            self._compact_session_start_port(intent)
-                        ),
-                        session_start_boundary_port=(
-                            self._compact_session_start_boundary_port(intent)
-                        ),
-                    )
-                    self._require_active_compaction_continuation(compaction)
-                    successor_dispatch = compaction.successor_dispatch
-                    completed_tool_batch = False
-                    continue
-                if pending_prospective_root_dispatch is not None:
-                    prepared_root_dispatch = pending_prospective_root_dispatch
-                    pending_prospective_root_dispatch = None
-                    activated_root = (
-                        await self._provider_dispatch.activate_prospective_root_input(
-                            prepared_root_dispatch,
-                            deadline=self._planning_deadline(),
-                        )
-                    )
-                    if activated_root is None:
-                        continue
-                    (
-                        successor_dispatch,
-                        successor_wire_decision,
-                    ) = activated_root
                 model_call_count += 1
                 input_selection_in_progress = True
                 planning_deadline = self._planning_deadline()
@@ -1615,6 +1362,26 @@ class ConversationKernelRunner:
                 direct_switch_candidate = None
                 wire_decision = successor_wire_decision
                 successor_wire_decision = None
+                if dispatch is not None:
+                    unbound_dispatch = dispatch
+                    dispatch = None
+                    try:
+                        if wire_decision is None:
+                            wire_decision = await self.compaction.measure_dispatch_wire(
+                                unbound_dispatch, deadline=planning_deadline,
+                            )
+                    except BaseException:
+                        unbound_dispatch.close()
+                        raise
+                    # This API consumes the old owner even when it raises.
+                    # Only its returned dispatch remains ours to retire.
+                    dispatch, wire_decision = (
+                        await self._provider_dispatch.finalize_compaction_input(
+                            unbound_dispatch, wire_decision,
+                            deadline=planning_deadline,
+                            inherited_memory_use_policy=current_memory_use_policy,
+                        )
+                    )
                 if dispatch is None:
                     headroom_admission = (
                         await self.compaction.prepare_precompile_admission(
@@ -1645,6 +1412,7 @@ class ConversationKernelRunner:
                         )
                         precompile = await self.compaction.prepare_precompile(
                             turn_id=turn_id,
+                            first_call_history_through_sequence=first_call_history_through_sequence,
                             model_call_index=model_call_count,
                             inherited_memory_use_policy=current_memory_use_policy,
                             trigger=auto_trigger,
@@ -1679,11 +1447,11 @@ class ConversationKernelRunner:
                             automatic_compaction_decided = True
                             compaction = await self.compaction.execute_active(
                                 turn_id=turn_id,
+                                first_call_history_through_sequence=first_call_history_through_sequence,
                                 model_call_index=model_call_count,
                                 inherited_memory_use_policy=(current_memory_use_policy),
                                 trigger=precompile.trigger,
                                 force=False,
-                                manual_request=None,
                                 scope_kind=intent.scope_kind,
                                 hook_scope=self._hook_scope,
                                 session_start_compact_port=(
@@ -1697,6 +1465,7 @@ class ConversationKernelRunner:
                             if compaction.successor_dispatch is not None:
                                 model_call_count -= 1
                                 successor_dispatch = compaction.successor_dispatch
+                                successor_wire_decision = compaction.successor_wire_decision
                                 completed_tool_batch = False
                                 continue
                         if isinstance(
@@ -1707,6 +1476,7 @@ class ConversationKernelRunner:
                             compaction = (
                                 await self.compaction.execute_model_switch_active(
                                     turn_id=turn_id,
+                                    first_call_history_through_sequence=first_call_history_through_sequence,
                                     model_call_index=model_call_count,
                                     inherited_memory_use_policy=(
                                         current_memory_use_policy
@@ -1727,7 +1497,7 @@ class ConversationKernelRunner:
                             self._require_active_compaction_continuation(compaction)
                             if compaction.successor_dispatch is not None:
                                 if (
-                                    compaction.model_switch_tier == 3
+                                    compaction.context_reduction_notice
                                     and self._presentation_notice_sink is not None
                                 ):
                                     self._presentation_notice_sink(
@@ -1735,6 +1505,7 @@ class ConversationKernelRunner:
                                     )
                                 model_call_count -= 1
                                 successor_dispatch = compaction.successor_dispatch
+                                successor_wire_decision = compaction.successor_wire_decision
                                 completed_tool_batch = False
                                 continue
                     session_start_context = None
@@ -1864,6 +1635,7 @@ class ConversationKernelRunner:
                             dispatch.close_for_canonical_replan()
                             compaction = await self.compaction.execute_model_switch_active(
                                 turn_id=turn_id,
+                                first_call_history_through_sequence=first_call_history_through_sequence,
                                 model_call_index=model_call_count,
                                 inherited_memory_use_policy=current_memory_use_policy,
                                 candidate=direct_switch_candidate,
@@ -1882,7 +1654,7 @@ class ConversationKernelRunner:
                                     "model switch did not prepare its successor"
                                 )
                             if (
-                                compaction.model_switch_tier == 3
+                                compaction.context_reduction_notice
                                 and self._presentation_notice_sink is not None
                             ):
                                 self._presentation_notice_sink(
@@ -1890,6 +1662,7 @@ class ConversationKernelRunner:
                                 )
                             model_call_count -= 1
                             successor_dispatch = compaction.successor_dispatch
+                            successor_wire_decision = compaction.successor_wire_decision
                             completed_tool_batch = False
                             continue
                     if (
@@ -1902,11 +1675,11 @@ class ConversationKernelRunner:
                         dispatch.close_for_canonical_replan()
                         compaction = await self.compaction.execute_active(
                             turn_id=turn_id,
+                            first_call_history_through_sequence=first_call_history_through_sequence,
                             model_call_index=model_call_count,
                             inherited_memory_use_policy=current_memory_use_policy,
                             trigger=auto_trigger,
                             force=False,
-                            manual_request=None,
                             scope_kind=intent.scope_kind,
                             hook_scope=self._hook_scope,
                             session_start_compact_port=(
@@ -1920,6 +1693,7 @@ class ConversationKernelRunner:
                         if compaction.successor_dispatch is not None:
                             model_call_count -= 1
                             successor_dispatch = compaction.successor_dispatch
+                            successor_wire_decision = compaction.successor_wire_decision
                             completed_tool_batch = False
                             continue
                         planning_deadline = self._planning_deadline()
@@ -2008,6 +1782,7 @@ class ConversationKernelRunner:
                         permit=permit,
                         proposed_entry_id=entry_id,
                     )
+                    first_call_history_through_sequence = None
                     completed = collected.completed
                     entry_id = completed.draft_identity
                     calls = tuple(
@@ -2355,88 +2130,87 @@ class ConversationKernelRunner:
                 tool_call_count += batch.tool_call_count
                 completed_tool_batch = True
         except BaseException as error:
-            if successor_dispatch is not None:
-                successor_dispatch.close()
-            if active_surface_borrow is not None:
-                active_surface_borrow.close()
-                active_surface_borrow = None
-            if (
-                input_selection_in_progress
-                and self._provider_input_failure_observer is not None
-            ):
-                await self._provider_input_failure_observer(
-                    turn_id,
-                    "INPUT_COMPILE_FAILED"
-                    if isinstance(error, StructuredModelInputCompileError)
-                    else "INPUT_ADMISSION_FAILED",
-                )
-            if self._extensions is not None:
-                if isinstance(error, StructuredModelInputCompileError):
+            try:
+                if successor_dispatch is not None:
+                    successor_dispatch.close()
+                if active_surface_borrow is not None:
+                    active_surface_borrow.close()
+                    active_surface_borrow = None
+                if (
+                    input_selection_in_progress
+                    and self._provider_input_failure_observer is not None
+                ):
+                    await self._provider_input_failure_observer(
+                        turn_id,
+                        "INPUT_COMPILE_FAILED"
+                        if isinstance(error, StructuredModelInputCompileError)
+                        else "INPUT_ADMISSION_FAILED",
+                    )
+                if self._extensions is not None:
+                    if isinstance(error, StructuredModelInputCompileError):
+                        self._offer_operational_best_effort(
+                            OperationalHookOffer(
+                                event_type=(
+                                    OperationalHookType.MODEL_INPUT_COMPILE_OBSERVED
+                                ),
+                                session_id=self._writer_lease.guard.session_id,
+                                turn_id=turn_id,
+                                public_payload={
+                                    "disposition": "FAILED",
+                                    "model_call_index": model_call_count,
+                                    "failure_kind": error.kind.value,
+                                },
+                            )
+                        )
+                    if isinstance(error, CanonicalProviderContinuityError):
+                        self._offer_operational_best_effort(
+                            OperationalHookOffer(
+                                event_type=OperationalHookType.PROVIDER_CONTINUITY_FAILED,
+                                session_id=self._writer_lease.guard.session_id,
+                                turn_id=turn_id,
+                                public_payload={"failure_kind": error.kind.value},
+                            )
+                        )
+                    failure_payload: dict[str, object] = {
+                        "failure_code": "FOREGROUND_EXECUTION_INTERRUPTED"
+                    }
+                    if isinstance(error, ProviderModelExecutionFailed):
+                        failure_payload["provider_error_code"] = error.error.code.value
+                        failure_payload["provider_error_fingerprint"] = (
+                            error.error.error_fingerprint
+                        )
                     self._offer_operational_best_effort(
                         OperationalHookOffer(
-                            event_type=(
-                                OperationalHookType.MODEL_INPUT_COMPILE_OBSERVED
-                            ),
+                            event_type=OperationalHookType.FOREGROUND_TURN_FAILED,
                             session_id=self._writer_lease.guard.session_id,
                             turn_id=turn_id,
-                            public_payload={
-                                "disposition": "FAILED",
-                                "model_call_index": model_call_count,
-                                "failure_kind": error.kind.value,
-                            },
+                            public_payload=failure_payload,
                         )
                     )
-                if isinstance(error, CanonicalProviderContinuityError):
-                    self._offer_operational_best_effort(
-                        OperationalHookOffer(
-                            event_type=OperationalHookType.PROVIDER_CONTINUITY_FAILED,
-                            session_id=self._writer_lease.guard.session_id,
-                            turn_id=turn_id,
-                            public_payload={"failure_kind": error.kind.value},
-                        )
-                    )
-                failure_payload: dict[str, object] = {
-                    "failure_code": "FOREGROUND_EXECUTION_INTERRUPTED"
-                }
-                if isinstance(error, ProviderModelExecutionFailed):
-                    failure_payload["provider_error_code"] = error.error.code.value
-                    failure_payload["provider_error_fingerprint"] = (
-                        error.error.error_fingerprint
-                    )
-                self._offer_operational_best_effort(
-                    OperationalHookOffer(
-                        event_type=OperationalHookType.FOREGROUND_TURN_FAILED,
-                        session_id=self._writer_lease.guard.session_id,
-                        turn_id=turn_id,
-                        public_payload=failure_payload,
-                    )
+            finally:
+                cause = intent.cause
+                # The installed logical stop/close cause remains the ROOT winner
+                # even if physical cancellation surfaces a typed provider error.
+                reason = (
+                    root_cancellation_terminal_reason(intent)
+                    if cause is not None
+                    else _provider_incomplete_terminal_reason(error)
                 )
-            cause = intent.cause
-            # The installed logical stop/close cause remains the ROOT winner
-            # even if physical cancellation surfaces a typed provider error.
-            reason = (
-                root_cancellation_terminal_reason(intent)
-                if cause is not None
-                else _provider_incomplete_terminal_reason(error)
-            )
-            if reason is None:
-                reason = _model_input_terminal_reason(error)
-            if reason is None:
-                reason = "FOREGROUND_EXECUTION_INTERRUPTED"
-            public_detail = None
-            if isinstance(error, ProviderModelExecutionFailed) and cause is None:
-                reason = "PROVIDER_REQUEST_FAILED"
-                public_detail = f"{error.error.code.value}: {error.error.message}"
-            if public_detail is None:
-                await self._turn_admission.interrupt_turn(turn_id, reason=reason)
-            else:
-                await self._turn_admission.interrupt_turn(
-                    turn_id, reason=reason, public_detail=public_detail
-                )
+                if reason is None:
+                    reason = _model_input_terminal_reason(error)
+                if reason is None:
+                    reason = "FOREGROUND_EXECUTION_INTERRUPTED"
+                public_detail = None
+                if isinstance(error, ProviderModelExecutionFailed) and cause is None:
+                    reason = "PROVIDER_REQUEST_FAILED"
+                    public_detail = f"{error.error.code.value}: {error.error.message}"
+                if public_detail is None:
+                    await self._turn_admission.interrupt_turn(turn_id, reason=reason)
+                else:
+                    await self._turn_admission.interrupt_turn(
+                        turn_id, reason=reason, public_detail=public_detail
+                    )
             raise
-        finally:
-            if pending_prospective_root_dispatch is not None:
-                pending_prospective_root_dispatch.close()
 
     async def _dispatch_initial_session_start(
         self,
@@ -2511,7 +2285,7 @@ class ConversationKernelRunner:
         deadline_monotonic: float,
         admitted_writer: CompactionWriteReservation,
         cancellation_intent: ActiveTurnCancellationIntent | None = None,
-    ) -> tuple[AcceptedEntry | None, PreparedProspectiveRootDispatch | None]:
+    ) -> tuple[AcceptedEntry | None, StartedTurnInputGroup | None]:
         prepared_attempt = await self._io.run(
             self._safe_point.prepare_terminal_observation_installation,
             coordinator=coordinator,
@@ -2521,8 +2295,30 @@ class ConversationKernelRunner:
             actor_id=actor_id,
             deadline_monotonic=deadline_monotonic,
         )
-        if prepared_attempt is None or isinstance(prepared_attempt, AcceptedEntry):
-            return prepared_attempt, None
+        if prepared_attempt is None:
+            return None, None
+        if isinstance(prepared_attempt, AcceptedEntry):
+            group = None
+            if isinstance(target, NewTurnInstallation):
+                load_group = asyncio.create_task(self._io.run(
+                    self._repository.read_started_turn_input_group,
+                    self._writer_lease.guard,
+                    turn_id=prepared_attempt.turn_id,
+                    deadline_monotonic=deadline_monotonic,
+                ))
+                try:
+                    group = await _await_shielded(load_group)
+                except StaleHostWriter:
+                    raise
+                except BaseException as error:
+                    await self._turn_admission.interrupt_turn(
+                        prepared_attempt.turn_id,
+                        reason=root_cancellation_terminal_reason(cancellation_intent),
+                    )
+                    if isinstance(error, Exception):
+                        raise TerminalObservationStartedFailure(error, prepared_attempt) from error
+                    raise
+            return prepared_attempt, group
         attempt: TerminalObservationInstallationAttempt = prepared_attempt
         if isinstance(attempt.target, ExistingTurnInstallation):
             candidate = await self._io.run(
@@ -2566,31 +2362,71 @@ class ConversationKernelRunner:
                     prepared_active.close()
         if not isinstance(attempt.target, NewTurnInstallation):
             raise TypeError("terminal observation target is unknown")
-        candidate = await self._io.run(
-            self._repository.prepare_new_terminal_observation_provider_input_candidate,
-            self._writer_lease.guard,
-            candidate=attempt,
-            deadline_monotonic=deadline_monotonic,
+        async def publish_started_observation():
+            accepted = None
+            try:
+                try:
+                    accepted = await self._io.run(
+                        self._safe_point.publish_terminal_observation,
+                        None,
+                        coordinator=coordinator,
+                        attempt=attempt,
+                        provider_input_admission=None,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                except StaleHostWriter:
+                    raise
+                except Exception:
+                    # Join the exact original write after an unknown ACK.
+                    # A NONE result is a failed unstarted installation; never
+                    # manufacture another observation or restart its write.
+                    while True:
+                        try:
+                            confirmed = await self._io.run(
+                                self._repository.confirm_terminal_observation_winner,
+                                self._writer_lease.guard,
+                                candidate=attempt,
+                                deadline_monotonic=self._canonical_deadline(),
+                            )
+                            break
+                        except (TimeoutError, ConnectionError, InterfaceError, OperationalError):
+                            await asyncio.sleep(0.05)
+                    if confirmed is None:
+                        raise
+                    coordinator.settle_installation(attempt, accepted=True)
+                    accepted = confirmed
+                group = await self._io.run(
+                    self._repository.read_started_turn_input_group,
+                    self._writer_lease.guard,
+                    turn_id=accepted.turn_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
+                return accepted, group
+            except StaleHostWriter:
+                raise
+            except BaseException as error:
+                if accepted is not None:
+                    await self._turn_admission.interrupt_turn(
+                        accepted.turn_id,
+                        reason=root_cancellation_terminal_reason(cancellation_intent),
+                    )
+                    if isinstance(error, Exception):
+                        raise TerminalObservationStartedFailure(error, accepted) from error
+                raise
+
+        settlement = asyncio.create_task(
+            publish_started_observation(),
+            name=f"kernel-terminal-observation-start:{attempt.target.turn_id}",
         )
-        prospective_root: PreparedProspectiveRootDispatch | None = None
         try:
-            prospective_root = await self.prepare_prospective_root_input(
-                candidate,
-                admitted_writer=admitted_writer,
-                cancellation_intent=cancellation_intent,
-            )
-            accepted = await self._io.run(
-                self._safe_point.publish_terminal_observation,
-                None,
-                coordinator=coordinator,
-                attempt=attempt,
-                provider_input_admission=prospective_root.admission,
-                deadline_monotonic=deadline_monotonic,
-            )
-            return accepted, prospective_root
-        except BaseException:
-            if prospective_root is not None:
-                prospective_root.close()
+            return await _await_shielded(settlement)
+        except asyncio.CancelledError:
+            if not settlement.cancelled() and settlement.exception() is None:
+                accepted, _group = settlement.result()
+                await self._turn_admission.interrupt_turn(
+                    accepted.turn_id,
+                    reason=root_cancellation_terminal_reason(cancellation_intent),
+                )
             raise
 
     async def install_user_control_feedback(
@@ -3291,6 +3127,13 @@ def _model_input_terminal_reason(error: BaseException) -> str | None:
     if not isinstance(error, StructuredModelInputCompileError):
         return None
     if error.kind in {
+        ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED,
+        ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED,
+        ModelInputCompileFailureKind.PROTECTED_TRANSCRIPT_EXCEEDS_BUDGET,
+        ModelInputCompileFailureKind.PREFIX_EPOCH_BUDGET_EXHAUSTED,
+        ModelInputCompileFailureKind.STATEFUL_SOURCE_REPLACEMENT_OVER_BUDGET,
+        ModelInputCompileFailureKind.REQUIRED_CONTEXT_EXCEEDS_BUDGET,
+        ModelInputCompileFailureKind.TOOL_SCHEMA_EXCEEDS_BUDGET,
         ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE,
         ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET,
     }:
@@ -3304,6 +3147,7 @@ def _json_digest(value: FrozenJsonObjectFact) -> str:
 
 __all__ = [
     "ConversationKernelRunner",
+    "TerminalObservationStartedFailure",
     "FrozenPostResponseResourceQuote",
     "KernelRunResult",
     "OutputResourceInterruption",

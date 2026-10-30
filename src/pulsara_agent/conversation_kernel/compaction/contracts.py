@@ -34,6 +34,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputCompileBinding,
     ModelInputScopeKind,
     ProviderToolResultClosure,
+    PreparedProviderInputCut,
     late_tool_outcome_observation_leaf,
     provider_input_item_fingerprint,
     provider_input_item_logical_utf8_bytes,
@@ -55,6 +56,10 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.conversation_kernel.prompt_content import (
     canonical_prompt_body_bytes,
+)
+from pulsara_agent.llm.model_connections import (
+    ModelCallBinding,
+    model_call_binding_to_dict,
 )
 from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.primitives.context import (
@@ -111,7 +116,7 @@ class CompactionTargetBranch(StrEnum):
 class CompactionDisposition(StrEnum):
     COMPACTED = "COMPACTED"
     NOT_NEEDED = "NOT_NEEDED"
-    DEFERRED_TO_SAFE_POINT = "DEFERRED_TO_SAFE_POINT"
+    RESULT_UNAVAILABLE = "RESULT_UNAVAILABLE"
     REJECTED_BUSY = "REJECTED_BUSY"
     FAILED = "FAILED"
 
@@ -142,26 +147,33 @@ class CompactionConfirmationKind(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PreparedManualCompactionCommand:
-    """Stable semantic command accepted before process-local execution starts."""
+    """One idle operation's exact model selection and canonical source."""
 
     session_id: str
     command_id: str
     scope_kind: ModelInputScopeKind
     target_turn_id: str
-    expected_active_turn_id: str | None
-    force: bool
+    model_call_binding: ModelCallBinding
+    source_cut: PreparedProviderInputCut
     semantic_digest: str
 
     def __post_init__(self) -> None:
-        if not self.session_id or not self.command_id or not self.target_turn_id:
-            raise ValueError("manual compaction command identity is incomplete")
+        if (
+            not self.session_id
+            or not self.command_id
+            or not self.target_turn_id
+            or self.scope_kind is not ModelInputScopeKind.ROOT
+            or self.source_cut.session_id != self.session_id
+            or self.source_cut.turn_id != self.target_turn_id
+        ):
+            raise ValueError("manual compaction identity/source is incomplete")
         expected = manual_compaction_command_semantic_digest(
             session_id=self.session_id,
             command_id=self.command_id,
             scope_kind=self.scope_kind,
             target_turn_id=self.target_turn_id,
-            expected_active_turn_id=self.expected_active_turn_id,
-            force=self.force,
+            model_call_binding=self.model_call_binding,
+            source_cut=self.source_cut,
         )
         if self.semantic_digest != expected:
             raise ValueError("manual compaction command digest mismatch")
@@ -173,8 +185,8 @@ def manual_compaction_command_semantic_digest(
     command_id: str,
     scope_kind: ModelInputScopeKind,
     target_turn_id: str,
-    expected_active_turn_id: str | None,
-    force: bool,
+    model_call_binding: ModelCallBinding,
+    source_cut: PreparedProviderInputCut,
 ) -> str:
     return context_fingerprint(
         "pulsara:compact-context-command:v1",
@@ -183,8 +195,9 @@ def manual_compaction_command_semantic_digest(
             "command_id": command_id,
             "scope_kind": scope_kind.value,
             "target_turn_id": target_turn_id,
-            "expected_active_turn_id": expected_active_turn_id,
-            "force": force,
+            "model_call_binding": model_call_binding_to_dict(model_call_binding),
+            "source_context_binding_revision_id": source_cut.context_binding_revision_id,
+            "source_through_sequence": source_cut.provider_input_through_sequence,
         },
     )
 
@@ -195,23 +208,23 @@ def build_prepared_manual_compaction_command(
     command_id: str,
     scope_kind: ModelInputScopeKind,
     target_turn_id: str,
-    expected_active_turn_id: str | None,
-    force: bool,
+    model_call_binding: ModelCallBinding,
+    source_cut: PreparedProviderInputCut,
 ) -> PreparedManualCompactionCommand:
     return PreparedManualCompactionCommand(
         session_id=session_id,
         command_id=command_id,
         scope_kind=scope_kind,
         target_turn_id=target_turn_id,
-        expected_active_turn_id=expected_active_turn_id,
-        force=force,
+        model_call_binding=model_call_binding,
+        source_cut=source_cut,
         semantic_digest=manual_compaction_command_semantic_digest(
             session_id=session_id,
             command_id=command_id,
             scope_kind=scope_kind,
             target_turn_id=target_turn_id,
-            expected_active_turn_id=expected_active_turn_id,
-            force=force,
+            model_call_binding=model_call_binding,
+            source_cut=source_cut,
         ),
     )
 
@@ -697,6 +710,7 @@ class FrozenCompactionCanonicalRead:
     safe_head_range: FrozenCompactionCanonicalRange = field(repr=False)
     source_interruption: TurnInterruptionNotice | None = None
     imported_interruptions: tuple[TurnInterruptionNotice, ...] = ()
+    executed_history_interruptions: tuple[TurnInterruptionNotice, ...] = ()
 
     def __post_init__(self) -> None:
         if self.source_interruption is not None and (
@@ -715,6 +729,15 @@ class FrozenCompactionCanonicalRead:
             raise ValueError(
                 "compaction imported interruption lies outside source range"
             )
+        if any(
+            n.owner_kind != "EXECUTED_TURN"
+            or n.owner_id == self.scope.turn_id
+            or not self.safe_head_range.effective_materialization_lineage_floor
+            < n.display_after_entry_sequence
+            <= self.safe_head_range.source_through_sequence
+            for n in self.executed_history_interruptions
+        ):
+            raise ValueError("compaction executed history interruption is out of cut")
         identity = self.dispatch_read.compile_snapshot.canonical_input.identity
         if (
             identity.session_id != self.scope.session_id
@@ -771,6 +794,7 @@ def freeze_compaction_canonical_read(
     safe_head_range: FrozenCompactionCanonicalRange,
     source_interruption: TurnInterruptionNotice | None = None,
     imported_interruptions: tuple[TurnInterruptionNotice, ...] = (),
+    executed_history_interruptions: tuple[TurnInterruptionNotice, ...] = (),
 ) -> FrozenCompactionCanonicalRead:
     return FrozenCompactionCanonicalRead(
         scope=scope,
@@ -780,6 +804,7 @@ def freeze_compaction_canonical_read(
         safe_head_range=safe_head_range,
         source_interruption=source_interruption,
         imported_interruptions=imported_interruptions,
+        executed_history_interruptions=executed_history_interruptions,
     )
 
 
@@ -853,6 +878,7 @@ def provider_input_item_canonical_expanded_bytes(
             CanonicalInputOriginKind.AGENT_PROFILE,
             CanonicalInputOriginKind.AGENT_MATERIAL,
             CanonicalInputOriginKind.AGENT_MESSAGE,
+            CanonicalInputOriginKind.SCHEDULED_TASK,
         }
     ) or (
         item.item_kind

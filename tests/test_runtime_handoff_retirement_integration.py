@@ -187,6 +187,11 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         self.resources = {}
         self.child_started = asyncio.Event()
         self.child_release = asyncio.Event()
+        self.child_calls = 0
+        self.todo_before = None
+        self.todo_record = None
+        self.todo_after_adoption = None
+        self.todo_record_after_adoption = None
         self.idle_agent_id = None
         self.todo_arguments = {"items": [
             {"text": f"{index:02d}" + '"' * 104, "status": "in_progress" if index == 0 else "pending"}
@@ -309,7 +314,10 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         self.resources.update(running=running, ended=ended.process_id, tokens=tokens,
             active=active, terminal_cell=terminal_cell, cell_release=cell_release,
             terminal_before=before, release_path=release_path, cleanup_id=cleanup_id,
-            cleanup_gate=cleanup_gate, cleanup_ack=cleanup_ack)
+            cleanup_gate=cleanup_gate, cleanup_ack=cleanup_ack,
+            process_states={key: terminal.process_registry._states[key] for key in running},
+            active_cell_owner=cells._cells[active],
+            monitor_owner=coordinator._registrations[tokens[0].monitor_id])
         if self.variant == "large_todo":
             self._seed_todo(request)
 
@@ -320,9 +328,12 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
             proposed_result_entry_id=random_id("entry"), candidate=self.todo_candidate,
             acknowledgement=b'{"status":"updated"}')
         owner.commit(prepared)
+        self.todo_record = owner._root
+        self.todo_before = owner.freeze_compaction_handoff(scope_kind=ModelInputScopeKind.ROOT)
 
     async def _stream(self, request):
         if request.session_id != self.session.session_id:
+            self.child_calls += 1
             self.child_started.set()
             await self.child_release.wait()
             for event in _text("text:child", "CHILD_EXISTING_WORK_FINISHED"):
@@ -341,6 +352,10 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
             events = _text("text:large", "accepted pre-compaction material " + "a" * 920_000)
             events += _tool_call("read_file", "call:trigger", {"target": {"kind": "PATH", "path": "input.txt"}})
         elif index == (3 if self.variant == "large_todo" else 2):
+            if self.variant in {"large_todo", "todo_only"}:
+                self.todo_record_after_adoption = self.session._tools.todo_owner._root
+                self.todo_after_adoption = self.session._tools.todo_owner.freeze_compaction_handoff(
+                    scope_kind=ModelInputScopeKind.ROOT)
             if self.variant == "plan":
                 events = _tool_call("write_file", "call:denied-write", {
                     "target": {"kind": "PATH", "path": "must-not-exist.txt"}, "content": "forbidden"})
@@ -427,6 +442,10 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                     if observation.source_kind.value == "RUNTIME_ENVIRONMENT":
                         assert "cell_index" not in observation.body
             if variant in {"large_todo", "todo_only"}:
+                # Inspect at the first post-adoption call, before ordinary turn
+                # completion legitimately settles the live TODO state.
+                assert model.todo_record_after_adoption is model.todo_record
+                assert model.todo_after_adoption == model.todo_before
                 assert handoff is not None
                 assert handoff.presence.value == "VALUE"
                 payload = _payload(handoff.body)
@@ -443,6 +462,15 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                 record_property("full_handoff_tokens", estimate_runtime_handoff_pmca_tokens(handoff.body))
                 record_property("actual_wire_handoff_body", wire_observations["COMPACTION_RUNTIME_HANDOFF"])
             if variant == "large_todo":
+                for process_id, process_owner in model.resources["process_states"].items():
+                    assert session._tools._terminal.process_registry._states[process_id] is process_owner
+                    assert process_owner.process.poll() is None
+                assert session._code_mode._cells[model.resources["active"]] is model.resources["active_cell_owner"]
+                assert session._tools.terminal_monitor_coordinator._registrations[
+                    model.resources["tokens"][0].monitor_id] is model.resources["monitor_owner"]
+                assert model.child_calls == 1 and not model.child_release.is_set()
+                record_property("background_owners_unchanged", True)
+                record_property("todo_owner_and_snapshot_unchanged", True)
                 assert {row["target"]["process_id"] for row in payload["terminal_processes"]} == set(model.resources["running"])
                 assert model.resources["ended"] not in handoff.body
                 assert [row["target"]["monitor_id"] for row in payload["terminal_monitors"]] == [model.resources["tokens"][0].monitor_id]

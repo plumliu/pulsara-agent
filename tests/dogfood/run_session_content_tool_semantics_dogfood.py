@@ -97,7 +97,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
             catalog = ModelCatalogOwner(ModelsDevCatalogClient())
             await catalog.refresh()
             delegate = ModelRuntime.production(settings=settings, catalog=catalog)
-            runtime = _RecordingModelRuntime(delegate, evidence["calls"], None)
+            runtime = _RecordingModelRuntime(delegate, evidence["calls"])
             core = KernelHostCore.production(model_runtime=runtime)
             try:
                 sessions = []
@@ -241,7 +241,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                 )[0]["result_entry_id"]
                 compact = await asyncio.wait_for(
                     source.compact_context(
-                        command_id='command:cfrvsdxgcpzsazkdccnnzpslma', force=True
+                        command_id='command:cfrvsdxgcpzsazkdccnnzpslma'
                     ),
                     600,
                 )

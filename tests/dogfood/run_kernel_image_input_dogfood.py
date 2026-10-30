@@ -659,7 +659,7 @@ async def run(args, report, saved):
             report["phase"] = "manual_compaction"
             print(f"K4 {args.model}: manual_compaction", flush=True)
             compacted = await session.compact_context(
-                command_id=random_id("command"), force=True
+                command_id=random_id("command")
             )
             report["compaction"] = {
                 "disposition": compacted.disposition.value,

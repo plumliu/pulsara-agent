@@ -306,6 +306,7 @@ export interface RuntimeProjection {
   promptTransitions: LocalPromptSubmission[];
   planMode: boolean;
   activeTurnId?: string;
+  manualCompactionCommandId?: string;
   hostSessionId?: string;
   controlAdmissionDeadlineMs?: number;
   control: ProtocolCanonicalControl;
@@ -395,10 +396,10 @@ export interface BackgroundProcessLog {
 export interface UserControlCommandRef {
   admissionDeadlineMs: number;
   commandId: string;
-  operation: 'STOP_ACTIVE_TURN' | 'TERMINATE_BACKGROUND_PROCESS';
+  operation: 'STOP_ACTIVE_TURN' | 'STOP_CONTEXT_COMPACTION' | 'TERMINATE_BACKGROUND_PROCESS';
   sessionId: string;
   hostSessionId: string;
-  targetKind: 'ROOT_TURN' | 'BACKGROUND_PROCESS';
+  targetKind: 'ROOT_TURN' | 'MANUAL_COMPACTION' | 'BACKGROUND_PROCESS';
   targetId: string;
 }
 
@@ -740,6 +741,7 @@ export interface RuntimeConnection {
   cancelQueuedPrompt(commandId: string, queueItemId: string): Promise<CommandReceipt>;
   steerQueuedPrompt(commandId: string, queueItemId: string, targetTurnId: string): Promise<CommandReceipt>;
   stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt>;
+  stopContextCompaction(reference: UserControlCommandRef): Promise<CommandReceipt>;
   terminateBackgroundProcess(reference: UserControlCommandRef): Promise<CommandReceipt>;
   queryControlCommand(reference: UserControlCommandRef): Promise<UserControlQueryResult>;
   listBackgroundProcesses(cursor?: string): Promise<BackgroundProcessPage>;
@@ -750,7 +752,7 @@ export interface RuntimeConnection {
   readImageReference(imageRef: string, signal?: AbortSignal): Promise<SavedImageData>;
   readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
   readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent>;
-  compactContext(targetTurnId?: string): Promise<CommandReceipt>;
+  compactContext(): Promise<CommandReceipt>;
   enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt>;
   readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent>;
   resolveInteraction(
@@ -786,6 +788,7 @@ export type RuntimeCommandKind =
   | 'CANCEL_QUEUED_PROMPT'
   | 'STEER_QUEUED_PROMPT'
   | 'STOP_ACTIVE_TURN'
+  | 'STOP_CONTEXT_COMPACTION'
   | 'TERMINATE_BACKGROUND_PROCESS'
   | 'COMPACT_CONTEXT'
   | 'ENTER_PLAN';
@@ -946,6 +949,7 @@ export interface ProtocolLiveControlSnapshot {
   input_admission_deferred?: boolean;
   host_session_id?: string;
   active_root_turn_id?: string;
+  manual_compaction_command_id?: string;
   control_admission_deadline_ms?: string | number;
 }
 
@@ -1086,6 +1090,8 @@ interface ObservationPayload {
   }>;
   presentation_notices?: string[];
   root_compaction_in_progress?: boolean;
+  manual_compaction_command_id?: string;
+  active_root_turn_id?: string;
   gap?: { kind: string; reason?: string };
 }
 
@@ -2969,6 +2975,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       this.presentationNotices.push('部分临时进展已丢失，已从当前进展继续；已保存的会话记录不受影响。');
     }
     this.liveControl.root_compaction_in_progress = observation.root_compaction_in_progress === true;
+    this.liveControl.manual_compaction_command_id = observation.manual_compaction_command_id || '';
+    this.liveControl.active_root_turn_id = observation.active_root_turn_id || '';
     this.rememberQueueContent(this.control);
     for (const committed of observation.committed ?? []) {
       if (committed.interruption_notice) this.mergeInterruptionNotices([committed.interruption_notice]);
@@ -3064,6 +3072,11 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       control_admission_deadline_ms: reference.admissionDeadlineMs,
       target_turn_id: reference.targetId,
     }, reference.commandId);
+  }
+
+  stopContextCompaction(reference: UserControlCommandRef): Promise<CommandReceipt> {
+    this.assertControlReference(reference, 'STOP_CONTEXT_COMPACTION', 'MANUAL_COMPACTION');
+    return this.controlCommand(reference, 'target_compaction_command_id');
   }
 
   terminateBackgroundProcess(reference: UserControlCommandRef): Promise<CommandReceipt> {
@@ -3213,11 +3226,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     return { parts };
   }
 
-  compactContext(targetTurnId?: string): Promise<CommandReceipt> {
-    return this.command('COMPACT_CONTEXT', {
-      ...(targetTurnId ? { target_turn_id: targetTurnId } : {}),
-      force: true,
-    });
+  compactContext(): Promise<CommandReceipt> {
+    return this.command('COMPACT_CONTEXT');
   }
 
   enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt> {
@@ -3468,7 +3478,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
 
   private controlCommand(
     reference: UserControlCommandRef,
-    targetField: 'target_process_id',
+    targetField: 'target_process_id' | 'target_compaction_command_id',
   ): Promise<CommandReceipt> {
     return this.command(reference.operation, {
       client_submission_id: '',
@@ -3941,7 +3951,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     }
     this.applyProjectedLiveResults(messages, activeTurnIds);
     const hasActiveDraft = visibleDrafts.length > 0;
-    const activeTurn = this.control.active_turns?.[0];
+    const manualCommandId = this.liveControl.manual_compaction_command_id;
+    const activeTurn = manualCommandId ? undefined : this.control.active_turns?.[0];
     const todo = projectTodo(this.liveControl);
     const interaction = projectInteraction(this.liveControl, this.control);
     const readingMessages = this.readingMessages(messages);
@@ -3954,7 +3965,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       presentationNotices: this.presentationNotices,
       contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base,
-      isRunning: Boolean(activeTurn) || hasActiveDraft,
+      isRunning: !manualCommandId && (Boolean(this.liveControl.active_root_turn_id) || Boolean(activeTurn) || hasActiveDraft),
       queuedCount: numeric(this.control.prompt_queue_total_count),
       queuedPrompts: projectQueuedPrompts(this.control).filter(item => !['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.commandId)?.status ?? '') && !canonical.some(entry => entry.input_source?.command_id === item.commandId && entry.input_source.queue_item_id === item.queueItemId)),
       promptTransitions: this.projectPromptTransitions(),
@@ -3963,6 +3974,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         && Object.keys(this.control.active_plan_workflow).length,
       ),
       activeTurnId: this.liveControl.active_root_turn_id || activeTurn?.turn_id,
+      manualCompactionCommandId: manualCommandId || undefined,
       hostSessionId: this.liveControl.host_session_id || undefined,
       controlAdmissionDeadlineMs: numeric(
         this.liveControl.control_admission_deadline_ms,

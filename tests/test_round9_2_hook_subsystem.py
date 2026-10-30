@@ -1965,7 +1965,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
             turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
             scope_kind=ModelInputScopeKind.ROOT,
-            trigger=CompactionTrigger.MANUAL,
+            trigger=CompactionTrigger.AUTO_ACTIVE_CONTEXT,
         )
         candidate = SimpleNamespace(
             snapshot=SimpleNamespace(snapshot_id='snapshot:hui7qoo4witxjjls4whfaupz2e'),
@@ -1985,9 +1985,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
             source_wire_candidate=SimpleNamespace(
                 prepared_call=SimpleNamespace(epoch_call_target=SimpleNamespace())
             ),
-            model_switch_candidate=None,
-            model_switch_tier=None,
-            prospective_root_dispatch=None,
+            destination_projection_target=None,
             ordinary_destination_target=SimpleNamespace(),
             pending_active_candidate=None,
             protected_tail_selection_fingerprint="tail:1",
@@ -2005,7 +2003,7 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     )
                 )
             ),
-            trigger=CompactionTrigger.MANUAL,
+            trigger=CompactionTrigger.AUTO_ACTIVE_CONTEXT,
             attempt_token=attempt,
             hook_scope=None,
             hook_model_id="model:1",
@@ -2035,7 +2033,6 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
 
             class _OuterOwner:
                 def __init__(self) -> None:
-                    self.settled = None
                     self.policy = SimpleNamespace(enabled=True)
 
                 async def run_fenced(
@@ -2044,9 +2041,6 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     del scope, trigger, attempt_id
                     assert admitted_writer is None
                     return await operation()
-
-                async def settle_manual(self, request, outcome) -> None:
-                    self.settled = (request, outcome)
 
                 def record_automatic_failure(self, **kwargs) -> None:
                     del kwargs
@@ -2068,18 +2062,13 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
 
             outer._resolved_workspace_id = workspace_id
             outer._execute_compaction_fenced = fail_after_adoption
-            manual = SimpleNamespace(
-                command_id='command:3mkyvtvppfglbmqedm6zqizjvy',
-                scope_kind=ModelInputScopeKind.ROOT,
-            )
             with pytest.raises(type(failure)) as propagated:
                 await outer._execute_active(
                     turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
                     model_call_index=1,
                     inherited_memory_use_policy=MemoryUsePolicy.ENABLED,
-                    trigger=CompactionTrigger.MANUAL,
+                    trigger=CompactionTrigger.AUTO_ACTIVE_CONTEXT,
                     force=False,
-                    manual_request=manual,
                     scope_kind=ModelInputScopeKind.ROOT,
                     hook_scope=None,
                     session_start_compact_port=None,
@@ -2087,7 +2076,6 @@ def test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linea
                     pending_active_candidate=None,
                 )
             assert propagated.value is failure
-            assert outer_owner.settled == (manual, carrier.outcome)
 
     asyncio.run(exercise())
 

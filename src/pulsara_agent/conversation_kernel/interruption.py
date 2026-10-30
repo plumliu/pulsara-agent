@@ -177,9 +177,11 @@ def read_imported_notices(
 
 
 def summary_interruption_suffix(
-    current: TurnInterruptionNotice | None, imported: tuple[TurnInterruptionNotice, ...]
+    current: TurnInterruptionNotice | None,
+    imported: tuple[TurnInterruptionNotice, ...],
+    executed_history: tuple[TurnInterruptionNotice, ...] = (),
 ) -> str:
-    if current is None and not imported:
+    if current is None and not imported and not executed_history:
         return ""
     import json
     from dataclasses import asdict
@@ -190,6 +192,7 @@ def summary_interruption_suffix(
             {
                 "current_source_turn": None if current is None else asdict(current),
                 "selected_imported_history": [asdict(n) for n in imported],
+                "selected_executed_history": [asdict(n) for n in executed_history],
             },
             ensure_ascii=False,
             sort_keys=True,

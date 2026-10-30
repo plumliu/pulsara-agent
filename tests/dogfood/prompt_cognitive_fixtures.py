@@ -49,22 +49,10 @@ async def seed_unknown_local_append(session, workspace: Path) -> dict[str, str]:
         actor_id="prompt-cognitive-fixture",
     )
     resolution = session._model_runtime.freeze_resolution_snapshot()
-    candidate = repository.prepare_root_provider_input_candidate(
+    repository.accept_root_turn_intent(
         guard, intent=intent, model_resolution_snapshot=resolution,
         deadline_monotonic=monotonic() + 60,
     )
-    prepared = await session._runner._provider_dispatch.prepare_prospective_root_input(
-        candidate=candidate,
-        inherited_memory_use_policy=session._runner._root_memory_use_policy,
-        deadline=monotonic() + 60,
-    )
-    try:
-        repository.accept_root_turn_intent(
-            guard, intent=intent, provider_input_admission=prepared.admission,
-            model_resolution_snapshot=resolution, deadline_monotonic=monotonic() + 60,
-        )
-    finally:
-        prepared.close()
     cut = repository.prepare_provider_input_cut(
         guard, turn_id=turn_id, deadline_monotonic=monotonic() + 30,
     )

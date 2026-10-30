@@ -20,7 +20,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CONTEXT_SNAPSHOT_MEDIA_TYPE,
     CompactionActiveRequestLocation,
     CompactionCanonicalAdoptionFactoryInput,
-    CompactionConfirmationKind,
     CompactionContinuationMode,
     CompactionDisposition,
     CompactionOutcome,
@@ -32,7 +31,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     FrozenRetainedHistoricalRequest,
     ResolvedCompactionPolicy,
     build_prepared_compaction_canonical_adoption,
-    build_prepared_manual_compaction_command,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.assembler import (
@@ -190,58 +188,85 @@ def _wire_quote(
     )
 
 
-def test_round5b_manual_command_settlement_keys_the_exact_semantic_digest() -> None:
+def _manual_host() -> KernelHostSession:
     host = object.__new__(KernelHostSession)
     host._session_scope_kind = ModelInputScopeKind.ROOT
-    host._root_session_id = None
+    host.root_session_id = None
     host._writer_renewal_failure = None
-    host._scheduled_tasks = None
+    host._closing = False
+    host._runtime_reopen_quiescence = None
+    host._active_task = None
+    host._active_turn_id = None
+    host._external_new_turn_accepting = False
+    host._pending_root_successor = None
+    host._plan_exit_fence = False
+    host._prompt_admission_attempts = {}
+    host._compaction_write_reservations = {}
     host._manual_compaction_command_attempts = {}
     host._compaction = HostCompactionRuntimeOwner()
-    started = asyncio.Event()
-    release = asyncio.Event()
-    calls: list[str] = []
+    host._query_command_row = AsyncMock(return_value=None)
+    host._lock = asyncio.Lock()
+    host._queue_wake = asyncio.Event()
+    host._monitor_wake = asyncio.Event()
+    return host
 
-    async def settle(candidate):
-        calls.append(candidate.semantic_digest)
-        started.set()
-        await release.wait()
-        return CompactionConfirmationKind.FULL
 
-    host._settle_manual_compaction_command_worker = settle
-    exact = build_prepared_manual_compaction_command(
-        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
-        command_id="command:u5fuuol2z2xsyv3uxg27btghta",
-        scope_kind=ModelInputScopeKind.ROOT,
-        target_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        expected_active_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        force=True,
+def _manual_target(turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a"):
+    from pulsara_agent.conversation_kernel.direct_model import (
+        DirectKernelModelPort,
+        KernelModelTargetPreparationRequest,
     )
-    conflict = build_prepared_manual_compaction_command(
-        session_id="session:336wrfwkamrr3up6kjtsgvgcte",
-        command_id="command:u5fuuol2z2xsyv3uxg27btghta",
-        scope_kind=ModelInputScopeKind.ROOT,
-        target_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        expected_active_turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        force=False,
+    from pulsara_agent.primitives.model_call import ModelCallPurpose
+    from tests.support.model_config import test_model_binding, test_model_runtime
+
+    runtime = test_model_runtime()
+    return DirectKernelModelPort(model_runtime=runtime).prepare_target(
+        KernelModelTargetPreparationRequest(
+            session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+            turn_id=turn_id,
+            model_call_index=1,
+            purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+            maximum_input_tokens=None,
+            binding=test_model_binding(runtime),
+        )
     )
 
-    async def exercise() -> tuple[CompactionConfirmationKind, ...]:
-        first = asyncio.create_task(host._settle_manual_compaction_command(exact))
+
+def test_round5b_manual_operation_joins_same_command_and_rejects_other_commands() -> (
+    None
+):
+    async def exercise():
+        host = _manual_host()
+        started, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        outcome = CompactionOutcome(
+            CompactionDisposition.COMPACTED,
+            "turn:klmmazz67vfgsfsvg6ceqgdsfu",
+            None,
+            1,
+            "COMPACTED",
+        )
+
+        async def execute(command_id):
+            calls.append(command_id)
+            started.set()
+            await release.wait()
+            return outcome
+
+        host._prepare_idle_manual_compaction = execute
+        command = "command:u5fuuol2z2xsyv3uxg27btghta"
+        first = asyncio.create_task(host.compact_context(command_id=command))
         await started.wait()
-        duplicate = asyncio.create_task(host._settle_manual_compaction_command(exact))
-        conflicting = await host._settle_manual_compaction_command(conflict)
+        duplicate = asyncio.create_task(host.compact_context(command_id=command))
+        conflict = await host.compact_context(command_id="command:other")
+        assert conflict.disposition is CompactionDisposition.REJECTED_BUSY
         release.set()
-        results = (await first, await duplicate, conflicting)
+        assert await first is outcome
+        assert await duplicate is outcome
+        assert calls == [command]
         await host._compaction.aclose()
-        return results
 
-    assert asyncio.run(exercise()) == (
-        CompactionConfirmationKind.FULL,
-        CompactionConfirmationKind.FULL,
-        CompactionConfirmationKind.CONFLICT,
-    )
-    assert calls == [exact.semantic_digest]
+    asyncio.run(exercise())
 
 
 def test_round5b_compaction_cut_rebase_only_advances_global_sequence() -> None:
@@ -1946,155 +1971,65 @@ def test_round5b_resource_headroom_exact_boundaries() -> None:
     )
 
 
-@pytest.mark.parametrize("force", [False, True])
-def test_round5b_empty_session_manual_compaction_never_starts_summary(
-    force: bool,
-) -> None:
-    host = object.__new__(KernelHostSession)
-    host._session_scope_kind = ModelInputScopeKind.ROOT
-    host._root_session_id = None
-    host._writer_renewal_failure = None
-    host._scheduled_tasks = None
-    host._lock = asyncio.Lock()
-    host._closing = False
-    host._active_task = None
-    host._active_turn_id = None
-    host._query_command_row = AsyncMock(return_value=None)
-    host._canonical_deadline = lambda: 123.0
-    host._lease = SimpleNamespace(guard=object())
-    read_terminal = Mock(return_value=None)
-    host.repository = SimpleNamespace(read_latest_terminal_scope_turn_id=read_terminal)
-    host._io = SimpleNamespace(
-        run=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs))
-    )
-    host._settle_manual_compaction_command = AsyncMock()
-    host._runner = SimpleNamespace(compact_idle_turn=AsyncMock())
-    host._compaction = SimpleNamespace(request_manual=AsyncMock())
-
-    outcome = asyncio.run(
-        host.compact_context(
-            command_id="command:riky2xot32nm3mkqbgvkblreh4", force=force
+def test_round5b_empty_session_manual_compaction_never_starts_summary() -> None:
+    async def exercise():
+        host = _manual_host()
+        host.session_id = "session:336wrfwkamrr3up6kjtsgvgcte"
+        host._canonical_deadline = lambda: 123.0
+        host._lease = SimpleNamespace(guard=object())
+        read_terminal = Mock(return_value=None)
+        host.repository = SimpleNamespace(
+            pending_prompt_head_mode=Mock(return_value=None),
+            read_latest_terminal_scope_turn_id=read_terminal,
         )
-    )
-
-    assert outcome.disposition is CompactionDisposition.NOT_NEEDED
-    assert outcome.public_code == "NO_TERMINAL_TURN"
-    read_terminal.assert_called_once()
-    host._settle_manual_compaction_command.assert_not_awaited()
-    host._runner.compact_idle_turn.assert_not_awaited()
-    host._compaction.request_manual.assert_not_awaited()
-
-
-def test_round5b_terminal_provider_race_handoffs_manual_to_idle_owner() -> None:
-    owner = HostCompactionRuntimeOwner(
-        policy=ResolvedCompactionPolicy(automatic_enabled=False)
-    )
-    host = object.__new__(KernelHostSession)
-    host._session_scope_kind = ModelInputScopeKind.ROOT
-    host._root_session_id = None
-    host._writer_renewal_failure = None
-    host._scheduled_tasks = None
-    host.session_id = "session:336wrfwkamrr3up6kjtsgvgcte"
-    host._ephemeral = SimpleNamespace(invalidate=lambda: None)
-    host._lock = asyncio.Lock()
-    host._closing = False
-    host._pending_root_successor = None
-    host._user_control_attempts = {}
-    host._active_turn_id = "turn:vmlprtvcqs6oi7vfc6vmq2kihm"
-    host._active_cancellation_intent = None
-    host._active_command_id = "command:7mamexfpd2cwpaabzipvhuaqyi"
-    host._active_root_phase = object()
-    host._queue_wake = asyncio.Event()
-    host._monitor_wake = asyncio.Event()
-    host._compaction = owner
-    idle_calls: list[tuple[str, str, bool]] = []
-
-    class _Compaction:
-        async def compact_idle_turn(
-            self, *, turn_id: str, command_id: str, force: bool
-        ) -> CompactionOutcome:
-            idle_calls.append((turn_id, command_id, force))
-            return CompactionOutcome(
-                CompactionDisposition.COMPACTED,
-                turn_id,
-                "snapshot:utq7x4hsfyf57wmay7ezztmgwi",
-                1,
-                "COMPACTED",
-            )
-
-    class _Runner:
-        async def compact_idle_turn(
-            self, *, turn_id: str, command_id: str, force: bool
-        ) -> CompactionOutcome:
-            return await _Compaction().compact_idle_turn(
-                turn_id=turn_id,
-                command_id=command_id,
-                force=force,
-            )
-
-    idle_marks: list[str] = []
-    host._runner = _Runner()
-    host._tools = SimpleNamespace(
-        offer_todo_installation=lambda _installation: None,
-        todo_owner=SimpleNamespace(
-            mark_root_idle=lambda *, exact_turn_id: idle_marks.append(exact_turn_id)
-        ),
-    )
-
-    async def no_command(_command_id: str):
-        return None
-
-    async def full_confirmation(_candidate):
-        from pulsara_agent.conversation_kernel.compaction.contracts import (
-            CompactionConfirmationKind,
+        host._io = SimpleNamespace(
+            run=AsyncMock(side_effect=lambda fn, *args, **kwargs: fn(*args, **kwargs))
         )
-
-        return CompactionConfirmationKind.FULL
-
-    host._query_command_row = no_command
-    host._settle_manual_compaction_command = full_confirmation
-
-    async def exercise() -> CompactionOutcome:
-        provider_started = asyncio.Event()
-        provider_release = asyncio.Event()
-
-        async def active_owner() -> None:
-            provider_started.set()
-            await provider_release.wait()
-            current = asyncio.current_task()
-            assert current is not None
-            await host._settle_active_root_task(current)
-
-        active_task = asyncio.create_task(active_owner())
-        host._active_task = active_task
-        await provider_started.wait()
-        compact = asyncio.create_task(
-            host.compact_context(
-                command_id="command:u5fuuol2z2xsyv3uxg27btghta", force=True
-            )
+        host._settle_manual_compaction_command_worker = AsyncMock()
+        host._runner = SimpleNamespace(compact_idle_turn=AsyncMock())
+        outcome = await host.compact_context(
+            command_id="command:riky2xot32nm3mkqbgvkblreh4"
         )
-        while (
-            await owner.find_manual(
+        assert outcome.disposition is CompactionDisposition.NOT_NEEDED
+        assert outcome.public_code == "NO_TERMINAL_TURN"
+        read_terminal.assert_called_once()
+        host._settle_manual_compaction_command_worker.assert_not_awaited()
+        host._runner.compact_idle_turn.assert_not_awaited()
+        assert not host._manual_compaction_command_attempts
+        await host._compaction.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_round5b_active_manual_request_is_busy_and_never_revives_at_idle() -> None:
+    async def exercise():
+        host = _manual_host()
+        release = asyncio.Event()
+        host._active_turn_id = "turn:vmlprtvcqs6oi7vfc6vmq2kihm"
+        host._active_task = asyncio.create_task(release.wait())
+        host._prepare_idle_manual_compaction = AsyncMock()
+        outcome = await host.compact_context(
+            command_id="command:u5fuuol2z2xsyv3uxg27btghta"
+        )
+        assert outcome.disposition is CompactionDisposition.REJECTED_BUSY
+        assert outcome.public_code == "SESSION_BUSY"
+        host._prepare_idle_manual_compaction.assert_not_awaited()
+        assert not host._manual_compaction_command_attempts
+        assert (
+            await host._compaction.find_manual(
                 command_id="command:u5fuuol2z2xsyv3uxg27btghta",
                 scope_kind=ModelInputScopeKind.ROOT,
             )
             is None
-        ):
-            await asyncio.sleep(0)
-        provider_release.set()
-        await active_task
-        outcome = await asyncio.wait_for(compact, timeout=1)
-        await owner.aclose()
-        return outcome
+        )
+        release.set()
+        await host._active_task
+        await asyncio.sleep(0)
+        host._prepare_idle_manual_compaction.assert_not_awaited()
+        assert not host._manual_compaction_command_attempts
+        await host._compaction.aclose()
 
-    outcome = asyncio.run(exercise())
-
-    assert outcome.disposition is CompactionDisposition.COMPACTED
-    assert idle_calls == [
-        ("turn:vmlprtvcqs6oi7vfc6vmq2kihm", "command:u5fuuol2z2xsyv3uxg27btghta", True)
-    ]
-    assert idle_marks == ["turn:vmlprtvcqs6oi7vfc6vmq2kihm"]
-    assert host._active_task is None
+    asyncio.run(exercise())
 
 
 def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
@@ -2120,8 +2055,14 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
         todo=None,
         agent_work_index=(
             {
-                "agent": {"kind": "AGENT", "agent_id": "session:itnsbirlmxzeu74pn7keq6zuzi"},
-                "current_work": {"kind": "WORK", "work_id": "queue:itnsbirlmxzeu74pn7keq6zuzi"},
+                "agent": {
+                    "kind": "AGENT",
+                    "agent_id": "session:itnsbirlmxzeu74pn7keq6zuzi",
+                },
+                "current_work": {
+                    "kind": "WORK",
+                    "work_id": "queue:itnsbirlmxzeu74pn7keq6zuzi",
+                },
                 "queued_count": 0,
             },
         ),
@@ -2137,11 +2078,15 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
 
 
 def test_round5b_runtime_handoff_reports_a_bounded_pmca_projection() -> None:
-    from pulsara_agent.conversation_kernel.compaction.runtime_handoff import HANDOFF_BUDGET_OMISSION
+    from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
+        HANDOFF_BUDGET_OMISSION,
+    )
 
     handoff = freeze_compaction_runtime_handoff(
         terminal_processes=tuple(
-            FrozenTerminalProcessHandoffFact(process_id=f"process:{index:026d}", status="running")
+            FrozenTerminalProcessHandoffFact(
+                process_id=f"process:{index:026d}", status="running"
+            )
             for index in range(200)
         ),
         terminal_monitors=(),
@@ -2246,17 +2191,18 @@ def test_round5b_close_drains_admitted_settlement_without_cancelling_it() -> Non
 def test_round5b_manual_candidate_is_idempotent_and_conflict_closed() -> None:
     async def exercise() -> None:
         owner = HostCompactionRuntimeOwner()
+        prepared_target = _manual_target()
         request, future = await owner.request_manual(
             command_id="command:3mkyvtvppfglbmqedm6zqizjvy",
             scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
-            force=False,
+            target_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
+            prepared_target=prepared_target,
         )
         duplicate, same_future = await owner.request_manual(
             command_id="command:3mkyvtvppfglbmqedm6zqizjvy",
             scope_kind=ModelInputScopeKind.ROOT,
-            expected_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
-            force=False,
+            target_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
+            prepared_target=prepared_target,
         )
         assert duplicate == request
         assert same_future is future
@@ -2264,8 +2210,8 @@ def test_round5b_manual_candidate_is_idempotent_and_conflict_closed() -> None:
             await owner.request_manual(
                 command_id="command:wpqnljdtvxcoaudexasizwddny",
                 scope_kind=ModelInputScopeKind.ROOT,
-                expected_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
-                force=True,
+                target_turn_id="turn:nzc36cttgo7xxki7bcjc7ops7a",
+                prepared_target=prepared_target,
             )
         outcome = CompactionOutcome(
             CompactionDisposition.NOT_NEEDED,
@@ -2761,7 +2707,7 @@ def test_final_wire_quote_does_not_expand_fingerprint_or_registry_topology() -> 
     assert "openai_responses" not in estimator
 
 
-def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> None:
+def test_compaction_adoption_transfers_unbound_input_to_common_safe_point() -> None:
     coordinator = (
         ROOT / "src/pulsara_agent/conversation_kernel/compaction/coordinator.py"
     )
@@ -2793,7 +2739,8 @@ def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> No
 
     installs = attribute_calls("install_provider_open")
     hook_siblings = attribute_calls("prepare_hook_context_sibling")
-    assert len(installs) == 1
+    assert len(installs) == 0
+    assert not attribute_calls("bind_prepared_executable_wire_input")
     assert len(hook_siblings) == 1
     assert len(attribute_calls("_settle_compaction_adoption")) == 1
     assert len(attribute_calls("_dispatch_post_compact")) == 1
@@ -2804,7 +2751,7 @@ def test_round9_2_compaction_hard_cut_has_one_post_adoption_install_path() -> No
         < attribute_calls("_dispatch_post_compact")[0].lineno
         < rotations[0].lineno
         < hook_siblings[0].lineno
-        < installs[0].lineno
+        < attribute_calls("install_continuation_abandonment")[0].lineno
     )
 
     no_hook_prepares = tuple(

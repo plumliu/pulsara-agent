@@ -115,7 +115,7 @@ async def run(destination: Path) -> None:
             await catalog.refresh()
             native = ModelRuntime.production(settings=settings, catalog=catalog)
             core = KernelHostCore.production(
-                model_runtime=_RecordingModelRuntime(native, report["calls"], None)
+                model_runtime=_RecordingModelRuntime(native, report["calls"])
             )
             workspace_input = HostWorkspaceInput(
                 workspace_kind="project",
@@ -262,7 +262,7 @@ async def run(destination: Path) -> None:
                     await preview("before_compaction")
                     summary_start = len(report["calls"])
                     compaction = await session.compact_context(
-                        command_id=derive_id("command", "test-fixture", "command:budget-compact:" + uuid4().hex), force=True
+                        command_id=derive_id("command", "test-fixture", "command:budget-compact:" + uuid4().hex)
                     )
                     report["results"][-1]["compaction"] = str(compaction)
                     save()

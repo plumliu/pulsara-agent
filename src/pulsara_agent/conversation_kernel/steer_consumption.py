@@ -114,6 +114,10 @@ class SteerConsumptionCoordinator:
                     )
                     accepted.append(value)
                     break
+                except (StaleHostWriter, TypeError, ValueError):
+                    # Losing the writer or rejecting an invalid typed request
+                    # is definitive, not an unknown commit to reissue forever.
+                    raise
                 except ConversationKernelConflict:
                     confirmation = await self._io.run(
                         self._repository.confirm_prepared_prompt_steer,

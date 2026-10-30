@@ -33,11 +33,8 @@ from pulsara_agent.llm.model_connections import (
     model_call_binding_to_dict,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
-from pulsara_agent.model_input.contracts import ContextBindingBaseKind
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
-    FrozenProviderInputItem,
-    FrozenProviderInputItemKind,
 )
 from pulsara_agent.primitives.run_permission import (
     FrozenRunPermissionSnapshot,
@@ -54,8 +51,6 @@ from pulsara_agent.conversation_kernel.steer import (
     PreparedPromptIngressCommand,
     PreparedQueuedRootTurnAdmission,
     PreparedQueuedInputEntry,
-    PreparedRootProviderInputAdmission,
-    PreparedRootProviderInputCandidate,
     PreparedSteerConsumptionCandidate,
     PreparedSteerPlanConflictInterruption,
     PreparedSteerResourceRejection,
@@ -908,42 +903,6 @@ class _PromptOperations:
                 item["workspace_id"]
             ):
                 raise ConversationKernelConflict("queued ROOT session is absent")
-            identity = build_queued_root_turn_identity(session_id, str(item["id"]))
-            latest_sequence = int(session["latest_entry_sequence"])
-            base_kind, snapshot_id, source_through = (
-                self._initial_context_binding_values(
-                    connection,
-                    session_id=session_id,
-                    turn_id=identity.turn_id,
-                    initial_entry_sequence=latest_sequence + 1,
-                )
-            )
-            provider_input_candidate = PreparedRootProviderInputCandidate(
-                session_id=session_id,
-                workspace_id=str(item["workspace_id"]),
-                exact_turn_id=identity.turn_id,
-                exact_initial_entry_id=identity.entry_id,
-                exact_context_binding_revision_id=identity.context_revision_id,
-                unpublished_items=tuple(
-                    FrozenProviderInputItem(item_kind=FrozenProviderInputItemKind.USER,
-                        source_entry_id=entry.entry_id,source_entry_sequence=latest_sequence+i+1,
-                        source_turn_id=identity.turn_id,content=entry.canonical_prompt.content.parts,
-                        input_origin=entry.input_origin,scheduled_input=(self._queue_scheduled_provenance(item) if entry.entry_id==identity.entry_id else None))
-                    for i,entry in enumerate(input_entries)),
-                unpublished_item_canonical_expanded_bytes=tuple(entry.canonical_prompt.resource_quote.canonical_expanded_bytes for entry in input_entries),
-                permission_snapshot=permission,
-                model_call_binding=model_call_binding,
-                expected_latest_entry_sequence=latest_sequence,
-                context_base_kind=ContextBindingBaseKind(base_kind),
-                context_snapshot_id=snapshot_id,
-                source_through_sequence=source_through,
-                pending_plan_handoff_workflow_id=handoff_workflow,
-                pending_plan_handoff_interaction_id=handoff_interaction,
-                pending_plan_handoff_kind=handoff_kind,
-                unpublished_plan_workflow_fact=None,
-                unpublished_plan_handoff_fact=None,
-                unpublished_approved_plan_fact=None,
-            )
         return build_queued_root_turn_admission(
             input_origin=CanonicalInputOriginKind(item["input_origin"]),
             scheduled_input=self._queue_scheduled_provenance(item),
@@ -958,7 +917,6 @@ class _PromptOperations:
             input_entries=input_entries,
             permission_snapshot=permission,
             model_call_binding=model_call_binding,
-            provider_input_candidate=provider_input_candidate,
             pending_plan_handoff_workflow_id=handoff_workflow,
             pending_plan_handoff_interaction_id=handoff_interaction,
             pending_plan_handoff_kind=handoff_kind,
@@ -971,15 +929,12 @@ class _PromptOperations:
         guard: HostWriterGuard,
         *,
         candidate: PreparedQueuedRootTurnAdmission,
-        provider_input_admission: PreparedRootProviderInputAdmission,
         deadline_monotonic: float,
     ) -> QueuedRootTurnAdmissionConfirmation | None:
         """Consume one exact stable queue candidate in its canonical batch."""
 
         if candidate.session_id != guard.session_id:
             raise ValueError("queued ROOT candidate belongs to another session")
-        if provider_input_admission.candidate != candidate.provider_input_candidate:
-            raise ValueError("queued ROOT provider input admission differs from head")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -1076,7 +1031,6 @@ class _PromptOperations:
                     ),
                 )
                 return None
-            prospective = candidate.provider_input_candidate
             if self._queue_delivery_handoff(connection, item) != (
                 candidate.pending_plan_handoff_workflow_id,
                 candidate.pending_plan_handoff_interaction_id,
@@ -1088,34 +1042,11 @@ class _PromptOperations:
                 "FROM pulsara_v3.sessions WHERE id=%s",
                 (guard.session_id,),
             ).fetchone()
-            if session is None or (
-                str(session["workspace_id"]) != prospective.workspace_id
-                or int(session["latest_entry_sequence"])
-                != prospective.expected_latest_entry_sequence
-            ):
-                raise ConversationKernelConflict(
-                    "queued ROOT provider input head drifted"
-                )
-            base_kind, snapshot_id, source_through = (
-                self._initial_context_binding_values(
-                    connection,
-                    session_id=guard.session_id,
-                    turn_id=candidate.exact_turn_id,
-                    initial_entry_sequence=(
-                        prospective.expected_latest_entry_sequence + 1
-                    ),
-                )
-            )
-            if (
-                ContextBindingBaseKind(base_kind)
-                is not prospective.context_base_kind
-                or snapshot_id != prospective.context_snapshot_id
-                or source_through != prospective.source_through_sequence
-                or permission != prospective.permission_snapshot
-            ):
-                raise ConversationKernelConflict(
-                    "queued ROOT provider input basis drifted"
-                )
+            if session is None or str(session["workspace_id"]) != candidate.workspace_id:
+                raise ConversationKernelConflict("queued ROOT workspace changed")
+            if permission != candidate.permission_snapshot:
+                raise ConversationKernelConflict("queued ROOT permission changed before start")
+            first_entry_sequence = int(session["latest_entry_sequence"]) + 1
             input_sequences = {entry.entry_id:self._allocate_entry_sequence(connection,guard.session_id) for entry in candidate.ordered_input_entries}
             entry_sequence = input_sequences[candidate.exact_initial_entry_id]
             connection.execute(
@@ -1150,7 +1081,7 @@ class _PromptOperations:
                 session_id=guard.session_id,
                 turn_id=candidate.exact_turn_id,
                 revision_id=candidate.exact_context_binding_revision_id,
-                initial_entry_sequence=prospective.expected_latest_entry_sequence+1,
+                initial_entry_sequence=first_entry_sequence,
             )
             for input_entry in candidate.ordered_input_entries:
                 is_instruction=input_entry.entry_id==candidate.exact_initial_entry_id
@@ -1195,6 +1126,13 @@ class _PromptOperations:
                     turn_id=candidate.exact_turn_id,
                     entry_sequence=entry_sequence,
                     event_sequence=events[-1].event_sequence,
+                    started_input_group=self._started_turn_input_group(
+                        connection, session_id=guard.session_id, turn_id=candidate.exact_turn_id,
+                        instruction_entry_id=candidate.exact_initial_entry_id,
+                        entry_ids=tuple(entry.entry_id for entry in candidate.ordered_input_entries),
+                        canonical_prompts=tuple(entry.canonical_prompt for entry in candidate.ordered_input_entries),
+                        revision_id=candidate.exact_context_binding_revision_id,
+                    ),
                 ),
             )
 
@@ -1218,19 +1156,16 @@ class _PromptOperations:
             deadline_monotonic=deadline_monotonic,
         )
 
-    def reject_prepared_prompt_head_input_resource_exhausted(
+    def reject_prepared_prompt_head_start_rejected(
         self,
         guard: HostWriterGuard,
         *,
         candidate: PreparedQueuedRootTurnAdmission,
         deadline_monotonic: float,
     ) -> bool:
-        """Reject one exact FIFO head that cannot pass full input admission."""
-
+        """End an exactly confirmed unstarted request after a definite rejection."""
         return self._reject_prepared_prompt_head_before_delivery(
-            guard,
-            candidate=candidate,
-            reason="PROVIDER_INPUT_RESOURCE_EXHAUSTED_BEFORE_DELIVERY",
+            guard, candidate=candidate, reason="REQUEST_START_REJECTED",
             deadline_monotonic=deadline_monotonic,
         )
 
@@ -1249,7 +1184,7 @@ class _PromptOperations:
         if reason not in {
             "HOOK_BLOCKED_BEFORE_DELIVERY",
             "MODEL_CONFIGURATION_UNAVAILABLE_BEFORE_DELIVERY",
-            "PROVIDER_INPUT_RESOURCE_EXHAUSTED_BEFORE_DELIVERY",
+            "REQUEST_START_REJECTED",
         }:
             raise ValueError("queued ROOT rejection reason is invalid")
         with self._writer_transaction(
@@ -1395,11 +1330,20 @@ class _PromptOperations:
                 connection, entry, candidate
             )
             input_rows=tuple(connection.execute("SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s AND id=%s",(candidate.session_id,x.entry_id)).fetchone() for x in candidate.ordered_input_entries)
-            group_matches=all(row is not None and int(row['entry_sequence'])==candidate.provider_input_candidate.expected_latest_entry_sequence+i+1
+            group_matches=all(row is not None for row in input_rows) and all(int(row['entry_sequence'])==int(input_rows[0]['entry_sequence'])+i
                 and row['turn_id']==candidate.exact_turn_id and row['entry_kind']=='USER_MESSAGE'
                 and row['input_origin']==x.input_origin.value and self._content_from_row(row)==x.body_storage
                 and canonical_prompt_owner_is_exact(connection,row=row,expected=x.canonical_prompt,transcript_entry_id=x.entry_id)
                 for i,(x,row) in enumerate(zip(candidate.ordered_input_entries,input_rows,strict=True)))
+            started_input_group = None
+            if group_matches and revision_matches and self._queued_root_turn_matches_candidate(turn, candidate):
+                started_input_group = self._started_turn_input_group(
+                    connection, session_id=candidate.session_id, turn_id=candidate.exact_turn_id,
+                    instruction_entry_id=candidate.exact_initial_entry_id,
+                    entry_ids=tuple(item.entry_id for item in candidate.ordered_input_entries),
+                    canonical_prompts=tuple(item.canonical_prompt for item in candidate.ordered_input_entries),
+                    revision_id=candidate.exact_context_binding_revision_id,
+                )
         winner_rows = (turn, revision, *input_rows, consumed_event, accepted_event)
         if (
             queue is not None
@@ -1424,6 +1368,7 @@ class _PromptOperations:
                     turn_id=candidate.exact_turn_id,
                     entry_sequence=int(entry["entry_sequence"]),
                     event_sequence=int(accepted_event["event_sequence"]),
+                    started_input_group=started_input_group,
                 ),
             )
         if (
@@ -1508,10 +1453,7 @@ class _PromptOperations:
                 str(row["id"]) == candidate.exact_turn_id
                 and str(row["session_id"]) == candidate.session_id
                 and str(row["workspace_id"]) == candidate.workspace_id
-                and str(row["status"]) == TurnStatus.RUNNING.value
                 and str(row["initial_entry_id"]) == candidate.exact_initial_entry_id
-                and str(row["current_context_binding_revision_id"])
-                == candidate.exact_context_binding_revision_id
                 and self._permission_from_row(row) == candidate.permission_snapshot
                 and model_call_binding_from_dict(row["model_call_binding"])
                 == candidate.model_call_binding
@@ -1536,7 +1478,12 @@ class _PromptOperations:
                     session_id=candidate.session_id,
                     turn_id=candidate.exact_turn_id,
                     revision_id=candidate.exact_context_binding_revision_id,
-                    initial_entry_sequence=candidate.provider_input_candidate.expected_latest_entry_sequence+1,
+                    initial_entry_sequence=int(connection.execute(
+                        "SELECT min(entry_sequence) AS first_sequence FROM pulsara_v3.transcript_entries "
+                        "WHERE session_id=%s AND turn_id=%s AND id=ANY(%s)",
+                        (candidate.session_id, candidate.exact_turn_id,
+                         [item.entry_id for item in candidate.ordered_input_entries]),
+                    ).fetchone()["first_sequence"]),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -1595,38 +1542,24 @@ class _PromptOperations:
         occurred_at: datetime,
         actor_id: str,
     ) -> None:
-        """Reject the complete bounded prefix of terminal-target steers."""
+        """Settle every pending input whose exact target is terminal."""
 
-        for _ in range(STAGE2_LIMITS.pending_prompt_hard_items):
-            item = connection.execute(
-                """
-                SELECT * FROM pulsara_v3.prompt_queue_items
-                WHERE session_id = %s AND status = 'PENDING'
-                  AND delivery_mode = 'STEER_ACTIVE_TURN'
-                ORDER BY queue_sequence, id
-                LIMIT 1
-                FOR UPDATE
-                """,
-                (guard.session_id,),
-            ).fetchone()
-            if (
-                item is None
-                or item["delivery_mode"] != PromptDeliveryMode.STEER_ACTIVE_TURN.value
-            ):
-                return
-            target = connection.execute(
-                """
-                SELECT status
-                FROM pulsara_v3.turns
-                WHERE session_id = %s AND id = %s FOR UPDATE
-                """,
-                (guard.session_id, item["target_turn_id"]),
-            ).fetchone()
-            if (
-                target is not None
-                and target["status"] == "RUNNING"
-            ):
-                return
+        # A RUNNING target at the head of the queue must not hide terminal
+        # targets behind it.  The writer transaction serializes this complete
+        # target selection with message admission and turn settlement.
+        items = connection.execute(
+            """
+            SELECT q.* FROM pulsara_v3.prompt_queue_items AS q
+            JOIN pulsara_v3.turns AS t
+              ON t.session_id=q.session_id AND t.id=q.target_turn_id
+            WHERE q.session_id=%s AND q.status='PENDING'
+              AND q.delivery_mode='STEER_ACTIVE_TURN' AND t.status<>'RUNNING'
+            ORDER BY q.queue_sequence, q.id
+            FOR UPDATE OF q
+            """,
+            (guard.session_id,),
+        ).fetchall()
+        for item in items:
             updated = connection.execute(
                 """
                 UPDATE pulsara_v3.prompt_queue_items

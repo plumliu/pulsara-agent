@@ -96,13 +96,6 @@ elif event == "PermissionRequest":
 elif event == "PostToolUse":
     state = value["tool_response"].get("result_state", "UNKNOWN") if isinstance(value["tool_response"], dict) else "UNKNOWN"
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": f"POST_TOOL_CONTEXT:{label}:{state}"}}))
-elif event == "SubagentStart":
-    print(f"SUBAGENT_START_CONTEXT:{label}:{value['agent_id']}")
-elif event == "SubagentStop" and not value["stop_hook_active"]:
-    print("SUBAGENT_STOP_CONTINUE_ONCE", file=sys.stderr)
-    raise SystemExit(2)
-elif event == "SubagentStop":
-    print(json.dumps({"continue": False, "stopReason": "SUBAGENT_STOP_TERMINALIZED"}))
 elif event == "Stop" and not value["stop_hook_active"]:
     print("STOP_CONTINUE_ONCE", file=sys.stderr)
     raise SystemExit(2)
@@ -320,9 +313,8 @@ class _QueuedImageK2Model(CallbackScriptedKernelModel):
             yield item
 
 
-class _SubagentHookModel(CallbackScriptedKernelModel):
-    def __init__(self, log_path: Path) -> None:
-        self._log_path = log_path
+class _AgentWorkHookModel(CallbackScriptedKernelModel):
+    def __init__(self) -> None:
         super().__init__(self._stream)
 
     async def _stream(self, request):
@@ -330,32 +322,14 @@ class _SubagentHookModel(CallbackScriptedKernelModel):
         if identity.conversation_scope_kind is ModelInputScopeKind.ROOT:
             if request.model_call_index == 1:
                 items = _tool_stream(
-                    "spawn_agent",
-                    "call:round9-2-spawn",
-                    {"task": "Exercise child lifecycle Hooks exactly once."},
+                    "run_agent",
+                    "call:round9-2-work",
+                    {"instruction": "Exercise child Work lifecycle Hooks exactly once."},
                 )
-            elif request.model_call_index == 2:
-                deadline = monotonic() + 5
-                while True:
-                    values = (
-                        _log_values(self._log_path) if self._log_path.exists() else []
-                    )
-                    stop_count = sum(
-                        value["stdin"]["hook_event_name"] == "SubagentStop"
-                        for value in values
-                    )
-                    if stop_count == 2:
-                        break
-                    if monotonic() >= deadline:
-                        raise AssertionError(
-                            "ROOT final opened before child Hook terminalization"
-                        )
-                    await asyncio.sleep(0.01)
-                items = _text_stream("ROOT_AFTER_CHILD_COMPLETE", "text:root-final")
-            else:  # pragma: no cover - an extra ROOT open is a topology failure
-                raise AssertionError("unexpected ROOT provider open")
+            else:
+                items = _text_stream("ROOT_DELEGATION_COMPLETE", "text:root-final")
         else:
-            assert identity.conversation_scope_kind is ModelInputScopeKind.SUBAGENT_TASK
+            assert identity.conversation_scope_kind is ModelInputScopeKind.SUBAGENT
             if request.model_call_index == 1:
                 items = _text_stream("CHILD_FIRST_COMPLETION", "text:child-first")
             elif request.model_call_index == 2:
@@ -379,11 +353,13 @@ def _config(
     *,
     tool_matcher: str = "write_file",
     additional_context_limit: int = 2048,
+    scope_policy: str = "ROOT",
 ) -> dict[str, object]:
     def handler(event: str) -> dict[str, object]:
         value: dict[str, object] = {
             "type": "command",
             "command": command,
+            "scope_policy": scope_policy,
             "timeout": 3 if event == "SessionEnd" else 5,
         }
         if event in {
@@ -391,7 +367,6 @@ def _config(
             "UserPromptSubmit",
             "PreToolUse",
             "PostToolUse",
-            "SubagentStart",
         }:
             value["additionalContextLimit"] = additional_context_limit
         return value
@@ -1271,7 +1246,7 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
     assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"  # type: ignore[index]
 
 
-def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
+def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_continuation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage2_migrated_postgres_database,
@@ -1283,18 +1258,22 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
     workspace.mkdir()
     driver = tmp_path / "hook_driver.py"
     log_path = tmp_path / "hooks.jsonl"
-    driver.write_text(_HOOK_DRIVER, encoding="utf-8")
+    driver.write_text(_HOOK_DRIVER.replace(
+        'elif event == "Stop" and not value["stop_hook_active"]:',
+        'elif event == "Stop" and value["session_kind"] == "SUBAGENT" and not value["stop_hook_active"]:',
+    ), encoding="utf-8")
     _install_trusted_sources(
         home=home,
         workspace_root=workspace,
         user_config=_config(
             _command(driver, log_path, "USER"),
-            ("SubagentStart", "SubagentStop", "SessionEnd"),
+            ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"),
+            scope_policy="BOTH",
         ),
         workspace_config=None,
     )
     monkeypatch.setenv("PULSARA_HOME", str(home))
-    model = _SubagentHookModel(log_path)
+    model = _AgentWorkHookModel()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
 
@@ -1314,16 +1293,22 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
                 command_id='command:i4edho72yhopiobty7ordlrooa',
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
-            assert result.final_text == "ROOT_AFTER_CHILD_COMPLETE"
+            assert result.final_text == "ROOT_DELEGATION_COMPLETE"
             deadline = monotonic() + 5
+            agent_ids = await session._io.run(
+                session.repository.list_root_agent_session_ids,
+                root_session_id=session.session_id,
+                deadline_monotonic=monotonic() + 5,
+            )
+            assert len(agent_ids) == 1
             rows = ()
             while True:
-                rows = session.repository.list_subagent_tasks(
-                    session_id=session.session_id,
-                    maximum_items=50,
+                rows = await session._io.run(
+                    session.repository.list_agent_works,
+                    root_session_id=session.session_id, agent_id=agent_ids[0], limit=50,
                     deadline_monotonic=monotonic() + 5,
                 )
-                if len(rows) == 1 and rows[0]["status"] == "COMPLETED":
+                if len(rows) == 1 and rows[0]["status"] == "completed":
                     break
                 assert monotonic() < deadline
                 await asyncio.sleep(0.01)
@@ -1331,16 +1316,22 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
                 request
                 for request in model.requests
                 if request.compiled_input.canonical_input_identity.conversation_scope_kind
-                is ModelInputScopeKind.SUBAGENT_TASK
+                is ModelInputScopeKind.SUBAGENT
             ]
             assert len(child_requests) == 2
+            first, second = (request.compiled_input for request in child_requests)
+            assert second.system_prompt == first.system_prompt
+            assert second.tools == first.tools
+            assert second.messages[:len(first.messages)] == first.messages
+            assert rows[0]["turn_id"] == child_requests[0].turn_id == child_requests[1].turn_id
+            assert rows[0]["final"] == "CHILD_FINAL_COMPLETION"
             first_context = _hook_observations(child_requests[0])
             assert any(
-                "SUBAGENT_START_CONTEXT:USER" in item.body for item in first_context
+                "USER_PROMPT_CONTEXT:USER:Exercise child Work lifecycle Hooks exactly once." in item.body for item in first_context
             )
             second_context = _hook_observations(child_requests[1])
             assert any(
-                "SUBAGENT_STOP_CONTINUE_ONCE" in item.body for item in second_context
+                "STOP_CONTINUE_ONCE" in item.body for item in second_context
             )
         finally:
             await core.close_session(session.host_session_id)
@@ -1348,26 +1339,21 @@ def test_round9_2_subagent_start_stop_real_owner_and_one_shot_continuation(
 
     asyncio.run(scenario())
     logs = _log_values(log_path)
-    lifecycle = [
-        value["stdin"]
-        for value in logs
-        if value["stdin"]["hook_event_name"]  # type: ignore[index]
-        in {"SubagentStart", "SubagentStop"}
+    child_lifecycle = [
+        value["stdin"] for value in logs
+        if value["stdin"]["session_kind"] == "SUBAGENT"
     ]
-    assert [value["hook_event_name"] for value in lifecycle] == [
-        "SubagentStart",
-        "SubagentStop",
-        "SubagentStop",
+    assert [value["hook_event_name"] for value in child_lifecycle] == [
+        "UserPromptSubmit", "SessionStart", "Stop", "Stop", "SessionEnd",
     ]
-    assert lifecycle[0]["turn_id"] == lifecycle[1]["turn_id"]
-    assert lifecycle[0]["agent_id"] == lifecycle[1]["agent_id"]
-    assert lifecycle[0]["agent_type"] == "general_worker"
-    assert lifecycle[0]["permission_mode"] == "bypassPermissions"
-    assert [value["stop_hook_active"] for value in lifecycle[1:]] == [
-        False,
-        True,
-    ]
-    assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"  # type: ignore[index]
+    prompt, _start, first_stop, last_stop, _end = child_lifecycle
+    assert prompt["input_origin"] == "AGENT_INSTRUCTION"
+    assert prompt["prompt"] == "Exercise child Work lifecycle Hooks exactly once."
+    assert prompt["session_id"] == first_stop["session_id"] == last_stop["session_id"]
+    assert prompt["turn_id"] == first_stop["turn_id"] == last_stop["turn_id"]
+    assert prompt["permission_mode"] == "bypassPermissions"
+    assert [first_stop["stop_hook_active"], last_stop["stop_hook_active"]] == [False, True]
+    assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"
 
 
 def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
@@ -1424,7 +1410,6 @@ def test_round9_2_idle_compaction_runs_real_pre_and_post_hooks(
             assert result.final_text.endswith("HISTORY_RESPONSE")
         outcome = await session.compact_context(
             command_id='command:twwkfwp4aqirfamrkvljbq42ca',
-            force=True,
         )
         assert outcome.disposition is CompactionDisposition.COMPACTED
         assert outcome.snapshot_id is not None
@@ -1599,7 +1584,7 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    (workspace / "active-input.txt").write_text("active input", encoding="utf-8")
+    (workspace / "active-input.txt").write_text("active input evidence " * 200, encoding="utf-8")
     driver = tmp_path / "hook_driver.py"
     log_path = tmp_path / "hooks.jsonl"
     driver.write_text(_HOOK_DRIVER, encoding="utf-8")
@@ -1625,7 +1610,6 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
         )
         session = None
         running = None
-        compacting = None
         try:
             session = await core.open_session(
                 HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
@@ -1652,30 +1636,26 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
             await asyncio.wait_for(model.active_provider_started.wait(), timeout=5)
             active_turn_id = session._active_turn_id  # noqa: SLF001
             assert active_turn_id is not None
-            compacting = asyncio.create_task(
-                session.compact_context(
-                    command_id='command:ryzh4hl54myfkiogcx65edh4fu',
-                    force=True,
-                    expected_active_turn_id=active_turn_id,
-                )
+            # Derive the threshold from the active ordinary wire. The real
+            # following tool result crosses it; the three previous requests
+            # did not run with this lower trigger.
+            active_wire = model.requests[-1].wire_input_plan.quote
+            budget = active_wire.effective_input_budget_tokens
+            before_tokens = active_wire.raw_final_wire_estimated_input_tokens
+            session._compaction.policy = replace(
+                session._compaction.policy,
+                auto_trigger_ratio=(before_tokens + 128) / budget,
+                post_compaction_target_ratio=(before_tokens - 1) / budget,
+                minimum_reclaim_tokens=1,
             )
-            deadline = monotonic() + 5
-            while (
-                await session._compaction.find_manual(  # noqa: SLF001
-                    command_id='command:ryzh4hl54myfkiogcx65edh4fu',
-                    scope_kind=ModelInputScopeKind.ROOT,
-                    scope_subagent_task_id=None,
-                )
-                is None
-            ):
-                assert monotonic() < deadline
-                await asyncio.sleep(0.01)
             model.active_provider_release.set()
-            outcome = await asyncio.wait_for(compacting, timeout=10)
-            assert outcome.disposition is CompactionDisposition.COMPACTED
             result = await asyncio.wait_for(running, timeout=10)
             assert result.final_text == "ACTIVE_COMPACTION_COMPLETE"
             assert len(model.requests) == 5
+            for predecessor, following in zip(model.requests[:3], model.requests[1:4], strict=True):
+                assert predecessor.compiled_input.system_prompt == following.compiled_input.system_prompt
+                assert predecessor.compiled_input.tools == following.compiled_input.tools
+                assert following.compiled_input.messages[:len(predecessor.compiled_input.messages)] == predecessor.compiled_input.messages
             assert model.summary_transport.open_count == 1
             final_observations = _hook_observations(model.requests[-1])
             assert any(
@@ -1688,11 +1668,11 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
                 await core.close_session(
                     session.host_session_id
                 )
-            for task in (running, compacting):
+            for task in (running,):
                 if task is not None and not task.done():
                     task.cancel()
             await asyncio.gather(
-                *(task for task in (running, compacting) if task is not None),
+                *(task for task in (running,) if task is not None),
                 return_exceptions=True,
             )
             await core.shutdown()
@@ -1716,8 +1696,8 @@ def test_round9_2_active_compaction_runs_post_then_root_compact_session_start(
         for value in lifecycle
         if value["hook_event_name"] == "SessionStart"
     ] == ["startup", "compact"]
-    assert lifecycle[1]["trigger"] == "manual"
-    assert lifecycle[2]["trigger"] == "manual"
+    assert lifecycle[1]["trigger"] == "auto"
+    assert lifecycle[2]["trigger"] == "auto"
     assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"  # type: ignore[index]
 
 
@@ -1737,8 +1717,8 @@ def test_joint_hook_review_full_production_host_includes_agent_owner(tmp_path, m
         try:
             prepared = await session._tools._capability_management.prepare({'action': 'TRUST_HOOK_SOURCE', 'target': {'kind': 'HOOK_SOURCE', 'scope': 'WORKSPACE', 'source_kind': 'LOCAL'}})
             hook = thaw_json(prepared.public_prefill)['hook_source']
-            assert hook['definitions'][0]['matched_operations'] == ['创建子任务']
-            assert hook['definitions'][0]['matching_aliases'] == [{'tool_name': 'spawn_agent', 'aliases': ['Agent']}]
+            assert hook['definitions'][0]['matched_operations'] == ['派发工作']
+            assert hook['definitions'][0]['matching_aliases'] == [{'tool_name': 'run_agent', 'aliases': ['Agent']}]
             assert hook['workspace_path'] == str(workspace)
             assert hook['tool_inventory_complete'] is True
             assert hook['trust_disposition'] == 'UNTRUSTED'

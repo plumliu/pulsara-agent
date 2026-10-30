@@ -10,8 +10,6 @@ from datetime import datetime, timezone
 from io import BytesIO
 from time import monotonic
 from threading import Event
-from types import SimpleNamespace
-from typing import cast
 
 from PIL import Image
 import psycopg
@@ -49,7 +47,6 @@ from pulsara_agent.conversation_kernel.repository import (
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.conversation_kernel.steer import (
-    PreparedRootProviderInputAdmission,
     PromptIngressConfirmationKind,
     QueuedRootTurnAdmissionConfirmationKind,
     SteerConsumptionConfirmationKind,
@@ -141,29 +138,13 @@ def _direct_intent(repository, lease, runtime, content: FrozenPromptContent):
         occurred_at=datetime.now(timezone.utc),
     )
     resolution_snapshot = runtime.freeze_resolution_snapshot()
-    candidate = repository.prepare_root_provider_input_candidate(
-        lease.guard,
-        intent=intent,
-        model_resolution_snapshot=resolution_snapshot,
-        deadline_monotonic=monotonic() + 30,
-    )
-    admission = _fixture_root_admission(candidate)
     accepted = repository.accept_root_turn_intent(
         lease.guard,
         intent=intent,
-        provider_input_admission=admission,
         model_resolution_snapshot=resolution_snapshot,
         deadline_monotonic=monotonic() + 30,
     )
-    return intent, accepted, admission
-
-
-def _fixture_root_admission(candidate) -> PreparedRootProviderInputAdmission:
-    """Repository-only fixture; production admission is compiler/materializer-owned."""
-
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", candidate)
-    return admission
+    return intent, accepted
 
 
 def _rows(repository, query: str, args: tuple[object, ...] = ()):
@@ -187,7 +168,7 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
     content = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("after"), image)
     )
-    intent, accepted, admission = _direct_intent(repository, lease, runtime, content)
+    intent, accepted = _direct_intent(repository, lease, runtime, content)
 
     confirmation = repository.confirm_root_turn_intent(
         intent=intent,
@@ -254,24 +235,9 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
         == "CONFLICT"
     )
     with pytest.raises(ConversationKernelConflict, match="command identity conflict"):
-        changed_admission = _fixture_root_admission(
-            replace(
-                admission.candidate,
-                unpublished_items=(
-                    replace(
-                        admission.candidate.unpublished_items[0],
-                        content=changed.canonical_prompt.content.parts,
-                    ),
-                ),
-                unpublished_item_canonical_expanded_bytes=(
-                    changed.canonical_prompt.resource_quote.canonical_expanded_bytes,
-                ),
-            ),
-        )
         repository.accept_root_turn_intent(
             lease.guard,
             intent=changed,
-            provider_input_admission=changed_admission,
             model_resolution_snapshot=runtime.freeze_resolution_snapshot(),
             deadline_monotonic=monotonic() + 30,
         )
@@ -376,7 +342,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
     lease, runtime, _binding = _bound_session(
         repository, workspace_id=workspace_id
     )
-    intent, _accepted, _admission = _direct_intent(
+    intent, _accepted = _direct_intent(
         repository,
         lease,
         runtime,
@@ -657,7 +623,7 @@ def test_compaction_headroom_counts_one_snapshot_with_repeated_image_refs_once(
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     lease, runtime, _binding = _bound_session(repository)
-    intent, _accepted, _admission = _direct_intent(
+    intent, _accepted = _direct_intent(
         repository,
         lease,
         runtime,
@@ -758,7 +724,7 @@ def test_full_confirmation_reads_body_blob_but_not_image_payload(
     lease, runtime, _binding = _bound_session(repository)
     image = _image(workspace_id=_workspace(repository, lease))
     content = FrozenPromptContent((LLMTextPart("x" * 70_000), image))
-    intent, _accepted, _admission = _direct_intent(
+    intent, _accepted = _direct_intent(
         repository, lease, runtime, content
     )
     owner = _rows(
@@ -892,10 +858,6 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
     consumed = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=queued,
-        provider_input_admission=cast(
-            PreparedRootProviderInputAdmission,
-            SimpleNamespace(candidate=queued.provider_input_candidate),
-        ),
         deadline_monotonic=monotonic() + 30,
     )
     assert consumed is not None
@@ -1002,7 +964,6 @@ def test_queue_redirect_and_steer_copy_independent_ordered_refs(
         scope=ProviderInputContinuityScope(
             session_id=lease.guard.session_id,
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         ),
         canonical_frontier=canonical_frontier(base.canonical_input, base),
         dispatch_anchor=NoNewTriggerAnchor(None),
@@ -1062,17 +1023,10 @@ def test_direct_publication_rolls_back_body_image_refs_and_command_together(
         occurred_at=datetime.now(timezone.utc),
     )
     resolution_snapshot = runtime.freeze_resolution_snapshot()
-    provider_candidate = repository.prepare_root_provider_input_candidate(
-        lease.guard,
-        intent=intent,
-        model_resolution_snapshot=resolution_snapshot,
-        deadline_monotonic=monotonic() + 30,
-    )
     with pytest.raises(RuntimeError, match="after canonical publication"):
         repository.accept_root_turn_intent(
             lease.guard,
             intent=intent,
-            provider_input_admission=_fixture_root_admission(provider_candidate),
             model_resolution_snapshot=resolution_snapshot,
             deadline_monotonic=monotonic() + 30,
         )
@@ -1500,7 +1454,7 @@ def test_scope_misbinding_and_extra_ref_fail_before_image_hydration(
     lease, runtime, _binding = _bound_session(repository)
     image = _image(workspace_id=_workspace(repository, lease))
     content = FrozenPromptContent((image,))
-    intent, _accepted, _admission = _direct_intent(
+    intent, _accepted = _direct_intent(
         repository, lease, runtime, content
     )
     cut = repository.prepare_provider_input_cut(

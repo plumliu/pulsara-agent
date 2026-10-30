@@ -661,6 +661,7 @@ message SessionLiveControlSnapshot {
   string active_root_turn_id = 12;
   uint64 control_admission_deadline_ms = 13;
   bool root_compaction_in_progress = 14;
+  string manual_compaction_command_id = 15;
 }
 
 enum LiveControlEventKind {
@@ -719,6 +720,8 @@ message ObservationResponse {
   repeated LiveControlEventProjection live_control = 11;
   repeated string presentation_notices = 12;
   bool root_compaction_in_progress = 13;
+  string manual_compaction_command_id = 14;
+  string active_root_turn_id = 15;
 }
 
 message LiveControlSnapshotRequest {
@@ -765,6 +768,7 @@ enum CommandKind {
   STEER_QUEUED_PROMPT = 15;
   STEER_ACTIVE_TURN = 16;
   STOP_CODE_MODE_CELL = 17;
+  STOP_CONTEXT_COMPACTION = 18;
 }
 
 message CommandRequest {
@@ -780,7 +784,7 @@ message CommandRequest {
   PermissionMode requested_permission_mode = 11;
   string target_plan_workflow_id = 12;
   uint64 expected_plan_workflow_revision = 13;
-  bool force = 14;
+  reserved 14;
   string expected_session_id = 15;
   string expected_host_session_id = 16;
   string target_process_id = 17;
@@ -788,6 +792,7 @@ message CommandRequest {
   PromptContent prompt_content = 19;
   uint64 control_admission_deadline_ms = 20;
   string target_cell_id = 21;
+  string target_compaction_command_id = 22;
 }
 
 message PromptImagePart {
@@ -832,6 +837,7 @@ enum UserControlOperation {
   USER_CONTROL_STOP_ACTIVE_TURN = 1;
   USER_CONTROL_TERMINATE_BACKGROUND_PROCESS = 3;
   USER_CONTROL_STOP_CODE_MODE_CELL = 4;
+  USER_CONTROL_STOP_CONTEXT_COMPACTION = 5;
 }
 
 enum UserControlTargetKind {
@@ -839,6 +845,7 @@ enum UserControlTargetKind {
   USER_CONTROL_ROOT_TURN = 1;
   USER_CONTROL_BACKGROUND_PROCESS = 3;
   USER_CONTROL_CODE_MODE_CELL = 4;
+  USER_CONTROL_MANUAL_COMPACTION = 5;
 }
 
 enum UserControlExecution {

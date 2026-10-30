@@ -82,7 +82,7 @@ async def run(*, evidence_path: Path | None = None):
             await catalog.refresh()
             delegate = ModelRuntime.production(settings=settings, catalog=catalog)
             core = KernelHostCore.production(
-                model_runtime=_RecordingModelRuntime(delegate, calls, None)
+                model_runtime=_RecordingModelRuntime(delegate, calls)
             )
             try:
                 source = await core.open_session(

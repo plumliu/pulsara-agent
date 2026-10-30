@@ -28,6 +28,7 @@ from time import monotonic
 from typing import Awaitable, Callable, Literal, Mapping
 
 from psycopg import IsolationLevel
+from psycopg import InterfaceError, OperationalError
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.session_deletion import (
     KernelSessionRetirement, SessionDeleteRejected,
@@ -52,7 +53,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
 from pulsara_agent.conversation_kernel.compaction.runtime import (
     CompactionWriteReservation,
     HostCompactionRuntimeOwner,
-    ManualCompactionRequest,
 )
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
@@ -169,6 +169,7 @@ from pulsara_agent.conversation_kernel.steer import (
     PreparedRootTurnIdentity,
     QueuedRootTurnAdmissionConfirmation,
     QueuedRootTurnAdmissionConfirmationKind,
+    StartedTurnInputGroup,
     build_direct_root_turn_identity,
     build_prompt_ingress_command,
     build_queued_root_turn_identity,
@@ -187,9 +188,7 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     KernelRunResult,
-)
-from pulsara_agent.conversation_kernel.provider_dispatch import (
-    PreparedProspectiveRootDispatch,
+    TerminalObservationStartedFailure,
 )
 from pulsara_agent.conversation_kernel.safe_point import ExternalSourceNotAtSafePoint
 from pulsara_agent.conversation_kernel.subagent import AgentSessionRuntime
@@ -580,7 +579,7 @@ class _PendingRootSuccessorHandoff:
     workflow_id: str
     interaction_id: str | None
     handoff_kind: PlanHandoffKind
-    prospective_root_dispatch: PreparedProspectiveRootDispatch
+    started_input_group: StartedTurnInputGroup
 
 
 class KernelCompositionUnavailable(ValueError):
@@ -937,6 +936,8 @@ class KernelHostSession:
         )
         self._active_task: asyncio.Task[KernelRunResult] | None = None
         self._active_turn_id: str | None = None
+        self._active_turn_started = False
+        self._active_work_id: str | None = None
         self._active_cancellation_intent: ActiveTurnCancellationIntent | None = None
         self._active_command_id: str | None = None
         self._active_root_phase: RootChainPhase | None = None
@@ -950,6 +951,7 @@ class KernelHostSession:
         self._external_new_turn_accepting = False
         self._plan_exit_fence = False
         self._terminal_new_turn_observation_id: str | None = None
+        self._external_new_turn_cancellation_intent: ActiveTurnCancellationIntent | None = None
         self._external_new_turn_settled = asyncio.Event()
         self._external_new_turn_settled.set()
         self._command_failures: dict[str, KernelCommandOutcome] = {}
@@ -969,7 +971,7 @@ class KernelHostSession:
         self._root_compaction_write_changed = asyncio.Event()
         self._root_compaction_write_changed.set()
         self._manual_compaction_command_attempts: dict[
-            str, tuple[str, asyncio.Task[CompactionConfirmationKind]]
+            str, asyncio.Task[CompactionOutcome]
         ] = {}
         self._compaction.bind_host_fence_callbacks(
             install=self._install_compaction_fence,
@@ -1010,7 +1012,6 @@ class KernelHostSession:
         attempt_id: str,
         owner_task: asyncio.Task[object],
         admitted_writer: CompactionWriteReservation | None,
-        pending_root_turn_id: str | None,
     ) -> None:
         """Recapture and install one exact-scope fence under the Host lock."""
 
@@ -1034,29 +1035,11 @@ class KernelHostSession:
             self._retire_done_active_root_locked()
             active_owner = self._active_task is owner_task
             idle_owner = self._active_task is None
-            pending_root_owner = (
-                pending_root_turn_id is not None
-                and scope.turn_id != pending_root_turn_id
-                and (
-                    (
-                        active_owner
-                        and admitted_writer is None
-                        and not admitted_writers
-                        and self._active_turn_id == pending_root_turn_id
-                    )
-                    or (idle_owner and external_recovery_owner)
-                )
-            )
-            if pending_root_turn_id is not None and not pending_root_owner:
-                raise RuntimeError(
-                    "compaction pending ROOT owner does not exact-join"
-                )
             if not (active_owner or idle_owner or external_recovery_owner):
                 raise RuntimeError("compaction ROOT task ownership changed")
             if (
                 active_owner
                 and not external_recovery_owner
-                and not pending_root_owner
                 and self._active_turn_id != scope.turn_id
             ):
                 raise RuntimeError("compaction active ROOT target changed")
@@ -1892,6 +1875,7 @@ class KernelHostSession:
                     or self._plan_exit_fence
                     or self._external_new_turn_accepting
                     or self._active_task is not None
+                    or self._manual_compaction_command_attempts
                 ):
                     raise RuntimeError("a canonical ROOT turn is already running")
             permission = await self._io.run(
@@ -1928,12 +1912,14 @@ class KernelHostSession:
                     or self._plan_exit_fence
                     or self._external_new_turn_accepting
                     or self._active_task is not None
+                    or self._manual_compaction_command_attempts
                 ):
                     if context_reservation is not None:
                         context_reservation.retire()
                     raise RuntimeError("prompt Hook admission became stale")
                 task = self._install_active_root_task_locked(
                     turn_id=identity.turn_id,
+                    started=False,
                     command_id=command,
                     name=f"kernel-turn:{command}",
                     run=lambda intent: self._run_root_turn_chain(
@@ -1953,276 +1939,232 @@ class KernelHostSession:
         await self._settle_prompt_admission_attempt(attempt, result=result)
         return result
 
-    async def compact_context(
-        self,
-        *,
-        command_id: str,
-        force: bool = False,
-        expected_active_turn_id: str | None = None,
-    ) -> CompactionOutcome:
-        """Request one ROOT compaction without attaching waiter lifetime.
-
-        Active compaction is consumed by the existing ROOT runner at its next
-        provider-safe boundary.  Idle compaction is implemented by the same
-        owner later in this module; no command creates a durable execution
-        attempt or background job.
-        """
-
+    async def compact_context(self, *, command_id: str) -> CompactionOutcome:
+        """Accept one idle operation; a caller only waits on its existing owner."""
         if not command_id:
             raise ValueError("compaction command identity is required")
-
-        # Query the stable semantic command before consulting replaceable Host
-        # liveness.  An ACK-unknown retry must observe the original target, not
-        # silently retarget the same command ID to a newly active/idle turn.
         existing = await self._query_command_row(command_id)
-        if existing is not None and str(existing.get("command_kind")) != (
-            "COMPACT_CONTEXT"
-        ):
-            return CompactionOutcome(
-                CompactionDisposition.FAILED,
-                str(existing.get("target_turn_id") or ""),
-                None,
-                None,
-                "COMMAND_CONFLICT",
-            )
-        existing_target = (
-            None
-            if existing is None
-            else str(existing.get("target_turn_id") or "") or None
-        )
+        if existing is not None and existing.get("command_kind") != "COMPACT_CONTEXT":
+            return CompactionOutcome(CompactionDisposition.FAILED, "idle", None, None, "COMMAND_CONFLICT")
         async with self._lock:
             self._require_open()
             self._retire_done_active_root_locked()
-            active_turn_id = self._active_turn_id
-            active = self._active_task is not None and active_turn_id is not None
-            if expected_active_turn_id is not None and (
-                not active or active_turn_id != expected_active_turn_id
-            ):
-                return CompactionOutcome(
-                    CompactionDisposition.FAILED,
-                    expected_active_turn_id,
-                    None,
-                    None,
-                    "TARGET_TURN_CHANGED",
+            task = self._manual_compaction_command_attempts.get(command_id)
+            if task is None and existing is None:
+                if (
+                    self.root_session_id is not None
+                    or self._active_task is not None
+                    or self._external_new_turn_accepting
+                    or self._pending_root_successor is not None
+                    or self._plan_exit_fence
+                    or self._prompt_admission_attempts
+                    or self._compaction_write_reservations
+                    or self._runtime_reopen_quiescence is not None
+                    or self._manual_compaction_command_attempts
+                    or self._compaction.has_active_work()
+                ):
+                    return CompactionOutcome(CompactionDisposition.REJECTED_BUSY, "idle", None, None, "SESSION_BUSY")
+                task = self._compaction.start_owned(
+                    self._prepare_idle_manual_compaction(command_id),
+                    name=f"kernel-idle-compaction:{command_id}",
                 )
-        if existing_target is not None:
-            target_turn_id = existing_target
-        elif active:
-            assert active_turn_id is not None
-            target_turn_id = active_turn_id
-        else:
+                self._manual_compaction_command_attempts[command_id] = task
+                def retire(completed):
+                    if self._manual_compaction_command_attempts.get(command_id) is completed:
+                        self._manual_compaction_command_attempts.pop(command_id, None)
+                    self._queue_wake.set()
+                    self._monitor_wake.set()
+                task.add_done_callback(retire)
+        if task is not None:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+                return CompactionOutcome(
+                    CompactionDisposition.FAILED, "idle", None, None,
+                    "HOST_CLOSING" if self._closing else "COMPACTION_CANCELLED",
+                )
+        local = await self._compaction.find_manual(command_id=command_id, scope_kind=self._session_scope_kind)
+        if local is not None:
+            return await asyncio.shield(local)
+        return CompactionOutcome(
+            CompactionDisposition.RESULT_UNAVAILABLE,
+            str(existing.get("target_turn_id") or "idle"), None, None,
+            "HISTORICAL_RESULT_UNAVAILABLE",
+        )
+
+    async def _prepare_idle_manual_compaction(self, command_id: str) -> CompactionOutcome:
+        from pulsara_agent.conversation_kernel.direct_model import KernelModelTargetPreparationRequest
+        from pulsara_agent.primitives.model_call import ModelCallPurpose
+        target_turn_id = "idle"
+        request = None
+        try:
+            # This task occupies the ordinary Host admission boundary while
+            # configuration and source are selected. Queue-only writes remain
+            # available; their execution waits for this exact operation.
+            if await self._io.run(
+                self.repository.pending_prompt_head_mode,
+                session_id=self.session_id, deadline_monotonic=self._canonical_deadline(),
+            ) is not None:
+                return CompactionOutcome(CompactionDisposition.REJECTED_BUSY, target_turn_id, None, None, "SESSION_BUSY")
             target_turn_id = await self._io.run(
-                self.repository.read_latest_terminal_scope_turn_id,
-                self._lease.guard,
+                self.repository.read_latest_terminal_scope_turn_id, self._lease.guard,
                 scope_kind=ConversationScopeKind.ROOT,
                 deadline_monotonic=self._canonical_deadline(),
             )
             if target_turn_id is None:
-                return CompactionOutcome(
-                    CompactionDisposition.NOT_NEEDED,
-                    "idle",
-                    None,
-                    None,
-                    "NO_TERMINAL_TURN",
-                )
-
-        candidate = build_prepared_manual_compaction_command(
-            session_id=self.session_id,
-            command_id=command_id,
-            scope_kind=self._session_scope_kind,
-            target_turn_id=target_turn_id,
-            expected_active_turn_id=expected_active_turn_id,
-            force=force,
-        )
-        confirmation = await self._settle_manual_compaction_command(candidate)
-        if confirmation is not CompactionConfirmationKind.FULL:
-            return CompactionOutcome(
-                CompactionDisposition.FAILED,
-                target_turn_id,
-                None,
-                None,
-                "COMMAND_CONFLICT",
+                return CompactionOutcome(CompactionDisposition.NOT_NEEDED, "idle", None, None, "NO_TERMINAL_TURN")
+            snapshot = self._model_runtime.freeze_resolution_snapshot()
+            binding = await self._io.run(
+                self.repository.read_session_model_call_binding, self._lease.guard,
+                deadline_monotonic=self._canonical_deadline(),
             )
-        if existing is not None:
+            if binding is None:
+                return CompactionOutcome(CompactionDisposition.FAILED, target_turn_id, None, None, "MODEL_CONFIGURATION_REQUIRED")
+            target = self._model.prepare_target_from_snapshot(
+                KernelModelTargetPreparationRequest(
+                    session_id=self.session_id, turn_id=target_turn_id,
+                    model_call_index=1, purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                    maximum_input_tokens=self._runner._provider_dispatch._maximum_input_tokens_per_call,
+                    binding=binding,
+                ), resolution_snapshot=snapshot,
+            )
+            cut = await self._io.run(
+                self.repository.prepare_compaction_input_cut, self._lease.guard,
+                turn_id=target_turn_id, allow_terminal=True,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            candidate = build_prepared_manual_compaction_command(
+                session_id=self.session_id, command_id=command_id,
+                scope_kind=self._session_scope_kind, target_turn_id=target_turn_id,
+                model_call_binding=binding, source_cut=cut,
+            )
+            confirmation, cancelled = await self._drain_start_settlement(
+                self._compaction.start_settlement(
+                    self._settle_manual_compaction_command_worker(
+                        candidate, operation_task=asyncio.current_task(),
+                    ),
+                    name=f"kernel-compaction-command:{command_id}",
+                )
+            )
+            if confirmation is not CompactionConfirmationKind.FULL:
+                return CompactionOutcome(CompactionDisposition.FAILED, target_turn_id, None, None, "COMMAND_CONFLICT")
+            (request, future), request_cancelled = await self._drain_start_settlement(asyncio.create_task(
+                self._compaction.request_manual(
+                    command_id=command_id, scope_kind=self._session_scope_kind,
+                    target_turn_id=target_turn_id, prepared_target=target,
+                ),
+                name=f"kernel-manual-request:{command_id}",
+            ))
+            if cancelled or request_cancelled or self._closing:
+                raise asyncio.CancelledError
+            if not await self._compaction.claim_manual_execution(request):
+                return await asyncio.shield(future)
+            outcome = await self._runner.compact_idle_turn(
+                turn_id=target_turn_id, command_id=command_id, prepared_target=target,
+            )
+        except StaleHostWriter:
+            outcome = CompactionOutcome(CompactionDisposition.FAILED, target_turn_id or "idle", None, None, "WRITER_REPLACED")
+        except asyncio.CancelledError:
+            outcome = CompactionOutcome(CompactionDisposition.FAILED, target_turn_id or "idle", None, None,
+                "HOST_CLOSING" if self._closing else "COMPACTION_CANCELLED")
+        except ConversationKernelConflict as error:
+            outcome = CompactionOutcome(
+                CompactionDisposition.REJECTED_BUSY if str(error) == "COMPACTION_BUSY" else CompactionDisposition.FAILED,
+                target_turn_id or "idle", None, None,
+                "SESSION_BUSY" if str(error) == "COMPACTION_BUSY" else str(error),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception("Idle compaction failed")
+            outcome = CompactionOutcome(CompactionDisposition.FAILED, target_turn_id or "idle", None, None, "COMPACTION_FAILED")
+        if outcome.disposition is CompactionDisposition.COMPACTED:
+            self._ephemeral.invalidate()
+        if request is not None:
+            await self._drain_start_settlement(asyncio.create_task(
+                self._compaction.settle_manual(request, outcome),
+                name=f"kernel-manual-result:{command_id}",
+            ))
+        return outcome
+
+    async def stop_manual_compaction(self, *, command_id: str) -> CompactionOutcome:
+        """Stop the exact manual operation without inventing a turn target."""
+        async with self._lock:
+            task = self._manual_compaction_command_attempts.get(command_id)
+            if task is not None and not task.done():
+                task.cancel()
+        if task is not None:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.cancelled():
+                    raise
+                return CompactionOutcome(CompactionDisposition.FAILED, "idle", None, None, "COMPACTION_CANCELLED")
+        existing = await self._query_command_row(command_id)
+        if existing is not None and existing.get("command_kind") == "COMPACT_CONTEXT":
             local = await self._compaction.find_manual(
-                command_id=command_id,
-                scope_kind=self._session_scope_kind,
+                command_id=command_id, scope_kind=self._session_scope_kind,
             )
             if local is not None:
                 return await asyncio.shield(local)
-            # A replacement Host never resumes an old process-local summary.
-            # The stable command remains queryable, but execution is not
-            # replayed merely because its original waiter/Host disappeared.
-            return CompactionOutcome(
-                CompactionDisposition.DEFERRED_TO_SAFE_POINT,
-                target_turn_id,
-                None,
-                None,
-                "HISTORICAL_COMMAND_ACCEPTED",
-            )
-
-        launch_idle = False
-        reject_changed_target = False
-        # Publication of the process-local request and the active->idle
-        # decision share the ROOT-slot lock with task-owned finalization.  A
-        # request is therefore either visible to the exact active task before
-        # it clears its slot, or is claimed here after that slot is idle; there
-        # is no unowned interval between those two states.
-        async with self._lock:
-            self._require_open()
-            self._retire_done_active_root_locked()
-            request, future = await self._compaction.request_manual(
-                command_id=command_id,
-                scope_kind=self._session_scope_kind,
-                expected_turn_id=target_turn_id,
-                force=force,
-            )
-            if self._active_task is None:
-                launch_idle = await self._compaction.claim_manual_execution(request)
-            elif self._active_turn_id != target_turn_id:
-                reject_changed_target = True
-        if reject_changed_target:
-            await self._compaction.settle_manual(
-                request,
-                CompactionOutcome(
-                    CompactionDisposition.FAILED,
-                    target_turn_id,
-                    None,
-                    None,
-                    "TARGET_TURN_CHANGED",
-                ),
-            )
-        elif launch_idle:
-            self._compaction.start_owned(
-                self._execute_idle_manual_compaction(request),
-                name=f"kernel-idle-compaction:{command_id}",
-            )
-        return await asyncio.shield(future)
-
-    async def _execute_idle_manual_compaction(
-        self, request: ManualCompactionRequest
-    ) -> None:
-        target_turn_id = request.expected_turn_id
-        if target_turn_id is None:
-            outcome = CompactionOutcome(
-                CompactionDisposition.FAILED,
-                "idle",
-                None,
-                None,
-                "TARGET_TURN_CHANGED",
-            )
-        else:
-            try:
-                outcome = await self._runner.compact_idle_turn(
-                    turn_id=target_turn_id,
-                    command_id=request.command_id,
-                    force=request.force,
-                )
-            except StaleHostWriter:
-                outcome = CompactionOutcome(
-                    CompactionDisposition.FAILED,
-                    target_turn_id,
-                    None,
-                    None,
-                    "WRITER_REPLACED",
-                )
-            except asyncio.CancelledError:
-                outcome = CompactionOutcome(
-                    CompactionDisposition.FAILED,
-                    target_turn_id,
-                    None,
-                    None,
-                    "HOST_CLOSING" if self._closing else "COMPACTION_CANCELLED",
-                )
-                await self._compaction.settle_manual(request, outcome)
-                raise
-            except BaseException:
-                outcome = CompactionOutcome(
-                    CompactionDisposition.FAILED,
-                    target_turn_id,
-                    None,
-                    None,
-                    "COMPACTION_FAILED",
-                )
-        if outcome.disposition is CompactionDisposition.COMPACTED:
-            self._ephemeral.invalidate()
-        await self._compaction.settle_manual(request, outcome)
-
-    async def _settle_manual_compaction_command(
-        self, candidate: PreparedManualCompactionCommand
-    ) -> CompactionConfirmationKind:
-        existing = self._manual_compaction_command_attempts.get(candidate.command_id)
-        if existing is not None:
-            semantic_digest, task = existing
-            if semantic_digest != candidate.semantic_digest:
-                return CompactionConfirmationKind.CONFLICT
-        else:
-            task = self._compaction.start_settlement(
-                self._settle_manual_compaction_command_worker(candidate),
-                name=f"kernel-compaction-command:{candidate.command_id}",
-            )
-            self._manual_compaction_command_attempts[candidate.command_id] = (
-                candidate.semantic_digest,
-                task,
-            )
-
-            def retire(completed: asyncio.Task[CompactionConfirmationKind]) -> None:
-                current = self._manual_compaction_command_attempts.get(
-                    candidate.command_id
-                )
-                if current is not None and current[1] is completed:
-                    self._manual_compaction_command_attempts.pop(
-                        candidate.command_id, None
-                    )
-
-            task.add_done_callback(retire)
-        return await asyncio.shield(task)
+        return CompactionOutcome(
+            CompactionDisposition.RESULT_UNAVAILABLE,
+            str((existing or {}).get("target_turn_id") or "idle"), None, None,
+            "HISTORICAL_RESULT_UNAVAILABLE",
+        )
 
     async def _settle_manual_compaction_command_worker(
-        self, candidate: PreparedManualCompactionCommand
+        self, candidate: PreparedManualCompactionCommand,
+        *, operation_task: asyncio.Task | None,
     ) -> CompactionConfirmationKind:
         delay = 0.05
+        write_error = None
         while True:
             try:
+                await self._io.run(
+                    self.repository.validate_host_writer, self._lease.guard,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
                 confirmation = await self._io.run(
                     self.repository.confirm_manual_compaction_command,
-                    candidate=candidate,
-                    deadline_monotonic=self._canonical_deadline(),
+                    candidate=candidate, deadline_monotonic=self._canonical_deadline(),
                 )
             except StaleHostWriter:
                 raise
-            except BaseException:
+            except (TimeoutError, OSError, OperationalError, InterfaceError):
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 0.5)
                 continue
-            if confirmation is CompactionConfirmationKind.FULL:
+            if confirmation is not CompactionConfirmationKind.NONE:
                 return confirmation
-            if confirmation is CompactionConfirmationKind.CONFLICT:
+            if self._closing or (operation_task is not None and operation_task.cancelling()):
                 return confirmation
+            if write_error is not None and not isinstance(write_error, (TimeoutError, OSError, OperationalError, InterfaceError)):
+                raise write_error
             try:
-                written = await self._io.run(
+                return await self._io.run(
                     self.repository.accept_manual_compaction_command,
-                    self._lease.guard,
-                    candidate=candidate,
+                    self._lease.guard, candidate=candidate,
                     deadline_monotonic=self._canonical_deadline(),
                 )
-                if written is CompactionConfirmationKind.FULL:
-                    return written
-                if written is CompactionConfirmationKind.CONFLICT:
-                    return written
             except StaleHostWriter:
                 raise
-            except BaseException:
+            except Exception as error:
+                write_error = error
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 0.5)
-                continue
-            await asyncio.sleep(0)
 
     def root_compaction_in_progress(self) -> bool:
         """Disposable GUI progress, owned by the existing ROOT compaction fence."""
         return self._compaction.is_fenced(
             scope_kind=self._session_scope_kind
         )
+
+    def active_manual_compaction_command_id(self) -> str | None:
+        return next((
+            command for command, task in self._manual_compaction_command_attempts.items()
+            if not task.done()
+        ), None)
 
     def current_compaction_projection(
         self,
@@ -2257,14 +2199,15 @@ class KernelHostSession:
         self,
         turn_id: str,
         cancellation_intent: ActiveTurnCancellationIntent,
-        prospective_root_dispatch: PreparedProspectiveRootDispatch | None = None,
+        *,
+        started_input_group: StartedTurnInputGroup | None = None,
     ) -> KernelRunResult:
         """Run one accepted ROOT turn and every automatic successor."""
 
         result = await self._runner.run_accepted_turn(
             turn_id,
             cancellation_intent=cancellation_intent,
-            prospective_root_dispatch=prospective_root_dispatch,
+            started_input_group=started_input_group,
         )
         return await self._finish_root_chain(result, cancellation_intent)
 
@@ -2296,6 +2239,7 @@ class KernelHostSession:
                     self._closing
                     or self._plan_exit_fence
                     or asyncio.current_task().cancelling() != 0
+                    or cancellation_intent.cause is not None
                 ):
                     raise asyncio.CancelledError
                 self._tools.todo_owner.bind_continuation(
@@ -2319,7 +2263,7 @@ class KernelHostSession:
             result = await self._runner.run_accepted_turn(
                 continuation_turn_id,
                 cancellation_intent=cancellation_intent,
-                prospective_root_dispatch=pending.prospective_root_dispatch,
+                started_input_group=pending.started_input_group,
             )
             total_model_calls += result.model_call_count
             total_tool_calls += result.tool_call_count
@@ -2341,13 +2285,16 @@ class KernelHostSession:
         name: str,
         run: Callable[[ActiveTurnCancellationIntent], Awaitable[KernelRunResult]],
         work_id: str | None = None,
+        started: bool = True,
+        cancellation_intent: ActiveTurnCancellationIntent | None = None,
     ) -> asyncio.Task[KernelRunResult]:
         """Install the sole Host-owned ROOT task while ``self._lock`` is held."""
 
         self._retire_done_active_root_locked()
         if self._active_task is not None:
             raise RuntimeError("a canonical ROOT turn is already running")
-        intent = ActiveTurnCancellationIntent(turn_id, self._session_scope_kind)
+        intent = cancellation_intent or ActiveTurnCancellationIntent(turn_id, self._session_scope_kind)
+        intent.require_exact(turn_id=turn_id, scope_kind=self._session_scope_kind)
         if self.root_session_id is None:
             self._ephemeral.activate(turn_id)
         task = asyncio.create_task(
@@ -2356,6 +2303,8 @@ class KernelHostSession:
         )
         self._active_task = task
         self._active_turn_id = turn_id
+        self._active_turn_started = started
+        self._active_work_id = work_id
         self._active_cancellation_intent = intent
         self._active_command_id = command_id
         self._active_root_phase = RootChainPhase.ORIGIN_RUNNING
@@ -2392,28 +2341,49 @@ class KernelHostSession:
                 await self._agent_runtime.deliver_pending_completions(self.session_id)
             result = await run(intent)
             return result
+        except BaseException as error:
+            reason = (
+                "USER_STOPPED" if intent.cause is ForegroundCancellationCause.USER_REQUEST
+                else "SESSION_CLOSED" if self._closing or intent.cause is ForegroundCancellationCause.HOST_SESSION_CLOSE
+                else "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
+                if isinstance(error, StructuredModelInputCompileError) and _is_input_resource_exhaustion(error)
+                else "FOREGROUND_EXECUTION_INTERRUPTED"
+            )
+            await self._drain_start_settlement(asyncio.create_task(
+                self._interrupt_queued_admission_until_safe(turn_id=intent.turn_id, reason=reason),
+                name=f"kernel-turn-terminal:{intent.turn_id}",
+            ))
+            raise
         finally:
-            settled = False
-            try:
-                await self._settle_pending_root_successor(task)
-                await self._settle_active_root_task(task)
-                settled = True
-            finally:
-                self._ephemeral.completed(intent.turn_id, result if settled else None)
-                self._tools.terminal_monitor_coordinator.close_work(intent.turn_id)
-                if self.root_session_id is not None:
-                    await self._agent_runtime.release(self.session_id)
-                    try:
-                        await self._io.run(
-                            self.repository.mark_agent_idle, session_id=self.session_id,
-                            idle=True, at=datetime.now(timezone.utc),
-                            deadline_monotonic=self._canonical_deadline(),
-                        )
-                    except Exception:
-                        logging.getLogger(__name__).exception("Agent idle observation will be retried by scheduler")
-                if self.root_session_id is not None and work_id is not None:
-                    await self._agent_runtime.completed_work(self.root_session_id, work_id)
-                await self._agent_runtime.notify_changed()
+            await self._drain_start_settlement(asyncio.create_task(
+                self._finish_owned_root_task(task, intent, work_id, result),
+                name=f"kernel-turn-cleanup:{intent.turn_id}",
+            ))
+
+    async def _finish_owned_root_task(self, task, intent, work_id, result) -> None:
+        settled = False
+        try:
+            await self._settle_pending_root_successor(task)
+            self._tools.terminal_monitor_coordinator.close_work(intent.turn_id)
+            if self.root_session_id is not None:
+                # Capacity belongs to this exact task from before start until
+                # its execution and resource settlement have finished.
+                await self._agent_runtime.release(self.session_id)
+                try:
+                    await self._io.run(
+                        self.repository.mark_agent_idle, session_id=self.session_id,
+                        idle=True, at=datetime.now(timezone.utc),
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
+                except Exception:
+                    logging.getLogger(__name__).exception("Agent idle observation will be retried by scheduler")
+            await self._settle_active_root_task(task)
+            settled = True
+        finally:
+            self._ephemeral.completed(intent.turn_id, result if settled else None)
+            if self.root_session_id is not None and work_id is not None:
+                await self._agent_runtime.completed_work(self.root_session_id, work_id)
+            await self._agent_runtime.notify_changed()
 
     async def _settle_pending_root_successor(self, task: asyncio.Task[object]) -> None:
         async with self._lock:
@@ -2452,54 +2422,16 @@ class KernelHostSession:
                 continue
 
     async def _settle_active_root_task(self, task: asyncio.Task[object]) -> None:
-        manual: ManualCompactionRequest | None = None
         async with self._lock:
             if self._active_task is task:
                 active_turn_id = self._active_turn_id
-                if active_turn_id is not None and not self._closing:
-                    manual = await self._compaction.take_manual(
-                        scope_kind=self._session_scope_kind,
-                        turn_id=active_turn_id,
-                    )
-                if manual is None and active_turn_id is not None:
+                if active_turn_id is not None and self._active_turn_started:
                     self._tools.offer_todo_installation(
                         self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
                     )
-                if manual is None:
-                    if active_turn_id is not None:
-                        self._mark_feedback_target_ended_locked(active_turn_id)
-                    self._clear_active_root_locked()
-        if manual is None:
-            return
-
-        # The exact ROOT task remains the visible slot owner until this
-        # already-started request reaches a terminal process-local outcome.
-        # Repeated waiter/close cancellation can detach this await, but cannot
-        # strand the request or clear the slot ahead of settlement.
-        settlement = asyncio.create_task(
-            self._execute_idle_manual_compaction(manual),
-            name=f"kernel-terminal-manual-compaction:{manual.command_id}",
-        )
-        try:
-            while True:
-                try:
-                    await asyncio.shield(settlement)
-                    break
-                except asyncio.CancelledError:
-                    if settlement.done():
-                        settlement.result()
-                        break
-                    continue
-        finally:
-            async with self._lock:
-                if self._active_task is task:
-                    active_turn_id = self._active_turn_id
-                    if active_turn_id is not None:
-                        self._tools.offer_todo_installation(
-                            self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
-                        )
-                        self._mark_feedback_target_ended_locked(active_turn_id)
-                    self._clear_active_root_locked()
+                if active_turn_id is not None:
+                    self._mark_feedback_target_ended_locked(active_turn_id)
+                self._clear_active_root_locked()
 
     async def _finalize_todo_run_activation(
         self,
@@ -2507,6 +2439,8 @@ class KernelHostSession:
         accepted: object,
     ) -> None:
         async with self._lock:
+            if self._active_turn_id == accepted.turn_id:
+                self._active_turn_started = True
             closed = self._finalize_todo_run_activation_locked(prepared, accepted)
         self._tools.offer_todo_close(closed)
 
@@ -2550,6 +2484,8 @@ class KernelHostSession:
             self._control_completion_seal_changed.set()
         self._active_task = None
         self._active_turn_id = None
+        self._active_turn_started = False
+        self._active_work_id = None
         self._active_cancellation_intent = None
         self._active_command_id = None
         self._active_root_phase = None
@@ -2564,6 +2500,8 @@ class KernelHostSession:
         """Linearize every new Plan-resolution write against force exit."""
 
         self._require_open()
+        if self._manual_compaction_command_attempts:
+            raise ConversationKernelConflict("Plan resolution conflicts with idle compaction")
         if self._plan_exit_fence:
             raise ConversationKernelConflict(
                 "Plan resolution conflicts with force exit"
@@ -2585,7 +2523,7 @@ class KernelHostSession:
         )
         if creates_turn:
             self._external_new_turn_accepting = True
-            self._external_new_turn_settled.clear()
+            self._external_new_turn_settled = asyncio.Event()
         return reservation
 
     async def _accept_automatic_plan_continuation(
@@ -2607,46 +2545,19 @@ class KernelHostSession:
         attempt_id = ("plan-continuation", candidate.candidate_fingerprint)
 
         async def accept() -> AcceptedPlanToolBatch:
-            prospective_dispatch: PreparedProspectiveRootDispatch | None = None
             try:
-                provider_candidate = await self._io.run(
-                    self.repository.prepare_fresh_plan_continuation_provider_input_candidate,
-                    self._lease.guard,
-                    candidate=candidate,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                prospective_dispatch = (
-                    await self._runner.prepare_plan_continuation_input(
-                        provider_candidate
-                    )
-                )
                 result = await self._io.run(
                     self.repository.accept_plan_tool_batch,
-                    self._lease.guard,
-                    candidate=candidate,
-                    continuation_provider_input_admission=(
-                        prospective_dispatch.admission
-                    ),
+                    self._lease.guard, candidate=candidate,
                     deadline_monotonic=deadline_monotonic,
                 )
-            except asyncio.CancelledError:
-                if prospective_dispatch is not None:
-                    prospective_dispatch.close()
-                raise
             except Exception:
-                try:
-                    winner = await self._io.run(
-                        self.repository.confirm_plan_tool_batch_winner,
-                        candidate=candidate,
-                        deadline_monotonic=self._canonical_deadline(),
-                    )
-                except BaseException:
-                    if prospective_dispatch is not None:
-                        prospective_dispatch.close()
-                    raise
+                winner = await self._io.run(
+                    self.repository.confirm_plan_tool_batch_winner,
+                    candidate=candidate,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
                 if winner is None:
-                    if prospective_dispatch is not None:
-                        prospective_dispatch.close()
                     raise
                 result = winner
             try:
@@ -2661,14 +2572,16 @@ class KernelHostSession:
                     inspection, self._lease.guard
                 )
                 if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
-                    if prospective_dispatch is not None:
-                        prospective_dispatch.close()
-                        prospective_dispatch = None
                     return replace(
                         result,
                         continuation_turn_id=None,
                         continuation_entry_id=None,
                     )
+                started_group = await self._io.run(
+                    self.repository.read_started_turn_input_group, self._lease.guard,
+                    turn_id=candidate.continuation_turn_id,
+                    deadline_monotonic=self._canonical_deadline(),
+                )
                 async with self._lock:
                     current_writer = (
                         disposition
@@ -2680,6 +2593,8 @@ class KernelHostSession:
                     )
                     origin_runner_live = (
                         not origin_task.done() and origin_task.cancelling() == 0
+                        and self._active_cancellation_intent is not None
+                        and self._active_cancellation_intent.cause is None
                     )
                     if (
                         not self._closing
@@ -2705,9 +2620,8 @@ class KernelHostSession:
                             workflow_id=candidate.workflow_id,
                             interaction_id=None,
                             handoff_kind=handoff_kind,
-                            prospective_root_dispatch=prospective_dispatch,
+                            started_input_group=started_group,
                         )
-                        prospective_dispatch = None
                         self._active_root_phase = (
                             RootChainPhase.SUCCESSOR_COMMITTED_PENDING_HANDOFF
                         )
@@ -2717,8 +2631,6 @@ class KernelHostSession:
                 # process-local attempt must own its terminalization until the
                 # exact turn is terminal or belongs to a replacement writer.
                 pass
-            if prospective_dispatch is not None:
-                prospective_dispatch.close()
             await self._terminalize_unbound_plan_successor(
                 attempt_id=attempt_id,
                 turn_id=candidate.continuation_turn_id,
@@ -3031,46 +2943,28 @@ class KernelHostSession:
                 )
                 if completion_sealed:
                     seal_changed = self._control_completion_seal_changed
-                else:
-                    try:
-                        reservation = self._reserve_compaction_write_locked(
-                            scope_kind=self._session_scope_kind,
-                        )
-                    except RuntimeError:
-                        if hook_context_reservation is not None:
-                            hook_context_reservation.retire()
-                        return KernelCommandOutcome(
-                            command_id,
-                            "REJECTED",
-                            target_turn_id or "",
-                            "COMPACTION_IN_PROGRESS",
-                            "Context compaction is in progress for the ROOT scope.",
-                        )
             if not completion_sealed:
                 break
             await seal_changed.wait()
         try:
-            try:
-                return await self._submit_prompt_reserved(
-                    command_id=command_id,
-                    queue_item_id=queue_item_id,
-                    delivery_mode=delivery_mode,
-                    target_turn_id=target_turn_id,
-                    permission_snapshot_id=permission_snapshot_id,
-                    effective_requested_permission=effective_requested_permission,
-                    ingress=ingress,
-                    model_resolution_snapshot=model_resolution_snapshot,
-                    expected_permission_snapshot=permission_projection,
-                    hook_context_reservation=hook_context_reservation,
-                )
-            except BaseException:
-                if hook_context_reservation is not None:
-                    hook_context_reservation.retire()
-                raise
-        finally:
-            await self._release_compaction_write_reservation(reservation)
+            return await self._publish_prompt(
+                command_id=command_id,
+                queue_item_id=queue_item_id,
+                delivery_mode=delivery_mode,
+                target_turn_id=target_turn_id,
+                permission_snapshot_id=permission_snapshot_id,
+                effective_requested_permission=effective_requested_permission,
+                ingress=ingress,
+                model_resolution_snapshot=model_resolution_snapshot,
+                expected_permission_snapshot=permission_projection,
+                hook_context_reservation=hook_context_reservation,
+            )
+        except BaseException:
+            if hook_context_reservation is not None:
+                hook_context_reservation.retire()
+            raise
 
-    async def _submit_prompt_reserved(
+    async def _publish_prompt(
         self,
         *,
         command_id: str,
@@ -3351,70 +3245,55 @@ class KernelHostSession:
                     "PLAN_TRANSITION_BUSY",
                     "A Plan force-exit transition is in progress.",
                 )
-            try:
-                reservation = self._reserve_compaction_write_locked(
-                    scope_kind=self._session_scope_kind,
-                )
-            except RuntimeError:
-                return KernelCommandOutcome(
-                    candidate.command_id,
-                    "REJECTED",
-                    "",
-                    "COMPACTION_IN_PROGRESS",
-                    "Context compaction is in progress for the ROOT scope.",
-                )
         try:
-            try:
-                await self._io.run(
-                    self.repository.apply_queued_prompt_action,
-                    self._lease.guard,
-                    candidate=candidate,
-                    occurred_at=datetime.now().astimezone(),
-                    actor_id=self.host_session_id,
-                    deadline_monotonic=self._canonical_deadline(),
-                )
-            except QueuedPromptActionRejected as error:
-                return KernelCommandOutcome(
-                    candidate.command_id,
-                    "REJECTED",
-                    "",
-                    error.code,
-                    {
-                        "COMMAND_CONFLICT": "该操作身份已经用于另一项操作。",
-                        "PROMPT_NOT_PENDING": "这条输入已不在等待队列中。",
-                        "SCHEDULED_INPUT_CANNOT_STEER": "定时输入只能按队列顺序处理。",
-                        "PROMPT_ALREADY_CONSUMED": "这条输入已开始处理。",
-                        "STEER_TARGET_CLOSED": "当前任务已结束；输入仍按队列顺序处理。",
-                    }[error.code],
-                )
-            except Exception:
-                # Confirm the original action only. Never reissue a mutation
-                # after an unknown ACK, or infer a winner from source text.
-                row = await self._query_command_row(candidate.command_id)
-                if row is None:
-                    raise
-                if (
-                    row["command_kind"] != candidate.command_kind
-                    or row["semantic_digest"] != candidate.semantic_digest
-                    or row["target_queue_item_id"] != candidate.target_queue_item_id
-                ):
-                    raise ConversationKernelConflict(
-                        "queue action confirmation conflicts"
-                    )
-            self._hook_context.retire_prompt_candidate(
-                scope=self._hook_root_scope,
-                prompt_candidate_id=candidate.source_queue_item_id,
+            await self._io.run(
+                self.repository.apply_queued_prompt_action,
+                self._lease.guard,
+                candidate=candidate,
+                occurred_at=datetime.now().astimezone(),
+                actor_id=self.host_session_id,
+                deadline_monotonic=self._canonical_deadline(),
             )
-            self._queue_wake.set()
-            outcome = await self.query_command(candidate.command_id)
-            if outcome is None:
-                raise ConversationKernelConflict("queue action has no canonical winner")
-            if candidate.target_turn_id is not None:
-                outcome = await self._wake_accepted_steer(command_id=candidate.command_id,
-                    target_turn_id=candidate.target_turn_id, outcome=outcome)
-            return outcome
-        finally:
-            await self._release_compaction_write_reservation(reservation)
+        except QueuedPromptActionRejected as error:
+            return KernelCommandOutcome(
+                candidate.command_id,
+                "REJECTED",
+                "",
+                error.code,
+                {
+                    "COMMAND_CONFLICT": "该操作身份已经用于另一项操作。",
+                    "PROMPT_NOT_PENDING": "这条输入已不在等待队列中。",
+                    "SCHEDULED_INPUT_CANNOT_STEER": "定时输入只能按队列顺序处理。",
+                    "PROMPT_ALREADY_CONSUMED": "这条输入已开始处理。",
+                    "STEER_TARGET_CLOSED": "当前任务已结束；输入仍按队列顺序处理。",
+                }[error.code],
+            )
+        except Exception:
+            # Confirm the original action only. Never reissue a mutation
+            # after an unknown ACK, or infer a winner from source text.
+            row = await self._query_command_row(candidate.command_id)
+            if row is None:
+                raise
+            if (
+                row["command_kind"] != candidate.command_kind
+                or row["semantic_digest"] != candidate.semantic_digest
+                or row["target_queue_item_id"] != candidate.target_queue_item_id
+            ):
+                raise ConversationKernelConflict(
+                    "queue action confirmation conflicts"
+                )
+        self._hook_context.retire_prompt_candidate(
+            scope=self._hook_root_scope,
+            prompt_candidate_id=candidate.source_queue_item_id,
+        )
+        self._queue_wake.set()
+        outcome = await self.query_command(candidate.command_id)
+        if outcome is None:
+            raise ConversationKernelConflict("queue action has no canonical winner")
+        if candidate.target_turn_id is not None:
+            outcome = await self._wake_accepted_steer(command_id=candidate.command_id,
+                target_turn_id=candidate.target_turn_id, outcome=outcome)
+        return outcome
 
     async def steer_active_turn(
         self, *, command_id: str, content: PromptContent, target_turn_id: str
@@ -3480,7 +3359,7 @@ class KernelHostSession:
                     "Plan mode can only be entered while the ROOT slot is idle.",
                 )
             self._external_new_turn_accepting = True
-            self._external_new_turn_settled.clear()
+            self._external_new_turn_settled = asyncio.Event()
         try:
             accepted = await self._io.run(
                 self.repository.enter_plan_by_user,
@@ -3895,36 +3774,8 @@ class KernelHostSession:
         attempt_id = ("plan-review-continuation", command_id)
 
         async def admit() -> AcceptedPlanResolution:
-            prospective_dispatch: PreparedProspectiveRootDispatch | None = None
             try:
                 occurred_at = datetime.now().astimezone()
-                if creates_turn:
-                    assert continuation_turn_id is not None
-                    assert continuation_entry_id is not None
-                    assert continuation_revision_id is not None
-                    provider_candidate = await self._io.run(
-                        self.repository.prepare_plan_draft_review_provider_input_candidate,
-                        self._lease.guard,
-                        workflow_id=workflow_id,
-                        expected_workflow_revision=expected_workflow_revision,
-                        interaction_id=interaction_id,
-                        decision=decision,
-                        canonical_prompt=canonical_prompt,
-                        source_queue_item_id=source_queue_item_id,
-                        continuation_turn_id=continuation_turn_id,
-                        continuation_entry_id=continuation_entry_id,
-                        continuation_context_binding_revision_id=(
-                            continuation_revision_id
-                        ),
-                        deadline_monotonic=self._canonical_deadline(),
-                    )
-                    assert write_reservation is not None
-                    prospective_dispatch = (
-                        await self._runner.prepare_plan_review_continuation_input(
-                            provider_candidate,
-                            admitted_writer=write_reservation,
-                        )
-                    )
                 try:
                     resolution = await self._io.run(
                         self.repository.resolve_plan_draft_review,
@@ -3940,11 +3791,6 @@ class KernelHostSession:
                         continuation_entry_id=continuation_entry_id,
                         continuation_context_binding_revision_id=(
                             continuation_revision_id
-                        ),
-                        provider_input_admission=(
-                            None
-                            if prospective_dispatch is None
-                            else prospective_dispatch.admission
                         ),
                         occurred_at=occurred_at,
                         actor_id=self.host_session_id,
@@ -3966,11 +3812,6 @@ class KernelHostSession:
                         continuation_context_binding_revision_id=(
                             continuation_revision_id
                         ),
-                        provider_input_admission=(
-                            None
-                            if prospective_dispatch is None
-                            else prospective_dispatch.admission
-                        ),
                         occurred_at=occurred_at,
                         actor_id=self.host_session_id,
                         deadline_monotonic=self._canonical_deadline(),
@@ -3981,9 +3822,6 @@ class KernelHostSession:
                         scope=self._hook_root_scope, prompt_candidate_id=source_queue_item_id,
                     )
                 if resolution.continuation_turn_id is None:
-                    if prospective_dispatch is not None:
-                        prospective_dispatch.close()
-                        prospective_dispatch = None
                     if reserved:
                         await self._release_plan_continuation_reservation()
                     return resolution
@@ -4007,20 +3845,21 @@ class KernelHostSession:
                     if disposition is PlanContinuationDisposition.HISTORICAL_TERMINAL:
                         await self._release_plan_continuation_reservation()
                         return resolution
+                    started_group = await self._io.run(
+                        self.repository.read_started_turn_input_group, self._lease.guard,
+                        turn_id=resolution.continuation_turn_id,
+                        deadline_monotonic=self._canonical_deadline(),
+                    )
                     if await self._bind_plan_review_successor(
                         command_id=command_id,
                         inspection=inspection,
-                        prospective_root_dispatch=prospective_dispatch,
+                        started_input_group=started_group,
                     ):
-                        prospective_dispatch = None
                         return resolution
                 except BaseException:
                     # FULL canonical acceptance already owns the successor;
                     # this attempt must continue into terminalization.
                     pass
-                if prospective_dispatch is not None:
-                    prospective_dispatch.close()
-                    prospective_dispatch = None
                 await self._terminalize_unbound_plan_successor(
                     attempt_id=attempt_id,
                     turn_id=resolution.continuation_turn_id,
@@ -4032,8 +3871,6 @@ class KernelHostSession:
                 await self._release_plan_continuation_reservation()
                 return resolution
             except BaseException:
-                if prospective_dispatch is not None:
-                    prospective_dispatch.close()
                 if reserved:
                     await self._release_plan_continuation_reservation()
                 raise
@@ -4049,6 +3886,10 @@ class KernelHostSession:
                     creates_turn=creates_turn
                 )
                 reserved = creates_turn
+                if creates_turn:
+                    self._external_new_turn_cancellation_intent = ActiveTurnCancellationIntent(
+                        continuation_turn_id, self._session_scope_kind,
+                    )
 
             attempt = self._plan_continuations.start(
                 attempt_id=attempt_id,
@@ -4098,7 +3939,7 @@ class KernelHostSession:
         *,
         command_id: str,
         inspection: PlanContinuationInspection,
-        prospective_root_dispatch: PreparedProspectiveRootDispatch | None,
+        started_input_group: StartedTurnInputGroup | None,
     ) -> bool:
         async with self._lock:
             self._retire_done_active_root_locked()
@@ -4108,6 +3949,8 @@ class KernelHostSession:
                 or not self._inspection_owned_by_current_host(inspection)
                 or not self._external_new_turn_accepting
                 or self._active_task is not None
+                or (self._external_new_turn_cancellation_intent is not None
+                    and self._external_new_turn_cancellation_intent.cause is not None)
             ):
                 return False
             self._tools.todo_owner.bind_continuation_if_present(
@@ -4118,15 +3961,24 @@ class KernelHostSession:
                 turn_id=inspection.turn_id,
                 command_id=command_id,
                 name=f"kernel-plan-review-turn:{inspection.turn_id}",
+                cancellation_intent=self._external_new_turn_cancellation_intent,
                 run=lambda intent: self._run_accepted_root_chain(
                     inspection.turn_id,
                     intent,
-                    prospective_root_dispatch=prospective_root_dispatch,
+                    started_input_group=started_input_group,
                 ),
             )
             self._external_new_turn_accepting = False
+            self._external_new_turn_cancellation_intent = None
             self._external_new_turn_settled.set()
             return True
+
+    def _starting_turn_cancellation_cause(self, turn_id: str):
+        external = self._external_new_turn_cancellation_intent
+        if external is not None and external.turn_id == turn_id:
+            return external.cause
+        active = self._active_cancellation_intent
+        return None if active is None else active.cause
 
     async def _terminalize_unbound_plan_successor(
         self,
@@ -4153,23 +4005,24 @@ class KernelHostSession:
             workflow_id=workflow_id,
             interaction_id=interaction_id,
             handoff_kind=handoff_kind,
-            reason="PLAN_CONTINUATION_NOT_BOUND",
+            reason=(
+                "USER_STOPPED" if self._starting_turn_cancellation_cause(turn_id) is ForegroundCancellationCause.USER_REQUEST
+                else "SESSION_CLOSED" if self._closing or self._starting_turn_cancellation_cause(turn_id) is ForegroundCancellationCause.HOST_SESSION_CLOSE
+                else "PLAN_CONTINUATION_NOT_BOUND"
+            ),
         )
 
     async def _terminalize_pending_root_successor(
         self, pending: _PendingRootSuccessorHandoff, *, reason: str
     ) -> None:
-        try:
-            await self._terminalize_plan_successor_until_safe(
-                turn_id=pending.successor_turn_id,
-                entry_id=pending.successor_entry_id,
-                workflow_id=pending.workflow_id,
-                interaction_id=pending.interaction_id,
-                handoff_kind=pending.handoff_kind,
-                reason=reason,
-            )
-        finally:
-            pending.prospective_root_dispatch.close()
+        await self._terminalize_plan_successor_until_safe(
+            turn_id=pending.successor_turn_id,
+            entry_id=pending.successor_entry_id,
+            workflow_id=pending.workflow_id,
+            interaction_id=pending.interaction_id,
+            handoff_kind=pending.handoff_kind,
+            reason=reason,
+        )
 
     async def _terminalize_plan_successor_until_safe(
         self,
@@ -4225,6 +4078,7 @@ class KernelHostSession:
     async def _release_plan_continuation_reservation(self) -> None:
         async with self._lock:
             self._external_new_turn_accepting = False
+            self._external_new_turn_cancellation_intent = None
             self._external_new_turn_settled.set()
 
     async def _prompt_delivery_loop(self) -> None:
@@ -4246,7 +4100,7 @@ class KernelHostSession:
                     )
                 if reopen_gated:
                     break
-                if compaction_fenced:
+                if compaction_fenced or self._manual_compaction_command_attempts:
                     await asyncio.sleep(0.05)
                     self._queue_wake.set()
                     break
@@ -4305,53 +4159,42 @@ class KernelHostSession:
                         self._queue_wake.set()
                         continue
                     break
-                async with self._lock:
-                    try:
-                        write_reservation = self._reserve_compaction_write_locked(
-                            scope_kind=self._session_scope_kind,
-                        )
-                    except RuntimeError:
-                        if self.root_session_id is not None:
-                            await self._agent_runtime.release(self.session_id)
-                        self._queue_wake.set()
-                        break
-                settlement = asyncio.create_task(
-                    self._settle_queued_root_admission_reserved(
-                        candidate, write_reservation
-                    ),
-                    name=f"kernel-queued-admission:{candidate.queue_item_id}",
-                )
+                task = None
                 try:
-                    task = await asyncio.shield(settlement)
-                except asyncio.CancelledError:
-                    # Host close detaches the delivery-loop waiter, never the
-                    # exact queue admission settlement owner.
-                    while not settlement.done():
-                        try:
-                            await asyncio.shield(settlement)
-                        except asyncio.CancelledError:
-                            continue
-                    settlement.result()
-                    raise
-                except StructuredModelInputCompileError as error:
-                    if not _is_input_resource_exhaustion(error):
-                        raise
-                    rejected = await self._settle_queued_input_resource_rejection(
-                        candidate
-                    )
-                    if rejected:
+                    if not await self._prepare_queued_prompt_hook(candidate):
                         self._queue_wake.set()
                         continue
-                    break
-                if task is None:
-                    self._queue_wake.set()
-                    break
-                try:
-                    await task
-                except BaseException:
-                    pass
+                    async with self._lock:
+                        self._retire_done_active_root_locked()
+                        if (
+                            self._closing
+                            or self._active_task is not None
+                            or self._external_new_turn_accepting
+                            or self._plan_exit_fence
+                            or self._compaction.has_active_work()
+                        ):
+                            self._queue_wake.set()
+                            break
+                        task = self._install_active_root_task_locked(
+                            turn_id=candidate.exact_turn_id,
+                            started=False,
+                            command_id=None,
+                            name=f"kernel-queued-turn:{candidate.exact_turn_id}",
+                            work_id=candidate.queue_item_id if self.root_session_id is not None else None,
+                            run=lambda intent: self._run_queued_root_admission(candidate, intent),
+                        )
+                    # Closing or cancelling this scheduler never cancels the
+                    # task that owns start confirmation and physical capacity.
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        if self._closing:
+                            raise
+                    except Exception:
+                        pass
                 finally:
-                    await self._settle_active_root_task(task)
+                    if task is None and self.root_session_id is not None:
+                        await self._agent_runtime.release(self.session_id)
 
     async def _settle_queued_model_rejection(
         self,
@@ -4377,224 +4220,231 @@ class KernelHostSession:
                 delay_seconds = min(delay_seconds * 2, 0.5)
         return False
 
-    async def _settle_queued_input_resource_rejection(
+    async def _prepare_queued_prompt_hook(
+        self, candidate: PreparedQueuedRootTurnAdmission,
+    ) -> bool:
+        if self.root_session_id is None:
+            return True
+        outcome = self._agent_prompt_hooks.get(candidate.queue_item_id)
+        if outcome is None:
+            key = _IngressHookReservationKey(
+                _IngressHookApiVariant.QUEUED,
+                candidate.command_id,
+                candidate.canonical_prompt,
+                candidate.permission_snapshot.requested_mode,
+                candidate.queue_item_id,
+                None,
+                PromptDeliveryMode.NEW_TURN,
+                None,
+            )
+            outcome = await self._dispatch_user_prompt_hook(
+                key=key,
+                identity=build_queued_root_turn_identity(self.session_id, candidate.queue_item_id),
+                permission=candidate.permission_snapshot,
+                model_call_binding=candidate.model_call_binding,
+                input_origin="AGENT_INSTRUCTION",
+            )
+            self._agent_prompt_hooks[candidate.queue_item_id] = outcome
+            if outcome[1] is not None:
+                outcome[1].commit_prompt_bound(candidate.queue_item_id)
+        if outcome[0] is None:
+            return True
+        await self._io.run(
+            self.repository.reject_prepared_prompt_head_hook_blocked,
+            self._lease.guard, candidate=candidate,
+            deadline_monotonic=self._canonical_deadline(),
+        )
+        self._agent_prompt_hooks.pop(candidate.queue_item_id, None)
+        await self._agent_runtime.completed_work(self.root_session_id, candidate.queue_item_id)
+        return False
+
+    @staticmethod
+    async def _drain_start_settlement(task: asyncio.Task):
+        """Keep the exact mutation result attached through repeated stop/close."""
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+            except BaseException:
+                break
+        return task.result(), cancelled
+
+    async def _settle_queued_start(
         self,
         candidate: PreparedQueuedRootTurnAdmission,
-    ) -> bool:
-        """Settle one full-input failure while its FIFO head remains pending."""
-
-        delay_seconds = 0.05
-        while not self._closing:
+        intent: ActiveTurnCancellationIntent,
+    ) -> QueuedRootTurnAdmissionConfirmation | None:
+        delay = 0.05
+        while not self._closing and intent.cause is None:
+            await self.workspace_gate.wait_available()
             try:
                 return await self._io.run(
-                    self.repository.reject_prepared_prompt_head_input_resource_exhausted,
+                    self.repository.consume_prepared_prompt_head,
                     self._lease.guard,
                     candidate=candidate,
                     deadline_monotonic=self._canonical_deadline(),
                 )
-            except asyncio.CancelledError:
-                raise
             except StaleHostWriter:
-                return False
-            except Exception:
-                await asyncio.sleep(delay_seconds)
-                delay_seconds = min(delay_seconds * 2, 0.5)
-        return False
+                return None
+            except Exception as error:
+                # An unknown acknowledgement confirms this original candidate;
+                # an authoritative NONE permits only a transient I/O retry.
+                while True:
+                    try:
+                        await self._io.run(
+                            self.repository.validate_host_writer,
+                            self._lease.guard,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                        confirmation = await self._io.run(
+                            self.repository.confirm_prepared_prompt_head_consumption,
+                            candidate=candidate,
+                            deadline_monotonic=self._canonical_deadline(),
+                        )
+                        break
+                    except StaleHostWriter:
+                        return None
+                    except (TimeoutError, OSError, OperationalError, InterfaceError):
+                        await asyncio.sleep(delay)
+                        delay = min(delay * 2, 0.5)
+                if confirmation.kind is not QueuedRootTurnAdmissionConfirmationKind.NONE:
+                    return confirmation
+                if (
+                    self._closing or intent.cause is not None
+                ):
+                    return None
+                if not isinstance(error, (TimeoutError, OSError, OperationalError, InterfaceError)):
+                    # This logical request was definitively refused before
+                    # start. Leaving it pending would make the scheduler retry
+                    # the same business rejection as a new physical attempt.
+                    while True:
+                        try:
+                            await self._io.run(
+                                self.repository.reject_prepared_prompt_head_start_rejected,
+                                self._lease.guard, candidate=candidate,
+                                deadline_monotonic=self._canonical_deadline(),
+                            )
+                            break
+                        except StaleHostWriter:
+                            return None
+                        except (TimeoutError, OSError, OperationalError, InterfaceError):
+                            await asyncio.sleep(delay)
+                            delay = min(delay * 2, 0.5)
+                    raise error
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 0.5)
+        return None
 
-    async def _settle_queued_root_admission_reserved(
+    async def _run_queued_root_admission(
         self,
         candidate: PreparedQueuedRootTurnAdmission,
-        reservation: CompactionWriteReservation,
-    ) -> asyncio.Task[KernelRunResult] | None:
-        task = None
+        intent: ActiveTurnCancellationIntent,
+    ) -> KernelRunResult | None:
+        """The sole task owns start, preparation, execution and terminal cleanup."""
+        accepted = None
+        execution_entered = False
+        self._hook_context.activate_prompt_candidate(
+            scope=self._hook_root_scope, prompt_candidate_id=candidate.queue_item_id,
+        )
         try:
-            task = await self._settle_queued_root_admission(candidate, reservation=reservation)
-            return task
+            confirmation, cancelled = await self._drain_start_settlement(
+                asyncio.create_task(
+                    self._settle_queued_start(candidate, intent),
+                    name=f"kernel-queued-start:{candidate.queue_item_id}",
+                )
+            )
+            if confirmation is None or confirmation.kind is not QueuedRootTurnAdmissionConfirmationKind.FULL:
+                return None
+            accepted = confirmation.accepted
+            assert accepted is not None
+            self._agent_prompt_hooks.pop(candidate.queue_item_id, None)
+            if self._scheduled_tasks is not None:
+                self._scheduled_tasks.wake()
+            status = await self._io.run(
+                self.repository.read_turn_status,
+                session_id=self.session_id, turn_id=accepted.turn_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            if status is None or status.value != "RUNNING":
+                return None
+            if cancelled or self._closing or intent.cause is not None:
+                raise asyncio.CancelledError
+            await self._io.run(
+                self.repository.validate_host_writer, self._lease.guard,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            async with self._lock:
+                if self._closing or intent.cause is not None:
+                    raise asyncio.CancelledError
+                if self._active_turn_id == accepted.turn_id:
+                    self._active_turn_started = True
+            activation = build_root_activation(
+                session_id=candidate.session_id,
+                admission_kind="QUEUED",
+                queue_item_id=candidate.queue_item_id,
+                queue_sequence=candidate.queue_sequence,
+                exact_turn_id=candidate.exact_turn_id,
+                exact_initial_entry_id=candidate.exact_initial_entry_id,
+                exact_context_binding_revision_id=candidate.exact_context_binding_revision_id,
+            )
+            _closed, finalizer_cancelled = await self._drain_start_settlement(asyncio.create_task(
+                self._finalize_todo_run_activation(activation, accepted),
+                name=f"kernel-queued-todo-finalizer:{accepted.turn_id}",
+            ))
+            if finalizer_cancelled or self._closing or intent.cause is not None:
+                raise asyncio.CancelledError
+            execution_entered = True
+            return await self._run_accepted_root_chain(
+                accepted.turn_id, intent,
+                started_input_group=accepted.started_input_group,
+            )
+        except StaleHostWriter:
+            # The takeover transaction owns canonical interruption.
+            return None
+        except Exception:
+            if accepted is None:
+                # A deterministic confirmer failure must not strand a pending
+                # request either. The existing rejection transaction refuses
+                # to overwrite a canonical started winner.
+                try:
+                    await self._drain_start_settlement(asyncio.create_task(
+                        self._reject_failed_queued_start(candidate),
+                        name=f"kernel-queued-start-rejection:{candidate.queue_item_id}",
+                    ))
+                except ConversationKernelConflict:
+                    pass
+            raise
         finally:
-            await self._release_compaction_write_reservation(reservation)
-            if task is None and self.root_session_id is not None:
-                await self._agent_runtime.release(self.session_id)
-
-    async def _settle_queued_root_admission(
-        self,
-        candidate: PreparedQueuedRootTurnAdmission,
-        *,
-        reservation: CompactionWriteReservation,
-    ) -> asyncio.Task[KernelRunResult] | None:
-        """Own one queued mutation through confirmation and task installation."""
-
-        if self.root_session_id is not None:
-            outcome = self._agent_prompt_hooks.get(candidate.queue_item_id)
-            if outcome is None:
-                key = _IngressHookReservationKey(
-                    _IngressHookApiVariant.QUEUED,
-                    candidate.command_id,
-                    candidate.canonical_prompt,
-                    candidate.permission_snapshot.requested_mode,
-                    candidate.queue_item_id,
-                    None,
-                    PromptDeliveryMode.NEW_TURN,
-                    None,
+            if accepted is not None and not execution_entered:
+                reason = (
+                    "USER_STOPPED" if intent.cause is ForegroundCancellationCause.USER_REQUEST
+                    else "SESSION_CLOSED" if self._closing or intent.cause is ForegroundCancellationCause.HOST_SESSION_CLOSE
+                    else "FOREGROUND_EXECUTION_INTERRUPTED"
                 )
-                outcome = await self._dispatch_user_prompt_hook(
-                    key=key,
-                    identity=build_queued_root_turn_identity(self.session_id, candidate.queue_item_id),
-                    permission=candidate.permission_snapshot,
-                    model_call_binding=candidate.model_call_binding,
-                    input_origin="AGENT_INSTRUCTION",
+                await self._drain_start_settlement(asyncio.create_task(
+                    self._interrupt_queued_admission_until_safe(turn_id=accepted.turn_id, reason=reason),
+                    name=f"kernel-queued-start-terminal:{accepted.turn_id}",
+                ))
+            if not execution_entered:
+                self._hook_context.retire_prompt_candidate(
+                    scope=self._hook_root_scope, prompt_candidate_id=candidate.queue_item_id,
                 )
-                self._agent_prompt_hooks[candidate.queue_item_id] = outcome
-                if outcome[1] is not None:
-                    outcome[1].commit_prompt_bound(candidate.queue_item_id)
-            if outcome[0] is not None:
+
+    async def _reject_failed_queued_start(self, candidate) -> None:
+        while True:
+            try:
                 await self._io.run(
-                    self.repository.reject_prepared_prompt_head_hook_blocked,
+                    self.repository.reject_prepared_prompt_head_start_rejected,
                     self._lease.guard, candidate=candidate,
                     deadline_monotonic=self._canonical_deadline(),
                 )
-                self._agent_prompt_hooks.pop(candidate.queue_item_id, None)
-                await self._agent_runtime.completed_work(self.root_session_id, candidate.queue_item_id)
-                return None
-        activation = build_root_activation(
-            session_id=candidate.session_id,
-            admission_kind="QUEUED",
-            queue_item_id=candidate.queue_item_id,
-            queue_sequence=candidate.queue_sequence,
-            exact_turn_id=candidate.exact_turn_id,
-            exact_initial_entry_id=candidate.exact_initial_entry_id,
-            exact_context_binding_revision_id=(
-                candidate.exact_context_binding_revision_id
-            ),
-        )
-        self._hook_context.activate_prompt_candidate(
-            scope=self._hook_root_scope,
-            prompt_candidate_id=candidate.queue_item_id,
-        )
-        prospective_dispatch: PreparedProspectiveRootDispatch | None = None
-        try:
-            prospective_dispatch = await self._runner.prepare_prospective_root_input(
-                candidate.provider_input_candidate,
-                admitted_writer=reservation,
-            )
-            if (
-                prospective_dispatch.admission.candidate
-                != candidate.provider_input_candidate
-            ):
-                candidate = replace(
-                    candidate,
-                    provider_input_candidate=(prospective_dispatch.admission.candidate),
-                )
-        except BaseException:
-            self._hook_context.retire_prompt_candidate(
-                scope=self._hook_root_scope,
-                prompt_candidate_id=candidate.queue_item_id,
-            )
-            raise
-        confirmation: QueuedRootTurnAdmissionConfirmation | None = None
-        delay_seconds = 0.05
-        try:
-            while confirmation is None:
-                if self._closing:
-                    prospective_dispatch.close()
-                    return None
-                await self.workspace_gate.wait_available()
-                try:
-                    confirmation = await self._io.run(
-                        self.repository.consume_prepared_prompt_head,
-                        self._lease.guard,
-                        candidate=candidate,
-                        provider_input_admission=prospective_dispatch.admission,
-                        deadline_monotonic=self._canonical_deadline(),
-                    )
-                    if confirmation is None:
-                        prospective_dispatch.close()
-                        return None
-                except asyncio.CancelledError:
-                    raise
-                except StaleHostWriter:
-                    prospective_dispatch.close()
-                    return None
-                except Exception:
-                    while True:
-                        try:
-                            confirmation = await self._io.run(
-                                self.repository.confirm_prepared_prompt_head_consumption,
-                                candidate=candidate,
-                                deadline_monotonic=self._canonical_deadline(),
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception:
-                            await asyncio.sleep(delay_seconds)
-                            delay_seconds = min(delay_seconds * 2, 0.5)
-                            continue
-                        if (
-                            confirmation.kind
-                            is QueuedRootTurnAdmissionConfirmationKind.NONE
-                        ):
-                            confirmation = None
-                        break
-        except BaseException:
-            if prospective_dispatch is not None:
-                prospective_dispatch.close()
-            raise
-        if confirmation.kind is QueuedRootTurnAdmissionConfirmationKind.CONFLICT:
-            prospective_dispatch.close()
-            return None
-        if confirmation.kind is not QueuedRootTurnAdmissionConfirmationKind.FULL:
-            raise RuntimeError("queued ROOT admission has an invalid disposition")
-        accepted = confirmation.accepted
-        assert accepted is not None
-        self._agent_prompt_hooks.pop(candidate.queue_item_id, None)
-        if self._scheduled_tasks is not None:
-            self._scheduled_tasks.wake()
-        closed: FrozenTodoCloseProjection | None = None
-        finalization_failed = False
-        async with self._lock:
-            try:
-                closed = self._finalize_todo_run_activation_locked(activation, accepted)
-            except BaseException:
-                finalization_failed = True
-                task = None
-            if not finalization_failed and not self._closing:
-                try:
-                    task = self._install_active_root_task_locked(
-                        turn_id=accepted.turn_id,
-                        command_id=None,
-                        name=f"kernel-queued-turn:{accepted.turn_id}",
-                        work_id=candidate.queue_item_id if self.root_session_id is not None else None,
-                        run=lambda intent: self._run_accepted_root_chain(
-                            accepted.turn_id, intent, prospective_dispatch
-                        ),
-                    )
-                    if self.root_session_id is None:
-                        self._ephemeral.admitted(accepted.turn_id)
-                except BaseException:
-                    task = None
-            elif finalization_failed:
-                task = None
-            else:
-                task = None
-        self._tools.offer_todo_close(closed)
-        if task is None:
-            prospective_dispatch.close()
-            self._hook_context.retire_prompt_candidate(
-                scope=self._hook_root_scope,
-                prompt_candidate_id=candidate.queue_item_id,
-            )
-            await self._interrupt_queued_admission_until_safe(
-                turn_id=accepted.turn_id,
-                reason=(
-                    "SESSION_CLOSED"
-                    if self._closing
-                    else "FOREGROUND_EXECUTION_INTERRUPTED"
-                ),
-            )
-            if not finalization_failed:
-                self._tools.offer_todo_installation(
-                    self._tools.todo_owner.mark_root_idle(exact_turn_id=accepted.turn_id)
-                )
-        return task
+                return
+            except StaleHostWriter:
+                return
+            except (TimeoutError, OSError, OperationalError, InterfaceError):
+                await asyncio.sleep(0.05)
 
     async def _interrupt_queued_admission_until_safe(
         self, *, turn_id: str, reason: str
@@ -4627,8 +4477,10 @@ class KernelHostSession:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                status = None
-            if status is not None and status.value != "RUNNING":
+                await asyncio.sleep(delay_seconds)
+                delay_seconds = min(delay_seconds * 2, 0.5)
+                continue
+            if status is None or status.value != "RUNNING":
                 return
             await asyncio.sleep(delay_seconds)
             delay_seconds = min(delay_seconds * 2, 0.5)
@@ -4737,7 +4589,7 @@ class KernelHostSession:
                     async with self._lock:
                         self._retire_done_active_root_locked()
                         active = self._active_task
-                        active_turn_id = self._active_turn_id
+                        active_turn_id = self.active_root_turn_id()
                         if active is not None and active_turn_id is not None:
                             try:
                                 write_reservation = (
@@ -4754,8 +4606,10 @@ class KernelHostSession:
                                 )
                         elif (
                             self.root_session_id is None
+                            and active is None
                             and not self._plan_exit_fence
                             and not self._external_new_turn_accepting
+                            and not self._manual_compaction_command_attempts
                         ):
                             try:
                                 write_reservation = (
@@ -4768,7 +4622,7 @@ class KernelHostSession:
                             else:
                                 self._external_new_turn_accepting = True
                                 self._terminal_new_turn_observation_id = observation_id
-                                self._external_new_turn_settled.clear()
+                                self._external_new_turn_settled = asyncio.Event()
                                 reserved_new_turn = True
                                 turn_id = derive_id("turn", "terminal-observation", self.session_id, observation_id)
                                 target = NewTurnInstallation(
@@ -4807,7 +4661,7 @@ class KernelHostSession:
                             else:
                                 self._external_new_turn_accepting = True
                                 self._terminal_new_turn_observation_id = observation_id
-                                self._external_new_turn_settled.clear()
+                                self._external_new_turn_settled = asyncio.Event()
                                 reserved_new_turn = True
                         else:
                             target = None
@@ -4830,11 +4684,23 @@ class KernelHostSession:
                             active_cancellation_intent = (
                                 self._active_cancellation_intent
                             )
+                else:
+                    async with self._lock:
+                        if self._external_new_turn_cancellation_intent is None:
+                            self._external_new_turn_cancellation_intent = ActiveTurnCancellationIntent(
+                                target.turn_id, self._session_scope_kind,
+                            )
+                        active_cancellation_intent = self._external_new_turn_cancellation_intent
+                        active_cancellation_intent.require_exact(
+                            turn_id=target.turn_id, scope_kind=self._session_scope_kind,
+                        )
+                        if self._closing:
+                            active_cancellation_intent.install_cause(ForegroundCancellationCause.HOST_SESSION_CLOSE)
                 try:
                     assert write_reservation is not None
                     (
                         accepted,
-                        prospective_root_dispatch,
+                        started_input_group,
                     ) = await self._runner.install_terminal_observation(
                         coordinator=coordinator,
                         monitor_id=monitor_id,
@@ -4850,7 +4716,21 @@ class KernelHostSession:
                         await self._release_compaction_write_reservation(
                             write_reservation
                         )
+                    if reserved_new_turn:
+                        await self._release_terminal_new_turn_reservation(observation_id)
                     raise
+                except TerminalObservationStartedFailure:
+                    await self._release_compaction_write_reservation(write_reservation)
+                    if reserved_new_turn:
+                        await self._release_terminal_new_turn_reservation(observation_id)
+                    # Publication already consumed this observation. Its
+                    # original turn has been interrupted by the same owner.
+                    continue
+                except StaleHostWriter:
+                    await self._release_compaction_write_reservation(write_reservation)
+                    if reserved_new_turn:
+                        await self._release_terminal_new_turn_reservation(observation_id)
+                    return
                 except (ConversationKernelConflict, ExternalSourceNotAtSafePoint):
                     if write_reservation is not None:
                         await self._release_compaction_write_reservation(
@@ -4875,8 +4755,6 @@ class KernelHostSession:
                 if write_reservation is not None:
                     await self._release_compaction_write_reservation(write_reservation)
                 if accepted is None:
-                    if prospective_root_dispatch is not None:
-                        prospective_root_dispatch.close()
                     if reserved_new_turn:
                         await self._release_terminal_new_turn_reservation(
                             observation_id
@@ -4887,14 +4765,11 @@ class KernelHostSession:
                     await self._start_terminal_observation_turn(
                         accepted.turn_id,
                         observation_id,
-                        prospective_root_dispatch=prospective_root_dispatch,
+                        started_input_group=started_input_group,
                     )
                     break
-                if prospective_root_dispatch is not None:
-                    prospective_root_dispatch.close()
-                    raise RuntimeError(
-                        "active Terminal observation retained a ROOT dispatch"
-                    )
+                if started_input_group is not None:
+                    raise RuntimeError("active Terminal observation returned a new-turn input group")
             if self._closing:
                 await self._release_any_terminal_new_turn_reservation()
                 return
@@ -4907,6 +4782,7 @@ class KernelHostSession:
             if self._terminal_new_turn_observation_id != observation_id:
                 return
             self._terminal_new_turn_observation_id = None
+            self._external_new_turn_cancellation_intent = None
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
             self._queue_wake.set()
@@ -4916,6 +4792,7 @@ class KernelHostSession:
             if self._terminal_new_turn_observation_id is None:
                 return
             self._terminal_new_turn_observation_id = None
+            self._external_new_turn_cancellation_intent = None
             self._external_new_turn_accepting = False
             self._external_new_turn_settled.set()
             self._queue_wake.set()
@@ -4925,13 +4802,25 @@ class KernelHostSession:
         turn_id: str,
         observation_id: str,
         *,
-        prospective_root_dispatch: PreparedProspectiveRootDispatch | None,
+        started_input_group: StartedTurnInputGroup | None,
     ) -> None:
+        cancellation_declined = False
         try:
+            await self._io.run(
+                self.repository.require_provider_safe_turn, self._lease.guard,
+                turn_id=turn_id, deadline_monotonic=self._canonical_deadline(),
+            )
             async with self._lock:
                 self._retire_done_active_root_locked()
+                cancellation_declined = (
+                    self._closing
+                    or (self._external_new_turn_cancellation_intent is not None
+                        and self._external_new_turn_cancellation_intent.cause is not None)
+                )
                 if (
-                    self._terminal_new_turn_observation_id != observation_id
+                    cancellation_declined
+                    or self._plan_exit_fence
+                    or self._terminal_new_turn_observation_id != observation_id
                     or not self._external_new_turn_accepting
                     or self._active_task is not None
                 ):
@@ -4944,28 +4833,31 @@ class KernelHostSession:
                     turn_id=turn_id,
                     command_id=None,
                     name=f"kernel-terminal-observation-turn:{turn_id}",
+                    cancellation_intent=self._external_new_turn_cancellation_intent,
                     run=lambda intent: self._run_accepted_root_chain(
                         turn_id,
                         intent,
-                        prospective_root_dispatch,
+                        started_input_group=started_input_group,
                     ),
                 )
                 self._terminal_new_turn_observation_id = None
+                self._external_new_turn_cancellation_intent = None
                 self._external_new_turn_accepting = False
                 self._external_new_turn_settled.set()
         except BaseException:
-            # Publication may already be canonical FULL.  A failed local
-            # start releases only its process-local admission/resources;
-            # it does not rewrite or retry the accepted observation.
-            try:
-                if prospective_root_dispatch is not None:
-                    prospective_root_dispatch.close()
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "Terminal observation dispatch cleanup failed"
-                )
-            finally:
-                await self._release_terminal_new_turn_reservation(observation_id)
+            await self._drain_start_settlement(asyncio.create_task(
+                self._interrupt_queued_admission_until_safe(
+                    turn_id=turn_id,
+                    reason=(
+                        "USER_STOPPED" if self._starting_turn_cancellation_cause(turn_id) is ForegroundCancellationCause.USER_REQUEST
+                        else "SESSION_CLOSED" if self._closing else "FOREGROUND_EXECUTION_INTERRUPTED"
+                    ),
+                ),
+                name=f"kernel-terminal-start-cleanup:{turn_id}",
+            ))
+            await self._release_terminal_new_turn_reservation(observation_id)
+            if cancellation_declined:
+                return
             raise
 
     async def _query_command_row(self, command_id: str):
@@ -4985,12 +4877,16 @@ class KernelHostSession:
         """Project the exact process-local ROOT target without mutating it."""
 
         task = self._active_task
-        return self._active_turn_id if task is not None and not task.done() else None
+        return (
+            self._active_turn_id
+            if task is not None and not task.done() and self._active_turn_started
+            else None
+        )
 
     def _has_runtime_work(self) -> bool:
         manual_tasks = tuple(
             task
-            for _turn_id, task in self._manual_compaction_command_attempts.values()
+            for task in self._manual_compaction_command_attempts.values()
         )
         return (
             (self._active_task is not None and not self._active_task.done())
@@ -5102,6 +4998,7 @@ class KernelHostSession:
     ) -> KernelCommandOutcome | None:
         expected_target_kind = {
             UserControlOperation.STOP_ACTIVE_TURN: UserControlTargetKind.ROOT_TURN,
+            UserControlOperation.STOP_CONTEXT_COMPACTION: UserControlTargetKind.MANUAL_COMPACTION,
             UserControlOperation.STOP_CODE_MODE_CELL: UserControlTargetKind.CODE_MODE_CELL,
             UserControlOperation.TERMINATE_BACKGROUND_PROCESS: (
                 UserControlTargetKind.BACKGROUND_PROCESS
@@ -5670,6 +5567,91 @@ class KernelHostSession:
             ),
         )
 
+    async def request_stop_context_compaction(
+        self, *, command_id: str, admission_deadline_ms: int,
+        expected_session_id: str, expected_host_session_id: str,
+        target_command_id: str,
+    ) -> KernelCommandOutcome:
+        request = UserControlRequest(
+            UserControlOperation.STOP_CONTEXT_COMPACTION, command_id,
+            expected_session_id, expected_host_session_id,
+            UserControlTarget(UserControlTargetKind.MANUAL_COMPACTION, target_command_id),
+            admission_deadline_ms,
+        )
+        async with self._lock:
+            existing = self._existing_control_outcome_locked(request)
+            if existing is not None:
+                return existing
+            rejection = self._validate_new_control_request_locked(request)
+            if rejection is not None:
+                return rejection
+            task = self._manual_compaction_command_attempts.get(target_command_id)
+            if task is None:
+                return self._control_rejection(
+                    request, "CONTROL_TARGET_UNAVAILABLE",
+                    "The original manual compaction owner is unavailable.",
+                )
+            if task.done():
+                outcome = KernelCommandOutcome(
+                    command_id, "SUCCEEDED", target_command_id,
+                    "CONTROL_ALREADY_TERMINAL", "The manual compaction has already ended.",
+                    user_control=UserControlOutcome(
+                        request.operation, request.session_id, request.host_session_id,
+                        request.target, False, UserControlExecution.FINISHED,
+                    ),
+                )
+                attempt = self._install_control_attempt_locked(request, outcome)
+                self._finish_control_attempt_locked(attempt, outcome)
+                return outcome
+            attempt = self._install_control_attempt_locked(request, self._pending_control_outcome(request))
+            attempt.task = asyncio.create_task(
+                self._execute_stop_context_compaction(attempt, task),
+                name=f"kernel-stop-manual-compaction:{target_command_id}",
+            )
+            return attempt.outcome
+
+    async def _execute_stop_context_compaction(self, attempt, task) -> None:
+        # Capture the exact owner at control admission. A later operation can
+        # never be cancelled by resolving this target name a second time.
+        task.cancel()
+        try:
+            result, _cancelled = await self._drain_start_settlement(task)
+            stopped = result.public_code == "COMPACTION_CANCELLED"
+            outcome = KernelCommandOutcome(
+                attempt.request.command_id, "SUCCEEDED", attempt.request.target.target_id,
+                "COMPACTION_STOPPED" if stopped else "CONTROL_ALREADY_TERMINAL",
+                "The manual compaction was stopped." if stopped else "The manual compaction has ended.",
+                user_control=UserControlOutcome(
+                    attempt.request.operation, attempt.request.session_id,
+                    attempt.request.host_session_id, attempt.request.target,
+                    True, UserControlExecution.FINISHED,
+                ),
+            )
+        except asyncio.CancelledError:
+            if not task.cancelled():
+                raise
+            outcome = KernelCommandOutcome(
+                attempt.request.command_id, "SUCCEEDED", attempt.request.target.target_id,
+                "COMPACTION_STOPPED", "The manual compaction was stopped before it started.",
+                user_control=UserControlOutcome(
+                    attempt.request.operation, attempt.request.session_id,
+                    attempt.request.host_session_id, attempt.request.target,
+                    True, UserControlExecution.FINISHED,
+                ),
+            )
+        except Exception:
+            outcome = KernelCommandOutcome(
+                attempt.request.command_id, "FAILED", attempt.request.target.target_id,
+                "CONTROL_FAILED", "The manual compaction owner could not be settled.",
+                user_control=UserControlOutcome(
+                    attempt.request.operation, attempt.request.session_id,
+                    attempt.request.host_session_id, attempt.request.target,
+                    True, UserControlExecution.FINISHED,
+                ),
+            )
+        async with self._lock:
+            self._finish_control_attempt_locked(attempt, outcome)
+
     async def request_stop_turn(
         self,
         *,
@@ -5712,6 +5694,31 @@ class KernelHostSession:
                     name=f"kernel-user-stop:{target_turn_id}",
                 )
                 return pending
+            external_intent = self._external_new_turn_cancellation_intent
+            if (
+                self._external_new_turn_accepting
+                and external_intent is not None
+                and external_intent.turn_id == target_turn_id
+            ):
+                external_intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
+                attempt = self._install_control_attempt_locked(request, self._pending_control_outcome(request))
+                attempt.task = asyncio.create_task(
+                    self._execute_stop_starting_turn(attempt, self._external_new_turn_settled),
+                    name=f"kernel-stop-starting-turn:{target_turn_id}",
+                )
+                return attempt.outcome
+            admission_owner = self._plan_continuations.owned_task_for_turn(target_turn_id)
+            if admission_owner is not None and task is not None and not task.done() and intent is not None:
+                # An automatic successor is already canonical while the origin
+                # chain still owns the handoff. Stop that exact chain; its
+                # admitted child settles the successor under the first cause.
+                intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
+                attempt = self._install_control_attempt_locked(request, self._pending_control_outcome(request))
+                attempt.task = asyncio.create_task(
+                    self._execute_stop_turn_attempt(attempt, task),
+                    name=f"kernel-stop-plan-successor:{target_turn_id}",
+                )
+                return attempt.outcome
             active_drifted = self._active_turn_id is not None
         terminal = await self._io.run(
             self.repository.read_turn_terminal_outcome,
@@ -5730,6 +5737,11 @@ class KernelHostSession:
                     if active_drifted
                     else "CONTROL_TARGET_UNAVAILABLE",
                     "The target ROOT turn is not the current running turn.",
+                )
+            if str(terminal["status"]) == "RUNNING":
+                return self._control_rejection(
+                    request, "CONTROL_TARGET_UNAVAILABLE",
+                    "The running turn has no current execution owner available to stop.",
                 )
             root = RootControlResult(
                 str(terminal["status"]),
@@ -5754,6 +5766,55 @@ class KernelHostSession:
             attempt = self._install_control_attempt_locked(request, outcome)
             self._finish_control_attempt_locked(attempt, outcome)
             return outcome
+
+    async def _execute_stop_starting_turn(self, attempt, original_settlement: asyncio.Event) -> None:
+        target = attempt.request.target.target_id
+        try:
+            # This Event belongs to the captured admission, not to a subsequent
+            # reservation. The admission keeps its physical write/confirmation
+            # owner and observes the already-installed stop cause before binding.
+            await original_settlement.wait()
+            async with self._lock:
+                task = self._active_task if self._active_turn_id == target else None
+            if task is not None and not task.done():
+                await self._execute_stop_turn_attempt(attempt, task)
+                return
+            await self._drain_start_settlement(asyncio.create_task(
+                self._interrupt_queued_admission_until_safe(turn_id=target, reason="USER_STOPPED"),
+                name=f"kernel-start-stop-terminal:{target}",
+            ))
+            terminal = await self._io.run(
+                self.repository.read_turn_terminal_outcome,
+                session_id=self.session_id, turn_id=target,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            root = RootControlResult(
+                None if terminal is None else str(terminal["status"]),
+                None if terminal is None else terminal.get("terminal_reason"),
+            )
+            succeeded = root.status == "INTERRUPTED"
+            outcome = KernelCommandOutcome(
+                attempt.request.command_id, "SUCCEEDED" if succeeded else "FAILED", target,
+                "ROOT_STOPPED" if succeeded else "CONTROL_FAILED",
+                "The starting turn was stopped." if succeeded else "The starting turn did not confirm interruption.",
+                user_control=UserControlOutcome(
+                    attempt.request.operation, attempt.request.session_id,
+                    attempt.request.host_session_id, attempt.request.target,
+                    True, UserControlExecution.FINISHED, root=root,
+                ),
+            )
+        except Exception:
+            outcome = KernelCommandOutcome(
+                attempt.request.command_id, "FAILED", target,
+                "CONTROL_FAILED", "The starting turn control could not confirm its terminal result.",
+                user_control=UserControlOutcome(
+                    attempt.request.operation, attempt.request.session_id,
+                    attempt.request.host_session_id, attempt.request.target,
+                    True, UserControlExecution.FINISHED,
+                ),
+            )
+        async with self._lock:
+            self._finish_control_attempt_locked(attempt, outcome)
 
     async def _execute_stop_turn_attempt(
         self, attempt: _UserControlAttempt, task: asyncio.Task[KernelRunResult]
@@ -6715,6 +6776,32 @@ class KernelHostSession:
         if row is None:
             return failure
         command_kind = str(row.get("command_kind") or "")
+        if command_kind == "COMPACT_CONTEXT":
+            local = self._manual_compaction_command_attempts.get(command_id)
+            if local is not None and not local.done():
+                return KernelCommandOutcome(
+                    command_id, "PENDING", str(row.get("target_turn_id") or "idle"),
+                    "COMPACTION_RUNNING", "Context compaction is in progress.",
+                )
+            outcome = None
+            if local is not None and not local.cancelled():
+                outcome = local.result()
+            if outcome is None:
+                future = await self._compaction.find_manual(
+                    command_id=command_id, scope_kind=self._session_scope_kind,
+                )
+                if future is not None and future.done():
+                    outcome = future.result()
+            if outcome is None:
+                return KernelCommandOutcome(
+                    command_id, "REJECTED", str(row.get("target_turn_id") or "idle"),
+                    "COMPACTION_RESULT_UNAVAILABLE", "The original compaction result is unavailable.",
+                )
+            succeeded = outcome.disposition in {CompactionDisposition.COMPACTED, CompactionDisposition.NOT_NEEDED}
+            return KernelCommandOutcome(
+                command_id, "SUCCEEDED" if succeeded else "REJECTED", outcome.target_turn_id,
+                outcome.disposition.value, outcome.public_code,
+            )
         if command_kind in {"ENTER_PLAN", "CANCEL_PLAN", "FORCE_EXIT_PLAN"}:
             workflow_status = str(row.get("plan_workflow_status") or "")
             if not workflow_status:
@@ -6996,13 +7083,14 @@ class KernelHostSession:
                 )
                 or self._external_new_turn_accepting
                 or self._active_task is not None
+                or self._manual_compaction_command_attempts
             ):
                 return None
             reservation = self._reserve_compaction_write_locked(
                 scope_kind=self._session_scope_kind,
             )
             self._external_new_turn_accepting = True
-            self._external_new_turn_settled.clear()
+            self._external_new_turn_settled = asyncio.Event()
             return reservation
 
     async def _release_external_new_turn_reservation(self) -> None:
@@ -7026,6 +7114,10 @@ class KernelHostSession:
             )
             async with self._lock:
                 self._closing = True
+                if self._external_new_turn_cancellation_intent is not None:
+                    self._external_new_turn_cancellation_intent.install_cause(
+                        ForegroundCancellationCause.HOST_SESSION_CLOSE,
+                    )
                 if self._active_task is not None and not self._active_task.done():
                     if self._active_cancellation_intent is None:
                         raise RuntimeError("active ROOT task lacks cancellation intent")
@@ -7769,19 +7861,17 @@ class KernelHostCore:
         live = self._live_agent_session(agent_id)
         if live is None:
             return
-        expected_turn_id = None
         if work_id is not None:
             row = await live._io.run(live.repository.query_agent_work,
                 root_session_id=live.root_session_id or live.session_id,
                 work_id=work_id, deadline_monotonic=live._canonical_deadline())
             if row is None:
                 return
-            expected_turn_id = row.get("turn_id")
         async with live._lock:
             task = live._active_task
             intent = live._active_cancellation_intent
             if (task is None or task.done() or intent is None
-                or (work_id is not None and live._active_turn_id != expected_turn_id)):
+                or (work_id is not None and live._active_work_id != work_id)):
                 return
             intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
             task.cancel()

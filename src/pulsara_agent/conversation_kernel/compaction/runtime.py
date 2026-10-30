@@ -23,6 +23,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionTrigger,
     ResolvedCompactionPolicy,
 )
+from pulsara_agent.conversation_kernel.direct_model import PreparedKernelModelTarget
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.llm.provider_open import (
     CompactionSummaryPromotionAuthority,
@@ -45,12 +46,17 @@ class ManualCompactionRequest:
     request_id: str
     command_id: str
     scope_kind: ModelInputScopeKind
-    expected_turn_id: str | None
-    force: bool
+    target_turn_id: str
+    prepared_target: PreparedKernelModelTarget
 
     def __post_init__(self) -> None:
-        if not self.request_id or not self.command_id:
-            raise ValueError("manual compaction identity is incomplete")
+        if (
+            not self.request_id
+            or not self.command_id
+            or self.scope_kind is not ModelInputScopeKind.ROOT
+            or self.prepared_target.turn_id != self.target_turn_id
+        ):
+            raise ValueError("manual compaction identity/target is incomplete")
 
 
 @dataclass(slots=True)
@@ -88,7 +94,6 @@ class HostCompactionRuntimeOwner:
                     str,
                     asyncio.Task[object],
                     CompactionWriteReservation | None,
-                    str | None,
                 ],
                 Awaitable[None],
             ]
@@ -109,7 +114,6 @@ class HostCompactionRuntimeOwner:
                 str,
                 asyncio.Task[object],
                 CompactionWriteReservation | None,
-                str | None,
             ],
             Awaitable[None],
         ],
@@ -198,16 +202,16 @@ class HostCompactionRuntimeOwner:
         *,
         command_id: str,
         scope_kind: ModelInputScopeKind,
-        expected_turn_id: str | None,
-        force: bool,
+        target_turn_id: str,
+        prepared_target: PreparedKernelModelTarget,
     ) -> tuple[ManualCompactionRequest, asyncio.Future[CompactionOutcome]]:
         key = self.scope_key(scope_kind)
         request = ManualCompactionRequest(
             request_id=random_id("request"),
             command_id=command_id,
             scope_kind=scope_kind,
-            expected_turn_id=expected_turn_id,
-            force=force,
+            target_turn_id=target_turn_id,
+            prepared_target=prepared_target,
         )
         async with self._state_lock:
             if self._closing:
@@ -217,8 +221,9 @@ class HostCompactionRuntimeOwner:
                 previous, outcome = completed
                 if (
                     previous.scope_kind is not scope_kind
-                    or previous.expected_turn_id != expected_turn_id
-                    or previous.force != force
+                    or previous.target_turn_id != target_turn_id
+                    or previous.prepared_target.call.binding != prepared_target.call.binding
+                    or previous.prepared_target.target.fact != prepared_target.target.fact
                 ):
                     raise RuntimeError("manual compaction command identity conflict")
                 future = asyncio.get_running_loop().create_future()
@@ -228,8 +233,9 @@ class HostCompactionRuntimeOwner:
             if existing is not None:
                 if (
                     existing.request.command_id != command_id
-                    or existing.request.expected_turn_id != expected_turn_id
-                    or existing.request.force != force
+                    or existing.request.target_turn_id != target_turn_id
+                    or existing.request.prepared_target.call.binding != prepared_target.call.binding
+                    or existing.request.prepared_target.target.fact != prepared_target.target.fact
                 ):
                     raise RuntimeError("another manual compaction is pending")
                 return existing.request, existing.future
@@ -271,42 +277,6 @@ class HostCompactionRuntimeOwner:
             waiter.started = True
             return True
 
-    async def take_manual(
-        self,
-        *,
-        scope_kind: ModelInputScopeKind,
-        turn_id: str,
-    ) -> ManualCompactionRequest | None:
-        key = self.scope_key(scope_kind)
-        async with self._state_lock:
-            waiter = self._manual.get(key)
-            if waiter is None:
-                return None
-            expected = waiter.request.expected_turn_id
-            if expected is not None and expected != turn_id:
-                self._manual.pop(key, None)
-                outcome = CompactionOutcome(
-                    CompactionDisposition.FAILED,
-                    turn_id,
-                    None,
-                    None,
-                    "TARGET_TURN_CHANGED",
-                )
-                self._manual_outcomes[waiter.request.command_id] = (
-                    waiter.request,
-                    outcome,
-                )
-                self._manual_outcomes.move_to_end(waiter.request.command_id)
-                while len(self._manual_outcomes) > 256:
-                    self._manual_outcomes.popitem(last=False)
-                if not waiter.future.done():
-                    waiter.future.set_result(outcome)
-                return None
-            if waiter.started:
-                return None
-            waiter.started = True
-            return waiter.request
-
     async def settle_manual(
         self, request: ManualCompactionRequest, outcome: CompactionOutcome
     ) -> None:
@@ -330,7 +300,6 @@ class HostCompactionRuntimeOwner:
         trigger: CompactionTrigger,
         operation: Callable[[], Awaitable[_T]],
         admitted_writer: CompactionWriteReservation | None = None,
-        pending_root_turn_id: str | None = None,
         attempt_id: str,
     ) -> _T:
         """Run one exact scope after acquiring the Host-wide summary lane."""
@@ -360,7 +329,6 @@ class HostCompactionRuntimeOwner:
                     attempt_id,
                     current,
                     admitted_writer,
-                    pending_root_turn_id,
                 )
             try:
                 return await operation()
@@ -459,11 +427,8 @@ class HostCompactionRuntimeOwner:
     ) -> tuple[bool, str | None, str | None, str | None]:
         if not self._fenced_scopes:
             return False, None, None, None
-        (scope_kind, task_id), (_attempt, trigger, phase) = next(
-            iter(self._fenced_scopes.items())
-        )
-        scope = scope_kind.value if task_id is None else f"{scope_kind.value}:{task_id}"
-        return True, trigger.value, phase.value, scope
+        scope_kind, (_attempt, trigger, phase) = next(iter(self._fenced_scopes.items()))
+        return True, trigger.value, phase.value, scope_kind.value
 
     def automatic_allowed(
         self,
@@ -507,7 +472,7 @@ class HostCompactionRuntimeOwner:
                     waiter.future.set_result(
                         CompactionOutcome(
                             CompactionDisposition.FAILED,
-                            waiter.request.expected_turn_id or "unknown",
+                            waiter.request.target_turn_id,
                             None,
                             None,
                             "HOST_CLOSING",

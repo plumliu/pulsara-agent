@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pulsara_agent.identity import derive_id
-from pulsara_agent.conversation_kernel.repository_errors import PreparedRootInputHeadStale
 
 
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
@@ -75,7 +74,6 @@ from pulsara_agent.llm.model_connections import (
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
-    ContextBindingBaseKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     PreparedProviderInputCut,
@@ -83,8 +81,7 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.conversation_kernel.steer import (
     PreparedActiveRootInputAdmission,
     PreparedActiveRootInputCandidate,
-    PreparedRootProviderInputAdmission,
-    PreparedRootProviderInputCandidate,
+    StartedTurnInputGroup,
 )
 from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.ports.terminal_observation import (
@@ -129,15 +126,43 @@ from .matching import (
 )
 
 
-def _manual_compaction_turn_matches(
-    row: Mapping[str, object], candidate: PreparedManualCompactionCommand
-) -> bool:
-    return (
-        str(row['session_id']) == candidate.session_id
-    )
-
-
 class _ConversationOperations:
+    def read_started_turn_input_group(
+        self,
+        guard: HostWriterGuard,
+        *,
+        turn_id: str,
+        deadline_monotonic: float,
+    ) -> StartedTurnInputGroup:
+        """Narrow-read an atomic Plan/observation successor's original input.
+
+        Ordinary requests return their complete initial group from the start
+        transaction. Independent producers each publish one opening entry;
+        loading it must not materialize the potentially oversized history.
+        """
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL, row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            turn = connection.execute(
+                """SELECT t.initial_entry_id, r.id AS revision_id
+                   FROM pulsara_v3.turns t
+                   JOIN pulsara_v3.turn_context_binding_revisions r
+                     ON r.session_id=t.session_id AND r.turn_id=t.id AND r.revision_ordinal=0
+                   WHERE t.session_id=%s AND t.id=%s""",
+                (guard.session_id, turn_id),
+            ).fetchone()
+            if turn is None:
+                raise ConversationKernelConflict("started successor is absent")
+            entry_id = str(turn["initial_entry_id"])
+            return self._started_turn_input_group(
+                connection, session_id=guard.session_id, turn_id=turn_id,
+                instruction_entry_id=entry_id, entry_ids=(entry_id,),
+                revision_id=str(turn["revision_id"]),
+            )
+
     def read_ephemeral_user_origin(
         self, guard: HostWriterGuard, *, turn_id: str, deadline_monotonic: float,
     ):
@@ -285,109 +310,11 @@ class _ConversationOperations:
                 admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
             )
 
-    def prepare_root_provider_input_candidate(
-        self,
-        guard: HostWriterGuard,
-        *,
-        intent: PreparedRootTurnIntent,
-        model_resolution_snapshot: FrozenModelResolutionSnapshot,
-        deadline_monotonic: float,
-    ) -> PreparedRootProviderInputCandidate:
-        """Freeze the exact future ROOT cut without creating durable rows."""
-
-        if intent.session_id != guard.session_id:
-            raise ValueError("ROOT input candidate belongs to another session")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-            deadline_monotonic=deadline_monotonic,
-        ) as connection:
-            session = self._require_writer(connection, guard, lock=False)
-            if connection.execute(
-                "SELECT 1 FROM pulsara_v3.session_commands "
-                "WHERE session_id=%s AND command_id=%s",
-                (guard.session_id, intent.command_id),
-            ).fetchone() is not None:
-                raise ConversationKernelConflict("command was already accepted")
-            self._require_root_admission_open(connection, session_id=guard.session_id)
-            binding = model_call_binding_from_dict(session["model_call_binding"])
-            if binding is None:
-                raise ValueError("session has no model configuration")
-            binding, _resolved, _preference_reset = model_resolution_snapshot.reconcile(
-                binding
-            )
-            permission = self._freeze_root_permission_snapshot(
-                connection,
-                session_id=guard.session_id,
-                snapshot_id=intent.permission_snapshot_id,
-                requested_mode=intent.requested_permission_mode,
-                admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
-            )
-            if (
-                intent.expected_permission_snapshot is not None
-                and permission != intent.expected_permission_snapshot
-            ):
-                raise ConversationKernelConflict("INGRESS_PRECONDITION_CHANGED")
-            latest_sequence = int(session["latest_entry_sequence"])
-            base_kind, snapshot_id, source_through = (
-                self._initial_context_binding_values(
-                    connection,
-                    session_id=guard.session_id,
-                    turn_id=intent.turn_id,
-                    initial_entry_sequence=latest_sequence + 1,
-                )
-            )
-            handoff = self._eligible_plan_handoff(
-                connection, session_id=guard.session_id
-            )
-            return PreparedRootProviderInputCandidate(
-                session_id=guard.session_id,
-                workspace_id=str(session["workspace_id"]),
-                exact_turn_id=intent.turn_id,
-                exact_initial_entry_id=intent.entry_id,
-                exact_context_binding_revision_id=(
-                    intent.context_binding_revision_id
-                ),
-                unpublished_items=(
-                    FrozenProviderInputItem(
-                        item_kind=FrozenProviderInputItemKind.USER,
-                        source_entry_id=intent.entry_id,
-                        source_entry_sequence=latest_sequence + 1,
-                        source_turn_id=intent.turn_id,
-                        content=intent.canonical_prompt.content.parts,
-                        input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-                    ),
-                ),
-                unpublished_item_canonical_expanded_bytes=(
-                    intent.canonical_prompt.resource_quote.canonical_expanded_bytes,
-                ),
-                permission_snapshot=permission,
-                model_call_binding=binding,
-                expected_latest_entry_sequence=latest_sequence,
-                context_base_kind=ContextBindingBaseKind(base_kind),
-                context_snapshot_id=snapshot_id,
-                source_through_sequence=source_through,
-                pending_plan_handoff_workflow_id=(
-                    None if handoff is None else handoff.workflow_id
-                ),
-                pending_plan_handoff_interaction_id=(
-                    None if handoff is None else handoff.interaction_id
-                ),
-                pending_plan_handoff_kind=(
-                    None if handoff is None else handoff.kind.value
-                ),
-                unpublished_plan_workflow_fact=None,
-                unpublished_plan_handoff_fact=None,
-                unpublished_approved_plan_fact=None,
-            )
-
     def accept_root_turn_intent(
         self,
         guard: HostWriterGuard,
         *,
         intent: PreparedRootTurnIntent,
-        provider_input_admission: PreparedRootProviderInputAdmission,
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
         deadline_monotonic: float,
     ) -> AcceptedRootTurnAdmission:
@@ -395,39 +322,6 @@ class _ConversationOperations:
 
         if intent.session_id != guard.session_id:
             raise ValueError("ROOT turn intent belongs to another session")
-        if not isinstance(provider_input_admission, PreparedRootProviderInputAdmission):
-            raise TypeError("ROOT provider input admission must be prepared")
-        prospective = provider_input_admission.candidate
-        if (
-            prospective.session_id != intent.session_id
-            or prospective.exact_turn_id != intent.turn_id
-            or prospective.exact_initial_entry_id != intent.entry_id
-            or prospective.exact_context_binding_revision_id
-            != intent.context_binding_revision_id
-            or prospective.unpublished_items
-            != (
-                FrozenProviderInputItem(
-                    item_kind=FrozenProviderInputItemKind.USER,
-                    source_entry_id=intent.entry_id,
-                    source_entry_sequence=prospective.exact_initial_entry_sequence,
-                    source_turn_id=intent.turn_id,
-                    content=intent.canonical_prompt.content.parts,
-                    input_origin=CanonicalInputOriginKind.HUMAN_MESSAGE,
-                ),
-            )
-            or prospective.unpublished_item_canonical_expanded_bytes
-            != (intent.canonical_prompt.resource_quote.canonical_expanded_bytes,)
-            or prospective.permission_snapshot.snapshot_id
-            != intent.permission_snapshot_id
-            or prospective.permission_snapshot.requested_mode
-            is not intent.requested_permission_mode
-            or (
-                intent.expected_permission_snapshot is not None
-                and prospective.permission_snapshot
-                != intent.expected_permission_snapshot
-            )
-        ):
-            raise ValueError("ROOT provider input admission differs from intent")
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -493,6 +387,12 @@ class _ConversationOperations:
                     raise ConversationKernelConflict("command identity conflict")
                 return AcceptedRootTurnAdmission(
                     self._accepted_entry(connection, guard.session_id, intent.entry_id),
+                    self._started_turn_input_group(
+                        connection, session_id=guard.session_id, turn_id=intent.turn_id,
+                        instruction_entry_id=intent.entry_id, entry_ids=(intent.entry_id,),
+                        canonical_prompts=(intent.canonical_prompt,),
+                        revision_id=intent.context_binding_revision_id,
+                    ),
                 )
 
             binding = model_call_binding_from_dict(session["model_call_binding"])
@@ -501,8 +401,6 @@ class _ConversationOperations:
             binding, _resolved, preference_reset = model_resolution_snapshot.reconcile(
                 binding
             )
-            if binding != prospective.model_call_binding:
-                raise ConversationKernelConflict("ROOT provider target changed")
             if preference_reset:
                 connection.execute(
                     """
@@ -528,6 +426,11 @@ class _ConversationOperations:
                 expected_permission_snapshot=intent.expected_permission_snapshot,
             )
             self._require_root_admission_open(connection, session_id=guard.session_id)
+            if connection.execute(
+                "SELECT 1 FROM pulsara_v3.turns WHERE session_id=%s AND status='RUNNING'",
+                (guard.session_id,),
+            ).fetchone() is not None:
+                raise ConversationKernelConflict("session already has a RUNNING turn")
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             workspace_id = str(session["workspace_id"])
             permission = self._freeze_root_permission_snapshot(
@@ -545,40 +448,6 @@ class _ConversationOperations:
             handoff = self._eligible_plan_handoff(
                 connection, session_id=guard.session_id
             )
-            expected_handoff = (
-                prospective.pending_plan_handoff_workflow_id,
-                prospective.pending_plan_handoff_interaction_id,
-                prospective.pending_plan_handoff_kind,
-            )
-            actual_handoff = (
-                None if handoff is None else handoff.workflow_id,
-                None if handoff is None else handoff.interaction_id,
-                None if handoff is None else handoff.kind.value,
-            )
-            if actual_handoff != expected_handoff:
-                raise ConversationKernelConflict("ROOT provider Plan handoff changed")
-            if str(session["workspace_id"]) != prospective.workspace_id:
-                raise ConversationKernelConflict("ROOT provider workspace changed")
-            if (
-                int(session["latest_entry_sequence"])
-                != prospective.expected_latest_entry_sequence
-            ):
-                raise PreparedRootInputHeadStale("ROOT provider input head changed")
-            base_kind, snapshot_id, source_through = (
-                self._initial_context_binding_values(
-                    connection,
-                    session_id=guard.session_id,
-                    turn_id=intent.turn_id,
-                    initial_entry_sequence=prospective.exact_initial_entry_sequence,
-                )
-            )
-            if (
-                ContextBindingBaseKind(base_kind)
-                is not prospective.context_base_kind
-                or snapshot_id != prospective.context_snapshot_id
-                or source_through != prospective.source_through_sequence
-            ):
-                raise ConversationKernelConflict("ROOT provider input base changed")
             validate_annotation_sources(connection, session_id=guard.session_id,
                                         content=intent.canonical_prompt.content)
             publication = materialize_canonical_prompt(
@@ -674,6 +543,12 @@ class _ConversationOperations:
                     turn_id=intent.turn_id,
                     entry_sequence=entry_sequence,
                     event_sequence=event.event_sequence,
+                ),
+                self._started_turn_input_group(
+                    connection, session_id=guard.session_id, turn_id=intent.turn_id,
+                    instruction_entry_id=intent.entry_id, entry_ids=(intent.entry_id,),
+                    canonical_prompts=(intent.canonical_prompt,),
+                    revision_id=intent.context_binding_revision_id,
                 ),
                 preference_reset,
             )
@@ -798,6 +673,12 @@ class _ConversationOperations:
                 TurnAdmissionConfirmationKind.FULL,
                 self._accepted_entry(
                     connection, candidate.session_id, candidate.entry_id
+                ),
+                self._started_turn_input_group(
+                    connection, session_id=candidate.session_id, turn_id=candidate.turn_id,
+                    instruction_entry_id=candidate.entry_id, entry_ids=(candidate.entry_id,),
+                    canonical_prompts=(candidate.canonical_prompt,),
+                    revision_id=candidate.context_binding_revision_id,
                 ),
             )
 
@@ -1033,9 +914,7 @@ class _ConversationOperations:
         guard: HostWriterGuard,
         *,
         candidate: TerminalObservationInstallationAttempt,
-        provider_input_admission: (
-            PreparedActiveRootInputAdmission | PreparedRootProviderInputAdmission
-        ),
+        provider_input_admission: PreparedActiveRootInputAdmission | None = None,
         deadline_monotonic: float,
     ) -> AcceptedEntry:
         """Atomically accept one same-Host Terminal observation.
@@ -1060,7 +939,7 @@ class _ConversationOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            prospective_root: PreparedRootProviderInputCandidate | None = None
+            new_turn_values: tuple[ModelCallBinding, FrozenRunPermissionSnapshot] | None = None
             if isinstance(target, ExistingTurnInstallation):
                 prospective = self._build_active_terminal_provider_input_candidate(
                     connection,
@@ -1078,20 +957,11 @@ class _ConversationOperations:
                         "terminal observation provider admission is stale"
                     )
             elif isinstance(target, NewTurnInstallation):
-                prospective_root = self._build_new_terminal_provider_input_candidate(
-                    connection,
-                    guard,
-                    candidate=candidate,
+                if provider_input_admission is not None:
+                    raise ValueError("new Terminal turn does not accept prepared provider input")
+                new_turn_values = self._new_terminal_turn_admission_values(
+                    connection, guard, candidate=candidate,
                 )
-                if (
-                    not isinstance(
-                        provider_input_admission, PreparedRootProviderInputAdmission
-                    )
-                    or provider_input_admission.candidate != prospective_root
-                ):
-                    raise ConversationKernelConflict(
-                        "terminal observation ROOT admission is stale"
-                    )
             else:  # pragma: no cover - closed union exhaustiveness
                 raise TypeError("terminal observation installation target is unknown")
             workspace_id = self._workspace_id(connection, guard.session_id)
@@ -1104,7 +974,7 @@ class _ConversationOperations:
                 turn_id = target.turn_id
                 entry_id = target.entry_id
             elif isinstance(target, NewTurnInstallation):
-                assert prospective_root is not None
+                assert new_turn_values is not None
                 turn_id = target.turn_id
                 entry_id = target.initial_entry_id
                 connection.execute(
@@ -1130,13 +1000,13 @@ class _ConversationOperations:
                         workspace_id,
                         Jsonb(
                             model_call_binding_to_dict(
-                                prospective_root.model_call_binding
+                                new_turn_values[0]
                             )
                         ),
                         entry_id,
                         target.context_binding_revision_id,
                         *self._permission_columns(
-                            prospective_root.permission_snapshot
+                            new_turn_values[1]
                         ),
                     ),
                 )
@@ -1170,41 +1040,13 @@ class _ConversationOperations:
                 event_sequence=event.event_sequence,
             )
 
-    def prepare_new_terminal_observation_provider_input_candidate(
-        self,
-        guard: HostWriterGuard,
-        *,
-        candidate: TerminalObservationInstallationAttempt,
-        deadline_monotonic: float,
-    ) -> PreparedRootProviderInputCandidate:
-        """Freeze an idle Terminal observation ROOT before publication."""
-
-        if candidate.session_id != guard.session_id:
-            raise ValueError("terminal observation belongs to another session")
-        if candidate.writer_generation != guard.writer_generation:
-            raise StaleHostWriter("terminal observation writer generation is stale")
-        if not isinstance(candidate.target, NewTurnInstallation):
-            raise ValueError("terminal observation is not a new ROOT candidate")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.HOST_CONTROL,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-            isolation_level=IsolationLevel.REPEATABLE_READ,
-        ) as connection:
-            self._require_writer(connection, guard, lock=False)
-            return self._build_new_terminal_provider_input_candidate(
-                connection,
-                guard,
-                candidate=candidate,
-            )
-
-    def _build_new_terminal_provider_input_candidate(
+    def _new_terminal_turn_admission_values(
         self,
         connection: Connection,
         guard: HostWriterGuard,
         *,
         candidate: TerminalObservationInstallationAttempt,
-    ) -> PreparedRootProviderInputCandidate:
+    ) -> tuple[ModelCallBinding, FrozenRunPermissionSnapshot]:
         target = candidate.target
         if not isinstance(target, NewTurnInstallation):
             raise ValueError("terminal observation is not a new ROOT candidate")
@@ -1250,49 +1092,7 @@ class _ConversationOperations:
             admission_source=RunPermissionAdmissionSource.TERMINAL_OBSERVATION,
             inherited_from_turn_id=candidate.origin_turn_id,
         )
-        session = connection.execute(
-            "SELECT workspace_id, latest_entry_sequence FROM pulsara_v3.sessions "
-            "WHERE id=%s",
-            (guard.session_id,),
-        ).fetchone()
-        if session is None or str(session["workspace_id"]) != candidate.workspace_id:
-            raise ConversationKernelConflict("terminal observation workspace conflicts")
-        latest_sequence = int(session["latest_entry_sequence"])
-        base_kind, snapshot_id, source_through = self._initial_context_binding_values(
-            connection,
-            session_id=guard.session_id,
-            turn_id=target.turn_id,
-            initial_entry_sequence=latest_sequence + 1,
-        )
-        return PreparedRootProviderInputCandidate(
-            session_id=guard.session_id,
-            workspace_id=candidate.workspace_id,
-            exact_turn_id=target.turn_id,
-            exact_initial_entry_id=target.initial_entry_id,
-            exact_context_binding_revision_id=target.context_binding_revision_id,
-            unpublished_items=(
-                FrozenProviderInputItem(
-                    item_kind=FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
-                    source_entry_id=target.initial_entry_id,
-                    source_entry_sequence=latest_sequence + 1,
-                    source_turn_id=target.turn_id,
-                    content=(LLMTextPart(body.decode("utf-8")),),
-                ),
-            ),
-            unpublished_item_canonical_expanded_bytes=(len(body),),
-            permission_snapshot=permission,
-            model_call_binding=binding,
-            expected_latest_entry_sequence=latest_sequence,
-            context_base_kind=ContextBindingBaseKind(base_kind),
-            context_snapshot_id=snapshot_id,
-            source_through_sequence=source_through,
-            pending_plan_handoff_workflow_id=None,
-            pending_plan_handoff_interaction_id=None,
-            pending_plan_handoff_kind=None,
-            unpublished_plan_workflow_fact=None,
-            unpublished_plan_handoff_fact=None,
-            unpublished_approved_plan_fact=None,
-        )
+        return binding, permission
 
     def prepare_active_terminal_observation_provider_input_candidate(
         self,
@@ -1771,10 +1571,10 @@ class _ConversationOperations:
                 (candidate.session_id, candidate.target_turn_id),
             ).fetchone()
             if command is None:
-                if turn is None or not _manual_compaction_turn_matches(turn, candidate):
+                if turn is None:
                     return CompactionConfirmationKind.CONFLICT
                 return CompactionConfirmationKind.NONE
-            if turn is None or not _manual_compaction_turn_matches(turn, candidate):
+            if turn is None:
                 return CompactionConfirmationKind.CONFLICT
             if (
                 str(command["command_kind"]) != "COMPACT_CONTEXT"
@@ -1800,15 +1600,6 @@ class _ConversationOperations:
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
-            turn = connection.execute(
-                "SELECT session_id "
-                "FROM pulsara_v3.turns WHERE session_id = %s AND id = %s FOR SHARE",
-                (guard.session_id, candidate.target_turn_id),
-            ).fetchone()
-            if turn is None or not _manual_compaction_turn_matches(turn, candidate):
-                raise ConversationKernelConflict(
-                    "manual compaction target scope drifted"
-                )
             existing = connection.execute(
                 "SELECT * FROM pulsara_v3.session_commands "
                 "WHERE session_id = %s AND command_id = %s",
@@ -1826,6 +1617,40 @@ class _ConversationOperations:
                         "manual compaction command identity conflict"
                     )
                 return CompactionConfirmationKind.FULL
+            session = self._require_writer(connection, guard, lock=False)
+            if session["root_session_id"] is not None:
+                raise ConversationKernelConflict("manual compaction requires ROOT")
+            if connection.execute(
+                """SELECT 1 FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id=%s AND status='PENDING' AND delivery_mode='NEW_TURN'
+                   UNION ALL
+                   SELECT 1 FROM pulsara_v3.turns
+                   WHERE session_id=%s AND status='RUNNING' LIMIT 1""",
+                (guard.session_id, guard.session_id),
+            ).fetchone() is not None:
+                raise ConversationKernelConflict("COMPACTION_BUSY")
+            if model_call_binding_from_dict(session["model_call_binding"]) != candidate.model_call_binding:
+                raise ConversationKernelConflict("manual compaction model selection changed")
+            turn = connection.execute(
+                """SELECT t.id, t.status, t.current_context_binding_revision_id
+                   FROM pulsara_v3.turns AS t
+                   JOIN pulsara_v3.transcript_entries AS initial
+                     ON initial.session_id=t.session_id AND initial.id=t.initial_entry_id
+                   WHERE t.session_id=%s
+                   ORDER BY initial.entry_sequence DESC, t.id DESC LIMIT 1
+                   FOR SHARE OF t""",
+                (guard.session_id,),
+            ).fetchone()
+            if (
+                turn is None
+                or str(turn["id"]) != candidate.target_turn_id
+                or str(turn["status"]) == "RUNNING"
+                or str(turn["current_context_binding_revision_id"])
+                != candidate.source_cut.context_binding_revision_id
+                or int(session["latest_entry_sequence"])
+                != candidate.source_cut.provider_input_through_sequence
+            ):
+                raise ConversationKernelConflict("manual compaction source or idle target changed")
             connection.execute(
                 """
                 INSERT INTO pulsara_v3.session_commands (

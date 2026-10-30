@@ -113,7 +113,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 6
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:f5840ba2908905390a670223d3a4e8781ee478721964934ebffc1c293cc0d329"
+    "sha256:eae8ac74b5ebaa90c966387d9ed3b086b3f9b1530dd4cfac289780a90f808312"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -537,6 +537,7 @@ class TerminalKernelProtocolServer:
                     root_compaction_in_progress=state.host_session.root_compaction_in_progress(),
                     host_session_id=state.host_session.host_session_id,
                     active_root_turn_id=state.host_session.active_root_turn_id(),
+                    manual_compaction_command_id=state.host_session.active_manual_compaction_command_id(),
                     control_admission_deadline_ms=(
                         state.host_session.control_admission_deadline_ms()
                     ),
@@ -689,6 +690,8 @@ class TerminalKernelProtocolServer:
                         live_control=control_wire,
                         presentation_notices=presentation_notices,
                         root_compaction_in_progress=state.host_session.root_compaction_in_progress(),
+                        manual_compaction_command_id=state.host_session.active_manual_compaction_command_id(),
+                        active_root_turn_id=state.host_session.active_root_turn_id(),
                     )
                 )
             await asyncio.sleep(min(0.05, max(0.0, deadline - monotonic())))
@@ -717,8 +720,8 @@ class TerminalKernelProtocolServer:
             blocked = self._workspace_write_error(state, request.request_id)
             if blocked is not None:
                 return blocked
-        if request.force and request.command_kind != wire.COMPACT_CONTEXT:
-            return _error(request.request_id, "COMMAND_FORCE_FIELD_NOT_ALLOWED")
+        if request.command_kind != wire.STOP_CONTEXT_COMPACTION and request.target_compaction_command_id:
+            return _error(request.request_id, "COMPACTION_TARGET_FIELD_NOT_ALLOWED")
         if request.command_kind != wire.STOP_CODE_MODE_CELL and request.target_cell_id:
             return _error(request.request_id, "CELL_TARGET_FIELD_NOT_ALLOWED")
         queue_action = request.command_kind in (
@@ -752,6 +755,7 @@ class TerminalKernelProtocolServer:
             return _error(request.request_id, "PLAN_COMMAND_FIELDS_NOT_ALLOWED")
         control_command = request.command_kind in (
             wire.STOP_ACTIVE_TURN,
+            wire.STOP_CONTEXT_COMPACTION,
             wire.STOP_CODE_MODE_CELL,
             wire.TERMINATE_BACKGROUND_PROCESS,
         )
@@ -764,7 +768,6 @@ class TerminalKernelProtocolServer:
                 != wire.PERMISSION_MODE_UNSPECIFIED
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
-                or request.force
                 or request.plan_reason
                 or request.HasField("prompt_content")
             ):
@@ -826,6 +829,16 @@ class TerminalKernelProtocolServer:
                 expected_session_id=request.expected_session_id,
                 expected_host_session_id=request.expected_host_session_id,
                 target_turn_id=request.target_turn_id,
+            )
+        elif request.command_kind == wire.STOP_CONTEXT_COMPACTION:
+            if not request.target_compaction_command_id or request.target_turn_id or request.target_process_id:
+                return _error(request.request_id, "COMPACTION_CONTROL_REQUEST_INVALID")
+            outcome = await state.host_session.request_stop_context_compaction(
+                admission_deadline_ms=int(request.control_admission_deadline_ms),
+                command_id=request.command_id,
+                expected_session_id=request.expected_session_id,
+                expected_host_session_id=request.expected_host_session_id,
+                target_command_id=request.target_compaction_command_id,
             )
         elif request.command_kind == wire.STOP_CODE_MODE_CELL:
             if request.target_turn_id or request.target_process_id or not request.target_cell_id:
@@ -898,12 +911,11 @@ class TerminalKernelProtocolServer:
                 or request.HasField("prompt_content")
                 or request.target_plan_workflow_id
                 or request.expected_plan_workflow_revision
+                or request.target_turn_id
             ):
                 return _error(request.request_id, "COMPACTION_REQUEST_INVALID")
             value = await state.host_session.compact_context(
                 command_id=request.command_id,
-                force=request.force,
-                expected_active_turn_id=request.target_turn_id or None,
             )
             from pulsara_agent.conversation_kernel.host import KernelCommandOutcome
 
@@ -912,8 +924,8 @@ class TerminalKernelProtocolServer:
                 status=(
                     "SUCCEEDED"
                     if value.disposition.value in {"COMPACTED", "NOT_NEEDED"}
-                    else "PENDING"
-                    if value.disposition.value == "DEFERRED_TO_SAFE_POINT"
+                    else "FAILED"
+                    if value.disposition.value in {"FAILED", "RESULT_UNAVAILABLE"}
                     else "REJECTED"
                 ),
                 target_id=value.target_turn_id,
@@ -1865,6 +1877,7 @@ def _live_control_snapshot_to_wire(
     root_compaction_in_progress: bool = False,
     host_session_id: str = "",
     active_root_turn_id: str | None = None,
+    manual_compaction_command_id: str | None = None,
     control_admission_deadline_ms: int = 0,
 ) -> wire.SessionLiveControlSnapshot:
     in_progress, trigger, phase, scope = compaction_projection
@@ -1904,6 +1917,7 @@ def _live_control_snapshot_to_wire(
         input_admission_deferred=in_progress,
         host_session_id=host_session_id,
         active_root_turn_id=active_root_turn_id or "",
+        manual_compaction_command_id=manual_compaction_command_id or "",
         control_admission_deadline_ms=control_admission_deadline_ms,
     )
     if snapshot.current_interaction is not None:
@@ -1998,6 +2012,7 @@ def _control_request_from_wire(
     operation = {
         wire.USER_CONTROL_STOP_CODE_MODE_CELL: UserControlOperation.STOP_CODE_MODE_CELL,
         wire.USER_CONTROL_STOP_ACTIVE_TURN: UserControlOperation.STOP_ACTIVE_TURN,
+        wire.USER_CONTROL_STOP_CONTEXT_COMPACTION: UserControlOperation.STOP_CONTEXT_COMPACTION,
         wire.USER_CONTROL_TERMINATE_BACKGROUND_PROCESS: (
             UserControlOperation.TERMINATE_BACKGROUND_PROCESS
         ),
@@ -2005,11 +2020,13 @@ def _control_request_from_wire(
     kind = {
         wire.USER_CONTROL_CODE_MODE_CELL: UserControlTargetKind.CODE_MODE_CELL,
         wire.USER_CONTROL_ROOT_TURN: UserControlTargetKind.ROOT_TURN,
+        wire.USER_CONTROL_MANUAL_COMPACTION: UserControlTargetKind.MANUAL_COMPACTION,
         wire.USER_CONTROL_BACKGROUND_PROCESS: UserControlTargetKind.BACKGROUND_PROCESS,
     }.get(expected.target.kind)
     expected_kind = {
         UserControlOperation.STOP_CODE_MODE_CELL: UserControlTargetKind.CODE_MODE_CELL,
         UserControlOperation.STOP_ACTIVE_TURN: UserControlTargetKind.ROOT_TURN,
+        UserControlOperation.STOP_CONTEXT_COMPACTION: UserControlTargetKind.MANUAL_COMPACTION,
         UserControlOperation.TERMINATE_BACKGROUND_PROCESS: (
             UserControlTargetKind.BACKGROUND_PROCESS
         ),
@@ -2038,6 +2055,7 @@ def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
         operation={
             "STOP_CODE_MODE_CELL": wire.USER_CONTROL_STOP_CODE_MODE_CELL,
             "STOP_ACTIVE_TURN": wire.USER_CONTROL_STOP_ACTIVE_TURN,
+            "STOP_CONTEXT_COMPACTION": wire.USER_CONTROL_STOP_CONTEXT_COMPACTION,
             "TERMINATE_BACKGROUND_PROCESS": (
                 wire.USER_CONTROL_TERMINATE_BACKGROUND_PROCESS
             ),
@@ -2048,6 +2066,7 @@ def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
             kind={
                 "CODE_MODE_CELL": wire.USER_CONTROL_CODE_MODE_CELL,
                 "ROOT_TURN": wire.USER_CONTROL_ROOT_TURN,
+                "MANUAL_COMPACTION": wire.USER_CONTROL_MANUAL_COMPACTION,
                 "BACKGROUND_PROCESS": wire.USER_CONTROL_BACKGROUND_PROCESS,
             }[value.target.kind.value],
             target_id=value.target.target_id,

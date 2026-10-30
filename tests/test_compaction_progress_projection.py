@@ -23,9 +23,9 @@ def test_progress_follows_root_fence_in_snapshot_and_observation(role: int, trig
     async def run() -> None:
         owner = HostCompactionRuntimeOwner()
         host = SimpleNamespace(
-            session_id='session:336wrfwkamrr3up6kjtsgvgcte', host_session_id='host:yinyxklzunar54s7objjdbphcy', _compaction=owner,
+            _session_scope_kind=ModelInputScopeKind.ROOT, session_id='session:336wrfwkamrr3up6kjtsgvgcte', host_session_id='host:yinyxklzunar54s7objjdbphcy', _compaction=owner,
             live_bus=LiveAgentEventBus(), live_control=SessionLiveControlOwner(session_id='session:336wrfwkamrr3up6kjtsgvgcte'),
-            current_todo_snapshots=lambda: (), active_root_turn_id=lambda: None,
+            current_todo_snapshots=lambda: (), active_root_turn_id=lambda: None, active_manual_compaction_command_id=lambda: None,
             control_admission_deadline_ms=lambda: 10000, take_presentation_notices=lambda _: (),
             current_compaction_projection=owner.current_projection,
         )
@@ -39,8 +39,8 @@ def test_progress_follows_root_fence_in_snapshot_and_observation(role: int, trig
                 projections=(), through_event_sequence=0, gap_reason=None)),
         )
         server = TerminalKernelProtocolServer(socket_path=Path('/tmp/compaction-progress-test.sock'), session_provider=lambda _: host)
-        root = CompactionScope('session:336wrfwkamrr3up6kjtsgvgcte', 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', 'turn:klmmazz67vfgsfsvg6ceqgdsfu', ModelInputScopeKind.ROOT, None)
-        child = CompactionScope('session:336wrfwkamrr3up6kjtsgvgcte', 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', ModelInputScopeKind.SUBAGENT_TASK, 'task:kmz6pl55dsqspcz6dgmhr7sxpy')
+        root = CompactionScope('session:336wrfwkamrr3up6kjtsgvgcte', 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', 'turn:klmmazz67vfgsfsvg6ceqgdsfu', ModelInputScopeKind.ROOT)
+        child = CompactionScope('session:336wrfwkamrr3up6kjtsgvgcte', 'workspace:wdl6b3mtrkghwnvjo4an3ekbau', 'turn:h2g7tkxc3t3s7qaeuv3uyoxu7m', ModelInputScopeKind.SUBAGENT)
         task = asyncio.current_task()
         assert task is not None
 

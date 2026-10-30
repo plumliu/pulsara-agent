@@ -372,8 +372,10 @@ class NoContinuationAdmissionFence:
                 != candidate.predecessor.binding_revision_id
             )
             or (
-                cut.provider_input_through_sequence
-                != candidate.snapshot.source_through_sequence
+                # A first-call summary excludes the admitted initial group,
+                # while the actual safe cut includes that protected suffix.
+                candidate.snapshot.source_through_sequence
+                > cut.provider_input_through_sequence
             )
             or (destination.session_id != scope.session_id)
             or (destination.turn_id != turn_id)

@@ -19,9 +19,19 @@ from pulsara_agent.conversation_kernel.contracts import (
     CommittedEventSubject,
     EntryKind,
     HostWriterGuard,
+    InlineContent,
     StoredCommittedEvent,
 )
-from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher
+from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher, PostgresCanonicalBlobStore
+from pulsara_agent.conversation_kernel.prompt_storage import canonical_prompt_owner_is_exact, hydrate_canonical_prompt_owner
+from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
+from pulsara_agent.conversation_kernel.steer import StartedTurnInputGroup
+from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind, ContextBindingBaseKind,
+    FrozenProviderInputItem, FrozenProviderInputItemKind,
+)
+from pulsara_agent.scheduling.contracts import ScheduledProvenance
+from pulsara_agent.llm.input import LLMTextPart
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.run_permission import (
@@ -942,27 +952,125 @@ class _RepositoryKernel:
     ) -> bool:
         if row is None:
             return False
-        expected_kind, expected_snapshot, expected_through = (
-            cls._initial_context_binding_values(
-                connection,
-                session_id=session_id,
-                turn_id=turn_id,
-                initial_entry_sequence=initial_entry_sequence,
-            )
-        )
-        return bool(
+        # Revision zero is an immutable fact of its original admission.  A
+        # later idle adoption may advance its predecessor's current revision;
+        # that must not change confirmation of this already committed row.
+        if not (
             str(row["id"]) == revision_id
             and str(row["session_id"]) == session_id
             and str(row["turn_id"]) == turn_id
             and int(row["revision_ordinal"]) == 0
-            and str(row["base_kind"]) == expected_kind
-            and (
-                None
-                if row["context_snapshot_id"] is None
-                else str(row["context_snapshot_id"])
-            )
-            == expected_snapshot
-            and int(row["source_through_sequence"]) == expected_through
+        ):
+            return False
+        source_through = int(row["source_through_sequence"])
+        if str(row["base_kind"]) == "FULL_HISTORY":
+            return (row["context_snapshot_id"] is None
+                    and source_through == initial_entry_sequence - 1)
+        if str(row["base_kind"]) != "SNAPSHOT" or row["context_snapshot_id"] is None:
+            return False
+        snapshot = connection.execute(
+            "SELECT source_through_sequence FROM pulsara_v3.context_snapshots "
+            "WHERE session_id=%s AND id=%s",
+            (session_id, row["context_snapshot_id"]),
+        ).fetchone()
+        return (snapshot is not None
+                and int(snapshot["source_through_sequence"]) == source_through
+                and 0 <= source_through < initial_entry_sequence)
+
+    @classmethod
+    def _started_turn_input_group(
+        cls,
+        connection: Connection,
+        *,
+        session_id: str,
+        turn_id: str,
+        instruction_entry_id: str,
+        entry_ids: tuple[str, ...],
+        canonical_prompts: tuple[FrozenCanonicalPrompt, ...] | None = None,
+        revision_id: str,
+    ) -> StartedTurnInputGroup:
+        """Read the exact original group, independently of subsequent execution."""
+        rows = tuple(connection.execute(
+            "SELECT * FROM pulsara_v3.transcript_entries "
+            "WHERE session_id=%s AND turn_id=%s AND entry_owner_kind='EXECUTED_TURN' "
+            "AND id=ANY(%s) ORDER BY entry_sequence",
+            (session_id, turn_id, list(entry_ids)),
+        ).fetchall())
+        if not rows or tuple(str(row["id"]) for row in rows) != entry_ids:
+            raise ConversationKernelConflict("started request initial entries differ")
+        revision = connection.execute(
+            "SELECT * FROM pulsara_v3.turn_context_binding_revisions "
+            "WHERE session_id=%s AND id=%s",
+            (session_id, revision_id),
+        ).fetchone()
+        if not cls._initial_context_binding_revision_matches(
+            connection, row=revision, session_id=session_id, turn_id=turn_id,
+            revision_id=revision_id, initial_entry_sequence=int(rows[0]["entry_sequence"]),
+        ):
+            raise ConversationKernelConflict("started request initial base differs")
+        assert revision is not None
+        items = []
+        for index, row in enumerate(rows):
+            kind = str(row["entry_kind"])
+            if kind != "USER_MESSAGE":
+                if kind not in {"PLAN_CONTINUATION", "TERMINAL_OBSERVATION"}:
+                    raise ConversationKernelConflict("started request initial entry kind differs")
+                content = cls._content_from_row(row)
+                body = (content.canonical_bytes if isinstance(content, InlineContent)
+                        else PostgresCanonicalBlobStore.read_exact_in_connection(
+                            connection, blob_id=content.blob_id,
+                            expected_digest=content.digest, expected_size=content.size,
+                            expected_workspace_id=str(row["workspace_id"]),
+                            expected_media_type=content.media_type, expected_codec=content.codec,
+                        ))
+                from pulsara_agent.conversation_kernel.reader import (
+                    _project_plan_continuation_storage, _validate_terminal_observation_content,
+                )
+                text = body.decode("utf-8")
+                if kind == "PLAN_CONTINUATION":
+                    text = _project_plan_continuation_storage(row, text)
+                    origin = CanonicalInputOriginKind.PLAN_CONTINUATION
+                    item_kind = FrozenProviderInputItemKind.PLAN_CONTINUATION
+                else:
+                    _validate_terminal_observation_content(body)
+                    origin = None
+                    item_kind = FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+                items.append(FrozenProviderInputItem(
+                    item_kind=item_kind, source_entry_id=str(row["id"]),
+                    source_entry_sequence=int(row["entry_sequence"]), source_turn_id=turn_id,
+                    content=(LLMTextPart(text),), input_origin=origin,
+                ))
+                continue
+            prompt = (hydrate_canonical_prompt_owner(
+                connection, row=row, transcript_entry_id=str(row["id"]),
+            ) if canonical_prompts is None else canonical_prompts[index])
+            # Confirmation reads the canonical body/ref metadata, while the
+            # immutable caller value already carries image payloads.  Re-reading
+            # image blobs here would turn observation damage into a false
+            # failure of the original atomic start.
+            if not canonical_prompt_owner_is_exact(
+                connection, row=row, expected=prompt, transcript_entry_id=str(row["id"]),
+            ):
+                raise ConversationKernelConflict("started request canonical input differs")
+            items.append(FrozenProviderInputItem(
+                item_kind=FrozenProviderInputItemKind.USER,
+                source_entry_id=str(row["id"]),
+                source_entry_sequence=int(row["entry_sequence"]),
+                source_turn_id=turn_id,
+                content=prompt.content.parts,
+                input_origin=CanonicalInputOriginKind(str(row["input_origin"])),
+                scheduled_input=(None if row["scheduled_input"] is None
+                                 else ScheduledProvenance.from_dict(row["scheduled_input"])),
+            ))
+        return StartedTurnInputGroup(
+            session_id=session_id, turn_id=turn_id,
+            instruction_entry_id=instruction_entry_id, ordered_items=tuple(items),
+            predecessor_through_sequence=int(rows[0]["entry_sequence"]) - 1,
+            initial_context_binding_revision_id=revision_id,
+            initial_base_kind=ContextBindingBaseKind(str(revision["base_kind"])),
+            initial_context_snapshot_id=(None if revision["context_snapshot_id"] is None
+                                         else str(revision["context_snapshot_id"])),
+            initial_source_through_sequence=int(revision["source_through_sequence"]),
         )
 
     @staticmethod

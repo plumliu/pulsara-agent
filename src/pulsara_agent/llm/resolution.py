@@ -83,6 +83,25 @@ def resolve_model_target(
         connection=connection,
         route_wires=route_wires,
     )
+    return resolve_observed_model_target(
+        connection=connection,
+        binding=binding,
+        contract=contract,
+        registry=registry,
+    )
+
+
+def resolve_observed_model_target(
+    *,
+    connection: ModelConnectionConfig,
+    binding: ModelCallBinding,
+    contract: ModelTargetContract,
+    registry: NormalizedLLMTransportRegistry,
+) -> ResolvedModelTarget:
+    """Construct a target from one already-frozen resolution observation."""
+
+    if binding.connection_id != connection.id or contract.key != connection.target:
+        raise ModelTargetBindingMismatch("observed target differs from connection")
     validate_reasoning_selection(contract.reasoning, binding.reasoning)
     try:
         transport = registry.get(contract.key.wire_api.value)
@@ -244,6 +263,7 @@ __all__ = [
     "rebind_model_target",
     "resolve_model_call",
     "resolve_model_target",
+    "resolve_observed_model_target",
     "with_call_output_cap",
     "resolve_wire_output_tokens",
 ]

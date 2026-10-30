@@ -4,12 +4,13 @@ from __future__ import annotations
 from pulsara_agent.identity import random_id
 import asyncio
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 from time import monotonic
 import shutil
 import pytest
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.llm.input import PromptContent
+from pulsara_agent.llm.input import FrozenPromptContent, PromptContent
 from pulsara_agent.scheduling.service import ScheduledTaskService
 from pulsara_agent.scheduling.contracts import ScheduledTriggerSource
 from pulsara_agent.tool_permission import default_permission_policy
@@ -31,14 +32,14 @@ async def settled(check):
             await asyncio.sleep(0.01)
 
 
-async def setup(tmp_path, db, monkeypatch, port):
+async def setup(tmp_path, db, monkeypatch, port, *, runtime=None):
     import pulsara_agent.conversation_kernel.host as host
 
     monkeypatch.setattr(host, "DirectKernelModelPort", lambda **_: port)
     monkeypatch.setattr(
         host.LocalMcpManagementService, "load_configs", lambda *a, **k: ()
     )
-    runtime = test_model_runtime(postgres_dsn=db.runtime_dsn)
+    runtime = runtime or test_model_runtime(postgres_dsn=db.runtime_dsn)
     root = tmp_path / "workspace"
     root.mkdir()
     core = KernelHostCore.production(model_runtime=runtime)
@@ -536,12 +537,45 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
     tmp_path, stage2_migrated_postgres_database, monkeypatch
 ):
     async def scenario():
+        from pulsara_agent.conversation_kernel.compaction.contracts import (
+            ResolvedCompactionPolicy,
+        )
+        from tests.test_round9_2_hook_integration_postgres import (
+            _CompactionSummaryExecution,
+            _tool_stream,
+        )
+
+        class SummaryTransport:
+            def __init__(self):
+                self.calls = []
+
+            def open_stream(self, *, call, context):
+                del call
+                self.calls.append(context)
+                execution = _CompactionSummaryExecution(
+                    "Prior scheduled reports checked the workspace."
+                )
+                if len(self.calls) == 1:
+                    execution._items[:0] = _tool_stream(
+                        "exec_process", "summary:forbidden", {}
+                    )
+                return execution
+
         class SummaryPort(_DogfoodModelPort):
             def __init__(self):
                 self.started = asyncio.Event()
                 self.release = asyncio.Event()
                 self.pausing = None
+                self.summary = SummaryTransport()
                 super().__init__()
+
+            def resolve_compaction_summary_call(self, **kwargs):
+                call = self._delegate.resolve_compaction_summary_call(**kwargs)
+                self.summary.binding_id = call.target.transport.binding_id
+                self.summary.contract_version = call.target.transport.contract_version
+                call = replace(call, target=replace(call.target, transport=self.summary))
+                self.model_runtime.register_test_call_override(call)
+                return call
 
             def __getattr__(self, name):
                 return getattr(self._delegate, name)
@@ -579,28 +613,23 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
         port = SummaryPort()
         port.model_runtime = port._delegate.model_runtime
         port.transport_timeout_policy = port._delegate.transport_timeout_policy
-        from pulsara_agent.conversation_kernel.compaction.model_call import (
-            PreparedCompactionSummaryCall,
-            RawCompactionSummaryResponse,
-        )
-        from pulsara_agent.llm.input import LLMToolCall
-
-        summary_calls = []
-
-        async def summary(call):
-            summary_calls.append(call.semantic.semantic_input)
-            return RawCompactionSummaryResponse(
-                "Prior scheduled reports checked the workspace.",
-                (LLMToolCall(id="summary:forbidden", name="exec_process", arguments="{}"),)
-                if len(summary_calls) == 1
-                else (),
-            )
-
-        monkeypatch.setattr(PreparedCompactionSummaryCall, "open_once", summary)
+        summary_calls = port.summary.calls
         core, sessions, service, h, _ = await setup(
-            tmp_path, stage2_migrated_postgres_database, monkeypatch, port
+            tmp_path, stage2_migrated_postgres_database, monkeypatch, port,
+            runtime=test_model_runtime(
+                postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
+                model_id="test-pro", wire_api="openai_chat_completions",
+            ),
         )
+        from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
+
+        port._delegate._model_runtime = core._model_runtime
+        port._delegate._preparer = DirectKernelModelPort(model_runtime=core._model_runtime)
+        port.model_runtime = core._model_runtime
         try:
+            h.session._compaction.policy = ResolvedCompactionPolicy(
+                automatic_enabled=False, minimum_reclaim_tokens=1
+            )
             task = await create(
                 service, h.session, prompt="Saved report context. " * 1500
             )
@@ -652,6 +681,14 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 action="update",
                 values=values,
             )
+            usage = await h.session.read_context_usage()
+            ratio = float(usage["input_tokens"]) / int(usage["input_budget_tokens"])
+            h.session._compaction.policy = replace(
+                h.session._compaction.policy,
+                automatic_enabled=True,
+                auto_trigger_ratio=ratio * 0.95,
+                post_compaction_target_ratio=ratio * 0.85,
+            )
             port.pausing = {
                 "action": "pause",
                 "target": {"kind": "SCHEDULE", "task_id": task["id"]},
@@ -669,17 +706,25 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 ),
             )
             await asyncio.wait_for(port.started.wait(), 15)
-            compact = asyncio.create_task(
-                h.session.compact_context(command_id='command:d5eueadedp3fbgc446jlz5lefa', force=True)
-            )
+            # Automatic summary and its repair finish before this scheduled
+            # request's first ordinary call can issue the Schedule pause tool.
+            assert len(summary_calls) == 2
+            active_turn = h.session.active_root_turn_id()
+            assert active_turn is not None
+            from tests.test_compaction_request_start_integration import _rows
 
-            async def registered():
-                return bool(h.session._compaction._manual)
-
-            await settled(registered)
+            adopted = _rows(
+                h.session,
+                "SELECT r.revision_ordinal FROM pulsara_v3.turns t "
+                "JOIN pulsara_v3.turn_context_binding_revisions r "
+                "ON r.session_id=t.session_id "
+                "AND r.id=t.current_context_binding_revision_id "
+                "WHERE t.session_id=%s AND t.id=%s",
+                (h.session_id, active_turn),
+            )[0]
+            assert adopted["revision_ordinal"] == 1
+            assert (await service.get(task["id"]))["status"] == "ACTIVE"
             port.release.set()
-            outcome = await compact
-            assert outcome.disposition.value == "COMPACTED", outcome
 
             async def quiet():
                 return h.session._active_task is None
@@ -721,8 +766,8 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 maximum_control_items=128,
                 deadline_monotonic=monotonic() + 30,
             )
-            # A pre-compaction fork owns copied typed rows; a post-compaction
-            # fork owns the snapshot plus its suffix, and source is in the carrier.
+            # The forks preserve typed scheduled provenance in copied history
+            # and in the exact current-request suffix after the snapshot.
             before_child = sessions._by_session[
                 historical_child["child_session_id"]
             ].session
@@ -752,12 +797,23 @@ def test_scheduled_source_survives_real_compaction_fork_and_parent_deletion(
                 port._delegate.requests[-1].cut,
                 deadline_monotonic=monotonic() + 30,
             )
-            retained = canonical.snapshot_carrier.retained_historical_requests
-            assert any(
-                r.input_origin.value == "SCHEDULED_TASK"
-                and r.scheduled_input.task_id == task["id"]
-                and r.scheduled_input.trigger_source is ScheduledTriggerSource.RUN_ONCE
-                for r in retained
+            facts = canonical.dispatch_read.compile_snapshot
+            scheduled_suffix = tuple(
+                item for item in facts.canonical_input.items
+                if item.input_origin is not None
+                and item.input_origin.value == "SCHEDULED_TASK"
+            )
+            assert len(scheduled_suffix) == 1
+            scheduled_request = scheduled_suffix[0]
+            assert scheduled_request.scheduled_input.task_id == task["id"]
+            assert (
+                scheduled_request.scheduled_input.trigger_source
+                is ScheduledTriggerSource.RUN_ONCE
+            )
+            assert scheduled_request.content == FrozenPromptContent.text(task["prompt"]).parts
+            assert (
+                scheduled_request.source_entry_sequence
+                > facts.context_binding_fact.source_through_sequence
             )
             assert all(
                 r.input_origin.value != "SCHEDULED_TASK"

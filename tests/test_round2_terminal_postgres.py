@@ -21,7 +21,6 @@ from pulsara_agent.conversation_kernel.reader import (
 )
 from pulsara_agent.conversation_kernel.steer import (
     PreparedActiveRootInputAdmission,
-    PreparedRootProviderInputAdmission,
 )
 from pulsara_agent.model_input.contracts import (
     STRUCTURED_MODEL_INPUT_LIMITS,
@@ -119,7 +118,7 @@ def _provider_input_admission(
     repository: ConversationKernelRepository,
     lease,
     candidate: TerminalObservationInstallationAttempt,
-) -> PreparedActiveRootInputAdmission | PreparedRootProviderInputAdmission:
+) -> PreparedActiveRootInputAdmission | None:
     if isinstance(candidate.target, ExistingTurnInstallation):
         prospective = (
             repository.prepare_active_terminal_observation_provider_input_candidate(
@@ -131,16 +130,7 @@ def _provider_input_admission(
         admission = object.__new__(PreparedActiveRootInputAdmission)
         object.__setattr__(admission, "candidate", prospective)
         return admission
-    prospective = (
-        repository.prepare_new_terminal_observation_provider_input_candidate(
-            lease.guard,
-            candidate=candidate,
-            deadline_monotonic=monotonic() + 30,
-        )
-    )
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", prospective)
-    return admission
+    return None
 
 
 def test_round2_existing_turn_observation_is_atomic_and_rematerializes_untrusted(
@@ -305,6 +295,15 @@ def test_round2_idle_observation_creates_exact_genesis_and_initial_fk_is_strict(
         deadline_monotonic=monotonic() + 30,
     )
     assert accepted.turn_id == target.turn_id
+    group = repository.read_started_turn_input_group(
+        lease.guard, turn_id=target.turn_id, deadline_monotonic=monotonic() + 30,
+    )
+    assert len(group.ordered_items) == 1
+    assert group.ordered_items[0].item_kind.value == "TERMINAL_OBSERVATION"
+    assert group.ordered_items[0].input_origin is None
+    assert group.instruction_entry_id == target.initial_entry_id
+    assert group.predecessor_through_sequence == accepted.entry_sequence - 1
+    assert group.initial_context_binding_revision_id == target.context_binding_revision_id
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn) as connection:
         row = connection.execute(
             """

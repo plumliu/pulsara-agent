@@ -108,7 +108,7 @@ def test_compaction_release_authorities_reject_another_adoption_candidate() -> N
                     ),
             confirmation=confirmation,
             candidate=candidate_a,
-            cut=PreparedProviderInputCut('session:cbauiajfisf4gvpdotrq4qgxhq', 'turn:nzc36cttgo7xxki7bcjc7ops7a', "revision:old", 2),
+            cut=PreparedProviderInputCut('session:cbauiajfisf4gvpdotrq4qgxhq', 'turn:nzc36cttgo7xxki7bcjc7ops7a', "revision:old", 0),
             destination=SimpleNamespace(  # type: ignore[arg-type]
                 session_id='session:cbauiajfisf4gvpdotrq4qgxhq', turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a'
             ),

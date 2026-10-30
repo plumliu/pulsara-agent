@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
-from pulsara_agent.conversation_kernel.repository_errors import PreparedRootInputHeadStale
 
 import asyncio
-from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Callable, Protocol
+
+from psycopg import InterfaceError, OperationalError
 
 from pulsara_agent.conversation_kernel.cancellation import (
     ActiveTurnCancellationIntent,
@@ -22,6 +22,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
+    AcceptedRootTurnAdmission,
     ConversationKernelConflict,
     ConversationKernelRepository,
     PreparedRootTurnIntent,
@@ -29,9 +30,6 @@ from pulsara_agent.conversation_kernel.repository import (
     TurnAdmissionConfirmationKind,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
-from pulsara_agent.conversation_kernel.steer import (
-    PreparedRootProviderInputAdmission,
-)
 from pulsara_agent.conversation_kernel.todo_runtime import (
     PreparedTodoRootRunActivation,
     build_root_activation,
@@ -77,10 +75,14 @@ class TurnAdmissionCoordinator:
         self,
         intent: PreparedRootTurnIntent,
         *,
-        provider_input_admission: PreparedRootProviderInputAdmission,
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
         cancellation_intent: ActiveTurnCancellationIntent,
-    ) -> AcceptedEntry:
+    ) -> AcceptedRootTurnAdmission:
+        """Start the canonical request independently of provider preparation.
+
+        The shield joins the one physical start/finalization owner after stop
+        or close.  It does not grant permission to continue model execution.
+        """
         if self._workspace_gate is not None:
             self._workspace_gate.require_available()
         activation = build_root_activation(
@@ -91,65 +93,73 @@ class TurnAdmissionCoordinator:
             exact_initial_entry_id=intent.entry_id,
             exact_context_binding_revision_id=intent.context_binding_revision_id,
         )
-        try:
-            outcome = await self._io.run(
-                self._repository.accept_root_turn_intent,
-                self._writer_lease.guard,
+        cancellation_requested = asyncio.Event()
+        settlement = asyncio.create_task(
+            self._accept_root_intent_worker(
                 intent=intent,
-                provider_input_admission=provider_input_admission,
-                model_resolution_snapshot=model_resolution_snapshot,
-                deadline_monotonic=self._deadline(),
-            )
-        except asyncio.CancelledError as cancellation:
-            await self._settle_root_intent(
-                intent=intent,
-                provider_input_admission=provider_input_admission,
                 model_resolution_snapshot=model_resolution_snapshot,
                 activation=activation,
-                reissue_allowed=False,
-                cancellation_requested=True,
                 cancellation_intent=cancellation_intent,
-            )
-            raise cancellation
-        except BaseException as error:
-            accepted = await self._settle_root_intent(
-                intent=intent,
-                provider_input_admission=provider_input_admission,
-                model_resolution_snapshot=model_resolution_snapshot,
-                activation=activation,
-                reissue_allowed=True,
-                cancellation_requested=False,
-                cancellation_intent=cancellation_intent,
-                stale_input=(
-                    error if isinstance(error, PreparedRootInputHeadStale) else None
-                ),
-            )
-            if accepted is None:
-                raise ConversationKernelConflict("ROOT turn admission did not settle")
-            return accepted
+                cancellation_requested=cancellation_requested,
+            ),
+            name=f"kernel-root-start:{intent.turn_id}",
+        )
         try:
-            await self._finalize_todo(activation, outcome.accepted)
-        except asyncio.CancelledError as cancellation:
-            await self.interrupt_turn(
-                outcome.accepted.turn_id,
-                reason=root_cancellation_terminal_reason(cancellation_intent),
+            outcome = await _await_shielded(
+                settlement, on_cancelled=cancellation_requested.set,
             )
-            raise cancellation
-        return outcome.accepted
+        except asyncio.CancelledError:
+            if not settlement.cancelled() and settlement.exception() is None:
+                outcome = settlement.result()
+                if outcome is not None:
+                    await self.interrupt_turn(
+                        intent.turn_id,
+                        reason=root_cancellation_terminal_reason(cancellation_intent),
+                    )
+            raise
+        if cancellation_intent.cause is not None:
+            if outcome is not None:
+                await self.interrupt_turn(
+                    intent.turn_id,
+                    reason=root_cancellation_terminal_reason(cancellation_intent),
+                )
+            raise asyncio.CancelledError
+        if outcome is None:
+            raise asyncio.CancelledError
+        return outcome
 
-    async def _settle_root_intent(
+    async def _accept_root_intent_worker(
         self,
         *,
         intent: PreparedRootTurnIntent,
-        provider_input_admission: PreparedRootProviderInputAdmission,
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
         activation: PreparedTodoRootRunActivation,
-        reissue_allowed: bool,
-        cancellation_requested: bool,
         cancellation_intent: ActiveTurnCancellationIntent,
-        stale_input: PreparedRootInputHeadStale | None = None,
-    ) -> AcceptedEntry | None:
+        cancellation_requested: asyncio.Event,
+    ) -> AcceptedRootTurnAdmission | None:
+        original_error: Exception | None = None
         while True:
+            if original_error is None:
+                if cancellation_requested.is_set() or cancellation_intent.cause is not None:
+                    return None
+                try:
+                    outcome = await self._io.run(
+                        self._repository.accept_root_turn_intent,
+                        self._writer_lease.guard,
+                        intent=intent,
+                        model_resolution_snapshot=model_resolution_snapshot,
+                        deadline_monotonic=self._deadline(),
+                    )
+                except StaleHostWriter:
+                    raise
+                except Exception as error:
+                    # Even a deterministic rejection may follow an unknown
+                    # acknowledgement. Confirm the exact original identity once;
+                    # only physical I/O failures permit reissuing a NONE write.
+                    original_error = error
+                else:
+                    await self._finalize_current_start(activation, outcome.accepted, cancellation_intent)
+                    return outcome
             try:
                 confirmation = await self._io.run(
                     self._repository.confirm_root_turn_intent,
@@ -159,56 +169,77 @@ class TurnAdmissionCoordinator:
                 )
             except StaleHostWriter:
                 raise
-            except BaseException:
+            except (TimeoutError, ConnectionError, InterfaceError, OperationalError):
                 await asyncio.sleep(0.05)
                 continue
             if confirmation.kind is TurnAdmissionConfirmationKind.FULL:
                 assert confirmation.accepted is not None
-                await self._finalize_todo(activation, confirmation.accepted)
-                if cancellation_requested:
-                    await self.interrupt_turn(
-                        intent.turn_id,
-                        reason=root_cancellation_terminal_reason(cancellation_intent),
-                    )
-                    return None
-                return confirmation.accepted
+                assert confirmation.started_input_group is not None
+                outcome = AcceptedRootTurnAdmission(
+                    accepted=confirmation.accepted,
+                    started_input_group=confirmation.started_input_group,
+                )
+                await self._finalize_current_start(activation, outcome.accepted, cancellation_intent)
+                return outcome
             if confirmation.kind is TurnAdmissionConfirmationKind.CONFLICT:
                 raise ConversationKernelConflict(
                     "ROOT turn admission has a conflicting winner"
-                )
-            if stale_input is not None:
-                raise stale_input
-            if cancellation_requested or not reissue_allowed:
+                ) from original_error
+            if cancellation_requested.is_set() or cancellation_intent.cause is not None:
                 return None
+            if not isinstance(
+                original_error,
+                (TimeoutError, ConnectionError, InterfaceError, OperationalError),
+            ):
+                assert original_error is not None
+                raise original_error
             if self._workspace_gate is not None:
                 await self._workspace_gate.wait_available()
+            original_error = None
+
+    async def _finalize_current_start(
+        self,
+        activation: PreparedTodoRootRunActivation,
+        accepted: AcceptedEntry,
+        cancellation_intent: ActiveTurnCancellationIntent,
+    ) -> None:
+        """Publish a confirmed start only while its current writer may run it."""
+        try:
             try:
-                outcome = await self._io.run(
-                    self._repository.accept_root_turn_intent,
+                await self._io.run(
+                    self._repository.require_provider_safe_turn,
                     self._writer_lease.guard,
-                    intent=intent,
-                    provider_input_admission=provider_input_admission,
-                    model_resolution_snapshot=model_resolution_snapshot,
+                    turn_id=accepted.turn_id,
                     deadline_monotonic=self._deadline(),
                 )
-            except PreparedRootInputHeadStale as error:
-                # Confirm the exact immutable command before retiring its input.
-                stale_input = error
-                continue
-            except StaleHostWriter:
+            except ConversationKernelConflict:
+                status = await self._io.run(
+                    self._repository.read_turn_status,
+                    session_id=self._writer_lease.guard.session_id,
+                    turn_id=accepted.turn_id,
+                    deadline_monotonic=self._deadline(),
+                )
+                if status in {TurnStatus.COMPLETED, TurnStatus.INTERRUPTED}:
+                    # The immutable FULL admission remains true. A terminal
+                    # winner has no new TODO activation or public active target.
+                    return
                 raise
-            except BaseException:
-                continue
-            await self._finalize_todo(activation, outcome.accepted)
-            return outcome.accepted
-
-
-
+        except StaleHostWriter:
+            # The replacement writer owns canonical takeover settlement.
+            raise
+        except BaseException:
+            await self.interrupt_turn(
+                accepted.turn_id,
+                reason=root_cancellation_terminal_reason(cancellation_intent),
+            )
+            raise
+        await self._finalize_todo(activation, accepted, cancellation_intent)
 
     async def _finalize_todo(
         self,
         prepared: PreparedTodoRootRunActivation,
         accepted: AcceptedEntry,
+        cancellation_intent: ActiveTurnCancellationIntent,
     ) -> None:
         if self._todo_finalizer is None:
             return
@@ -218,12 +249,10 @@ class TurnAdmissionCoordinator:
         )
         try:
             await _await_shielded(activation)
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:
+        except BaseException:
             await self.interrupt_turn(
                 accepted.turn_id,
-                reason="FOREGROUND_EXECUTION_INTERRUPTED",
+                reason=root_cancellation_terminal_reason(cancellation_intent),
             )
             raise
 
@@ -295,13 +324,19 @@ def root_cancellation_terminal_reason(
     return "FOREGROUND_EXECUTION_INTERRUPTED"
 
 
-async def _await_shielded(task: asyncio.Task[object]) -> object:
+async def _await_shielded(
+    task: asyncio.Task[object],
+    *,
+    on_cancelled: Callable[[], None] | None = None,
+) -> object:
     cancellation: asyncio.CancelledError | None = None
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError as exc:
             cancellation = exc
+            if on_cancelled is not None:
+                on_cancelled()
             continue
         except BaseException:
             break

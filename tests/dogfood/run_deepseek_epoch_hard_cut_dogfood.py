@@ -80,7 +80,7 @@ async def _run() -> dict[str, object]:
             await catalog.refresh()
             delegate = ModelRuntime.production(settings=injected, catalog=catalog)  # type: ignore[arg-type]
             calls: list[dict[str, object]] = []
-            runtime = _RecordingModelRuntime(delegate, calls, None)
+            runtime = _RecordingModelRuntime(delegate, calls)
             core = KernelHostCore.production(model_runtime=runtime)  # type: ignore[arg-type]
             try:
                 session = await core.open_session(
@@ -144,7 +144,6 @@ async def _run() -> dict[str, object]:
                 )
                 compaction = await session.compact_context(
                     command_id=random_id("command"),
-                    force=True,
                 )
                 await session.update_model_call_binding(_binding(delegate, responses))
                 first_call = len(calls)

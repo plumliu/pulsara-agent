@@ -83,7 +83,7 @@ from pulsara_agent.primitives.plan_workflow import (
     require_plan_interaction_contract,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
-from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection
+from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection, StartedTurnInputGroup
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
 )
@@ -306,6 +306,7 @@ class PreparedRootTurnIntent:
 @dataclass(frozen=True, slots=True)
 class AcceptedRootTurnAdmission:
     accepted: AcceptedEntry
+    started_input_group: StartedTurnInputGroup
     reasoning_preference_reset: bool = False
 
 
@@ -315,6 +316,7 @@ class AcceptedRootTurnAdmission:
 class TurnAdmissionConfirmation:
     kind: TurnAdmissionConfirmationKind
     accepted: AcceptedEntry | None = None
+    started_input_group: StartedTurnInputGroup | None = None
 
     def __post_init__(self) -> None:
         carries_entry = self.kind in {
@@ -323,6 +325,8 @@ class TurnAdmissionConfirmation:
         }
         if carries_entry != (self.accepted is not None):
             raise ValueError("turn admission confirmation union is invalid")
+        if carries_entry != (self.started_input_group is not None):
+            raise ValueError("turn admission confirmation input group is invalid")
 
 
 @dataclass(frozen=True, slots=True)

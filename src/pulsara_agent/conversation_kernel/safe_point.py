@@ -11,7 +11,6 @@ from pulsara_agent.conversation_kernel.contracts import HostWriterGuard
 from pulsara_agent.conversation_kernel.steer import (
     PreparedActiveRootInputAdmission,
     PreparedActiveRootInputCandidate,
-    PreparedRootProviderInputAdmission,
 )
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
@@ -26,6 +25,8 @@ from pulsara_agent.conversation_kernel.tool_surface import (
 )
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
 from pulsara_agent.ports.terminal_observation import (
+    ExistingTurnInstallation,
+    NewTurnInstallation,
     PreparedInstallationTarget,
     TerminalObservationInstallationAttempt,
 )
@@ -719,14 +720,22 @@ class ProviderSafePointCoordinator:
         *,
         coordinator: TerminalMonitorCoordinator,
         attempt: TerminalObservationInstallationAttempt,
-        provider_input_admission: (
-            PreparedActiveRootInputAdmission | PreparedRootProviderInputAdmission
-        ),
+        provider_input_admission: PreparedActiveRootInputAdmission | None,
         deadline_monotonic: float,
     ) -> AcceptedEntry:
-        """Publish one already-measured Terminal observation exactly once."""
+        """Publish an exact observation; only an active suffix needs admission."""
 
         with self._lock:
+            if isinstance(attempt.target, ExistingTurnInstallation):
+                if handle is None or not isinstance(
+                    provider_input_admission, PreparedActiveRootInputAdmission
+                ):
+                    raise ValueError("active terminal observation requires its input admission")
+            elif isinstance(attempt.target, NewTurnInstallation):
+                if handle is not None or provider_input_admission is not None:
+                    raise ValueError("new terminal turn starts before provider preparation")
+            else:
+                raise TypeError("terminal observation target is not closed")
             if handle is not None:
                 self._require_current(handle)
                 if handle._model_active:

@@ -24,6 +24,7 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     FrozenRetainedHistoricalRequest,
     ProviderPrefixCutProof,
     canonical_compaction_range_digest,
+    freeze_compaction_canonical_range,
     compaction_summary_message_prefix_fingerprint,
 )
 from pulsara_agent.conversation_kernel.compaction.planner import (
@@ -190,11 +191,22 @@ class DestinationProjectionSummarySourceProof:
             self._seal is not _COMPACTION_SUMMARY_SOURCE_SEAL
             or self.effective_input_budget_tokens < 1
             or not 0 < self.resolved_trigger_tokens < self.effective_input_budget_tokens
-            or self.source_through_sequence
-            != source.safe_head_range.source_through_sequence
+            or not source.safe_head_range.effective_materialization_lineage_floor
+            <= self.source_through_sequence
+            <= source.safe_head_range.source_through_sequence
             or self.cumulative_source_digest
             != canonical_compaction_range_digest(
-                source.lineage_base, source.safe_head_range
+                source.lineage_base,
+                freeze_compaction_canonical_range(
+                    scope=source.scope,
+                    effective_materialization_lineage_floor=(
+                        source.safe_head_range.effective_materialization_lineage_floor
+                    ),
+                    source_through_sequence=self.source_through_sequence,
+                    ordered_items=source.safe_head_range.ordered_items,
+                    closures=source.safe_head_range.closures,
+                    late_outcomes=source.safe_head_range.late_outcomes,
+                ),
             )
             or self.projection_message_ordinal < 0
             or self.source_projection.canonical_input_identity
@@ -211,12 +223,24 @@ class DestinationProjectionSummarySourceProof:
                 raise ValueError("destination-projection summary proof is invalid")
         elif (
             source.turn_status != "RUNNING"
-            or active.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
-            or active.content is None
             or active.entry_id
             != source.dispatch_read.compile_snapshot.canonical_input.identity.initial_entry_id
-            or self.active_request_message_ordinal
-            != self.projection_message_ordinal + 1
+            or (
+                active.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+                and (
+                    active.content is None
+                    or self.active_request_message_ordinal
+                    != self.projection_message_ordinal + 1
+                )
+            )
+            or (
+                active.location is CompactionActiveRequestLocation.CANONICAL_SUFFIX
+                and (
+                    active.content is not None
+                    or active.entry_sequence <= self.source_through_sequence
+                    or self.active_request_message_ordinal is not None
+                )
+            )
         ):
             raise ValueError("destination-projection summary proof is invalid")
 
@@ -334,7 +358,10 @@ class PreparedCompactionSummarySemantic:
                 raise ValueError(
                     "destination-projection summary proof does not exact-join"
                 )
-            if proof.active_request is None:
+            if proof.active_request is None or (
+                proof.active_request.location
+                is CompactionActiveRequestLocation.CANONICAL_SUFFIX
+            ):
                 if active_ordinal is not None or active_placement is not None:
                     raise ValueError(
                         "destination-projection summary proof does not exact-join"
@@ -636,7 +663,9 @@ def _destination_source_messages_and_active_placement(
     tuple[FrozenCompiledMessagePlacement, ...],
     FrozenCompiledMessagePlacement | None,
 ]:
-    if active_request is None:
+    if active_request is None or (
+        active_request.location is CompactionActiveRequestLocation.CANONICAL_SUFFIX
+    ):
         active_matches: tuple[
             tuple[LLMMessage, FrozenCompiledMessagePlacement], ...
         ] = ()
@@ -650,10 +679,14 @@ def _destination_source_messages_and_active_placement(
             )
             if placement.origin_entry_id == active_request.entry_id
         )
-    if active_request is not None and (
-        len(active_matches) != 1
-        or active_request.content is None
-        or active_matches[0][0] != _active_request_message(active_request)
+    if (
+        active_request is not None
+        and (active_request.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT)
+        and (
+            len(active_matches) != 1
+            or active_request.content is None
+            or active_matches[0][0] != _active_request_message(active_request)
+        )
     ):
         raise ValueError("destination active request has no exact source placement")
     current: list[tuple[LLMMessage, FrozenCompiledMessagePlacement]] = []
@@ -676,7 +709,7 @@ def _destination_source_messages_and_active_placement(
     return (
         current_messages,
         current_placements,
-        None if active_request is None else active_matches[0][1],
+        None if not active_matches else active_matches[0][1],
     )
 
 
@@ -708,6 +741,7 @@ def prepare_destination_projection_summary_semantic(
     active_request: FrozenCompactionActiveRequest | None,
     summary_request: str,
     resolved_trigger_tokens: int,
+    source_through_sequence: int | None = None,
 ) -> PreparedCompactionSummarySemantic:
     """Build one sealed B summary source without impersonating installed replay."""
 
@@ -735,11 +769,23 @@ def prepare_destination_projection_summary_semantic(
             raise ValueError("destination projection summary inputs do not exact-join")
     elif (
         canonical_source.turn_status != "RUNNING"
-        or active_request.location is not CompactionActiveRequestLocation.SNAPSHOT_EXACT
-        or active_request.content is None
         or active_request.entry_id != identity.initial_entry_id
-        or active_request_placement is None
-        or active_request_placement.origin_entry_id != active_request.entry_id
+        or (
+            active_request.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+            and (
+                active_request.content is None
+                or active_request_placement is None
+                or active_request_placement.origin_entry_id != active_request.entry_id
+            )
+        )
+        or (
+            active_request.location is CompactionActiveRequestLocation.CANONICAL_SUFFIX
+            and (
+                source_through_sequence is None
+                or active_request.entry_sequence <= source_through_sequence
+                or active_request_placement is not None
+            )
+        )
     ):
         raise ValueError("destination projection summary inputs do not exact-join")
     normalized_source_placements = tuple(
@@ -765,7 +811,9 @@ def prepare_destination_projection_summary_semantic(
         ),
     ]
     active_ordinal: int | None = None
-    if active_request is not None:
+    if active_request is not None and (
+        active_request.location is CompactionActiveRequestLocation.SNAPSHOT_EXACT
+    ):
         assert active_request_placement is not None
         active_ordinal = len(message_values)
         message_values.append(_active_request_message(active_request))
@@ -784,9 +832,23 @@ def prepare_destination_projection_summary_semantic(
     )
     messages = tuple(message_values)
     placements = tuple(placement_values)
+    source_boundary = (
+        canonical_source.safe_head_range.source_through_sequence
+        if source_through_sequence is None
+        else source_through_sequence
+    )
+    source_range = freeze_compaction_canonical_range(
+        scope=canonical_source.scope,
+        effective_materialization_lineage_floor=(
+            canonical_source.safe_head_range.effective_materialization_lineage_floor
+        ),
+        source_through_sequence=source_boundary,
+        ordered_items=canonical_source.safe_head_range.ordered_items,
+        closures=canonical_source.safe_head_range.closures,
+        late_outcomes=canonical_source.safe_head_range.late_outcomes,
+    )
     source_digest = canonical_compaction_range_digest(
-        canonical_source.lineage_base,
-        canonical_source.safe_head_range,
+        canonical_source.lineage_base, source_range
     )
     proof = DestinationProjectionSummarySourceProof(
         canonical_source=canonical_source,
@@ -796,9 +858,7 @@ def prepare_destination_projection_summary_semantic(
         estimator_fact=compile_binding.estimator.fact,
         effective_input_budget_tokens=(compile_binding.effective_input_budget_tokens),
         resolved_trigger_tokens=resolved_trigger_tokens,
-        source_through_sequence=(
-            canonical_source.safe_head_range.source_through_sequence
-        ),
+        source_through_sequence=source_boundary,
         cumulative_source_digest=source_digest,
         projection=projection,
         active_request=active_request,

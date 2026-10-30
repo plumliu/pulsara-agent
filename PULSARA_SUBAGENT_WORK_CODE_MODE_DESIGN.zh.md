@@ -33,7 +33,7 @@ ID 遵循 [统一身份规格](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_I
 
 已有内容原样保留，包括旧请求、消息、工具结果和已采用的压缩摘要；不根据新 Work 重写旧 snapshot、ROOT 消息或 handling。profile 作为独立 user message 放在本次 instruction 前，不拼入通用 SYSTEM，也不作为开启 entry。ROOT 派活的 instruction 是本次 turn 的开启 entry；各份前置 final 分别作为后续 user entry 追加，明确选择的材料同样由接收方持有，不合并改写 instruction。模型沿 context binding 读取有效摘要与尾部；UI 沿同一 Agent scope 分页展示已接纳的 canonical 历史，可以查看压缩前记录。两者共用事实与既有投影，UI 的历史浏览不把旧全文重新塞回模型输入。
 
-Subagent 仅在 bypass-permissions 下使用，不提供独立的权限模式选择或权限确认入口。共同请求接纳时直接继承并冻结发起者 ROOT 的模型连接、模型、reasoning 与 bypass 权限事实。原生派活取该次 ROOT 调用的快照；JS 派活取启动该 cell 的 exec_cell 快照。排队期间设置变化不改变已接纳请求；新派活可取得新的快照。启动时由共同 turn admission 承接这些事实，协作层不增加权限或配置权威。公共接口不提供模型配置枚举工具、独立选模或 reasoning 覆盖参数。
+Subagent 仅在 bypass-permissions 下使用，不提供独立的权限模式选择或权限确认入口。共同请求接纳时直接继承并冻结发起者 ROOT 的完整 `ModelCallBinding`（连接选择与 reasoning）及 bypass 权限事实。原生派活取该次 ROOT 调用的快照；JS 派活取启动该 cell 的 exec_cell 快照。排队期间设置变化不改变已接纳请求；新派活可取得新的快照。实际执行沿现有合法 resolver 观察，不永久冻结 catalog、allowance 或凭据；已安装 epoch 的 target bundle 保持冻结。启动时由共同 turn admission 承接这些事实，协作层不增加权限或配置权威。公共接口不提供模型配置枚举工具、独立选模或 reasoning 覆盖参数。
 
 新请求沿 ROOT 的共同接纳与 provider-input 安装链路进入同一个 Agent scope：目标配置相同时沿已安装 epoch 追加；真正切换模型配置时，复用已有模型切换接纳与测量、合法 cold 边界或已采用的压缩 successor。Work 开始、结束及 profile 变化本身不触发重建。已安装 epoch 内 SYSTEM／tools 字节不变，messages 只追加；压缩和模型切换均使用共同 reader、planner 与 coordinator。
 
@@ -87,11 +87,11 @@ user：D 的 final
 
 native tools 位于 provider 请求的工具定义中。复用已有 B 时，本次 user 消息追加到其有效历史末尾，不插入旧 SYSTEM 后面。前置结果按 `depends_on` 的声明顺序排列，不按完成时间排列；每条正文独立保存、独立呈现为 user 消息。共同 runtime observation 仍可在现有输入准备点插入；需要说明材料来源时，最多追加一条简短说明，指出 instruction 后的前置结果及其顺序，不重复正文或逐条包成 JSON。
 
-请求已接纳时就有稳定 WORK 引用。等待前置期间，结果陆续进入 B 自己的待处理请求材料；全部前置成功且具备执行容量后，才准备并提交本次 turn 的整组 entry，随后首次调用模型。若还有显式 `materials`，同样作为独立输入材料追加。不得先调用模型，再补入本应等待的前置结果。
+请求已接纳时就有稳定 WORK 引用。等待前置期间，结果陆续进入 B 自己的待处理请求材料；全部前置成功且具备执行容量后，由共同启动事务建立真实 RUNNING turn、完整初始 entries、初始 binding revision 和 queue 消费关系，再准备首次 provider 输入。首次准备中的压缩、补充与停止由同一个执行 owner 承接。若还有显式 `materials`，同样作为独立输入材料追加。不得先调用模型，再补入本应等待的前置结果。
 
-共同候选与提交链路分别表示 instruction 的位置和整组输入的末尾位置：按 ID 定位开启 entry，以最后 entry 确定首次输入截止位置，以实际旧历史末尾确定前驱边界。复用现有 reader、compiler、lowering 与接纳事务，冻结、计量、写入并确认整组 entry 的顺序和内容；不能只提交或确认 instruction，也不能用它的序号截掉后续结果。图片能力检查覆盖整组输入。
+共同启动与读取链路分别表示 instruction 和整组输入边界：按 ID 定位开启 entry，从启动确认的实际有序初始 entries 确定组首和组尾，前驱截止为组首 sequence 减一。复用现有 reader、compiler、lowering 与接纳事务，写入并确认整组 entry 的顺序和内容，启动后计量和准备完整输入；不能只提交或确认 instruction，也不能用它的序号截掉后续结果。图片能力检查覆盖整组输入。
 
-profile 与前置结果保留真实的非人类来源，不因使用 user role 而被当作人类请求。压缩沿共同规则定位和保留活动 instruction；profile 与前置结果走普通摘要／尾部处理，不增设精确保留机制。WORK 始终使用原 `queue:` ID，不改成 instruction 的 entry ID 或执行 turn ID。
+profile 与前置结果保留真实的非人类来源，不因使用 user role 而被当作人类请求。首次普通 provider 调用前，压缩仅处理完整初始组之前的历史，整组原文和图片保留为新 turn 的精确 suffix；摘要采用目标是本次 RUNNING turn。首调用后的压缩继续遵守既有当前 instruction 精确保留与普通摘要／尾部处理规则。输入边界与共同 safe point 遵守 [压缩实施规格](PULSARA_COMPACTION_MODEL_CONFIGURATION_AND_MANUAL_IDLE_ONLY_IMPLEMENTATION_SPEC.zh.md)。WORK 始终使用原 `queue:` ID，不改成 instruction 的 entry ID 或执行 turn ID。
 
 ### 1.2 会话种类、展示与检索
 
@@ -872,7 +872,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 |---|---|---|
 | 身份／请求 | ROOT session、`prompt_queue_items`、queue identity | `root_session_id` 外键及索引记录归属，kind 派生而不存储；AGENT 使用完整 `session:`，WORK 使用完整 `queue:`，无额外身份映射 |
 | 接纳／调度 | `_repository/prompts.py`、`turn_admission.py`、Host delivery loop | 按 session 选队首，等待条件属于请求；取得前置正文后清除对应条件；instruction 是 initial／consumed entry，profile 与各结果独立排列，同一事务提交并确认整组；原生和 JS 共用按需加载 |
-| 上下文／模型切换 | ROOT reader、provider dispatch、continuity、compaction 与 UI 历史投影 | 开启 entry 与整组输入末尾分别定位，完整计量并编译有序 suffix；保留真实前驱边界；同 scope 连续追加，压缩按 initial 定位 instruction，profile／结果正常压缩 |
+| 上下文／模型切换 | ROOT reader、provider dispatch、continuity、compaction 与 UI 历史投影 | 开启 entry 与完整初始组分别定位；首调用前仅摘要组首之前的前驱并精确保留整组，之后沿原 instruction 保留与普通摘要规则；同 scope 连续追加 |
 | 状态／结果 | `_repository/conversation.py` 的请求联查、assistant settlement、turn final／终止原因 | 统一公开投影，无 Work 状态或结果副本；材料与 final 交付时保存为接收方输入，之后不依赖源 session |
 | 等待／停止 | 共同请求／turn 读取、变化通知、队列取消与 ActiveTurnCancellationIntent | WORK 按 queue→entry→turn 处理；AGENT 停止当前工作并取消本次覆盖的排队工作，历史终态不变；与调度竞态共用 owner，返回实际结果 |
 | 消息 | ROOT steer／补充输入、待输入与完成裁决、Hook 上下文接纳 | ROOT／Subagent 均只向活动 turn 接纳 steer；无活动 turn 则工具结果明确返回未接纳，不暂存、不加载、不开启工作；发送与完成竞态由共同 owner 裁决 |

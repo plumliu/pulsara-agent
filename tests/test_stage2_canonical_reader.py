@@ -62,10 +62,6 @@ from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.conversation_kernel.safe_point import (
     ProviderSafePointCoordinator,
 )
-from pulsara_agent.conversation_kernel.steer import (
-    PreparedRootProviderInputAdmission,
-    PreparedRootProviderInputCandidate,
-)
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItemKind,
@@ -95,14 +91,6 @@ from tests.support.model_config import (
 
 
 pytestmark = pytest.mark.postgres
-
-
-def _root_provider_input_admission(
-    candidate: PreparedRootProviderInputCandidate,
-) -> PreparedRootProviderInputAdmission:
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", candidate)
-    return admission
 
 
 def _id(prefix: str) -> str:
@@ -339,9 +327,6 @@ def test_protocol_reader_rebinds_a_large_queue_blob_to_its_exact_consumed_entry(
     consumed = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=candidate,
-        provider_input_admission=_root_provider_input_admission(
-            candidate.provider_input_candidate
-        ),
         deadline_monotonic=deadline,
     )
     assert consumed is not None and consumed.accepted is not None
@@ -813,7 +798,6 @@ def test_reader_preflights_plan_continuation_before_loading_any_payload(
 ) -> None:
     from tests.test_round4_plan_postgres import (
         _commit_plan_batch,
-        _fresh_plan_provider_input_admission,
     )
 
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -841,9 +825,6 @@ def test_reader_preflights_plan_continuation_before_loading_any_payload(
     accepted = repository.accept_plan_tool_batch(
         lease.guard,
         candidate=prepared.candidate,
-        continuation_provider_input_admission=(
-            _fresh_plan_provider_input_admission(repository, lease, prepared.candidate)
-        ),
         deadline_monotonic=monotonic() + 30,
     )
     assert accepted.continuation_turn_id is not None

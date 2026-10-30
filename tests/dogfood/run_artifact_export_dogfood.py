@@ -107,7 +107,7 @@ async def run(args, report):
             await catalog.refresh()
             native = ModelRuntime.production(settings=settings, catalog=catalog)
             records = []
-            runtime = _RecordingModelRuntime(native, records, None)
+            runtime = _RecordingModelRuntime(native, records)
             core = KernelHostCore.production(model_runtime=runtime)
             original_init = DirectKernelToolPort.__init__
 

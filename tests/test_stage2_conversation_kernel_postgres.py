@@ -72,7 +72,6 @@ from pulsara_agent.llm.model_connections import (
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
 from pulsara_agent.conversation_kernel.steer import (
-    PreparedRootProviderInputAdmission,
     PromptIngressConfirmationKind,
     QueuedRootTurnAdmissionConfirmationKind,
     SteerConsumptionConfirmationKind,
@@ -118,11 +117,6 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput, resolve_workspa
 
 pytestmark = pytest.mark.postgres
 
-
-def _root_provider_input_admission(candidate) -> PreparedRootProviderInputAdmission:
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", candidate)
-    return admission
 
 
 def _two_connection_resolution_cut():
@@ -303,17 +297,9 @@ def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
         ),
         occurred_at=datetime.now(timezone.utc),
     )
-    provider_candidate = repository.prepare_root_provider_input_candidate(
-        lease.guard,
-        intent=intent,
-        model_resolution_snapshot=cut,
-        deadline_monotonic=monotonic() + 30,
-    )
-    provider_admission = _root_provider_input_admission(provider_candidate)
     accepted = repository.accept_root_turn_intent(
         lease.guard,
         intent=intent,
-        provider_input_admission=provider_admission,
         model_resolution_snapshot=cut,
         deadline_monotonic=monotonic() + 30,
     )
@@ -332,8 +318,7 @@ def test_direct_root_retry_confirms_turn_binding_not_later_session_choice(
         repository.accept_root_turn_intent(
             lease.guard,
             intent=intent,
-            provider_input_admission=provider_admission,
-            model_resolution_snapshot=cut,
+                model_resolution_snapshot=cut,
             deadline_monotonic=monotonic() + 30,
         ).accepted
         == accepted.accepted
@@ -477,9 +462,6 @@ def test_lightweight_todo_queued_root_admission_has_exact_confirmation(
     consumed = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=candidate,
-        provider_input_admission=_root_provider_input_admission(
-            candidate.provider_input_candidate
-        ),
         deadline_monotonic=monotonic() + 30,
     )
     assert consumed is not None
@@ -1613,9 +1595,6 @@ def test_stage2_prompt_queue_has_stable_fifo_and_frozen_terminal_steer_target(
     consumed = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=candidate,
-        provider_input_admission=_root_provider_input_admission(
-            candidate.provider_input_candidate
-        ),
         deadline_monotonic=deadline,
     )
     assert consumed is not None
@@ -1940,7 +1919,6 @@ def test_round3_1_steer_consumption_ack_confirmation_is_exact(
         scope=ProviderInputContinuityScope(
             session_id=session_id,
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         ),
         canonical_frontier=ProcessLocalCanonicalFrontier(
             latest_context_binding_revision_id=revision_id,
@@ -2074,7 +2052,6 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         scope=ProviderInputContinuityScope(
             session_id=session_id,
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         ),
         canonical_frontier=ProcessLocalCanonicalFrontier(
             latest_context_binding_revision_id=revision_id,
@@ -2111,7 +2088,6 @@ def test_round3_1_steer_consume_rejects_canonical_base_drift_without_mutation(
         workspace_id=workspace_id,
         turn_id=turn_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     snapshot_carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output(
@@ -2462,15 +2438,26 @@ def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=deadline,
     )
+    repository.interrupt_turn(
+        lease.guard, turn_id=turn_id, reason="USER_STOP",
+        occurred_at=datetime.now(timezone.utc), actor_id="test",
+        deadline_monotonic=deadline,
+    )
+    source_cut = repository.prepare_compaction_input_cut(
+        lease.guard, turn_id=turn_id, allow_terminal=True,
+        deadline_monotonic=deadline,
+    )
+    binding = repository.read_session_model_call_binding(
+        lease.guard, deadline_monotonic=deadline,
+    )
     command_id = _name("command")
     candidate = build_prepared_manual_compaction_command(
         session_id=session_id,
         command_id=command_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         target_turn_id=turn_id,
-        expected_active_turn_id=turn_id,
-        force=False,
+        model_call_binding=binding,
+        source_cut=source_cut,
     )
     assert (
         repository.confirm_manual_compaction_command(
@@ -2498,10 +2485,9 @@ def test_round5b_manual_compaction_command_is_exact_and_ack_confirmable(
         session_id=session_id,
         command_id=command_id,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         target_turn_id=turn_id,
-        expected_active_turn_id=turn_id,
-        force=True,
+        model_call_binding=ModelCallBinding(ModelConnectionId(_name("connection")), None),
+        source_cut=source_cut,
     )
     assert (
         repository.confirm_manual_compaction_command(
@@ -2556,7 +2542,6 @@ def test_round5b_next_exact_scope_turn_inherits_latest_snapshot_base(
         workspace_id=workspace_id,
         turn_id=first_turn,
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     snapshot_carrier = build_compaction_snapshot_carrier(
         summary=freeze_compaction_summary_output("old summary", maximum_utf8_bytes=100),

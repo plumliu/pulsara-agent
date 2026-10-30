@@ -48,9 +48,7 @@ from pulsara_agent.llm.model_connections import (
 )
 from pulsara_agent.llm.model_target import default_reasoning_selection
 from pulsara_agent.llm.normalized_transport import NormalizedLLMTransport
-from pulsara_agent.llm.provider_sanitization import sanitize_provider_failure
 from pulsara_agent.llm.resolution import ResolvedModelTarget
-from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.ports.live_agent_event import (
     DataEndPayload,
@@ -59,9 +57,6 @@ from pulsara_agent.ports.live_agent_event import (
     ToolCallEndPayload,
 )
 from pulsara_agent.ports.provider_stream import (
-    ProviderNormalizedTerminalKind,
-    ProviderPhysicalCompletion,
-    ProviderPhysicalCompletionStatus,
     ProviderStreamTerminal,
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
@@ -77,7 +72,7 @@ from pulsara_agent.storage.postgres_connection_provider import (
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 
 
-_SCHEMA_VERSION = "model-switch-handover-dogfood.v2"
+_SCHEMA_VERSION = "model-switch-handover-dogfood.v3"
 _SOURCE_MODEL = "openai/gpt-5.6-luna"
 _DESTINATION_MODEL = "gpt-5.5"
 
@@ -93,53 +88,6 @@ class _ReadOnlySettingsStore:
     # operation-local projection scope used by the GUI adapter.
     capture_credential_mutations = LocalSettingsStore.capture_credential_mutations
     credential_mutation_scrub = LocalSettingsStore.credential_mutation_scrub
-
-
-@dataclass(slots=True)
-class _ForcedSourceSummaryProviderError:
-    connection_id: str
-    used: bool = False
-
-    def applies(self, *, purpose: str, connection_id: str) -> bool:
-        if (
-            self.used
-            or purpose != "context_compaction_summary"
-            or connection_id != self.connection_id
-        ):
-            return False
-        self.used = True
-        return True
-
-
-class _ForcedProviderErrorExecution:
-    def __init__(self) -> None:
-        self._terminal_pending = True
-
-    async def read_next(self):
-        if not self._terminal_pending:
-            return None
-        self._terminal_pending = False
-        return ProviderStreamTerminal(
-            terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
-            usage=TransportUsageReport(usage_status="missing", usage=None),
-            error=sanitize_provider_failure(
-                message="dogfood-injected source provider quota exhaustion",
-                code_hint="429",
-            ),
-        )
-
-    async def request_cancel(self, *, reason: str) -> None:
-        del reason
-        self._terminal_pending = False
-
-    async def aclose(self) -> None:
-        self._terminal_pending = False
-
-    async def wait_physical_completion(self) -> ProviderPhysicalCompletion:
-        return ProviderPhysicalCompletion(
-            ProviderPhysicalCompletionStatus.COMPLETED,
-            None,
-        )
 
 
 class _RecordingExecution:
@@ -207,11 +155,9 @@ class _RecordingTransport:
         self,
         delegate: NormalizedLLMTransport,
         records: list[dict[str, object]],
-        forced_source_summary_error: _ForcedSourceSummaryProviderError | None,
     ) -> None:
         self._delegate = delegate
         self._records = records
-        self._forced_source_summary_error = forced_source_summary_error
         for name in (
             "api",
             "binding_id",
@@ -252,15 +198,6 @@ class _RecordingTransport:
             "terminal": None,
         }
         self._records.append(record)
-        if (
-            self._forced_source_summary_error is not None
-            and self._forced_source_summary_error.applies(
-                purpose=call.fact.purpose.value,
-                connection_id=call.binding.connection_id.value,
-            )
-        ):
-            record["dogfood_injected_source_provider_error"] = True
-            return _RecordingExecution(_ForcedProviderErrorExecution(), record)
         return _RecordingExecution(
             self._delegate.open_stream(call=call, context=context), record
         )
@@ -271,11 +208,9 @@ class _RecordingModelRuntime:
         self,
         delegate: ModelRuntime,
         records: list[dict[str, object]],
-        forced_source_summary_error: _ForcedSourceSummaryProviderError | None,
     ) -> None:
         self._delegate = delegate
         self._records = records
-        self._forced_source_summary_error = forced_source_summary_error
         self.settings = delegate.settings
         self.catalog = delegate.catalog
         self.route_wires = delegate.route_wires
@@ -302,9 +237,14 @@ class _RecordingModelRuntime:
             transport=_RecordingTransport(
                 target.transport,
                 self._records,
-                self._forced_source_summary_error,
             ),
         )
+
+    def resolve_snapshot_target(self, binding, *, resolution_snapshot, timeout_policy):
+        target = self._delegate.resolve_snapshot_target(
+            binding, resolution_snapshot=resolution_snapshot, timeout_policy=timeout_policy,
+        )
+        return replace(target, transport=_RecordingTransport(target.transport, self._records))
 
     def resolve_frozen_target_bundle(self, bundle, *, binding, timeout_policy):
         return self._delegate.resolve_frozen_target_bundle(
@@ -318,7 +258,6 @@ class _RecordingModelRuntime:
         return _RecordingBorrowedTransport(
             borrowed,
             self._records,
-            self._forced_source_summary_error,
         )
 
     def assert_no_provider_borrows(self, *, session_id: str, turn_id: str) -> None:
@@ -334,14 +273,12 @@ class _RecordingBorrowedTransport:
         self,
         delegate,
         records: list[dict[str, object]],
-        forced_source_summary_error: _ForcedSourceSummaryProviderError | None,
     ) -> None:
         self._delegate = delegate
         self.call = delegate.call
         self._transport = _RecordingTransport(
             delegate.call.target.transport,
             records,
-            forced_source_summary_error,
         )
 
     def open_stream(self, *, context):
@@ -434,27 +371,12 @@ async def _seed_completed_history(
             actor_id="model-switch-dogfood",
         )
         resolution_snapshot = session._model_runtime.freeze_resolution_snapshot()  # noqa: SLF001
-        candidate = repository.prepare_root_provider_input_candidate(
+        repository.accept_root_turn_intent(
             guard,
             intent=intent,
             model_resolution_snapshot=resolution_snapshot,
             deadline_monotonic=monotonic() + 60,
         )
-        prepared = await session._runner._provider_dispatch.prepare_prospective_root_input(  # noqa: SLF001
-            candidate=candidate,
-            inherited_memory_use_policy=session._runner._root_memory_use_policy,  # noqa: SLF001
-            deadline=monotonic() + 60,
-        )
-        try:
-            repository.accept_root_turn_intent(
-                guard,
-                intent=intent,
-                provider_input_admission=prepared.admission,
-                model_resolution_snapshot=resolution_snapshot,
-                deadline_monotonic=monotonic() + 60,
-            )
-        finally:
-            prepared.close()
         cut = repository.prepare_provider_input_cut(
             guard,
             turn_id=turn_id,
@@ -553,7 +475,6 @@ async def _run(
     segments: int,
     repetitions: int,
     calls: list[dict[str, object]],
-    force_source_summary_provider_error: bool,
 ) -> dict[str, object]:
     saved = LocalSettingsStore().read()
     source = _find_connection(saved, source_model)
@@ -584,16 +505,7 @@ async def _run(
                 settings=settings_store,
                 catalog=catalog,
             )
-            forced_source_summary_error = (
-                _ForcedSourceSummaryProviderError(source.id.value)
-                if force_source_summary_provider_error
-                else None
-            )
-            runtime = _RecordingModelRuntime(
-                delegate,
-                calls,
-                forced_source_summary_error,
-            )
+            runtime = _RecordingModelRuntime(delegate, calls)
             source_binding = _binding(delegate, source)
             destination_binding = _binding(delegate, destination)
             source_target = delegate.freeze_resolution_snapshot().validate(
@@ -602,11 +514,6 @@ async def _run(
             destination_target = delegate.freeze_resolution_snapshot().validate(
                 destination_binding
             ).target
-            if (
-                source_target.target_facts.limits.total_context_tokens
-                <= destination_target.target_facts.limits.total_context_tokens
-            ):
-                raise RuntimeError("source context is not larger than destination")
             core = KernelHostCore.production(model_runtime=runtime)  # type: ignore[arg-type]
             try:
                 session = await core.open_session(
@@ -683,10 +590,7 @@ async def _run(
                     if item["purpose"] == "agent_model_loop"
                     and item["model_id"] == destination_model
                 )
-                model_switch_tiers = tuple(
-                    getattr(item, "model_switch_tier", None)
-                    for item in switch_results
-                )
+                switch_outcomes = tuple(item.outcome.disposition.value for item in switch_results)
                 destination_tool_call_count = sum(
                     1
                     for item in destination_calls
@@ -696,12 +600,7 @@ async def _run(
                 destination_tool_result_count = int(
                     evidence["tool_result_count"]
                 ) - int(before_switch_evidence["tool_result_count"])
-                expected_tier = 3 if force_source_summary_provider_error else 2
-                expected_summary_models = (
-                    (source_model, destination_model)
-                    if force_source_summary_provider_error
-                    else (source_model,)
-                )
+                expected_summary_models = (destination_model,)
                 report: dict[str, object] = {
                     "schema_version": _SCHEMA_VERSION,
                     "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -728,11 +627,8 @@ async def _run(
                     "model_call_purposes": dict(purposes),
                     "normal_model_sequence": normal_models,
                     "summary_model_sequence": summary_models,
-                    "model_switch_tiers": model_switch_tiers,
+                    "model_switch_outcomes": switch_outcomes,
                     "presentation_notices": presentation_notices,
-                    "forced_source_summary_provider_error": (
-                        force_source_summary_provider_error
-                    ),
                     "destination_tool_call_count": destination_tool_call_count,
                     "destination_tool_result_count": destination_tool_result_count,
                     "database_evidence_before_switch": before_switch_evidence,
@@ -746,7 +642,7 @@ async def _run(
                     and int(evidence["context_snapshot_count"]) == 1
                     and int(evidence["compaction_adopted_event_count"]) == 1
                     and summary_models == expected_summary_models
-                    and model_switch_tiers == (expected_tier,)
+                    and switch_outcomes == ("COMPACTED",)
                     and normal_models[-1:] == (destination_model,)
                     and len(summary_calls) == len(expected_summary_models)
                     and all(
@@ -762,14 +658,7 @@ async def _run(
                     )
                     and destination_tool_call_count == 1
                     and destination_tool_result_count == 1
-                    and (
-                        not force_source_summary_provider_error
-                        or (
-                            forced_source_summary_error is not None
-                            and forced_source_summary_error.used
-                            and bool(presentation_notices)
-                        )
-                    )
+
                 )
                 return report
             finally:
@@ -788,14 +677,6 @@ def main() -> int:
     parser.add_argument("--destination-model", default=_DESTINATION_MODEL)
     parser.add_argument("--segments", type=int, default=24)
     parser.add_argument("--repetitions", type=int, default=1_000)
-    parser.add_argument(
-        "--force-source-summary-provider-error",
-        action="store_true",
-        help=(
-            "inject one typed 429 at the source summary boundary so the "
-            "destination model performs the real Tier 3 calls"
-        ),
-    )
     args = parser.parse_args()
     if args.segments < 1 or args.repetitions < 1:
         raise SystemExit("segments and repetitions must be positive")
@@ -810,9 +691,6 @@ def main() -> int:
                 segments=args.segments,
                 repetitions=args.repetitions,
                 calls=calls,
-                force_source_summary_provider_error=(
-                    args.force_source_summary_provider_error
-                ),
             )
         )
     except BaseException as exc:

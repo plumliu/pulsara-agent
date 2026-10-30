@@ -14,7 +14,6 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
 )
-from pulsara_agent.conversation_kernel.steer import PreparedRootProviderInputAdmission
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     PreparedAgentRequest,
 )
@@ -167,14 +166,9 @@ def start(repository, req):
         deadline_monotonic=deadline(),
     )
     assert candidate is not None
-    # These persistence tests validate the exact ordered writer candidate. Actual
-    # model compilation and provider calls are exercised by the Host dogfood.
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", candidate.provider_input_candidate)
     result = repository.consume_prepared_prompt_head(
         lease.guard,
         candidate=candidate,
-        provider_input_admission=admission,
         deadline_monotonic=deadline(),
     )
     assert result.kind.value == "FULL"
@@ -329,12 +323,14 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
     texts = ["".join(p.text for p in e.canonical_prompt.content.parts) for e in entries]
     assert texts[1:] == ["Compare both results.", large, "second-result"]
     assert entries[1].entry_id == candidate.exact_initial_entry_id
-    assert candidate.provider_input_candidate.exact_initial_entry_sequence == 2
-    assert (
-        candidate.provider_input_candidate.resulting_provider_input_through_sequence
-        == 4
+    confirmation = repository.confirm_prepared_prompt_head_consumption(
+        candidate=candidate, deadline_monotonic=deadline()
     )
-    assert candidate.provider_input_candidate.source_through_sequence == 0
+    group = confirmation.accepted.started_input_group
+    assert group.ordered_items[1].source_entry_sequence == 2
+    assert group.provider_input_through_sequence == 4
+    assert group.predecessor_through_sequence == 0
+    assert group.initial_source_through_sequence == 0
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         row_factory=dict_row,
@@ -493,8 +489,6 @@ def test_start_cancel_race_has_one_actual_stage(source):
         actor_id="test",
         deadline_monotonic=deadline(),
     )
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", candidate.provider_input_candidate)
     gate = Barrier(2)
 
     def consume():
@@ -502,7 +496,6 @@ def test_start_cancel_race_has_one_actual_stage(source):
         return repository.consume_prepared_prompt_head(
             lease.guard,
             candidate=candidate,
-            provider_input_admission=admission,
             deadline_monotonic=deadline(),
         )
 

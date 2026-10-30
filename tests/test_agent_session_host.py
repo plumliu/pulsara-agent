@@ -357,7 +357,7 @@ def test_actual_admission_wins_stale_idle_retirement_for_loaded_and_unloaded_age
     asyncio.run(scenario())
 
 
-def test_child_adopts_real_common_compaction_snapshot_then_runs_next_work(
+def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
     from tests.test_stage2_conversation_runner import _CompactionScriptedModel
@@ -404,36 +404,30 @@ def test_child_adopts_real_common_compaction_snapshot_then_runs_next_work(
                 root_session_id=root.session_id,deadline_monotonic=monotonic()+10)
             model.agent_id=ids[0]
             child=core._live_agent_session(model.agent_id)
-            first_turn_id=child.active_root_turn_id()
             model.first_child_release.set()
             async def child_idle():
                 return child.active_root_turn_id() is None
             await eventually(child_idle)
-            child._compaction.policy=ResolvedCompactionPolicy(automatic_enabled=False,minimum_reclaim_tokens=1)
-            import sys
-            failures=[]
-            previous_trace=sys.gettrace()
-            def trace(frame,event,arg):
-                frame.f_trace_lines=False
-                if event=='exception' and '/src/pulsara_agent/' in frame.f_code.co_filename:
-                    kind,error,_=arg
-                    if not isinstance(error,(StopIteration,StopAsyncIteration,GeneratorExit)):
-                        failures.append((frame.f_code.co_filename,frame.f_code.co_name,frame.f_lineno,type(error).__name__,str(error)))
-                return trace
-            try:
-                sys.settrace(trace)
-                outcome=await child._runner.compaction.compact_idle_turn(
-                    turn_id=first_turn_id,command_id=random_id('command'),force=True, scope_kind=child._session_scope_kind)
-            finally:
-                sys.settrace(previous_trace)
-            assert outcome.disposition.value=='COMPACTED', (outcome,failures[-30:])
-            assert outcome.snapshot_id is not None
-            assert len(model.summary_transport.contexts)==1
-            from pulsara_agent.primitives.context import canonical_json_bytes
-            assert tuple(canonical_json_bytes({'name':tool.name,'description':tool.description,'parameters':tool.parameters})
-                for tool in model.summary_transport.contexts[0].tools) == tuple(
-                    tool.canonical_bytes for tool in model.child_requests[0].compiled_input.tools)
-            assert model.summary_transport.contexts[0].system_prompt==model.child_requests[0].compiled_input.system_prompt
+            child._compaction.policy=ResolvedCompactionPolicy(
+                auto_trigger_ratio=0.10, post_compaction_target_ratio=0.08,
+                minimum_reclaim_tokens=1,
+            )
+            compactions=[]
+            planning_failures=[]
+            fenced=child._runner.compaction._execute_compaction_fenced
+            async def recorded_fenced(**kwargs):
+                try:
+                    return await fenced(**kwargs)
+                except Exception as error:
+                    planning_failures.append(error)
+                    raise
+            monkeypatch.setattr(child._runner.compaction, '_execute_compaction_fenced', recorded_fenced)
+            execute=child._runner.compaction.execute_active
+            async def recorded_compaction(**kwargs):
+                result=await execute(**kwargs)
+                compactions.append(result)
+                return result
+            monkeypatch.setattr(child._runner.compaction, 'execute_active', recorded_compaction)
             await root.run_turn(PromptContent.text('Continue the compressed investigator'),
                 command_id=random_id('command'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             async def next_completed():
@@ -442,6 +436,13 @@ def test_child_adopts_real_common_compaction_snapshot_then_runs_next_work(
                     deadline_monotonic=monotonic()+10)
                 return len(rows)==2 and all(r['status']=='completed' for r in rows)
             await eventually(next_completed)
+            assert compactions and compactions[0].outcome.disposition.value=='COMPACTED', (compactions, planning_failures)
+            assert len(model.summary_transport.contexts)==1
+            from pulsara_agent.primitives.context import canonical_json_bytes
+            assert tuple(canonical_json_bytes({'name':tool.name,'description':tool.description,'parameters':tool.parameters})
+                for tool in model.summary_transport.contexts[0].tools) == tuple(
+                    tool.canonical_bytes for tool in model.child_requests[0].compiled_input.tools)
+            assert model.summary_transport.contexts[0].system_prompt==model.child_requests[0].compiled_input.system_prompt
             rendered='\n'.join(t for m in model.child_requests[1].compiled_input.messages for t in text_part_values(m.content))
             assert summary in rendered
             assert 'CHILD_SECOND' in rendered
@@ -450,7 +451,7 @@ def test_child_adopts_real_common_compaction_snapshot_then_runs_next_work(
                     row_factory=dict_row,deadline_monotonic=monotonic()+10) as connection:
                 revisions=connection.execute('SELECT context_snapshot_id FROM pulsara_v3.turn_context_binding_revisions WHERE session_id=%s AND turn_id=%s',
                     (model.agent_id,model.child_requests[1].turn_id)).fetchall()
-                assert any(r['context_snapshot_id']==outcome.snapshot_id for r in revisions)
+                assert any(r['context_snapshot_id']==compactions[0].outcome.snapshot_id for r in revisions)
         finally:
             model.first_child_release.set()
             await core.shutdown()

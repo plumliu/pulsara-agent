@@ -83,6 +83,7 @@ class _CommandHost:
         self.resolved: list[dict[str, object]] = []
         self.accepted_job_results: list[dict[str, object]] = []
         self.stop_requests: list[dict[str, str]] = []
+        self.compaction_stop_requests: list[dict[str, str]] = []
         self.cell_stop_requests: list[dict[str, str]] = []
         self.terminate_requests: list[dict[str, str]] = []
         self.control_queries: list[UserControlRequest] = []
@@ -134,6 +135,15 @@ class _CommandHost:
             target_id=str(kwargs["target_turn_id"]),
         )
 
+
+    async def request_stop_context_compaction(self, **kwargs) -> KernelCommandOutcome:
+        self.compaction_stop_requests.append(dict(kwargs))
+        return self._control_outcome(
+            command_id=str(kwargs["command_id"]),
+            operation=UserControlOperation.STOP_CONTEXT_COMPACTION,
+            target_kind=UserControlTargetKind.MANUAL_COMPACTION,
+            target_id=str(kwargs["target_command_id"]),
+        )
 
     async def request_stop_code_mode_cell(self, **kwargs) -> KernelCommandOutcome:
         self.cell_stop_requests.append(dict(kwargs))
@@ -460,6 +470,7 @@ def test_stage2_observer_cannot_mutate_but_can_detach() -> None:
     ("command_kind", "target_field", "target_id", "record_name"),
     (
         (wire.STOP_ACTIVE_TURN, "target_turn_id", 'turn:74y74rvr2pht5lydgxvy57nxgq', "stop_requests"),
+        (wire.STOP_CONTEXT_COMPACTION, "target_compaction_command_id", 'command:wm7mqtvoxp5oecp2gof4o25zna', "compaction_stop_requests"),
         (
             wire.STOP_CODE_MODE_CELL,
             "target_cell_id",
@@ -505,6 +516,7 @@ def test_pr03_controller_commands_preserve_exact_owner_and_target(
             "expected_host_session_id": 'host:yinyxklzunar54s7objjdbphcy',
             {
                 "target_turn_id": "target_turn_id",
+                "target_compaction_command_id": "target_command_id",
                 "target_cell_id": "cell_id",
                 "target_process_id": "process_id",
             }[target_field]: target_id,
@@ -965,3 +977,21 @@ def test_direct_steer_is_exact_targeted_and_cannot_carry_permission() -> None:
         assert len(received) == 1
         assert state.host_session.has_controller_attachment(state.attachment_id)
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("kind,fields", (
+    (wire.STOP_ACTIVE_TURN, {"target_turn_id": "turn:klmmazz67vfgsfsvg6ceqgdsfu", "target_compaction_command_id": "command:wm7mqtvoxp5oecp2gof4o25zna"}),
+    (wire.STOP_CONTEXT_COMPACTION, {"target_turn_id": "turn:klmmazz67vfgsfsvg6ceqgdsfu", "target_compaction_command_id": "command:wm7mqtvoxp5oecp2gof4o25zna"}),
+))
+def test_manual_and_turn_stop_targets_are_strictly_separate(kind, fields):
+    controller = _state(role=wire.ATTACHMENT_ROLE_CONTROLLER)
+    request = wire.CommandRequest(
+        command_id='command:wm7mqtvoxp5oecp2gof4o25zna', command_kind=kind,
+        expected_session_id=controller.host_session.session_id,
+        expected_host_session_id=controller.host_session.host_session_id,
+        control_admission_deadline_ms=9000, **fields,
+    )
+    response = asyncio.run(_server()._command(controller, request))
+    assert response.HasField('error')
+    assert not controller.host_session.stop_requests
+    assert not controller.host_session.compaction_stop_requests

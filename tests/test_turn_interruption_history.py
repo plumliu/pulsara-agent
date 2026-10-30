@@ -383,12 +383,13 @@ def test_completed_winner_does_not_gain_interruption_notice_or_detail(repo):
     )
 
 
-@pytest.mark.parametrize("route", ["installed", "destination"])
+@pytest.mark.parametrize("route", ["installed", "empty", "destination"])
 def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them(
     repo, monkeypatch, route
 ):
     import asyncio
     import json
+    from dataclasses import replace
     from pulsara_agent.conversation_kernel.compaction.runtime import (
         HostCompactionRuntimeOwner,
     )
@@ -398,12 +399,6 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
     from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
-    from pulsara_agent.ports.provider_stream import (
-        ProviderStreamTerminal,
-        ProviderNormalizedTerminalKind,
-    )
-    from pulsara_agent.llm.result import TransportUsageReport
-    from pulsara_agent.llm.provider_sanitization import sanitize_provider_failure
     from pulsara_agent.llm.model_connections import ModelConnectionId
     from pulsara_agent.llm.input import join_text_content
     from tests.support.model_config import (
@@ -443,7 +438,7 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
         intent="EXISTING",
         session_id=child.child_session_id,
         workspace_id=workspace_id,
-        writer_owner_id='host:z4m5y7kg22rs2sivbqavrhcqte',
+        writer_owner_id="host:z4m5y7kg22rs2sivbqavrhcqte",
         lease_seconds=300,
         deadline_monotonic=monotonic() + 30,
     )
@@ -453,7 +448,7 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     destination = test_model_runtime(
         model_id="destination-notice",
         wire_api="openai_chat_completions",
-        connection_id=ModelConnectionId('connection:ytw3elhyjuqyshh2v6bdqzshli'),
+        connection_id=ModelConnectionId("connection:ytw3elhyjuqyshh2v6bdqzshli"),
         limits=test_model_limits(
             max_input_tokens=20_000,
             max_output_tokens=1000,
@@ -463,31 +458,17 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     )
     include_test_runtime_connections(destination, source)
     active = [source]
-    source_failure = [
-        ProviderStreamTerminal(
-            terminal_kind=ProviderNormalizedTerminalKind.PROVIDER_ERROR,
-            usage=TransportUsageReport(usage_status="missing", usage=None),
-            error=sanitize_provider_failure(
-                message="controlled source summary failure", code_hint="503"
-            ),
-        )
+    summaries = [
+        _summary_tool_stream("denied-summary-call"),
+        "small retained summary"
+        if route != "destination"
+        else "small destination summary",
     ]
-    summaries = (
-        [_summary_tool_stream("denied-summary-call"), "small retained summary"]
-        if route == "installed"
-        else [
-            source_failure,
-            _summary_tool_stream("denied-summary-call"),
-            "small destination summary",
-        ]
+    ordinary_calls = (
+        [] if route == "empty" else [_text_stream("installed history:" + "x" * 50_000)]
     )
-    model = _CompactionScriptedModel(
-        [
-            _text_stream("installed history:" + "x" * 50_000),
-            _text_stream("destination answer"),
-        ],
-        summaries,
-    )
+    ordinary_calls.append(_text_stream("destination answer"))
+    model = _CompactionScriptedModel(ordinary_calls, summaries)
     model._model_runtime = source
     model._preparer = DirectKernelModelPort(model_runtime=source)
     repo.update_session_model_call_binding(
@@ -543,17 +524,34 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     )
 
     async def exercise():
-        await runner.run_turn(frozen_test_prompt("install original epoch"))
+        if route == "empty":
+            turn(repo, lease.guard, "canonical history without installed epoch",
+                 answer="installed history:" + "x" * 50_000)
+            scope = coordinator.ProviderInputContinuityScope(
+                session_id=lease.guard.session_id,
+                scope_kind=coordinator.ModelInputScopeKind.ROOT,
+            )
+            assert runner._continuity.current_cohort(scope) is None
+        else:
+            await runner.run_turn(frozen_test_prompt("install original epoch"))
         ended, _, _ = turn(repo, lease.guard, "stop this source", finish=False)
         stop(repo, lease.guard, ended)
-        active[0] = destination
-        model._model_runtime = destination
-        model._preparer = DirectKernelModelPort(model_runtime=destination)
-        repo.update_session_model_call_binding(
-            lease.guard,
-            binding=test_model_binding(destination),
-            deadline_monotonic=monotonic() + 30,
-        )
+        if route != "destination":
+            owner.policy = replace(
+                owner.policy,
+                automatic_enabled=True,
+                auto_trigger_ratio=0.10,
+                post_compaction_target_ratio=0.08,
+            )
+        else:
+            active[0] = destination
+            model._model_runtime = destination
+            model._preparer = DirectKernelModelPort(model_runtime=destination)
+            repo.update_session_model_call_binding(
+                lease.guard,
+                binding=test_model_binding(destination),
+                deadline_monotonic=monotonic() + 30,
+            )
         result = await runner.run_turn(
             frozen_test_prompt("continue with smaller model")
         )
@@ -563,16 +561,37 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
     try:
         result = asyncio.run(exercise())
     except Exception as error:
-        raise AssertionError({"models": [c.target.fact.model_id for c in model.summary_transport.calls], "quotes": [(s.call.target.fact.model_id,q.budget_input_tokens,q.effective_input_budget_tokens) for s,q in measured], "prepared": len(prepared)}) from error
+        raise AssertionError(
+            {
+                "models": [
+                    c.target.fact.model_id for c in model.summary_transport.calls
+                ],
+                "quotes": [
+                    (
+                        s.call.target.fact.model_id,
+                        q.budget_input_tokens,
+                        q.effective_input_budget_tokens,
+                    )
+                    for s, q in measured
+                ],
+                "prepared": len(prepared),
+            }
+        ) from error
     assert result.final_text == "destination answer"
     contexts = model.summary_transport.contexts
-    assert len(contexts) == (2 if route == "installed" else 3)
-    # Original installed summary includes the imported end; destination tier 3
-    # omits the old group that cannot fit, while retaining source lifecycle.
+    assert len(contexts) == 2
+    assert all(
+        call.target.fact.model_id
+        == ("source-notice" if route != "destination" else "destination-notice")
+        for call in model.summary_transport.calls
+    )
+    # Same-target history keeps the imported ending. A destination projection
+    # omits the old group that cannot fit, while selected executed history keeps
+    # its own ending without pretending it belongs to the new RUNNING turn.
     initial = join_text_content(contexts[-2].messages[-1].content)
     repair_messages = contexts[-1].messages
     assert "USER_STOPPED" in initial
-    assert ("OLD_IMPORTED_END" in initial) == (route == "installed")
+    assert ("OLD_IMPORTED_END" in initial) == (route != "destination")
     assert tuple(repair_messages[: len(contexts[-2].messages)]) == tuple(
         contexts[-2].messages
     )
@@ -611,7 +630,14 @@ def test_actual_summary_candidates_quote_selected_endings_and_repair_reuses_them
             sequences = {mapping.get(p.origin_entry_id) for p in placements}
         assert all(
             n["display_after_entry_sequence"] in sequences
-            for n in payload["selected_imported_history"]
+            for n in (
+                *payload["selected_imported_history"],
+                *payload["selected_executed_history"],
+            )
+        )
+        assert payload["current_source_turn"] is None
+        assert any(
+            n["reason"] == "USER_STOPPED" for n in payload["selected_executed_history"]
         )
     assert (
         len(

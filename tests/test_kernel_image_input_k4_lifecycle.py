@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pulsara_agent.identity import derive_id
-
 import asyncio
 from time import monotonic
 
@@ -21,7 +19,6 @@ from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReade
 from pulsara_agent.conversation_kernel.prompt_storage import (
     hydrate_canonical_prompt_owner,
 )
-from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
@@ -49,6 +46,7 @@ from tests.test_kernel_image_input_k2_postgres import (
 from tests.test_stage2_conversation_runner import (
     _AssertingTool,
     _CompactionSequencedDirectKernelModel,
+    _compact_idle,
     _name,
 )
 
@@ -71,7 +69,7 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
     original = FrozenPromptContent(
         (LLMTextPart("before"), image, LLMTextPart("between"), image)
     )
-    intent, _, _ = _direct_intent(repository, lease, source_runtime, original)
+    intent, _ = _direct_intent(repository, lease, source_runtime, original)
     original_cut = repository.prepare_provider_input_cut(
         lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic() + 30
     )
@@ -181,23 +179,36 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
             (session_id,),
         )[0]["final_entry_id"]
 
-    async def compact_next(runner, owner, label):
-        command = _name("command")
-        turn_id = derive_id("turn", "command", source_session, command)
-        _, waiter = await owner.request_manual(
-            command_id=_name("command"),
+    async def compact_next(runner, label):
+        turn_id = repository.read_latest_terminal_scope_turn_id(
+            runner._writer_lease.guard,
             scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-            expected_turn_id=turn_id,
-            force=True,
+            deadline_monotonic=monotonic() + 30,
         )
-        await runner.run_turn(frozen_test_prompt(label), command_id=command)
-        outcome = await waiter
+        assert turn_id is not None
+        turns_before = rows(
+            repository,
+            "SELECT id FROM pulsara_v3.turns WHERE session_id=%s ORDER BY id",
+            (source_session,),
+        )
+        model = runner._provider_dispatch._model
+        ordinary_count = len(model.requests)
+        outcome = await _compact_idle(
+            runner, turn_id=turn_id, command_id=_name("command")
+        )
         assert outcome.disposition.value == "COMPACTED", outcome
+        assert len(model.requests) == ordinary_count
+        assert rows(
+            repository,
+            "SELECT id FROM pulsara_v3.turns WHERE session_id=%s ORDER BY id",
+            (source_session,),
+        ) == turns_before
+        await runner.run_turn(frozen_test_prompt(label), command_id=_name("command"))
 
     async def exercise():
         try:
-            # No installed A epoch: the real cold entry must adopt Tier 3 P.
+            # With no installed source epoch, the cold entry adopts the
+            # destination's historical-image projection.
             first, first_model, first_owner = runner_for(
                 lease,
                 text_runtime,
@@ -206,7 +217,23 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                     "Historical user said before and between; [Image omitted]; [Image omitted]."
                 ],
             )
-            await first.run_turn(frozen_test_prompt("continue with text"))
+            first_result = await first.run_turn(frozen_test_prompt("continue with text"))
+            adopted = rows(
+                repository,
+                """SELECT t.status, r.revision_ordinal, r.base_kind,
+                          r.context_snapshot_id
+                   FROM pulsara_v3.turns AS t
+                   JOIN pulsara_v3.turn_context_binding_revisions AS r
+                     ON r.session_id=t.session_id
+                    AND r.id=t.current_context_binding_revision_id
+                   WHERE t.session_id=%s AND t.id=%s""",
+                (source_session, first_result.turn_id),
+            )
+            assert len(adopted) == 1
+            assert adopted[0]["status"] == "COMPLETED"
+            assert adopted[0]["revision_ordinal"] > 0
+            assert adopted[0]["base_kind"] == "SNAPSHOT"
+            assert adopted[0]["context_snapshot_id"] is not None
             assert_no_images(first_model)
             assert len(first_model.summary_transport.contexts) == 1
             assert (
@@ -239,10 +266,10 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                 for message in cold_model.requests[0].compiled_input.messages
             )
             await compact_next(
-                cold, cold_owner, "continue after first ordinary compaction"
+                cold, "continue after first idle compaction"
             )
             await compact_next(
-                cold, cold_owner, "continue after second ordinary compaction"
+                cold, "continue after second idle compaction"
             )
             assert len(cold_model.summary_transport.contexts) == 2
             assert_no_images(cold_model)
@@ -290,16 +317,19 @@ def test_omitted_images_do_not_return_after_cold_compaction_and_two_forks(
                 )
                 == original_refs
             )
-            # The old provider cut is correctly stale after adoption. Original
-            # user-visible content is read through its immutable entry owner.
-            with pytest.raises(
-                ConversationKernelConflict, match="provider binding revision is stale"
-            ):
-                CanonicalProviderInputReader(
-                    repository.connection_provider
-                ).read_frozen_snapshot(
-                    original_cut, deadline_monotonic=monotonic() + 30
-                )
+            # New-turn adoption leaves the historical source turn unchanged.
+            # Its exact old cut remains inspectable without resurrecting images
+            # in any later effective model input checked above.
+            original_snapshot = CanonicalProviderInputReader(
+                repository.connection_provider
+            ).read_frozen_snapshot(
+                original_cut, deadline_monotonic=monotonic() + 30
+            )
+            assert next(
+                item.content
+                for item in original_snapshot.items
+                if item.source_entry_id == intent.entry_id
+            ) == original.parts
             with repository.connection_provider.connection(
                 lane=PostgresConnectionLane.INSPECTOR,
                 row_factory=dict_row,

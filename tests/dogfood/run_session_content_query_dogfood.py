@@ -60,7 +60,7 @@ async def run():
             catalog = ModelCatalogOwner(ModelsDevCatalogClient())
             await catalog.refresh()
             delegate = ModelRuntime.production(settings=settings, catalog=catalog)
-            runtime = _RecordingModelRuntime(delegate, calls, None)
+            runtime = _RecordingModelRuntime(delegate, calls)
             core = KernelHostCore.production(model_runtime=runtime)
             try:
                 sessions = []
@@ -153,7 +153,7 @@ async def run():
                 await turn(source, "recent", "原始资料保持不变。只回答收到，不要重述资料。")
                 compact = await asyncio.wait_for(
                     source.compact_context(
-                        command_id='command:ghcruarl3twmqsik45cf3wnxai', force=True
+                        command_id='command:ghcruarl3twmqsik45cf3wnxai'
                     ),
                     timeout=240,
                 )

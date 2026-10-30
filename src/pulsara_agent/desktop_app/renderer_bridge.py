@@ -672,12 +672,12 @@ class RendererBridge:
             "requested_permission_mode",
             "target_plan_workflow_id",
             "expected_plan_workflow_revision",
-            "force",
             "expected_session_id",
             "expected_host_session_id",
             "control_admission_deadline_ms",
             "target_process_id",
             "target_cell_id",
+            "target_compaction_command_id",
             "prompt_content",
         }
         if set(body) - allowed_fields:
@@ -691,6 +691,7 @@ class RendererBridge:
                 "SUBMIT_PROMPT",
                 "STEER_ACTIVE_TURN",
                 "STOP_ACTIVE_TURN",
+                "STOP_CONTEXT_COMPACTION",
                 "STOP_CODE_MODE_CELL",
                 "DETACH",
                 "CLOSE_SESSION",
@@ -726,6 +727,7 @@ class RendererBridge:
                     if kind_name
                     in {
                         "STOP_ACTIVE_TURN",
+                        "STOP_CONTEXT_COMPACTION",
                         "STOP_CODE_MODE_CELL",
                         "TERMINATE_BACKGROUND_PROCESS",
                     }
@@ -741,11 +743,11 @@ class RendererBridge:
                 body.get("expected_plan_workflow_revision", 0),
                 "expected_plan_workflow_revision",
             ),
-            force=bool(body.get("force", False)),
             expected_session_id=str(body.get("expected_session_id", "")),
             expected_host_session_id=str(body.get("expected_host_session_id", "")),
             target_process_id=str(body.get("target_process_id", "")),
             target_cell_id=str(body.get("target_cell_id", "")),
+            target_compaction_command_id=str(body.get("target_compaction_command_id", "")),
             control_admission_deadline_ms=_uint(
                 body.get("control_admission_deadline_ms", 0),
                 "control_admission_deadline_ms",
@@ -772,6 +774,7 @@ class RendererBridge:
                 _required_string(expected, "operation"),
                 allowed={
                     "USER_CONTROL_STOP_ACTIVE_TURN",
+                    "USER_CONTROL_STOP_CONTEXT_COMPACTION",
                     "USER_CONTROL_STOP_CODE_MODE_CELL",
                     "USER_CONTROL_TERMINATE_BACKGROUND_PROCESS",
                 },
@@ -780,6 +783,7 @@ class RendererBridge:
                 _required_string(expected, "target_kind"),
                 allowed={
                     "USER_CONTROL_ROOT_TURN",
+                    "USER_CONTROL_MANUAL_COMPACTION",
                     "USER_CONTROL_CODE_MODE_CELL",
                     "USER_CONTROL_BACKGROUND_PROCESS",
                 },

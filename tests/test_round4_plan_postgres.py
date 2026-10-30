@@ -55,7 +55,6 @@ from pulsara_agent.conversation_kernel.repository import (
 from pulsara_agent.conversation_kernel.runner import ConversationKernelRunner
 from pulsara_agent.conversation_kernel.steer import (
     PreparedActiveRootInputAdmission,
-    PreparedRootProviderInputAdmission,
     QueuedRootTurnAdmissionConfirmationKind,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
@@ -296,19 +295,6 @@ def _commit_plan_batch(
     return _AcceptedAssistantBatch(candidate, assistant_entry_id, selected_call_id)
 
 
-def _fresh_plan_provider_input_admission(
-    repository: ConversationKernelRepository,
-    lease,
-    candidate: PreparedPlanToolBatch,
-) -> PreparedRootProviderInputAdmission:
-    prospective = repository.prepare_fresh_plan_continuation_provider_input_candidate(
-        lease.guard,
-        candidate=candidate,
-        deadline_monotonic=monotonic() + 30,
-    )
-    # These repository tests exercise the transaction and exact candidate join.
-    # Full compiler/materialization admission is covered at the Host boundary.
-    return _root_provider_input_admission(prospective)
 
 
 def _active_provider_input_admission(
@@ -322,14 +308,6 @@ def _active_provider_input_admission(
     )
 
 
-def _root_provider_input_admission(
-    candidate,
-) -> PreparedRootProviderInputAdmission:
-    # These repository tests exercise the transaction and exact candidate join.
-    # Full compiler/materialization admission is covered at the Host boundary.
-    admission = object.__new__(PreparedRootProviderInputAdmission)
-    object.__setattr__(admission, "candidate", candidate)
-    return admission
 
 
 def _open_user_plan(repository, lease, *, resume=PermissionMode.ACCEPT_EDITS):
@@ -644,11 +622,6 @@ def test_round4_agent_enter_batch_cancels_every_sibling_before_dispatch(
     accepted = repository.accept_plan_tool_batch(
         lease.guard,
         candidate=prepared.candidate,
-        continuation_provider_input_admission=(
-            _fresh_plan_provider_input_admission(
-                repository, lease, prepared.candidate
-            )
-        ),
         deadline_monotonic=monotonic() + 30,
     )
     confirmed = repository.confirm_plan_tool_batch_winner(
@@ -682,7 +655,7 @@ def test_round4_agent_enter_batch_cancels_every_sibling_before_dispatch(
     assert continuation_permission.effective_mode is PermissionMode.READ_ONLY
 
 
-def test_k3_fresh_plan_result_and_continuation_exactly_match_prospective_read(
+def test_k3_fresh_plan_result_and_started_continuation_commit_atomically(
     stage2_migrated_postgres_database,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
@@ -702,30 +675,16 @@ def test_k3_fresh_plan_result_and_continuation_exactly_match_prospective_read(
         expected_workflow_revision=None,
         sibling_before=True,
     )
-    candidate = repository.prepare_fresh_plan_continuation_provider_input_candidate(
-        lease.guard,
-        candidate=prepared.candidate,
-        deadline_monotonic=monotonic() + 30,
-    )
     reader = CanonicalProviderInputReader(repository.connection_provider)
-    prospective = reader.read_prospective_root_dispatch(
-        candidate,
-        deadline_monotonic=monotonic() + 30,
-    )
-
     accepted = repository.accept_plan_tool_batch(
         lease.guard,
         candidate=prepared.candidate,
-        continuation_provider_input_admission=cast(
-            PreparedRootProviderInputAdmission,
-            SimpleNamespace(candidate=candidate),
-        ),
         deadline_monotonic=monotonic() + 30,
     )
-    assert accepted.continuation_turn_id == candidate.exact_turn_id
+    assert accepted.continuation_turn_id == prepared.candidate.continuation_turn_id
     actual_cut = repository.prepare_provider_input_cut(
         lease.guard,
-        turn_id=candidate.exact_turn_id,
+        turn_id=prepared.candidate.continuation_turn_id,
         deadline_monotonic=monotonic() + 30,
     )
     actual = reader.read_frozen_dispatch(
@@ -733,7 +692,20 @@ def test_k3_fresh_plan_result_and_continuation_exactly_match_prospective_read(
         deadline_monotonic=monotonic() + 30,
     )
 
-    assert actual == prospective
+    confirmed = repository.confirm_plan_tool_batch_winner(
+        candidate=prepared.candidate, deadline_monotonic=monotonic() + 30,
+    )
+    assert confirmed == accepted
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        origin = connection.execute("SELECT status FROM pulsara_v3.turns WHERE id=%s", (origin_turn_id,)).fetchone()
+        successor = connection.execute("SELECT status,initial_entry_id FROM pulsara_v3.turns WHERE id=%s", (accepted.continuation_turn_id,)).fetchone()
+        revision = connection.execute("SELECT revision_ordinal FROM pulsara_v3.turn_context_binding_revisions WHERE turn_id=%s", (accepted.continuation_turn_id,)).fetchall()
+    assert origin["status"] == "COMPLETED"
+    assert successor == {"status": "RUNNING", "initial_entry_id": accepted.continuation_entry_id}
+    assert [row["revision_ordinal"] for row in revision] == [0]
     assert tuple(
         item.item_kind
         for item in actual.compile_snapshot.canonical_input.items[-3:]
@@ -777,11 +749,6 @@ def test_round4_plan_batch_confirmation_rejects_every_exact_identity_drift(
     repository.accept_plan_tool_batch(
         lease.guard,
         candidate=prepared.candidate,
-        continuation_provider_input_admission=(
-            _fresh_plan_provider_input_admission(
-                repository, lease, prepared.candidate
-            )
-        ),
         deadline_monotonic=monotonic() + 30,
     )
     candidate = prepared.candidate
@@ -920,9 +887,6 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
         return repository.accept_plan_tool_batch(
             lease.guard,
             candidate=candidate,
-            continuation_provider_input_admission=(
-                _fresh_plan_provider_input_admission(repository, lease, candidate)
-            ),
             deadline_monotonic=deadline,
         )
 
@@ -1269,18 +1233,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     revise_turn = _id("turn")
     revise_entry = _id("entry")
     revise_revision = _id("binding")
-    revise_candidate = repository.prepare_plan_draft_review_provider_input_candidate(
-        lease.guard,
-        workflow_id=workflow_id,
-        expected_workflow_revision=4,
-        interaction_id=str(opened_draft.interaction_id),
-        decision=PlanDraftDecision.REVISE,
-        canonical_prompt=frozen_test_prompt("please add rollback"),
-        continuation_turn_id=revise_turn,
-        continuation_entry_id=revise_entry,
-        continuation_context_binding_revision_id=revise_revision,
-        deadline_monotonic=monotonic() + 30,
-    )
     revised = repository.resolve_plan_draft_review(
         lease.guard,
         command_id=revise_command,
@@ -1292,7 +1244,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         continuation_turn_id=revise_turn,
         continuation_entry_id=revise_entry,
         continuation_context_binding_revision_id=revise_revision,
-        provider_input_admission=_root_provider_input_admission(revise_candidate),
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1349,43 +1300,21 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
     implementation_entry = _id("entry")
     implementation_revision = _id("binding")
     approve_command = _id("command")
-    approve_candidate = repository.prepare_plan_draft_review_provider_input_candidate(
-        lease.guard,
-        workflow_id=workflow_id,
-        expected_workflow_revision=6,
-        interaction_id=str(second_draft.interaction_id),
-        decision=PlanDraftDecision.APPROVE,
-        canonical_prompt=None,
-        continuation_turn_id=implementation_turn,
-        continuation_entry_id=implementation_entry,
-        continuation_context_binding_revision_id=implementation_revision,
-        deadline_monotonic=monotonic() + 30,
-    )
-    approve_admission = _root_provider_input_admission(approve_candidate)
     with pytest.raises(
         ConversationKernelConflict,
-        match="Plan review provider admission is stale",
+        match="Plan draft review is not open",
     ):
         repository.resolve_plan_draft_review(
             lease.guard,
             command_id=approve_command,
             workflow_id=workflow_id,
-            expected_workflow_revision=6,
+            expected_workflow_revision=5,
             interaction_id=str(second_draft.interaction_id),
             decision=PlanDraftDecision.APPROVE,
             canonical_prompt=None,
             continuation_turn_id=implementation_turn,
             continuation_entry_id=implementation_entry,
             continuation_context_binding_revision_id=implementation_revision,
-            provider_input_admission=_root_provider_input_admission(
-                replace(
-                    approve_candidate,
-                    unpublished_item_canonical_expanded_bytes=(
-                        approve_candidate.unpublished_item_canonical_expanded_bytes[0]
-                        + 1,
-                    ),
-                )
-            ),
             occurred_at=_now(),
             actor_id="user:test",
             deadline_monotonic=monotonic() + 30,
@@ -1414,7 +1343,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         continuation_turn_id=implementation_turn,
         continuation_entry_id=implementation_entry,
         continuation_context_binding_revision_id=implementation_revision,
-        provider_input_admission=approve_admission,
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1610,7 +1538,6 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         continuation_turn_id=implementation_turn,
         continuation_entry_id=implementation_entry,
         continuation_context_binding_revision_id=implementation_revision,
-        provider_input_admission=approve_admission,
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1687,7 +1614,6 @@ def test_round4_draft_cancel_handoff_is_delivery_owned_exactly_once(
         continuation_turn_id=None,
         continuation_entry_id=None,
         continuation_context_binding_revision_id=None,
-        provider_input_admission=None,
         occurred_at=_now(),
         actor_id="user:test",
         deadline_monotonic=monotonic() + 30,
@@ -1734,10 +1660,6 @@ def test_round4_draft_cancel_handoff_is_delivery_owned_exactly_once(
         confirmation = repository.consume_prepared_prompt_head(
             lease.guard,
             candidate=candidate,
-            provider_input_admission=cast(
-                PreparedRootProviderInputAdmission,
-                SimpleNamespace(candidate=candidate.provider_input_candidate),
-            ),
             deadline_monotonic=monotonic() + 30,
         )
         assert confirmation is not None

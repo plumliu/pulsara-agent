@@ -67,7 +67,7 @@ async def run(args):
                 await session.update_model_call_binding(_binding(runtime, connection))
                 spans, clock = [], [perf_counter()]
                 for owner, methods in (
-                    (session, ("_settle_queued_root_admission",)),
+                    (session, ("_run_queued_root_admission",)),
                     (session._runner._provider_dispatch, (
                         "prepare_prospective_root_candidate_family",
                         "prepare_prospective_root_candidate", "measure_prepared_wire_candidate",
@@ -88,7 +88,7 @@ async def run(args):
                         raise RuntimeError("startup probe prompt was rejected")
                     # This watchdog bounds the diagnostic, not a product turn.
                     async with asyncio.timeout(120):
-                        while not any(s["phase"] == "_settle_queued_root_admission" for s in spans):
+                        while not any(s["phase"] == "_run_queued_root_admission" for s in spans):
                             await asyncio.sleep(0.01)
                         task = session._active_task
                         result = await asyncio.shield(task) if task else None

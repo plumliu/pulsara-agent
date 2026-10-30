@@ -365,7 +365,7 @@ async def _exercise_pr03_renderer_bridge_fields(monkeypatch) -> None:
     assert request.expected_host_session_id == 'host:7r7elstdigup6xfbo3hd3d5jfu'
     assert request.target_process_id == 'process:77t67dg5pb4j4dif5xd3xcidwe'
     assert not request.target_turn_id
-    assert not request.subagent_task_id
+    assert "subagent_task_id" not in request.DESCRIPTOR.fields_by_name
 
     await bridge.query_command(
         connection_id,
@@ -387,6 +387,41 @@ async def _exercise_pr03_renderer_bridge_fields(monkeypatch) -> None:
     assert query.expected_control.admission_deadline_ms == 9000
     assert query.expected_control.target.target_id == 'process:77t67dg5pb4j4dif5xd3xcidwe'
     assert query.expected_control.host_session_id == 'host:7r7elstdigup6xfbo3hd3d5jfu'
+
+    await bridge.command(connection_id, {
+        "command_id": command_id,
+        "command_kind": "STOP_CONTEXT_COMPACTION",
+        "control_admission_deadline_ms": 9000,
+        "expected_session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
+        "expected_host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
+        "target_compaction_command_id": 'command:manual-original',
+    })
+    kind, manual_stop = connection.requests[-1]
+    assert kind == "command"
+    assert manual_stop.command_kind == wire.STOP_CONTEXT_COMPACTION
+    assert manual_stop.target_compaction_command_id == 'command:manual-original'
+    assert not manual_stop.target_turn_id
+    assert not manual_stop.client_submission_id
+    await bridge.query_command(connection_id, {
+        "command_id": command_id,
+        "expected_control": {
+            "admission_deadline_ms": 9000,
+            "operation": "USER_CONTROL_STOP_CONTEXT_COMPACTION",
+            "session_id": 'session:5dyf7lfzp7z22pphjtostkgsjm',
+            "host_session_id": 'host:7r7elstdigup6xfbo3hd3d5jfu',
+            "target_kind": "USER_CONTROL_MANUAL_COMPACTION",
+            "target_id": 'command:manual-original',
+        },
+    })
+    kind, manual_query = connection.requests[-1]
+    assert kind == "query_command"
+    assert manual_query.expected_control.operation == wire.USER_CONTROL_STOP_CONTEXT_COMPACTION
+    assert manual_query.expected_control.target.kind == wire.USER_CONTROL_MANUAL_COMPACTION
+    assert manual_query.expected_control.target.target_id == 'command:manual-original'
+    with pytest.raises(ValueError, match="unexpected field"):
+        await bridge.command(connection_id, {
+            "command_id": command_id, "command_kind": "COMPACT_CONTEXT", "force": True,
+        })
 
     await bridge.list_background_processes(
         connection_id,

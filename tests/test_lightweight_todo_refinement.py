@@ -357,12 +357,12 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         # Exercise the production ROOT completion boundary, owner, live bus and
         # wire projection together. A stale completed task must not clear it.
         from pulsara_agent.conversation_kernel.host import KernelHostSession
-        from unittest.mock import AsyncMock, Mock
+        from unittest.mock import Mock
         active = asyncio.current_task()
         host = SimpleNamespace(_lock=asyncio.Lock(), _active_task=active,
             _session_scope_kind=ModelInputScopeKind.ROOT,
             _active_turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a', _closing=False,
-            _compaction=SimpleNamespace(take_manual=AsyncMock(return_value=None)),
+            _active_turn_started=True,
             _tools=port, _mark_feedback_target_ended_locked=Mock(),
             _clear_active_root_locked=Mock())
         await KernelHostSession._settle_active_root_task(host, object())
@@ -569,10 +569,13 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
         coordinator = object.__new__(TurnAdmissionCoordinator)
         coordinator._workspace_gate = None
         coordinator._todo_finalizer = finalizer
+        from unittest.mock import AsyncMock
+        coordinator.interrupt_turn = AsyncMock()
         task = asyncio.create_task(
             coordinator._finalize_todo(
                 _root_activation(),
                 AcceptedEntry('entry:kbwuv6gdfgm4t6267hmfj2ylka', 'turn:nzc36cttgo7xxki7bcjc7ops7a', 1, 1),
+                ActiveTurnCancellationIntent('turn:nzc36cttgo7xxki7bcjc7ops7a', ModelInputScopeKind.ROOT),
             )
         )
         await started.wait()
@@ -616,6 +619,7 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         coordinator._deadlines = SimpleNamespace(deadline=lambda _owner: 999_999_999.0)
         coordinator._repository = SimpleNamespace(
             accept_root_turn_intent=object(),
+            require_provider_safe_turn=object(),
         )
         coordinator._writer_lease = SimpleNamespace(guard=object())
         coordinator._todo_finalizer = finalizer
@@ -631,7 +635,6 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
         task = asyncio.create_task(
             coordinator.accept_root_intent(
                 candidate,
-                provider_input_admission=object(),
                 model_resolution_snapshot=object(),
                 cancellation_intent=intent,
             )
