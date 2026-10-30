@@ -17,7 +17,8 @@ Choose the exploration, preparation, calculation, or statistical steps the quest
 | Explore distributions, resolve missing data, combine sources, or build an ETL script | [Exploration and transformation](references/explore-transform.md) |
 | Define comparisons, diagnose changes, choose statistical methods, or evaluate a model | [Analysis methods](references/analysis-methods.md) |
 | Explain findings with charts and arrange complementary views | [Charts and visual explanations](references/visualization-render.md), including an optional Python example |
-| Integrate an HTML figure with host theme, animation or capture behavior | [HTML environment](references/html-environment.md); read only when this integration is needed |
+| Style HTML with host theme colors | [HTML theme CSS](references/html-theme-css.md), with the complete variable list and examples |
+| Use JavaScript theme, animation or capture behavior | [HTML environment](references/html-environment.md); read only when this integration is needed |
 
 Use a suitable existing environment or prepare task dependencies with uv, venv, or Conda. Install only what the chosen work needs; loading this Skill does not supply Python packages, database access, or a chart library. Resolve bundled resource paths relative to this `SKILL.md`; scripts are optional code references that may be adapted or replaced.
 

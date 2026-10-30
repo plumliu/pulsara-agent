@@ -1,6 +1,6 @@
 # HTML display environment
 
-Read this reference when an HTML figure needs host theme, animation or screenshot integration. It applies to any HTML illustration or interactive view; it does not require a data-analysis workflow.
+Read this reference when an HTML figure needs JavaScript theme, animation or screenshot integration. For CSS colors alone, [HTML theme CSS](html-theme-css.md) contains the complete variable list and examples. These references apply to any HTML illustration or interactive view; they do not require a data-analysis workflow.
 
 ## Layout and resources
 
@@ -10,11 +10,9 @@ HTML can use inline SVG, Canvas, ordinary elements or a locally included library
 
 ## Theme and animation
 
-The optional read-only `window.PulsaraVisualization` exposes `getSnapshot()` and `subscribe(callback)`. Read the initial snapshot before subscribing; `subscribe` returns an unsubscribe function. Snapshots contain `theme` (`light`/`dark`), `visible`, `reducedMotion`, and `colors` (`background`, `foreground`, `muted`, `accent`, `border`, `soft`). Matching CSS variables are available as `--pulsara-*`. Supply ordinary browser fallbacks for use outside Pulsara.
+The optional read-only `window.PulsaraVisualization` exposes `getSnapshot()` and `subscribe(callback)`. Read the initial snapshot before subscribing; `subscribe` returns an unsubscribe function. Snapshots contain `theme` (`light`/`dark`), `visible`, `reducedMotion`, and `colors` (`background`, `foreground`, `muted`, `accent`, `border`, `soft`). CSS-only theme styling needs no subscription; see [HTML theme CSS](html-theme-css.md).
 
 ```css
-html, body { background: transparent; }
-body { margin: 0; color: var(--pulsara-foreground, #17191f); }
 [data-animated] { animation-play-state: var(--animation-state, paused); }
 ```
 
