@@ -2686,6 +2686,11 @@ class McpHostSupervisor:
             entries.append(
                 McpServerCatalogEntry(
                     server_id=config.server_id,
+                    runtime_source=(
+                        candidate.slot_lease._slot.client.config.runtime_source
+                        if candidate is not None
+                        else config.runtime_source
+                    ),
                     display_name=config.display_name,
                     status=state,
                     required=config.required,
@@ -2941,7 +2946,7 @@ async def discover_mcp_catalog(
         else ()
     )
     templates = (
-        await _list_legacy_optional_resource_templates(client, budget=budget)
+        await _list_optional_resource_templates(client, budget=budget)
         if advertised.resources
         else ()
     )
@@ -3137,8 +3142,9 @@ async def _list_pages(
     field_name: str,
     *,
     budget: _DiscoveryBudget,
+    optional_method: bool = False,
 ) -> tuple[object, ...]:
-    from .sdk_facade import types
+    from .sdk_facade import MCPError, types
 
     cursor: str | None = None
     items: list[object] = []
@@ -3149,7 +3155,15 @@ async def _list_pages(
             if cursor is not None
             else None
         )
-        result = await method(params=params)  # type: ignore[operator]
+        try:
+            result = await method(params=params)  # type: ignore[operator]
+        except MCPError as exc:
+            # A server can expose concrete resources without a template-list
+            # method in either protocol era. Only its first-page -32601 proves
+            # absence; all other errors (including mid-pagination) must fail.
+            if optional_method and cursor is None and exc.code == types.METHOD_NOT_FOUND:
+                return ()
+            raise
         if client.require_closed_result_type(result) != "complete":
             raise RuntimeError("MCP listing cannot require input")
         page = getattr(result, field_name)
@@ -3167,28 +3181,18 @@ async def _list_pages(
     raise ValueError("MCP discovery page bound exceeded")
 
 
-async def _list_legacy_optional_resource_templates(
+async def _list_optional_resource_templates(
     client: BoundedMcpSdkClient,
     *,
     budget: _DiscoveryBudget,
 ) -> tuple[object, ...]:
-    from .sdk_facade import MCPError
-
-    try:
-        return await _list_pages(
-            client,
-            client.session.list_resource_templates,
-            "resource_templates",
-            budget=budget,
-        )
-    except MCPError as exc:
-        # MCP 1.x servers can advertise the resources surface without
-        # implementing the later resource-template listing method.  The
-        # absence is an empty optional sub-surface only after legacy
-        # initialize was explicitly negotiated; modern peers stay strict.
-        if client.uses_legacy_initialize and exc.code == -32601:
-            return ()
-        raise
+    return await _list_pages(
+        client,
+        client.session.list_resource_templates,
+        "resource_templates",
+        budget=budget,
+        optional_method=True,
+    )
 
 
 def _candidate(

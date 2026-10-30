@@ -65,18 +65,16 @@ it('shows four recent sessions with shared presence and opens the selected sessi
   expect(onOpenSession).toHaveBeenCalledWith('session-2');
 });
 
-it('aggregates task counts across sessions and shows model and retrieval configuration', () => {
+it('aggregates subagents across sessions and shows model and retrieval configuration', () => {
   const { container } = renderOverview({
-    sessions: [
-      { total: 7, active: 2, waiting: 1, attention: 0 },
-      { total: 5, active: 3, waiting: 0, attention: 1 },
-    ].map((taskCounts, index) => ({
+    sessions: [2, 3].map((subagentCount, index) => ({
       id: `session-${index}`,
       title: `任务 ${index}`,
       subtitle: '/workspace/project',
       updatedAt: '刚刚',
       status: 'running',
-      taskCounts,
+      live: false,
+      subagentCount,
     })),
     localSettings: {
       postgres: null,
@@ -96,8 +94,8 @@ it('aggregates task counts across sessions and shows model and retrieval configu
     })),
   });
 
-  expect(container.querySelectorAll('.metric-grid article')[1]?.querySelector('strong')?.textContent).toBe('5');
-  expect(screen.getByText('共 12 个任务')).toBeTruthy();
+  expect(container.querySelectorAll('.metric-grid article')[3]?.querySelector('strong')?.textContent).toBe('5');
+  expect(screen.getByText('未归档会话中的子代理')).toBeTruthy();
   expect(screen.getByText('1 组可用 · 1 组不可用')).toBeTruthy();
   expect(screen.getByText('已开启')).toBeTruthy();
   expect(screen.getByText('已关闭')).toBeTruthy();

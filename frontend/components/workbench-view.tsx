@@ -480,6 +480,7 @@ function TraceCard({
   const mcpDetail = mcpTraceDetail(trace, mcpToolRefs);
   const builtinSummary = builtinToolSummary(trace);
   const purpose = skill ? `使用 ${skill.name} 技能` : builtinSummary?.title ?? trace.title;
+  const showPurposeAsTitle = Boolean(builtinSummary) || trace.toolName === 'use_new_mcp_tool';
   const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
   const parsedResult = parseJsonObject(trace.resultText);
   const showTargets = useContext(PresentationContext);
@@ -560,8 +561,8 @@ function TraceCard({
   };
   const summary = <TraceSummary
     icon={<span className={`trace-icon trace-icon--${trace.kind}`}><Icon size={14} /></span>}
-    title={builtinSummary ? purpose : trace.toolName ?? trace.title}
-    purpose={!builtinSummary && trace.toolName && purpose !== trace.toolName ? purpose : undefined}
+    title={showPurposeAsTitle ? purpose : trace.toolName ?? trace.title}
+    purpose={!showPurposeAsTitle && trace.toolName && purpose !== trace.toolName ? purpose : undefined}
     subtitle={subtitle} status={trace.status}
     state={trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? (builtinSummary ? undefined : trace.meta)}
     action={expandable && <ChevronRight className="trace-chevron" size={13} />} />;
@@ -2265,7 +2266,7 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
               </article>}
             {reading.atLatestHistory && steers.map(item => <div key={item.queueItemId} data-queue-item-id={item.queueItemId}>
               <UserMessage message={{ id: item.queueItemId, role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content), promptContent: item.content, time: '' }}
-                {...pendingSteerSender(item)} onReadPromptImage={contentReader.readPromptImage} onNotify={onNotify} deliveryStatus="等待模型接收" />
+                {...pendingSteerSender(item)} onReadPromptImage={contentReader.readPromptImage} onNotify={onNotify} />
             </div>)}
             <div data-thread-tail-end="" aria-hidden="true" />
           </div>
@@ -2965,7 +2966,7 @@ export function WorkbenchView({
                 role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
                 promptContent: item.content, status: 'completed',
                 time: item.submittedAt ? new Date(item.submittedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '' }}
-                {...pendingSteerSender(item)} deliveryStatus="等待模型接收" onNotify={onNotify} onReadPromptImage={onReadPromptImage} />
+                {...pendingSteerSender(item)} onNotify={onNotify} onReadPromptImage={onReadPromptImage} />
             </div>
           ))}
           {atLatestHistory && canControl && interaction && (

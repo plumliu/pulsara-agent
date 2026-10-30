@@ -689,54 +689,39 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     ))) refreshVisibleUserCapabilities.current?.();
   }, [acceptUserCapabilities]);
 
-  const loadUserCapabilities = useCallback(async (refresh = false, signal?: AbortSignal) => {
+  const loadUserCapabilities = useCallback(async (signal?: AbortSignal) => {
     if (signal?.aborted) return;
     const load = async () => {
       if (signal?.aborted) return;
       const attempt = ++userCapabilityAttempt.current;
-      const controller = refresh ? undefined : new AbortController();
-      const readSignal = controller
-        ? signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
-        : undefined;
-      if (controller) userCapabilityReadAbort.current = controller;
+      const controller = new AbortController();
+      const readSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
+      userCapabilityReadAbort.current = controller;
       setUserCapabilityLoading(true);
       setUserCapabilityError(undefined);
       try {
-        const next = refresh
-          ? await adapter.refreshUserCapabilities()
-          : await adapter.inspectUserCapabilities(readSignal);
-        if (refresh) {
-          // A dispatched reload settles even after navigation or a newer mutation.
-          // Report its result once without rolling back newer inventory.
-          const inventory = attempt === userCapabilityAttempt.current
-            ? next : userCapabilitiesRef.current ?? next;
-          acceptUserCapabilities(inventory);
-          notify(next.adoption?.attentionSessions ? '部分会话需要重试' : '会话能力已重新加载',
-            capabilityAdoptionMessages(next.adoption).join(' ') || undefined,
-            next.adoption?.attentionSessions ? 'warning' : 'success');
-        } else if (!readSignal?.aborted && attempt === userCapabilityAttempt.current) {
+        const next = await adapter.inspectUserCapabilities(readSignal);
+        if (!readSignal.aborted && attempt === userCapabilityAttempt.current) {
           acceptUserCapabilities(next);
         }
       } catch (error) {
-        if (!refresh && (readSignal?.aborted || attempt !== userCapabilityAttempt.current)) return;
+        if (readSignal.aborted || attempt !== userCapabilityAttempt.current) return;
         const message = productMessage(
           error instanceof Error ? error.message : undefined,
           '暂时无法读取这台设备上的能力。',
         );
-        if (refresh) notify('会话能力未重新加载', message, 'warning');
-        else setUserCapabilityError(message);
+        setUserCapabilityError(message);
         setUserCapabilityLoading(false);
       } finally {
-        if (controller && userCapabilityReadAbort.current === controller) userCapabilityReadAbort.current = undefined;
-        if (readSignal?.aborted && attempt === userCapabilityAttempt.current) setUserCapabilityLoading(false);
+        if (userCapabilityReadAbort.current === controller) userCapabilityReadAbort.current = undefined;
+        if (readSignal.aborted && attempt === userCapabilityAttempt.current) setUserCapabilityLoading(false);
       }
     };
-    // Toolbar reads, explicit reloads and periodic reads share one admission
-    // lane. GET cancellation never cancels or replays an admitted POST.
+    // Toolbar and periodic reads share one admission lane.
     const operation = userCapabilityLoads.current.then(load, load);
     userCapabilityLoads.current = operation;
     await operation;
-  }, [adapter, acceptUserCapabilities, notify]);
+  }, [adapter, acceptUserCapabilities]);
 
   const forgetSession = useCallback((sessionId: string) => {
     suggestionCache.forget(sessionId);
@@ -1452,7 +1437,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       refreshRequested = false;
       request = new AbortController();
       try {
-        await loadUserCapabilities(false, request.signal);
+        await loadUserCapabilities(request.signal);
       } finally {
         reading = false;
         if (!disposed && document.visibilityState === 'visible') {
@@ -3012,8 +2997,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           snapshot={userCapabilities}
           loading={userCapabilityLoading}
           error={userCapabilityError}
-          onRefresh={() => loadUserCapabilities(false, userCapabilityPageAbort.current?.signal)}
-          onReload={() => loadUserCapabilities(true)}
+          onRefresh={() => loadUserCapabilities(userCapabilityPageAbort.current?.signal)}
           onOpenRoot={openCapabilityRoot}
           onInstallSkill={installDeviceSkill}
           onPreviewSkills={(sourcePath) => adapter.previewSkillImport(sourcePath)}

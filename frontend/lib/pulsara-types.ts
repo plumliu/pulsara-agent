@@ -292,6 +292,7 @@ export interface SessionSummary {
   status: SessionStatus | null;
   updatedAt: string;
   live: boolean;
+  subagentCount?: number;
   pinned?: boolean;
   unread?: boolean;
   modelCallBinding?: {

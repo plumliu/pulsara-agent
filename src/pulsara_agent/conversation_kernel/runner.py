@@ -12,7 +12,7 @@ from pulsara_agent.identity import derive_id
 from pulsara_agent.identity import random_id
 
 import asyncio
-from dataclasses import dataclass, field as dataclass_field
+from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -276,13 +276,17 @@ from pulsara_agent.hooks.context import (
 )
 from pulsara_agent.hooks.contracts import (
     ContinuationDecision,
+    ContinuationOutcome,
     GateDecision,
+    GateOutcome,
     HookDispatchEnvelope,
     HookDispatchScopeRef,
     HookEventType,
     SessionStartInput,
     SessionStartRef,
+    SubagentStartInput,
     StopInput,
+    SubagentStopInput,
     StopRef,
     external_permission_mode,
 )
@@ -664,7 +668,7 @@ class _PendingSessionStartBoundary:
 
 
 class _SessionStartColdBoundaryOwner(SessionStartCompactBoundaryPort):
-    """One process-local pending SessionStart for the next ROOT cold open."""
+    """One process-local pending start boundary for the next session cold open."""
 
     def __init__(self, initial_source: str) -> None:
         if initial_source not in {"startup", "resume"}:
@@ -737,6 +741,87 @@ class RootControlCompletionSettlementPort(Protocol):
     async def __call__(self, turn_id: str, *, turn_completed: bool) -> None: ...
 
 
+async def _dispatch_session_start_hooks(
+    dispatcher: KernelHookDispatcher,
+    envelope: HookDispatchEnvelope[SessionStartInput],
+    intent: ActiveTurnCancellationIntent,
+) -> GateOutcome:
+    """Add the delegated-session event at the same existing start boundary."""
+    public = envelope.public_input
+    outcome = await dispatcher.dispatch(
+        envelope,
+        matcher_subject=event_matcher_subject(public.event_type, source=public.source),
+    )
+    if intent.cause is not None:
+        raise asyncio.CancelledError
+    if public.session_kind != "SUBAGENT" or outcome.decision is GateDecision.BLOCK:
+        return outcome
+    child_input = SubagentStartInput(
+        session_id=public.session_id,
+        session_kind=public.session_kind,
+        input_origin=public.input_origin,
+        cwd=public.cwd,
+        model=public.model,
+        source=public.source,
+        permission_mode=public.permission_mode,
+    )
+    child = await dispatcher.dispatch(
+        replace(envelope, public_input=child_input),
+        matcher_subject=event_matcher_subject(
+            child_input.event_type, source=child_input.source
+        ),
+    )
+    return replace(
+        outcome,
+        context_entries=(*outcome.context_entries, *child.context_entries),
+        diagnostics=(*outcome.diagnostics, *child.diagnostics),
+    )
+
+
+async def _dispatch_session_stop_hooks(
+    dispatcher: KernelHookDispatcher,
+    envelope: HookDispatchEnvelope[StopInput],
+    intent: ActiveTurnCancellationIntent,
+) -> ContinuationOutcome:
+    """Compose final-attempt controls without ending the reusable child session."""
+    public = envelope.public_input
+    outcome = await dispatcher.dispatch(
+        envelope,
+        matcher_subject=event_matcher_subject(public.event_type),
+        continuation_already_used=public.stop_hook_active,
+    )
+    if intent.cause is not None:
+        raise asyncio.CancelledError
+    if public.session_kind != "SUBAGENT":
+        return outcome
+    child_input = SubagentStopInput(
+        session_id=public.session_id,
+        session_kind=public.session_kind,
+        input_origin=public.input_origin,
+        cwd=public.cwd,
+        model=public.model,
+        turn_id=public.turn_id,
+        stop_hook_active=public.stop_hook_active,
+        last_assistant_message=public.last_assistant_message,
+        permission_mode=public.permission_mode,
+    )
+    child = await dispatcher.dispatch(
+        replace(envelope, public_input=child_input),
+        matcher_subject=event_matcher_subject(child_input.event_type),
+        continuation_already_used=public.stop_hook_active,
+    )
+    if intent.cause is not None:
+        raise asyncio.CancelledError
+    outcomes = (outcome, child)
+    winner = next((item for item in outcomes if item.explicit_terminalize), None)
+    if winner is None:
+        winner = next(
+            (item for item in outcomes if item.decision is ContinuationDecision.CONTINUE_ONCE),
+            outcome,
+        )
+    return replace(winner, diagnostics=(*outcome.diagnostics, *child.diagnostics))
+
+
 @dataclass(frozen=True, slots=True)
 class _RootSessionStartCompactPort(SessionStartCompactPort):
     dispatcher: KernelHookDispatcher | None = dataclass_field(repr=False, compare=False)
@@ -784,7 +869,8 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
             ),
             "compact",
         )
-        outcome = await self.dispatcher.dispatch(
+        outcome = await _dispatch_session_start_hooks(
+            self.dispatcher,
             HookDispatchEnvelope(
                 self.dispatcher.capture_view(),
                 self.scope,
@@ -792,9 +878,7 @@ class _RootSessionStartCompactPort(SessionStartCompactPort):
                 causal_ref,
                 facts.deadline_monotonic,
             ),
-            matcher_subject=event_matcher_subject(
-                public_input.event_type, source="compact"
-            ),
+            self.intent,
         )
         if self.intent.cause is not None:
             raise asyncio.CancelledError
@@ -1894,7 +1978,8 @@ class ConversationKernelRunner:
                             epoch_nonce=permit.epoch_nonce,
                             binding_revision_id=request.cut.context_binding_revision_id,
                         )
-                        stop_continuation = await self._hook_dispatcher.dispatch(
+                        stop_continuation = await _dispatch_session_stop_hooks(
+                            self._hook_dispatcher,
                             HookDispatchEnvelope(
                                 self._hook_dispatcher.capture_view(),
                                 self._hook_scope,
@@ -1902,10 +1987,7 @@ class ConversationKernelRunner:
                                 stop_causal_ref,
                                 self._planning_deadline(),
                             ),
-                            matcher_subject=event_matcher_subject(
-                                stop_public_input.event_type
-                            ),
-                            continuation_already_used=stop_continuation_used,
+                            intent,
                         )
                         complete_turn = (
                             stop_continuation.decision
@@ -2233,7 +2315,8 @@ class ConversationKernelRunner:
             ),
         )
         causal_ref = SessionStartRef(token, source)
-        outcome = await dispatcher.dispatch(
+        outcome = await _dispatch_session_start_hooks(
+            dispatcher,
             HookDispatchEnvelope(
                 view,
                 scope,
@@ -2241,9 +2324,7 @@ class ConversationKernelRunner:
                 causal_ref,
                 deadline_monotonic,
             ),
-            matcher_subject=event_matcher_subject(
-                public_input.event_type, source=source
-            ),
+            intent,
         )
         if outcome.decision is GateDecision.BLOCK:
             raise SessionStartBlocked(outcome.reason or "SessionStart Hook blocked")
@@ -2645,6 +2726,8 @@ class ConversationKernelRunner:
                 ),
             )
         )
+        if not call_count and scope_kind is ModelInputScopeKind.SUBAGENT:
+            event_occurrences += ((HookEventType.SUBAGENT_STOP_EVENT, 1, True),)
         body_bytes = maximum_hook_context_provider_body_bytes(
             view,
             event_occurrences=event_occurrences,

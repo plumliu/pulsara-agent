@@ -18,10 +18,7 @@ def test_session_summary_keeps_live_state_out_of_display_copy() -> None:
         writer_generation=4,
         latest_entry_sequence=13,
         updated_at=datetime(2026, 8, 30, 11, 0, tzinfo=timezone.utc),
-        subagent_task_total=7,
-        subagent_task_active=2,
-        subagent_task_waiting=1,
-        subagent_task_attention=2,
+        subagent_count=7,
     )
 
     resumable = LocalSessionController._summary_payload(summary, live=False)
@@ -33,9 +30,4 @@ def test_session_summary_keeps_live_state_out_of_display_copy() -> None:
     assert loaded["live"] is True
     assert resumable["latest_root_turn"] is None
     assert loaded["latest_root_turn"] is None
-    assert loaded["task_counts"] == {
-        "total": 7,
-        "active": 2,
-        "waiting": 1,
-        "attention": 2,
-    }
+    assert loaded["subagent_count"] == 7

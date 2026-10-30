@@ -18,7 +18,8 @@ This is the value of `config`, not a whole management call. Supply the user's
 actual endpoint. For explicit legacy SSE use transport type `sse`; do not probe
 transport types by guesswork. Explicitly approved loopback HTTP requires
 `allow_http_localhost:true` inside transport. It does not authorize non-loopback
-plain HTTP or broaden network permission.
+plain HTTP. HTTPS endpoints may use public, private or loopback addresses.
+DNS and proxy routing follow the host network through the HTTP client.
 
 A stdio transport uses `type:"stdio"`, `command`, an `args` array, optional
 workspace-relative `cwd`, and public-only `env`. Obtain the vendor's actual MCP

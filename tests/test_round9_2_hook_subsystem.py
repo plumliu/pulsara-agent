@@ -48,6 +48,7 @@ from pulsara_agent.hooks.contracts import (
     HookDispatchScopeRef,
     HookEventType,
     HookScopeKind,
+    HookScopePolicy,
     HookSourceKind,
     HookSourceSnapshotDisposition,
     HookSourceTrustAssessment,
@@ -72,8 +73,10 @@ from pulsara_agent.hooks.contracts import (
     SessionEndInput,
     SessionEndRef,
     SessionStartInput,
+    SubagentStartInput,
     SessionStartRef,
     StopInput,
+    SubagentStopInput,
     StopRef,
     UserPromptSubmitInput,
     external_permission_mode,
@@ -268,6 +271,8 @@ def _inputs() -> tuple[object, ...]:
             last_assistant_message="done",
             permission_mode="default",
         session_kind="ROOT", input_origin=None),
+        SubagentStartInput(**common, source="startup", permission_mode="default", session_kind="SUBAGENT", input_origin=None),
+        SubagentStopInput(**common, turn_id="turn:test", stop_hook_active=False, last_assistant_message="done", permission_mode="default", session_kind="SUBAGENT", input_origin=None),
     )
 
 
@@ -311,9 +316,9 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     causal_refs = _causal_refs()
     alias = HookDispatchCausalRef.__value__
 
-    assert len(HookEventType) == 9
-    assert len(inputs) == 9
-    assert len(EVENT_OUTCOME_FAMILY) == 9
+    assert len(HookEventType) == 11
+    assert len(inputs) == 11
+    assert len(EVENT_OUTCOME_FAMILY) == 11
     assert {value.__name__ for value in EVENT_OUTCOME_FAMILY.values()} == {
         "ObserveOutcome",
         "ContextOutcome",
@@ -972,6 +977,7 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
     async def exercise() -> None:
         outputs = {event.external_name: (0, b"", b"") for event in HookEventType}
         outputs["SessionStart"] = (0, b"start context", b"")
+        outputs["SubagentStart"] = (0, b"child context", b"")
         outputs["UserPromptSubmit"] = (2, b"", b"prompt block")
         outputs["PreToolUse"] = (
             0,
@@ -992,13 +998,13 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
         outputs["PostCompact"] = (0, b'{"continue":true}', b"")
         outputs["Stop"] = (0, b'{"continue":false}', b"")
         definitions = tuple(
-            _definition(
+            replace(_definition(
                 tmp_path,
                 event,
                 event.external_name,
                 ordinal=ordinal,
                 status=f"status:{event.external_name}",
-            )
+            ), scope_policy=HookScopePolicy.BOTH)
             for ordinal, event in enumerate(HookEventType)
         )
         executor = _ScriptedExecutor(outputs)
@@ -1013,12 +1019,14 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
         scope = _scope()
         causal_by_event = dict(
             zip(
-                HookEventType,
+                [item.event_type for item in _inputs()],
                 (
                     _causal_refs()[0],
                     _causal_refs()[1],
                     _causal_refs()[2],
                     *_causal_refs()[4:],
+                    _causal_refs()[0],
+                    _causal_refs()[-1],
                 ),
                 strict=True,
             )
@@ -1031,7 +1039,7 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
             outcome = await dispatcher.dispatch(
                 HookDispatchEnvelope(
                     dispatcher.capture_view(),
-                    scope,
+                    _scope(session_id=public_input.session_id) if public_input.session_kind == "SUBAGENT" else scope,
                     public_input,
                     causal_by_event[public_input.event_type],
                     monotonic() + 10,
@@ -1074,15 +1082,18 @@ def test_round9_2_dispatcher_all_events_status_and_terminal_lane(
             is ContinuationDecision.TERMINALIZE
         )
         assert isinstance(terminal, ObserveOutcome)
-        assert len(executor.calls) == 9
-        assert sum(item.code == "HOOK_STATUS" for item in diagnostics.values) == 9
+        assert isinstance(outcomes[HookEventType.SUBAGENT_START_EVENT], ContextOutcome)
+        assert outcomes[HookEventType.SUBAGENT_START_EVENT].context_entries
+        assert isinstance(outcomes[HookEventType.SUBAGENT_STOP_EVENT], ContinuationOutcome)
+        assert len(executor.calls) == 11
+        assert sum(item.code == "HOOK_STATUS" for item in diagnostics.values) == 11
 
     asyncio.run(exercise())
 
 
 def _matcher_for_input(public_input):
     event = public_input.event_type
-    if event is HookEventType.SESSION_START_EVENT:
+    if event in {HookEventType.SESSION_START_EVENT, HookEventType.SUBAGENT_START_EVENT}:
         return event_matcher_subject(event, source=public_input.source)
     if event is HookEventType.SESSION_END_EVENT:
         return event_matcher_subject(event, reason=public_input.reason)
@@ -1715,126 +1726,6 @@ def test_round9_2_session_start_boundary_supersedes_resume_and_inherits_deadline
             initial_deadline,
             compact_deadline,
         ]
-
-    asyncio.run(exercise())
-
-
-@pytest.mark.parametrize("failure_kind", ("cancel", "error"))
-def test_pending_root_session_start_failure_retires_hook_context(
-    tmp_path: Path,
-    failure_kind: str,
-) -> None:
-    from pulsara_agent.conversation_kernel.cancellation import (
-        ActiveTurnCancellationIntent,
-    )
-    from pulsara_agent.conversation_kernel.runner import (
-        ConversationKernelRunner,
-        _SessionStartColdBoundaryOwner,
-    )
-    from pulsara_agent.hooks.contracts import HookContextEntry
-    from pulsara_agent.model_input.contracts import ModelInputScopeKind
-    from pulsara_agent.primitives.permission import PermissionMode
-
-    class _Dispatcher:
-        def capture_view(self):
-            return _view(tmp_path, ())
-
-        async def dispatch(self, envelope, *, matcher_subject):
-            del envelope, matcher_subject
-            definition = _definition(
-                tmp_path,
-                HookEventType.SESSION_START_EVENT,
-                "noop",
-                context_limit=0,
-            )
-            return GateOutcome(
-                context_entries=(
-                    HookContextEntry(
-                        definition,
-                        0,
-                        1,
-                        "session start context",
-                        HookSecretScrubSet.capture(),
-                    ),
-                )
-            )
-
-    class _ProviderDispatch:
-        def __init__(self) -> None:
-            self.started = asyncio.Event()
-
-        async def prepare_hook_context_sibling(self, *args, **kwargs):
-            del args, kwargs
-            self.started.set()
-            if failure_kind == "cancel":
-                await asyncio.Event().wait()
-            raise RuntimeError("Hook sibling preparation failed")
-
-    class _Prepared:
-        def __init__(self) -> None:
-            permission = SimpleNamespace(
-                effective_mode=PermissionMode.BYPASS_PERMISSIONS,
-                plan_workflow_id=None,
-            )
-            self.admission = SimpleNamespace(
-                candidate=SimpleNamespace(
-                    exact_turn_id='turn:6lpydfwcm7rxi7t3wlyt5ke4pe',
-                    permission_snapshot=permission,
-                )
-            )
-            self.prepared_target = SimpleNamespace(
-                target=SimpleNamespace(fact=SimpleNamespace(model_id="model:1"))
-            )
-            self.closed = False
-
-        @property
-        def owns_resources(self) -> bool:
-            return not self.closed
-
-        def close(self) -> None:
-            assert not self.closed
-            self.closed = True
-
-    async def exercise() -> None:
-        scope = _scope()
-        context_owner = HookContextOwner()
-        context_owner.register_scope(scope)
-        provider_dispatch = _ProviderDispatch()
-        prepared = _Prepared()
-        runner = object.__new__(ConversationKernelRunner)
-        runner._session_scope_kind = ModelInputScopeKind.ROOT
-        runner._session_start_boundary = _SessionStartColdBoundaryOwner("startup")
-        runner._hook_dispatcher = _Dispatcher()
-        runner._hook_context_owner = context_owner
-        runner._hook_scope = scope
-        runner._writer_lease = SimpleNamespace(
-            guard=SimpleNamespace(session_id='session:cbauiajfisf4gvpdotrq4qgxhq')
-        )
-        runner._tools = SimpleNamespace(snapshot_workspace_root=lambda: tmp_path)
-        runner._provider_dispatch = provider_dispatch
-        runner._planning_deadline = lambda: monotonic() + 10
-        intent = ActiveTurnCancellationIntent(
-            'turn:6lpydfwcm7rxi7t3wlyt5ke4pe', ModelInputScopeKind.ROOT, None
-        )
-        task = asyncio.create_task(
-            runner._attach_pending_root_hook_context(prepared, intent)
-        )
-        await provider_dispatch.started.wait()
-        if failure_kind == "cancel":
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            with pytest.raises(RuntimeError, match="preparation failed"):
-                await task
-
-        assert prepared.closed
-        assert (
-            context_owner.freeze_for_target(
-                scope_kind="ROOT", session_id="session:cbauiajfisf4gvpdotrq4qgxhq", estimator=_Estimator()
-            )
-            is None
-        )
 
     asyncio.run(exercise())
 

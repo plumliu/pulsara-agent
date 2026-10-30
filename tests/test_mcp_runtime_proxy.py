@@ -3,7 +3,6 @@
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-import ipaddress
 import socket
 import ssl
 from types import SimpleNamespace
@@ -13,13 +12,10 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
-import dns.message
-import dns.rdatatype
-import dns.rrset
 import httpx2
 import pytest
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 from starlette.routing import Mount, Route
 import uvicorn
 from mcp.server.mcpserver import MCPServer
@@ -50,14 +46,6 @@ def runtime_network(monkeypatch):
         monkeypatch.delenv(name, raising=False)
         monkeypatch.delenv(name.upper(), raising=False)
     monkeypatch.setattr("httpx2._utils.getproxies", getproxies_environment)
-    resolve = asyncio.BaseEventLoop.getaddrinfo
-
-    async def addresses(self, host, port, **kwargs):
-        if host.endswith(".example"):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
-        return await resolve(self, host, port, **kwargs)
-
-    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", addresses)
 
 
 def http_client(**kwargs):
@@ -98,9 +86,9 @@ async def test_runtime_selects_against_logical_hostname(runtime_network, monkeyp
     async with http_client() as client:
         await client.get("https://mcp.example/mcp")
     assert [label for label, _ in calls] == ["direct" if mode in {"none", "no_proxy"} else "proxy"]
-    assert calls[0][1].url.host == "93.184.216.34"
+    assert calls[0][1].url.host == "mcp.example"
     assert calls[0][1].headers["host"] == "mcp.example"
-    assert calls[0][1].extensions["sni_hostname"] == "mcp.example"
+    assert "sni_hostname" not in calls[0][1].extensions
 
 
 @pytest.mark.anyio
@@ -113,7 +101,7 @@ async def test_loopback_stays_local_without_no_proxy(runtime_network, monkeypatc
     ) as client:
         await client.get("http://localhost:17839/callback")
     assert len(calls) == 1 and calls[0][0] == "direct"
-    assert ipaddress.ip_address(calls[0][1].url.host).is_loopback
+    assert calls[0][1].url.host == "localhost"
 
 
 @pytest.mark.anyio
@@ -176,22 +164,21 @@ async def test_bypassed_proxy_credentials_do_not_block_direct_admission(runtime_
 
 
 @pytest.mark.anyio
-async def test_proxy_does_not_bypass_private_network_policy(runtime_network, monkeypatch):
+async def test_proxy_does_not_require_local_dns_or_public_addresses(runtime_network, monkeypatch):
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9876")
 
-    async def private(self, host, port, **kwargs):
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.10", port))]
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Pulsara must not resolve a proxy destination locally")
 
-    async def private_recovery(*args, **kwargs):
-        return frozenset({ipaddress.ip_address("192.168.1.10")})
-
-    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", private)
-    monkeypatch.setattr("pulsara_agent.conversation_kernel.mcp.sdk_facade._resolve_public_http_addresses", private_recovery)
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", forbidden)
     calls = recorded_transports(monkeypatch)
     async with http_client() as client:
-        with pytest.raises(ValueError, match="PRIVATE_NETWORK_DENIED"):
-            await client.get("https://mcp.example/mcp")
-    assert calls == []
+        await client.get("https://mcp.example/mcp")
+        await client.get("https://192.168.1.10/mcp")
+        await client.get("https://198.18.0.59/mcp")
+    assert [(label, req.url.host) for label, req in calls] == [
+        ("proxy", "mcp.example"), ("proxy", "192.168.1.10"), ("proxy", "198.18.0.59"),
+    ]
 
 
 @pytest.mark.anyio
@@ -204,7 +191,7 @@ async def test_proxy_discovery_does_not_adopt_certificate_environment(runtime_ne
 
 
 @asynccontextmanager
-async def sdk_proxy_service(tmp_path, monkeypatch, *, doh_handler=None, legacy_sse=False):
+async def sdk_proxy_service(tmp_path, monkeypatch, *, legacy_sse=False):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "MCP proxy test")])
     cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
@@ -212,7 +199,7 @@ async def sdk_proxy_service(tmp_path, monkeypatch, *, doh_handler=None, legacy_s
         .not_valid_before(datetime(2000, 1, 1, tzinfo=timezone.utc))
         .not_valid_after(datetime(2100, 1, 1, tzinfo=timezone.utc))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .add_extension(x509.SubjectAlternativeName([x509.DNSName("mcp.example"), x509.DNSName("oauth.example"), x509.DNSName("cloudflare-dns.com")]), critical=False)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("mcp.example"), x509.DNSName("oauth.example")]), critical=False)
         .sign(key, hashes.SHA256()))
     cert_path, key_path = tmp_path / "cert.pem", tmp_path / "key.pem"
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
@@ -225,7 +212,7 @@ async def sdk_proxy_service(tmp_path, monkeypatch, *, doh_handler=None, legacy_s
         return context
 
     monkeypatch.setattr(httpx2, "create_ssl_context", verified_test_ca)
-    state = SimpleNamespace(connects=[], echoes=[], oauth=[], doh=[], tasks=set(), writers=set())
+    state = SimpleNamespace(connects=[], echoes=[], oauth=[], tasks=set(), writers=set())
     sdk = MCPServer("proxy-regression")
 
     @sdk.tool()
@@ -240,18 +227,7 @@ async def sdk_proxy_service(tmp_path, monkeypatch, *, doh_handler=None, legacy_s
         state.oauth.append((request.method, request.url.hostname, request.url.path, await request.body()))
         return JSONResponse({"ok": True})
 
-    async def doh(request):
-        query = dns.message.from_wire(await request.body())
-        state.doh.append((query, dict(request.headers)))
-        if doh_handler is not None:
-            return await doh_handler(query)
-        reply = dns.message.make_response(query)
-        question = query.question[0]
-        if question.rdtype == dns.rdatatype.A:
-            reply.answer.append(dns.rrset.from_text(question.name, 60, "IN", "A", "93.184.216.34"))
-        return Response(reply.to_wire(), media_type="application/dns-message")
-
-    app = Starlette(routes=[Route("/dns-query", doh, methods=["POST"]), Route("/metadata", oauth), Route("/token", oauth, methods=["POST"]), Mount("/", app=mcp_app)], lifespan=mcp_app.router.lifespan_context)
+    app = Starlette(routes=[Route("/metadata", oauth), Route("/token", oauth, methods=["POST"]), Mount("/", app=mcp_app)], lifespan=mcp_app.router.lifespan_context)
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     sock.listen()
@@ -327,7 +303,7 @@ async def test_real_sdk_discovers_and_calls_through_automatic_connect_proxy(tmp_
             assert state.echoes == ["once"]
         finally:
             await client.aclose()
-        assert state.connects and set(state.connects) == {"93.184.216.34:443"}
+        assert state.connects and set(state.connects) == {"mcp.example:443"}
 
 
 @pytest.mark.anyio
@@ -342,4 +318,4 @@ async def test_production_oauth_http_uses_same_automatic_proxy(tmp_path, runtime
         finally:
             await service.aclose()
         assert state.oauth == [("GET", "oauth.example", "/metadata", b""), ("POST", "oauth.example", "/token", b"code=synthetic-code")]
-        assert state.connects and set(state.connects) == {"93.184.216.34:443"}
+        assert state.connects and set(state.connects) == {"oauth.example:443"}

@@ -28,7 +28,6 @@ dependencies = [
     "mdit-py-plugins>=0.5,<1",
     "html5lib>=1.1,<2",
     "tinycss2>=1.5,<2",
-    "dnspython[doh]>=2.9,<3",
 ]
 
 [project.scripts]

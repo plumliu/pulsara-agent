@@ -18,7 +18,6 @@ from pulsara_agent.mcp_config import (
     McpConfiguredEffect,
     McpEffectPolicyConfig,
     McpExposurePolicy,
-    McpHttpNetworkPolicy,
     McpScopePolicy,
     McpServerConfig,
     StdioTransportConfig,
@@ -323,7 +322,6 @@ def plugin_declaration_transport(server, *, package_root, data_root):
         )(
             endpoint=server.endpoint,
             allow_http_localhost=server.endpoint.lower().startswith("http://"),
-            network_policy=McpHttpNetworkPolicy.PUBLIC_ONLY,
         )
     return transport
 

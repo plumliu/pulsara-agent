@@ -1,33 +1,19 @@
-"""DNS pinning must preserve availability without replaying HTTP operations."""
+"""Host networking owns addresses; Pulsara never replays an HTTP operation."""
 import asyncio
-import ipaddress
-import socket
 
 import httpx2
 import pytest
 
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import _McpHttpClient
 from pulsara_agent.conversation_kernel.mcp.wire import DEFAULT_MCP_WIRE_BOUNDS
-from pulsara_agent.mcp_config import StreamableHttpTransportConfig
+from pulsara_agent.mcp_config import StreamableHttpTransportConfig, _parse_server
+from pulsara_agent.capability.mcp_management import config_to_entry
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
 
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
-
-
-@pytest.fixture
-def addresses(monkeypatch):
-    values = ["93.184.216.34", "93.184.216.35"]
-    calls = []
-
-    async def resolve(self, host, port, **kwargs):
-        calls.append(host)
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in values]
-
-    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", resolve)
-    return values, calls
 
 
 def client(handler):
@@ -40,35 +26,35 @@ def client(handler):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure", [httpx2.ConnectError, httpx2.ConnectTimeout])
-async def test_connect_failure_uses_other_validated_address(addresses, failure):
-    seen = []
+@pytest.mark.parametrize("host", ["mcp.example", "192.168.1.10", "198.18.0.59", "127.0.0.1", "[::1]"])
+async def test_url_reaches_httpx_without_local_resolution_or_rewriting(monkeypatch, host):
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("product-level DNS resolution must not run")
 
+    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", forbidden)
+    seen = []
     def handle(request):
         seen.append(request)
-        if len(seen) == 1:
-            raise failure("connection did not open", request=request)
-        return httpx2.Response(200, json={"ok": True})
+        return httpx2.Response(200)
 
+    url = f"https://{host}:9443/mcp?mode=test"
     async with client(handle) as connection:
-        response = await connection.post("https://mcp.example/mcp?mode=test", content=b"operation")
+        response = await connection.post(url, content=b"operation")
     assert response.status_code == 200
-    assert str(response.request.url) == "https://mcp.example/mcp?mode=test"
-    assert [r.url.host for r in seen] == addresses[0]
-    assert addresses[1] == ["mcp.example"]
-    assert all(r.headers["host"] == "mcp.example" for r in seen)
-    assert all(r.extensions["sni_hostname"] == "mcp.example" for r in seen)
-    assert all(r.content == b"operation" for r in seen)
+    assert len(seen) == 1
+    assert str(seen[0].url) == url
+    assert seen[0].headers["host"] == f"{host}:9443"
+    assert "sni_hostname" not in seen[0].extensions
+    assert seen[0].content == b"operation"
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("failure", [httpx2.ReadError, httpx2.WriteError, httpx2.ReadTimeout, httpx2.RemoteProtocolError])
-async def test_possible_transmission_is_never_replayed(addresses, failure):
+@pytest.mark.parametrize("failure", [httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.ReadError, httpx2.WriteError, httpx2.ReadTimeout, httpx2.RemoteProtocolError])
+async def test_product_does_not_replay_http_requests(failure):
     seen = []
-
     def handle(request):
         seen.append(request)
-        raise failure("operation may have reached server", request=request)
+        raise failure("operation failed", request=request)
 
     async with client(handle) as connection:
         with pytest.raises(failure):
@@ -78,9 +64,8 @@ async def test_possible_transmission_is_never_replayed(addresses, failure):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("status", [401, 429, 500])
-async def test_http_result_is_returned_without_another_address(addresses, status):
+async def test_http_result_is_returned_without_retry(status):
     seen = []
-
     def handle(request):
         seen.append(request)
         return httpx2.Response(status)
@@ -92,33 +77,23 @@ async def test_http_result_is_returned_without_another_address(addresses, status
 
 
 @pytest.mark.anyio
-async def test_mixed_public_private_dns_answer_blocks_all_candidates(addresses, monkeypatch):
-    addresses[0].append("127.0.0.1")
-    async def mixed_public_recovery(*args, **kwargs):
-        return frozenset(ipaddress.ip_address(value) for value in addresses[0])
-    monkeypatch.setattr("pulsara_agent.conversation_kernel.mcp.sdk_facade._resolve_public_http_addresses", mixed_public_recovery)
+async def test_redirect_cannot_downgrade_https():
     seen = []
-
     def handle(request):
         seen.append(request)
-        return httpx2.Response(200)
+        return httpx2.Response(302, headers={"Location": "http://192.168.1.10/token"})
 
     async with client(handle) as connection:
-        with pytest.raises(ValueError, match="PRIVATE_NETWORK_DENIED"):
-            await connection.get("https://mcp.example/mcp")
-    assert seen == []
+        with pytest.raises(ValueError, match="requires HTTPS"):
+            await connection.get("https://mcp.example/authorize", follow_redirects=True)
+    assert len(seen) == 1
 
 
-@pytest.mark.anyio
-async def test_exhausted_addresses_propagate_connect_failure(addresses):
-    seen = []
-
-    def handle(request):
-        seen.append(request.url.host)
-        raise httpx2.ConnectError("unreachable", request=request)
-
-    async with client(handle) as connection:
-        with pytest.raises(httpx2.ConnectError):
-            await connection.get("https://mcp.example/mcp")
-    assert seen == addresses[0]
-    assert addresses[1] == ["mcp.example"]
+@pytest.mark.parametrize("kind", ["streamable_http", "sse"])
+def test_network_policy_is_not_part_of_config_contract(kind):
+    transport = {"type": kind, "endpoint": "https://192.168.1.10/mcp"}
+    config = _parse_server("local", {"transport": transport})
+    assert "network_policy" not in config_to_entry(config)["transport"]
+    for removed in ("PUBLIC_ONLY", "ALLOW_PRIVATE"):
+        with pytest.raises(ValueError, match="unknown"):
+            _parse_server("local", {"transport": {**transport, "network_policy": removed}})

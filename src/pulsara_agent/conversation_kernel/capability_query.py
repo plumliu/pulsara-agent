@@ -254,18 +254,17 @@ class CapabilitySourceQuery:
                 "server_id": server.local_server_id,
             }
             runtime_id = framed_plugin_mcp_server_id(plugin_id, server.local_server_id)
-            config = frozen_runtime_config(self.runtime, runtime_id)
+            origin = self._runtime_origin(runtime_id)
             expected_scope = (
                 "user"
                 if scope == "USER"
                 else f"workspace:{item.identity.workspace_state_key}"
             )
             linked = (
-                config is not None
-                and isinstance(config.runtime_source, ManagedPackageMcpRuntimeSource)
-                and config.runtime_source.store_scope_key == expected_scope
-                and config.runtime_source.package_owner_key == plugin_id
-                and config.runtime_source.package_install_id == item.package_install_id
+                isinstance(origin, ManagedPackageMcpRuntimeSource)
+                and origin.store_scope_key == expected_scope
+                and origin.package_owner_key == plugin_id
+                and origin.package_install_id == item.package_install_id
             )
             detail = {
                 "target": target,
@@ -671,12 +670,10 @@ class CapabilitySourceQuery:
                         "server_id": config.server_id,
                     }
                     source = {"kind": "LOCAL"}
-                    runtime_config = frozen_runtime_config(
-                        self.runtime, config.server_id
-                    )
+                    runtime_origin = self._runtime_origin(config.server_id)
                     linked = (
-                        runtime_config is not None
-                        and runtime_config.runtime_source == config.runtime_source
+                        runtime_origin is not None
+                        and runtime_origin == config.runtime_source
                     )
                     status = (
                         "已禁用。"
@@ -1131,11 +1128,19 @@ class CapabilitySourceQuery:
                 ]
         return detail
 
-    def _runtime_source(self, server_id):
-        config = frozen_runtime_config(self.runtime, server_id)
-        if config is None:
+    def _runtime_origin(self, server_id):
+        # Read provenance from the same borrowed, scope-checked catalog that
+        # supplied the runtime row, including disabled/undiscovered services.
+        if self.runtime is None or ("MCP_SERVER", server_id) not in self.runtime_details:
             return None
-        source = config.runtime_source
+        return next(
+            (entry.runtime_source for entry in self.runtime.catalog_for_scope(self.scope).servers
+             if entry.server_id == server_id),
+            None,
+        )
+
+    def _runtime_source(self, server_id):
+        source = self._runtime_origin(server_id)
         if isinstance(source, LocalConfiguredMcpRuntimeSource):
             if source.source_kind.value in {"USER", "WORKSPACE"}:
                 return {"kind": "LOCAL", "scope": source.source_kind.value}

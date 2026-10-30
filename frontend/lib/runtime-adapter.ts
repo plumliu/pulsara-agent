@@ -4687,6 +4687,7 @@ function projectSessionSummary(value: Record<string, unknown>): SessionSummary {
     status: projectRootStatus(value.latest_root_turn as {status?: string} | null),
     updatedAt: formatRelativeTime(String(value.updated_at ?? '')),
     live: Boolean(value.live),
+    subagentCount: typeof value.subagent_count === 'number' ? value.subagent_count : undefined,
     modelCallBinding: projectModelCallBinding(value.model_call_binding),
     workspace,
   };

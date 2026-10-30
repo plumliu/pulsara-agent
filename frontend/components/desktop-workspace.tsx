@@ -4,7 +4,7 @@ import { BrowserPanel } from './browser-panel';
 import { uiPreferences } from '../lib/ui-preferences';
 import type { CommandReceipt, UserControlCommandRef } from '../lib/runtime-adapter';
 import type { AgentReadingState } from './agent-conversation-pane';
-import { Blocks, Bot, ChevronLeft, ChevronRight, Globe, FileText, FolderKanban, ListChecks, PanelRightClose, Server, TerminalSquare, X } from 'lucide-react';
+import { Blocks, Bot, ChevronLeft, ChevronRight, Globe, FileCode2, FileText, FolderKanban, ListChecks, PanelRightClose, Server, TerminalSquare, X } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 
@@ -134,7 +134,7 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   const value = useMemo(() => ({ interact, interactionVersion, publish, sessionId, visible, browserTabs, backgroundControls, tabs: visibleTabs, activeId, open, update, close, activate }), [interact, interactionVersion, publish, backgroundControls, browserTabs, visible, visibleTabs, sessionId, activeId, open, update, close, activate]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
-const icons = { browser: Globe, file: FileText, visualization: FileText, capabilities: Blocks, mcp: Server, background: TerminalSquare, process: TerminalSquare, subagents: Bot, agent: Bot, cells: ListChecks, 'cells-unavailable': ListChecks, cell: FileText, 'cell-graph': ListChecks };
+const icons = { browser: Globe, file: FileText, visualization: FileText, capabilities: Blocks, mcp: Server, background: TerminalSquare, process: TerminalSquare, subagents: Bot, agent: Bot, cells: FileCode2, 'cells-unavailable': FileCode2, cell: FileText, 'cell-graph': ListChecks };
 function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: WorkspaceTab[]; selectedId?: string; activate: (id: string) => void; close: (id: string) => void }) {
   const list = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ left: false, right: false });

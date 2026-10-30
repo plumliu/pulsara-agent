@@ -5,25 +5,20 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 import ipaddress
 import logging
 import os
 from pathlib import Path
 import signal
-import socket
 from typing import Awaitable, Callable
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from pulsara_agent.windows_interop import create_scope
 from pulsara_agent.windows_interop.scope import InteropScopeError, WindowsInteropScope
 
 import anyio
-import dns.asyncquery
-import dns.asyncresolver
-import dns.exception
-import dns.nameserver
 import httpx2
 from mcp import ClientSession
 from mcp.client.subscriptions import SubscriptionLost, listen
@@ -39,7 +34,6 @@ from mcp.shared.message import SessionMessage
 from pulsara_agent.mcp_config import (
     ExactAbsoluteMcpCwd,
     LegacySseTransportConfig,
-    McpHttpNetworkPolicy,
     McpServerConfig,
     StdioTransportConfig,
     StreamableHttpTransportConfig,
@@ -70,12 +64,6 @@ from . import contracts as mcp_contracts
 NotificationCallback = Callable[[str], Awaitable[None]]
 
 _private_sdk_wire = ContextVar("pulsara_mcp_private_sdk_wire", default=False)
-_mcp_proxy_target = ContextVar("pulsara_mcp_proxy_target", default=None)
-
-# Product-owned public DNS recovery authority, never a Fake-IP allowlist.
-_MCP_DOH_URL = "https://cloudflare-dns.com/dns-query"
-_MCP_DOH_BOOTSTRAP = "1.1.1.1"
-_DNS_WIRE_MAXIMUM = 65535  # RFC 8484 §6: maximum DNS message size.
 
 
 class _SdkWireLogFilter(logging.Filter):
@@ -93,15 +81,6 @@ for _logger_name in ("mcp.client.sse", "mcp.client.streamable_http"):
 class McpWireResultPresence:
     present: bool
     value: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class _PinnedHttpEndpoint:
-    """One validated DNS answer set with the logical authority preserved."""
-
-    urls: tuple[str, ...]
-    host_header: str
-    sni_hostname: str | None
 
 
 def _has_legacy_discovery_fallback_evidence(message: str) -> bool:
@@ -596,8 +575,6 @@ async def _terminate_stdio_group(process: asyncio.subprocess.Process) -> None:
 class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
     """HTTP policy/credentials only; SDK owns MCP and SSE protocol behavior."""
 
-    _allows_event_stream = True
-
     def __init__(
         self,
         transport_config,
@@ -673,17 +650,16 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
                 raise ValueError("MCP proxy contains the protected credential")
 
     def _transport_for_url(self, url):
-        # HTTPX has no public routing hook before our DNS-pinned URL is used.
-        # Adapt only its selector: retain dependency-owned proxy rules, pools
-        # and lifecycle, matching NO_PROXY against each hop's logical URL.
+        # Local callback/MCP traffic stays local even without NO_PROXY. All
+        # other routing, DNS, proxy tunnels and address fallback belong to HTTPX.
+        if url.host == "localhost":
+            return self._transport
         try:
             if ipaddress.ip_address(url.host).is_loopback:
                 return self._transport
         except ValueError:
             pass
-        target = _mcp_proxy_target.get()
-        logical = target[1] if target is not None and target[0] is self else url
-        return super()._transport_for_url(logical)
+        return super()._transport_for_url(url)
 
     async def send(self, request, **kwargs):
         if request.method == "DELETE":
@@ -695,17 +671,16 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
                 return await super().send(request, **kwargs)
         return await super().send(request, **kwargs)
 
-    async def _pin_endpoint(self, url):
-        return await _enforce_http_network_policy(
-            replace(self.transport_config, endpoint=str(url)),
-            credential_boundary=self._credential_boundary,
-            observe_secrets=self.observe_secrets,
-        )
-
     async def _send_single_request(self, request):
-        from pulsara_agent.mcp_config import OAuthAuthorization
+        from pulsara_agent.mcp_config import OAuthAuthorization, StreamableHttpTransportConfig
         from pulsara_agent.mcp_credentials import McpCredentialMissing
 
+        # Scheme validation also applies to OAuth endpoints and redirect hops.
+        # It does not resolve or classify the destination address.
+        StreamableHttpTransportConfig(
+            endpoint=str(request.url),
+            allow_http_localhost=self.transport_config.allow_http_localhost,
+        )
         observe_rejection = None
         if self.config is not None:
             if _http_origin(str(request.url)) != _http_origin(
@@ -729,30 +704,9 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
             raise mcp_contracts.McpTransportOperationError(
                 may_have_reached_server=False
             )
-        pinned = await self._pin_endpoint(request.url)
-        headers = dict(request.headers)
-        headers["host"] = pinned.host_header
-        # HTTPX owns TCP/TLS and identifies failures before HTTP transmission.
-        # Pinning replaces its hostname resolution, so retain every validated DNS
-        # candidate here. Never replay after a read/write failure or HTTP response.
-        for index, url in enumerate(pinned.urls):
-            physical = httpx2.Request(
-                request.method,
-                url,
-                headers=headers,
-                content=content,
-                extensions={**request.extensions, **_http_request_extensions(pinned)},
-            )
-            target = _mcp_proxy_target.set((self, request.url))
-            try:
-                response = await super()._send_single_request(physical)
-                break
-            except (httpx2.ConnectError, httpx2.ConnectTimeout):
-                if index == len(pinned.urls) - 1:
-                    raise
-            finally:
-                _mcp_proxy_target.reset(target)
-        response.request = request  # Logical origin for SDK URLs and HTTP redirects.
+        # Keep the logical URL intact. The dependency owns DNS, proxy routing,
+        # TLS/SNI and physical connection establishment; do not replay requests.
+        response = await super()._send_single_request(request)
         # Observe the real response before SSE/body processing can suspend/fail.
         # This owner reports rejection only; OAuth is never installed here and no
         # application request is replayed to obtain a replacement grant.
@@ -762,10 +716,7 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
             self.sessionful = True
             if self.observe_session_id is not None:
                 await self.observe_session_id()
-        if (
-            self._allows_event_stream
-            and "text/event-stream" in response.headers.get("content-type", "").lower()
-        ):
+        if "text/event-stream" in response.headers.get("content-type", "").lower():
             return response
         # HTTPX2 owns decompression; bound the decoded body before SDK materializes
         # its RPC carrier. This is not a claim about decoder-internal allocations.
@@ -802,7 +753,7 @@ class _McpHttpClient(ProcessCredentialBoundHttpx2Client):
             )
         finally:
             await response.aclose()
-        # Preserve SDK timing when supplied (dnspython reads it). HTTPX permits
+        # Preserve response timing when supplied. HTTPX permits
         # preclosed custom-transport responses with no timing; retain absence.
         with suppress(RuntimeError):
             result.elapsed = response.elapsed
@@ -1007,187 +958,6 @@ async def _bounded_aread(
             raise McpWireBoundExceeded("MCP HTTP body exceeds the bound")
         body.extend(chunk)
     return body
-
-
-def _http_request_extensions(endpoint: _PinnedHttpEndpoint) -> dict[str, object]:
-    return (
-        {"sni_hostname": endpoint.sni_hostname}
-        if endpoint.sni_hostname is not None
-        else {}
-    )
-
-
-class _McpDohHttpClient(_McpHttpClient):
-    _allows_event_stream = False
-
-    async def _pin_endpoint(self, url):
-        # An injected dnspython client owns bootstrap itself. Using its
-        # bootstrap_address argument together with client= would be ineffective.
-        # No recursive DNS recovery, redirects or arbitrary bootstrap targets.
-        if str(url) != _MCP_DOH_URL:
-            raise ValueError("MCP_DOH_DESTINATION_CHANGED")
-        return _pin_http_endpoint(
-            str(url), frozenset({ipaddress.ip_address(_MCP_DOH_BOOTSTRAP)})
-        )
-
-
-class _McpDohNameserver(dns.nameserver.DoHNameserver):
-    def __init__(self, client):
-        super().__init__(_MCP_DOH_URL)
-        self.client = client
-
-    async def async_query(
-        self,
-        request,
-        timeout,
-        source,
-        source_port,
-        max_size,
-        backend,
-        one_rr_per_rrset=False,
-        ignore_trailing=False,
-    ):
-        # The SDK resolver retains answer/CNAME/error handling. Its standard
-        # DoHNameserver has no client injection; adapt only this HTTP seam.
-        return await dns.asyncquery.https(
-            request,
-            self.url,
-            timeout=timeout,
-            client=self.client,
-            one_rr_per_rrset=one_rr_per_rrset,
-            ignore_trailing=ignore_trailing,
-        )
-
-
-async def _resolve_public_http_addresses(host, *, credential_boundary, observe_secrets):
-    async with _McpDohHttpClient(
-        StreamableHttpTransportConfig(endpoint=_MCP_DOH_URL),
-        credential_boundary=credential_boundary,
-        bounds=replace(
-            DEFAULT_MCP_WIRE_BOUNDS, maximum_http_json_body_bytes=_DNS_WIRE_MAXIMUM
-        ),
-        timeout=httpx2.Timeout(10),
-        observe_secrets=observe_secrets,
-    ) as client:
-        resolver = dns.asyncresolver.Resolver(configure=False)
-        resolver.nameservers = [_McpDohNameserver(client)]
-        resolver.timeout = resolver.lifetime = 10
-        try:
-            answers = await resolver.resolve_name(host.rstrip(".") + ".", search=False)
-        except dns.exception.DNSException as exc:
-            raise RuntimeError("MCP_HTTP_PUBLIC_DNS_UNAVAILABLE") from exc
-        return frozenset(ipaddress.ip_address(value) for value in answers.addresses())
-
-
-def _public_dns_recovery_name(host):
-    try:
-        ipaddress.ip_address(host.split("%", 1)[0])
-    except ValueError:
-        name = host.rstrip(".").lower()
-        local = (
-            "localhost",
-            "local",
-            "lan",
-            "internal",
-            "home.arpa",
-            "test",
-            "invalid",
-            "onion",
-        )
-        return "." in name and not any(
-            name == item or name.endswith("." + item) for item in local
-        )
-    return False
-
-
-async def _enforce_http_network_policy(
-    transport: StreamableHttpTransportConfig,
-    *,
-    credential_boundary: ProcessCredentialBoundary,
-    observe_secrets=None,
-) -> _PinnedHttpEndpoint:
-    """Resolve, validate, and pin the exact address used by HTTPX."""
-
-    parsed = urlsplit(transport.endpoint)
-    host = parsed.hostname
-    if host is None:
-        raise ValueError("MCP HTTP endpoint has no host")
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    try:
-        # Reuse the existing per-resolution budget for both system DNS and
-        # public recovery; this is not a connection or application lifetime cap.
-        async with asyncio.timeout(10):
-            addresses = await asyncio.get_running_loop().getaddrinfo(
-                host,
-                port,
-                family=socket.AF_UNSPEC,
-                type=socket.SOCK_STREAM,
-            )
-            if not addresses:
-                raise RuntimeError("MCP_HTTP_DNS_EMPTY")
-            resolved = frozenset(
-                ipaddress.ip_address(item[4][0].split("%", 1)[0]) for item in addresses
-            )
-            localhost = all(address.is_loopback for address in resolved)
-            allowed = (
-                (localhost and transport.allow_http_localhost)
-                or transport.network_policy is McpHttpNetworkPolicy.ALLOW_PRIVATE
-                or all(address.is_global for address in resolved)
-            )
-            if (
-                not allowed
-                and parsed.scheme == "https"
-                and _public_dns_recovery_name(host)
-            ):
-                # Never trust the suspicious address or ask a proxy to resolve
-                # the domain. Independently obtain and pin public addresses.
-                resolved = await _resolve_public_http_addresses(
-                    host,
-                    credential_boundary=credential_boundary,
-                    observe_secrets=observe_secrets,
-                )
-                allowed = bool(resolved) and all(
-                    address.is_global for address in resolved
-                )
-            if not allowed:
-                raise ValueError("MCP_HTTP_PRIVATE_NETWORK_DENIED")
-    except TimeoutError as exc:
-        raise RuntimeError("MCP_HTTP_DNS_TIMEOUT") from exc
-    return _pin_http_endpoint(transport.endpoint, resolved)
-
-
-def _pin_http_endpoint(endpoint, resolved):
-    parsed = urlsplit(endpoint)
-    host = parsed.hostname
-    explicit_port = parsed.port
-    urls = []
-    for address in sorted(resolved, key=lambda item: (item.version, item.packed)):
-        pinned_host = f"[{address}]" if address.version == 6 else str(address)
-        pinned_netloc = (
-            f"{pinned_host}:{explicit_port}"
-            if explicit_port is not None
-            else pinned_host
-        )
-        urls.append(
-            urlunsplit(
-                (
-                    parsed.scheme,
-                    pinned_netloc,
-                    parsed.path,
-                    parsed.query,
-                    parsed.fragment,
-                )
-            )
-        )
-    logical_host = f"[{host}]" if ":" in host else host
-    host_header = (
-        f"{logical_host}:{explicit_port}" if explicit_port is not None else logical_host
-    )
-    return _PinnedHttpEndpoint(
-        urls=tuple(urls),
-        host_header=host_header,
-        sni_hostname=host if parsed.scheme == "https" else None,
-    )
 
 
 class SchemaBoundMcpClientSession(ClientSession):

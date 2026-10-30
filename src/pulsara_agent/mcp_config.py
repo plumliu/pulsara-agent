@@ -49,11 +49,6 @@ class McpTransportKind(StrEnum):
     SSE = "sse"
 
 
-class McpHttpNetworkPolicy(StrEnum):
-    PUBLIC_ONLY = "PUBLIC_ONLY"
-    ALLOW_PRIVATE = "ALLOW_PRIVATE"
-
-
 class McpScopePolicy(StrEnum):
     ROOT_ONLY = "ROOT_ONLY"
     ROOT_AND_SUBAGENTS = "ROOT_AND_SUBAGENTS"
@@ -184,7 +179,6 @@ class StdioTransportConfig:
 class StreamableHttpTransportConfig:
     endpoint: str
     allow_http_localhost: bool = False
-    network_policy: McpHttpNetworkPolicy = McpHttpNetworkPolicy.PUBLIC_ONLY
     stateless_http_asserted: bool = False
     kind: McpTransportKind = McpTransportKind.STREAMABLE_HTTP
 
@@ -799,7 +793,6 @@ def _parse_server_declaration(
                 "type",
                 "endpoint",
                 "allow_http_localhost",
-                "network_policy",
                 "stateless_http_asserted",
             },
             "MCP HTTP transport",
@@ -816,12 +809,6 @@ def _parse_server_declaration(
             allow_http_localhost=_boolean(
                 transport_raw.get("allow_http_localhost", False),
                 "MCP allow_http_localhost",
-            ),
-            network_policy=McpHttpNetworkPolicy(
-                _string(
-                    transport_raw.get("network_policy", "PUBLIC_ONLY"),
-                    "MCP HTTP network policy",
-                ).upper()
             ),
             stateless_http_asserted=_boolean(
                 transport_raw.get("stateless_http_asserted", False),
@@ -1022,7 +1009,6 @@ def _transport_fingerprint_payload(
         "kind": value.kind.value,
         "endpoint": value.endpoint,
         "allow_http_localhost": value.allow_http_localhost,
-        "network_policy": value.network_policy.value,
         "stateless_http_asserted": value.stateless_http_asserted,
     }
 
@@ -1080,7 +1066,6 @@ def _transport_workspace_approval_payload(value: McpTransportConfig) -> object:
         "kind": value.kind.value,
         "endpoint": value.endpoint,
         "allow_http_localhost": value.allow_http_localhost,
-        "network_policy": value.network_policy.value,
         "stateless_http_asserted": value.stateless_http_asserted,
     }
 
@@ -1449,7 +1434,6 @@ __all__ = [
     "McpExposurePolicy",
     "McpInvalidToolPolicy",
     "McpLocalConfigSourceKind",
-    "McpHttpNetworkPolicy",
     "McpScopePolicy",
     "McpServerConfig",
     "McpStdioCwdBinding",

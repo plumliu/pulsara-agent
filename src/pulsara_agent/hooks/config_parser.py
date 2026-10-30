@@ -44,9 +44,11 @@ _HANDLER_FIELDS = frozenset(
 _MATCHER_IGNORED_EVENTS = {
     HookEventType.USER_PROMPT_SUBMIT_EVENT,
     HookEventType.STOP_EVENT,
+    HookEventType.SUBAGENT_STOP_EVENT,
 }
 _CONTEXT_EVENTS = {
     HookEventType.SESSION_START_EVENT,
+    HookEventType.SUBAGENT_START_EVENT,
     HookEventType.USER_PROMPT_SUBMIT_EVENT,
     HookEventType.PRE_TOOL_USE_EVENT,
     HookEventType.POST_TOOL_USE_EVENT,
@@ -298,7 +300,14 @@ def _parse_handler(
     )
     asynchronous = value.get("async", False)
     try:
-        scope_policy = HookScopePolicy(value.get("scope_policy", "ROOT"))
+        default_scope = (
+            "BOTH"
+            if event_type is HookEventType.SESSION_START_EVENT
+            else "SUBAGENT"
+            if event_type in {HookEventType.SUBAGENT_START_EVENT, HookEventType.SUBAGENT_STOP_EVENT}
+            else "ROOT"
+        )
+        scope_policy = HookScopePolicy(value.get("scope_policy", default_scope))
     except (TypeError, ValueError):
         diagnostics.append(_diag("HOOK_CONFIG_INVALID_SCOPE_POLICY", label, event_type))
         return None

@@ -1246,7 +1246,9 @@ def test_round9_2_plan_immediate_and_delayed_settlements_share_hook_projection(
     assert logs[-1]["stdin"]["hook_event_name"] == "SessionEnd"  # type: ignore[index]
 
 
+@pytest.mark.parametrize("stop_event", ["Stop", "SubagentStop"])
 def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_continuation(
+    stop_event: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage2_migrated_postgres_database,
@@ -1258,16 +1260,16 @@ def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_conti
     workspace.mkdir()
     driver = tmp_path / "hook_driver.py"
     log_path = tmp_path / "hooks.jsonl"
-    driver.write_text(_HOOK_DRIVER.replace(
-        'elif event == "Stop" and not value["stop_hook_active"]:',
-        'elif event == "Stop" and value["session_kind"] == "SUBAGENT" and not value["stop_hook_active"]:',
+    driver.write_text(_HOOK_DRIVER.replace('"Stop"', f'"{stop_event}"').replace(
+        f'elif event == "{stop_event}" and not value["stop_hook_active"]:',
+        f'elif event == "{stop_event}" and value["session_kind"] == "SUBAGENT" and not value["stop_hook_active"]:',
     ), encoding="utf-8")
     _install_trusted_sources(
         home=home,
         workspace_root=workspace,
         user_config=_config(
             _command(driver, log_path, "USER"),
-            ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"),
+            ("SessionStart", "UserPromptSubmit", stop_event, "SessionEnd"),
             scope_policy="BOTH",
         ),
         workspace_config=None,
@@ -1344,7 +1346,7 @@ def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_conti
         if value["stdin"]["session_kind"] == "SUBAGENT"
     ]
     assert [value["hook_event_name"] for value in child_lifecycle] == [
-        "UserPromptSubmit", "SessionStart", "Stop", "Stop", "SessionEnd",
+        "UserPromptSubmit", "SessionStart", stop_event, stop_event, "SessionEnd",
     ]
     prompt, _start, first_stop, last_stop, _end = child_lifecycle
     assert prompt["input_origin"] == "AGENT_INSTRUCTION"

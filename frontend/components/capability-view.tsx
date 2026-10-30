@@ -58,7 +58,6 @@ interface CapabilityViewProps {
   loading: boolean;
   error?: string;
   onRefresh: () => Promise<void>;
-  onReload?: () => Promise<void>;
   onOpenRoot: (root: 'agents' | 'pulsara') => Promise<void>;
   onInstallSkill: (input: SkillImportInput) => Promise<boolean>;
   onPreviewSkills: (sourcePath: string) => Promise<SkillImportCandidate[]>;
@@ -135,7 +134,6 @@ export function CapabilityView({
   loading,
   error,
   onRefresh,
-  onReload,
   onOpenRoot,
   onInstallSkill,
   onPreviewSkills,
@@ -210,8 +208,21 @@ export function CapabilityView({
           <div><span className="page-kicker">扩展能力</span><h1>能力</h1><p>管理这台设备上的插件、MCP 与技能。</p></div>
           <div className="capability-page-actions">
             <button className="secondary-action" onClick={() => setAddKind('mcp-import')}><PlugZap size={14} />导入 MCP 配置</button>
-            <div className="capability-menu"><button className="secondary-action" onClick={() => { setRootMenuOpen((value) => !value); setAddMenuOpen(false); }}><FolderOpen size={14} /> 浏览目录</button>{rootMenuOpen && <div className="capability-menu__popover"><button onClick={() => { setRootMenuOpen(false); void onOpenRoot('agents'); }}><FolderOpen size={14} /><span><strong>.agents</strong><small>{snapshot?.roots.find((item) => item.kind === 'agents')?.path}</small></span><ExternalLink size={12} /></button><button onClick={() => { setRootMenuOpen(false); void onOpenRoot('pulsara'); }}><FolderOpen size={14} /><span><strong>.pulsara</strong><small>{snapshot?.roots.find((item) => item.kind === 'pulsara')?.path}</small></span><ExternalLink size={12} /></button></div>}</div>
-            <div className="capability-menu"><button className="capability-primary" onClick={() => { setAddMenuOpen((value) => !value); setRootMenuOpen(false); }}>添加 <ChevronDown size={13} /></button>{addMenuOpen && <div className="capability-menu__popover is-compact"><button onClick={() => { setAddKind('plugin'); setAddMenuOpen(false); }}><PackageOpen size={14} /><span><strong>安装插件</strong><small>从本地目录添加</small></span></button><button onClick={() => { setAddKind('mcp'); setAddMenuOpen(false); }}><PlugZap size={14} /><span><strong>添加 MCP</strong><small>连接远程服务或本地命令</small></span></button><button onClick={() => { setAddKind('skill'); setAddMenuOpen(false); }}><BookOpenText size={14} /><span><strong>安装技能</strong><small>从本地目录添加</small></span></button></div>}</div>
+            <div className="capability-menu">
+              <button className="secondary-action" aria-expanded={rootMenuOpen} onClick={() => { setRootMenuOpen((value) => !value); setAddMenuOpen(false); }}><FolderOpen size={14} /> 浏览目录</button>
+              <div className={`capability-menu__popover capability-menu__popover--animated capability-menu__popover--roots${rootMenuOpen ? ' is-open' : ''}`} inert={!rootMenuOpen} aria-hidden={!rootMenuOpen}>
+                <button onClick={() => { setRootMenuOpen(false); void onOpenRoot('agents'); }}><FolderOpen size={14} /><span><strong>.agents</strong><small>{snapshot?.roots.find((item) => item.kind === 'agents')?.path}</small></span><ExternalLink size={12} /></button>
+                <button onClick={() => { setRootMenuOpen(false); void onOpenRoot('pulsara'); }}><FolderOpen size={14} /><span><strong>.pulsara</strong><small>{snapshot?.roots.find((item) => item.kind === 'pulsara')?.path}</small></span><ExternalLink size={12} /></button>
+              </div>
+            </div>
+            <div className="capability-menu">
+              <button className="capability-primary" aria-expanded={addMenuOpen} onClick={() => { setAddMenuOpen((value) => !value); setRootMenuOpen(false); }}>添加 <ChevronDown size={13} /></button>
+              <div className={`capability-menu__popover capability-menu__popover--animated is-compact${addMenuOpen ? ' is-open' : ''}`} inert={!addMenuOpen} aria-hidden={!addMenuOpen}>
+                <button onClick={() => { setAddKind('plugin'); setAddMenuOpen(false); }}><PackageOpen size={14} /><span><strong>安装插件</strong><small>从本地目录添加</small></span></button>
+                <button onClick={() => { setAddKind('mcp'); setAddMenuOpen(false); }}><PlugZap size={14} /><span><strong>添加 MCP</strong><small>连接远程服务或本地命令</small></span></button>
+                <button onClick={() => { setAddKind('skill'); setAddMenuOpen(false); }}><BookOpenText size={14} /><span><strong>安装技能</strong><small>从本地目录添加</small></span></button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -225,7 +236,6 @@ export function CapabilityView({
           </div>
           <div className="capability-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${tab === 'plugins' ? '插件' : tab === 'mcp' ? ' MCP' : tab === 'hooks' ? '钩子' : '技能'}`} /></div>
           <div className="capability-page-controls">
-          {onReload && <button className="secondary-ghost capability-reload" disabled={loading} title="显式重新加载所有运行中会话的能力，沿用原采纳边界" onClick={() => void onReload()}>重新加载会话能力</button>}
           <button className="capability-refresh" onClick={() => {setHooksRefresh(value => value + 1); void onRefresh();}} disabled={loading} aria-label="刷新能力">{loading ? <LoaderCircle size={14} /> : <RefreshCw size={14} />}</button>
           </div>
         </div>

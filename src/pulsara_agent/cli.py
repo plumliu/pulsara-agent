@@ -168,7 +168,6 @@ def build_parser() -> argparse.ArgumentParser:
     transport.add_argument("--url")
     add.add_argument("--arg", action="append", default=[])
     add.add_argument("--allow-http-localhost", action="store_true")
-    add.add_argument("--allow-private-network", action="store_true")
     add.add_argument("--stateless-http-asserted", action="store_true")
     add.add_argument("--required", action="store_true")
     add.add_argument("--disabled", action="store_true")
@@ -1418,9 +1417,6 @@ async def _mcp_command(
                 "type": "streamable_http",
                 "endpoint": args.url,
                 "allow_http_localhost": args.allow_http_localhost,
-                "network_policy": (
-                    "ALLOW_PRIVATE" if args.allow_private_network else "PUBLIC_ONLY"
-                ),
                 "stateless_http_asserted": args.stateless_http_asserted,
             }
         entry = {

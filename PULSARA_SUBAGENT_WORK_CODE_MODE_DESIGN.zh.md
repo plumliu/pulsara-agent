@@ -166,6 +166,21 @@ ROOT 与 Subagent 共用能力发现、`query_capabilities` 查询、刷新、�
 
 Hook 共用 ROOT 的发现、匹配、执行、输出处理与上下文追加链路。用户在配置阶段授权其适用于 ROOT、Subagent 或两者，不逐次询问；Hook 输入如实提供会话身份与输入来源。适用范围由配置决定，不为特定插件增加引擎分支或自动改写插件行为。
 
+会话启动 Hook 采用叠加语义。ROOT 在合法启动边界执行 `SessionStart`；Subagent 在同一边界先执行 `SessionStart`，通过后执行 `SubagentStart`。两个事件分别选择和执行各自的 handler，即使命令相同也不跨事件去重。未声明 `scope_policy` 时，`SessionStart` 默认 `BOTH`，`SubagentStart`／`SubagentStop` 默认 `SUBAGENT`，其他事件默认 `ROOT`；显式声明的 `ROOT`／`SUBAGENT`／`BOTH` 仍然决定适用范围。ROOT 永远不产生 `SubagentStart`。
+
+两个启动事件共用现有冷启动边界和 `SessionStartRef`：`source` 与 matcher subject 都是 `startup`、`resume` 或已采用压缩 successor 的 `compact`。Subagent 的 stdin 携带真实子会话 `session_id`、`session_kind=SUBAGENT`、`input_origin=null`、`cwd`、`model`、`source`、`permission_mode`，不恢复 agent profile、task 身份或额外生命周期。后续 Work、唤醒、能力刷新不单独产生启动事件。
+
+`SessionStart` 保持现有 gate 语义，阻止或取消启动时不执行后续 `SubagentStart`。`SubagentStart` 只提供 advisory context：接受 plain stdout 或 `hookSpecificOutput.additionalContext`；同步输出的布尔 `continue` 仅报告忽略诊断，不控制会话。两个同步结果按事件顺序保留，通过同一次现有上下文 reservation 追加；异步输出沿现有 best-effort context owner 接纳，不承诺完成顺序，仍禁止控制字段。两次 dispatch 共用冻结定义视图、scope、causal ref 与当前操作 deadline，不新增持久事件、关系、回执或 provider prefix 重建边界。定义范围的改变沿现有 Hook trust 重新审阅规则处理，不自动信任或启用插件。
+
+验收覆盖 ROOT/子会话、只注册一种及同时注册两种事件、相同命令独立执行、默认与显式 scope、启动阻止和取消、两份上下文保留、startup/resume/compact、同一子会话多 Work 不重复启动，以及实际插件 inspection 不再把 `SubagentStart` 报作未知事件。启动 Hook 产出的上下文在 provider 输入准备报错或取消时必须清退，无论其仍待消费还是已冻结；输入 handle、tool surface borrow 同时释放。真实 Host 验收须确认没有调用模型，同一 session 能继续下一轮且模型输入不含上次失败遗留的 Hook 上下文。
+
+子会话当前 Work 准备接纳无工具调用的 final assistant message 时，在已有 `Stop` 检查点先执行适用的 `Stop`，再执行 `SubagentStop`。它不是 session 关闭通知；同一子会话的后续 Work 有自己的检查点。普通工具调用、等待、进程结束、取消、异常或关闭 session 不单独产生 `SubagentStop`。如果等待完成后模型产生 final，则正常进入此检查点。ROOT 不产生 `SubagentStop`；`Stop` 的现有默认 `ROOT` 与显式范围不变。
+
+`SubagentStop` 共用 `StopRef`、ContinuationOutcome、当前 Work 的 `turn_id`、冻结定义视图、操作 deadline 与现有 continuation settlement。公开输入携带真实 child session_id、session_kind=SUBAGENT、input_origin=null、stop_hook_active 和 last_assistant_message，不新增 task/profile 身份；matcher 与 `Stop` 一样忽略。同步 JSON `decision:block` 加 reason 或退出码 2 加 stderr 请求继续当前 Work。适用的两个事件中任一 handler 的 `continue:false` 优先，所有适用 handler 都会执行；没有请求的中性结果不能覆盖另一事件的 continuation。聚合结果保留 explicit terminalize 与中性的区别，仅用于本次控制合并，不持久化。两个事件共用现有每轮一次 continuation guard；后续 Work 重新开始，不增加另一份额度或累计生命周期限制。异步 handler 不能控制 continuation，纯文本 stdout 不是合法 continuation 输出。
+
+验收要求：ROOT 不收到 SubagentStop；真实子会话连续两份 Work 都收到对应 final 检查；continuation 保持同一 Work／turn、正确更新 stop_hook_active、最终只结算最终完成结果并保持 provider 前缀连续；共同 Stop 与 SubagentStop 的任一显式结束优先于继续请求；事件和解析器选项保持一致。会话启动事件仍保留上述叠加语义，不因实现 SubagentStop 而缩小 SessionStart 范围。
+
+
 MCP 的“为子代理也提供”开关只决定该 MCP 是否进入 Subagent 的能力范围，覆盖其工具、资源、资源模板和 prompt；其余启停、连接、发现及执行规则与 ROOT 一致。目录可展示当前状态，看到条目不等于当前可执行。
 
 手动配置与插件附带的 MCP 使用同一项 `scope_policy` 配置及同一个“为子代理也提供”开关：`ROOT_ONLY` 仅向 ROOT 提供，`ROOT_AND_SUBAGENTS` 同时向两者提供。安装插件时，向用户展示各 MCP 的这项设置并允许审阅、调整；安装后沿共同 MCP 配置入口管理。来源是插件不自动决定向 Subagent 提供，适配器读取用户配置，不硬编码另一套提供范围。

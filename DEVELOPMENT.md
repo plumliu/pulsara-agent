@@ -4,6 +4,8 @@
 
 Read [AGENTS.md](AGENTS.md) before changing code. Build native resources on the target OS; Windows uses a Linux payload built in WSL2 Ubuntu and an Electron shell built on Windows.
 
+MCP networking, optional resource-template discovery and real-model acceptance follow the [MCP host-network contract](PULSARA_MCP_HOST_NETWORK_AND_OPTIONAL_TEMPLATES_IMPLEMENTATION_SPEC.zh.md).
+
 ## Build tools
 
 `mise.toml` pins Node.js 22.23.3, uv 0.13.4 and protoc 34.0. `.python-version` pins Python 3.12.15; uv manages the repository `.venv`.

@@ -9,7 +9,7 @@ const server: UserMcpServerCapability = {
   id: 'docs', name: '文档', enabled: true, status: 'configured', required: false,
   availableToSubagents: false, toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0,
   instructions: '', hasFailure: false, transport: { kind: 'http', summary: 'https://example.org/mcp' }, tools: [], currentIdentity: 'current-docs',
-  config: { display_name: '文档', enabled: true, transport: { type: 'streamable_http', endpoint: 'https://example.org/mcp', network_policy: 'PUBLIC_ONLY' }, auth: { type: 'bearer', reference: { source: 'managed', binding } }, exposure_policy: { include_tool_names: ['search'] }, default_tool_timeout_ms: 45000 },
+  config: { display_name: '文档', enabled: true, transport: { type: 'streamable_http', endpoint: 'https://example.org/mcp' }, auth: { type: 'bearer', reference: { source: 'managed', binding } }, exposure_policy: { include_tool_names: ['search'] }, default_tool_timeout_ms: 45000 },
 };
 
 describe('MCP connection editor', () => {
@@ -24,6 +24,7 @@ describe('MCP connection editor', () => {
       expect(input.checked).toBe(true);
     }
     expect(screen.getByLabelText('无状态请求并发数')).toBeTruthy();
+    expect(screen.queryByLabelText('连接网络范围')).toBeNull();
     fireEvent.click(screen.getByRole('button', {name: '保存连接'}));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
       config: expect.objectContaining({
@@ -70,6 +71,17 @@ describe('MCP connection editor', () => {
         exposure_policy: {include_tool_names: ['search'], exclude_tool_names: ['write', 'delete']}}),
       secretChanges: [],
     }));
+  });
+
+  it('saves HTTP transport with only the current fields', async () => {
+    const save = vi.fn(async () => true);
+    render(<McpEditor server={server} onSave={save} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', {name: '保存连接'}));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({config: expect.objectContaining({transport: {
+      type: 'streamable_http', endpoint: 'https://example.org/mcp',
+      allow_http_localhost: false, stateless_http_asserted: false,
+    }})}));
   });
 
   it('switches a saved bearer to an environment reference without copying its value', async () => {

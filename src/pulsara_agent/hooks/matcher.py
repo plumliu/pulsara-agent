@@ -57,9 +57,13 @@ def event_matcher_subject(
     if event_type in {
         HookEventType.USER_PROMPT_SUBMIT_EVENT,
         HookEventType.STOP_EVENT,
+        HookEventType.SUBAGENT_STOP_EVENT,
     }:
         return FrozenHookMatcherSubject("*", ())
-    if event_type is HookEventType.SESSION_START_EVENT and source is not None:
+    if event_type in {
+        HookEventType.SESSION_START_EVENT,
+        HookEventType.SUBAGENT_START_EVENT,
+    } and source is not None:
         return FrozenHookMatcherSubject(source, ())
     if event_type is HookEventType.SESSION_END_EVENT and reason is not None:
         return FrozenHookMatcherSubject(reason, ())

@@ -6,11 +6,10 @@ import {
   Bot,
   ChevronRight,
   ExternalLink,
+  FileCode2,
   FolderCog,
   Globe,
   Info,
-  GitFork,
-  ListChecks,
   LoaderCircle,
   Plus,
   RefreshCw,
@@ -562,7 +561,7 @@ export function InspectorPanel({
     } finally { prepared?.release(); }
   };
   const renderTab = (tab: WorkspaceTab) => {
-    if (!session.id) return <div className="workspace-empty" role="status"><strong>创建或选择会话后查看内容</strong></div>;
+    if (!session.id) return <div className="inspector-empty" role="status">创建或选择会话后查看内容</div>;
     if (tab.kind === 'subagents') return <AgentList root={session.id} onOpen={(agent, source) => void openPrepared({ kind: 'agent', rootSessionId: session.id, agentSessionId: agent.agent_id }, source)} />;
     if (tab.kind === 'cells-unavailable') return <div className="inspector-empty" role="status">暂无可用运行实例</div>;
     if (tab.kind === 'cells') {
@@ -629,7 +628,7 @@ export function InspectorPanel({
 
     <button type="button" title="进程" onClick={() => open('background', '进程')}><TerminalSquare size={13} />进程</button>
     <button type="button" title="子代理" onClick={() => open('subagents', '子代理')}><Bot size={13} />子代理</button>
-    <button type="button" title="cell" onClick={() => session.id && backgroundHostSessionId ? open('cells', 'cell', undefined, backgroundHostSessionId) : open('cells-unavailable', 'cell')}><GitFork size={13} />cell</button>
+    <button type="button" title="cell" onClick={() => session.id && backgroundHostSessionId ? open('cells', 'cell', undefined, backgroundHostSessionId) : open('cells-unavailable', 'cell')}><FileCode2 size={13} />cell</button>
     <button type="button" title="网页" aria-label="网页" onClick={() => workspace?.browserTabs.open()}><Globe size={13} />网页</button>
   </nav>} />;
 }

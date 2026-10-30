@@ -1,5 +1,6 @@
 [
   {"value":"SessionStart","label":"会话开始","matcher":true,"context":true},
+  {"value":"SubagentStart","label":"子会话开始","matcher":true,"context":true},
   {"value":"SessionEnd","label":"会话结束","matcher":true,"context":false},
   {"value":"UserPromptSubmit","label":"发送消息前","matcher":false,"context":true},
   {"value":"PreToolUse","label":"工具调用前","matcher":true,"context":true},
@@ -7,7 +8,6 @@
   {"value":"PostToolUse","label":"工具调用后","matcher":true,"context":true},
   {"value":"PreCompact","label":"上下文压缩前","matcher":true,"context":false},
   {"value":"PostCompact","label":"上下文压缩后","matcher":true,"context":false},
-  {"value":"SubagentStart","label":"子任务开始","matcher":true,"context":true},
-  {"value":"SubagentStop","label":"子任务结束","matcher":true,"context":false},
+  {"value":"SubagentStop","label":"子会话工作准备结束","matcher":false,"context":false},
   {"value":"Stop","label":"模型准备结束","matcher":false,"context":false}
 ]

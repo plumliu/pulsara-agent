@@ -35,7 +35,7 @@ it('saves an inline MCP through the conversation owner once and keeps the Token 
   const [interaction, result] = adapter.lastConnection!.resolveInteraction.mock.calls[0];
   expect(interaction).toEqual(expect.objectContaining({id: 'interaction:card', kind: 'capability-form'}));
   expect(result).toEqual({kind: 'capability', decision: 'SUBMIT', submission: {
-    config: {...config, public_headers: {}, scope_policy: 'ROOT_ONLY', transport: {...config.transport, allow_http_localhost: false, network_policy: 'PUBLIC_ONLY', stateless_http_asserted: false}, auth: {type: 'bearer', reference: {source: 'managed', binding: {owner, name: 'bearer'}}}},
+    config: {...config, public_headers: {}, scope_policy: 'ROOT_ONLY', transport: {...config.transport, allow_http_localhost: false, stateless_http_asserted: false}, auth: {type: 'bearer', reference: {source: 'managed', binding: {owner, name: 'bearer'}}}},
     secret_changes: [{binding: {owner, name: 'bearer'}, value: 'regression-token'}], retain_credentials_confirmed: false,
   }});
   expect(JSON.stringify(result.kind === 'capability' && result.submission?.config)).not.toContain('regression-token');

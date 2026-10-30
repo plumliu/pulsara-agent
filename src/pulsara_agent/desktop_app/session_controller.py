@@ -3000,6 +3000,7 @@ class LocalSessionController:
             "subtitle": f"{summary.latest_entry_sequence} 条记录",
             "lifecycle": summary.lifecycle,
             "latest_root_turn": summary.latest_root_turn,
+            "subagent_count": summary.subagent_count,
             "updated_at": updated_value,
             "latest_entry_sequence": summary.latest_entry_sequence,
             "model_call_binding": model_call_binding_to_dict(

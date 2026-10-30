@@ -53,7 +53,6 @@ from pulsara_agent.settings import LocalSettingsStore
 from .oauth_callback_page import oauth_callback_response
 from .sdk_facade import (
     _McpHttpClient,
-    _enforce_http_network_policy,
 )
 from .wire import DEFAULT_MCP_WIRE_BOUNDS
 
@@ -515,7 +514,12 @@ class McpOAuthManager:
             nonlocal expected_state
             if flow is None:
                 raise McpOAuthNeedsLogin()
-            await self._validate_url(config, url)
+            # Browser authorization follows the same transport scheme contract;
+            # DNS and reachability belong to the host network, not this owner.
+            StreamableHttpTransportConfig(
+                endpoint=url,
+                allow_http_localhost=config.transport.allow_http_localhost,
+            )
             expected_state = parse_qs(urlsplit(url).query).get("state", [None])[0]
             if not expected_state:
                 raise ValueError("OAuth state is missing")
@@ -698,16 +702,6 @@ class McpOAuthManager:
                 callback_result.cancel()
             elif not callback_result.cancelled():
                 callback_result.exception()
-
-    async def _validate_url(self, config, url):
-        return await _enforce_http_network_policy(
-            StreamableHttpTransportConfig(
-                endpoint=url,
-                allow_http_localhost=config.transport.allow_http_localhost,
-                network_policy=config.transport.network_policy,
-            ),
-            credential_boundary=self.credential_boundary,
-        )
 
     async def _request(self, config, request):
         """SDK-native HTTP; OAuth redirects remain in the auth-only context."""

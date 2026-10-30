@@ -8,6 +8,7 @@ import {
   Radio,
   Search,
   Sparkles,
+  UsersRound,
 } from 'lucide-react';
 import type {
   AppView,
@@ -65,6 +66,9 @@ export function OverviewView({
   const unavailableModelConfigurations = modelConfigurations.length - readyModelConfigurations;
   const embeddingConfigured = localSettings?.memory_retrieval.embedding_enabled === true;
   const rerankConfigured = localSettings?.memory_retrieval.ranking_mode !== undefined && localSettings.memory_retrieval.ranking_mode !== 'off';
+  const subagentCount = sessions.every((session) => session.subagentCount !== undefined)
+    ? sessions.reduce((total, session) => total + (session.subagentCount ?? 0), 0)
+    : undefined;
 
   return (
     <section className="surface-view overview-view">
@@ -104,7 +108,8 @@ export function OverviewView({
           <article><div className="metric-icon amber"><Radio size={15} /></div><div><strong>{sessions.filter((session) => session.status === 'running').length}</strong><span>活动会话</span></div><small>共 {sessions.length} 个会话</small></article>
 
           <article><div className="metric-icon green"><Sparkles size={15} /></div><div><strong>{sessions.length}</strong><span>最近会话</span></div><small>可随时继续</small></article>
-          <article><div className="metric-icon violet"><Database size={15} /></div><div><strong>{connected ? '正常' : '—'}</strong><span>本地数据</span></div><small>{connected ? '已经就绪' : '等待连接'}</small></article>
+          <article><div className="metric-icon violet"><Database size={15} /></div><div><strong className="metric-status">{connected ? '正常' : '—'}</strong><span>本地数据</span></div><small>{connected ? '已经就绪' : '等待连接'}</small></article>
+          <article><div className="metric-icon blue"><UsersRound size={15} /></div><div><strong>{subagentCount ?? '—'}</strong><span>子代理</span></div><small>未归档会话中的子代理</small></article>
         </section>
 
         <div className="overview-columns">

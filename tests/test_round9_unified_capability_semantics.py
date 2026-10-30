@@ -7,6 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from pulsara_agent.mcp_config import LocalConfiguredMcpRuntimeSource
+
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
     CapabilityRouteReasonCode,
@@ -836,6 +838,7 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
 def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
     entries = tuple(
         McpServerCatalogEntry(
+            runtime_source=LocalConfiguredMcpRuntimeSource(),
             server_id=f"server-{index}",
             display_name=f"Server {index}",
             status=McpServerState.READY,
@@ -953,6 +956,7 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
         catalog_revision=1,
         entries=(
             McpServerCatalogEntry(
+                runtime_source=LocalConfiguredMcpRuntimeSource(),
                 server_id="server",
                 display_name="Server",
                 status=McpServerState.READY,

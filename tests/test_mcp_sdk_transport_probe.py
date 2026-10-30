@@ -10,9 +10,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import gzip
-import ipaddress
 import json
-import socket
 from urllib.parse import parse_qs, urlsplit
 
 import anyio
@@ -27,7 +25,6 @@ import pytest
 
 from pulsara_agent.mcp_config import _parse_server
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
-    _enforce_http_network_policy,
     _McpHttpClient,
 )
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
@@ -78,33 +75,15 @@ class SizedBody(httpx2.AsyncByteStream):
         await self.stream.aclose()
 
 
-class PolicyTransport(httpx2.AsyncBaseTransport):
-    def __init__(self, inner, config, *, body_limit=None):
-        self.inner, self.config, self.body_limit = inner, config, body_limit
+class BodyBoundTransport(httpx2.AsyncBaseTransport):
+    def __init__(self, inner, *, body_limit=None):
+        self.inner, self.body_limit = inner, body_limit
         self.checked = []
         self.closed = False
 
     async def handle_async_request(self, request):
         self.checked.append(str(request.url))
-        pinned = await _enforce_http_network_policy(
-            replace(self.config, endpoint=str(request.url)),
-            credential_boundary=ProcessCredentialBoundary(),
-        )
-        headers = dict(request.headers)
-        headers["host"] = pinned.host_header
-        physical = httpx2.Request(
-            request.method,
-            pinned.urls[0],
-            headers=headers,
-            content=await request.aread(),
-            extensions={
-                **request.extensions,
-                **(
-                    {"sni_hostname": pinned.sni_hostname} if pinned.sni_hostname else {}
-                ),
-            },
-        )
-        response = await self.inner.handle_async_request(physical)
+        response = await self.inner.handle_async_request(request)
         if self.body_limit is not None and response.headers.get(
             "content-type", ""
         ).startswith("application/json"):
@@ -131,21 +110,6 @@ def config():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
-
-
-@pytest.fixture
-def dns(monkeypatch):
-    async def denied_public_recovery(*args, **kwargs):
-        return frozenset({ipaddress.ip_address("127.0.0.1")})
-
-    monkeypatch.setattr("pulsara_agent.conversation_kernel.mcp.sdk_facade._resolve_public_http_addresses", denied_public_recovery)
-    async def addresses(self, host, port, **kwargs):
-        address = (
-            "127.0.0.1" if host in {"private.example", "127.0.0.1"} else "93.184.216.34"
-        )
-        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
-
-    monkeypatch.setattr(asyncio.BaseEventLoop, "getaddrinfo", addresses)
 
 
 def call():
@@ -177,7 +141,7 @@ async def exchange(client):
 
 
 @pytest.mark.anyio
-async def test_sdk_custom_client_network_pin_and_body_limit(dns):
+async def test_sdk_custom_client_body_limit():
     sent = []
     stream = Chunks([json.dumps(result("x" * 100)).encode()])
 
@@ -187,48 +151,21 @@ async def test_sdk_custom_client_network_pin_and_body_limit(dns):
             200, headers={"content-type": "application/json"}, stream=stream
         )
 
-    policy = PolicyTransport(httpx2.MockTransport(respond), config(), body_limit=64)
+    policy = BodyBoundTransport(httpx2.MockTransport(respond), body_limit=64)
     async with httpx2.AsyncClient(transport=policy, trust_env=False) as client:
         reply = await exchange(client)
         assert isinstance(reply.message, types.JSONRPCError)
         assert "probe response byte limit" in reply.message.error.message
         assert len(sent) == 1
-        assert sent[0].url.host == "93.184.216.34"
+        assert sent[0].url.host == "public.example"
         assert sent[0].headers["host"] == "public.example"
-        assert sent[0].extensions["sni_hostname"] == "public.example"
+        assert "sni_hostname" not in sent[0].extensions
         assert not client.is_closed  # Injected client remains caller-owned.
     assert policy.closed and stream.closed
 
 
 @pytest.mark.anyio
-async def test_sdk_checks_redirect_destination_before_connecting(dns):
-    sent = []
-
-    async def respond(request):
-        sent.append(request)
-        return httpx2.Response(307, headers={"location": "https://private.example/mcp"})
-
-    policy = PolicyTransport(httpx2.MockTransport(respond), config())
-    async with httpx2.AsyncClient(
-        transport=policy, follow_redirects=True, trust_env=False
-    ) as client:
-        # The SDK propagates this policy ValueError through its task group;
-        # it does not convert arbitrary application policy errors to RPC errors.
-        with pytest.raises(ExceptionGroup) as caught:
-            await exchange(client)
-        assert len(caught.value.exceptions) == 1
-        assert type(caught.value.exceptions[0]) is ValueError
-        assert str(caught.value.exceptions[0]) == "MCP_HTTP_PRIVATE_NETWORK_DENIED"
-    assert policy.checked == [
-        "https://public.example/mcp",
-        "https://private.example/mcp",
-    ]
-    assert len(sent) == 1
-    assert policy.closed
-
-
-@pytest.mark.anyio
-async def test_gap_follow_redirects_can_repeat_tool_post(dns):
+async def test_gap_follow_redirects_can_repeat_tool_post():
     sent = []
 
     async def respond(request):
@@ -238,7 +175,7 @@ async def test_gap_follow_redirects_can_repeat_tool_post(dns):
         return httpx2.Response(200, json=result("redirected"))
 
     async with httpx2.AsyncClient(
-        transport=PolicyTransport(httpx2.MockTransport(respond), config()),
+        transport=BodyBoundTransport(httpx2.MockTransport(respond)),
         trust_env=False,
         follow_redirects=True,
     ) as client:
@@ -250,7 +187,7 @@ async def test_gap_follow_redirects_can_repeat_tool_post(dns):
 
 
 @pytest.mark.anyio
-async def test_gap_raw_body_limit_does_not_bound_decompressed_json(dns):
+async def test_gap_raw_body_limit_does_not_bound_decompressed_json():
     payload = json.dumps(result("x" * 4096)).encode()
     encoded = gzip.compress(payload)
     maximum = 256
@@ -264,8 +201,8 @@ async def test_gap_raw_body_limit_does_not_bound_decompressed_json(dns):
         )
 
     async with httpx2.AsyncClient(
-        transport=PolicyTransport(
-            httpx2.MockTransport(respond), config(), body_limit=maximum
+        transport=BodyBoundTransport(
+            httpx2.MockTransport(respond), body_limit=maximum
         ),
         trust_env=False,
     ) as client:
@@ -274,7 +211,7 @@ async def test_gap_raw_body_limit_does_not_bound_decompressed_json(dns):
 
 
 @pytest.mark.anyio
-async def test_gap_byte_limit_alone_does_not_preserve_preparse_node_limit(dns):
+async def test_gap_byte_limit_alone_does_not_preserve_preparse_node_limit():
     bounds = DEFAULT_MCP_WIRE_BOUNDS
     document = result("many nodes")
     document["result"]["structuredContent"] = {
@@ -291,9 +228,8 @@ async def test_gap_byte_limit_alone_does_not_preserve_preparse_node_limit(dns):
         )
 
     async with httpx2.AsyncClient(
-        transport=PolicyTransport(
+        transport=BodyBoundTransport(
             httpx2.MockTransport(respond),
-            config(),
             body_limit=bounds.maximum_http_json_body_bytes,
         ),
         trust_env=False,
@@ -310,7 +246,7 @@ async def test_gap_byte_limit_alone_does_not_preserve_preparse_node_limit(dns):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("status", [401, 429, 500])
-async def test_sdk_without_auth_replay_does_not_repeat_tool_post(dns, status):
+async def test_sdk_without_auth_replay_does_not_repeat_tool_post(status):
     sent = []
 
     async def respond(request):
@@ -318,7 +254,7 @@ async def test_sdk_without_auth_replay_does_not_repeat_tool_post(dns, status):
         return httpx2.Response(status)
 
     async with httpx2.AsyncClient(
-        transport=PolicyTransport(httpx2.MockTransport(respond), config()),
+        transport=BodyBoundTransport(httpx2.MockTransport(respond)),
         trust_env=False,
     ) as client:
         reply = await exchange(client)
@@ -335,7 +271,7 @@ async def test_sdk_without_auth_replay_does_not_repeat_tool_post(dns, status):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("status", [401, 403])
-async def test_gap_sdk_oauth_on_tool_client_repeats_tool_post(dns, status):
+async def test_gap_sdk_oauth_on_tool_client_repeats_tool_post(status):
     """Do not attach automatic SDK auth to the tool transport in production."""
 
     class Storage:
@@ -423,7 +359,7 @@ async def test_gap_sdk_oauth_on_tool_client_repeats_tool_post(dns, status):
         callback_handler=callback,
     )
     async with httpx2.AsyncClient(
-        transport=PolicyTransport(httpx2.MockTransport(respond), config()),
+        transport=BodyBoundTransport(httpx2.MockTransport(respond)),
         auth=provider,
         trust_env=False,
     ) as client:
@@ -435,7 +371,7 @@ async def test_gap_sdk_oauth_on_tool_client_repeats_tool_post(dns, status):
 
 
 @pytest.mark.anyio
-async def test_sdk_cancel_closes_pending_stream_without_tool_replay(dns):
+async def test_sdk_cancel_closes_pending_stream_without_tool_replay():
     stream = Chunks([], wait=True)
     sent = []
 
@@ -445,7 +381,7 @@ async def test_sdk_cancel_closes_pending_stream_without_tool_replay(dns):
             200, headers={"content-type": "text/event-stream"}, stream=stream
         )
 
-    policy = PolicyTransport(httpx2.MockTransport(respond), config())
+    policy = BodyBoundTransport(httpx2.MockTransport(respond))
     async with httpx2.AsyncClient(transport=policy, trust_env=False) as client:
         async with anyio.create_task_group() as group:
             group.start_soon(exchange, client)
@@ -456,7 +392,7 @@ async def test_sdk_cancel_closes_pending_stream_without_tool_replay(dns):
 
 
 @pytest.mark.anyio
-async def test_sdk_response_resumption_is_get_not_second_tool_post(dns):
+async def test_sdk_response_resumption_is_get_not_second_tool_post():
     sent = []
 
     async def respond(request):
@@ -471,7 +407,7 @@ async def test_sdk_response_resumption_is_get_not_second_tool_post(dns):
         )
 
     async with httpx2.AsyncClient(
-        transport=PolicyTransport(httpx2.MockTransport(respond), config()),
+        transport=BodyBoundTransport(httpx2.MockTransport(respond)),
         trust_env=False,
     ) as client:
         reply = await exchange(client)
@@ -480,7 +416,7 @@ async def test_sdk_response_resumption_is_get_not_second_tool_post(dns):
 
 
 @pytest.mark.anyio
-async def test_gap_post_sse_ignores_custom_client_sse_limit(dns):
+async def test_gap_post_sse_ignores_custom_client_sse_limit():
     """SDK-owned POST events stay at 1 MiB despite a larger client.sse limit."""
     requested_limit = 16 * 1024 * 1024
 
@@ -501,7 +437,7 @@ async def test_gap_post_sse_ignores_custom_client_sse_limit(dns):
         )
 
     async with LargerSseClient(
-        transport=PolicyTransport(httpx2.MockTransport(respond), config()),
+        transport=BodyBoundTransport(httpx2.MockTransport(respond)),
         trust_env=False,
     ) as client:
         async with client.sse("https://public.example/mcp") as events:
@@ -512,7 +448,7 @@ async def test_gap_post_sse_ignores_custom_client_sse_limit(dns):
 
 
 @pytest.mark.anyio
-async def test_sdk_legacy_sse_uses_injected_client_for_endpoint_and_post(dns):
+async def test_sdk_legacy_sse_uses_injected_client_for_endpoint_and_post():
     queue = asyncio.Queue()
     sent = []
 
@@ -533,7 +469,7 @@ async def test_sdk_legacy_sse_uses_injected_client_for_endpoint_and_post(dns):
         await queue.put(json.dumps(result("legacy")).encode())
         return httpx2.Response(202)
 
-    policy = PolicyTransport(httpx2.MockTransport(respond), config())
+    policy = BodyBoundTransport(httpx2.MockTransport(respond))
 
     @asynccontextmanager
     async def factory(**kwargs):
@@ -554,7 +490,7 @@ async def test_sdk_legacy_sse_uses_injected_client_for_endpoint_and_post(dns):
 
 
 @pytest.mark.anyio
-async def test_production_client_bounds_decoded_body_before_sdk(dns):
+async def test_production_client_bounds_decoded_body_before_sdk():
     payload = gzip.compress(json.dumps(result("x" * 4096)).encode())
     stream = Chunks([payload])
 
@@ -578,7 +514,7 @@ async def test_production_client_bounds_decoded_body_before_sdk(dns):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("method", ["GET", "POST", "DELETE"])
-async def test_production_client_every_request_crosses_credential_gate(dns, method):
+async def test_production_client_every_request_crosses_credential_gate(method):
     sent = []
 
     async def respond(request):
@@ -601,7 +537,7 @@ async def test_production_client_every_request_crosses_credential_gate(dns, meth
 
 
 @pytest.mark.anyio
-async def test_production_tool_client_does_not_follow_post_redirect(dns):
+async def test_production_tool_client_does_not_follow_post_redirect():
     sent = []
 
     async def respond(request):
@@ -622,7 +558,7 @@ async def test_production_tool_client_does_not_follow_post_redirect(dns):
 
 
 @pytest.mark.anyio
-async def test_session_header_is_observed_before_delivering_response(dns):
+async def test_session_header_is_observed_before_delivering_response():
     observed = []
     async def observe_session():
         observed.append('sessionful')

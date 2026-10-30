@@ -10,6 +10,8 @@ from time import monotonic
 from types import SimpleNamespace
 
 import pytest
+
+from pulsara_agent.mcp_config import LocalConfiguredMcpRuntimeSource
 from PIL import Image
 
 from pulsara_agent.capability.contracts import (
@@ -142,6 +144,7 @@ def _mcp_source():
     # Use the production bounded renderer at all three existing variant bounds.
     servers = tuple(
         McpServerCatalogEntry(
+            runtime_source=LocalConfiguredMcpRuntimeSource(),
             server_id=f"server-{index:03d}",
             display_name=f"Server {index}",
             status=McpServerState.READY,

@@ -4,6 +4,8 @@
 
 修改代码前请阅读 [AGENTS.md](AGENTS.md)。原生资源在目标系统构建；Windows 使用 WSL2 Ubuntu 中构建的 Linux 资源，以及 Windows 中构建的 Electron 界面。
 
+MCP 网络所有权、可选资源模板发现和真实模型验收遵循 [MCP 本机网络与可选资源模板契约](PULSARA_MCP_HOST_NETWORK_AND_OPTIONAL_TEMPLATES_IMPLEMENTATION_SPEC.zh.md)。
+
 ## 构建工具
 
 `mise.toml` 固定 Node.js 22.23.3、uv 0.13.4 和 protoc 34.0；`.python-version` 固定 Python 3.12.15，仓库 `.venv` 由 uv 管理。

@@ -46,7 +46,7 @@ def test_child_session_start_and_compaction_owners_send_actual_identity(tmp_path
     from pulsara_agent.primitives.permission import PermissionMode
 
     async def scenario():
-        dispatcher, executor = _dispatcher(tmp_path, (HookEventType.SESSION_START_EVENT, HookEventType.PRE_COMPACT_EVENT, HookEventType.POST_COMPACT_EVENT))
+        dispatcher, executor = _dispatcher(tmp_path, (HookEventType.SESSION_START_EVENT, HookEventType.SUBAGENT_START_EVENT, HookEventType.PRE_COMPACT_EVENT, HookEventType.POST_COMPACT_EVENT))
         session = "session:actual-child"
         scope = HookDispatchScopeRef(object(), object(), HookScopeKind.SUBAGENT, session)
         context = HookContextOwner()
@@ -80,8 +80,8 @@ def test_child_session_start_and_compaction_owners_send_actual_identity(tmp_path
             assert (await coordinator._dispatch_post_compact(model_id="model:test", cwd=str(tmp_path), scope=scope,
                 attempt_token=attempt, candidate=candidate, turn_id="turn:compact", trigger=CompactionTrigger.MANUAL, deadline=monotonic()+5))[0]
             payloads = [item.public_stdin for item in executor.calls]
-            assert [item["hook_event_name"] for item in payloads] == ["SessionStart", "SessionStart", "PreCompact", "PostCompact"]
-            assert [item.get("source") for item in payloads[:2]] == ["resume", "compact"]
+            assert [item["hook_event_name"] for item in payloads] == ["SessionStart", "SubagentStart", "SessionStart", "SubagentStart", "PreCompact", "PostCompact"]
+            assert [item.get("source") for item in payloads[:4]] == ["resume", "resume", "compact", "compact"]
             assert all(item["session_id"] == session and item["session_kind"] == "SUBAGENT" and item["input_origin"] is None for item in payloads)
         finally:
             await dispatcher.aclose(deadline_monotonic=monotonic()+5)
@@ -134,7 +134,7 @@ def test_child_final_real_host_dispatches_stop_with_actual_session(tmp_path, mon
     import shlex
     import sys
     from pulsara_agent.identity import random_id
-    from pulsara_agent.llm.input import PromptContent
+    from pulsara_agent.llm.input import PromptContent, text_part_values
     from pulsara_agent.primitives.permission import PermissionMode
     from tests.test_agent_session_host import AgentModel, eventually
     from tests.test_round4_plan_host import _open_test_session
@@ -144,10 +144,10 @@ def test_child_final_real_host_dispatches_stop_with_actual_session(tmp_path, mon
         home = tmp_path / "home"
         log = tmp_path / "hook-inputs.jsonl"
         script = tmp_path / "capture.py"
-        script.write_text("import json,sys\nfrom pathlib import Path\nv=json.load(sys.stdin)\nwith Path(sys.argv[1]).open('a') as f:f.write(json.dumps(v)+'\\n')\n")
+        script.write_text("import json,sys\nfrom pathlib import Path\nv=json.load(sys.stdin)\nwith Path(sys.argv[1]).open('a') as f:f.write(json.dumps(v)+'\\n')\nif v['hook_event_name'] in ('SessionStart', 'SubagentStart'): print('START_CONTEXT_'+v['hook_event_name'])\n")
         command = " ".join(shlex.quote(str(item)) for item in (sys.executable, script, log))
         config = {"hooks": {event: [{"matcher": "*", "hooks": [{"type": "command", "command": command, "scope_policy": "BOTH"}]}]
-                            for event in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SessionEnd")}}
+                            for event in ("SessionStart", "SubagentStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop", "SubagentStop", "SessionEnd")}}
         _install_trusted_sources(home=home, workspace_root=tmp_path, user_config=config, workspace_config=None)
         monkeypatch.setenv("PULSARA_HOME", str(home))
         model = AgentModel()
@@ -183,9 +183,24 @@ def test_child_final_real_host_dispatches_stop_with_actual_session(tmp_path, mon
                 agent_id=model.agent_id, limit=10, deadline_monotonic=monotonic()+5)
         finally:
             await core.shutdown()
+        assert len(model.child_requests) == 2
+        before, after = (request.compiled_input for request in model.child_requests)
+        rendered = "\n".join(text for message in before.messages for text in text_part_values(message.content))
+        assert rendered.count("START_CONTEXT_SessionStart") == 1
+        assert rendered.count("START_CONTEXT_SubagentStart") == 1
+        assert rendered.index("START_CONTEXT_SessionStart") < rendered.index("START_CONTEXT_SubagentStart")
+        assert after.system_prompt == before.system_prompt
+        assert after.tools == before.tools
+        assert after.messages[:len(before.messages)] == before.messages
         payloads = [json.loads(line) for line in log.read_text().splitlines()]
         child = [item for item in payloads if item["session_id"] == model.agent_id]
-        assert {item["hook_event_name"] for item in child} >= {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
+        assert {item["hook_event_name"] for item in child} >= {"SessionStart", "SubagentStart", "UserPromptSubmit", "Stop", "SubagentStop", "SessionEnd"}
+        assert [item["hook_event_name"] for item in child if item["hook_event_name"] in {"SessionStart", "SubagentStart"}] == ["SessionStart", "SubagentStart"]
+        assert not any(item["hook_event_name"] in {"SubagentStart", "SubagentStop"} and item["session_kind"] == "ROOT" for item in payloads)
+        stops = [item for item in child if item["hook_event_name"] == "SubagentStop"]
+        assert [item["turn_id"] for item in stops] == [work["turn_id"] for work in works]
+        assert [item["stop_hook_active"] for item in stops] == [False, False]
+        assert [item["last_assistant_message"] for item in stops] == ["CHILD_FIRST_FINAL", "CHILD_SECOND_FINAL"]
         assert all(item["session_kind"] == "SUBAGENT" for item in child)
         assert all(item["input_origin"] is None for item in child if item["hook_event_name"] != "UserPromptSubmit")
         submissions = [item for item in child if item['hook_event_name'] == 'UserPromptSubmit']

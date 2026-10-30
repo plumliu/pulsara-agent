@@ -76,7 +76,6 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
   const [enabled, setEnabled] = useState(server?.enabled ?? true);
   const [subagents, setSubagents] = useState(server?.availableToSubagents ?? false);
   const [allowLocal, setAllowLocal] = useState(Boolean(previousTransport.allow_http_localhost));
-  const [networkPolicy, setNetworkPolicy] = useState(String(previousTransport.network_policy ?? 'PUBLIC_ONLY'));
   const [stateless, setStateless] = useState(Boolean(previousTransport.stateless_http_asserted));
   const [policies, setPolicies] = useState<Record<string, unknown>>({});
   const [perToolTimeout, setPerToolTimeout] = useState<string>();
@@ -146,7 +145,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
       if (!Array.isArray(argv) || argv.some((value) => typeof value !== 'string')) throw new Error('参数需要是字符串数组，例如 ["-y", "包名"]。');
       const transport = kind === 'stdio'
         ? { type: kind, command, args: argv, cwd, env: pairs(env), secret_env: secretPairs(envSecrets, 'env:') }
-        : { ...(previousTransport.type === kind ? previousTransport : {}), type: kind, endpoint, allow_http_localhost: allowLocal, network_policy: networkPolicy, stateless_http_asserted: kind === 'streamable_http' && stateless };
+        : { ...(previousTransport.type === kind ? previousTransport : {}), type: kind, endpoint, allow_http_localhost: allowLocal, stateless_http_asserted: kind === 'streamable_http' && stateless };
       const extra = {...policies};
       if (perToolTimeout !== undefined) {
         const values = JSON.parse(perToolTimeout);
@@ -235,7 +234,6 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
           <label className="capability-field"><span>{kind === 'stdio' ? '普通环境变量' : '普通 Header'}（JSON 对象，不填写密钥）</span><textarea value={kind === 'stdio' ? env : headers} onChange={(event) => kind === 'stdio' ? setEnv(event.target.value) : setHeaders(event.target.value)} /></label>
           {kind !== 'stdio' && <label className="capability-check"><input type="checkbox" checked={allowLocal} onChange={(event) => setAllowLocal(event.target.checked)} />允许本机 HTTP 测试地址</label>}
           {!packageDefinition && <>
-            {kind !== 'stdio' && <label className="capability-field"><span>连接网络范围</span><select value={networkPolicy} onChange={(event) => setNetworkPolicy(event.target.value)}><option value="PUBLIC_ONLY">仅公开网络（与明确允许的本机地址）</option><option value="ALLOW_PRIVATE">也允许内网地址</option></select></label>}
             <div className="mcp-option-group">
             {kind === 'streamable_http' && <label className="capability-check"><input type="checkbox" checked={stateless} onChange={(event) => setStateless(event.target.checked)} />按无状态 HTTP 配置此服务</label>}
             <label className="capability-check"><input type="checkbox" checked={Boolean(policy.required)} onChange={(event) => setPolicy('required', event.target.checked)} />将此服务标记为必需</label>

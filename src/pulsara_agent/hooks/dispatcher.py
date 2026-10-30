@@ -541,6 +541,7 @@ def _aggregate(
         return ObserveOutcome(diagnostics)
     if event_type in {
         HookEventType.POST_TOOL_USE_EVENT,
+        HookEventType.SUBAGENT_START_EVENT,
     }:
         return ContextOutcome(contexts, diagnostics)
     if event_type is HookEventType.PERMISSION_REQUEST_EVENT:
@@ -557,6 +558,7 @@ def _aggregate(
         return PermissionOutcome(diagnostics=diagnostics)
     if event_type in {
         HookEventType.STOP_EVENT,
+        HookEventType.SUBAGENT_STOP_EVENT,
     }:
         vetoes = tuple(item for item in valid if item.explicit_terminalize)
         requests = tuple(item for item in valid if item.continuation_request)
@@ -565,6 +567,7 @@ def _aggregate(
                 decision=ContinuationDecision.TERMINALIZE,
                 reason=next((item.reason for item in vetoes if item.reason), None),
                 diagnostics=diagnostics,
+                explicit_terminalize=True,
             )
         reason = next((item.reason for item in requests if item.reason), None)
         if requests and not continuation_already_used:

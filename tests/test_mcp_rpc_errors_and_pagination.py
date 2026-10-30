@@ -9,7 +9,8 @@ import sys
 
 import pytest
 
-from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor
+from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor, discover_mcp_catalog
+from pulsara_agent.conversation_kernel.mcp.sdk_facade import BoundedMcpSdkClient, MCPError
 from pulsara_agent.mcp_config import _parse_server
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
@@ -45,7 +46,11 @@ for line in sys.stdin:
     method = request['method']
     counts[method] = counts.get(method,0)+1
     response = {'jsonrpc':'2.0','id':request['id']}
-    if method == options.get('error_method') and counts[method] == 1:
+    if method == 'server/discover' and options.get('legacy'):
+        response['error'] = {'code':-32601,'message':'Method not found'}
+        print(json.dumps(response),flush=True)
+        continue
+    if method == options.get('error_method') and counts[method] == options.get('error_on_page', 1):
         response['error'] = {
             'code':options['error_code'], 'message':'requested operation rejected',
             'data':{'reason':'server rejected request','retryHint':'fix parameters'},
@@ -57,6 +62,10 @@ for line in sys.stdin:
     if method == 'server/discover':
         result = {'supportedVersions':['2026-07-28'],
                   'capabilities':{'tools':{},'resources':{},'prompts':{}}}
+    elif method == 'initialize':
+        result = {'protocolVersion':'2025-11-25',
+                  'capabilities':{'tools':{},'resources':{},'prompts':{}},
+                  'serverInfo':{'name':'legacy-probe','version':'1'}}
     elif method in listings:
         field,items = listings[method]
         if method == options.get('pagination_method'):
@@ -76,15 +85,14 @@ for line in sys.stdin:
         result = {'messages':[{'role':'user','content':{'type':'text','text':'same connection success'}}]}
     else:
         raise RuntimeError(method)
-    if method == 'server/discover' or method in listings:
+    if not options.get('legacy') and (method == 'server/discover' or method in listings):
         result.update(cacheScope='private',ttlMs=0)
-    response['result'] = {**result,'resultType':'complete'}
+    response['result'] = result if options.get('legacy') else {**result,'resultType':'complete'}
     print(json.dumps(response),flush=True)
 '''
 
 
-@asynccontextmanager
-async def _runtime(tmp_path, **options):
+def _config(tmp_path, options):
     script = tmp_path / "peer.py"
     script.write_text(_SERVER.replace("OPTIONS", repr(json.dumps(options))))
     transport = {
@@ -99,6 +107,12 @@ async def _runtime(tmp_path, **options):
         "effect_policy": {"default_effect": "READ_ONLY"},
         "transport": transport,
     })
+    return config
+
+
+@asynccontextmanager
+async def _runtime(tmp_path, **options):
+    config = _config(tmp_path, options)
     supervisor = McpHostSupervisor(
         session_id="session:rpc-review", workspace_root=tmp_path,
         configs=(config,), credential_boundary=ProcessCredentialBoundary(),
@@ -146,7 +160,7 @@ def test_remote_error_data_retains_diagnostics_and_scrubs_actual_secret(tmp_path
             executor = next(iter(runtime.executors.values()))
             permit = executor.admit(
                 session_id="session:rpc-review", scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None, turn_id="turn:rpc-review",
+                turn_id="turn:rpc-review",
                 tool_call_id="call:rpc-review:secret",
             )
             permit.mark_attempt_accepted()
@@ -165,8 +179,8 @@ def test_remote_error_data_retains_diagnostics_and_scrubs_actual_secret(tmp_path
 @pytest.mark.parametrize("error_code", [-32602, -32042])
 @pytest.mark.parametrize("method,tool_name,arguments", [
     ("tools/call", None, {}),
-    ("resources/read", "read_mcp_resource", {"server_id":"probe", "uri":"fixture://first"}),
-    ("prompts/get", "get_mcp_prompt", {"server_id":"probe", "prompt_name":"first"}),
+    ("resources/read", "read_mcp_resource", {"target":{"kind":"MCP_RESOURCE","server_id":"probe", "uri":"fixture://first"}}),
+    ("prompts/get", "get_mcp_prompt", {"target":{"kind":"MCP_PROMPT","server_id":"probe", "name":"first"}}),
 ])
 def test_remote_rpc_error_keeps_slot_and_allows_next_operation(
     tmp_path, error_code, method, tool_name, arguments,
@@ -179,7 +193,6 @@ def test_remote_rpc_error_keeps_slot_and_allows_next_operation(
                 identity = {
                     "session_id": "session:rpc-review",
                     "scope_kind": ModelInputScopeKind.ROOT,
-                    "scope_subagent_task_id": None,
                     "turn_id": "turn:rpc-review",
                     "tool_call_id": f"call:rpc-review:{index}",
                 }
@@ -217,4 +230,54 @@ def test_remote_rpc_error_keeps_slot_and_allows_next_operation(
             requests = json.loads((tmp_path / "requests.json").read_text())
             assert sum(request["method"] == method for request in requests) == 2
 
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_missing_template_method_keeps_tools_and_resources_available(tmp_path, legacy):
+    async def exercise():
+        async with _runtime(tmp_path, legacy=legacy, error_method="resources/templates/list", error_code=-32601) as (supervisor, runtime):
+            candidate = runtime.candidates["probe"]
+            snapshot = candidate.discovery_snapshot
+            assert snapshot.protocol_version == ("2025-11-25" if legacy else "2026-07-28")
+            assert len(snapshot.tools) == len(snapshot.resources) == len(snapshot.prompts) == 1
+            assert snapshot.resource_templates == ()
+            assert "probe" not in supervisor._retry_tasks
+            result = await candidate.slot_lease._slot.client.session.call_tool("first", {})
+            assert result.content[0].text == "same connection success"
+            requests = json.loads((tmp_path / "requests.json").read_text())
+            assert sum(r["method"] == "resources/templates/list" for r in requests) == 1
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("method,code,page", [
+    ("resources/templates/list", -32602, 1),
+    ("resources/templates/list", -32603, 1),
+    ("resources/templates/list", -32001, 1),
+    ("resources/templates/list", -32601, 2),
+    ("tools/list", -32601, 1),
+    ("resources/list", -32601, 1),
+    ("prompts/list", -32601, 1),
+])
+def test_optional_templates_does_not_hide_other_or_partial_discovery_errors(tmp_path, method, code, page, legacy):
+    async def exercise():
+        config = _config(tmp_path, dict(legacy=legacy, error_method=method, error_code=code,
+                         error_on_page=page, pagination_method=method if page == 2 else None))
+        async def notify(_):
+            pass
+        client = BoundedMcpSdkClient(config, workspace_root=tmp_path,
+                    notification_callback=notify, credential_boundary=ProcessCredentialBoundary())
+        try:
+            await client.open()
+            with pytest.raises(MCPError) as caught:
+                await discover_mcp_catalog(client, config)
+            assert caught.value.code == code
+            requests = json.loads((tmp_path / "requests.json").read_text())
+            observed = [r for r in requests if r["method"] == method]
+            assert len(observed) == page
+            if page == 2:
+                assert observed[-1]["params"]["cursor"] == ""
+        finally:
+            await client.aclose()
     asyncio.run(exercise())

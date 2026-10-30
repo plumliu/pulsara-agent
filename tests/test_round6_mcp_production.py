@@ -61,7 +61,6 @@ from pulsara_agent.conversation_kernel.mcp.naming import mangle_mcp_tool_names
 from pulsara_agent.conversation_kernel.mcp.sdk_facade import (
     BoundedMcpSdkClient,
     MCPError,
-    _enforce_http_network_policy,
     _has_legacy_discovery_fallback_evidence,
     _normalize_legacy_discovery_http_error,
 )
@@ -130,9 +129,7 @@ from pulsara_agent.mcp_config import (
     _parse_server,
     LocalConfiguredMcpRuntimeSource,
     McpConfiguredEffect,
-    McpHttpNetworkPolicy,
     McpLocalConfigSourceKind,
-    StreamableHttpTransportConfig,
     load_mcp_server_configs,
 )
 from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
@@ -568,61 +565,6 @@ def test_round6_legacy_only_http_prevalidation_falls_back_to_initialize(
         "notifications/initialized",
         "tools/list",
     ]
-
-
-def test_round6_http_network_policy_is_typed_and_private_default_denied() -> None:
-    denied = StreamableHttpTransportConfig(
-        endpoint="https://127.0.0.1:9443/mcp",
-    )
-    with pytest.raises(ValueError, match="PRIVATE_NETWORK_DENIED"):
-        asyncio.run(_enforce_http_network_policy(denied, credential_boundary=ProcessCredentialBoundary()))
-
-    explicit_local = StreamableHttpTransportConfig(
-        endpoint="http://127.0.0.1:9443/mcp",
-        allow_http_localhost=True,
-    )
-    asyncio.run(_enforce_http_network_policy(explicit_local, credential_boundary=ProcessCredentialBoundary()))
-
-    explicit_private = StreamableHttpTransportConfig(
-        endpoint="https://127.0.0.1:9443/mcp",
-        network_policy=McpHttpNetworkPolicy.ALLOW_PRIVATE,
-    )
-    asyncio.run(_enforce_http_network_policy(explicit_private, credential_boundary=ProcessCredentialBoundary()))
-
-
-def test_round6_public_http_resolution_is_pinned_with_logical_host_and_sni(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def exercise() -> None:
-        loop = asyncio.get_running_loop()
-        calls = 0
-
-        async def getaddrinfo(*_args, **_kwargs):
-            nonlocal calls
-            calls += 1
-            return [
-                (
-                    socket.AF_INET,
-                    socket.SOCK_STREAM,
-                    socket.IPPROTO_TCP,
-                    "",
-                    ("93.184.216.34", 443),
-                )
-            ]
-
-        monkeypatch.setattr(loop, "getaddrinfo", getaddrinfo)
-        pinned = await _enforce_http_network_policy(
-            StreamableHttpTransportConfig(
-                endpoint="https://mcp.example.test:9443/v1/mcp?mode=bounded"
-            ),
-            credential_boundary=ProcessCredentialBoundary(),
-        )
-        assert calls == 1
-        assert pinned.urls == ("https://93.184.216.34:9443/v1/mcp?mode=bounded",)
-        assert pinned.host_header == "mcp.example.test:9443"
-        assert pinned.sni_hostname == "mcp.example.test"
-
-    asyncio.run(exercise())
 
 
 def test_round6_json_shape_is_rejected_before_object_allocation(
@@ -2152,6 +2094,7 @@ def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
         catalog_revision=1,
         servers=(
             McpServerCatalogEntry(
+                runtime_source=LocalConfiguredMcpRuntimeSource(),
                 server_id="fixture",
                 display_name="Fixture",
                 status=McpServerState.READY,

@@ -18,6 +18,7 @@
 .metric-grid article > div:nth-child(2) { min-width: 0; }
 .metric-grid article strong, .metric-grid article span { display: block; }
 .metric-grid article strong { font-family: var(--serif); font-size: var(--type-display-small); font-weight: 550; line-height: .9; }
+.metric-grid article strong.metric-status { font-size: var(--type-heading-small); }
 .metric-grid article span { margin-top: 4px; color: var(--muted); font-size: var(--type-caption); }
 .metric-grid article > small { grid-column: 1 / -1; padding-top: 7px; border-top: 1px solid var(--line); color: var(--faint); font-family: var(--mono); font-size: var(--type-micro); }
 .overview-columns { display: grid; grid-template-columns: minmax(0,1.3fr) minmax(300px,.8fr); gap: 12px; max-width: 1188px; margin: 0 auto 12px; }

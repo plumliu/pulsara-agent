@@ -19,10 +19,15 @@
 .capability-menu__popover strong, .capability-menu__popover small { display: block; min-width: 0; }
 .capability-menu__popover strong { font-size: var(--type-control); font-weight: 600; }
 .capability-menu__popover small { overflow: hidden; margin-top: 2px; color: var(--faint); font-family: var(--mono); font-size: var(--type-caption); text-overflow: ellipsis; white-space: nowrap; }
+.capability-menu__popover--animated { opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(-5px) scale(.98); transform-origin: top right; transition: opacity .18s ease, transform .22s cubic-bezier(.2,.8,.2,1), visibility 0s linear .22s; }
+.capability-menu__popover--animated.is-open { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1); transition: opacity .18s ease, transform .22s cubic-bezier(.2,.8,.2,1), visibility 0s; }
+.capability-menu__popover--animated button { position: relative; transition: background .16s ease, color .16s ease; }
+.capability-menu__popover--roots button { padding: 5px 9px; }
+.capability-menu__popover--animated button + button::before { position: absolute; top: 0; right: 10px; left: 10px; height: 1px; background: color-mix(in srgb, var(--line) 65%, transparent); content: ''; pointer-events: none; }
+@media (prefers-reduced-motion: reduce) { .capability-menu__popover--animated, .capability-menu__popover--animated.is-open, .capability-menu__popover--animated button { transition: none; } }
 .capability-page-toolbar { display: grid; grid-template-columns: minmax(0,1fr) minmax(150px,230px) auto; gap: 10px; align-items: center; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
 .capability-page-controls { display: flex; align-items: center; gap: 8px; }
 .capability-page-controls > button { flex: none; white-space: nowrap; }
-.capability-page-controls .capability-reload { min-height: 38px; border: 1px solid var(--line); background: var(--paper-solid); }
 .capability-tabs { --sliding-count: 4; justify-self: start; max-width: 100%; }
 .capability-tabs[data-active='mcp'] { --sliding-index: 1; }
 .capability-tabs[data-active='skills'] { --sliding-index: 2; }

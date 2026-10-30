@@ -19,6 +19,7 @@ type JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
 
 class HookEventType(StrEnum):
     SESSION_START_EVENT = "SessionStartEvent"
+    SUBAGENT_START_EVENT = "SubagentStartEvent"
     SESSION_END_EVENT = "SessionEndEvent"
     USER_PROMPT_SUBMIT_EVENT = "UserPromptSubmitEvent"
     PRE_TOOL_USE_EVENT = "PreToolUseEvent"
@@ -27,6 +28,7 @@ class HookEventType(StrEnum):
     PRE_COMPACT_EVENT = "PreCompactEvent"
     POST_COMPACT_EVENT = "PostCompactEvent"
     STOP_EVENT = "StopEvent"
+    SUBAGENT_STOP_EVENT = "SubagentStopEvent"
 
     @property
     def external_name(self) -> str:
@@ -471,6 +473,16 @@ class SessionStartInput(_HookInputBase):
 
 
 @dataclass(frozen=True, slots=True)
+class SubagentStartInput(SessionStartInput):
+    event_type = HookEventType.SUBAGENT_START_EVENT
+
+    def __post_init__(self) -> None:
+        super(SubagentStartInput, self).__post_init__()
+        if self.session_kind != "SUBAGENT":
+            raise ValueError("SubagentStart requires a delegated session")
+
+
+@dataclass(frozen=True, slots=True)
 class SessionEndInput(_HookInputBase):
     reason: str = "other"
     event_type = HookEventType.SESSION_END_EVENT
@@ -601,6 +613,16 @@ class StopInput(_HookInputBase):
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SubagentStopInput(StopInput):
+    event_type = HookEventType.SUBAGENT_STOP_EVENT
+
+    def __post_init__(self) -> None:
+        super(SubagentStopInput, self).__post_init__()
+        if self.session_kind != "SUBAGENT":
+            raise ValueError("SubagentStop requires a delegated session")
+
+
 TInput = TypeVar("TInput", bound=HookPublicInput)
 
 
@@ -673,6 +695,7 @@ class PermissionOutcome:
 
 @dataclass(frozen=True, slots=True)
 class ContinuationOutcome:
+    explicit_terminalize: bool = field(default=False, kw_only=True)
     decision: ContinuationDecision = ContinuationDecision.TERMINALIZE
     reason: str | None = None
     diagnostics: tuple[HookDiagnostic, ...] = ()
@@ -690,6 +713,7 @@ type HookDispatchOutcome = (
 
 EVENT_OUTCOME_FAMILY: Mapping[HookEventType, type[HookDispatchOutcome]] = {
     HookEventType.SESSION_START_EVENT: GateOutcome,
+    HookEventType.SUBAGENT_START_EVENT: ContextOutcome,
     HookEventType.SESSION_END_EVENT: ObserveOutcome,
     HookEventType.USER_PROMPT_SUBMIT_EVENT: GateOutcome,
     HookEventType.PRE_TOOL_USE_EVENT: GateOutcome,
@@ -698,6 +722,7 @@ EVENT_OUTCOME_FAMILY: Mapping[HookEventType, type[HookDispatchOutcome]] = {
     HookEventType.PRE_COMPACT_EVENT: GateOutcome,
     HookEventType.POST_COMPACT_EVENT: GateOutcome,
     HookEventType.STOP_EVENT: ContinuationOutcome,
+    HookEventType.SUBAGENT_STOP_EVENT: ContinuationOutcome,
 }
 
 
@@ -771,8 +796,10 @@ __all__ = [
     "SessionEndInput",
     "SessionEndRef",
     "SessionStartInput",
+    "SubagentStartInput",
     "SessionStartRef",
     "StopInput",
+    "SubagentStopInput",
     "StopRef",
     "UserPromptSubmitInput",
     "external_permission_mode",

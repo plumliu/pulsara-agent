@@ -224,7 +224,6 @@ def config_to_entry(config: McpServerConfig) -> dict[str, object]:
             "type": transport.kind.value,
             "endpoint": transport.endpoint,
             "allow_http_localhost": transport.allow_http_localhost,
-            "network_policy": transport.network_policy.value,
             "stateless_http_asserted": transport.stateless_http_asserted,
         }
     return {

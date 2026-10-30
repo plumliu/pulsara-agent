@@ -387,6 +387,7 @@ class KernelSessionSummary:
     title: str | None = None
     model_call_binding: ModelCallBinding | None = None
     latest_root_turn: dict[str, str] | None = None
+    subagent_count: int | None = None
 
     @property
     def runtime_session_id(self) -> str:
@@ -7549,6 +7550,8 @@ def _list_resumable_session_rows_across_workspaces(
                        LIMIT 1
                    )) END AS updated_at,
                    s.model_call_binding,
+                   (SELECT count(*) FROM pulsara_v3.sessions AS child
+                    WHERE child.root_session_id = s.id) AS subagent_count,
                    {LATEST_ROOT_SUMMARY_SQL} AS latest_root_turn
             FROM pulsara_v3.sessions AS s
             JOIN pulsara_v3.workspaces AS w
@@ -7610,6 +7613,7 @@ def _kernel_session_summary(row) -> KernelSessionSummary:
         updated_at=row["updated_at"],
         model_call_binding=model_call_binding_from_dict(row["model_call_binding"]),
         latest_root_turn=row["latest_root_turn"],
+        subagent_count=row.get("subagent_count"),
     )
 
 

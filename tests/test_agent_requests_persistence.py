@@ -149,6 +149,19 @@ def request(*, agent_id=None, work_id=None, create=True, **kwargs):
     )
 
 
+def test_session_list_counts_subagent_sessions_once_when_work_is_reused(source):
+    from pulsara_agent.conversation_kernel.host import _list_resumable_session_rows_across_workspaces
+
+    repository, root, admit = source
+    first, second = request(), request()
+    admit(first, second)
+    admit(request(agent_id=first.agent_id, create=False))
+    rows = _list_resumable_session_rows_across_workspaces(repository, 'u_local', False, deadline())
+    summary = next(row for row in rows if row['id'] == root.guard.session_id)
+    assert summary['subagent_count'] == 2
+    assert all(row['id'] not in {first.agent_id, second.agent_id} for row in rows)
+
+
 def start(repository, req):
     lease = repository.acquire_host_writer(
         intent="EXISTING",

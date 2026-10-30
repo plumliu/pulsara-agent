@@ -58,6 +58,8 @@ Emit only the root fields `description` and `hooks`, only the group fields
   only for events that accept context. A positive value omits the whole context
   contribution when its provider-specific estimate exceeds the threshold; zero
   disables this per-handler threshold but not capture or compiler bounds;
+- `scope_policy`: `ROOT`, `SUBAGENT`, or `BOTH`. The default is `BOTH` for
+  `SessionStart`, `SUBAGENT` for `SubagentStart`/`SubagentStop`, and `ROOT` for other events;
 - `async`: optional boolean, default false. `SessionEnd` is always synchronous.
 
 The whole config is bounded to 1 MiB, 16,384 JSON nodes, depth 64, ordinary
@@ -75,6 +77,7 @@ The only event names are:
 
 ```text
 SessionStart
+SubagentStart
 SessionEnd
 UserPromptSubmit
 PreToolUse
@@ -83,7 +86,23 @@ PostToolUse
 PreCompact
 PostCompact
 Stop
+SubagentStop
 ```
+
+A delegated session dispatches `SessionStart` followed by `SubagentStart` at its
+existing `startup`, `resume`, or adopted `compact` boundary. ROOT dispatches only
+`SessionStart`. Both registered handlers execute, even if their commands are
+identical, and both context contributions are kept. Explicit scope restrictions
+still apply. A blocked or cancelled `SessionStart` prevents the second dispatch.
+A later Work in the same running session does not create another start boundary.
+`SubagentStart` uses the same source matcher and child session identity; there is
+no agent-profile matcher or task identity. At each delegated Work's final assistant-message attempt, applicable `Stop`
+handlers run followed by `SubagentStop` handlers. ROOT never emits
+`SubagentStop`. A subsequent Work in the same session gets its own final check;
+waiting, cancellation, failure, and session close do not independently emit it.
+A `continue: false` from either event takes precedence over continuation requests.
+Both share the existing one-continuation-per-turn guard and the same Work/turn.
+This is distinct from closing the reusable child session.
 
 Missing, empty, or exact `*` matches all. Other matchers use case-sensitive RE2
 search semantics, not Python backtracking regular expressions. Lookaround,
@@ -94,12 +113,12 @@ Matcher subjects are fixed:
 
 | Event | Subject |
 |---|---|
-| `SessionStart` | `startup`, `resume`, or `compact`; Pulsara has no `clear` producer |
+| `SessionStart`, `SubagentStart` | `startup`, `resume`, or `compact`; Pulsara has no `clear` producer |
 | `SessionEnd` | exact `other` reason |
 | `UserPromptSubmit` | matcher ignored; always selected |
 | tool lifecycle events | frozen tool identity and closed aliases below |
 | `PreCompact`, `PostCompact` | `manual` or `auto` |
-| `Stop` | matcher ignored; always selected |
+| `Stop`, `SubagentStop` | matcher ignored; always selected |
 
 Important tool aliases and public names are:
 
@@ -136,6 +155,8 @@ Each command receives one JSON object on stdin. Common fields are:
 
 ```text
 session_id: string
+session_kind: ROOT | SUBAGENT
+input_origin: HUMAN_MESSAGE | AGENT_INSTRUCTION | SCHEDULED_TASK | MODEL_TOOL_CALL | CODE_MODE_CALL | null
 transcript_path: null
 cwd: string
 hook_event_name: exact event name
@@ -155,19 +176,19 @@ Event-specific fields are:
 
 | Event | Additional required input |
 |---|---|
-| `SessionStart` | `source`, `permission_mode` |
+| `SessionStart`, `SubagentStart` | `source`, `permission_mode` |
 | `SessionEnd` | `reason: "other"` |
 | `UserPromptSubmit` | `turn_id`, `prompt`, `permission_mode` |
 | `PreToolUse` | `turn_id`, `tool_name`, `tool_use_id`, `tool_input`, `permission_mode` |
 | `PermissionRequest` | `turn_id`, `tool_name`, `tool_input`, `permission_mode` |
 | `PostToolUse` | `turn_id`, `tool_name`, `tool_use_id`, `tool_input`, public `tool_response`, `permission_mode` |
 | `PreCompact`, `PostCompact` | `turn_id`, `trigger` |
-| `Stop` | `turn_id`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
+| `Stop`, `SubagentStop` | `turn_id`, `stop_hook_active`, `last_assistant_message`, `permission_mode` |
 
 `permission_mode` is one of `default`, `acceptEdits`, `plan`, `dontAsk`, or
 `bypassPermissions`. Scripts receive Pulsara tool names and parameters; aliases never translate stdin or script-internal comparisons. File operations identify their file in `tool_input.target.path`; terminal process and monitor actions use `tool_input.target` for the selected PROCESS or MONITOR. The `exec_process` startup command and workdir remain top-level parameters. There is no pulsara_tool_name field. Configuration conversion does not prove arbitrary vendor scripts work.
 
-`transcript_path` and `agent_transcript_path` are deliberately null. Hook stdin
+`transcript_path` is deliberately null. Hook stdin
 does not contain Plugin identity, install paths, private replay, raw artifacts, or
 any model or retrieval credential. A vendor Hook that requires a transcript file, Plugin
 provenance in stdin, hidden reasoning, or a different tool-input schema has no
@@ -207,13 +228,14 @@ The supported behavior is:
 | Event | Exact accepted behavior |
 |---|---|
 | `SessionStart` | plain stdout or `hookSpecificOutput.additionalContext` adds advisory context; `continue:false` blocks |
+| `SubagentStart` | plain stdout or hook-specific additional context; synchronous boolean `continue` is diagnosed and ignored |
 | `SessionEnd` | observe only; JSON may contain only `systemMessage` |
 | `UserPromptSubmit` | plain/additional context; exit 2, `continue:false`, or legacy `decision:"block"` blocks |
 | `PreToolUse` | exit 2, legacy block, or hook-specific `permissionDecision:"deny"` blocks; hook-specific context is allowed |
 | `PermissionRequest` | hook-specific decision object with `behavior:"allow"|"deny"` and optional message |
 | `PostToolUse` | hook-specific additional context only; result rewrite or suppression is forbidden |
 | `PreCompact`, `PostCompact` | `continue:false` blocks; other stdout is diagnostic |
-| `Stop` | exit 2 or legacy block requests at most one continuation; `continue:false` terminalizes |
+| `Stop`, `SubagentStop` | exit 2 or legacy block requests at most one continuation; `continue:false` terminalizes |
 
 JSON `hookSpecificOutput.hookEventName` must equal the current event. PreTool does
 not support `allow` or `ask`; only `PermissionRequest` can explicitly allow.
@@ -222,7 +244,7 @@ fields, and output suppression have no target. `suppressOutput:true` is invalid.
 PostTool exit 2 does not replace or hide its already-settled result.
 
 An asynchronous handler cannot emit any control-vocabulary field. Plain async
-stdout is context only for `SessionStart` and `UserPromptSubmit`; otherwise it is diagnostic. Do not convert a vendor background
+stdout is context only for `SessionStart`, `SubagentStart`, and `UserPromptSubmit`; otherwise it is diagnostic. Do not convert a vendor background
 Hook whose correctness depends on blocking, permission, continuation, ordering,
 or durable completion.
 

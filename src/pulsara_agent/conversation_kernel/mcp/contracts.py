@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Mapping
 
 from pulsara_agent.capability.contracts import McpProviderNameCollisionFact
+from pulsara_agent.mcp_config import McpRuntimeSourceIdentity
 from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, context_fingerprint
 
@@ -244,6 +245,9 @@ def scope_mcp_discovery_snapshot(
 @dataclass(frozen=True, slots=True)
 class McpServerCatalogEntry:
     server_id: str
+    # Host-owned provenance exists before remote discovery. It is not a tool
+    # schema, configuration snapshot, or permission to expose private details.
+    runtime_source: McpRuntimeSourceIdentity = field(repr=False)
     display_name: str
     status: McpServerState
     required: bool
