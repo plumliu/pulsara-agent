@@ -281,7 +281,7 @@ def test_cancel_cascades_without_empty_turn_and_preserves_independent_fifo_work(
 
 def test_full_results_are_owned_and_ordered_before_first_model_input(source):
     repository, root, admit = source
-    a = request(profile="research_worker")
+    a = request()
     b = request()
     receiver = request(
         depends_on=(a.work_id, b.work_id), instruction="Compare both results."
@@ -321,14 +321,14 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
     lr, candidate = start(repository, receiver)
     entries = candidate.ordered_input_entries
     texts = ["".join(p.text for p in e.canonical_prompt.content.parts) for e in entries]
-    assert texts[1:] == ["Compare both results.", large, "second-result"]
-    assert entries[1].entry_id == candidate.exact_initial_entry_id
+    assert texts == ["Compare both results.", large, "second-result"]
+    assert entries[0].entry_id == candidate.exact_initial_entry_id
     confirmation = repository.confirm_prepared_prompt_head_consumption(
         candidate=candidate, deadline_monotonic=deadline()
     )
     group = confirmation.accepted.started_input_group
-    assert group.ordered_items[1].source_entry_sequence == 2
-    assert group.provider_input_through_sequence == 4
+    assert group.ordered_items[0].source_entry_sequence == 1
+    assert group.provider_input_through_sequence == 3
     assert group.predecessor_through_sequence == 0
     assert group.initial_source_through_sequence == 0
     with repository.connection_provider.connection(
@@ -341,7 +341,6 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
             (receiver.agent_id,),
         ).fetchall()
         assert [r["input_origin"] for r in rows] == [
-            "AGENT_PROFILE",
             "AGENT_INSTRUCTION",
             "AGENT_MATERIAL",
             "AGENT_MATERIAL",
@@ -356,10 +355,10 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
     )
 
 
-def test_profile_inherits_at_acceptance_and_waiting_work_is_not_idle(source):
+def test_waiting_work_is_not_idle_and_cancel_preserves_other_work(source):
     repository, root, admit = source
     predecessor = request()
-    first = request(profile="review_worker", depends_on=(predecessor.work_id,))
+    first = request(depends_on=(predecessor.work_id,))
     second = request(agent_id=first.agent_id, create=False)
     admit(predecessor, first, second)
     repository.cancel_agent_requests(
@@ -370,14 +369,13 @@ def test_profile_inherits_at_acceptance_and_waiting_work_is_not_idle(source):
         actor_id="test",
         deadline_monotonic=deadline(),
     )
-    assert (
-        repository.query_agent_work(
-            root_session_id=root.guard.session_id,
-            work_id=second.work_id,
-            deadline_monotonic=deadline(),
-        )["profile"]
-        == "review_worker"
+    work = repository.query_agent_work(
+        root_session_id=root.guard.session_id,
+        work_id=second.work_id,
+        deadline_monotonic=deadline(),
     )
+    assert work["status"] == "queued"
+    assert "profile" not in work
     assert (
         repository.mark_agent_idle(
             session_id=predecessor.agent_id, at=now(), deadline_monotonic=deadline()

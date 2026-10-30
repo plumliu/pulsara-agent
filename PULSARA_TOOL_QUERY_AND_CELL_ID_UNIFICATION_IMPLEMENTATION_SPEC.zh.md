@@ -10,7 +10,7 @@
 
 - [Subagent／Work 与双入口编排设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)。
 - [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)。
-- [Agent／Code Mode 暂缓范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。其中本规格列明的工具 schema、名称及必要使用指引纳入实施；其他提示词优化、profile 和新前端表面仍暂缓。
+- [Agent／Code Mode 暂缓范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。其中本规格列明的工具 schema、名称及必要使用指引纳入实施；其他提示词优化和新前端表面仍暂缓。
 - [统一身份合同](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)的 canonical ID 编码与唯一 owner 原则。
 - [target 共同规则](archived_docs/PULSARA_TOOL_TARGET_HARD_CUT_OVERVIEW.zh.md)中仍适用的对象身份、角色与参数分离规则。历史文档中的旧 Subagent／Task 表面不复活。
 

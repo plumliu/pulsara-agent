@@ -356,14 +356,14 @@ class _WorkModel(_Model):
     async def _stream(self, request):
         if request.session_id != self.root_id:
             self.child_requests.append(request)
-            text = ("FIRST_WORK_FINAL " + "completed independent evidence " * 6000
-                    if len(self.child_requests) == 1 else "SECOND_WORK_FINISHED")
+            text = "FIRST_WORK_FINAL" if len(self.child_requests) == 1 else "SECOND_WORK_FINISHED"
             events = _text(text)
         else:
             index = self.root_turn_calls.get(request.turn_id, 0)
             self.root_turn_calls[request.turn_id] = index + 1
             if index == 0:
-                arguments = {"instruction": "FIRST_WORK" if self.agent_id is None else _INITIAL}
+                arguments = {"instruction": ("FIRST_WORK " + "independent evidence " * 1500)
+                    if self.agent_id is None else _INITIAL}
                 if self.agent_id is not None:
                     arguments.update(target={"kind": "AGENT", "agent_id": self.agent_id},
                         materials=[{"kind": "WORK", "work_id": self.first_work_id}])
@@ -419,9 +419,11 @@ def test_subagent_first_summary_uses_full_initial_group_and_current_work(
                 deadline_monotonic=monotonic() + 10)
             assert current["status"] == "running" and current["turn_id"] == active
             entries = _rows(child, "SELECT id,input_origin,entry_sequence FROM pulsara_v3.transcript_entries WHERE session_id=%s AND turn_id=%s ORDER BY entry_sequence", (child.session_id, active))
-            assert [r["input_origin"] for r in entries] == ["AGENT_PROFILE", "AGENT_INSTRUCTION", "AGENT_MATERIAL"]
+            assert [r["input_origin"] for r in entries] == ["AGENT_INSTRUCTION", "AGENT_MATERIAL"]
             initial = _rows(child, "SELECT initial_entry_id FROM pulsara_v3.turns WHERE session_id=%s AND id=%s", (child.session_id, active))[0]["initial_entry_id"]
-            assert initial == entries[1]["id"]
+            assert initial == entries[0]["id"]
+            queue = _rows(child, "SELECT status,consumed_entry_id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s", (child.session_id, current["work_id"]))[0]
+            assert queue == {"status": "CONSUMED", "consumed_entry_id": initial}
             assert _INITIAL not in _render(model.summary.contexts[0].messages)
             outcome = await core._send_agent_message(child.session_id, _AGENT,
                 SimpleNamespace(session_id=root.session_id, work_id=None))
@@ -434,6 +436,9 @@ def test_subagent_first_summary_uses_full_initial_group_and_current_work(
                 assert row["status"] != "stopped", row
                 return row["status"] == "completed"
             await _eventually(second_done)
+            revisions = _rows(child, "SELECT revision_ordinal,source_through_sequence FROM pulsara_v3.turn_context_binding_revisions WHERE session_id=%s AND turn_id=%s ORDER BY revision_ordinal", (child.session_id, active))
+            assert [revision["revision_ordinal"] for revision in revisions] == [0, 1]
+            assert revisions[1]["source_through_sequence"] < entries[0]["entry_sequence"]
             rendered = _render(model.child_requests[1].compiled_input.messages)
             assert rendered.index(_INITIAL) < rendered.index(_AGENT)
             assert "FIRST_WORK_FINAL" in rendered

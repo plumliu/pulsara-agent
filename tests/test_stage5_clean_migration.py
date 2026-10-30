@@ -216,6 +216,34 @@ def test_empty_install_second_migrate_and_binding_v2_checkout() -> None:
             assert repository.connection_provider is provider
 
 
+def test_clean_catalog_removes_profile_columns_and_origin() -> None:
+    with _migrated_database() as database:
+        with psycopg.connect(database.admin_dsn) as connection:
+            columns = {
+                row[0] for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema='pulsara_v3' AND table_name='prompt_queue_items'"
+                )
+            }
+            assert {"effective_profile", "profile_text"}.isdisjoint(columns)
+            constraints = connection.execute(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conrelid='pulsara_v3.transcript_entries'::regclass "
+                "AND contype='c' AND pg_get_constraintdef(oid) LIKE '%input_origin%'"
+            ).fetchall()
+            assert len(constraints) == 1
+            connection.execute(
+                sql.SQL("CREATE TEMP TABLE input_origin_probe (input_origin text {})").format(
+                    sql.SQL(constraints[0][0])
+                )
+            )
+            for origin in ("AGENT_INSTRUCTION", "AGENT_MATERIAL", "AGENT_MESSAGE"):
+                connection.execute("INSERT INTO input_origin_probe VALUES (%s)", (origin,))
+            with pytest.raises(psycopg.errors.CheckViolation):
+                with connection.transaction():
+                    connection.execute("INSERT INTO input_origin_probe VALUES ('AGENT_PROFILE')")
+
+
 def test_runtime_connection_accepts_far_future_deadline_without_guc_overflow() -> None:
     with _migrated_database() as database:
         factory = PostgresRuntimeConnectionFactory(database.runtime_dsn)

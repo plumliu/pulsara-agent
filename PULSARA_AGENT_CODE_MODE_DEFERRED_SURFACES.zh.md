@@ -12,14 +12,13 @@
 
 | 内容 | 本轮处理 | 后续讨论 |
 |---|---|---|
-| ROOT／Subagent SYSTEM 提示词 | 两份完整文本独立定义；ROOT 提供原生／JS 共用对象与按需 Skill 入口；Subagent 仅保留工作区、权限、能力使用、运行时判读与交付规则，角色职责由 profile 提供 | 其余 ROOT 文案、与工具及 Skill 的分工、token 与理解成本 |
-| 预设 profile 提示词 | 暂缓五种预设的正文修订；profile 作为独立 user message、正常压缩等运行时语义仍按主设计实现 | 各预设是否必要、职责与具体措辞 |
+| ROOT／Subagent SYSTEM 提示词 | 两份完整文本独立定义；ROOT 提供原生／JS 共用对象与按需 Skill 入口；Subagent 保留工作区、工具与 Skill 使用、运行时判读和交付规则，具体任务职责由 instruction 提供 | 其余 ROOT 文案、与工具及 Skill 的分工、token 与理解成本 |
 | 工具 schema 与说明文案的最终审阅 | 工具查询、命名与 Cell 身份统一规格所列 schema、紧凑分支签名和必要指引纳入实施；其他提示词优化仍暂缓 | 后续继续审阅其余信息量与使用负担 |
 | 三个 Code Mode 工具 schema | 实施 `exec_cell`、`query_cells`、`manage_cell` 的闭合分支与简洁说明 | 其余环境教学随实际使用优化 |
 | Bundled skill | `pulsara-code-mode` 统一提供普通工具组合与 Agent 编排教学；主文档展示交叉使用，两组参考目录按需读取 | 随实际使用优化表达与示例 |
 | 前端展示 | 暂不实施新的标签页、脚本页面、成员页面或依赖图，也不把暂定布局当作完成验收条件 | 信息架构、交互、布局、图形和详细状态展示 |
 
-暂缓文案不改变代码中的调用方、权限和工具可用性规则，也不取消 profile 输入位置等已经确定的业务语义。Skill 教学按下节实施；其余 ROOT 文案、profile 新文案和新的前端表面仍暂缓。
+暂缓文案不改变代码中的调用方、权限和工具可用性规则。Skill 教学按下节实施；其余 ROOT 文案和新的前端表面仍暂缓。
 
 ## 2. 三个 Code Mode 入口要求
 

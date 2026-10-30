@@ -101,18 +101,6 @@ Matcher subjects are fixed:
 | `PreCompact`, `PostCompact` | `manual` or `auto` |
 | `Stop` | matcher ignored; always selected |
 
-The existing worker-profile matcher values are exactly. They select an existing
-Pulsara lifecycle event; this conversion target does not define or install a
-worker, agent, preset, or child runtime:
-
-```text
-general_worker
-research_worker
-review_worker
-verification_worker
-synthesizer
-```
-
 Important tool aliases and public names are:
 
 | Pulsara tool | Matcher candidates | Public `tool_name` |

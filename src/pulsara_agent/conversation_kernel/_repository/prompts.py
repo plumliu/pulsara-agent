@@ -831,7 +831,6 @@ class _PromptOperations:
             pub=materialize_canonical_prompt(connection,publisher=self._canonical_content_publisher,
                 workspace_id=str(item['workspace_id']),prompt=prompt)
             result.append(PreparedQueuedInputEntry(derive_id('entry','queue-input',str(item['id']),key),pub.body,prompt,origin))
-        add(item['profile_text'],CanonicalInputOriginKind.AGENT_PROFILE,'profile')
         for i,text in enumerate(item['initial_context']):
             add(text,CanonicalInputOriginKind.AGENT_MATERIAL,'context:'+str(i))
         result.append(instruction)

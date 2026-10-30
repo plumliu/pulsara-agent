@@ -52,7 +52,6 @@ def event_matcher_subject(
     source: str | None = None,
     reason: str | None = None,
     trigger: str | None = None,
-    agent_type: str | None = None,
     tool: FrozenHookMatcherSubject | None = None,
 ) -> FrozenHookMatcherSubject:
     if event_type in {

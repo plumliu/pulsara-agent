@@ -39,16 +39,17 @@ from tests.test_round3_structured_model_input_compiler import (
 )
 
 
-def _group(turn, start=1, image=False):
+def _group(turn, start=1, image=False, *, include_context=True):
     contents = [
-        (LLMTextPart("profile"),),
+        (LLMTextPart("initial context"),),
         (LLMTextPart("instruction"),),
         (LLMTextPart("dependency A"),),
         (LLMTextPart("dependency C"),),
     ]
     if image:
+        # Synthetic canonical image; Work delegation currently supplies text.
         contents[-1] += (bound_test_image("image/png", b"pixels", 2, 2),)
-    return tuple(
+    items = tuple(
         FrozenProviderInputItem(
             Kind.USER,
             derive_id("entry", "agent-input-test", turn, str(i)),
@@ -61,7 +62,7 @@ def _group(turn, start=1, image=False):
             zip(
                 contents,
                 (
-                    Origin.AGENT_PROFILE,
+                    Origin.AGENT_MATERIAL,
                     Origin.AGENT_INSTRUCTION,
                     Origin.AGENT_MATERIAL,
                     Origin.AGENT_MATERIAL,
@@ -69,6 +70,12 @@ def _group(turn, start=1, image=False):
                 strict=True,
             )
         )
+    )
+    if include_context:
+        return items
+    return tuple(
+        replace(item, source_entry_sequence=item.source_entry_sequence - 1)
+        for item in items[1:]
     )
 
 
@@ -124,6 +131,14 @@ def test_started_group_distinguishes_instruction_suffix_end_and_predecessor():
     assert group.provider_input_through_sequence == 14
     assert group.ordered_items == items
     assert group.initial_revision_ordinal == 0
+    inherited = replace(
+        group,
+        initial_base_kind=ContextBindingBaseKind.SNAPSHOT,
+        initial_context_snapshot_id=derive_id("snapshot", "agent-input-test"),
+        initial_source_through_sequence=4,
+    )
+    assert inherited.initial_source_through_sequence == 4
+    assert inherited.predecessor_through_sequence == 10
     with pytest.raises(ValueError, match="started turn input group is invalid"):
         replace(group, initial_source_through_sequence=11)
     with pytest.raises(ValueError, match="started turn input group does not exact-join"):
@@ -142,9 +157,9 @@ def test_agent_group_has_independent_ordered_user_messages_and_instruction_compa
         if message.role is MessageRole.USER
         for part in message.content
         if isinstance(part, LLMTextPart)
-        and part.text in {"profile", "instruction", "dependency A", "dependency C"}
+        and part.text in {"initial context", "instruction", "dependency A", "dependency C"}
     ]
-    assert texts == ["profile", "instruction", "dependency A", "dependency C"]
+    assert texts == ["initial context", "instruction", "dependency A", "dependency C"]
     assert (
         sum(
             isinstance(part, LLMImagePart)
@@ -167,7 +182,7 @@ def test_agent_group_has_independent_ordered_user_messages_and_instruction_compa
     assert active.content.parts == (LLMTextPart("instruction"),)
 
 
-def test_reused_agent_appends_profile_and_materials_within_same_epoch():
+def test_reused_agent_appends_instruction_and_materials_within_same_epoch():
     compiler = StructuredModelInputCompiler()
     owner = new_test_provider_input_continuity_owner()
     first = _group(derive_id("turn", "agent-input-test", "first"))
@@ -176,20 +191,29 @@ def test_reused_agent_appends_profile_and_materials_within_same_epoch():
         owner=owner,
         request=_prepared_request(_snapshot_for(first, first[1]), _sources()),
     )
-    second = _group(derive_id("turn", "agent-input-test", "second"), 5)
-    second = (replace(second[0], content=(LLMTextPart("new profile"),)), *second[1:])
+    second = _group(
+        derive_id("turn", "agent-input-test", "second"), 5, include_context=False
+    )
     _, appended = _compile_and_install_append(
         compiler=compiler,
         owner=owner,
         request=_prepared_request(
-            _snapshot_for((*first, *second), second[1]), _sources()
+            _snapshot_for((*first, *second), second[0]), _sources()
         ),
     )
     assert appended.epoch_nonce == installed.epoch_nonce
     assert appended.system_prompt == installed.system_prompt
     assert appended.tools == installed.tools
     assert appended.messages[: len(installed.messages)] == installed.messages
-    assert appended.canonical_frontier.through_sequence == 8
+    suffix_text = [
+        part.text
+        for message in appended.messages[len(installed.messages):]
+        for part in message.content
+        if isinstance(part, LLMTextPart)
+        and part.text in {"instruction", "dependency A", "dependency C"}
+    ]
+    assert suffix_text == ["instruction", "dependency A", "dependency C"]
+    assert appended.canonical_frontier.through_sequence == 7
 
 
 def test_live_cell_changes_do_not_change_environment_facts(tmp_path):
@@ -298,11 +322,13 @@ def test_environment_fact_changes_are_appended_without_rebuilding_prefix():
         compiler=compiler, owner=owner,
         request=_prepared_request(snapshot, _sources(first_source)),
     )
-    next_items = _group(derive_id("turn", "environment-facts-prefix-test-next"), 5)
+    next_items = _group(
+        derive_id("turn", "environment-facts-prefix-test-next"), 5, include_context=False
+    )
     _, second = _compile_and_install_append(
         compiler=compiler, owner=owner,
         request=_prepared_request(
-            _snapshot_for((*items, *next_items), next_items[1]), _sources(next_source)
+            _snapshot_for((*items, *next_items), next_items[0]), _sources(next_source)
         ),
     )
     assert second.epoch_nonce == first.epoch_nonce

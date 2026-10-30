@@ -23,7 +23,6 @@ const readme = await tools.read_file({
 const phase1 = await tools.run_agent.batch({
   design: {
     name: "Design investigator",
-    profile: "research_worker",
     instruction: `Investigate the requested change and propose its simplest complete design.
 Read the relevant code. Starting README excerpt:
 ${readme.content}`,
@@ -31,13 +30,11 @@ ${readme.content}`,
   },
   integration: {
     name: "Integration investigator",
-    profile: "research_worker",
     instruction: "Inspect the requested change's callers, integration points, and meaningful validation. Explain the implementation boundaries.",
     context: { mode: "last_n", turns: 1 }
   },
   critic: {
     name: "Design critic",
-    profile: "review_worker",
     depends_on: ({ design, integration }) => [design.work, integration.work],
     instruction: ({ design, integration }) =>
       `Review the two prerequisite findings against the user's requested change.

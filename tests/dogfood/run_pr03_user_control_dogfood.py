@@ -26,7 +26,6 @@ from typing import Any, Callable
 from psycopg.rows import dict_row
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.subagents import SubagentTaskStatus
 from pulsara_agent.conversation_kernel.user_control import (
     FeedbackCanonicalStatus,
     FeedbackInclusionStatus,
@@ -617,189 +616,6 @@ async def _run_background_controls(session) -> dict[str, object]:
     }
 
 
-async def _task_rows(session) -> list[dict[str, Any]]:
-    return await session._io.run(  # noqa: SLF001
-        session.repository.list_subagent_tasks,
-        session_id=session.session_id,
-        maximum_items=50,
-        deadline_monotonic=monotonic() + 30,
-    )
-
-
-async def _run_task_controls(session, workspace: Path) -> dict[str, object]:
-    release = workspace / "pr03-subagent-release"
-    hold = f"while [ ! -f {shlex.quote(str(release))} ]; do sleep 0.1; done"
-    arguments = {
-        "tasks": [
-            {
-                "task_key": "slow",
-                "label": "Slow worker",
-                "profile": "general_worker",
-                "task": (
-                    f"Call terminal once with command {hold!r}, yield_time_ms "
-                    "30000, then call report_agent_result alone with summary SLOW_DONE."
-                ),
-            },
-            {
-                "task_key": "waiting",
-                "label": "Waiting worker",
-                "profile": "general_worker",
-                "depends_on": ["slow"],
-                "task": "Call report_agent_result alone with summary WAITING_DONE.",
-            },
-            {
-                "task_key": "unrelated",
-                "label": "Unrelated worker",
-                "profile": "general_worker",
-                "task": (
-                    "Call report_agent_result alone with summary UNRELATED_OK."
-                ),
-            },
-        ]
-    }
-    prompt = (
-        "Call create_agent_tasks exactly once with this exact JSON argument, then "
-        "return immediately without query_agents or wait_agent: "
-        + json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
-    )
-    root_result = await session.run_turn(
-        PromptContent.text(prompt),
-        command_id='command:npud5dax6c2el76l53spuogcjm',
-        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-    )
-
-    async def read_three():
-        return await _task_rows(session)
-
-    rows = await _wait_until(
-        "three-task group",
-        read_three,
-        lambda values: {row.get("task_key") for row in values}
-        >= {"slow", "waiting", "unrelated"},
-        timeout_seconds=120,
-    )
-    by_key = {str(row["task_key"]): row for row in rows if row.get("task_key")}
-    cancel_results = []
-    for key in ("waiting", "slow"):
-        task_id = str(by_key[key]["id"])
-        request = _control_request(
-            session,
-            operation=UserControlOperation.CANCEL_SUBAGENT_TASK,
-            target_kind=UserControlTargetKind.SUBAGENT_TASK,
-            target_id=task_id,
-            suffix=f"task-{key}",
-        )
-        accepted = await session.request_cancel_subagent(
-            command_id=request.command_id,
-            expected_session_id=request.session_id,
-            expected_host_session_id=request.host_session_id,
-            task_id=task_id,
-         admission_deadline_ms=session.control_admission_deadline_ms())
-        if accepted.status == "PENDING":
-            outcome = await _wait_control(session, request, feedback=False)
-        else:
-            outcome = accepted
-        cancel_results.append(_control_fact(outcome))
-    release.touch()
-
-    async def read_terminal_tasks():
-        return await _task_rows(session)
-
-    final_group = await _wait_until(
-        "task group terminal settlement",
-        read_terminal_tasks,
-        lambda values: all(
-            SubagentTaskStatus(str(row["status"])).terminal
-            for row in values
-            if row.get("task_key") in {"slow", "waiting", "unrelated"}
-        ),
-        timeout_seconds=180,
-    )
-    final_by_key = {
-        str(row["task_key"]): row
-        for row in final_group
-        if row.get("task_key") in {"slow", "waiting", "unrelated"}
-    }
-    if final_by_key["unrelated"]["status"] != "COMPLETED":
-        raise RuntimeError("unrelated task did not continue after sibling cancellation")
-
-    single_result = await session.run_turn(
-        PromptContent.text("Call spawn_agent exactly once with task_name single_worker and objective "
-        "'Call report_agent_result alone with summary SINGLE_OK'. Return immediately."),
-        command_id='command:jpytdnfk5tloh7p2jin4oy6soq',
-        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-    )
-
-    async def read_single():
-        return await _task_rows(session)
-
-    single_rows = await _wait_until(
-        "single spawn completion",
-        read_single,
-        lambda values: any(
-            row.get("task_key") == "single_worker"
-            and row.get("status") == "COMPLETED"
-            for row in values
-        ),
-        timeout_seconds=180,
-    )
-    single = next(row for row in single_rows if row.get("task_key") == "single_worker")
-
-    completion_command = "command:pr03:accept-completion"
-    completion = await session.accept_subagent_completion(
-        command_id=completion_command,
-        target_turn_id=None,
-        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-        task_id=str(final_by_key["unrelated"]["id"]),
-        actor_id="pr03-dogfood-controller",
-    )
-    if completion.status != "SUCCEEDED":
-        raise RuntimeError("completed task result was not accepted into a new ROOT")
-    await _wait_until(
-        "completion continuation ROOT",
-        lambda: asyncio.sleep(0, result=session.active_root_turn_id()),
-        lambda value: value is None,
-        timeout_seconds=180,
-    )
-
-    groups = await session._io.run(  # noqa: SLF001
-        session.repository.list_subagent_task_groups,
-        session_id=session.session_id,
-        after_first_accepted_at=None,
-        after_batch_id=None,
-        maximum_items=50,
-        deadline_monotonic=monotonic() + 30,
-    )
-    activities = await session._io.run(  # noqa: SLF001
-        session.repository.list_subagent_task_activities,
-        session_id=session.session_id,
-        task_id=str(final_by_key["unrelated"]["id"]),
-        after_entry_sequence=0,
-        maximum_items=50,
-        deadline_monotonic=monotonic() + 30,
-    )
-    return {
-        "group_root_reply": root_result.final_text,
-        "single_root_reply": single_result.final_text,
-        "cancellations": cancel_results,
-        "group_tasks": [dict(row) for row in final_by_key.values()],
-        "single_task": dict(single),
-        "completion_command": {
-            "command_id": completion_command,
-            "status": completion.status,
-            "public_code": completion.public_code,
-            "target_id": completion.target_id,
-        },
-        "task_groups": [dict(row) for row in groups],
-        "unrelated_task_activities": {
-            "entries": [dict(row) for row in activities[0]],
-            "blocks": [dict(row) for row in activities[1]],
-            "tool_results": [dict(row) for row in activities[2]],
-            "has_more": activities[3],
-        },
-    }
-
-
 async def _run(connection_id: str) -> dict[str, object]:
     saved = LocalSettingsStore().read()
     connection = _saved_connection(saved, connection_id)
@@ -868,7 +684,6 @@ async def _run(connection_id: str) -> dict[str, object]:
                 session._runner._provider_input_installed_observer = observe_input  # noqa: SLF001
                 stop_race = await _run_stop_race(session)
                 background = await _run_background_controls(session)
-                tasks = await _run_task_controls(session, workspace)
                 canonical = await asyncio.to_thread(
                     _rows,
                     session,
@@ -902,7 +717,6 @@ async def _run(connection_id: str) -> dict[str, object]:
                     "clean_v0_ephemeral_database": True,
                     "stop_race": stop_race,
                     "background_controls": background,
-                    "task_controls": tasks,
                     "canonical_feedback": canonical,
                     "provider_input_installs": installed_inputs,
                     "provider_calls": provider_calls,

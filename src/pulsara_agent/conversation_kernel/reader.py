@@ -975,7 +975,6 @@ class CanonicalProviderInputReader:
                         CanonicalInputOriginKind.HUMAN_MESSAGE,
                         CanonicalInputOriginKind.HUMAN_STEER,
                         CanonicalInputOriginKind.AGENT_INSTRUCTION,
-                        CanonicalInputOriginKind.AGENT_PROFILE,
                         CanonicalInputOriginKind.AGENT_MATERIAL,
                         CanonicalInputOriginKind.AGENT_MESSAGE,
                         CanonicalInputOriginKind.SCHEDULED_TASK,

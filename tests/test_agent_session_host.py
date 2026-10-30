@@ -9,7 +9,7 @@ import pytest
 from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id
-from pulsara_agent.llm.input import PromptContent, text_part_values
+from pulsara_agent.llm.input import LLMImagePart, PromptContent, text_part_values
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_round4_plan_host import _DetachedDraftModel, _open_test_session, _tool_call, _text
@@ -120,6 +120,10 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
             await eventually(second_completed)
             first, second = (r.compiled_input for r in model.child_requests)
             assert 'pulsara-viz' not in first.system_prompt
+            works = await root._io.run(root.repository.list_agent_works,
+                root_session_id=root.session_id, agent_id=model.agent_id,
+                limit=10, deadline_monotonic=monotonic()+10)
+            assert not any('profile' in work for work in works)
             if not unload_between:
                 assert first.system_prompt == second.system_prompt
                 assert first.tools == second.tools
@@ -131,6 +135,11 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
             assert rendered.index('CHILD_FIRST') < rendered.index('CHILD_FIRST_FINAL') < rendered.index('CHILD_SECOND')
             with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                     row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                child_inputs = connection.execute("""SELECT input_origin, entry_sequence
+                    FROM pulsara_v3.transcript_entries WHERE session_id=%s
+                    AND entry_kind='USER_MESSAGE' ORDER BY entry_sequence""", (model.agent_id,)).fetchall()
+                assert [entry['input_origin'] for entry in child_inputs] == ['AGENT_INSTRUCTION', 'AGENT_INSTRUCTION']
+                assert child_inputs[0]['entry_sequence'] == 1
                 rows = connection.execute("SELECT input_origin,inline_content FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence", (root.session_id,)).fetchall()
                 assert any(r['input_origin'] == 'AGENT_MATERIAL' and b'CHILD_FIRST_FINAL' in bytes(r['inline_content'] or b'') for r in rows), ([(r['input_origin'], bytes(r['inline_content'] or b'')[:300]) for r in rows], root._agent_runtime._completion_notifications, connection.execute('SELECT id,input_origin,status,target_turn_id,source_work_id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s', (root.session_id,)).fetchall())
             await core.close_session(root.host_session_id)
@@ -138,6 +147,95 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
             assert not core._sessions
         finally:
             model.first_child_release.set()
+            await core.shutdown()
+    asyncio.run(scenario())
+
+
+def test_agent_image_path_stays_text_until_real_view_image_tool(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
+    """Delegated context and instructions are text; viewing is an explicit tool call."""
+    import pulsara_agent.conversation_kernel.host as kernel_host
+    from PIL import Image
+    from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
+    from pulsara_agent.conversation_kernel.host import KernelHostCore
+    from pulsara_agent.workspace_identity import HostWorkspaceInput
+    from tests.support.model_config import test_model_binding, test_model_runtime
+
+    class ImageModel(_DetachedDraftModel):
+        def __init__(self, runtime):
+            super().__init__()
+            self._preparer = DirectKernelModelPort(model_runtime=runtime)
+            self.root_id = None
+            self.root_calls = 0
+            self.child_requests = []
+
+        async def stream(self, request):
+            if request.session_id == self.root_id:
+                self.root_calls += 1
+                events = (_tool_call('run_agent', random_id('call'), {
+                    'instruction': 'Inspect image.png with view_image.',
+                    'context': {'mode': 'last_n', 'turns': 1},
+                }) if self.root_calls == 1 else _text('ROOT_DONE'))
+            else:
+                self.child_requests.append(request)
+                events = (_tool_call('view_image', random_id('call'), {
+                    'target': {'kind': 'PATH', 'path': 'image.png'},
+                }) if len(self.child_requests) == 1 else _text('IMAGE_VIEWED'))
+            for event in events:
+                yield event
+
+    async def scenario():
+        monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
+        Image.new('RGB', (7, 5), (10, 20, 30)).save(tmp_path / 'image.png')
+        runtime = test_model_runtime(
+            model_id='test-pro', wire_api='openai_chat_completions',
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn,
+            input_modalities=('text', 'image'),
+        )
+        model = ImageModel(runtime)
+        monkeypatch.setattr(kernel_host, 'DirectKernelModelPort', lambda **_: model)
+        monkeypatch.setattr(kernel_host.LocalMcpManagementService, 'load_configs', lambda *_args, **_kwargs: ())
+        core = KernelHostCore.production(model_runtime=runtime)
+        root = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=tmp_path))
+        await root.update_model_call_binding(test_model_binding(runtime))
+        model.root_id = root.session_id
+        try:
+            await root.run_turn(PromptContent.text('Please examine image.png.'),
+                command_id=random_id('command'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+
+            async def child_completed():
+                ids = await root._io.run(root.repository.list_root_agent_session_ids,
+                    root_session_id=root.session_id, deadline_monotonic=monotonic()+10)
+                if not ids:
+                    return False
+                works = await root._io.run(root.repository.list_agent_works,
+                    root_session_id=root.session_id, agent_id=ids[0], limit=10,
+                    deadline_monotonic=monotonic()+10)
+                return works and works[0]['status'] == 'completed'
+
+            await eventually(child_completed)
+            assert len(model.child_requests) == 2
+            before, after = (request.compiled_input for request in model.child_requests)
+            assert not any(isinstance(part, LLMImagePart) for message in before.messages for part in message.content)
+            rendered = '\n'.join(text for message in before.messages for text in text_part_values(message.content))
+            assert 'Please examine image.png.' in rendered
+            assert 'Inspect image.png with view_image.' in rendered
+            with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                    row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                initial = connection.execute("""SELECT id, input_origin FROM pulsara_v3.transcript_entries
+                    WHERE session_id=%s AND turn_id=%s AND entry_kind='USER_MESSAGE' ORDER BY entry_sequence""",
+                    (model.child_requests[0].session_id, model.child_requests[0].turn_id)).fetchall()
+                assert [entry['input_origin'] for entry in initial] == ['AGENT_MATERIAL', 'AGENT_INSTRUCTION']
+                references = connection.execute("""SELECT count(*) FROM pulsara_v3.canonical_image_refs
+                    WHERE session_id=%s AND transcript_entry_id=ANY(%s)""",
+                    (model.child_requests[0].session_id, [entry['id'] for entry in initial])).fetchone()
+                assert references['count'] == 0
+            assert any(isinstance(part, LLMImagePart) for message in after.messages for part in message.content)
+            assert after.system_prompt == before.system_prompt
+            assert after.tools == before.tools
+            assert after.messages[:len(before.messages)] == before.messages
+        finally:
             await core.shutdown()
     asyncio.run(scenario())
 

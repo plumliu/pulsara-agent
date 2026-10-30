@@ -875,7 +875,6 @@ def provider_input_item_canonical_expanded_bytes(
             CanonicalInputOriginKind.HUMAN_MESSAGE,
             CanonicalInputOriginKind.HUMAN_STEER,
             CanonicalInputOriginKind.AGENT_INSTRUCTION,
-            CanonicalInputOriginKind.AGENT_PROFILE,
             CanonicalInputOriginKind.AGENT_MATERIAL,
             CanonicalInputOriginKind.AGENT_MESSAGE,
             CanonicalInputOriginKind.SCHEDULED_TASK,

@@ -53,20 +53,27 @@ def assert_shape(name, arguments, valid):
         ).is_valid(arguments)
 
 
-@pytest.mark.parametrize("field", ["context", "profile", "target", "name"])
+@pytest.mark.parametrize("field", ["context", "target", "name"])
 def test_run_agent_omitted_creation_options_and_explicit_null_have_distinct_meaning(
     field,
 ):
     omitted = prepared_request({"instruction": "Inspect"})
-    assert (
-        omitted.create_agent
-        and omitted.context_mode == "none"
-        and omitted.profile is None
-    )
+    assert omitted.create_agent and omitted.context_mode == "none"
     with pytest.raises(ValueError):
         validate_collaboration_parameters(
             "run_agent", {"instruction": "Inspect", field: None}
         )
+
+
+@pytest.mark.parametrize("value", ["research_worker", None])
+def test_run_agent_removed_profile_is_rejected_by_schema_and_runtime(value):
+    arguments = {"instruction": "Inspect", "profile": value}
+    assert_shape("run_agent", arguments, False)
+    assert not Draft202012Validator(lower_openai_function_parameters(schema("run_agent"))).is_valid(arguments)
+    with pytest.raises(ValueError, match="unexpected or missing parameter"):
+        validate_collaboration_parameters("run_agent", arguments)
+    with pytest.raises(ValueError, match="unexpected or missing parameter"):
+        prepared_request(arguments)
 
 
 def test_null_effort_is_an_exact_choice_not_an_omitted_selection():

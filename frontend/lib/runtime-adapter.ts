@@ -5024,17 +5024,6 @@ function projectInteraction(
   return undefined;
 }
 
-function profileLabel(profile?: string): string {
-  const labels: Record<string, string> = {
-    general_worker: '通用协作',
-    research_worker: '研究',
-    review_worker: '审阅',
-    verification_worker: '验证',
-    synthesizer: '整合',
-  };
-  return labels[profile ?? ''] ?? '任务';
-}
-
 function orderedRootTurnIdsFromEntries(entries: ProtocolEntry[]): string[] {
   const seen = new Set<string>();
   const ordered: string[] = [];

@@ -21,9 +21,6 @@ does not start work by itself or reset the agent's conversation.
 - Pass a prior `agent` target to give that same agent another Work. Its conversation
   continues, and assignments run in queue order. `name` and `context` are creation
   options, so omit them when reusing an agent.
-- Optional `profile` selects `general_worker`, `research_worker`, `review_worker`,
-  `verification_worker`, or `synthesizer`. A new agent defaults to `general_worker`;
-  reuse inherits its latest accepted profile unless explicitly changed.
 
 Use the complete targets supplied by the tools: AGENT has a `session:` ID and
 WORK has a `queue:` ID. `agent_id: "ROOT"` addresses ROOT for messages or waiting;
@@ -35,6 +32,10 @@ it is not a target for assigning new subagent work.
 | --- | --- |
 | `depends_on: [workTarget]` | When this assignment needs a prerequisite to succeed before it can begin. |
 | `materials: [workTarget]` | When an earlier outcome is useful background for this assignment. |
+
+Delegated instructions, initial context, prerequisite results, explicit materials, and
+agent messages are plain text. To share an image, supply its accessible path or
+reference in text so the agent can use `view_image`.
 
 The new instruction and each prerequisite result remain separate input messages.
 ROOT does not need to copy finals into an instruction just to pass them along.

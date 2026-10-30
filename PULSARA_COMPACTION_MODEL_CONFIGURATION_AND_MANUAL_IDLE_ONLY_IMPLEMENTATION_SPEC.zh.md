@@ -130,7 +130,7 @@ turn 表达请求已经开始执行，不表达首次 provider 输入已经准�
 
 请求成功开始后，即使还在首次调用前压缩，也接受针对它的补充并允许停止。当前 Work W1 活动、W2 排队时，消息针对 W1，不改投 W2。接收方无活动目标但有等待 Work 时返回 `not_started`；无工作或空闲时返回 `inactive`。未加载且只有等待 Work 也按未开始处理；这些失败结果均不接纳正文、不自动加载或启动工作。idle 手动压缩不创建普通 turn，不单独成为 Agent 消息目标。
 
-原始 instruction 是 `initial_entry_id` 对应的开启 entry，但不必是该 turn 第一条 entry。Subagent profile、initial context、instruction、依赖结果／其他材料按现有顺序各自保存；每条后续补充也保持独立 entry。不能把这些内容拼成 instruction，也不能合并多个普通新请求。Agent 来源归因保持，不能因复用共同队列而获得人类 Plan 授权或人类专属控制副作用。
+原始 instruction 是 `initial_entry_id` 对应的开启 entry，但不必是该 turn 第一条 entry。新建 Subagent 的 initial context、instruction、依赖结果／其他材料按现有顺序各自保存；复用 Agent 沿其历史执行且不接纳新的 context；每条后续补充也保持独立 entry。不能把这些内容拼成 instruction，也不能合并多个普通新请求。Agent 来源归因保持，不能因复用共同队列而获得人类 Plan 授权或人类专属控制副作用。
 
 - UserPromptSubmit 等启动前 gate 不因重试重复运行；Hook 未许可时不创建活动 turn。Hook context 绑定原请求，不污染前驱摘要。
 - TODO activation 跟随真实启动且 exact-join 原始 instruction，失败／终态沿原 finalization 收束；不等到 provider open 再激活。
@@ -148,7 +148,7 @@ turn 表达请求已经开始执行，不表达首次 provider 输入已经准�
 | 当前 canonical safe head | 本次冻结读取的真实历史末端，包含已经落库的完整初始组；用于采用时精确核对 |
 | 待输入截面 | safe point 读取的目标 steer queue 前缀；这些内容尚未消费时不属于 transcript |
 
-不能用 instruction 的 sequence 减一作为前驱截止，否则它之前的 profile／initial context 会被误当成旧历史。也不能使用初始 revision 的 `source_through_sequence` 代替请求起点；继承 SNAPSHOT 时该值指旧摘要截止。边界优先来自启动确认的实际有序输入组，也可由新 turn 的 executed entries 最小 sequence 推导，不另存持久边界。
+不能用 instruction 的 sequence 减一作为前驱截止，否则它之前的新建 Agent initial context 会被误当成旧历史。也不能使用初始 revision 的 `source_through_sequence` 代替请求起点；继承 SNAPSHOT 时该值指旧摘要截止。边界优先来自启动确认的实际有序输入组，也可由新 turn 的 executed entries 最小 sequence 推导，不另存持久边界。
 
 **摘要 source 来自前驱历史，采用 target 始终是当前新 RUNNING turn。** 沿 active adoption 更新该 turn 的 snapshot／binding revision；采用的 safe head 包含当前完整输入组，摘要 source cut 则不超过前驱截止。不能继续对旧 terminal turn 执行 IDLE_BASE_ONLY 再期待新 turn 自动继承变化，也不能删除 canonical-head 检查来放过冲突。
 
@@ -323,7 +323,9 @@ Plan review continuation、自动 Plan successor 和 NewTurn terminal observatio
 | 多条新请求分别捕获不同配置 | 各自开启 entry、各自配置；首调用前压缩不使用旧 turn 或队列后项配置 |
 | ROOT／Subagent 首调用前压缩期间收到补充 | 当前目标真实 RUNNING；补充可入队；原始输入组在前、补充独立 entries 在后；无重复接纳 |
 | 首次摘要 transport 屏障挂起 | DB 中唯一 RUNNING、完整初始 entries、revision0 与 CONSUMED 已成立；query／Work／live target 一致；普通 provider open 为零 |
-| Subagent profile 在 instruction 前，材料／依赖结果在其后 | 摘要 cut 在整组之前；新 turn 采用后整组原文与图片保持；旧 terminal binding 不被当成采用目标 |
+| 新建 Subagent 的 initial context 在 instruction 前，材料／依赖结果在其后 | 真实启动组顺序与组首 cut 准确，完整纯文本组保持；新建 Agent 没有本 Agent 的前驱 Work 历史 |
+| 复用 Subagent 的前驱历史与 instruction 后材料 | 摘要 source 排除当前完整组；当前新 turn 采用摘要后 instruction 与材料原文保持，旧 terminal binding 不被当成采用目标 |
+| 合成算法输入同时含前驱历史与 instruction 前的 context | 验证组首 cut 和完整 suffix；不作为可达的真实委派场景 |
 | 尚未取得执行位置的 Work | 无当前目标时消息未接纳；等待依赖不启动空 turn；W1 活动而 W2 排队时消息只到 W1 |
 | 压缩期间普通发送及队列转 steer | 两者均能合法接纳；转换原子、原 NEW_TURN 不再执行；无新增直接 steer UI |
 | R1 压缩、Q1/Q2 排队、将 Q2 转 steer | Q2 在 R1 safe point 处理，Q1 等 R1 结束；顺序、配置和 entry 身份正确 |

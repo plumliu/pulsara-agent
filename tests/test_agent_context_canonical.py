@@ -28,7 +28,7 @@ pytestmark = pytest.mark.postgres
 
 def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
     repository, root, admit = source
-    first = request(profile="research_worker", instruction="First investigation.")
+    first = request(instruction="First investigation.")
     admit(first)
     lease, candidate = start(repository, first)
     finish(repository, lease, candidate, "First final stays in this Agent history.")
@@ -36,7 +36,6 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
     second = request(
         agent_id=first.agent_id,
         create=False,
-        profile="review_worker",
         instruction="Continue critically.",
     )
     admit(second)
@@ -76,9 +75,7 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
     assert binding.context_snapshot_id == group.initial_context_snapshot_id
     assert binding.source_through_sequence == group.initial_source_through_sequence
     assert [item.input_origin for item in canonical.items if item.input_origin] == [
-        CanonicalInputOriginKind.AGENT_PROFILE,
         CanonicalInputOriginKind.AGENT_INSTRUCTION,
-        CanonicalInputOriginKind.AGENT_PROFILE,
         CanonicalInputOriginKind.AGENT_INSTRUCTION,
     ]
     texts = [
@@ -87,9 +84,8 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
         for part in item.content
         if isinstance(part, LLMTextPart)
     ]
-    assert texts[-3:] == [
+    assert texts[-2:] == [
         "First final stays in this Agent history.",
-        accepted.ordered_input_entries[0].canonical_prompt.content.parts[0].text,
         "Continue critically.",
     ]
     compiled = StructuredModelInputCompiler().compile(

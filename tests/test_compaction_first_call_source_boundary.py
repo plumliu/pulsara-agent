@@ -73,10 +73,11 @@ def _first_call_read(
     turn = derive_id("turn", "first-call-current")
     old_turn = derive_id("turn", "first-call-predecessor")
     image = bound_test_image("image/png", b"first-call-material", 2, 2)
+    # Controlled canonical fixture exercises a pre-instruction group with history.
     descriptions = (
         ("history", old_turn, CanonicalInputOriginKind.HUMAN_MESSAGE),
         ("old answer", old_turn, None),
-        ("profile before instruction", turn, CanonicalInputOriginKind.AGENT_PROFILE),
+        ("initial context before instruction", turn, CanonicalInputOriginKind.AGENT_MATERIAL),
         ("original instruction", turn, CanonicalInputOriginKind.AGENT_INSTRUCTION),
         (
             "dependency material after instruction",
@@ -253,7 +254,7 @@ def test_first_call_summary_ceiling_precedes_the_whole_initial_group() -> None:
     assert active.content is None
 
 
-def test_destination_summary_excludes_profile_instruction_and_dependency_material() -> (
+def test_destination_summary_excludes_context_instruction_and_dependency_material() -> (
     None
 ):
     read = _first_call_read()

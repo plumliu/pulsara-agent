@@ -20,10 +20,9 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
 from pulsara_agent.llm.model_connections import model_call_binding_from_dict
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
-from tests.test_agent_requests_persistence import start, finish, request, deadline, now
+from tests.test_agent_requests_persistence import start, finish, request, deadline, now, source as source
 from tests.test_agent_collaboration_api import RuntimeOwner
 
-pytest_plugins = ["tests.test_agent_requests_persistence"]
 pytestmark = pytest.mark.postgres
 
 

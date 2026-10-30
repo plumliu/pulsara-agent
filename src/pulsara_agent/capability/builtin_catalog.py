@@ -56,6 +56,10 @@ from pulsara_agent.code_mode.contracts import (
     manage_cell_parameters_schema,
     query_cells_parameters_schema,
 )
+from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+    query_agents_input_schema,
+    target_schema,
+)
 
 
 DEFAULT_ARTIFACT_READ_CHARS = 20_000
@@ -291,11 +295,6 @@ _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
     required=["source", "target", "relation_kind"],
 )
 
-from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
-    PROFILES, query_agents_input_schema, target_schema,
-)
-
-
 def _run_agent_schema() -> dict[str, Any]:
     works = {"type": "array", "maxItems": 16, "uniqueItems": True,
              "items": target_schema("WORK")}
@@ -303,7 +302,6 @@ def _run_agent_schema() -> dict[str, Any]:
         "instruction": {"type": "string", "minLength": 1, "maxLength": 65536},
         "target": target_schema("AGENT"),
         "name": {"type": "string", "minLength": 1, "maxLength": 256},
-        "profile": {"type": "string", "enum": list(PROFILES)},
         "context": {"oneOf": [
             object_schema(properties={"mode": {"const": "none"}}, required=["mode"]),
             object_schema(properties={"mode": {"const": "last_n"}, "turns": {"type": "integer", "minimum": 1, "maximum": 3}}, required=["mode", "turns"]),

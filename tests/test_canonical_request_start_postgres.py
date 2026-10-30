@@ -56,7 +56,7 @@ from tests.support.model_config import (
     test_model_runtime as model_runtime,
 )
 from tests.support.postgres import verified_postgres_provider
-from tests.test_agent_requests_persistence import request, source as source, start
+from tests.test_agent_requests_persistence import finish, request, source as source, start
 from tests.test_round4_plan_postgres import (
     _commit_plan_batch,
 )
@@ -235,9 +235,17 @@ def test_start_confirmation_survives_adoption_stop_and_later_requests(root):
     assert accept(repository, lease, runtime, intent) == started
 
 
-def test_queued_group_keeps_profile_context_instruction_and_material_identity(source):
+def test_queued_group_keeps_context_instruction_and_material_identity(source):
     repository, _root, admit = source
-    req = request(instruction="Exact instruction", initial_context=("First context", "Second context"))
+    dependency = request()
+    admit(dependency)
+    dependency_lease, dependency_candidate = start(repository, dependency)
+    finish(repository, dependency_lease, dependency_candidate, "Dependency result")
+    req = request(
+        instruction="Exact instruction",
+        initial_context=("First context", "Second context"),
+        depends_on=(dependency.work_id,),
+    )
     admit(req)
     lease, candidate = start(repository, req)
     result = repository.confirm_prepared_prompt_head_consumption(
@@ -247,15 +255,23 @@ def test_queued_group_keeps_profile_context_instruction_and_material_identity(so
     assert group.instruction_entry_id == candidate.exact_initial_entry_id
     assert group.predecessor_through_sequence == 0
     assert [item.input_origin for item in group.ordered_items] == [
-        CanonicalInputOriginKind.AGENT_PROFILE, CanonicalInputOriginKind.AGENT_MATERIAL,
-        CanonicalInputOriginKind.AGENT_MATERIAL, CanonicalInputOriginKind.AGENT_INSTRUCTION,
+        CanonicalInputOriginKind.AGENT_MATERIAL, CanonicalInputOriginKind.AGENT_MATERIAL,
+        CanonicalInputOriginKind.AGENT_INSTRUCTION, CanonicalInputOriginKind.AGENT_MATERIAL,
     ]
-    assert [item.content[0].text for item in group.ordered_items[1:]] == [
-        "First context", "Second context", "Exact instruction",
+    assert [item.content[0].text for item in group.ordered_items] == [
+        "First context", "Second context", "Exact instruction", "Dependency result",
     ]
-    assert group.ordered_items[-1].source_entry_id == candidate.exact_initial_entry_id
-    assert result.accepted.entry_sequence == 4
+    assert group.ordered_items[2].source_entry_id == candidate.exact_initial_entry_id
+    assert result.accepted.entry_sequence == 3
+    assert group.provider_input_through_sequence == 4
     assert group.initial_source_through_sequence == 0
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=deadline(),
+    ) as connection:
+        assert connection.execute(
+            "SELECT consumed_entry_id FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+            (req.work_id,),
+        ).fetchone()[0] == candidate.exact_initial_entry_id
     interrupt(repository, lease, candidate.exact_turn_id)
     assert repository.confirm_prepared_prompt_head_consumption(
         candidate=candidate, deadline_monotonic=deadline(),

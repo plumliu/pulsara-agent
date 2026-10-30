@@ -99,7 +99,6 @@ class CanonicalInputOriginKind(StrEnum):
     SCHEDULED_TASK = "SCHEDULED_TASK"
     HUMAN_STEER = "HUMAN_STEER"
     AGENT_INSTRUCTION = "AGENT_INSTRUCTION"
-    AGENT_PROFILE = "AGENT_PROFILE"
     AGENT_MATERIAL = "AGENT_MATERIAL"
     AGENT_MESSAGE = "AGENT_MESSAGE"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
@@ -904,7 +903,6 @@ def validate_compaction_request_shape(
             CanonicalInputOriginKind.SCHEDULED_TASK,
             CanonicalInputOriginKind.HUMAN_STEER,
             CanonicalInputOriginKind.AGENT_INSTRUCTION,
-            CanonicalInputOriginKind.AGENT_PROFILE,
             CanonicalInputOriginKind.AGENT_MATERIAL,
             CanonicalInputOriginKind.AGENT_MESSAGE,
             CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
@@ -920,7 +918,6 @@ def validate_compaction_request_shape(
     if active and input_origin in {
         CanonicalInputOriginKind.HUMAN_STEER,
         CanonicalInputOriginKind.USER_CONTROL_FEEDBACK,
-        CanonicalInputOriginKind.AGENT_PROFILE,
         CanonicalInputOriginKind.AGENT_MATERIAL,
         CanonicalInputOriginKind.AGENT_MESSAGE,
     }:
@@ -932,7 +929,6 @@ def validate_compaction_request_shape(
             CanonicalInputOriginKind.HUMAN_MESSAGE,
             CanonicalInputOriginKind.HUMAN_STEER,
             CanonicalInputOriginKind.AGENT_INSTRUCTION,
-            CanonicalInputOriginKind.AGENT_PROFILE,
             CanonicalInputOriginKind.AGENT_MATERIAL,
             CanonicalInputOriginKind.AGENT_MESSAGE,
         }
@@ -1143,7 +1139,6 @@ class FrozenProviderInputItem:
                 CanonicalInputOriginKind.HUMAN_MESSAGE,
                 CanonicalInputOriginKind.HUMAN_STEER,
                 CanonicalInputOriginKind.AGENT_INSTRUCTION,
-                CanonicalInputOriginKind.AGENT_PROFILE,
                 CanonicalInputOriginKind.AGENT_MATERIAL,
                 CanonicalInputOriginKind.AGENT_MESSAGE,
             }

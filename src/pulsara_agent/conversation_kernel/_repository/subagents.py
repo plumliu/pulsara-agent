@@ -48,15 +48,6 @@ _RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, w.workspace_k
 
 
 class _SubagentOperations:
-    @staticmethod
-    def _agent_profile_text(profile):
-        # The existing profile prose is shared verbatim; its editorial revision is deferred.
-        from pulsara_agent.conversation_kernel.context_sources import (
-            subagent_profile_text,
-        )
-
-        return subagent_profile_text(profile)
-
     def _agent_work_in_connection(self, connection, *, root_session_id, work_id):
         row = connection.execute(
             _WORK_SELECT + " AND q.id=%s", (root_session_id, work_id)
@@ -79,7 +70,6 @@ class _SubagentOperations:
             "terminal_reason": execution.terminal_reason,
             "turn_id": row["turn_id"],
             "accepted_at": row["accepted_at"],
-            "profile": row["effective_profile"],
             "waiting_on": row["waiting_on"],
             "cursor": str(row["id"]),
             "request_execution": execution,
@@ -228,13 +218,6 @@ class _SubagentOperations:
                     raise ConversationKernelConflict(
                         "Agent does not belong to this ROOT or is unavailable"
                     )
-                previous = connection.execute(
-                    "SELECT effective_profile FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_INSTRUCTION' ORDER BY queue_sequence DESC LIMIT 1",
-                    (req.agent_id,),
-                ).fetchone()
-                profile = req.profile or (
-                    previous["effective_profile"] if previous else "general_worker"
-                )
                 waiting, materials = [], []
                 for ordinal, work_id in enumerate(req.depends_on):
                     if work_id in batch_ids:
@@ -300,14 +283,14 @@ class _SubagentOperations:
                 connection.execute(
                     """INSERT INTO pulsara_v3.prompt_queue_items
                     (id,session_id,workspace_id,queue_sequence,delivery_mode,input_origin,
-                     source_session_id,source_turn_id,source_tool_attempt_id,effective_profile,profile_text,
+                     source_session_id,source_turn_id,source_tool_attempt_id,
                      initial_context,input_materials,waiting_on,model_call_binding,status,
                      inline_content,blob_id,content_digest,content_size,content_media_type,content_codec,
                      permission_snapshot_id,requested_permission_mode,effective_permission_mode,permission_admission_source,
                      permission_overlay,permission_plan_context_ordinal,permission_plan_workflow_id,
                      permission_plan_revision_at_admission,permission_inherited_from_turn_id,permission_contract_id,
                      permission_contract_fingerprint,permission_snapshot_fingerprint)
-                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,%s,%s,%s,'PENDING',
+                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,%s,'PENDING',
                     %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         req.work_id,
@@ -317,8 +300,6 @@ class _SubagentOperations:
                         root_guard.session_id,
                         source_turn_id,
                         source_tool_attempt_id,
-                        profile,
-                        self._agent_profile_text(profile),
                         Jsonb(list(req.initial_context)),
                         Jsonb(materials),
                         Jsonb(waiting),
@@ -412,8 +393,6 @@ class _SubagentOperations:
                     or row["input_origin"] != "AGENT_INSTRUCTION"
                     or self._agent_prompt_text(connection, row) != req.instruction
                     or row["initial_context"] != list(req.initial_context)
-                    or req.profile is not None
-                    and row["effective_profile"] != req.profile
                     or req.create_agent
                     and row["title"] != req.name
                     or row["model_call_binding"]

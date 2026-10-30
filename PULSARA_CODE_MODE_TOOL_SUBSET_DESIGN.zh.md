@@ -2,7 +2,7 @@
 
 日期：2026-10-30。状态：本轮运行时已实施；实际验收与边界见 §10，暂缓表面仍按配套范围执行。
 
-提示词、profile 文案与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+提示词与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 JS 接入、工具范围、结果、资源与生命周期。协作对象、工具业务语义、Subagent 能力范围与恢复方式以 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 为准；本文定义它们的 JS 接入，不另设业务合同。两篇共同构成实施基线，工具业务实现只有一套。
 

@@ -372,8 +372,8 @@ def test_real_host_stop_settles_effect_and_large_output_pages_keep_artifact(mode
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('change_identity', [False, True])
-def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(change_identity, tmp_path):
+@pytest.mark.parametrize('rewrite', ['valid', 'identity', 'profile', 'profile_null'])
+def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(rewrite, tmp_path):
     from types import SimpleNamespace
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor, CodeModeToolRequest, CodeModeCallFacts, _batch_reservations
@@ -397,8 +397,10 @@ def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(change_iden
         arguments = {'members':[{'key':key,'agent_id':peers[key]['agent']['agent_id'],
             'work_id':peers[key]['work']['work_id'],'parameters':spec} for key,spec in specs.items()]}
         replacement = {'instruction':'rewritten by hook'}
-        if change_identity:
+        if rewrite == 'identity':
             replacement['target'] = {'kind':'AGENT','agent_id':random_id('session')}
+        elif rewrite in ('profile', 'profile_null'):
+            replacement['profile'] = 'research_worker' if rewrite == 'profile' else None
         definition = _definition(tmp_path, HookEventType.PRE_TOOL_USE_EVENT, 'rewrite')
         response = json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','updatedInput':replacement}}).encode()
         executor = _ScriptedExecutor({'rewrite':(0,response,b'')})
@@ -428,8 +430,8 @@ def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(change_iden
             assert all(request.public_stdin['tool_use_id'] == call_id for request in executor.calls)
             assert all(request.public_stdin['input_origin'] == 'CODE_MODE_CALL' for request in executor.calls)
             assert causal.invocation_id == call_id
-            assert result.decision is (GateDecision.BLOCK if change_identity else GateDecision.PROCEED)
-            if not change_identity:
+            assert result.decision is (GateDecision.PROCEED if rewrite == 'valid' else GateDecision.BLOCK)
+            if rewrite == 'valid':
                 assert all(member['parameters'] == replacement for member in result.updated_input['members'])
         finally:
             current_tool_invocation.reset(source_token)
@@ -507,8 +509,8 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize('reject_identity', [False, True])
-def test_batch_hooks_reject_changed_identity_and_keep_accepted_work_after_post_failure(reject_identity, tmp_path, monkeypatch, stage2_migrated_postgres_database):
+@pytest.mark.parametrize('rewrite', ['valid', 'identity', 'profile', 'profile_null'])
+def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_failure(rewrite, tmp_path, monkeypatch, stage2_migrated_postgres_database):
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
@@ -532,7 +534,7 @@ def test_batch_hooks_reject_changed_identity_and_keep_accepted_work_after_post_f
         member = values.get('_member_key')
         if member is not None:
             member_posts.append(member)
-        if member == 'first' and not reject_identity:
+        if member == 'first' and rewrite == 'valid':
             raise RuntimeError('injected member post failure after actual batch admission')
         return await original_post(owner, **values)
     def observe_diagnostic(owner, offer):
@@ -541,9 +543,13 @@ def test_batch_hooks_reject_changed_identity_and_keep_accepted_work_after_post_f
         original_offer(owner, offer)
     async def change_pre_identity(owner, **values):
         outcome, causal = await original_pre(owner, **values)
-        if reject_identity and values.get('_member_key') == 'first':
-            return replace(outcome, updated_input={'instruction':'changed by hook',
-                'target':{'kind':'AGENT','agent_id':random_id('session')}}), causal
+        if rewrite != 'valid' and values.get('_member_key') == 'first':
+            updated = {'instruction':'changed by hook'}
+            if rewrite == 'identity':
+                updated['target'] = {'kind':'AGENT','agent_id':random_id('session')}
+            else:
+                updated['profile'] = 'research_worker' if rewrite == 'profile' else None
+            return replace(outcome, updated_input=updated), causal
         return outcome, causal
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_pre_tool',change_pre_identity)
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_post_tool',fail_one_member)
@@ -586,7 +592,7 @@ def test_batch_hooks_reject_changed_identity_and_keep_accepted_work_after_post_f
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,deadline_monotonic=monotonic()+10) as connection:
                 rows = connection.execute("SELECT r.result_state,r.attempt_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent.batch'",(root_session_id,)).fetchall()
                 assert len(rows) == 1
-                if reject_identity:
+                if rewrite != 'valid':
                     assert batch == {'rejected':'PERMISSION_DENIED'}
                     assert rows[0] == ('PERMISSION_DENIED',None)
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.sessions WHERE root_session_id=%s',(root_session_id,)).fetchone()[0] == 0

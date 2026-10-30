@@ -1028,8 +1028,10 @@ def test_target_projection_image_history_excludes_the_complete_first_call_group(
             input_origin=origin,
         )
 
-    profile = item(
-        "profile", 2, CanonicalInputOriginKind.AGENT_PROFILE, _image(b"profile")
+    # Canonical-level image fixtures exercise projection; Work delegation is text-only.
+    initial_material = item(
+        "initial-material", 2, CanonicalInputOriginKind.AGENT_MATERIAL,
+        _image(b"initial-material"),
     )
     instruction = item(
         "instruction", 3, CanonicalInputOriginKind.AGENT_INSTRUCTION,
@@ -1038,7 +1040,7 @@ def test_target_projection_image_history_excludes_the_complete_first_call_group(
     material = item(
         "material", 4, CanonicalInputOriginKind.AGENT_MATERIAL, _image(b"material")
     )
-    group = (profile, instruction, material)
+    group = (initial_material, instruction, material)
 
     def read(items):
         return SimpleNamespace(

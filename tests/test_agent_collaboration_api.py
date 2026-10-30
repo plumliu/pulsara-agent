@@ -378,6 +378,89 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["b"]["work"], peers["b"]["work"])
         self.assertEqual(self.runtime.wakes, 1)
 
+    async def test_removed_profile_is_rejected_before_single_or_batch_admission(self):
+        peers = prepare_batch_refs({"a": {}, "b": {}})
+        members = [
+            dict(key=key, agent_id=ref["agent"]["agent_id"],
+                 work_id=ref["work"]["work_id"], parameters={"instruction": key})
+            for key, ref in peers.items()
+        ]
+        for value in ("research_worker", None):
+            with self.subTest(value=value, operation="single"):
+                with self.assertRaisesRegex(ValueError, "unexpected or missing parameter"):
+                    await self.call("run_agent", {"instruction": "x", "profile": value})
+            with self.subTest(value=value, operation="batch"):
+                members[1]["parameters"]["profile"] = value
+                with self.assertRaisesRegex(ValueError, "unexpected or missing parameter"):
+                    await self.call("run_agent.batch", {"members": members})
+        self.assertEqual(self.repo.admissions, [])
+        self.assertEqual(self.repo.rows, {})
+        self.assertEqual(self.runtime.wakes, 0)
+
+    async def test_public_agent_work_wait_and_stop_never_expose_profile(self):
+        self.assertNotIn("profile", self.api._public_agent({
+            "agent_id": random_id("session"), "profile": "research_worker"
+        }))
+        agent, work = self.add_work(status="completed", final="done")
+        self.repo.rows[work]["profile"] = "research_worker"
+        self.assertNotIn("profile", await self.call("query_agents", {"target": work_target(work)}))
+        listed = await self.call("query_agents", {"target": agent_target(agent)})
+        self.assertNotIn("profile", listed["works"][0])
+        agents = await self.call("query_agents", {})
+        self.assertNotIn("profile", agents["agents"][0])
+        waited = await self.call("wait_agent.works", {"targets": [work_target(work)]})
+        self.assertNotIn("profile", waited["works"][0])
+        stopped = await self.call("stop_agent", {"target": work_target(work)})
+        self.assertNotIn("profile", stopped["works"][0])
+
+    async def test_new_and_reused_agent_work_has_no_profile(self):
+        first = await self.call("run_agent", {"instruction": "first"})
+        second = await self.call("run_agent", {
+            "target": first["agent"], "instruction": "continue"
+        })
+        self.assertEqual(first["agent"], second["agent"])
+        self.assertNotIn("profile", first)
+        self.assertNotIn("profile", second)
+        listed = await self.call("query_agents", {"target": first["agent"]})
+        self.assertEqual(len(listed["works"]), 2)
+        self.assertTrue(all("profile" not in work for work in listed["works"]))
+
+    async def test_code_mode_single_and_batch_reject_removed_profile_before_admission(self):
+        from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
+        from tests.test_code_mode_runtime import _finish, _start
+
+        host = CodeModeHost()
+
+        async def invoke(call):
+            try:
+                value = await self.call(call.tool_name, call.arguments)
+            except ValueError as error:
+                return CodeModeToolResult(state="FAILED", error_code="invalid_arguments", error_message=str(error))
+            return CodeModeToolResult(value=value)
+
+        try:
+            page, output = await _finish(host, await _start(host, '''
+                for (const profile of ["research_worker", null]) {
+                  try { await tools.run_agent({instruction:"single", profile}); }
+                  catch (error) { console.log({operation:"single", code:error.code, message:error.message}); }
+                  try { await tools.run_agent.batch({a:{instruction:"valid"},
+                    b:{instruction:"invalid", profile}}); }
+                  catch (error) { console.log({operation:"batch", code:error.code, message:error.message}); }
+                }
+            ''', invoke, {"run_agent": {}}))
+            self.assertEqual(page.state, "completed")
+            import json
+            self.assertEqual([json.loads(item["text"]) for item in output], [
+                {"operation": operation, "code": code, "message": "unexpected or missing parameter"}
+                for _ in range(2)
+                for operation, code in (("single", "invalid_arguments"), ("batch", "bridge_error"))
+            ])
+            self.assertEqual(self.repo.admissions, [])
+            self.assertEqual(self.repo.rows, {})
+            self.assertEqual(self.runtime.wakes, 0)
+        finally:
+            await host.aclose()
+
     async def test_unknown_admission_commit_is_confirmed_without_repeating_submission(
         self,
     ):
@@ -474,6 +557,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wait_binds_original_work_and_never_follows_next_request(self):
         agent, original = self.add_work()
+        self.repo.rows[original]["profile"] = "research_worker"
         waiter = asyncio.create_task(
             self.call("wait_agent", {"targets": [agent_target(agent)]})
         )
@@ -486,6 +570,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["state"], "settled")
         self.assertEqual(result["bindings"][0]["work"], work_target(original))
         self.assertEqual(result["works"][0]["final"], "original final")
+        self.assertNotIn("profile", result["works"][0])
         self.assertEqual(self.repo.rows[next_work]["status"], "running")
 
     async def test_message_wakes_agent_wait_without_copying_body_or_skipping_other_senders(

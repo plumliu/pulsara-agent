@@ -13,7 +13,6 @@ is to ask an agent to investigate and use its findings to inform the next step.
 ```js
 const investigation = await tools.run_agent({
   name: "Parser investigator",
-  profile: "research_worker",
   instruction: "Trace how the parser handles an empty input. Identify the relevant source and tests, and explain the observable behavior. Do not edit files."
 });
 console.log(investigation);
@@ -52,7 +51,6 @@ each teammate's role and target in the other's initial instruction.
 const team = await tools.run_agent.batch({
   backend: {
     name: "Backend investigator",
-    profile: "research_worker",
     instruction: ({ client }) =>
       `Inspect the backend response fields and error cases for the requested API change.
 The client investigator is ${JSON.stringify(client.agent)}.
@@ -62,7 +60,6 @@ Report the agreed fields and unresolved differences. Do not edit files.`,
   },
   client: {
     name: "Client investigator",
-    profile: "research_worker",
     instruction: ({ backend }) =>
       `Inspect the client expectations for the requested API change.
 The backend investigator is ${JSON.stringify(backend.agent)}.
@@ -96,13 +93,11 @@ submit both requests now and let their declared dependency determine startup.
 ```js
 const investigation = await tools.run_agent({
   name: "Change investigator",
-  profile: "research_worker",
   instruction: "Investigate the requested change. Read the relevant code and propose a complete implementation plan with affected interfaces and validation.",
   context: { mode: "last_n", turns: 1 }
 });
 const review = await tools.run_agent({
   name: "Plan reviewer",
-  profile: "review_worker",
   depends_on: [investigation.work],
   instruction: "Review the prerequisite plan against the user's request and the actual code. Identify concrete gaps and explain what is ready to implement.",
   context: { mode: "last_n", turns: 1 }
@@ -133,7 +128,6 @@ Native `run_agent` arguments:
 ```json
 {
   "name": "Parser investigator",
-  "profile": "research_worker",
   "instruction": "Investigate how the parser handles empty and whitespace-only input. Explain the relevant code and tests. Do not edit files."
 }
 ```
@@ -155,7 +149,6 @@ Report a concrete implementation plan and any unresolved differences.`
   },
   assessment: {
     name: "Parser behavior assessor",
-    profile: "review_worker",
     instruction: ({ plan }) =>
       `Independently inspect the effects of treating whitespace-only parser input as empty input, including existing callers and tests.
 Compare findings with the investigator ${JSON.stringify(plan.agent)} using native send_agent_message.

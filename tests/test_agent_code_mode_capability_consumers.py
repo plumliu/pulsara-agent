@@ -97,6 +97,37 @@ def test_subagent_can_query_shared_sources_without_management_authority(tmp_path
     assert parse_query({"kind": "SKILL"}, subagent=True)["kind"] == "SKILL"
 
 
+def test_native_and_code_mode_expose_same_profile_free_run_agent_schema(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+    from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
+    from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+    from pulsara_agent.conversation_kernel.tool_surface import CodeModeToolDirectory
+    from pulsara_agent.primitives.context import thaw_json
+    from pulsara_agent.primitives.permission import PermissionMode
+    from tests.support.round3 import prepare_test_direct_tool_surface
+
+    async def run():
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="schema-host",
+            session_id="session:root", live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"run_agent"})))
+        try:
+            surface = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            native = next(spec for spec in surface.model_surface.tool_specs if spec.name == "run_agent")
+            code = next(spec for spec in CodeModeToolDirectory.freeze(surface).tool_specs if spec.name == "run_agent")
+            assert native.parameters == code.parameters
+            schema = thaw_json(code.parameters)
+            assert "profile" not in schema["properties"]
+            for value in ("research_worker", None):
+                assert not Draft202012Validator(schema).is_valid({"instruction": "work", "profile": value})
+        finally:
+            await port.aclose()
+    asyncio.run(run())
+
+
 def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_rejects_changed_binding(tmp_path):
     import asyncio
     import json

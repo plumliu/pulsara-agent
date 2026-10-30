@@ -170,6 +170,17 @@ def test_child_final_real_host_dispatches_stop_with_actual_session(tmp_path, mon
                 return works and works[0]["status"] == "completed"
 
             await eventually(completed)
+            await asyncio.wait_for(root.run_turn(PromptContent.text('Continue the same work'),
+                command_id=random_id('command'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS), 15)
+
+            async def both_completed():
+                works = await root._io.run(root.repository.list_agent_works, root_session_id=root.session_id,
+                    agent_id=model.agent_id, limit=10, deadline_monotonic=monotonic()+5)
+                return len(works) == 2 and all(work['status'] == 'completed' for work in works)
+
+            await eventually(both_completed)
+            works = await root._io.run(root.repository.list_agent_works, root_session_id=root.session_id,
+                agent_id=model.agent_id, limit=10, deadline_monotonic=monotonic()+5)
         finally:
             await core.shutdown()
         payloads = [json.loads(line) for line in log.read_text().splitlines()]
@@ -177,7 +188,11 @@ def test_child_final_real_host_dispatches_stop_with_actual_session(tmp_path, mon
         assert {item["hook_event_name"] for item in child} >= {"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}
         assert all(item["session_kind"] == "SUBAGENT" for item in child)
         assert all(item["input_origin"] is None for item in child if item["hook_event_name"] != "UserPromptSubmit")
-        assert [item["input_origin"] for item in child if item["hook_event_name"] == "UserPromptSubmit"] == ["AGENT_INSTRUCTION"]
+        submissions = [item for item in child if item['hook_event_name'] == 'UserPromptSubmit']
+        assert [item['input_origin'] for item in submissions] == ['AGENT_INSTRUCTION', 'AGENT_INSTRUCTION']
+        assert [item['prompt'] for item in submissions] == ['CHILD_FIRST', 'CHILD_SECOND']
+        assert [item['turn_id'] for item in submissions] == [work['turn_id'] for work in works]
+        assert all(item['permission_mode'] == 'bypassPermissions' and item['model'] for item in submissions)
         tools = [item for item in payloads if item["hook_event_name"] in {"PreToolUse", "PostToolUse"}]
         assert tools and all(item["input_origin"] == "MODEL_TOOL_CALL" for item in tools)
 

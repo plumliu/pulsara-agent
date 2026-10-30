@@ -1409,29 +1409,6 @@ def build_memory_context_source(
     )
 
 
-_SUBAGENT_PROFILE_GUIDANCE = {
-    "general_worker": "Execute the delegated objective directly and report a concise, self-contained result.",
-    "research_worker": "Investigate the delegated objective carefully, distinguish evidence from inference, and report sources or file locations that matter.",
-    "review_worker": "Review the delegated subject critically, prioritize concrete defects and risks, and state the evidence for each conclusion.",
-    "verification_worker": "Verify the delegated claim with reproducible checks, report exact observed outcomes, and distinguish passed checks from untested assumptions.",
-    "synthesizer": "Synthesize the prerequisite summaries provided to you into one coherent answer without assuming access to the other agents' working conversations.",
-}
-
-
-def subagent_profile_text(profile_kind: str) -> str:
-    if profile_kind not in _SUBAGENT_PROFILE_GUIDANCE:
-        raise ValueError("unknown subagent profile")
-    return (
-        "You are handling one delegated task. You cannot delegate work to other "
-        "agents, manage their tasks, or ask the user directly. If required "
-        "information is unavailable, explain that clearly in your result. "
-        + _SUBAGENT_PROFILE_GUIDANCE[profile_kind]
-        + " Your result summary may be given directly to another task without your "
-        "working conversation or tool outputs. Make it self-contained: state the "
-        "conclusion, important constraints, and actionable file or artifact locations."
-    )
-
-
 def replace_memory_context_sources(
     sources: CollectedContextSources,
     replacements: tuple[ContextSourceCandidate | ContextSourceAbsentFact, ...],

@@ -22,13 +22,6 @@ AGENT_TOOLS = frozenset(
         "stop_agent",
     }
 )
-PROFILES = (
-    "general_worker",
-    "research_worker",
-    "review_worker",
-    "verification_worker",
-    "synthesizer",
-)
 
 
 def closed(
@@ -136,7 +129,6 @@ def validate_run_parameters(arguments: Mapping[str, object]) -> None:
             "instruction",
             "target",
             "name",
-            "profile",
             "context",
             "materials",
             "depends_on",
@@ -153,8 +145,6 @@ def validate_run_parameters(arguments: Mapping[str, object]) -> None:
             )
     if "name" in a:
         _text(a["name"], "name", 256)
-    if "profile" in a and a["profile"] not in PROFILES:
-        raise ValueError("unknown profile")
     if "context" in a:
         context = closed(a["context"], {"mode", "turns"}, {"mode"})
         if context["mode"] == "none":
@@ -237,7 +227,6 @@ class PreparedAgentRequest:
     instruction: str
     create_agent: bool
     name: str | None = None
-    profile: str | None = None
     context_mode: str = "none"
     context_turns: int | None = None
     materials: tuple[str, ...] = ()
@@ -261,8 +250,6 @@ class PreparedAgentRequest:
             "materials": [work_target(x) for x in self.materials],
             "depends_on": [work_target(x) for x in self.depends_on],
         }
-        if self.profile is not None:
-            arguments["profile"] = self.profile
         if self.create_agent:
             if self.name is not None:
                 arguments["name"] = self.name
@@ -328,7 +315,6 @@ def prepared_request(
         instruction=parameters["instruction"],
         create_agent=create,
         name=parameters.get("name"),
-        profile=parameters.get("profile"),
         context_mode=context["mode"],
         context_turns=context.get("turns"),
         materials=_targets(parameters.get("materials", []), "WORK", maximum=16),

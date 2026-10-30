@@ -5,7 +5,6 @@ barriers. Production receives no flags, endpoints, queues or delivery owners.
 """
 
 from __future__ import annotations
-from pulsara_agent.identity import derive_id
 
 from pulsara_agent.llm.input import PromptContent
 import argparse
@@ -15,7 +14,6 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-import shlex
 from tempfile import TemporaryDirectory
 import traceback
 
@@ -24,7 +22,6 @@ from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 
@@ -41,12 +38,6 @@ from tests.dogfood.run_pr03_user_control_dogfood import (
     _rows,
     _wait_until,
 )
-from tests.dogfood.run_round10_subagent_dogfood import (
-    _wait_for_root_tool,
-    _wait_for_task_key,
-    _wait_for_task_status,
-)
-
 
 def _secrets(settings):
     values = [item.value for item in settings.model_api_keys]
@@ -186,115 +177,8 @@ async def _drain_queue(session):
     )
 
 
-async def _provider_cases(session, workspace, directory, installs, calls):
+async def _provider_cases(session, directory, installs, calls):
     results = {}
-    release_child = workspace / "release-child"
-    hold = f"while [ ! -f {shlex.quote(str(release_child))} ]; do sleep 0.1; done; echo PR04_CHILD_DONE"
-    prompt = f"""Create exactly one general_worker task with task_key pr04_child. Its objective must call terminal exactly once with command {hold!r}; after that command completes, report_agent_result alone with summary PR04_CHILD_DONE. Then call wait_agent for that exact task ID with settle=all and timeout_seconds=120. If an exact steer wakes the wait, acknowledge its marker and finish this ROOT without calling wait again. Do not finish before both create_agent_tasks and wait_agent have been called."""
-    run = asyncio.create_task(
-        session.run_turn(
-            PromptContent.text(prompt),
-            command_id='command:wfduq7ql3jezcalkvgu7wp6sry',
-            requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-        )
-    )
-    task = await _wait_for_task_key(session, task_key="pr04_child", timeout_seconds=90)
-    root = session.active_root_turn_id()
-    assert root
-    await _wait_for_root_tool(
-        session, turn_id=root, tool_name="wait_agent", timeout_seconds=90
-    )
-    texts = [
-        "PR04_FIFO_ZERO: reply only FIFO_ZERO_DONE.",
-        "PR04_WAIT_STEER: acknowledge PR04_WAIT_STEER and finish now without waiting again.",
-        "  PR04_EDIT_ORIGINAL: reply only EDIT_DONE.  ",
-        "PR04_DELETE_ORIGINAL: reply only DELETE_SHOULD_NOT_RUN.",
-    ]
-    queued = [
-        await session.submit_prompt(
-            command_id=derive_id("command", "test-fixture", f"command:pr04:source:{index}"),
-            content=PromptContent.text(text),
-            requested_permission_mode=PermissionMode.READ_ONLY,
-        )
-        for index, text in enumerate(texts)
-    ]
-    await asyncio.sleep(0.3)
-    wait_before = await _wait_for_root_tool(
-        session, turn_id=root, tool_name="wait_agent", timeout_seconds=5
-    )
-    assert wait_before.get("result_state") is None
-    assert [row["command_id"] for row in await _queue_rows(session)] == [
-        item.command_id for item in queued
-    ]
-    redirect = await session.steer_queued_prompt(
-        command_id='command:xxlinczbrhglxuhr52cbh5twvi',
-        source_queue_item_id=queued[1].prompt_delivery.queue_item_id,
-        target_turn_id=root,
-    )
-    assert redirect.public_code in {
-        "PROMPT_STEER_QUEUED",
-        "PROMPT_CONSUMED",
-        "TURN_RUNNING",
-    }
-    for index in (2, 3):
-        cancelled = await session.cancel_queued_prompt(
-            command_id=derive_id("command", "test-fixture", f"command:pr04:cancel:{index}"),
-            source_queue_item_id=queued[index].prompt_delivery.queue_item_id,
-        )
-        assert (
-            cancelled.status == "SUCCEEDED"
-            and cancelled.public_code == "PROMPT_CANCELLED"
-        )
-    edited = await session.submit_prompt(
-        command_id='command:vujyodovutl2n7lmzuc3prhqpu',
-        content=PromptContent.text(texts[2]),
-        requested_permission_mode=PermissionMode.READ_ONLY,
-    )
-    try:
-        answer = await asyncio.wait_for(run, 150)
-        assert answer.turn_id == root and "PR04_WAIT_STEER" in answer.final_text
-        settled_wait = await _wait_for_root_tool(
-            session,
-            turn_id=root,
-            tool_name="wait_agent",
-            timeout_seconds=5,
-            require_result=True,
-        )
-        raw = settled_wait["result_content"]
-        if isinstance(raw, memoryview):
-            raw = raw.tobytes()
-        assert json.loads(raw)["outcome"] == "steer_available"
-        child_before_release = await asyncio.to_thread(
-            _rows,
-            session,
-            "SELECT status FROM pulsara_v3.subagent_tasks WHERE session_id=%s AND id=%s",
-            (session.session_id, str(task["id"])),
-        )
-        assert child_before_release[0]["status"] not in {
-            "CANCELLED",
-            "INTERRUPTED",
-            "FAILED",
-        }
-        results["wait_and_fifo"] = {
-            "root_turn_id": root,
-            "wait_before": wait_before,
-            "wait_result": settled_wait,
-            "queued_commands": [item.command_id for item in queued],
-            "redirect_command": redirect.command_id,
-            "edited_command": edited.command_id,
-            "answer": answer.final_text,
-            "child_before_release": child_before_release,
-        }
-    finally:
-        release_child.touch()
-    await _wait_for_task_status(
-        session,
-        task_id=str(task["id"]),
-        expected=frozenset({"COMPLETED"}),
-        timeout_seconds=120,
-    )
-    await _drain_queue(session)
-
     _arm(directory, "before")
     run = asyncio.create_task(
         session.run_turn(
@@ -460,7 +344,7 @@ async def _run(args, saved, secrets):
                 )
                 session = await core.open_session(
                     workspace_input,
-                    system_prompt="Follow each human instruction exactly. This is a controlled queue/wait test. Use only the requested tools and keep replies short. Preserve IDs and markers.",
+                    system_prompt="Follow each human instruction exactly. This is a controlled queue test. Use only the requested tools and keep replies short. Preserve IDs and markers.",
                 )
                 await session.update_model_call_binding(
                     _binding(delegate, connection)
@@ -468,7 +352,6 @@ async def _run(args, saved, secrets):
                 report["session_id"] = session.session_id
                 report["cases"] = await _provider_cases(
                     session,
-                    workspace,
                     args.output_dir,
                     report["provider_input_installs"],
                     report["provider_calls"],

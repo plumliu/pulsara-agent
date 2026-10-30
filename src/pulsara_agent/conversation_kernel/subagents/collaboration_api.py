@@ -122,7 +122,6 @@ class CollaborationToolPort:
             "diagnostic",
             "failed_dependency",
             "name",
-            "profile",
         ):
             if row.get(field) is not None:
                 result[field] = row[field]
@@ -301,7 +300,7 @@ class CollaborationToolPort:
             "name": row.get("name", row.get("title")),
             **{
                 k: row[k]
-                for k in ("current_work", "queued_count", "profile")
+                for k in ("current_work", "queued_count")
                 if k in row
             },
         }

@@ -2,7 +2,7 @@
 
 日期：2026-10-30。状态：本轮协作运行时已实施；实际验收与未覆盖边界见 §9，暂缓表面仍按配套范围执行。
 
-提示词、profile 文案与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+提示词与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施合同；示例中的 ID 仍须替换为运行时真实返回值。
 
@@ -31,11 +31,11 @@ ID 遵循 [统一身份规格](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_I
 
 每个 Subagent 是一份 session，归属由其 `root_session_id` 指向 ROOT；该字段为 NULL 的 session 就是 ROOT。ROOT／SUBAGENT 的 kind 由归属派生，不单独存储。Subagent 的 `agent_id` 直接使用其完整 session ID，Work 是其中一次已接纳的请求和执行。复用 Agent 时，直接读取该 session 的有效摘要与尾部，然后追加下一份请求，复用 ROOT 的 reader、compiler、压缩与 UI 历史读取链。协作接口不提供 Agent／Work 历史的 fork：继续已有上下文就复用原 Agent；新建 Agent 则建立独立 session，不从另一 Agent 或某份 Work 复制对话历史。
 
-已有内容原样保留，包括旧请求、消息、工具结果和已采用的压缩摘要；不根据新 Work 重写旧 snapshot、ROOT 消息或 handling。profile 作为独立 user message 放在本次 instruction 前，不拼入通用 SYSTEM，也不作为开启 entry。ROOT 派活的 instruction 是本次 turn 的开启 entry；各份前置 final 分别作为后续 user entry 追加，明确选择的材料同样由接收方持有，不合并改写 instruction。模型沿 context binding 读取有效摘要与尾部；UI 沿同一 Agent scope 分页展示已接纳的 canonical 历史，可以查看压缩前记录。两者共用事实与既有投影，UI 的历史浏览不把旧全文重新塞回模型输入。
+已有内容原样保留，包括旧请求、消息、工具结果和已采用的压缩摘要；不根据新 Work 重写旧 snapshot、ROOT 消息或 handling。ROOT 派活的 instruction 是本次 turn 的开启 entry；各份前置 final 分别作为后续 user entry 追加，明确选择的材料同样由接收方持有，不合并改写 instruction。模型沿 context binding 读取有效摘要与尾部；UI 沿同一 Agent scope 分页展示已接纳的 canonical 历史，可以查看压缩前记录。两者共用事实与既有投影，UI 的历史浏览不把旧全文重新塞回模型输入。
 
 Subagent 仅在 bypass-permissions 下使用，不提供独立的权限模式选择或权限确认入口。共同请求接纳时直接继承并冻结发起者 ROOT 的完整 `ModelCallBinding`（连接选择与 reasoning）及 bypass 权限事实。原生派活取该次 ROOT 调用的快照；JS 派活取启动该 cell 的 exec_cell 快照。排队期间设置变化不改变已接纳请求；新派活可取得新的快照。实际执行沿现有合法 resolver 观察，不永久冻结 catalog、allowance 或凭据；已安装 epoch 的 target bundle 保持冻结。启动时由共同 turn admission 承接这些事实，协作层不增加权限或配置权威。公共接口不提供模型配置枚举工具、独立选模或 reasoning 覆盖参数。
 
-新请求沿 ROOT 的共同接纳与 provider-input 安装链路进入同一个 Agent scope：目标配置相同时沿已安装 epoch 追加；真正切换模型配置时，复用已有模型切换接纳与测量、合法 cold 边界或已采用的压缩 successor。Work 开始、结束及 profile 变化本身不触发重建。已安装 epoch 内 SYSTEM／tools 字节不变，messages 只追加；压缩和模型切换均使用共同 reader、planner 与 coordinator。
+新请求沿 ROOT 的共同接纳与 provider-input 安装链路进入同一个 Agent scope：目标配置相同时沿已安装 epoch 追加；真正切换模型配置时，复用已有模型切换接纳与测量、合法 cold 边界或已采用的压缩 successor。Work 开始和结束本身不触发重建。已安装 epoch 内 SYSTEM／tools 字节不变，messages 只追加；压缩和模型切换均使用共同 reader、planner 与 coordinator。
 
 turn 结束只结算本轮执行与资源，Agent 的有效历史和已安装 scope 按 ROOT 的连续对话生命周期保留，不随一份 Work 结束而销毁。
 
@@ -54,7 +54,7 @@ ROOT 与 Subagent 使用同一套 session 请求接纳、排队、turn 执行及
 | 事实 | 唯一保存位置／读取方式 |
 |---|---|
 | Agent 身份、显示名称、归属、连续历史范围 | session 及其 `root_session_id` 和既有历史范围；kind 从归属派生 |
-| 请求正文、队列位置、接纳时配置、有效 profile、所选材料和委派来源 | 接收 session 的共用请求记录；材料保存实际内容，来源标识仅用于归因，不形成跨 session 外键 |
+| 请求正文、队列位置、接纳时配置、所选材料和委派来源 | 接收 session 的共用请求记录；材料保存实际内容，来源标识仅用于归因，不形成跨 session 外键 |
 | 尚未启动、启动前取消／拒绝 | 请求队列状态及实际原因；未启动不创建空 turn |
 | 已启动、完成、中断及具体结束原因 | 共用 `turns`；通过请求的 `consumed_entry_id → transcript entry.turn_id` 定位 |
 | final | `turn.final_entry_id` 指向的 canonical 内容，展示时按需生成预览／artifact |
@@ -74,11 +74,10 @@ Host 关闭或接管沿共同队列／turn 语义：已运行 turn 如实中断�
 
 ### 1.1.1 开启 entry 与前置结果的追加顺序
 
-所有 Subagent 的 Work 都以 ROOT 派活时的 `instruction` 作为开启 entry。profile 是身份预设，前置 final 是输入材料；它们有自己的 entry，但不各自开启 turn。以 B 依赖 A、C、D 为例，首次模型输入的业务消息顺序为：
+所有 Subagent 的 Work 都以 ROOT 派活时的 `instruction` 作为开启 entry。新建 Agent 选取的初始 context 可先于 instruction；前置 final 各有独立 entry，但不各自开启 turn。以 B 依赖 A、C、D 为例，首次模型输入的业务消息顺序为：
 
 ```text
 system：运行时组装的系统提示词
-user：B 的 profile
 user：ROOT 给 B 的 instruction  ← turn.initial_entry_id
 user：A 的 final
 user：C 的 final
@@ -89,9 +88,9 @@ native tools 位于 provider 请求的工具定义中。复用已有 B 时，本
 
 请求已接纳时就有稳定 WORK 引用。等待前置期间，结果陆续进入 B 自己的待处理请求材料；全部前置成功且具备执行容量后，由共同启动事务建立真实 RUNNING turn、完整初始 entries、初始 binding revision 和 queue 消费关系，再准备首次 provider 输入。首次准备中的压缩、补充与停止由同一个执行 owner 承接。若还有显式 `materials`，同样作为独立输入材料追加。不得先调用模型，再补入本应等待的前置结果。
 
-共同启动与读取链路分别表示 instruction 和整组输入边界：按 ID 定位开启 entry，从启动确认的实际有序初始 entries 确定组首和组尾，前驱截止为组首 sequence 减一。复用现有 reader、compiler、lowering 与接纳事务，写入并确认整组 entry 的顺序和内容，启动后计量和准备完整输入；不能只提交或确认 instruction，也不能用它的序号截掉后续结果。图片能力检查覆盖整组输入。
+共同启动与读取链路分别表示 instruction 和整组输入边界：按 ID 定位开启 entry，从启动确认的实际有序初始 entries 确定组首和组尾，前驱截止为组首 sequence 减一。复用现有 reader、compiler、lowering 与接纳事务，写入并确认整组 entry 的顺序和内容，启动后计量和准备完整输入；不能只提交或确认 instruction，也不能用它的序号截掉后续结果。委派输入均为纯文本。
 
-profile 与前置结果保留真实的非人类来源，不因使用 user role 而被当作人类请求。首次普通 provider 调用前，压缩仅处理完整初始组之前的历史，整组原文和图片保留为新 turn 的精确 suffix；摘要采用目标是本次 RUNNING turn。首调用后的压缩继续遵守既有当前 instruction 精确保留与普通摘要／尾部处理规则。输入边界与共同 safe point 遵守 [压缩实施规格](PULSARA_COMPACTION_MODEL_CONFIGURATION_AND_MANUAL_IDLE_ONLY_IMPLEMENTATION_SPEC.zh.md)。WORK 始终使用原 `queue:` ID，不改成 instruction 的 entry ID 或执行 turn ID。
+初始 context 与前置结果保留真实的非人类来源，不因使用 user role 而被当作人类请求。首次普通 provider 调用前，压缩仅处理完整初始组之前的历史，整组原文保留为新 turn 的精确 suffix；摘要采用目标是本次 RUNNING turn。首调用后的压缩继续遵守既有当前 instruction 精确保留与普通摘要／尾部处理规则。输入边界与共同 safe point 遵守 [压缩实施规格](PULSARA_COMPACTION_MODEL_CONFIGURATION_AND_MANUAL_IDLE_ONLY_IMPLEMENTATION_SPEC.zh.md)。WORK 始终使用原 `queue:` ID，不改成 instruction 的 entry ID 或执行 turn ID。
 
 ### 1.2 会话种类、展示与检索
 
@@ -281,14 +280,11 @@ monitor 记录注册者 AGENT，投递目标与订阅生命周期绑定注册时
 | `instruction` | 必填文本，本次工作请求；需要看图时在文本中提供图片引用或路径 |
 | `target` | 可选 AGENT，指向已有 Subagent；省略时创建新 Subagent，提供时复用；不接受 `agent_id:"ROOT"` |
 | `name` | 仅新建时可选的显示名称，由 ROOT 填写；不调用自动标题生成 |
-| `profile` | 可选身份／工作方法预设，作为独立 user 消息放在 instruction 前；新建默认通用方法，复用默认沿用原方法 |
 | `context` | 仅新建时可选：`{"mode":"none"}` 或 `{"mode":"last_n","turns":1}`；turns 沿用 1–3，省略为 none |
 | `materials` | 可选 WORK target 数组，接纳时读取已结束工作的 final 或公开失败材料，作为本请求自己的输入保存 |
 | `depends_on` | 可选 WORK target 数组，作为本请求尚未满足的启动条件；取得成功结果正文后清除相应条件，全部满足才启动 |
 
-原生 run_agent 与 JS／batch 的 instruction 均只传文本，不增加派活图片参数。ROOT 在文本中给出可访问的图片引用或路径，由 Subagent 按需调用原生 `view_image` 查看；引用文字本身不等于模型已经看到了图片。
-
-profile 先沿用现有五种工作方法，具体文本另行审阅。每份 Work 在接纳时确定其有效 profile：显式提供时采用该值；省略时继承该 Agent 最近一份已接纳 Work 的有效方法，新 Agent 使用通用方法。同一 batch 按 Object.entries(specs) 顺序解析。后续取消某份 Work 不改变其他已接纳 Work 的有效 profile，也不改写旧消息。模型不用搬运旧 profile 文本。
+原生 run_agent 与 JS／batch 的 instruction、初始 context、依赖结果、显式材料和 Agent 消息均只传纯文本。ROOT 在文本中给出可访问的图片引用或路径，由 Subagent 按需调用原生 `view_image` 查看；引用文字本身不等于模型已经看到了图片。
 
 `materials` 仅提供材料，不等待成功；`depends_on` 表达真实成功依赖，前置失败会阻止该 Work 启动。已经成功的前置工作在接纳时即可交付正文；尚未结束时保留等待条件。两者引用同一 Work 时，沿用依赖结果优先的规则。instruction 保持独立的开启 entry，各份前置结果在其后分别追加为 user entry，具体顺序见 §1.1.1。程序也可在取得结果并判断后再派下一份工作；不要求所有流程先构造成完整依赖图。
 
@@ -713,19 +709,16 @@ A 的 Work 保持活动。B 回复时，A 收到新消息后继续；B 先完成
 const research = await tools.run_agent.batch({
   schema: {
     name: "Schema researcher",
-    profile: "research_worker",
     instruction: ({ runtime }) =>
       `Investigate the parameter schema and parser. Propose a change with code evidence. Coordinate cross-layer questions with ${JSON.stringify(runtime.agent)}, who investigates execution and callers.`
   },
   runtime: {
     name: "Runtime researcher",
-    profile: "research_worker",
     instruction: ({ schema }) =>
       `Investigate execution and callers. Identify changes needed to preserve current behavior. Coordinate parameter-contract questions with ${JSON.stringify(schema.agent)}, who investigates the schema and parser.`
   },
   critic: {
     name: "Critic",
-    profile: "review_worker",
     depends_on: ({ schema, runtime }) => [schema.work, runtime.work],
     instruction: "Review the two prerequisite investigation results. Identify gaps, tradeoffs and decisions ROOT needs to make. Report your assessment in the final answer."
   }
@@ -739,7 +732,7 @@ console.log(await tools.wait_agent.works({
 
 schema 与 runtime 从第一轮起知道对方是谁，可以用原生消息工具直接核对调查中的问题。critic 在两项调查成功结束后才启动，前置工作的结果由依赖机制提供，不重复填写 materials。
 
-critic 的 session 虽然已经存在，但等待依赖时只有待处理请求，没有本次活动 turn 或模型执行，不会因闲置期限卸载或删除。调查者不需要向尚未启动的 critic 发消息。两个调查结果均进入 critic 自己的请求后再启动；首次输入中 profile 在前，instruction 是开启 entry，其后分别追加 schema、runtime 的 final。critic 不依赖两位调查者继续在线或保留源 session。需要进一步讨论时，ROOT 可以给仍存在的原调查者追加 Work，若其已卸载则执行前自动加载。
+critic 的 session 虽然已经存在，但等待依赖时只有待处理请求，没有本次活动 turn 或模型执行，不会因闲置期限卸载或删除。调查者不需要向尚未启动的 critic 发消息。两个调查结果均进入 critic 自己的请求后再启动；首次输入中 instruction 是开启 entry，其后分别追加 schema、runtime 的 final。critic 不依赖两位调查者继续在线或保留源 session。需要进一步讨论时，ROOT 可以给仍存在的原调查者追加 Work，若其已卸载则执行前自动加载。
 
 前置调查失败会使 critic 的依赖无法满足；等待结果保留实际状态。ROOT 阅读各项结果及 critic 的 final，决定接下来采用哪种方案。这里没有把执行 completed 当成方案获批。
 
@@ -848,7 +841,7 @@ ROOT 先用 `query_agents` 找到已有成员及当前／排队概览，再用 `
 |---|---|
 | 原生工具定义 | 本工具参数、target、结果、派活／消息／等待／停止的必要语义 |
 | code mode 环境说明 | exec_cell／query_cells／manage_cell、工具代理、输出、持续等待与脚本生命周期 |
-| SYSTEM | ROOT 与 Subagent 各自为完整文本；ROOT 简述原生／JS 共用对象及 Skill 入口，Subagent 只保留通用执行与交付规则；角色职责由 profile 提供，工具组合教学由 Skill 承担 |
+| SYSTEM | ROOT 与 Subagent 各自为完整文本；ROOT 简述原生／JS 共用对象及 Skill 入口，Subagent 保留通用执行与交付规则，具体任务职责由 instruction 提供，工具组合教学由 Skill 承担 |
 | `pulsara-code-mode` bundled Skill | 主文档展示普通工具与 Agent 交叉使用；`tool-calling` 参考目录介绍工具组合与结果，`agent-orchestration` 参考目录介绍复用、batch 队友引用、依赖、等待、多人协作与多阶段示例；正式输出只教 `console.log` |
 
 Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要知道实验过程、历史接口或内部协议名称。这里不新增独立的群组 skill 或 workflow 语言。
@@ -871,7 +864,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 | 责任 | 主要复用基础 | 本合同要求 |
 |---|---|---|
 | 身份／请求 | ROOT session、`prompt_queue_items`、queue identity | `root_session_id` 外键及索引记录归属，kind 派生而不存储；AGENT 使用完整 `session:`，WORK 使用完整 `queue:`，无额外身份映射 |
-| 接纳／调度 | `_repository/prompts.py`、`turn_admission.py`、Host delivery loop | 按 session 选队首，等待条件属于请求；取得前置正文后清除对应条件；instruction 是 initial／consumed entry，profile 与各结果独立排列，同一事务提交并确认整组；原生和 JS 共用按需加载 |
+| 接纳／调度 | `_repository/prompts.py`、`turn_admission.py`、Host delivery loop | 按 session 选队首，等待条件属于请求；取得前置正文后清除对应条件；instruction 是 initial／consumed entry，初始 context 与各结果独立排列，同一事务提交并确认整组；原生和 JS 共用按需加载 |
 | 上下文／模型切换 | ROOT reader、provider dispatch、continuity、compaction 与 UI 历史投影 | 开启 entry 与完整初始组分别定位；首调用前仅摘要组首之前的前驱并精确保留整组，之后沿原 instruction 保留与普通摘要规则；同 scope 连续追加 |
 | 状态／结果 | `_repository/conversation.py` 的请求联查、assistant settlement、turn final／终止原因 | 统一公开投影，无 Work 状态或结果副本；材料与 final 交付时保存为接收方输入，之后不依赖源 session |
 | 等待／停止 | 共同请求／turn 读取、变化通知、队列取消与 ActiveTurnCancellationIntent | WORK 按 queue→entry→turn 处理；AGENT 停止当前工作并取消本次覆盖的排队工作，历史终态不变；与调度竞态共用 owner，返回实际结果 |
@@ -882,16 +875,16 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 | 能力／MCP | 共同 capability 查询、planner、MCP supervisor、配置入口与 context sources | ROOT／Subagent 共用发现、查询、启停和执行规则；两种 MCP 来源共用提供范围开关，插件安装时供用户审阅；各受影响 session 正常输入时追加变化观察，保持 epoch 前缀 |
 | 退役／删除 | 现有 session 关闭、删除与内容回收 | 同次连续闲置满 1 小时卸载、满 3 天删除；运行或等待请求不计闲置；重新派活按需加载，不恢复旧执行；单独删除成员不影响其他会话已交付正文，删除 ROOT 一并关闭和删除所属成员 |
 
-Agent 使用 session 身份及 `root_session_id` 归属；委派来源、profile／初始材料和未满足的等待条件是请求的业务信息。其余接纳、turn、历史、完成与结果职责都由共同引擎承担。归属之外，消息、材料与结果不建立跨 session 外键或保留约束；不保留旧 task 状态／报告与 turn 双写，也不为 WORK 建映射表、结果表或独立生命周期。已有 event、subject、guard、job 类别不因“便于验证”增加。
+Agent 使用 session 身份及 `root_session_id` 归属；委派来源、初始材料和未满足的等待条件是请求的业务信息。其余接纳、turn、历史、完成与结果职责都由共同引擎承担。归属之外，消息、材料与结果不建立跨 session 外键或保留约束；不保留旧 task 状态／报告与 turn 双写，也不为 WORK 建映射表、结果表或独立生命周期。已有 event、subject、guard、job 类别不因“便于验证”增加。
 
 实施验收关注行为：WORK 请求 ID 从排队到完成不变；启动与取消只有一个胜出的实际阶段；失败依赖不创建空 turn；同 Agent 连续请求共用历史与允许的 epoch，压缩后不改写旧内容；batch 第一次模型调用已带正确队友；组合环不启动成员；消息接纳与 turn 交接不转投；容量满时等待者让槽；大 final 直接从原 entry 可读；完成 Hook 续接不提前终态；monitor 终态关闭不杀进程；重新打开只推进未启动请求。与 Code Mode 的跨压缩、取消及 provider 前缀验收一起完成，不新增冻结文案测试。
 
 会话验收同时覆盖：侧边栏仅列 ROOT，ROOT 对两种 session 的主动与隐式历史检索行为一致；关闭历史检索只关闭隐式召回；Subagent 无三个会话检索工具及上述隐式注入；A 长时间执行时，等待 A 的 B 不计入闲置删除；A 已交付后被删除，B 的请求正文和历史仍完整可读。
 
-本次输入与恢复验收覆盖：首次／复用 Work 均以 instruction 为开启 entry，profile 与前置 final 分别作为同轮 user 消息，依赖完成先后不改变声明顺序；整组输入计量、截止位置、提交确认及首次实际 provider 输入一致；压缩不误将 profile／结果当成人类请求。向已完成、未启动或已卸载的 Agent 发消息明确返回未接纳，ROOT 同样适用；1 小时／3 天共用闲置起点，等待工作不触发两段退役；原生及 JS 给已卸载会话派活可自动加载，旧执行不重跑。
+本次输入与恢复验收覆盖：新建／复用 Work 均以 instruction 为开启 entry；新建时选取的初始 context 与各前置 final 分别作为同轮 user 消息，复用沿原 Agent 的历史且不接纳新的 context，依赖完成先后不改变声明顺序；整组输入计量、截止位置、提交确认及首次实际 provider 输入一致；压缩不误将初始 context／结果当成人类请求。向已完成、未启动或已卸载的 Agent 发消息明确返回未接纳，ROOT 同样适用；1 小时／3 天共用闲置起点，等待工作不触发两段退役；原生及 JS 给已卸载会话派活可自动加载，旧执行不重跑。
 
 身份与归属验收覆盖：ROOT／SUBAGENT kind 仅由 `root_session_id` 派生；ROOT 成员列表按归属读取；删除 ROOT 同时关闭并删除所属成员，单独删除成员不删除 ROOT；模型接口始终传递完整 `session:`／`queue:` ID，`ROOT` 按可信协作上下文解析；WORK 从接纳、排队到执行结束使用同一个队列请求 ID，不改用 `turn:` ID。
 
 能力验收覆盖 §1.5 的四种变化：手动配置与插件 MCP 使用同一提供范围设置；每个受影响的活动 session 收到相应观察；禁用后阻止新调用，同 epoch 已安装 schema 保持不变；能力查询不扩大原生管理工具权限。
 
-前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。SYSTEM 简短入口与 Skill 教学见 §8，其余 SYSTEM 整体修订、profile 正文和新的前端表面仍按暂缓范围处理。
+前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。SYSTEM 简短入口与 Skill 教学见 §8，其余 SYSTEM 整体修订和新的前端表面仍按暂缓范围处理。
