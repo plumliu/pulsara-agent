@@ -831,16 +831,9 @@ class PreparedSteerConsumptionCandidate:
             raise ValueError("steer candidate canonical base fence does not exact-join")
 
 
-def build_steer_consumption_candidate(
-    *,
-    fact: PendingPromptSteerFact,
-    canonical_prompt: FrozenCanonicalPrompt,
-    expected_entry_sequence: int,
-    predecessor: FrozenProviderInputAppendPlanningInput,
-    canonical_base_fence: PreparedSteerCanonicalBaseFence,
-    occurred_at: datetime,
-    actor_id: str,
-) -> PreparedSteerConsumptionCandidate:
+def build_steer_consumption_occurrences(
+    *, fact: PendingPromptSteerFact, occurred_at: datetime, actor_id: str,
+) -> tuple[str, CommittedEventDraft, CommittedEventDraft]:
     entry_id = derive_id("entry", "steer", fact.session_id, fact.queue_item_id)
     prompt_event = CommittedEventDraft(
         event_id=derive_id(
@@ -881,6 +874,22 @@ def build_steer_consumption_candidate(
         projection_profile="DEFAULT",
         occurred_at=occurred_at,
         payload={"source": "PROMPT_QUEUE", "input_origin": fact.input_origin.value},
+    )
+    return entry_id, prompt_event, steer_event
+
+
+def build_steer_consumption_candidate(
+    *,
+    fact: PendingPromptSteerFact,
+    canonical_prompt: FrozenCanonicalPrompt,
+    expected_entry_sequence: int,
+    predecessor: FrozenProviderInputAppendPlanningInput,
+    canonical_base_fence: PreparedSteerCanonicalBaseFence,
+    occurred_at: datetime,
+    actor_id: str,
+) -> PreparedSteerConsumptionCandidate:
+    entry_id, prompt_event, steer_event = build_steer_consumption_occurrences(
+        fact=fact, occurred_at=occurred_at, actor_id=actor_id
     )
     return PreparedSteerConsumptionCandidate(
         input_origin=fact.input_origin,

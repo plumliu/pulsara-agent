@@ -322,7 +322,7 @@ class PolicyPermissionGate:
                 )
         if (
             classification is not None
-            and classification.builtin_tool_family == "subagent_parent"
+            and (classification.builtin_tool_family == "subagent_parent" or call.name == "query_agents")
             and self._state.mode is not _PermissionMode.BYPASS_PERMISSIONS
         ):
             return PermissionDecision(

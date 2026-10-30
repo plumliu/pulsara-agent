@@ -150,7 +150,6 @@ def _source_snapshot(
     source_id: str,
     facts: tuple,
     conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
-    scope_subagent_task_id: str | None = None,
 ):
     source = capability_source_ref(source_kind, source_id)
     return freeze_capability_source_snapshot(
@@ -166,7 +165,6 @@ def _source_snapshot(
             ),
         ),
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=facts,
     )
@@ -206,7 +204,6 @@ def _planning_view(
         source_id="builtin-registry",
         facts=builtin_facts,
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
     )
     mcp_snapshots = tuple(
         _source_snapshot(
@@ -214,7 +211,6 @@ def _planning_view(
             source_id=source_id,
             facts=tuple(fact for fact in mcp_facts if fact.identity.source.stable_source_id == source_id),
             conversation_scope_kind=conversation_scope_kind,
-            scope_subagent_task_id=scope_subagent_task_id,
         )
         for source_id in sorted({fact.identity.source.stable_source_id for fact in mcp_facts} or {"fixture"})
     )
@@ -223,7 +219,6 @@ def _planning_view(
         source_id="local-skills",
         facts=(),
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
     )
     builtin_owner = issue_sealed_builtin_capability_snapshot(
         conversation_scope_kind=conversation_scope_kind,

@@ -2851,7 +2851,7 @@ class KernelHostSession:
             if existing is None:
                 raise RuntimeError("compatible prompt command has no canonical outcome")
             if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
-                existing = await self._wake_accepted_steer(command_id=command_id, target_turn_id=target_turn_id, outcome=existing)
+                await self._notify_accepted_supplement(existing)
             return existing
         model_resolution_snapshot: FrozenModelResolutionSnapshot | None = None
         model_call_binding: ModelCallBinding | None = None
@@ -3074,7 +3074,7 @@ class KernelHostSession:
                         "compatible prompt command has no canonical outcome"
                     )
                 if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
-                    existing = await self._wake_accepted_steer(command_id=command_id, target_turn_id=target_turn_id, outcome=existing)
+                    await self._notify_accepted_supplement(existing)
                 return existing
             if confirmation.kind is PromptIngressConfirmationKind.CONFLICT:
                 if hook_context_reservation is not None:
@@ -3122,61 +3122,14 @@ class KernelHostSession:
         self._ephemeral.invalidate(preserve_running=True)
 
         if delivery_mode is PromptDeliveryMode.STEER_ACTIVE_TURN:
-            return await self._wake_accepted_steer(
-                command_id=command_id, target_turn_id=target_turn_id, outcome=outcome,
-            )
+            await self._notify_accepted_supplement(outcome)
         return outcome
 
-    async def _wake_accepted_steer(
-        self, *, command_id: str, target_turn_id: str, outcome: KernelCommandOutcome,
-    ) -> KernelCommandOutcome:
+    async def _notify_accepted_supplement(self, outcome: KernelCommandOutcome) -> None:
         delivery = outcome.prompt_delivery
         if delivery is None or delivery.queue_status != "PENDING":
-            return outcome
-        self._runner.steer_tool_batch(target_turn_id)
-        try:
-            await self.cancel_plan_question_for_steer(
-                command_id=command_id, target_turn_id=target_turn_id,
-            )
-        except Exception as error:
-            # Admission already owns the complete input. A failed cancellation
-            # suffix cannot leave that input pending behind an unanswered
-            # question. Existing interruption preserves committed results and
-            # rejects every remaining Steer for this exact terminal target.
-            async with self._lock:
-                task = self._active_task if self._active_turn_id == target_turn_id else None
-                intent = self._active_cancellation_intent if task is not None else None
-                cause = None if intent is None else intent.cause
-            reason = (
-                "USER_STOPPED" if cause is ForegroundCancellationCause.USER_REQUEST
-                else "SESSION_CLOSED" if cause is ForegroundCancellationCause.HOST_SESSION_CLOSE
-                else "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
-                if isinstance(error, StructuredModelInputCompileError) and _is_input_resource_exhaustion(error)
-                else "FOREGROUND_EXECUTION_INTERRUPTED"
-            )
-            try:
-                await self._io.run(
-                    self.repository.interrupt_turn, self._lease.guard,
-                    turn_id=target_turn_id, reason=reason,
-                    occurred_at=datetime.now().astimezone(), actor_id=self.host_session_id,
-                    deadline_monotonic=self._canonical_deadline(),
-                )
-            finally:
-                if task is not None and not task.done():
-                    # Let a waiting Plan runner observe the original typed
-                    # failure. A nonwaiting runner uses its existing physical
-                    # cancellation settlement before releasing the ROOT slot.
-                    waiting = await self._plan_interactions.abort_current(error, origin_turn_id=target_turn_id)
-                    if not waiting:
-                        task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                self._queue_wake.set()
-            terminal = await self.query_command(command_id)
-            if terminal is None:
-                raise ConversationKernelConflict("accepted Steer lost its canonical owner") from error
-            return terminal
+            return
         await self._agent_runtime.notify_changed()
-        return outcome
 
     async def cancel_queued_prompt(
         self, *, command_id: str, source_queue_item_id: str
@@ -3291,8 +3244,7 @@ class KernelHostSession:
         if outcome is None:
             raise ConversationKernelConflict("queue action has no canonical winner")
         if candidate.target_turn_id is not None:
-            outcome = await self._wake_accepted_steer(command_id=candidate.command_id,
-                target_turn_id=candidate.target_turn_id, outcome=outcome)
+            await self._notify_accepted_supplement(outcome)
         return outcome
 
     async def steer_active_turn(
@@ -3508,34 +3460,6 @@ class KernelHostSession:
                 self._plan_exit_fence = False
                 self._queue_wake.set()
                 self._monitor_wake.set()
-
-    async def cancel_plan_question_for_steer(self, *, command_id: str, target_turn_id: str) -> None:
-        """Settle an exact waiting question after the input owner accepted Steer."""
-        question = await self._io.run(
-            self.repository.read_open_plan_question_for_turn,
-            session_id=self.session_id, turn_id=target_turn_id,
-            deadline_monotonic=self._canonical_deadline(),
-        )
-        if question is None:
-            return
-        cancellation_command = derive_id("command", "steer-plan-question", self.session_id,
-                                         command_id, str(question["id"]))
-        try:
-            await self.resolve_plan_question(
-                command_id=cancellation_command,
-                workflow_id=str(question["plan_workflow_id"]),
-                expected_workflow_revision=int(question["workflow_revision"]),
-                interaction_id=str(question["id"]), answer=None,
-            )
-        except ConversationKernelConflict:
-            current = await self._io.run(
-                self.repository.read_open_plan_question_for_turn,
-                session_id=self.session_id, turn_id=target_turn_id,
-                deadline_monotonic=self._canonical_deadline(),
-            )
-            if current is not None:
-                raise
-            # Another real answer or terminal transition won; never overwrite it.
 
     async def resolve_plan_question(
         self,

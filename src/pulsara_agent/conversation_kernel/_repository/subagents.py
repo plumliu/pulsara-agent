@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from functools import wraps
 from time import monotonic
 
 from psycopg import IsolationLevel
+from psycopg.errors import DeadlockDetected, SerializationFailure
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -22,6 +24,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     validate_agent_request_graph,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
+from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
 from pulsara_agent.llm.model_connections import model_call_binding_to_dict
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -52,25 +55,70 @@ _RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, w.workspace_k
         ORDER BY q.queue_sequence LIMIT 1),false) AS head_ready
     FROM pulsara_v3.sessions s JOIN pulsara_v3.workspaces w ON w.id=s.workspace_id AND w.memory_domain_id=s.memory_domain_id"""
 
+_SESSION_IN_TEXT = re.compile(
+    r"(?<![A-Za-z0-9_:])session:" + ID_PAYLOAD_PATTERN + r"(?![A-Za-z0-9_:])"
+)
+
+# The observer is trusted runtime identity, and must itself belong to this ROOT.
+# This predicate is applied before every query limit and before reading Work bodies.
+_QUERY_AGENT_SCOPE = """s.root_session_id=%s AND EXISTS (
+    SELECT 1 FROM pulsara_v3.sessions observer WHERE observer.id=%s AND (
+      (observer.id=%s AND observer.root_session_id IS NULL) OR
+      (observer.root_session_id=%s AND (s.id=observer.id OR EXISTS (
+        SELECT 1 FROM pulsara_v3.agent_known_sessions known
+        WHERE known.observer_session_id=observer.id AND known.known_session_id=s.id
+      )))
+    ))"""
+
+
+def _session_ids_in_text(*texts):
+    return {
+        match.group()
+        for text in texts if isinstance(text, str)
+        for match in _SESSION_IN_TEXT.finditer(text)
+    }
+
 
 class _WorkInputsReplan(Exception):
     pass
 
 
-def _replan_work_inputs(operation):
+def _retry_agent_transaction(operation):
     @wraps(operation)
     def run(*args, **kwargs):
         while monotonic() < kwargs["deadline_monotonic"]:
             try:
                 return operation(*args, **kwargs)
-            except _WorkInputsReplan:
+            except (_WorkInputsReplan, DeadlockDetected, SerializationFailure):
                 continue
-        raise TimeoutError("Work input lock planning deadline expired")
+        raise TimeoutError("Agent transaction deadline expired")
 
     return run
 
 
 class _SubagentOperations:
+    @staticmethod
+    def _merge_known_agents(connection, *, root_session_id, pairs):
+        pairs = {(observer, known) for observer, known in pairs if observer != known}
+        if not pairs:
+            return
+        # Endpoint locks make deletion either precede this admission or wait for
+        # its commit. They do not acquire another session's writer lease.
+        identities = sorted({identity for pair in pairs for identity in pair})
+        rows = connection.execute(
+            """SELECT id FROM pulsara_v3.sessions
+               WHERE root_session_id=%s AND id=ANY(%s::text[])
+               ORDER BY id FOR KEY SHARE""",
+            (root_session_id, identities),
+        ).fetchall()
+        valid = {str(row["id"]) for row in rows}
+        for observer, known in sorted(pairs):
+            if observer in valid and known in valid:
+                connection.execute(
+                    "INSERT INTO pulsara_v3.agent_known_sessions (observer_session_id, known_session_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                    (observer, known),
+                )
+
     @staticmethod
     def _work_input_source_sessions(connection, *, root_session_id, work_ids):
         if not work_ids:
@@ -181,7 +229,7 @@ class _SubagentOperations:
             p.text for p in prompt.content.parts if isinstance(p, LLMTextPart)
         )
 
-    @_replan_work_inputs
+    @_retry_agent_transaction
     def admit_agent_requests(
         self,
         root_guard,
@@ -265,7 +313,7 @@ class _SubagentOperations:
                 raise ValueError("duplicate Work identity")
             for req in requests:
                 session = connection.execute(
-                    "SELECT * FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE",
+                    "SELECT * FROM pulsara_v3.sessions WHERE id=%s FOR NO KEY UPDATE",
                     (req.agent_id,),
                 ).fetchone()
                 if req.create_agent:
@@ -304,7 +352,28 @@ class _SubagentOperations:
                     if work_id not in batch_ids
                 ),
             )
+            source_agents = self._work_input_source_sessions(
+                connection,
+                root_session_id=root_guard.session_id,
+                work_ids={
+                    work_id for req in requests
+                    for work_id in (*req.depends_on, *req.materials)
+                } - batch_ids,
+            )
+            source_agents.update({req.work_id: req.agent_id for req in requests})
+            introductions = set()
             for req in requests:
+                introductions.update(
+                    (req.agent_id, candidate)
+                    for candidate in _session_ids_in_text(
+                        req.instruction, *req.initial_context
+                    )
+                )
+                introductions.update(
+                    (req.agent_id, source_agents[work_id])
+                    for work_id in (*req.depends_on, *req.materials)
+                    if work_id in source_agents
+                )
                 inputs = []
                 for ordinal, work_id in enumerate(req.depends_on):
                     if work_id in batch_ids:
@@ -360,6 +429,11 @@ class _SubagentOperations:
                             else work.get("diagnostic") or work["terminal_reason"],
                         }
                     )
+                introductions.update(
+                    (req.agent_id, candidate)
+                    for item in inputs
+                    for candidate in _session_ids_in_text(item["body"])
+                )
                 prompt = freeze_canonical_prompt(
                     FrozenPromptContent((LLMTextPart(req.instruction),))
                 )
@@ -411,6 +485,9 @@ class _SubagentOperations:
                     actor_id,
                     {"delivery_mode": "NEW_TURN", "input_origin": "AGENT_INSTRUCTION"},
                 )
+            self._merge_known_agents(
+                connection, root_session_id=root_guard.session_id, pairs=introductions
+            )
             # Resolve already-terminal prerequisites, including cascading stopped requests,
             # in the very same atomic admission transaction.
             self._resolve_agent_dependencies_in_connection(
@@ -592,6 +669,7 @@ class _SubagentOperations:
                 )
                 failure = None
                 updated = False
+                materialized = []
                 for condition in inputs:
                     if (
                         condition["kind"] != "dependency"
@@ -608,6 +686,7 @@ class _SubagentOperations:
                         break
                     if work["status"] == "completed":
                         condition["body"] = work["final"]
+                        materialized.append(work["final"])
                         updated = True
                 if failure is not None:
                     reason = "DEPENDENCY_NOT_SUCCESSFUL:" + failure
@@ -631,6 +710,14 @@ class _SubagentOperations:
                         "UPDATE pulsara_v3.prompt_queue_items SET work_inputs=%s WHERE id=%s",
                         (Jsonb(inputs), row["id"]),
                     )
+                    self._merge_known_agents(
+                        connection,
+                        root_session_id=root_session_id,
+                        pairs={
+                            (str(row["session_id"]), candidate)
+                            for candidate in _session_ids_in_text(*materialized)
+                        },
+                    )
                 else:
                     continue
                 progressed = True
@@ -638,7 +725,7 @@ class _SubagentOperations:
             if not progressed:
                 return tuple(changed)
 
-    @_replan_work_inputs
+    @_retry_agent_transaction
     def resolve_agent_dependencies(self, *, session_id, deadline_monotonic):
         self._begin_event_batch()
         try:
@@ -686,6 +773,22 @@ class _SubagentOperations:
             return self._agent_work_in_connection(
                 connection, root_session_id=root_session_id, work_id=work_id
             )
+
+    def query_visible_agent_work(
+        self, *, root_session_id, observer_session_id, work_id, deadline_monotonic
+    ):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                _WORK_SELECT + " AND q.id=%s AND " + _QUERY_AGENT_SCOPE,
+                (root_session_id, work_id, root_session_id, observer_session_id,
+                 root_session_id, root_session_id),
+            ).fetchone()
+            return None if row is None else self._agent_work_value(connection, row)
 
     def read_agent_work_graph_facts(
         self, *, root_session_id, work_id, deadline_monotonic
@@ -774,8 +877,9 @@ class _SubagentOperations:
                 for row in rows
             )
 
-    def list_agent_sessions(
-        self, *, root_session_id, cursor=None, limit=20, deadline_monotonic
+    def list_query_agent_sessions(
+        self, *, root_session_id, observer_session_id, cursor=None, limit=20,
+        active_only=False, deadline_monotonic,
     ):
         if limit < 1:
             raise ValueError("page limit must be positive")
@@ -784,37 +888,18 @@ class _SubagentOperations:
             row_factory=dict_row,
             deadline_monotonic=deadline_monotonic,
         ) as connection:
-            return tuple(
-                dict(x)
-                for x in connection.execute(
-                    _RUNTIME_SELECT
-                    + " WHERE s.root_session_id=%s AND (%s::text IS NULL OR s.id>%s) ORDER BY s.id LIMIT %s",
-                    (root_session_id, cursor, cursor, limit),
-                ).fetchall()
+            active = (
+                " AND (current_work_id IS NOT NULL OR queued_count > 0)"
+                if active_only else ""
             )
-
-    def list_active_agent_sessions(
-        self, *, root_session_id, cursor=None, limit=50, deadline_monotonic
-    ):
-        """Page handoff candidates after deriving and filtering canonical Work state."""
-        if limit < 1:
-            raise ValueError("page limit must be positive")
-        with self._provider.connection(
-            lane=PostgresConnectionLane.INSPECTOR,
-            row_factory=dict_row,
-            deadline_monotonic=deadline_monotonic,
-        ) as connection:
-            return tuple(
-                dict(row)
-                for row in connection.execute(
-                    "SELECT * FROM ("
-                    + _RUNTIME_SELECT
-                    + " WHERE s.root_session_id=%s) AS runtime"
-                    + " WHERE (current_work_id IS NOT NULL OR queued_count > 0)"
-                    + " AND (%s::text IS NULL OR agent_id>%s) ORDER BY agent_id LIMIT %s",
-                    (root_session_id, cursor, cursor, limit),
-                ).fetchall()
-            )
+            rows = connection.execute(
+                "SELECT * FROM (" + _RUNTIME_SELECT + " WHERE " + _QUERY_AGENT_SCOPE
+                + ") AS runtime WHERE (%s::text IS NULL OR agent_id>%s)" + active
+                + " ORDER BY agent_id LIMIT %s",
+                (root_session_id, observer_session_id, root_session_id, root_session_id,
+                 cursor, cursor, limit),
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
 
     def list_agent_works(
         self, *, root_session_id, agent_id, cursor=None, limit=20, deadline_monotonic
@@ -843,6 +928,33 @@ class _SubagentOperations:
                 (root_session_id, agent_id, cursor, agent_id, cursor, limit),
             ).fetchall()
             return tuple(self._agent_work_value(connection, x) for x in rows)
+
+    def list_query_agent_works(
+        self, *, root_session_id, observer_session_id, agent_id, cursor=None,
+        limit=20, deadline_monotonic,
+    ):
+        if limit < 1:
+            raise ValueError("page limit must be positive")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            visible = connection.execute(
+                "SELECT 1 FROM pulsara_v3.sessions s WHERE s.id=%s AND " + _QUERY_AGENT_SCOPE,
+                (agent_id, root_session_id, observer_session_id, root_session_id, root_session_id),
+            ).fetchone()
+            if visible is None:
+                raise ValueError("Agent is unavailable in this query scope")
+            rows = connection.execute(
+                _WORK_SELECT
+                + """ AND q.session_id=%s AND (%s::text IS NULL OR q.queue_sequence >
+                (SELECT queue_sequence FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s))
+                ORDER BY q.queue_sequence LIMIT %s""",
+                (root_session_id, agent_id, cursor, agent_id, cursor, limit),
+            ).fetchall()
+            return tuple(self._agent_work_value(connection, row) for row in rows)
 
     def list_root_agent_session_ids(self, *, root_session_id, deadline_monotonic):
         with self._provider.connection(
@@ -925,7 +1037,7 @@ class _SubagentOperations:
                 (at or datetime.now(timezone.utc), session_id),
             ).fetchone()["idle_since"]
 
-    @_replan_work_inputs
+    @_retry_agent_transaction
     def cancel_agent_requests(
         self,
         root_guard,
@@ -990,6 +1102,7 @@ class _SubagentOperations:
                 for x in ids
             )
 
+    @_retry_agent_transaction
     def enqueue_agent_steer(
         self,
         guard,
@@ -1051,6 +1164,16 @@ class _SubagentOperations:
             ).fetchone()
             if turn is None:
                 return None
+            if input_origin == "AGENT_MESSAGE":
+                pairs = {
+                    (guard.session_id, candidate)
+                    for candidate in _session_ids_in_text(text)
+                }
+                pairs.add((guard.session_id, source_session_id))
+                pairs.add((source_session_id, guard.session_id))
+                self._merge_known_agents(
+                    connection, root_session_id=source["root_id"], pairs=pairs
+                )
             prompt = freeze_canonical_prompt(FrozenPromptContent((LLMTextPart(text),)))
             pub = materialize_canonical_prompt(
                 connection,

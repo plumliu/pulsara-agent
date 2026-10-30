@@ -31,7 +31,7 @@
 | 空 handoff | PMCA 候选全空且没有 TODO 时返回空 source；不为单独发送承接句制造摘要 |
 | 普通环境 | 删除模型输入中的 Cell 索引及专用采集／筛选／预算／省略链路；环境保留工作区、时区等事实 |
 | 用户 Cell 控制 | 保留用户 UI 查看／停止 Cell 的接口和数据来源；删除模型环境投影不删除用户控制能力 |
-| 权限 | `query_agents`／`query_cells` 仍只供 ROOT bypass；不为压缩、Plan 或权限切换增加特权查询 |
+| 权限 | `query_agents` 供 ROOT 与 Subagent bypass，按调用方范围查询；`query_cells` 仅供 ROOT bypass |
 | 摘要预算 | 仅 PMCA 计量视图最多 3,200 个当前 V3 启发式 tokens，含说明与封装；TODO／todo_counts 完整追加且不占用此额度；完整输入仍受现有 provider 输入预算约束 |
 
 ### 0.2 不变量与非目标
@@ -215,7 +215,7 @@ Work 已结束不代表已冻结通知的写入结果已经确定。Host 的 Mon
 | Process | 现有物理存活判断为真，包括仍存活的进程组／interop | 已结束且仅保留历史记录的对象 | PROCESS target、`status:running` |
 | Monitor | 当前调用方可见，状态 ACTIVE 或 DORMANT | CLOSED，无论内部是否尚待结算删除 | MONITOR target、PROCESS target、state、既有 pending_observation |
 | Cell | queued／running；或终态但尚未确认终态；或 output 非空；或内部 pending 字典非空 | 终态已确认、无输出、无 pending，仅剩 observation／VM 释放等内部收尾的对象 | CELL target、state、has_unread_output、既有 pending_calls |
-| Agent | 属于当前 ROOT，`current_work_id IS NOT NULL OR queued_count > 0` | 尚保留但没有当前或排队 Work 的闲置 Agent | AGENT target、current_work 的 WORK target 或 null、queued_count |
+| Agent | 属于调用方可查询范围，`current_work_id IS NOT NULL OR queued_count > 0` | 尚保留但没有当前或排队 Work 的闲置 Agent | AGENT target、current_work 的 WORK target 或 null、queued_count |
 | TODO | 沿当前 ROOT run 的完整冻结快照 | 原 owner 判定没有当前清单时为空 | 原顺序、status、text 和原 counts |
 
 Process 的命令预览／cwd、Agent 名称预览不再作为对象候选行的必需内容，完整信息由原 query 提供。Monitor 与当前 Work／Process 的直接关联、Agent 当前 Work 以及 Cell 的未读／pending 状态仍保留，不能只输出难以区分的一串裸字符串。
@@ -230,16 +230,16 @@ Cell pending_calls 保持公开字段原有含义，不把 prepare 改计入它�
 - Monitor ROOT 沿全 Host 可见范围；Subagent 必须同时传真实 `agent_id=session_id` 和本次真实 `work_turn_id` 给 coordinator 现有过滤入口。
 - 当前 Subagent handoff 无参冻结全部 Monitor 后读取不存在的 `session_id` 字段，这条错误路径在本轮替换。不得通过 `.get()` 跳过所有记录掩盖问题，也不能退化成仅 Agent、不限 Work 的过滤。
 - 当前 freezer 接口不足以携带真实 Work turn 时，从已有 compaction scope／调用上下文显式传入；不借“最近一次调用”缓存猜 turn，不新增当前 Work 映射。
-- Subagent 不获得 ROOT Agent／Cell 库存；ROOT Agent 只来自自身 root_session_id；Cell 只来自当前 CodeModeHost。
+- ROOT 的 Agent 范围为其当前成员；Subagent 的 Agent 范围为自身及已知成员，不获得 ROOT 全库存或 Cell 库存。Cell 只来自当前 CodeModeHost；已知集合以 [已知对象与交接规格](PULSARA_SUBAGENT_KNOWN_AGENTS_QUERY_AND_HANDOFF_IMPLEMENTATION_SPEC.zh.md) 为准。
 - 这次观察的 scope 不授权之后的工具调用。query 继续检查执行时的权限、范围和存活性。
 
 ### 6.3 Agent 不能只过滤前 50 行
 
 现有 handoff 读取所有 Agent 的首页 50 行，再制造特殊 `{omitted_agents,next_cursor}` 条目，不能继续用于新的活跃状态筛选。
 
-在现有 repository owner 内复用 `_RUNTIME_SELECT` 的 current_work／queued_count 推导：先按 ROOT 和活跃条件筛选，再按 Agent ID 排序并沿现有读取边界分页采集。不得先 LIMIT 全库存首页，再在 Python 过滤，否则前 50 个闲置 Agent 会遮住后面的活动 Agent。
+在现有 repository owner 内复用 `_RUNTIME_SELECT` 的 current_work／queued_count 推导：先按调用方查询范围和活跃条件筛选，再按 Agent ID 排序并沿现有读取边界分页采集。不得先 LIMIT 全库存首页，再在 Python 过滤，否则前 50 个闲置 Agent 会遮住后面的活动 Agent。
 
-允许在该 owner 增加专用于 handoff 的只读查询／内部筛选参数；不新增表、索引、Agent 状态投影权威或模型工具过滤参数。复用真实 request／turn 状态，不能将加载在内存与否当成 Agent 活跃。
+handoff 复用该 owner 的只读范围和活跃筛选，不为 handoff 新增表、索引、Agent 状态投影权威或模型工具过滤参数。复用真实 request／turn 状态，不能将加载在内存与否当成 Agent 活跃。
 
 50 只作为既有单页读取大小，不作为候选对象总量上限。预算装箱前不混入分页标记伪装 Agent；按 §8 在预算允许范围继续读取活跃候选，确认下一项装不下时停止，不为计算遗漏总数扫描全部库存。读取失败沿既有 typed 错误路径处理，不能伪装成预算省略或空库存。
 
@@ -306,6 +306,8 @@ Agent 无 pending Work／running turn 后进入原 idle 状态；同一 idle 起
 **仅当符合 §6 状态条件的对象因本节预算没有完整展示时，再附带以下一句：**
 
 > Additional active or pending objects are omitted; when available, use query_processes, query_monitors, query_cells, or query_agents without a target to discover currently retained objects.
+
+Subagent 使用同一说明但不列 `query_cells`，该实际文案同样参与预算测量。
 
 PMCA 未超限时完全不输出这句，也不输出零遗漏提示、遗漏计数或额外查询说明。两段文字均计入 PMCA 的 3,200 上限。TODO 大小本身不触发超限句，也不挤占 PMCA 名额。
 

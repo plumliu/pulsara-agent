@@ -129,7 +129,7 @@ def test_round4_closed_oracle_and_permission_presets() -> None:
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     assert set(PLAN_INTERACTION_CONTRACTS.values()) == {
         "ask_plan_question",
         "exit_plan",
@@ -919,6 +919,7 @@ def test_round4_force_exit_fence_rejects_every_new_resolution_write() -> None:
         host.workspace = SimpleNamespace(workspace_key=derive_id("workspace", "plan-test"))
         host._plan_exit_fence = True  # type: ignore[attr-defined]
         host._external_new_turn_accepting = False  # type: ignore[attr-defined]
+        host._manual_compaction_command_attempts = {}  # type: ignore[attr-defined]
         host._active_task = None  # type: ignore[attr-defined]
         host._active_turn_id = None  # type: ignore[attr-defined]
         host._active_command_id = None  # type: ignore[attr-defined]

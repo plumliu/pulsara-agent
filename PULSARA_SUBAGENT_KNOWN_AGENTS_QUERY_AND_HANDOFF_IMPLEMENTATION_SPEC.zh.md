@@ -1,6 +1,6 @@
 # Subagent 已知对象、查询与压缩交接实施规格
 
-状态：已冻结。经集合／事务、工具查询、压缩、验收及独立一致性审阅；本轮仅修订实施规格，尚未实施生产代码或 schema 变更。
+状态：已实施并完成验证；ROOT 完整 diff 审阅与独立一致性审阅完成。结果及范围见 [验收记录](output/known-agents-implementation-20261030/verification.zh.md)。
 
 ## 1. 目标与边界
 
@@ -56,6 +56,7 @@ Subagent A 的普通 Agent 范围 = ({A} ∪ K(A)) ∩ 同一 ROOT 下当前仍�
 | 工具目录 | `capability/builtin_catalog.py` | 将 query_agents 从 ROOT 专属分类移入共享分类；保持 run_agent、stop_agent 的原范围 |
 | 工具实际可见性 | `tool_runtime.py::sealed_builtin_capability_snapshot` | 移除 SUBAGENT 对 query_agents 的过滤；不开放其他被过滤工具 |
 | 实际工具授权 | `tool_runtime.py::authorize` | 从 `root_tools` 移除 query_agents，保持已有共同权限检查；不能只放开 schema 和 invoke |
+| 工具权限分类 | `tool_permission.py` | query_agents 移出 parent family 后仍保留 bypass 门禁；send／wait 沿既有权限规则 |
 | 工具执行入口 | `subagents/collaboration_api.py::invoke` | 允许 Subagent query_agents；可信调用者决定范围，公共参数不能指定观察者 |
 | Work 接纳 | `_repository/subagents.py::admit_agent_requests` | 在原接纳事务内扫描 instruction、登记明确材料／依赖来源和已冻结材料正文 |
 | 初始上下文 | `provider_dispatch.py::_prepare_agent_invocation_snapshot` → `CollaborationToolPort._run` | 复用选定的 `req.initial_context` 公共文本投影，在 Work 接纳事务中扫描；不重新读取 ROOT 历史 |
@@ -223,4 +224,4 @@ ROOT 是通信目标别名，不是 Subagent，也没有委派 Work。为了单�
 - 当前 `tests/dogfood/run_compaction_request_start_dogfood.py` 可复用配置和证据收集，但只覆盖 ROOT，不能当作 Subagent 已通过的证据。子代理触发与采用链路参考 `test_compaction_request_start_integration.py::test_subagent_first_summary_uses_full_initial_group_and_current_work` 和 `test_agent_session_host.py::test_child_first_preparation_adopts_real_common_snapshot_for_next_work`，使用现有 owner 与压缩策略，不添加生产捷径或复活旧任务工具。
 - provider 验证复用有效 Pulsara home 的只读生产配置，通过 LocalSettingsStore 加载；保留具体工具参数、返回和 provider 证据，排除实际凭据值。不以模型未实际调用工具的自然语言陈述代替验证。
 
-本轮交付只包含本规格文档；上述实现、测试和 provider 验证是后续实施的完成条件。
+上述实施与验证已完成；实际测试、真实 provider 证据及保留的失败现场见 [验收记录](output/known-agents-implementation-20261030/verification.zh.md)。

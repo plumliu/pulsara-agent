@@ -95,6 +95,15 @@ CREATE CONSTRAINT TRIGGER trg_pulsara_v3_session_root
 AFTER INSERT OR UPDATE ON pulsara_v3.sessions DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION pulsara_v3.enforce_session_root();
 
+CREATE TABLE pulsara_v3.agent_known_sessions (
+    observer_session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
+    known_session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
+    PRIMARY KEY (observer_session_id, known_session_id),
+    CHECK (observer_session_id <> known_session_id)
+);
+CREATE INDEX idx_pulsara_v3_agent_known_sessions_known
+    ON pulsara_v3.agent_known_sessions (known_session_id);
+
 CREATE TABLE pulsara_v3.blobs (
     id text CHECK (id ~ '^(blob|image):[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     workspace_id text NOT NULL,

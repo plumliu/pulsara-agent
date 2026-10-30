@@ -168,12 +168,12 @@ def project_tool_result_storage_body(
     status = value.get("status")
     control = value.get("plan_control")
     if control == "QUESTION_CANCELLED":
-        if (status != "cancelled" or value.get("cancelled_by") != "USER_STEER"
-            or value.get("message") != "被用户取消"):
+        if (status != "cancelled" or value.get("cancelled_by") != "USER_CANCELLED"
+            or value.get("message") != "用户取消了问题"):
             raise ValueError("Plan question cancellation carrier is invalid")
         return canonical_json_bytes({
             "status": "cancelled", "plan_control": "QUESTION_CANCELLED",
-            "cancelled_by": "USER_STEER", "message": "被用户取消",
+            "cancelled_by": "USER_CANCELLED", "message": "用户取消了问题",
         }).decode("utf-8")
     if status != "success" or control not in {
         "ENTERED_PLAN",

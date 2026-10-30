@@ -657,7 +657,9 @@ def test_human_steer_during_ordinary_summary_after_question_resolution(
 ):
     from pulsara_agent.conversation_kernel.compaction.contracts import ResolvedCompactionPolicy
     from pulsara_agent.primitives.permission import PermissionMode
-    from tests.test_compaction_request_start_integration import _SummaryTransport
+    from pulsara_agent.conversation_kernel.repository import PlanQuestionAnswer
+    from pulsara_agent.primitives.plan_workflow import PlanQuestionAnswerKind
+    from tests.test_compaction_request_start_integration import _SUMMARY, _SummaryTransport
     from tests.test_stage2_conversation_runner import _CompactionScriptedModel
     from tests.test_round4_plan_host import _PreparedTestExecution, _tool_call
     class QuestionSummaryModel(_CompactionScriptedModel):
@@ -703,6 +705,23 @@ def test_human_steer_during_ordinary_summary_after_question_resolution(
             q1 = await session.submit_prompt(command_id=random_id("command"), content=PromptContent.text("FIRST_HUMAN_GUIDANCE"))
             first = asyncio.create_task(session.steer_queued_prompt(command_id=random_id("command"),
                 source_queue_item_id=q1.prompt_delivery.queue_item_id, target_turn_id=target))
+            await first
+            with session.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                deadline_monotonic=monotonic()+10,
+            ) as connection:
+                question = connection.execute("""SELECT i.id,i.status,i.control_tool_result_id,
+                    i.plan_workflow_id,w.workflow_revision FROM pulsara_v3.plan_interactions i
+                    JOIN pulsara_v3.plan_workflows w ON w.session_id=i.session_id AND w.id=i.plan_workflow_id
+                    WHERE i.session_id=%s AND i.kind='QUESTION'""", (session.session_id,)).fetchone()
+                assert question['status'] == 'OPEN' and question['control_tool_result_id'] is None
+            assert not running.done() and len(model.requests) == 2
+            assert not model.summary_transport.contexts
+            assert [row['status'] for row in snapshot(session)[1] if row['input_origin'] == 'HUMAN_STEER'] == ['PENDING']
+            await session.resolve_plan_question(command_id=random_id('command'),
+                workflow_id=question['plan_workflow_id'],
+                expected_workflow_revision=question['workflow_revision'], interaction_id=question['id'],
+                answer=PlanQuestionAnswer(PlanQuestionAnswerKind.FREE_TEXT, free_text='Continue investigation'))
             await asyncio.wait_for(model.summary_transport.started.wait(), 15)
             q2 = await session.submit_prompt(command_id=random_id("command"), content=PromptContent.text("SECOND_HUMAN_GUIDANCE"))
             second = asyncio.create_task(session.steer_queued_prompt(command_id=random_id("command"),
@@ -711,8 +730,8 @@ def test_human_steer_during_ordinary_summary_after_question_resolution(
                 _, queue, _ = snapshot(session)
                 return len([row for row in queue if row["delivery_mode"] == "STEER_ACTIVE_TURN" and row["status"] == "PENDING"]) == 2
             await eventually(both_accepted)
-            # OPEN Question is a hard source boundary. This legal summary
-            # starts only after its original cancellation has settled.
+            # OPEN Question is a hard source boundary. This summary starts
+            # only after the real answer and its tool result have settled.
             assert await session._plan_interactions.current_open() is None
             assert snapshot(session)[0][-1]["status"] == "RUNNING"
             assert len(model.summary_transport.contexts) == 1
@@ -723,6 +742,16 @@ def test_human_steer_during_ordinary_summary_after_question_resolution(
             final_input = "\n".join(text_part_values(part for message in model.requests[-1].compiled_input.messages for part in message.content))
             assert final_input.index("FIRST_HUMAN_GUIDANCE") < final_input.index("SECOND_HUMAN_GUIDANCE")
             assert "ASK_WITH_PLAN" in final_input
+            assert "Continue investigation" in final_input
+            assert _SUMMARY in final_input
+            with session.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                deadline_monotonic=monotonic()+10,
+            ) as connection:
+                revisions = connection.execute("""SELECT revision_ordinal,context_snapshot_id
+                    FROM pulsara_v3.turn_context_binding_revisions WHERE session_id=%s AND turn_id=%s
+                    ORDER BY revision_ordinal""", (session.session_id, target)).fetchall()
+                assert any(row['revision_ordinal'] > 0 and row['context_snapshot_id'] for row in revisions)
             turns, queue, entries = snapshot(session)
             current = next(row for row in turns if row["id"] == target)
             assert current["status"] == "COMPLETED"

@@ -7,7 +7,6 @@ keeps automatic continuation tasks alive when an origin request detaches.
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.repository_errors import PlanControlSupersededBySteer
 
 from pulsara_agent.identity import derive_id
 
@@ -517,17 +516,6 @@ class PlanToolBatchCoordinator:
         hook_cwd: str = ".",
         continuity_epoch_nonce: object | None = None,
     ) -> AcceptedPlanToolBatch:
-        pending = await self._io.run(
-            self._repository.read_pending_prompt_steer_facts,
-            session_id=self._writer_lease.guard.session_id,
-            target_turn_id=canonical_facts.canonical_input.identity.turn_id,
-            maximum_items=1,
-            deadline_monotonic=deadline,
-        )
-        if pending:
-            raise PlanControlSupersededBySteer(
-                "pending Steer supersedes the undispatched Plan batch"
-            )
         selected = calls[selected_call_index]
         kind = {
             "enter_plan": PlanToolControlKind.ENTER,
@@ -845,10 +833,6 @@ class PlanToolBatchCoordinator:
             if pre_context_reservation is not None:
                 pre_context_reservation.retire()
             if waiter is not None and self._plan_interactions is not None:
-                if isinstance(error, PlanControlSupersededBySteer):
-                    # No QUESTION was published and nobody awaits this dormant
-                    # future. The old batch is settled by the ordinary executor.
-                    waiter._future.cancel()
                 await self._plan_interactions.abandon(waiter, error)
             raise
 

@@ -33,7 +33,7 @@ def _runtime(host, read_source):
         session_id=port._session_id, turn_id=random_id("turn"),
         assistant_entry_id=random_id("entry"), tool_call_id="query_test", attempt_id=random_id("attempt"),
         attempt_permission_snapshot_fingerprint="permission", permission_snapshot_fingerprint="permission",
-        conversation_scope_kind="ROOT", surface_borrow=borrow, steer_event=None, code_cell_id=None,
+        conversation_scope_kind="ROOT", surface_borrow=borrow, cell_cancel_event=None, code_cell_id=None,
     )
     return port, context
 

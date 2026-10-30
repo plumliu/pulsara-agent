@@ -106,7 +106,7 @@ def test_collaboration_observes_only_validated_targets_before_wait_or_message_re
         port.bind_cell_observer(Observer())
         context = SimpleNamespace(session_id=root, code_cell_id=random_id("cell"),
             effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-            agent_message_cursors={}, steer_event=asyncio.Event())
+            agent_message_cursors={}, cell_cancel_event=asyncio.Event())
         await port.invoke(tool_name="query_agents", arguments={}, invocation_context=context)
         assert seen == []
         with pytest.raises(ValueError):

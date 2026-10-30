@@ -190,7 +190,7 @@ class KernelToolInvocationContext:
     image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
     session_content_range: SessionContentRange | None = None
     permission_confirmation_granted: bool = False
-    steer_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
+    cell_cancel_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
     capability_call: CapabilityManagementCall | None = field(
         default=None, repr=False, compare=False
     )
@@ -751,7 +751,7 @@ class ToolInvocationPort(Protocol):
         tool_name: str,
         assistant_entry_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
-        steer_event: asyncio.Event | None = None,
+        cell_cancel_event: asyncio.Event | None = None,
     ) -> KernelToolAuthorization: ...
 
     async def request_capability_form(
@@ -762,7 +762,7 @@ class ToolInvocationPort(Protocol):
         assistant_entry_id: str,
         tool_call_id: str,
         permission_snapshot: FrozenRunPermissionSnapshot,
-        steer_event: asyncio.Event | None = None,
+        cell_cancel_event: asyncio.Event | None = None,
     ) -> KernelToolAuthorization: ...
 
     def prepare_permission_request(

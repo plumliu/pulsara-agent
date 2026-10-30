@@ -102,19 +102,20 @@ def test_capability_owner_rejects_mixed_query_before_observing_runtime(monkeypat
 def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
     async def run():
         work_row = {"agent_id": AGENT, "work_id": WORK, "instruction": "Exact work", "status": "completed", "final": "Exact final"}
-        repository = NS(list_agent_sessions=object(), list_agent_works=object(), query_agent_work=object())
+        repository = NS(list_query_agent_sessions=object(), list_query_agent_works=object(), query_visible_agent_work=object())
         calls = []
 
         async def read(method, **values):
             calls.append((method, values))
             assert values["root_session_id"] == ROOT
-            if method is repository.list_agent_sessions:
+            assert values["observer_session_id"] in {ROOT, AGENT}
+            if method is repository.list_query_agent_sessions:
                 return [{"agent_id": AGENT}, {"agent_id": OTHER}]
-            if method is repository.list_agent_works:
+            if method is repository.list_query_agent_works:
                 if values["agent_id"] != AGENT:
-                    return None
+                    raise ValueError("AGENT does not exist in this collaboration")
                 return [work_row]
-            assert method is repository.query_agent_work
+            assert method is repository.query_visible_agent_work
             return work_row if values["work_id"] == WORK else None
 
         port = CollaborationToolPort(repository=repository, root_session_id=ROOT, session_id=ROOT,
@@ -125,8 +126,9 @@ def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
             return json.loads(result.content)
 
         page = await query({"max_items": 1})
-        assert page == {"agents": [{"agent": agent_target(AGENT), "name": None}], "next_cursor": AGENT}
+        assert page == {"root": agent_target("ROOT"), "agents": [{"agent": agent_target(AGENT), "name": None}], "next_cursor": AGENT}
         assert calls[-1][1]["limit"] == 2
+        assert calls[-1][1]["observer_session_id"] == ROOT
         works = await query({"target": agent_target(AGENT), "cursor": WORK, "max_items": 1})
         assert works["works"][0]["final"] == "Exact final"
         assert calls[-1][1]["cursor"] == WORK
@@ -138,9 +140,13 @@ def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
         for name in ("list_agents", "inspect_agent"):
             with pytest.raises(ValueError, match="unknown collaboration"):
                 await port.invoke(tool_name=name, arguments={}, invocation_context=context)
-        with pytest.raises(ValueError, match="ROOT"):
-            await port.invoke(tool_name="query_agents", arguments={}, invocation_context=NS(session_id=AGENT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS))
+        with pytest.raises(ValueError):
+            await query({"target": agent_target("ROOT")})
         assert len(calls) == before
+        await port.invoke(tool_name="query_agents", arguments={}, invocation_context=NS(
+            session_id=AGENT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS))
+        assert calls[-1][1]["observer_session_id"] == AGENT
+        assert len(calls) == before + 1
 
     asyncio.run(run())
 

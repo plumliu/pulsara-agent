@@ -84,11 +84,11 @@ class CollaborationToolPort:
     ) -> tuple[dict[str, object], ...]:
         # Fifty is the existing per-read boundary. The renderer asks for another
         # active page only while its observation budget still needs candidates.
-        if self.session_id != self.root_session_id:
-            return ()
         rows = await self._read(
-            self.repository.list_active_agent_sessions,
+            self.repository.list_query_agent_sessions,
             root_session_id=self.root_session_id,
+            observer_session_id=self.session_id,
+            active_only=True,
             cursor=cursor,
             limit=50,
             deadline_monotonic=self.runtime.read_deadline(),
@@ -258,7 +258,7 @@ class CollaborationToolPort:
         is_root = context.session_id == self.root_session_id
         if context.effective_permission_mode != PermissionMode.BYPASS_PERMISSIONS:
             raise ValueError("collaboration operations require bypass permissions")
-        if tool_name not in {"send_agent_message", "wait_agent"} and not is_root:
+        if tool_name not in {"query_agents", "send_agent_message", "wait_agent"} and not is_root:
             raise ValueError("operation is available only to ROOT")
         if (
             tool_name in {"run_agent.batch", "wait_agent.works"}
@@ -277,14 +277,16 @@ class CollaborationToolPort:
         elif tool_name == "query_agents" and "target" not in arguments:
             limit = arguments.get("max_items", 50)
             rows = await self._read(
-                self.repository.list_agent_sessions,
+                self.repository.list_query_agent_sessions,
                 root_session_id=self.root_session_id,
+                observer_session_id=context.session_id,
                 cursor=arguments.get("cursor"),
                 limit=limit + 1,
                 deadline_monotonic=self.runtime.read_deadline(),
             )
             selected = rows[:limit]
             result = {
+                "root": agent_target("ROOT"),
                 "agents": [self._public_agent(row) for row in selected],
                 "next_cursor": self._agent_cursor(selected[-1])
                 if len(rows) > limit
@@ -293,13 +295,28 @@ class CollaborationToolPort:
         elif tool_name == "query_agents":
             target = arguments["target"]
             if target["kind"] == "WORK":
-                result = await self._work(target_id(target, "WORK"))
+                row = await self._read(
+                    self.repository.query_visible_agent_work,
+                    root_session_id=self.root_session_id,
+                    observer_session_id=context.session_id,
+                    work_id=target_id(target, "WORK"),
+                    deadline_monotonic=self.runtime.read_deadline(),
+                )
+                if row is None:
+                    raise ValueError("WORK does not exist in this collaboration")
+                result = self._public_work(row)
                 self._observe_cell(context, ((result["agent"]["agent_id"], result["target"]["work_id"], "query"),))
             else:
                 identity = target_id(target, "AGENT")
                 limit = arguments.get("max_items", 50)
-                rows = await self._agent_rows(
-                    identity, cursor=arguments.get("cursor"), limit=limit + 1
+                rows = await self._read(
+                    self.repository.list_query_agent_works,
+                    root_session_id=self.root_session_id,
+                    observer_session_id=context.session_id,
+                    agent_id=identity,
+                    cursor=arguments.get("cursor"),
+                    limit=limit + 1,
+                    deadline_monotonic=self.runtime.read_deadline(),
                 )
                 selected = rows[:limit]
                 self._observe_cell(context, ((identity, None, "query"),))
@@ -418,15 +435,15 @@ class CollaborationToolPort:
 
     @staticmethod
     def _interrupted(context) -> bool:
-        return context.steer_event is not None and context.steer_event.is_set()
+        return context.cell_cancel_event is not None and context.cell_cancel_event.is_set()
 
     async def _wait_change(self, revision, context, *, timeout=None):
         """Race observations with caller control, without cancelling target work."""
         changed = asyncio.create_task(self.runtime.wait_for_agent_change(revision))
         control = (
             None
-            if context.steer_event is None
-            else asyncio.create_task(context.steer_event.wait())
+            if context.cell_cancel_event is None
+            else asyncio.create_task(context.cell_cancel_event.wait())
         )
         observers = (changed,) if control is None else (changed, control)
         try:

@@ -853,15 +853,14 @@ class _ConversationOperations:
                 """,
                 (guard.session_id, cut.turn_id),
             ).fetchone()
-            # Accepted Steer closes its exact open Plan question before that
-            # input can be appended. Ordinary answers still yield to Steer.
-            question_cancellation = False
+            # A real answer or explicit cancellation closes the exact open Plan
+            # question before the queued suffix can be appended.
+            question_resolution = False
             if len(candidate.unpublished_items) == 1:
                 item = candidate.unpublished_items[0]
                 if (item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
-                    and item.tool_result_context is not None
-                    and item.tool_result_context.result_state == "CANCELLED_BEFORE_DISPATCH"):
-                    question_cancellation = connection.execute(
+                    and item.tool_result_context is not None):
+                    question_resolution = connection.execute(
                         """SELECT 1 FROM pulsara_v3.plan_interactions
                            WHERE session_id = %s AND origin_turn_id = %s
                              AND assistant_entry_id = %s AND tool_call_id = %s
@@ -875,7 +874,7 @@ class _ConversationOperations:
                 != cut.context_binding_revision_id
                 or int(row["latest_entry_sequence"])
                 != cut.provider_input_through_sequence
-                or (bool(row["has_pending_steer"]) and not question_cancellation)
+                or (bool(row["has_pending_steer"]) and not question_resolution)
             ):
                 raise ConversationKernelConflict(
                     "prospective active input is not at its exact ROOT cut"

@@ -207,7 +207,7 @@ Code mode 仅供 ROOT 的 bypass-permissions 调用使用，Subagent 没有 JS �
 | 工具 | 原生 | JS | 原生调用方（JS 均仅 ROOT＋bypass） | 作用 |
 |---|---|---|---|---|
 | `run_agent` | 是 | `tools.run_agent` | ROOT | 新建或复用 Subagent，提交一份 Work |
-| `query_agents` | 是 | `tools.query_agents` | ROOT | 无 target 时分页列 Subagent；AGENT target 分页列 Work；WORK target 只读具体状态和结果 |
+| `query_agents` | 是 | `tools.query_agents` | ROOT、Subagent | 无 target 时分页列范围内 Subagent 并返回 ROOT 别名；AGENT target 分页列 Work；WORK target 只读具体状态和结果 |
 | `send_agent_message` | 是 | `tools.send_agent_message` | ROOT、Subagent | 向目标 Agent 的活动 turn 发送 steer；无活动 turn 时返回未接纳 |
 | `wait_agent` | 是 | `tools.wait_agent` | ROOT、Subagent | 只接受 AGENT，等指定 Agent 的消息或本次等待绑定的工作结果 |
 | `stop_agent` | 是 | `tools.stop_agent` | ROOT | WORK 停止一份工作；AGENT 停止当前工作并取消已排队工作，保留身份和历史 |
@@ -392,9 +392,11 @@ batch 成功返回表示整批请求已经接纳，不表示 final 已产生。�
 
 ### 4.2 `query_agents`
 
-- `query_agents({cursor?, max_items?})`：返回 agent target、显示名称、当前工作与排队概览、`next_cursor`。不默认输出全部历史。
+- `query_agents({cursor?, max_items?})`：返回范围内 agent target、显示名称、当前工作与排队概览、`next_cursor`，并单独返回固定通信别名 `root`。ROOT 可查询当前保留的全部成员，Subagent 可查询自身及其已知成员。不默认输出全部历史。
 - `query_agents({target: AGENT, cursor?, max_items?})`：查看指定 Subagent，以及分页的工作请求、状态和结果概览；本委派查询入口不接受 `agent_id:"ROOT"`。
 - `query_agents({target: WORK})`：查看一次工作及其实际结果。返回所属 agent、instruction、status、terminal_reason，以及完成时的 final 或停止时的诊断；依赖未成功时说明直接前置 WORK，见 §1.3.1。
+
+已知成员由接纳的 instruction、初始上下文、材料和消息中的完整 ID，以及已接纳的直接通信关系维护；不扫描直接工具结果，也不递归传播其他人的联系人。查询范围不限制向已知有效 ID 发消息或等待。集合、事务和压缩范围详见 [已知对象与交接规格](PULSARA_SUBAGENT_KNOWN_AGENTS_QUERY_AND_HANDOFF_IMPLEMENTATION_SPEC.zh.md)。
 
 排队管理只提供上述查看及 `stop_agent(WORK)` 取消，不提供将已接纳 Work 转为当前 turn 的 steer。新的补充通过 send_agent_message 独立发送，不隐含修改、消费或取消已有排队请求。
 
@@ -527,7 +529,7 @@ message_available 另给 `message_sources`（匹配的 AGENT target 数组），
 
 **等待期间。** timeout_seconds 默认 30，范围 0–300，沿用当前单次观察边界；0 为立即查询；超时只结束这次等待，不停止当前 Work 或目标 Work，也不重新发送问题。调用者可以再次等待。等待期间不空转模型，不占用模型调用与普通工具执行资源；让出物理执行名额，使需要回复的队友可以推进。调用者仍占据自己 Agent 的当前 Work 串行位置，同一 Agent 的下一份 Work 不得越过它；恢复时重新取得执行名额。不能通过把等待中的 Work 当成已结束来腾出容量。Subagent 调用者的 Work 进入任一终态时，结束归属于它的尚存等待；同一 Agent 的后续 Work 不接管该等待。ROOT 没有这里的 Subagent Work 生命周期，不能据此把 ROOT 的普通 final 当成删除 code mode cell 的指令。
 
-未被选中的普通消息沿正常收件链路排队，不仅因到达就提前满足这次等待；显式用户 steer、取消等控制沿既有行为处理。ROOT 需要在等成员结果时接收其求助，应使用 wait_agent；`tools.wait_agent.works` 只等待指定工作结束，普通消息不满足它的完成条件。
+未被选中的普通消息和用户 steer 沿正常收件链路排队，不仅因到达就提前满足或中断这次等待；显式 Stop 等控制沿既有行为处理。ROOT 需要在等成员结果时接收其求助，应使用 wait_agent；`tools.wait_agent.works` 只等待指定工作结束，普通消息不满足它的完成条件。共同安全点合同见 [统一安全点输入与显式停止规格](PULSARA_UNIFIED_SAFE_POINT_INPUT_AND_EXPLICIT_STOP_IMPLEMENTATION_SPEC.zh.md)。
 
 **ROOT 等待指引。** 原生 wait_agent 与 JS tools.wait_agent 的说明共同包含：
 

@@ -19,8 +19,7 @@ def test_direct_call_is_consumed_once_and_uses_canonical_local_owner(tmp_path):
         service = preparation(tmp_path)
         args = {
             "action": "ADD_LOCAL_MCP",
-            "scope": "WORKSPACE",
-            "server_id": "docs",
+            "target": {"kind": "MCP_CONNECTION", "scope": "WORKSPACE", "source_kind": "LOCAL", "server_id": "docs"},
             "config": {
                 "transport": {
                     "type": "streamable_http",
@@ -50,7 +49,7 @@ def test_direct_call_is_consumed_once_and_uses_canonical_local_owner(tmp_path):
 def test_form_validation_does_not_write_and_executes_user_candidate(tmp_path):
     async def run():
         service = preparation(tmp_path)
-        args = {"action": "ADD_LOCAL_MCP", "scope": "USER", "server_id": "docs"}
+        args = {"action": "ADD_LOCAL_MCP", "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": "docs"}}
         call = CapabilityManagementCall(service, await service.prepare(args))
         form = call.form("需要用户配置")
         with pytest.raises(RuntimeError):
@@ -92,7 +91,7 @@ def test_form_never_replaces_old_expected_guard_with_fresh_inspection(tmp_path):
         call = CapabilityManagementCall(
             service,
             await service.prepare(
-                {"action": "UPDATE_LOCAL_MCP", "scope": "USER", "server_id": "docs"}
+                {"action": "UPDATE_LOCAL_MCP", "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": "docs"}}
             ),
         )
         form = call.form("确认")
@@ -117,8 +116,7 @@ def test_plugin_enable_always_uses_user_review_then_guarded_existing_owner(tmp_p
         prepared = await service.prepare(
             {
                 "action": "SET_PLUGIN_ENABLED",
-                "scope": "USER",
-                "plugin_id": "example",
+                "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"},
                 "enabled": True,
             }
         )
@@ -173,22 +171,22 @@ def test_plugin_install_returns_published_identity_for_followup_management(tmp_p
                 assert result["current"]["operation_status"] == (
                     "REPLACED" if replace else "INSTALLED"
                 )
-                assert result["identity"] == {"plugin_id": "published-plugin"}
-                assert result["scope"] == scope
+                assert result["target"] == {
+                    "kind": "PLUGIN", "scope": scope, "plugin_id": "published-plugin"
+                }
 
             conflict = await CapabilityManagementCall(
                 service, await service.prepare(args)
             ).execute()
             assert conflict["status"] == "CONFLICT", conflict
-            assert conflict["identity"] == {}
+            assert "target" not in conflict
 
             remove = await CapabilityManagementCall(
                 service,
                 await service.prepare(
                     {
                         "action": "REMOVE_PLUGIN",
-                        "scope": result["scope"],
-                        "plugin_id": result["identity"]["plugin_id"],
+                        "target": result["target"],
                     }
                 ),
             ).execute()
@@ -221,7 +219,7 @@ def test_model_oauth_completion_carries_exact_owner_only_after_settlement(tmp_pa
 
         monkeypatch.setattr(service.mcp.oauth, "_exchange", exchange)
         call = CapabilityManagementCall(service, await service.prepare({
-            "action": "AUTHORIZE_MCP", "scope": scope, "server_id": "docs",
+            "action": "AUTHORIZE_MCP", "target": {"kind": "MCP_CONNECTION", "scope": scope, "source_kind": "LOCAL", "server_id": "docs"},
         }))
         form = call.form("authorize")
         call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
@@ -243,7 +241,7 @@ def test_model_oauth_completion_carries_exact_owner_only_after_settlement(tmp_pa
 
 
 @pytest.mark.parametrize("token_error", [False, True])
-def test_oauth_steer_detaches_only_conversation_wait_and_shared_sdk_flow_completes(tmp_path, token_error):
+def test_oauth_cell_stop_detaches_only_conversation_wait_and_shared_sdk_flow_completes(tmp_path, token_error):
     import httpx
     from tests.test_mcp_oauth import oauth_server
 
@@ -258,12 +256,12 @@ def test_oauth_steer_detaches_only_conversation_wait_and_shared_sdk_flow_complet
             service.mcp = trace["management"]
             await unused_owner.aclose()
             call = CapabilityManagementCall(service, await service.prepare({
-                "action": "AUTHORIZE_MCP", "scope": "USER", "server_id": target.server_id,
+                "action": "AUTHORIZE_MCP", "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": target.server_id},
             }))
             form = call.form("authorize")
             call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
             redirected = asyncio.Event()
-            work = asyncio.create_task(call.execute(steer_event=redirected))
+            work = asyncio.create_task(call.execute(cell_cancel_event=redirected))
             callback = None
             try:
                 async with asyncio.timeout(10):
@@ -280,7 +278,7 @@ def test_oauth_steer_detaches_only_conversation_wait_and_shared_sdk_flow_complet
                 assert not shared.task.done()
                 redirected.set()
                 result = await asyncio.wait_for(work, 5)
-                assert result == {"status": "CANCELLED", "message": "等待登录被用户取消", "adoption": "NOT_APPLICABLE"}
+                assert result == {"status": "CANCELLED", "message": "Cell 已停止等待登录", "adoption": "NOT_APPLICABLE"}
                 assert not shared.task.cancelled()
                 assert not shared.task.done()
                 assert manager.settings.read().mcp_authorization(target.owner) is None

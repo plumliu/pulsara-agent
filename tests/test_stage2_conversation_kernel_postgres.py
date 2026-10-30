@@ -816,8 +816,10 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     stage2_migrated_postgres_database,
 ) -> None:
     # The clean-v0 catalog and bounded vocabulary share one closed owner.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 29
+    # The known-Agent relation is canonical discovery state, not a delivery receipt.
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 30
+    assert "agent_known_sessions" in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 8

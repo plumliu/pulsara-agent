@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:8146acda42d921311c1a7ca3f331e6026218b7dbb3a765571603c34e0f67ea4b",
+  "observed_catalog_fingerprint": "sha256:d02a12e04febabfc7587568f7eb0460d4d4fc5c8f5b371cdb97748c502aea743",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -20,6 +20,7 @@
   "product_relations": [
     "workspaces",
     "sessions",
+    "agent_known_sessions",
     "session_commands",
     "turns",
     "provider_call_usage",

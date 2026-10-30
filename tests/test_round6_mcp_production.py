@@ -1005,7 +1005,6 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
             permit = executor.admit(
                 session_id='session:5z3uyfooohbmggby3l6ije7mzy',
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 turn_id='turn:atzljbrnatyfps6wohqabxsrce',
                 tool_call_id="call:long-remote-name",
             )
@@ -2387,7 +2386,6 @@ def test_mcp_call_failure_preserves_outcome_and_cancellation(
             permit = executor.admit(
                 session_id='session:wrofat77wvcxtwhfmgxsenmrli',
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 turn_id='turn:63tkghpnryt6t3hsfjuizpzv5e',
                 tool_call_id="call:failure-continuation",
             )
@@ -2773,7 +2771,6 @@ def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
                 descriptor_fingerprint="sha256:resource-descriptor",
                 session_id='session:cvnmzolif3db3m3a73i6vzqlka',
                 scope_kind=ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 turn_id='turn:2tft5wzj2hh3gasvoo6felsfgi',
                 tool_call_id="call:standard-timeout",
             )
@@ -3803,7 +3800,6 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
         surface = prepare_test_direct_tool_surface(
             port,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         effect = next(
             item
@@ -4014,7 +4010,6 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
         surface = prepare_test_direct_tool_surface(
             port,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
         )
         effect = next(
             item
@@ -4084,7 +4079,6 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 attempt_id=allowed.accepted_attempt_id,
                 result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.ROOT.value,
-                scope_subagent_task_id=None,
                 host_owner_epoch=1,
                 authorization_reference=allowed.reference,
                 permission_snapshot_fingerprint=permission.snapshot_fingerprint,
@@ -4694,7 +4688,8 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    # Known-Agent membership is the sole product relation added to this oracle.
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

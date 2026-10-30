@@ -73,9 +73,9 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 |---|---|---|---|
 | `list_capabilities` | `query_capabilities` 无 target | 可选 kind、source_kind、scope、parent、offset、limit | 概览／过滤／父组件列表，完整性和诊断 |
 | `inspect_capability` | `query_capabilities` 有 target | 当前支持的 capability target | 详情、资格、MCP schema／invocation 与原引用交付 |
-| `list_agents` | `query_agents` 无 target | 当前 ROOT 协作范围 | 按 Agent session 分页，不限于正在运行的 Agent |
-| `inspect_agent` + AGENT | `query_agents` + AGENT | 当前 ROOT 所属 Subagent | 该 Agent 的 WORK 分页列表 |
-| `inspect_agent` + WORK | `query_agents` + WORK | 当前 ROOT 协作中的委派工作 | 精确状态、instruction、final／diagnostic 等 |
+| `list_agents` | `query_agents` 无 target | ROOT 全成员；Subagent 自身及已知成员 | 按 Agent session 分页，不限于正在运行的 Agent；单独返回 ROOT 别名 |
+| `inspect_agent` + AGENT | `query_agents` + AGENT | 调用方可查询范围内的 Subagent | 该 Agent 的 WORK 分页列表 |
+| `inspect_agent` + WORK | `query_agents` + WORK | 调用方可查询范围内 Agent 的委派工作 | 精确状态、instruction、final／diagnostic 等 |
 
 `run_agent`、`send_agent_message`、`wait_agent`、`stop_agent`、`tools.run_agent.batch`、`tools.wait_agent.works` 不改名、不改变语义。`list_agent_models` 不是当前工具，不重新引入。
 
@@ -522,7 +522,7 @@ Session 工具三项参数的“可省略 target 时使用当前 session”等�
 |---|---|---|---|
 | query_capabilities 集合 | next_offset | 原 filters／parent + offset；limit 可调 | 当前观察排序，变化可影响页边界；保留 completeness |
 | query_capabilities 详情 | 无 | target | 非分页对象详情；MCP schema FULL，普通大详情沿 artifact |
-| query_agents 成员 | next_cursor（session 位置） | cursor、可调 max_items | 当前 ROOT，session 排序；不是 Work cursor |
+| query_agents 成员 | next_cursor（session 位置） | cursor、可调 max_items | 当前 ROOT 及调用方查询范围，session 排序；不是 Work cursor |
 | query_agents AGENT | next_cursor（queue 位置） | 同一 AGENT target、cursor、可调 max_items | 同 Agent 的 queue_sequence，归属检查不省略 |
 | query_agents WORK | 无 | WORK target | 单份工作；大结果沿原输出投影 |
 | query_processes | 无列表分页 | filters 或 target 二选一 | 当前 Host 的已有 retained inventory，不扫描 OS 全局 |
@@ -549,7 +549,7 @@ query_cells 的列表和源码页新增 FULL_REQUIRED 交付需求，使用既�
 | 目标入口 | ROOT 原生 | Subagent 原生 | Code Mode `tools.*` |
 |---|---|---|---|
 | query_capabilities | 原范围，非仅 bypass | 是，沿共同来源查询；MCP 运行目录仍按分配范围 | 是，ROOT＋bypass |
-| query_agents | 仅 bypass | 否 | 是，ROOT＋bypass |
+| query_agents | 仅 bypass | 是，bypass，限自身及已知成员 | 是，ROOT＋bypass |
 | exec_process／query_processes／manage_process | 原终端权限 | 原终端权限与 Host 范围 | 是，ROOT＋bypass |
 | query_monitors／manage_monitor | 原可见与管理范围 | 仅当前真实 Work 的 Monitor 范围 | 否 |
 | exec_cell／query_cells／manage_cell | 仅 bypass | 否 | **否，包括 query_cells** |

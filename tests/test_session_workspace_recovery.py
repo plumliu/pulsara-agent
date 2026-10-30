@@ -524,8 +524,8 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                     str([request.compiled_input.messages for request in model.requests])
                 )
             root_turn = session._active_turn_id
-            agents = session.repository.list_agent_sessions(
-                root_session_id=session.session_id, limit=10,
+            agents = session.repository.list_query_agent_sessions(
+                root_session_id=session.session_id, observer_session_id=session.session_id, limit=10,
                 deadline_monotonic=monotonic() + 5,
             )
             assert len(agents) == 1

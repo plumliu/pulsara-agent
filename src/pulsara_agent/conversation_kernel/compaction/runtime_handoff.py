@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from pulsara_agent.conversation_kernel.todo_runtime import FrozenTodoSnapshot
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
 MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS = 3_200
@@ -17,6 +18,11 @@ HANDOFF_BUDGET_OMISSION = (
     "Additional active or pending objects are omitted; when available, use "
     "query_processes, query_monitors, query_cells, or query_agents without a "
     "target to discover currently retained objects."
+)
+SUBAGENT_HANDOFF_BUDGET_OMISSION = (
+    "Additional active or pending objects are omitted; when available, use "
+    "query_processes, query_monitors, or query_agents without a target to "
+    "discover currently retained objects."
 )
 _PROJECTION_CONTRACT = "pulsara.compaction-runtime-handoff-projection.v4-active-pmca"
 PMCA_KEYS = ("terminal_processes", "terminal_monitors", "code_cells", "agents")
@@ -71,9 +77,9 @@ class FrozenCompactionRuntimeHandoff:
             raise ValueError("runtime handoff fingerprint mismatch")
 
 
-def _body(payload: dict[str, object], *, omitted: bool) -> str:
+def _body(payload: dict[str, object], *, omitted: bool, omission_text: str) -> str:
     text = canonical_json_bytes(payload).decode("utf-8") + "\n" + HANDOFF_CONTINUATION
-    return text + "\n" + HANDOFF_BUDGET_OMISSION if omitted else text
+    return text + "\n" + omission_text if omitted else text
 
 
 def _measure_pmca(body: str) -> int:
@@ -94,8 +100,16 @@ class CompactionRuntimeHandoffBuilder:
         self,
         *,
         todo: FrozenTodoSnapshot | None,
+        conversation_scope_kind: ModelInputScopeKind,
         measure_pmca: Callable[[str], int] = _measure_pmca,
     ) -> None:
+        if not isinstance(conversation_scope_kind, ModelInputScopeKind):
+            raise TypeError("runtime handoff requires an explicit conversation scope")
+        self._omission_text = (
+            HANDOFF_BUDGET_OMISSION
+            if conversation_scope_kind is ModelInputScopeKind.ROOT
+            else SUBAGENT_HANDOFF_BUDGET_OMISSION
+        )
         self._todo = todo
         self._measure = measure_pmca
         self._payload: dict[str, list[dict[str, object]]] = {
@@ -105,7 +119,9 @@ class CompactionRuntimeHandoffBuilder:
         self._has_candidates = False
         self._omitted = False
         if (
-            self._measure(_body(self._payload, omitted=True))
+            self._measure(
+                _body(self._payload, omitted=True, omission_text=self._omission_text)
+            )
             > MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
         ):
             raise CompactionRuntimeHandoffBoundError(
@@ -120,7 +136,9 @@ class CompactionRuntimeHandoffBuilder:
         self._has_candidates = True
         self._payload[key].append(item)
         if (
-            self._measure(_body(self._payload, omitted=False))
+            self._measure(
+                _body(self._payload, omitted=False, omission_text=self._omission_text)
+            )
             <= MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
         ):
             self._admitted.append(key)
@@ -128,7 +146,9 @@ class CompactionRuntimeHandoffBuilder:
         self._payload[key].pop()
         self._omitted = True
         while (
-            self._measure(_body(self._payload, omitted=True))
+            self._measure(
+                _body(self._payload, omitted=True, omission_text=self._omission_text)
+            )
             > MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
         ):
             self._payload[self._admitted.pop()].pop()
@@ -149,7 +169,7 @@ class CompactionRuntimeHandoffBuilder:
             "completed": 0 if todo is None else todo.completed_count,
             "total": len(todo_items),
         }
-        text = _body(payload, omitted=self._omitted)
+        text = _body(payload, omitted=self._omitted, omission_text=self._omission_text)
         return FrozenCompactionRuntimeHandoff(
             text,
             text,
@@ -188,6 +208,7 @@ def freeze_compaction_runtime_handoff(
     terminal_processes: tuple[FrozenTerminalProcessHandoffFact, ...],
     terminal_monitors: tuple[FrozenTerminalMonitorHandoffFact, ...],
     todo: FrozenTodoSnapshot | None,
+    conversation_scope_kind: ModelInputScopeKind,
     agent_work_index: Iterable[dict[str, object]] = (),
     code_cells: tuple[dict[str, object], ...] = (),
     measure_pmca: Callable[[str], int] = _measure_pmca,
@@ -197,7 +218,11 @@ def freeze_compaction_runtime_handoff(
     Agent rows are already in canonical ID order, allowing the owner to supply
     an iterator without forcing the renderer to enumerate the entire inventory.
     """
-    builder = CompactionRuntimeHandoffBuilder(todo=todo, measure_pmca=measure_pmca)
+    builder = CompactionRuntimeHandoffBuilder(
+        todo=todo,
+        conversation_scope_kind=conversation_scope_kind,
+        measure_pmca=measure_pmca,
+    )
     streams = {
         "terminal_processes": iter(handoff_process_rows(terminal_processes)),
         "terminal_monitors": iter(handoff_monitor_rows(terminal_monitors)),

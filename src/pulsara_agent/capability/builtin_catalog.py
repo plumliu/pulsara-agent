@@ -1020,7 +1020,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "query_agents": _descriptor(
         name="query_agents",
         description=(
-            "Query agents and their delegated work. To list agents, omit target; optional fields: cursor, max_items. To list one agent's work, pass its AGENT target; optional fields: cursor, max_items. To inspect one work item, pass only its WORK target, without pagination fields. Continue a page in the same branch and, for an agent's work, with the same AGENT target. Omit unused fields; target does not accept null. WORK results belong to that request, including stopped diagnostics."
+            "Query agents and their delegated work. ROOT can query all retained members; a subagent can query itself and agents introduced through accepted inputs or messages. The list also returns a separate ROOT target for send_agent_message and wait_agent; ROOT is not a query target. To list agents, omit target; optional fields: cursor, max_items. To list one agent's work, pass its AGENT target; optional fields: cursor, max_items. To inspect one work item, pass only its WORK target, without pagination fields. Continue a page in the same branch and, for an agent's work, with the same AGENT target. Omit unused fields; target does not accept null. WORK results belong to that request, including stopped diagnostics."
         ),
         input_schema=query_agents_input_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
@@ -1380,8 +1380,8 @@ _FILESYSTEM = frozenset(
 _MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
 _MEMORY_QUERY = frozenset({"get_memory"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
-_SUBAGENT_PARENT = frozenset({"run_agent", "query_agents", "stop_agent"})
-_SUBAGENT_SHARED = frozenset({"send_agent_message", "wait_agent"})
+_SUBAGENT_PARENT = frozenset({"run_agent", "stop_agent"})
+_SUBAGENT_SHARED = frozenset({"query_agents", "send_agent_message", "wait_agent"})
 _CODE_MODE = frozenset({"exec_cell", "query_cells", "manage_cell"})
 _TERMINAL_PROCESS_ACTIONS = (
     "close_stdin",

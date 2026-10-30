@@ -1859,7 +1859,8 @@ class LocalSessionController:
         maximum = browser_history_uint64(body.get("max_items", 50), "Agent page size")
         if not 1 <= maximum <= 50:
             raise ValueError("Agent page size is invalid")
-        rows = await asyncio.to_thread(repository.list_agent_sessions, root_session_id=root_session_id,
+        rows = await asyncio.to_thread(repository.list_query_agent_sessions, root_session_id=root_session_id,
+            observer_session_id=root_session_id,
             cursor=body.get("cursor"), limit=maximum + 1, deadline_monotonic=self.core._canonical_deadline())
         selected = rows[:maximum]
         await self._sidebar_root(root_session_id)

@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from pulsara_agent.identity import derive_id
 from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
 from pulsara_agent.storage.migrations.contracts import (
     BASELINE_RESOURCE,
@@ -244,6 +245,57 @@ def test_clean_catalog_removes_profile_columns_and_origin() -> None:
             with pytest.raises(psycopg.errors.CheckViolation):
                 with connection.transaction():
                     connection.execute("INSERT INTO input_origin_probe VALUES ('AGENT_PROFILE')")
+
+
+def test_known_agent_relation_has_exact_identity_privileges_and_cascades() -> None:
+    with _migrated_database() as database:
+        workspace = derive_id('workspace', 'known-agent-schema-test', 'workspace')
+        root, a, b, c = (derive_id('session', 'known-agent-schema-test', value)
+                         for value in ('root', 'a', 'b', 'c'))
+        with psycopg.connect(database.runtime_dsn) as connection:
+            connection.execute(
+                "INSERT INTO pulsara_v3.workspaces "
+                "(memory_domain_id,id,workspace_kind,workspace_root,workspace_label) "
+                "VALUES ('u_local',%s,'project','/known-agent-schema-test','test')",
+                (workspace,),
+            )
+            for session, parent in ((root, None), (a, root), (b, root), (c, root)):
+                connection.execute(
+                    "INSERT INTO pulsara_v3.sessions "
+                    "(id,root_session_id,workspace_id,memory_domain_id,lifecycle,writer_generation) "
+                    "VALUES (%s,%s,%s,'u_local','OPEN',1)",
+                    (session, parent, workspace),
+                )
+            connection.commit()
+            columns = connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='pulsara_v3' AND table_name='agent_known_sessions' "
+                "ORDER BY ordinal_position"
+            ).fetchall()
+            assert columns == [('observer_session_id',), ('known_session_id',)]
+            assert connection.execute(
+                "SELECT has_table_privilege(current_user,'pulsara_v3.agent_known_sessions','SELECT'), "
+                "has_table_privilege(current_user,'pulsara_v3.agent_known_sessions','INSERT'), "
+                "has_table_privilege(current_user,'pulsara_v3.agent_known_sessions','UPDATE'), "
+                "has_table_privilege(current_user,'pulsara_v3.agent_known_sessions','DELETE')"
+            ).fetchone() == (True, True, False, False)
+            for observer, known in ((a, b), (c, b), (b, c), (a, c)):
+                connection.execute(
+                    "INSERT INTO pulsara_v3.agent_known_sessions VALUES (%s,%s)", (observer, known)
+                )
+            with pytest.raises(psycopg.errors.UniqueViolation), connection.transaction():
+                connection.execute("INSERT INTO pulsara_v3.agent_known_sessions VALUES (%s,%s)", (a, b))
+            with pytest.raises(psycopg.errors.CheckViolation), connection.transaction():
+                connection.execute("INSERT INTO pulsara_v3.agent_known_sessions VALUES (%s,%s)", (a, a))
+            with pytest.raises(psycopg.errors.ForeignKeyViolation), connection.transaction():
+                connection.execute("INSERT INTO pulsara_v3.agent_known_sessions VALUES (%s,%s)",
+                                   (a, derive_id('session', 'known-agent-schema-test', 'absent')))
+            connection.execute("DELETE FROM pulsara_v3.sessions WHERE id=%s", (b,))
+            assert connection.execute(
+                "SELECT observer_session_id,known_session_id FROM pulsara_v3.agent_known_sessions"
+            ).fetchall() == [(a, c)]
+            connection.execute("DELETE FROM pulsara_v3.sessions WHERE id=%s", (a,))
+            assert connection.execute("SELECT count(*) FROM pulsara_v3.agent_known_sessions").fetchone() == (0,)
 
 
 def test_runtime_connection_accepts_far_future_deadline_without_guc_overflow() -> None:

@@ -122,6 +122,7 @@ def test_canonical_calls_survive_both_actual_wire_serializers(name, arguments):
 @pytest.mark.parametrize("name,arguments", [
     ("query_capabilities", {"target": MCP, "kind": "MCP_TOOL"}),
     ("query_capabilities", {"target": MCP, "parent": {"kind": "MCP_SERVER", "runtime_server_id": "fixture"}}),
+    ("query_agents", {"target": {"kind": "AGENT", "agent_id": "ROOT"}}),
     ("query_agents", {"target": WORK, "max_items": 1}),
     ("query_agents", {"target": WORK, "cursor": "x"}),
     ("query_processes", {"target": PROCESS, "include_running": True}),
@@ -184,6 +185,13 @@ def test_read_only_permission_gate_uses_new_catalog(name, arguments, allowed, tm
     assert (decision.kind is PermissionDecisionKind.ALLOW) is allowed
 
 
+@pytest.mark.parametrize("mode", list(PermissionMode))
+def test_shared_query_retains_bypass_permission_requirement(mode, tmp_path):
+    gate = PolicyPermissionGate(preset_to_policy(mode), AllowAllPermissionGate(), workspace_root=tmp_path)
+    decision = asyncio.run(gate.evaluate([ToolCall("query", "query_agents", {})]))
+    assert (decision.kind is PermissionDecisionKind.ALLOW) is (mode is PermissionMode.BYPASS_PERMISSIONS)
+
+
 def test_terminal_queries_keep_terminal_access_requirement(tmp_path):
     policy = replace(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS), terminal=TerminalAccess.OFF)
     gate = PolicyPermissionGate(policy, AllowAllPermissionGate(), workspace_root=tmp_path)
@@ -214,11 +222,16 @@ def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners():
     assert not names & {"exec_cell", "query_cells", "manage_cell", "query_monitors", "manage_monitor", "query_schedules", "manage_schedule", "search_memory", "get_memory"}
     for name in names:
         assert directory.binding(name) is prepared.binding(name)
-    for name in ("exec_cell", "query_cells", "manage_cell", "query_agents"):
+    for name in ("exec_cell", "query_cells", "manage_cell"):
         entry = builtin_tool_catalog_entry(name)
         assert entry.availability_requirement.allowed_invocation_owners == (ToolInvocationOwnerKind.HOST_MAIN_RUN,)
     for name in ("exec_cell", "query_cells", "manage_cell"):
         assert builtin_tool_catalog_entry(name).availability_requirement.kind is BuiltinToolAvailabilityKind.REQUIRES_CODE_MODE
+    query = builtin_tool_catalog_entry("query_agents")
+    assert query.availability_requirement.kind is BuiltinToolAvailabilityKind.REQUIRES_SHARED_AGENT_CONTROL
+    assert set(query.availability_requirement.allowed_invocation_owners) == {
+        ToolInvocationOwnerKind.HOST_MAIN_RUN, ToolInvocationOwnerKind.SUBAGENT,
+    }
     for name in ("exec_process", "query_processes", "manage_process", "query_monitors", "manage_monitor"):
         assert tool_observation_origin_for_binding(prepared.binding(name)) is ToolObservationOrigin.TERMINAL_PROCESS
 
@@ -254,3 +267,57 @@ def test_terminal_result_contracts_match_executor_shapes():
     assert builtin_tool_catalog_entry("exec_process").descriptor.result_render_contract is terminal_result_render_contract()
     assert builtin_tool_catalog_entry("manage_process").descriptor.result_render_contract is terminal_process_result_render_contract()
     assert builtin_tool_catalog_entry("query_processes").descriptor.result_render_contract is generic_result_render_contract()
+
+
+def test_native_subagent_query_binding_and_authorization_keep_management_closed(tmp_path):
+    from types import SimpleNamespace
+    from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+    from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
+    from pulsara_agent.conversation_kernel.memory.contracts import FrozenModelCallMemoryContext
+    from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import AGENT_TOOLS, validate_collaboration_parameters
+    from pulsara_agent.primitives.run_permission import build_run_permission_snapshot, RunPermissionAdmissionSource
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+    from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
+    from tests.support.round3 import prepare_test_direct_tool_surface
+
+    def validate(*, tool_name, arguments):
+        try:
+            validate_collaboration_parameters(tool_name, arguments)
+        except (TypeError, ValueError, KeyError) as error:
+            return str(error)
+        return None
+
+    async def scenario():
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="query-host",
+            session_id=random_id("session"), live_bus=LiveAgentEventBus(),
+            authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port.bind_subagent_port(SimpleNamespace(tool_names=AGENT_TOOLS,
+            validate_arguments=validate, bind_cell_observer=lambda _: None))
+        try:
+            surface = prepare_test_direct_tool_surface(port,
+                conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            names = {item.name for item in surface.model_surface.tool_specs}
+            assert {"query_agents", "send_agent_message", "wait_agent"} <= names
+            assert not {"run_agent", "stop_agent", "exec_cell", "query_cells", "manage_cell"} & names
+            prefix = tuple(item.canonical_bytes for item in surface.model_surface.tool_specs)
+            borrow = port.borrow_tool_surface(surface)
+            try:
+                for mode in PermissionMode:
+                    permission = build_run_permission_snapshot(snapshot_id=random_id("permission"),
+                        requested_mode=mode, effective_mode=mode,
+                        admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
+                    authorization = await port.authorize(tool_name="query_agents", arguments={},
+                        tool_call_id=random_id("call"), turn_id=random_id("turn"),
+                        assistant_entry_id=random_id("entry"), permission_snapshot=permission,
+                        surface_borrow=borrow, memory_context=FrozenModelCallMemoryContext())
+                    assert authorization.kind is (
+                        KernelToolAuthorizationKind.ALLOW if mode is PermissionMode.BYPASS_PERMISSIONS
+                        else KernelToolAuthorizationKind.PERMISSION_DENIED)
+                assert tuple(item.canonical_bytes for item in surface.model_surface.tool_specs) == prefix
+            finally:
+                borrow.close()
+        finally:
+            await port.aclose()
+    asyncio.run(scenario())

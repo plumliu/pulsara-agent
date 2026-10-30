@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from time import monotonic
 
 import pytest
@@ -105,7 +106,7 @@ class WaitControlModel(_DetachedDraftModel):
 
 
 @pytest.mark.parametrize("mode", ["code", "native"])
-def test_wait_observers_settle_on_cell_stop_or_human_steer_without_stopping_work(
+def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_input(
     mode,
     tmp_path,
     monkeypatch,
@@ -132,8 +133,9 @@ def test_wait_observers_settle_on_cell_stop_or_human_steer_without_stopping_work
 
             async def both_running():
                 rows = await root._io.run(
-                    root.repository.list_agent_sessions,
+                    root.repository.list_query_agent_sessions,
                     root_session_id=root.session_id,
+                    observer_session_id=root.session_id,
                     limit=10,
                     deadline_monotonic=monotonic() + 10,
                 )
@@ -145,8 +147,9 @@ def test_wait_observers_settle_on_cell_stop_or_human_steer_without_stopping_work
 
             await eventually(both_running)
             agents = await root._io.run(
-                root.repository.list_agent_sessions,
+                root.repository.list_query_agent_sessions,
                 root_session_id=root.session_id,
+                observer_session_id=root.session_id,
                 limit=10,
                 deadline_monotonic=monotonic() + 10,
             )
@@ -214,6 +217,9 @@ def test_wait_observers_settle_on_cell_stop_or_human_steer_without_stopping_work
                     target_turn_id=root.active_root_turn_id(),
                 )
                 assert outcome.status in {"PENDING", "SUCCEEDED"}
+                assert not control.done()
+                assert len(model.control_requests) == 1
+                model.release.set()
                 await asyncio.wait_for(control, 10)
                 assert len(model.control_requests) == 2
                 final_input = model.control_requests[-1].compiled_input
@@ -233,14 +239,14 @@ def test_wait_observers_settle_on_cell_stop_or_human_steer_without_stopping_work
                     for message in final_input.messages
                     if message.role is MessageRole.TOOL_RESULT
                 ]
-                assert any("interrupted" in str(body) for body in bodies)
+                assert any(json.loads(body).get("state") == "settled" for body in bodies)
             actual = await root._io.run(
                 root.repository.query_agent_work,
                 root_session_id=root.session_id,
                 work_id=model.selected_work["work_id"],
                 deadline_monotonic=monotonic() + 10,
             )
-            assert actual["status"] == "running"
+            assert actual["status"] == ("running" if mode == "code" else "completed")
         finally:
             model.release.set()
             model.other_send.set()

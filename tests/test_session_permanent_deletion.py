@@ -32,6 +32,7 @@ from tests.test_direct_advisory_memory import _open_direct_memory_session
 
 DIRECT = {
     "sessions",
+    "agent_known_sessions",
     "tool_invocations",
     "history_search_documents",
     "scheduled_tasks",
@@ -190,7 +191,7 @@ def test_condition_retry_checks_new_lifecycle(repo, monkeypatch):
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     fks = rows(
         repo,
         """SELECT c.conrelid::regclass::text AS child,

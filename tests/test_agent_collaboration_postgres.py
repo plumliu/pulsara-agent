@@ -63,7 +63,7 @@ def api_source(source):
         effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
         invocation_source=SimpleNamespace(kind="CODE_MODE_CALL"),
         agent_message_cursors={},
-        steer_event=asyncio.Event(),
+        cell_cancel_event=asyncio.Event(),
         agent_invocation_snapshot=snapshot,
     )
 

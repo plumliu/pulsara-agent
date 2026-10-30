@@ -73,7 +73,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_plan_question_cancellation_projects_user_visible_reason() -> None:
     carrier = {
         "status": "cancelled", "plan_control": "QUESTION_CANCELLED",
-        "cancelled_by": "USER_STEER", "message": "被用户取消",
+        "cancelled_by": "USER_CANCELLED", "message": "用户取消了问题",
         "interaction_id": "storage-only-interaction",
     }
     projected = json.loads(project_tool_result_storage_body(
@@ -81,7 +81,7 @@ def test_plan_question_cancellation_projects_user_visible_reason() -> None:
     ))
     assert projected == {
         "status": "cancelled", "plan_control": "QUESTION_CANCELLED",
-        "cancelled_by": "USER_STEER", "message": "被用户取消",
+        "cancelled_by": "USER_CANCELLED", "message": "用户取消了问题",
     }
     for field in ("status", "cancelled_by", "message"):
         invalid = dict(carrier)
@@ -515,7 +515,7 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
 
     production = ROOT / "src/pulsara_agent"
     definitions: list[tuple[Path, int]] = []

@@ -26,6 +26,12 @@ Use the complete targets supplied by the tools: AGENT has a `session:` ID and
 WORK has a `queue:` ID. `agent_id: "ROOT"` addresses ROOT for messages or waiting;
 it is not a target for assigning new subagent work.
 
+ROOT can query its retained agents. A subagent can use native `query_agents` to
+find itself and teammates introduced through accepted instructions, context,
+materials, or messages; the list also returns the `ROOT` communication alias.
+Query results do not introduce additional teammates. A valid teammate ID may be
+used for messaging or waiting even before it appears in the query list.
+
 ## Give results to the next assignment
 
 | Field | Use |

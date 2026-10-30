@@ -93,6 +93,35 @@ def test_form_requires_controller_without_attempt():
     asyncio.run(run())
 
 
+def test_cell_stop_closes_pending_form_without_submitting():
+    async def run():
+        coordinator, live, permission = setup()
+        await coordinator.attach_controller("browser:1")
+        stopped = asyncio.Event()
+
+        async def prepare(_):
+            pytest.fail("a stopped Cell must not submit the form")
+
+        waiter = asyncio.create_task(coordinator.request_capability_form(
+            turn_id='turn:qc5obgzujf23avn6iwnfufogvq',
+            assistant_entry_id='entry:t6fhz2rqzpnvsw3jyj34jkgtre',
+            tool_call_id="call:form",
+            permission_snapshot=permission,
+            form=PendingCapabilityForm(freeze_json({"action": "ADD_LOCAL_MCP"}), "配置 MCP", prepare),
+            cell_cancel_event=stopped,
+        ))
+        await asyncio.sleep(0)
+        assert live.current_snapshot().current_interaction is not None
+        stopped.set()
+        result = await asyncio.wait_for(waiter, 1)
+        assert result.reference == "interaction:cell-stopped"
+        assert result.capability_submission is None
+        assert live.current_snapshot().current_interaction is None
+        await coordinator.aclose()
+
+    asyncio.run(run())
+
+
 def test_form_secret_transfers_once_without_live_or_canonical_publication():
     async def run():
         coordinator, live, permission = setup()
@@ -340,7 +369,7 @@ def test_browser_form_uses_current_host_without_secret_protocol_frames():
             return session
 
         bridge = RendererBridge(
-            sessions=SimpleNamespace(session_by_host_id=get_session),
+            sessions=SimpleNamespace(session_by_host_id=get_session, host_writer_unavailable=lambda _: False),
             protocol_server=None,
         )
         bridge._connections["connection:form"] = SimpleNamespace(

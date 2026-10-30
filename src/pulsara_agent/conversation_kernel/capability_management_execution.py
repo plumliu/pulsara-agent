@@ -386,7 +386,7 @@ class CapabilityManagementCall:
             else None
         )
 
-    async def execute(self, *, steer_event: asyncio.Event | None = None):
+    async def execute(self, *, cell_cancel_event: asyncio.Event | None = None):
         state = self._state
         if state not in {"prepared", "submitted"}:
             raise RuntimeError(
@@ -454,7 +454,7 @@ class CapabilityManagementCall:
                 },
             )
         if action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}:
-            return await self._authorization(prepared, steer_event=steer_event)
+            return await self._authorization(prepared, cell_cancel_event=cell_cancel_event)
         observed = _plugin_observation(prepared, root)
         scope = PluginScopeKind(prepared.resolved_scope.value)
         if action is Action.INSTALL_PLUGIN:
@@ -757,7 +757,7 @@ class CapabilityManagementCall:
             },
         )
 
-    async def _authorization(self, prepared, *, steer_event=None):
+    async def _authorization(self, prepared, *, cell_cancel_event=None):
         service = self.service
         fields = {
             **thaw_json(prepared.intent.fields),
@@ -797,33 +797,33 @@ class CapabilityManagementCall:
             manager = await service.mcp.prepare_oauth()
             await manager.logout(owner, require_current=current)
         else:
-            if steer_event is not None and steer_event.is_set():
+            if cell_cancel_event is not None and cell_cancel_event.is_set():
                 return {
                     "status": "CANCELLED",
-                    "message": "等待登录被用户取消",
+                    "message": "Cell 已停止等待登录",
                     "adoption": "NOT_APPLICABLE",
                 }
             manager = await service.mcp.prepare_oauth()
             flow = await manager.begin(owner, current)
             assert flow.task is not None
-            if steer_event is None:
+            if cell_cancel_event is None:
                 await asyncio.shield(flow.task)
             else:
-                redirected = asyncio.create_task(steer_event.wait())
+                cell_cancelled = asyncio.create_task(cell_cancel_event.wait())
                 try:
                     await asyncio.wait(
-                        (flow.task, redirected), return_when=asyncio.FIRST_COMPLETED
+                        (flow.task, cell_cancelled), return_when=asyncio.FIRST_COMPLETED
                     )
-                    if steer_event.is_set():
+                    if cell_cancel_event.is_set():
                         return {
                             "status": "CANCELLED",
-                            "message": "等待登录被用户取消",
+                            "message": "Cell 已停止等待登录",
                             "adoption": "NOT_APPLICABLE",
                         }
                     await asyncio.shield(flow.task)
                 finally:
-                    redirected.cancel()
-                    await asyncio.gather(redirected, return_exceptions=True)
+                    cell_cancelled.cancel()
+                    await asyncio.gather(cell_cancelled, return_exceptions=True)
         result = self._result(
             prepared,
             "APPLIED",

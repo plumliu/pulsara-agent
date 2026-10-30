@@ -22,6 +22,10 @@
       "UPDATE",
       "DELETE"
     ],
+    "agent_known_sessions": [
+      "SELECT",
+      "INSERT"
+    ],
     "session_commands": [
       "SELECT",
       "INSERT"

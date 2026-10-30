@@ -6,10 +6,6 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.repository_errors import (
-    PlanControlSupersededBySteer,
-)
-
 from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 from pulsara_agent.identity import derive_id
 
@@ -1056,9 +1052,6 @@ class ConversationKernelRunner:
             hook_context_owner=hook_context_owner,
         )
 
-    def steer_tool_batch(self, turn_id: str) -> None:
-        self._tool_batches.steer(turn_id)
-
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
@@ -2055,7 +2048,6 @@ class ConversationKernelRunner:
                     active_surface_borrow.close()
                     active_surface_borrow = None
                     continue
-                plan_batch_steered = False
                 plan_call_indexes = tuple(
                     index
                     for index, call in enumerate(calls)
@@ -2070,45 +2062,38 @@ class ConversationKernelRunner:
                     plan_epoch = self._continuity.current_view(planning.scope)
                     if plan_epoch is None:
                         raise RuntimeError("Plan batch lost continuity epoch")
-                    try:
-                        outcome = await self._plan_batches.accept_batch(
-                            calls=calls,
-                            selected_call_index=plan_call_indexes[0],
-                            assistant_entry_id=accepted.entry_id,
-                            canonical_facts=canonical_facts,
-                            surface_borrow=active_surface_borrow,
-                            deadline=self._canonical_deadline(),
-                            hook_model=request.prepared_call.call.target.fact.model_id,
-                            hook_cwd=str(self._tools.snapshot_workspace_root()),
-                            continuity_epoch_nonce=plan_epoch.epoch_nonce,
-                        )
-                    except PlanControlSupersededBySteer:
-                        plan_batch_steered = True
-                    if not plan_batch_steered:
-                        tool_call_count += len(calls)
-                        active_surface_borrow.close()
-                        active_surface_borrow = None
-                        if outcome.interaction_kind is PlanInteractionKind.QUESTION:
-                            # The canonical answer/tool result is installed by the
-                            # Host resolution command.  Human think time is not a
-                            # provider/tool operation deadline.
-                            continue
-                        if not outcome.origin_turn_completed:
-                            # Idempotent enter_plan against the already-active
-                            # workflow settles the batch but keeps this exact run.
-                            continue
-                        return KernelRunResult(
-                            turn_id=turn_id,
-                            final_entry_id=(
-                                outcome.selected_result_entry_id or accepted.entry_id
-                            ),
-                            final_text=completed.public_text,
-                            model_call_count=model_call_count,
-                            tool_call_count=tool_call_count,
-                            continuation_turn_id=outcome.continuation_turn_id,
-                            continuation_entry_id=outcome.continuation_entry_id,
-                            pending_plan_interaction_id=outcome.interaction_id,
-                        )
+                    outcome = await self._plan_batches.accept_batch(
+                        calls=calls,
+                        selected_call_index=plan_call_indexes[0],
+                        assistant_entry_id=accepted.entry_id,
+                        canonical_facts=canonical_facts,
+                        surface_borrow=active_surface_borrow,
+                        deadline=self._canonical_deadline(),
+                        hook_model=request.prepared_call.call.target.fact.model_id,
+                        hook_cwd=str(self._tools.snapshot_workspace_root()),
+                        continuity_epoch_nonce=plan_epoch.epoch_nonce,
+                    )
+                    tool_call_count += len(calls)
+                    active_surface_borrow.close()
+                    active_surface_borrow = None
+                    if outcome.interaction_kind is PlanInteractionKind.QUESTION:
+                        # The Host resolution command installs the actual answer.
+                        continue
+                    if not outcome.origin_turn_completed:
+                        # Idempotent enter_plan keeps this exact run.
+                        continue
+                    return KernelRunResult(
+                        turn_id=turn_id,
+                        final_entry_id=(
+                            outcome.selected_result_entry_id or accepted.entry_id
+                        ),
+                        final_text=completed.public_text,
+                        model_call_count=model_call_count,
+                        tool_call_count=tool_call_count,
+                        continuation_turn_id=outcome.continuation_turn_id,
+                        continuation_entry_id=outcome.continuation_entry_id,
+                        pending_plan_interaction_id=outcome.interaction_id,
+                    )
                 if active_surface_borrow is None:
                     raise RuntimeError("Tool batch lost its execution-backed borrow")
                 batch_borrow = active_surface_borrow
@@ -2125,7 +2110,6 @@ class ConversationKernelRunner:
                     surface_borrow=batch_borrow,
                     hook_scope=self._hook_scope,
                     image_call_allowances=output_quote.image_call_allowances,
-                    cancelled_by_steer=plan_batch_steered,
                 )
                 tool_call_count += batch.tool_call_count
                 completed_tool_batch = True

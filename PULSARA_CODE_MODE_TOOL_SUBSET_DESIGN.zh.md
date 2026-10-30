@@ -278,7 +278,7 @@ cell 已 failed／terminated，而在途结果尚未成功 resolve/reject 给 JS
 | HostSession／工作区关闭 | 停接纳、终止全部所属 cell，再释放资源 | 在途调用按共同 owner 取消／结算；活动 turn 中断，未启动请求沿共同队列保留 |
 | 宿主崩溃 | VM 丢失，旧句柄不可继续 | 共同 Host 接管如实结算中断；不重放已运行 turn／工具，未启动请求按队列语义处理 |
 
-普通 steer 仍可取消前台原生批次尚未 dispatch 的步骤；独立后台 cell 不继承该前台 batch 的取消信号。新消息不是终止脚本；明确停止走上表。
+普通 steer 等待共同输入安全点，不取消前台原生批次或独立后台 cell。明确停止走上表；细节以 [统一安全点输入与显式停止规格](PULSARA_UNIFIED_SAFE_POINT_INPUT_AND_EXPLICIT_STOP_IMPLEMENTATION_SPEC.zh.md) 为准。
 
 停止和子调用接纳在同一个 cell owner 原子裁决：停止先赢则未派发；调用先接纳则按实际能力结算。释放 VM 不能抛弃线程／远端正在完成的结果。
 

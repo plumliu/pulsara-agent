@@ -137,7 +137,7 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
     import mcp_types as types
     from tests.test_mcp_catalog_subscriptions import _sdk_http
     from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor, McpSnapshotStale
-    from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
+    from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort, _await_mcp_operation
     from pulsara_agent.mcp_config import _parse_server
     from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 
@@ -200,7 +200,7 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
                 permit = executor.admit(session_id="session:root", scope_kind=ModelInputScopeKind.ROOT,
                                         turn_id="turn:actual", tool_call_id="tool:actual")
                 permit.mark_attempt_accepted()
-                known = await executor.invoke(permit, {"value": "actual"}, steer_event=None)
+                known = await executor.invoke(permit, {"value": "actual"}, cell_cancel_event=None)
                 assert known.state == "SUCCESS" and received == [{"value": "actual"}]
                 port._mcp_meta_refs.retire_scope_except_epoch(conversation_scope_kind=ModelInputScopeKind.ROOT,
                     session_id="session:root", continuity_epoch_nonce="epoch:compacted")
@@ -208,8 +208,14 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
                 slow_permit = executor.admit(session_id="session:root", scope_kind=ModelInputScopeKind.ROOT,
                     turn_id="turn:actual", tool_call_id="tool:slow")
                 slow_permit.mark_attempt_accepted()
-                slow = asyncio.create_task(executor.invoke(slow_permit, {"value": "slow"}, steer_event=None))
+                cell_stopped = asyncio.Event()
+                operation = asyncio.create_task(executor.invoke(slow_permit, {"value": "slow"}, cell_cancel_event=cell_stopped))
+                slow = asyncio.create_task(_await_mcp_operation(operation, permit=slow_permit))
                 await asyncio.wait_for(slow_started.wait(), 5)
+                cell_stopped.set()
+                slow.cancel()
+                await asyncio.sleep(0)
+                assert not slow.done()
                 revision = 2
                 await bus.publish(ToolsListChanged())
                 async with asyncio.timeout(5):
@@ -220,7 +226,9 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
                                    turn_id="turn:actual", tool_call_id="tool:blocked-after-refresh")
                 # SDK catalog refresh drains accepted calls before changing its schema cache.
                 slow_release.set()
-                assert (await asyncio.wait_for(slow, 5)).state == "SUCCESS"
+                known, caller_cancelled = await asyncio.wait_for(slow, 5)
+                assert known.state == "SUCCESS" and caller_cancelled
+                assert slow_permit.state.value == "RELEASED"
                 async with asyncio.timeout(5):
                     while "catalog" not in supervisor._pending:
                         await asyncio.sleep(.01)

@@ -166,10 +166,12 @@ def assert_session_aggregate_deleted(repo, guard):
         deadline_monotonic=monotonic()+30,
     ) == 'DELETED'
     independent = {'workspaces', 'blobs', 'memory_facts', 'memory_relations', 'memory_embeddings'}
-    children = set(CONVERSATION_KERNEL_RELATIONS) - independent - {'sessions'}
+    children = set(CONVERSATION_KERNEL_RELATIONS) - independent - {'sessions', 'agent_known_sessions'}
     for table in children:
         assert rows(repo, sql.SQL('SELECT 1 FROM pulsara_v3.{} WHERE session_id=%s').format(
             sql.Identifier(table)), (guard.session_id,)) == [], table
+    assert rows(repo, 'SELECT 1 FROM pulsara_v3.agent_known_sessions WHERE observer_session_id=%s OR known_session_id=%s',
+                (guard.session_id, guard.session_id)) == []
 
 
 def fork(repo, source, final, child=None):

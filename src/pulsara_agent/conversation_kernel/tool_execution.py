@@ -360,7 +360,6 @@ class CodeModeExecutionSnapshot:
     hook_epoch_nonce: object
 
 
-_foreground_steer: ContextVar[asyncio.Event | None] = ContextVar("tool_foreground_steer", default=None)
 _tool_hook_epoch: ContextVar[object | None] = ContextVar("tool_invocation_hook_epoch", default=None)
 _code_snapshot: ContextVar[CodeModeExecutionSnapshot | None] = ContextVar("tool_code_snapshot", default=None)
 _code_result: ContextVar[list | None] = ContextVar("tool_code_result", default=None)
@@ -410,18 +409,12 @@ class ToolBatchExecutor:
         self._deadlines = deadline_factory
         self._hooks = hook_dispatcher
         self._hook_context = hook_context_owner
-        self._active_calls: dict[object, tuple[str, asyncio.Event]] = {}
         self._admission_lock = asyncio.Lock()
         bind = getattr(tools, "bind_code_mode_executor", None)
         if bind is not None:
             bind(invoke=self.invoke_code_mode, freeze_source=self.freeze_code_mode_source,
                  archive_output=self.archive_code_mode_output,
                  read_source=self.read_code_mode_source)
-
-    def steer(self, turn_id: str) -> None:
-        for active_turn_id, event in tuple(self._active_calls.values()):
-            if active_turn_id == turn_id:
-                event.set()
 
     def freeze_code_mode_context(self, **values) -> CodeModeExecutionSnapshot:
         epoch = self._continuity.current_view(values["continuity_scope"])
@@ -492,7 +485,6 @@ class ToolBatchExecutor:
         invocation_token = _code_invocation.set(invocation)
         reservations = []
         reservations_token = _batch_reservations.set(reservations)
-        foreground_token = _foreground_steer.set(getattr(invocation, "cancelled", None))
         try:
             await self.execute(
                 turn_id=snapshot.turn_id, assistant_entry_id=None,
@@ -546,7 +538,6 @@ class ToolBatchExecutor:
                 error_message=None if success else str(failure_message),
                 delivery_succeeded=delivered, read_undelivered=read_undelivered)
         finally:
-            _foreground_steer.reset(foreground_token)
             _code_result.reset(result_token)
             _code_invocation.reset(invocation_token)
             for reservation in reservations:
@@ -1004,7 +995,6 @@ class ToolBatchExecutor:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         hook_scope: HookDispatchScopeRef | None = None,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (),
-        cancelled_by_steer: bool = False,
         _partition_batch: bool = True,
         _call_ordinal_offset: int = 0,
         _close_surface_borrow: bool = True,
@@ -1022,34 +1012,18 @@ class ToolBatchExecutor:
         source_context_token = None
         unsettled_process_local_effect: ProcessLocalEffectSettlementToken | None = None
         pending_hook_context_reservations = []
-        call_owner = object()
         source = current_tool_invocation.get()
         code_call = source is not None and source.kind is ToolInvocationSourceKind.CODE_MODE_CALL
-        steer_event = _foreground_steer.get()
-        steer_token = None
-        if _close_surface_borrow:
-            if not code_call or steer_event is None:
-                steer_event = asyncio.Event()
-            if cancelled_by_steer:
-                steer_event.set()
-            if not code_call:
-                self._active_calls[call_owner] = (turn_id, steer_event)
-                steer_token = _foreground_steer.set(steer_event)
+        cell_cancel_event = (
+            getattr(_code_invocation.get(), "cancelled", None) if code_call else None
+        )
         hook_epoch_token = None
         if _close_surface_borrow and not code_call:
             epoch = self._continuity.current_view(continuity_scope)
             if epoch is not None:
                 hook_epoch_token = _tool_hook_epoch.set(epoch.epoch_nonce)
         try:
-            if _close_surface_borrow and not code_call and canonical_identity.conversation_scope_kind is ModelInputScopeKind.ROOT:
-                pending = await self._io.run(
-                    self._repository.read_pending_prompt_steer_facts,
-                    session_id=request.session_id, target_turn_id=turn_id,
-                    maximum_items=1, deadline_monotonic=self._canonical_deadline(),
-                )
-                if pending:
-                    steer_event.set()
-            if (steer_event is not None and steer_event.is_set()) or (
+            if (cell_cancel_event is not None and cell_cancel_event.is_set()) or (
                 self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE"
             ):
                 _partition_batch = False
@@ -1099,12 +1073,12 @@ class ToolBatchExecutor:
                 await self._admission_lock.acquire()
                 admission_held = True
                 call_preauthorization = _preauthorization
-                steered = steer_event is not None and steer_event.is_set()
-                if steered:
+                cell_cancelled = cell_cancel_event is not None and cell_cancel_event.is_set()
+                if cell_cancelled:
                     call_preauthorization = (
                         PreparedResolvedToolInvocation(call.tool_name, call.tool_name, call.arguments),
                         KernelToolAuthorization(KernelToolAuthorizationKind.CANCELLED_BEFORE_DISPATCH,
-                                                "interaction:user-steer", "被用户取消"),
+                                                "code-mode:cell-stopped", "Cell 已停止，此工具未执行。"),
                     )
                 workspace_blocked = self._workspace_gate is not None and self._workspace_gate.observe().outcome != "AVAILABLE"
                 if workspace_blocked:
@@ -1123,12 +1097,10 @@ class ToolBatchExecutor:
                 result_entry_id = derive_id('entry', 'tool-result', result_id)
                 if surface_borrow is None:
                     raise RuntimeError("model response lost its tool surface borrow")
-                # A cancelled old batch needs only canonical settlement; a
-                # prospective Plan successor may already have retired its surface.
-                binding = None if steered else surface_borrow.execution_binding(call.tool_name)
+                binding = None if cell_cancelled else surface_borrow.execution_binding(call.tool_name)
                 hook_view = (
                     self._hooks.capture_view()
-                    if not workspace_blocked and not steered and self._hooks is not None and hook_scope is not None
+                    if not workspace_blocked and not cell_cancelled and self._hooks is not None and hook_scope is not None
                     else None
                 )
                 prepared_invocation = (
@@ -1290,7 +1262,7 @@ class ToolBatchExecutor:
                             authorization=authorization, turn_id=turn_id,
                             assistant_entry_id=assistant_entry_id, tool_call_id=call.tool_call_id,
                             permission_snapshot=canonical_facts.run_permission_snapshot,
-                            steer_event=steer_event,
+                            cell_cancel_event=cell_cancel_event,
                         )
                 if (
                     authorization.kind
@@ -1359,7 +1331,7 @@ class ToolBatchExecutor:
                             permission_snapshot=(
                                 canonical_facts.run_permission_snapshot
                             ),
-                            steer_event=steer_event,
+                            cell_cancel_event=cell_cancel_event,
                         )
                 attempt_id: str | None = None
                 attempt_permission_snapshot_fingerprint: str | None = (
@@ -1719,7 +1691,7 @@ class ToolBatchExecutor:
                             hook_scope=hook_scope,
                         ) if call.tool_name == "exec_cell" else None,
                         capability_call=authorization.capability_call,
-                        steer_event=steer_event,
+                        cell_cancel_event=cell_cancel_event,
                         memory_context=request.memory_context,
                         input_modalities=(
                             request.input_modalities if isinstance(request, CodeModeToolRequest)
@@ -1922,9 +1894,6 @@ class ToolBatchExecutor:
             for reservation in pending_hook_context_reservations:
                 reservation.retire()
             if _close_surface_borrow:
-                self._active_calls.pop(call_owner, None)
-                if steer_token is not None:
-                    _foreground_steer.reset(steer_token)
                 surface_borrow.close()
             if unsettled_process_local_effect is not None:
                 try:

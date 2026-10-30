@@ -584,7 +584,7 @@ class _RepositoryKernel:
         if session_id != guard.session_id:
             if any(draft.event_type not in {CommittedEventType.PROMPT_QUEUED,CommittedEventType.PROMPT_CANCELLED,CommittedEventType.PROMPT_REJECTED} for draft in drafts):
                 raise ConversationKernelConflict('ROOT writer can only accept or cancel an owned Agent request')
-            owner = connection.execute('SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE',(session_id,)).fetchone()
+            owner = connection.execute('SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s FOR NO KEY UPDATE',(session_id,)).fetchone()
             if owner is None or owner['root_session_id'] != guard.session_id:
                 raise ConversationKernelConflict('ROOT writer cannot append to an unowned Agent')
         guard_kind = AppendGuardKind.HOST_WRITER

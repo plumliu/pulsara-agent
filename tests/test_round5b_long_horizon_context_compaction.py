@@ -2034,6 +2034,7 @@ def test_round5b_active_manual_request_is_busy_and_never_revives_at_idle() -> No
 
 def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
     handoff = freeze_compaction_runtime_handoff(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
         terminal_processes=(
             FrozenTerminalProcessHandoffFact(
                 process_id="process:nihhtj3io4t4xhypmulh24ebgm",
@@ -2083,6 +2084,7 @@ def test_round5b_runtime_handoff_reports_a_bounded_pmca_projection() -> None:
     )
 
     handoff = freeze_compaction_runtime_handoff(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
         terminal_processes=tuple(
             FrozenTerminalProcessHandoffFact(
                 process_id=f"process:{index:026d}", status="running"
@@ -2637,7 +2639,7 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert len(LIVE_EVENT_TYPES) == 23
     assert len(SUBJECT_SLOTS) == 8
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 29
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     assert "canonical_image_refs" in CONVERSATION_KERNEL_RELATIONS
     assert not {
         "durable_jobs",

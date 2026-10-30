@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.repository_errors import PlanControlSupersededBySteer
-
 from pulsara_agent.identity import derive_id
 from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.conversation_kernel.prompt_storage import (
@@ -145,7 +143,7 @@ def _plan_question_result_values(
         ),
         arguments=frozen,
     )
-    response = ({"cancelled_by": "USER_STEER", "message": "被用户取消"} if answer is None
+    response = ({"cancelled_by": "USER_CANCELLED", "message": "用户取消了问题"} if answer is None
                 else _plan_question_response(content=content, answer=answer))
     return (
         frozen,
@@ -419,14 +417,6 @@ class _PlanOperations:
             )
             if winner is not None:
                 return winner
-            if connection.execute(
-                """SELECT 1 FROM pulsara_v3.prompt_queue_items
-                   WHERE session_id = %s AND target_turn_id = %s
-                     AND status = 'PENDING' AND delivery_mode = 'STEER_ACTIVE_TURN'
-                   LIMIT 1""",
-                (guard.session_id, candidate.origin_turn_id),
-            ).fetchone() is not None:
-                raise PlanControlSupersededBySteer("Plan batch was cancelled by accepted Steer")
             turn = connection.execute(
                 """
                 SELECT * FROM pulsara_v3.turns
@@ -646,6 +636,16 @@ class _PlanOperations:
             ):
                 origin_completed = True
             if origin_completed:
+                # Plan results precede the terminal handoff inputs in the same commit.
+                self._append_events(
+                    connection, guard, workspace_id=candidate.workspace_id,
+                    drafts=tuple(event_drafts),
+                )
+                event_drafts.clear()
+                self._consume_plan_terminal_inputs(
+                    connection, guard, turn_id=candidate.origin_turn_id,
+                    workspace_id=candidate.workspace_id,
+                )
                 if final_entry_id is None:
                     raise ConversationKernelConflict(
                         "terminal Plan batch has no final result entry"
@@ -1002,14 +1002,7 @@ class _PlanOperations:
         lock_clause = "FOR UPDATE OF t" if lock else ""
         turn = connection.execute(
             f"""
-            SELECT t.*, s.latest_entry_sequence,
-                   EXISTS (
-                       SELECT 1 FROM pulsara_v3.prompt_queue_items AS q
-                       WHERE q.session_id = t.session_id
-                         AND q.target_turn_id = t.id
-                         AND q.status = 'PENDING'
-                         AND q.delivery_mode = 'STEER_ACTIVE_TURN'
-                   ) AS has_pending_steer
+            SELECT t.*, s.latest_entry_sequence
             FROM pulsara_v3.turns AS t
             JOIN pulsara_v3.sessions AS s ON s.id = t.session_id
             WHERE t.session_id = %s AND t.id = %s AND t.status = 'RUNNING'
@@ -1020,7 +1013,6 @@ class _PlanOperations:
         if (
             turn is None
             or str(turn["workspace_id"]) != str(interaction["workspace_id"])
-            or (bool(turn["has_pending_steer"]) != (answer is None))
         ):
             raise ConversationKernelConflict(
                 "Plan question result is not at its exact ROOT boundary"

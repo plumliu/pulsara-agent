@@ -15,10 +15,6 @@ class PreparedCompletionSuffixStale(ConversationKernelConflict):
     """A speculative ROOT completion batch lost its exact canonical cut."""
 
 
-class PlanControlSupersededBySteer(ConversationKernelConflict):
-    """Accepted Steer won before this Plan batch crossed its dispatch boundary."""
-
-
 class SessionDeletionBusy(RuntimeError):
     """Deletion has no authority over the current canonical writer."""
 
@@ -35,4 +31,4 @@ ConversationKernelConflict.__module__ = (
 )
 
 
-__all__ = ["ConversationKernelConflict", "PreparedCompletionSuffixStale", "PlanControlSupersededBySteer", "SessionDeletionBusy", "SessionWriterConflict"]
+__all__ = ["ConversationKernelConflict", "PreparedCompletionSuffixStale", "SessionDeletionBusy", "SessionWriterConflict"]

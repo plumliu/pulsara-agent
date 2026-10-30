@@ -8,7 +8,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     validate_work_inputs,
 )
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pulsara_agent.identity import derive_id
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
@@ -51,6 +51,7 @@ from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, Sub
 from pulsara_agent.conversation_kernel.steer import (
     AcceptedSteerDispatchEntry,
     MAXIMUM_STEER_ITEMS_PER_SAFE_POINT,
+    build_steer_consumption_occurrences,
     PendingPromptSteerFact,
     PreparedPromptIngressCommand,
     PreparedQueuedRootTurnAdmission,
@@ -1813,64 +1814,109 @@ class _PromptOperations:
                 raise ConversationKernelConflict(
                     "prepared steer canonical base sequence drifted"
                 )
-            entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
-            if entry_sequence != candidate.expected_entry_sequence:
-                raise ConversationKernelConflict(
-                    "prepared steer entry sequence drifted"
+            return self._write_consumed_prompt_steer(
+                connection, guard, item=item, fact=candidate,
+                entry_id=candidate.new_entry_id,
+                prompt_event=candidate.prompt_consumed_occurrence,
+                steer_event=candidate.user_steer_accepted_occurrence,
+                expected_entry_sequence=candidate.expected_entry_sequence,
+            )
+
+    def _write_consumed_prompt_steer(
+        self, connection, guard, *, item, fact, entry_id, prompt_event,
+        steer_event, expected_entry_sequence=None,
+    ):
+        """Write one already-validated queue owner in the caller's transaction."""
+        entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
+        if expected_entry_sequence is not None and entry_sequence != expected_entry_sequence:
+            raise ConversationKernelConflict("prepared steer entry sequence drifted")
+        workspace_id = str(item["workspace_id"])
+        self._insert_entry(
+            connection, session_id=guard.session_id, workspace_id=workspace_id,
+            turn_id=fact.exact_target_turn_id, entry_id=entry_id,
+            entry_sequence=entry_sequence, entry_kind=EntryKind.USER_STEER,
+            content=fact.body_storage, input_origin=fact.input_origin,
+        )
+        copy_canonical_prompt_refs(
+            connection, session_id=guard.session_id, workspace_id=workspace_id,
+            source_queue_item_id=fact.queue_item_id, target_transcript_entry_id=entry_id,
+        )
+        updated = connection.execute(
+            """UPDATE pulsara_v3.prompt_queue_items
+               SET status='CONSUMED', consumed_entry_id=%s,
+                   terminal_reason='CONSUMED', terminal_at=clock_timestamp()
+               WHERE session_id=%s AND id=%s AND status='PENDING' RETURNING id""",
+            (entry_id, guard.session_id, fact.queue_item_id),
+        ).fetchone()
+        if updated is None:
+            raise ConversationKernelConflict("prepared steer queue CAS lost")
+        events = self._append_events(
+            connection, guard, workspace_id=workspace_id, drafts=(prompt_event, steer_event),
+        )
+        return AcceptedSteerDispatchEntry(
+            queue_item_id=fact.queue_item_id, queue_sequence=fact.queue_sequence,
+            entry_id=entry_id, entry_sequence=entry_sequence,
+            target_turn_id=fact.exact_target_turn_id,
+            content_digest=fact.body_storage.digest, content_size=fact.body_storage.size,
+            prompt_consumed_event_id=events[0].event_id,
+            prompt_consumed_event_sequence=events[0].event_sequence,
+            user_steer_event_id=events[1].event_id,
+            user_steer_event_sequence=events[1].event_sequence,
+        )
+
+    def _consume_plan_terminal_inputs(
+        self, connection, guard, *, turn_id, workspace_id,
+    ) -> None:
+        """Drain the exact turn lane in the Plan terminal transaction, one body at a time."""
+        while True:
+            items = connection.execute(
+                """SELECT * FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id=%s AND target_turn_id=%s AND status='PENDING'
+                     AND delivery_mode='STEER_ACTIVE_TURN'
+                   ORDER BY queue_sequence,id LIMIT %s FOR UPDATE""",
+                (guard.session_id, turn_id, MAXIMUM_STEER_ITEMS_PER_SAFE_POINT),
+            ).fetchall()
+            if not items:
+                return
+            for item in items:
+                if str(item["workspace_id"]) != workspace_id:
+                    raise ConversationKernelConflict("Plan steer workspace drifted")
+                images = connection.execute(
+                    """SELECT coalesce(sum(b.logical_size),0) AS image_bytes,
+                              count(*) AS ref_count, count(b.id) AS blob_count
+                       FROM pulsara_v3.canonical_image_refs r
+                       LEFT JOIN pulsara_v3.blobs b
+                         ON b.id=r.blob_id AND b.workspace_id=r.workspace_id
+                       WHERE r.session_id=%s AND r.queue_item_id=%s""",
+                    (guard.session_id, item["id"]),
+                ).fetchone()
+                if int(images["ref_count"]) != int(images["blob_count"]):
+                    raise ConversationKernelConflict("pending steer image reference is unavailable")
+                fact = build_pending_prompt_steer_fact(
+                    session_id=guard.session_id, workspace_id=workspace_id,
+                    queue_item_id=str(item["id"]), queue_sequence=int(item["queue_sequence"]),
+                    command_id=None if item["command_id"] is None else str(item["command_id"]),
+                    exact_target_turn_id=turn_id, content=self._content_from_row(item),
+                    canonical_expanded_bytes=int(item["content_size"]) + int(images["image_bytes"]),
+                    input_origin=CanonicalInputOriginKind(str(item["input_origin"])),
                 )
-            workspace_id = str(item["workspace_id"])
-            self._insert_entry(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=workspace_id,
-                turn_id=candidate.exact_target_turn_id,
-                entry_id=candidate.new_entry_id,
-                entry_sequence=entry_sequence,
-                entry_kind=EntryKind.USER_STEER,
-                content=candidate.body_storage,
-                input_origin=candidate.input_origin,
-            )
-            copy_canonical_prompt_refs(
-                connection,
-                session_id=guard.session_id,
-                workspace_id=workspace_id,
-                source_queue_item_id=candidate.queue_item_id,
-                target_transcript_entry_id=candidate.new_entry_id,
-            )
-            updated = connection.execute(
-                """
-                UPDATE pulsara_v3.prompt_queue_items
-                SET status = 'CONSUMED', consumed_entry_id = %s,
-                    terminal_reason = 'CONSUMED', terminal_at = clock_timestamp()
-                WHERE session_id = %s AND id = %s AND status = 'PENDING'
-                RETURNING id
-                """,
-                (candidate.new_entry_id, guard.session_id, candidate.queue_item_id),
-            ).fetchone()
-            if updated is None:
-                raise ConversationKernelConflict("prepared steer queue CAS lost")
-            events = self._append_events(
-                connection,
-                guard,
-                workspace_id=workspace_id,
-                drafts=(
-                    candidate.prompt_consumed_occurrence,
-                    candidate.user_steer_accepted_occurrence,
-                ),
-            )
-            return AcceptedSteerDispatchEntry(
-                queue_item_id=candidate.queue_item_id,
-                queue_sequence=candidate.queue_sequence,
-                entry_id=candidate.new_entry_id,
-                entry_sequence=entry_sequence,
-                target_turn_id=candidate.exact_target_turn_id,
-                content_digest=candidate.body_storage.digest,
-                content_size=candidate.body_storage.size,
-                prompt_consumed_event_id=events[0].event_id,
-                prompt_consumed_event_sequence=events[0].event_sequence,
-                user_steer_event_id=events[1].event_id,
-                user_steer_event_sequence=events[1].event_sequence,
-            )
+                # Hydrate and validate exactly one owner before copying its refs.
+                prompt = hydrate_canonical_prompt_owner(
+                    connection, row=item, queue_item_id=fact.queue_item_id,
+                )
+                if (prompt.resource_quote.canonical_expanded_bytes > fact.canonical_expanded_bytes
+                    or not canonical_prompt_owner_is_exact(
+                        connection, row=item, expected=prompt, queue_item_id=fact.queue_item_id,
+                    )):
+                    raise ConversationKernelConflict("pending steer content or resource quote drifted")
+                entry_id, prompt_event, steer_event = build_steer_consumption_occurrences(
+                    fact=fact, occurred_at=datetime.now(timezone.utc), actor_id=guard.writer_owner_id,
+                )
+                self._write_consumed_prompt_steer(
+                    connection, guard, item=item, fact=fact, entry_id=entry_id,
+                    prompt_event=prompt_event, steer_event=steer_event,
+                )
+                del prompt
 
     def confirm_prepared_prompt_steer(
         self,

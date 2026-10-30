@@ -12,6 +12,7 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     HANDOFF_BUDGET_OMISSION,
+    SUBAGENT_HANDOFF_BUDGET_OMISSION,
     HANDOFF_CONTINUATION,
     MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS,
     freeze_compaction_runtime_handoff,
@@ -95,7 +96,10 @@ def todo_snapshot(items):
 def test_no_pmca_and_no_todo_is_explicit_empty(todo):
     assert (
         freeze_compaction_runtime_handoff(
-            terminal_processes=(), terminal_monitors=(), todo=todo
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            terminal_processes=(),
+            terminal_monitors=(),
+            todo=todo,
         )
         is None
     )
@@ -108,7 +112,10 @@ def test_todo_only_preserves_status_text_order_counts_and_continuation():
         {"text": "finish", "status": "pending"},
     ]
     handoff = freeze_compaction_runtime_handoff(
-        terminal_processes=(), terminal_monitors=(), todo=todo_snapshot(items)
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        terminal_processes=(),
+        terminal_monitors=(),
+        todo=todo_snapshot(items),
     )
     assert payload(handoff)["todos"] == items
     assert payload(handoff)["todo_counts"] == {
@@ -123,15 +130,24 @@ def test_todo_only_preserves_status_text_order_counts_and_continuation():
 
 
 @pytest.mark.parametrize(
+    "scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT]
+)
+@pytest.mark.parametrize(
     "serializer", [chat_semantic_wire_group, responses_semantic_wire_group]
 )
 def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
     serializer,
+    scope,
 ):
     handoff = freeze_compaction_runtime_handoff(
+        conversation_scope_kind=scope,
         terminal_processes=tuple(process(i) for i in range(200, 0, -1)),
         terminal_monitors=tuple(monitor(i) for i in range(200, 0, -1)),
-        code_cells=tuple(cell(i) for i in range(200, 0, -1)),
+        code_cells=(
+            tuple(cell(i) for i in range(200, 0, -1))
+            if scope is ModelInputScopeKind.ROOT
+            else ()
+        ),
         agent_work_index=(agent(i) for i in range(200)),
         todo=None,
     )
@@ -150,18 +166,26 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
     )
     assert cost <= MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
     assert estimate_runtime_handoff_pmca_tokens(body) >= cost
-    assert handoff.full_text.endswith(HANDOFF_BUDGET_OMISSION)
+    omission = (
+        HANDOFF_BUDGET_OMISSION
+        if scope is ModelInputScopeKind.ROOT
+        else SUBAGENT_HANDOFF_BUDGET_OMISSION
+    )
+    assert handoff.full_text.endswith(omission)
+    assert ("query_cells" in handoff.full_text) is (scope is ModelInputScopeKind.ROOT)
     data = payload(handoff)
-    counts = [
-        len(data[key])
-        for key in ("terminal_processes", "terminal_monitors", "code_cells", "agents")
-    ]
+    keys = ("terminal_processes", "terminal_monitors", "agents")
+    if scope is ModelInputScopeKind.ROOT:
+        keys = (*keys, "code_cells")
+    counts = [len(data[key]) for key in keys]
     assert max(counts) - min(counts) <= 1
     assert data["terminal_processes"][0] == {
         "target": {"kind": "PROCESS", "process_id": f"process:{1:026d}"},
         "status": "running",
     }
-    assert data["code_cells"][0] == cell(1)
+    assert data["code_cells"][:1] == (
+        [cell(1)] if scope is ModelInputScopeKind.ROOT else []
+    )
     assert data["agents"][0] == agent(0)
     assert set(data) == {
         "terminal_processes",
@@ -173,15 +197,23 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
     }
 
 
-def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pmca_selection():
+@pytest.mark.parametrize(
+    "scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT]
+)
+def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pmca_selection(
+    scope,
+):
     # This passes the real NFC/unique/192-byte/4-KiB parser. Source JSON nesting
     # amplifies escaping; the complete message is deliberately above 3,200.
     items = [{"text": str(i) + '"' * 107, "status": "pending"} for i in range(16)]
     todo = todo_snapshot(items)
     facts = dict(
+        conversation_scope_kind=scope,
         terminal_processes=tuple(process(i) for i in range(150)),
         terminal_monitors=tuple(monitor(i) for i in range(150)),
-        code_cells=tuple(cell(i) for i in range(150)),
+        code_cells=tuple(cell(i) for i in range(150))
+        if scope is ModelInputScopeKind.ROOT
+        else (),
         agent_work_index=tuple(agent(i) for i in range(150)),
     )
     without = freeze_compaction_runtime_handoff(**facts, todo=None)
@@ -191,14 +223,28 @@ def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pmca_selecti
     assert payload(with_todo)["todo_counts"]["total"] == 16
     assert estimate_runtime_handoff_pmca_tokens(with_todo.full_text) > 3_200
     only_todo = freeze_compaction_runtime_handoff(
-        terminal_processes=(), terminal_monitors=(), todo=todo
+        conversation_scope_kind=scope,
+        terminal_processes=(),
+        terminal_monitors=(),
+        todo=todo,
     )
     assert estimate_runtime_handoff_pmca_tokens(only_todo.full_text) > 3_200
     assert HANDOFF_BUDGET_OMISSION not in only_todo.full_text
+    assert SUBAGENT_HANDOFF_BUDGET_OMISSION not in only_todo.full_text
 
 
-def test_exact_boundary_and_omission_note_remove_multiple_whole_rows_in_reverse_order():
+@pytest.mark.parametrize(
+    "scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT]
+)
+def test_exact_boundary_and_omission_note_remove_multiple_whole_rows_in_reverse_order(
+    scope,
+):
     seen = []
+    omission = (
+        HANDOFF_BUDGET_OMISSION
+        if scope is ModelInputScopeKind.ROOT
+        else SUBAGENT_HANDOFF_BUDGET_OMISSION
+    )
 
     def measure(body):
         data = json.loads(body.split("\n", 1)[0])
@@ -212,16 +258,19 @@ def test_exact_boundary_and_omission_note_remove_multiple_whole_rows_in_reverse_
             )
         )
         assert "todos" not in data and "todo_counts" not in data
-        seen.append((count, HANDOFF_BUDGET_OMISSION in body))
-        if HANDOFF_BUDGET_OMISSION in body:
+        seen.append((count, omission in body))
+        if omission in body:
             return 3_200 if count <= 1 else 3_201
         return 3_200 if count <= 3 else 3_201
 
     handoff = freeze_compaction_runtime_handoff(
+        conversation_scope_kind=scope,
         terminal_processes=(process(1),),
         terminal_monitors=(monitor(1),),
-        code_cells=(cell(1),),
-        agent_work_index=(agent(1),),
+        code_cells=(cell(1),) if scope is ModelInputScopeKind.ROOT else (),
+        agent_work_index=(agent(1),)
+        if scope is ModelInputScopeKind.ROOT
+        else (agent(1), agent(2)),
         todo=None,
         measure_pmca=measure,
     )
@@ -241,6 +290,7 @@ def test_first_candidate_too_large_still_produces_handoff_and_stops_enumeration(
         return 3_201 if json.loads(body.split("\n", 1)[0])["agents"] else 1
 
     handoff = freeze_compaction_runtime_handoff(
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
         terminal_processes=(),
         terminal_monitors=(),
         agent_work_index=candidates(),
@@ -254,7 +304,11 @@ def test_first_candidate_too_large_still_produces_handoff_and_stops_enumeration(
 
 def test_invalid_envelope_and_reader_errors_are_not_reported_as_empty_or_omission():
     with pytest.raises(CompactionRuntimeHandoffBoundError):
-        CompactionRuntimeHandoffBuilder(todo=None, measure_pmca=lambda _: 3_201)
+        CompactionRuntimeHandoffBuilder(
+            todo=None,
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
+            measure_pmca=lambda _: 3_201,
+        )
 
     def candidates():
         yield agent(1)
@@ -262,6 +316,7 @@ def test_invalid_envelope_and_reader_errors_are_not_reported_as_empty_or_omissio
 
     with pytest.raises(RuntimeError, match="repository read failed"):
         freeze_compaction_runtime_handoff(
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
             terminal_processes=(),
             terminal_monitors=(),
             agent_work_index=candidates(),
@@ -293,7 +348,7 @@ def freeze(port, scope=ModelInputScopeKind.ROOT):
     )
 
 
-def test_subagent_passes_real_agent_and_work_scope_without_root_inventory():
+def test_subagent_reads_scoped_agents_and_real_work_monitors_without_cells():
     scopes = []
 
     def monitors(**scope):
@@ -307,9 +362,14 @@ def test_subagent_passes_real_agent_and_work_scope_without_root_inventory():
             },
         )
 
-    class RootInventory:
+    class CellInventory:
         def freeze_compaction_handoff(self, **kwargs):
-            raise AssertionError("Subagent must not read ROOT Agent/Cell inventory")
+            raise AssertionError("Subagent must not read Cell inventory")
+
+    class AgentInventory:
+        async def freeze_compaction_handoff(self, *, cursor=None):
+            assert cursor is None
+            return (agent(1), agent(2))
 
     own = SimpleNamespace(
         process_id="process:own", origin=SimpleNamespace(session_id="session:current")
@@ -319,8 +379,8 @@ def test_subagent_passes_real_agent_and_work_scope_without_root_inventory():
     )
     port = port_fixture(
         monitor_freezer=monitors,
-        subagent=RootInventory(),
-        code_mode=RootInventory(),
+        subagent=AgentInventory(),
+        code_mode=CellInventory(),
         processes=(foreign, own),
     )
     data = payload(freeze(port, ModelInputScopeKind.SUBAGENT))
@@ -331,11 +391,15 @@ def test_subagent_passes_real_agent_and_work_scope_without_root_inventory():
             "status": "running",
         }
     ]
-    assert data["agents"] == data["code_cells"] == []
+    assert data["agents"] == [agent(1), agent(2)]
+    assert data["code_cells"] == []
     assert data["terminal_monitors"][0]["state"] == "dormant"
 
 
-def test_lazy_agent_pages_read_after_50_and_stop_on_confirmed_budget_omission():
+@pytest.mark.parametrize(
+    "scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT]
+)
+def test_lazy_agent_pages_read_after_50_and_stop_on_confirmed_budget_omission(scope):
     reads = []
 
     class Inventory:
@@ -345,13 +409,23 @@ def test_lazy_agent_pages_read_after_50_and_stop_on_confirmed_budget_omission():
             assert start < 100, "do not scan remaining pages after overflow"
             return tuple(agent(i) for i in range(start, start + 50))
 
-    handoff = freeze(port_fixture(subagent=Inventory()))
+    handoff = freeze(port_fixture(subagent=Inventory()), scope)
     assert reads == [None, agent(49)["agent"]["agent_id"]]
     assert 50 < len(payload(handoff)["agents"]) < 100
-    assert handoff.full_text.endswith(HANDOFF_BUDGET_OMISSION)
+    omission = (
+        HANDOFF_BUDGET_OMISSION
+        if scope is ModelInputScopeKind.ROOT
+        else SUBAGENT_HANDOFF_BUDGET_OMISSION
+    )
+    assert handoff.full_text.endswith(omission)
 
 
-def test_full_agent_page_requests_next_page_to_distinguish_exactly_complete_inventory():
+@pytest.mark.parametrize(
+    "scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT]
+)
+def test_full_agent_page_requests_next_page_to_distinguish_exactly_complete_inventory(
+    scope,
+):
     reads = []
 
     class Inventory:
@@ -359,13 +433,17 @@ def test_full_agent_page_requests_next_page_to_distinguish_exactly_complete_inve
             reads.append(cursor)
             return tuple(agent(i) for i in range(50)) if cursor is None else ()
 
-    handoff = freeze(port_fixture(subagent=Inventory()))
+    handoff = freeze(port_fixture(subagent=Inventory()), scope)
     assert len(reads) == 2
     assert len(payload(handoff)["agents"]) == 50
     assert HANDOFF_BUDGET_OMISSION not in handoff.full_text
+    assert SUBAGENT_HANDOFF_BUDGET_OMISSION not in handoff.full_text
 
 
-def test_async_reader_failure_on_needed_next_page_propagates():
+@pytest.mark.parametrize(
+    "scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT]
+)
+def test_async_reader_failure_on_needed_next_page_propagates(scope):
     class Inventory:
         async def freeze_compaction_handoff(self, *, cursor=None):
             if cursor is not None:
@@ -373,7 +451,7 @@ def test_async_reader_failure_on_needed_next_page_propagates():
             return tuple(agent(i) for i in range(50))
 
     with pytest.raises(RuntimeError, match="active page read failed"):
-        freeze(port_fixture(subagent=Inventory()))
+        freeze(port_fixture(subagent=Inventory()), scope)
 
 
 def test_wrong_scope_identity_is_rejected_before_reading_owners():

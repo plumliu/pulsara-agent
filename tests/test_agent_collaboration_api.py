@@ -129,6 +129,7 @@ class RepositoryOwner:
         self.root = root
         self.rows = {}
         self.agents = set()
+        self.known = {}
         self.admissions = []
         self.reject = False
 
@@ -164,7 +165,7 @@ class RepositoryOwner:
             title="Agent",
         )
 
-    def list_agent_sessions(
+    def _session_rows(
         self, *, root_session_id, cursor=None, limit=20, deadline_monotonic
     ):
         ids = sorted(self.agents)
@@ -180,17 +181,35 @@ class RepositoryOwner:
             for identity in ids[:limit]
         )
 
-    def list_active_agent_sessions(
-        self, *, root_session_id, cursor=None, limit=50, deadline_monotonic
+    def _query_visible(self, observer_session_id, agent_id):
+        return agent_id in self.agents and (
+            observer_session_id == self.root
+            or agent_id == observer_session_id
+            or agent_id in self.known.get(observer_session_id, set())
+        )
+
+    def list_query_agent_sessions(
+        self, *, root_session_id, observer_session_id, cursor=None, limit=50,
+        active_only=False, deadline_monotonic
     ):
-        rows = self.list_agent_sessions(
+        rows = self._session_rows(
             root_session_id=root_session_id, cursor=cursor,
             limit=len(self.agents) or 1, deadline_monotonic=deadline_monotonic,
         )
         return tuple(
             row for row in rows
-            if row["current_work_id"] is not None or row["queued_count"] > 0
+            if self._query_visible(observer_session_id, row["agent_id"])
+            and (not active_only or row["current_work_id"] is not None or row["queued_count"] > 0)
         )[:limit]
+
+    def list_query_agent_works(self, *, observer_session_id, agent_id, **kwargs):
+        if not self._query_visible(observer_session_id, agent_id):
+            raise ValueError("AGENT does not exist in this collaboration")
+        return self.list_agent_works(agent_id=agent_id, **kwargs)
+
+    def query_visible_agent_work(self, *, observer_session_id, **kwargs):
+        row = self.query_agent_work(**kwargs)
+        return row if row and self._query_visible(observer_session_id, row["agent_id"]) else None
 
     def admit_agent_requests(self, guard, *, requests, **kwargs):
         self.admissions.append(requests)
@@ -317,7 +336,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
                 initial_context_units=(),
             ),
             agent_message_cursors={},
-            steer_event=asyncio.Event(),
+            cell_cancel_event=asyncio.Event(),
         )
         self.api = CollaborationToolPort(
             repository=self.repo,
@@ -498,18 +517,77 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
             sorted(self.repo.agents),
         )
 
-    async def test_handoff_read_failure_propagates_and_subagent_has_no_inventory(self):
+    async def test_handoff_read_failure_propagates_for_root_and_subagent(self):
         failure = ConversationKernelConflict("active Agent read failed")
 
         def fail(**kwargs):
             raise failure
 
-        self.repo.list_active_agent_sessions = fail
+        self.repo.list_query_agent_sessions = fail
         with self.assertRaises(ConversationKernelConflict) as caught:
             await self.api.freeze_compaction_handoff()
         self.assertIs(caught.exception, failure)
         self.api.session_id = random_id("session")
-        self.assertEqual(await self.api.freeze_compaction_handoff(), ())
+        with self.assertRaises(ConversationKernelConflict) as caught:
+            await self.api.freeze_compaction_handoff()
+        self.assertIs(caught.exception, failure)
+
+    async def test_query_scopes_three_branches_and_keeps_root_alias_out_of_pagination(self):
+        own, own_work = self.add_work()
+        known, known_work = self.add_work(status="completed", final="known final")
+        hidden, hidden_work = self.add_work(status="stopped", final="hidden final")
+        self.repo.known[own] = {known}
+        root_work = await self.call("query_agents", {"target": work_target(known_work)})
+        self.api.session_id = self.context.session_id = own
+        self.context.invocation_source = SimpleNamespace(kind="MODEL_TOOL_CALL")
+        first = await self.call("query_agents", {"max_items": 1})
+        second = await self.call("query_agents", {"max_items": 1, "cursor": first["next_cursor"]})
+        for page in (first, second):
+            self.assertEqual(page["root"], agent_target("ROOT"))
+            self.assertEqual(len(page["agents"]), 1)
+        self.assertIsNone(second["next_cursor"])
+        self.assertEqual(
+            [page["agents"][0]["agent"]["agent_id"] for page in (first, second)],
+            sorted((own, known)),
+        )
+        for agent, work in ((own, own_work), (known, known_work)):
+            page = await self.call("query_agents", {"target": agent_target(agent)})
+            self.assertEqual(page["works"][0]["target"], work_target(work))
+        self.assertEqual(await self.call("query_agents", {"target": work_target(known_work)}), root_work)
+        for target in (agent_target(hidden), work_target(hidden_work), agent_target("ROOT")):
+            with self.assertRaises(ValueError):
+                await self.call("query_agents", {"target": target})
+        self.assertEqual(self.repo.known[own], {known})
+        self.assertEqual(await self.api.freeze_compaction_handoff(), ({
+            "agent": agent_target(own), "current_work": work_target(own_work), "queued_count": 0,
+        },))
+
+    async def test_query_work_pages_keep_target_and_communication_ignores_known_set(self):
+        own, _ = self.add_work()
+        other, first_work = self.add_work(status="completed", final="first")
+        _, second_work = self.add_work(agent=other, status="completed", final="second")
+        self.api.session_id = self.context.session_id = own
+        waited = await self.call("wait_agent", {"targets": [agent_target(other)]})
+        self.assertEqual(waited["works"][0]["target"], work_target(second_work))
+        self.assertNotIn(own, self.repo.known)
+        self.repo.rows[second_work]["status"] = "running"
+        sent = await self.call("send_agent_message", {"target": agent_target(other), "message": "hello"})
+        self.assertEqual(sent["delivery"], "queued")
+        self.repo.known[own] = {other}
+        first = await self.call("query_agents", {"target": agent_target(other), "max_items": 1})
+        second = await self.call("query_agents", {
+            "target": agent_target(other), "max_items": 1, "cursor": first["next_cursor"],
+        })
+        self.assertEqual(first["works"][0]["target"], work_target(first_work))
+        self.assertEqual(second["works"][0]["target"], work_target(second_work))
+        self.assertIsNone(second["next_cursor"])
+        for name, args in (("run_agent", {"instruction": "forbidden"}),
+                           ("stop_agent", {"target": agent_target(other)})):
+            with self.assertRaisesRegex(ValueError, "only to ROOT"):
+                await self.call(name, args)
+        self.context.effective_permission_mode = PermissionMode.READ_ONLY
+        with self.assertRaisesRegex(ValueError, "bypass permissions"):
+            await self.call("query_agents", {})
 
     async def test_cancelled_physical_admission_preserves_the_accepted_result(self):
         import threading
@@ -643,14 +721,14 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         )
         while not self.runtime.waiters:
             await asyncio.sleep(0)
-        self.context.steer_event.set()
+        self.context.cell_cancel_event.set()
         result = await asyncio.wait_for(waiter, 1)
         self.assertEqual(result["state"], "interrupted")
         self.assertEqual(result["pending_targets"], [work_target(work)])
         self.assertEqual(self.repo.rows[work]["status"], "queued")
         self.assertEqual(self.runtime.suspended, 0)
 
-    async def test_unselected_agent_message_does_not_interrupt_but_human_control_does(
+    async def test_unselected_agent_message_does_not_interrupt_but_cell_stop_does(
         self,
     ):
         selected, work = self.add_work()
@@ -667,11 +745,31 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.changed()
         await asyncio.sleep(0)
         self.assertFalse(waiter.done())
-        self.context.steer_event.set()
+        self.context.cell_cancel_event.set()
         result = await asyncio.wait_for(waiter, 1)
         self.assertEqual(result["state"], "interrupted")
         self.assertEqual(self.repo.rows[work]["status"], "running")
         self.assertNotIn(other, self.context.agent_message_cursors)
+
+    async def test_native_wait_ignores_unselected_message_until_selected_sender(self):
+        selected, _ = self.add_work()
+        other, _ = self.add_work()
+        self.context.cell_cancel_event = None
+        self.context.agent_message_cursors = None
+        waiter = asyncio.create_task(self.call(
+            "wait_agent", {"targets": [agent_target(selected)], "timeout_seconds": 30}
+        ))
+        while not self.runtime.waiters:
+            await asyncio.sleep(0)
+        self.runtime.messages[other] = 1
+        await self.runtime.changed()
+        await asyncio.sleep(0)
+        self.assertFalse(waiter.done())
+        self.runtime.messages[selected] = 1
+        await self.runtime.changed()
+        result = await asyncio.wait_for(waiter, 1)
+        self.assertEqual(result["state"], "message_available")
+        self.assertEqual(result["message_sources"], [agent_target(selected)])
 
     async def test_work_stop_does_not_cancel_unrelated_queued_work(self):
         agent, running = self.add_work()

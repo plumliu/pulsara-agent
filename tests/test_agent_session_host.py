@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from time import monotonic
 from datetime import datetime, timedelta, timezone
 
@@ -49,6 +50,173 @@ class AgentModel(_DetachedDraftModel):
                 events = _text('CHILD_SECOND_FINAL')
         for event in events:
             yield event
+
+
+class KnownQueryModel(_DetachedDraftModel):
+    def __init__(self):
+        super().__init__()
+        self.root_id = None
+        self.target_b = None
+        self.target_c = None
+        self.work_b = None
+        self.next_instruction = ''
+        self.next_target = None
+        self.query_before_delegation = False
+        self.root_query_result_input = None
+        self.root_counts = {}
+        self.child_counts = {}
+        self.b_started = asyncio.Event()
+        self.b_release = asyncio.Event()
+        self.c_release = asyncio.Event()
+        self.send_release = asyncio.Event()
+        self.query_result_input = None
+        self.send_result_input = None
+
+    async def stream(self, request):
+        self.requests.append(request)
+        if request.session_id == self.root_id:
+            index = self.root_counts.get(request.turn_id, 0)
+            self.root_counts[request.turn_id] = index + 1
+            arguments = {'instruction': self.next_instruction}
+            if self.next_target:
+                arguments['target'] = {'kind': 'AGENT', 'agent_id': self.next_target}
+            if self.query_before_delegation and index == 0:
+                events = _tool_call('query_agents', random_id('call'),
+                                    {'target': {'kind': 'WORK', 'work_id': self.work_b}})
+            elif self.query_before_delegation and index == 1:
+                self.root_query_result_input = request.compiled_input
+                arguments['context'] = {'mode': 'last_n', 'turns': 1}
+                events = _tool_call('run_agent', random_id('call'), arguments)
+            else:
+                events = (_tool_call('run_agent', random_id('call'), arguments)
+                          if index == 0 else _text('ROOT_FINISHED'))
+        elif self.target_b is None or request.session_id == self.target_b:
+            self.target_b = request.session_id
+            self.b_started.set()
+            await self.b_release.wait()
+            events = _text(f'B result mentions {self.target_c}')
+        elif self.target_c is None or request.session_id == self.target_c:
+            self.target_c = request.session_id
+            await self.c_release.wait()
+            events = _text('C_FINISHED')
+        else:
+            index = self.child_counts.get(request.session_id, 0)
+            self.child_counts[request.session_id] = index + 1
+            if index == 0:
+                events = _tool_call('wait_agent', random_id('call'),
+                                    {'targets': [{'kind': 'AGENT', 'agent_id': self.target_c}], 'timeout_seconds': 0})
+            elif index == 1:
+                events = _tool_call('query_agents', random_id('call'),
+                                    {'target': {'kind': 'WORK', 'work_id': self.work_b}})
+            elif index == 2:
+                self.query_result_input = request.compiled_input
+                await self.send_release.wait()
+                events = _tool_call('send_agent_message', random_id('call'),
+                                    {'target': {'kind': 'AGENT', 'agent_id': self.target_c}, 'message': 'hello'})
+            else:
+                self.send_result_input = request.compiled_input
+                events = _text('QUERY_FINISHED')
+        for event in events:
+            yield event
+
+
+def test_native_child_query_executes_and_tool_result_does_not_introduce_contacts(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
+    async def scenario():
+        monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
+        model = KnownQueryModel()
+        core, root = await _open_test_session(tmp_path=tmp_path, model=model,
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch)
+        model.root_id = root.session_id
+        async def run_root(instruction, prompt='Delegate.'):
+            model.next_instruction = instruction
+            await root.run_turn(PromptContent.text(prompt), command_id=random_id('command'),
+                                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+        try:
+            await run_root('B waits for C.')
+            await asyncio.wait_for(model.b_started.wait(), 15)
+            await run_root('C completes independently.')
+            async def c_started():
+                return model.target_c is not None
+            await eventually(c_started)
+            model.b_release.set()
+            async def b_finished():
+                rows = await root._io.run(root.repository.list_agent_works,
+                    root_session_id=root.session_id, agent_id=model.target_b,
+                    limit=10, deadline_monotonic=monotonic()+10)
+                if rows and rows[0]['status'] == 'completed':
+                    model.work_b = rows[0]['work_id']
+                    return True
+                return False
+            await eventually(b_finished)
+            model.query_before_delegation = True
+            await run_root('Query the known Agent.', prompt=f'Context introduces {model.target_b}.')
+            model.query_before_delegation = False
+            async def got_result():
+                return model.query_result_input is not None
+            await eventually(got_result)
+            provider_tools = {tool.name for tool in model.query_result_input.tools}
+            assert {'query_agents', 'send_agent_message', 'wait_agent'} <= provider_tools
+            assert not provider_tools.intersection({'run_agent', 'stop_agent', 'exec_cell',
+                'query_cells', 'manage_cell', 'enter_plan', 'ask_plan_question', 'exit_plan'})
+            rendered = '\n'.join(t for message in model.query_result_input.messages
+                                  for t in text_part_values(message.content))
+            assert model.target_c in rendered
+            root_rendered = '\n'.join(t for message in model.root_query_result_input.messages
+                                       for t in text_part_values(message.content))
+            assert model.target_c in root_rendered  # ROOT's query result was not copied into selected context.
+            a_id = next(identity for identity in model.child_counts if identity not in {model.target_b, model.target_c})
+            with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                    row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                related = connection.execute('SELECT known_session_id FROM pulsara_v3.agent_known_sessions WHERE observer_session_id=%s', (a_id,)).fetchall()
+                assert {row['known_session_id'] for row in related} == {model.target_b}
+                result = connection.execute('''SELECT r.result_state FROM pulsara_v3.tool_results r
+                    JOIN pulsara_v3.tool_invocations i ON i.id=r.invocation_id AND i.session_id=r.session_id
+                    JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id AND b.tool_call_id=i.tool_call_id
+                    WHERE r.session_id=%s AND b.tool_name='query_agents' ''', (a_id,)).fetchall()
+                assert [row['result_state'] for row in result] == ['SUCCESS']
+            model.send_release.set()
+            async def sent():
+                return model.send_result_input is not None
+            await eventually(sent)
+            sent_text = '\n'.join(t for message in model.send_result_input.messages
+                                  for t in text_part_values(message.content))
+            assert 'queued' in sent_text
+            with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                    row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                related = connection.execute('SELECT observer_session_id,known_session_id FROM pulsara_v3.agent_known_sessions WHERE observer_session_id=ANY(%s)', ([a_id, model.target_c],)).fetchall()
+                assert {(row['observer_session_id'], row['known_session_id']) for row in related} == {
+                    (a_id, model.target_b), (a_id, model.target_c), (model.target_c, a_id)}
+                queued = connection.execute("SELECT input_origin, status FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND source_session_id=%s AND input_origin='AGENT_MESSAGE'", (model.target_c, a_id)).fetchall()
+                assert len(queued) == 1 and queued[0]['status'] in {'PENDING', 'CONSUMED'}
+            child = core._live_agent_session(a_id)
+            async def child_idle():
+                return child.active_root_turn_id() is None
+            await eventually(child_idle)
+            with root.repository._writer_transaction(child._lease.guard, deadline_monotonic=monotonic()+10) as connection:
+                connection.execute('UPDATE pulsara_v3.sessions SET idle_since=%s WHERE id=%s',
+                    (datetime.now(timezone.utc)-timedelta(hours=2), a_id))
+            await core._agent_runtime._advance()
+            if retirement := core._session_retirements.get(a_id):
+                await asyncio.shield(retirement.settlement)
+            assert child._closed and core._live_agent_session(a_id) is None
+            model.next_target = a_id
+            await run_root('Continue the same Agent.')
+            async def resumed():
+                current = core._live_agent_session(a_id)
+                return current is not None and current is not child and model.child_counts.get(a_id, 0) >= 5
+            await eventually(resumed)
+            visible = await root._io.run(root.repository.list_query_agent_sessions,
+                root_session_id=root.session_id, observer_session_id=a_id, limit=20,
+                deadline_monotonic=monotonic()+10)
+            assert {row['agent_id'] for row in visible} == {a_id, model.target_b, model.target_c}
+        finally:
+            model.b_release.set()
+            model.c_release.set()
+            model.send_release.set()
+            await core.shutdown()
+    asyncio.run(scenario())
 
 
 async def eventually(predicate):
@@ -285,8 +453,8 @@ def test_exact_work_stop_cascades_dependencies_but_preserves_next_fifo_work(
             await asyncio.wait_for(root.run_turn(PromptContent.text('Start blocked investigation'),
                 command_id=random_id('command'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS),15)
             await asyncio.wait_for(model.first_child_started.wait(),15)
-            agents = await root._io.run(root.repository.list_agent_sessions,
-                root_session_id=root.session_id,limit=10,deadline_monotonic=monotonic()+10)
+            agents = await root._io.run(root.repository.list_query_agent_sessions,
+                root_session_id=root.session_id,observer_session_id=root.session_id,limit=10,deadline_monotonic=monotonic()+10)
             model.agent_id = agents[0]['agent_id']
             works = await root._io.run(root.repository.list_agent_works,
                 root_session_id=root.session_id,agent_id=model.agent_id,limit=10,deadline_monotonic=monotonic()+10)
@@ -295,8 +463,8 @@ def test_exact_work_stop_cascades_dependencies_but_preserves_next_fifo_work(
             await asyncio.wait_for(root.run_turn(PromptContent.text('Queue an independent continuation and dependent reviewer, then stop only the first work'),
                 command_id=random_id('command'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS),15)
             async def all_ended():
-                agents = await root._io.run(root.repository.list_agent_sessions,
-                    root_session_id=root.session_id,limit=10,deadline_monotonic=monotonic()+10)
+                agents = await root._io.run(root.repository.list_query_agent_sessions,
+                    root_session_id=root.session_id,observer_session_id=root.session_id,limit=10,deadline_monotonic=monotonic()+10)
                 all_works=[]
                 for agent in agents:
                     all_works.extend(await root._io.run(root.repository.list_agent_works,
@@ -307,8 +475,8 @@ def test_exact_work_stop_cascades_dependencies_but_preserves_next_fifo_work(
                 root_session_id=root.session_id,agent_id=model.agent_id,limit=10,deadline_monotonic=monotonic()+10)
             assert [w['status'] for w in own] == ['stopped','completed']
             assert own[0]['terminal_reason']=='USER_STOPPED'
-            agents = await root._io.run(root.repository.list_agent_sessions,
-                root_session_id=root.session_id,limit=10,deadline_monotonic=monotonic()+10)
+            agents = await root._io.run(root.repository.list_query_agent_sessions,
+                root_session_id=root.session_id,observer_session_id=root.session_id,limit=10,deadline_monotonic=monotonic()+10)
             reviewer = next(a for a in agents if a['agent_id'] != model.agent_id)
             reviewer_work = await root._io.run(root.repository.list_agent_works,
                 root_session_id=root.session_id,agent_id=reviewer['agent_id'],limit=10,deadline_monotonic=monotonic()+10)
@@ -455,8 +623,9 @@ def test_actual_admission_wins_stale_idle_retirement_for_loaded_and_unloaded_age
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize('receive_during_tool_call', [False, True])
 def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
-    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+    tmp_path, monkeypatch, stage2_migrated_postgres_database, receive_during_tool_call,
 ):
     from tests.test_stage2_conversation_runner import _CompactionScriptedModel
     from pulsara_agent.conversation_kernel.compaction.contracts import ResolvedCompactionPolicy
@@ -471,13 +640,41 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
             self.child_requests = []
             self.first_child_started = asyncio.Event()
             self.first_child_release = asyncio.Event()
+            self.pending_root_call = {}
+            self.core = None
+            self.message_injected = False
 
         def preflight_execution(self, request, *, append_candidate, install_authority):
             from tests.test_round4_plan_host import _PreparedTestExecution
             return _PreparedTestExecution(self, request, append_candidate, install_authority)
 
         async def stream(self, request):
-            if request.session_id != self.root_id and not self.child_requests:
+            if request.session_id == self.root_id:
+                self.requests.append(request)
+                pending = self.pending_root_call.get(request.turn_id)
+                if pending is not None:
+                    result = next((message for message in reversed(request.compiled_input.messages)
+                                   if message.role == 'tool_result' and message.tool_call_id == pending), None)
+                    assert result is not None, f'missing result for {pending}'
+                    payload = json.loads(''.join(text_part_values(result.content)))['pulsara_tool_result']
+                    assert payload['result_state'] == 'SUCCESS', payload
+                    for event in _text('ROOT_FINISHED'):
+                        yield event
+                    return
+                arguments = {'instruction': 'CHILD_FIRST' if self.agent_id is None else 'CHILD_SECOND'}
+                if self.agent_id is not None:
+                    arguments['target'] = {'kind': 'AGENT', 'agent_id': self.agent_id}
+                call_id = random_id('call')
+                self.pending_root_call[request.turn_id] = call_id
+                for event in _tool_call('run_agent', call_id, arguments):
+                    yield event
+                if receive_during_tool_call and self.agent_id is not None and not self.message_injected:
+                    from types import SimpleNamespace
+                    self.message_injected = True
+                    outcome = await self.core._send_agent_message(self.root_id, 'AGENT_MESSAGE_DURING_TOOL',
+                        SimpleNamespace(session_id=self.agent_id, work_id=None))
+                    assert outcome['delivery'] == 'queued'
+            elif not self.child_requests:
                 self.requests.append(request)
                 self.child_requests.append(request)
                 self.first_child_started.set()
@@ -494,6 +691,7 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
         core, root = await _open_test_session(tmp_path=tmp_path, model=model,
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch)
         model.root_id = root.session_id
+        model.core = core
         try:
             await root.run_turn(PromptContent.text('Investigate using the child'),
                 command_id=random_id('command'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
@@ -526,16 +724,64 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                 compactions.append(result)
                 return result
             monkeypatch.setattr(child._runner.compaction, 'execute_active', recorded_compaction)
-            await root.run_turn(PromptContent.text('Continue the compressed investigator'),
+            root_result = await root.run_turn(PromptContent.text('Continue the compressed investigator'),
                 command_id=random_id('command'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             async def next_completed():
                 rows=await root._io.run(root.repository.list_agent_works,
                     root_session_id=root.session_id,agent_id=model.agent_id,limit=10,
                     deadline_monotonic=monotonic()+10)
+                assert not any(r['status'] == 'stopped' for r in rows), (rows, compactions, planning_failures)
                 return len(rows)==2 and all(r['status']=='completed' for r in rows)
-            await eventually(next_completed)
+            try:
+                await eventually(next_completed)
+            except TimeoutError as error:
+                rows = await root._io.run(root.repository.list_agent_works,
+                    root_session_id=root.session_id, agent_id=model.agent_id, limit=10,
+                    deadline_monotonic=monotonic()+10)
+                with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                        row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                    calls = connection.execute('''SELECT b.tool_name,r.result_state,e.inline_content
+                        FROM pulsara_v3.assistant_message_blocks b
+                        LEFT JOIN pulsara_v3.tool_results r ON r.session_id=b.session_id AND r.tool_call_id=b.tool_call_id
+                        LEFT JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id AND e.id=r.result_entry_id
+                        WHERE b.session_id=%s AND b.tool_name IS NOT NULL ORDER BY b.assistant_entry_id,b.block_ordinal''',
+                        (root.session_id,)).fetchall()
+                compact_rows = [{k: row.get(k) for k in ('work_id', 'status', 'terminal_reason', 'turn_id')} for row in rows]
+                raise AssertionError(f'child did not complete: rows={compact_rows!r}; compactions={compactions!r}; '
+                                     f'planning_failures={planning_failures!r}; '
+                                     f'requests={len(model.child_requests)}; '
+                                     f'active={child.active_root_turn_id()!r}; '
+                                     f'root_result={root_result!r}; root_calls={calls!r}') from error
             assert compactions and compactions[0].outcome.disposition.value=='COMPACTED', (compactions, planning_failures)
             assert len(model.summary_transport.contexts)==1
+            if receive_during_tool_call:
+                with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                        row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                    results = connection.execute('''SELECT r.result_state, r.attempt_id, b.tool_arguments
+                        FROM pulsara_v3.tool_results r
+                        JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id
+                        JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id AND b.tool_call_id=i.tool_call_id
+                        WHERE i.session_id=%s AND i.turn_id=%s ORDER BY r.observed_at''',
+                        (root.session_id, root_result.turn_id)).fetchall()
+                    assert [row['result_state'] for row in results] == ['SUCCESS']
+                    assert results[0]['attempt_id'] is not None
+                    assert results[0]['tool_arguments'] == {
+                        'instruction': 'CHILD_SECOND', 'target': {'kind': 'AGENT', 'agent_id': model.agent_id}}
+                    messages = connection.execute('''SELECT q.status, q.input_origin, e.entry_sequence
+                        FROM pulsara_v3.prompt_queue_items q LEFT JOIN pulsara_v3.transcript_entries e
+                        ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
+                        WHERE q.session_id=%s AND q.source_session_id=%s AND q.input_origin='AGENT_MESSAGE' ''',
+                        (root.session_id, model.agent_id)).fetchall()
+                    assert len(messages) == 1 and messages[0]['status'] == 'CONSUMED'
+                root_inputs = [request.compiled_input for request in model.requests
+                               if request.session_id == root.session_id and request.turn_id == root_result.turn_id]
+                assert 'AGENT_MESSAGE_DURING_TOOL' not in '\n'.join(
+                    text for message in root_inputs[0].messages for text in text_part_values(message.content))
+                assert any('AGENT_MESSAGE_DURING_TOOL' in '\n'.join(
+                    text for message in compiled.messages for text in text_part_values(message.content))
+                           for compiled in root_inputs[1:])
+                assert all(compiled.system_prompt == root_inputs[0].system_prompt and compiled.tools == root_inputs[0].tools
+                           for compiled in root_inputs[1:])
             from pulsara_agent.primitives.context import canonical_json_bytes
             assert tuple(canonical_json_bytes({'name':tool.name,'description':tool.description,'parameters':tool.parameters})
                 for tool in model.summary_transport.contexts[0].tools) == tuple(

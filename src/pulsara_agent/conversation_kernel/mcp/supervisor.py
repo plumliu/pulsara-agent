@@ -154,26 +154,26 @@ async def _prepare_sdk_client_factory() -> type[BoundedMcpSdkClient]:
     return module.BoundedMcpSdkClient
 
 
-async def _acquire_dispatch_lane(lane: asyncio.Semaphore, steer_event: asyncio.Event | None) -> None:
-    if steer_event is None:
+async def _acquire_dispatch_lane(lane: asyncio.Semaphore, cell_cancel_event: asyncio.Event | None) -> None:
+    if cell_cancel_event is None:
         await lane.acquire()
         return
-    if steer_event.is_set():
+    if cell_cancel_event.is_set():
         raise _McpDispatchCancelledBeforeStart
     acquire = asyncio.create_task(lane.acquire())
-    redirected = asyncio.create_task(steer_event.wait())
+    cell_cancelled = asyncio.create_task(cell_cancel_event.wait())
     transferred = False
     try:
-        await asyncio.wait((acquire, redirected), return_when=asyncio.FIRST_COMPLETED)
-        if steer_event.is_set():
+        await asyncio.wait((acquire, cell_cancelled), return_when=asyncio.FIRST_COMPLETED)
+        if cell_cancel_event.is_set():
             raise _McpDispatchCancelledBeforeStart
         await acquire
         transferred = True
     finally:
-        redirected.cancel()
+        cell_cancelled.cancel()
         if not transferred:
             acquire.cancel()
-        settled = await asyncio.gather(acquire, redirected, return_exceptions=True)
+        settled = await asyncio.gather(acquire, cell_cancelled, return_exceptions=True)
         # Cancellation can race a successful semaphore grant. Return exactly
         # that grant unless ownership transferred to the physical operation.
         if not transferred and settled[0] is True:
@@ -286,8 +286,8 @@ class McpDispatchAdmissionPermit:
     def mark_attempt_accepted(self) -> None:
         self._slot.mark_attempt_accepted(self)
 
-    async def acquire_operation(self, *, steer_event: asyncio.Event | None = None) -> "McpPhysicalOperationPermit":
-        return await self._slot.acquire_operation(self, steer_event=steer_event)
+    async def acquire_operation(self, *, cell_cancel_event: asyncio.Event | None = None) -> "McpPhysicalOperationPermit":
+        return await self._slot.acquire_operation(self, cell_cancel_event=cell_cancel_event)
 
     def release(self) -> None:
         if self.state is McpDispatchPermitState.RELEASED:
@@ -575,7 +575,7 @@ class McpConnectionSlot:
             permit.state = McpDispatchPermitState.ATTEMPT_ACCEPTED
 
     async def acquire_operation(
-        self, permit: McpDispatchAdmissionPermit, *, steer_event: asyncio.Event | None = None
+        self, permit: McpDispatchAdmissionPermit, *, cell_cancel_event: asyncio.Event | None = None
     ) -> McpPhysicalOperationPermit:
         with self._lock:
             self._require_permit(permit)
@@ -583,16 +583,16 @@ class McpConnectionSlot:
                 raise RuntimeError("MCP attempt is not accepted")
         # A request waiting on its server must not reserve capacity that an
         # unrelated ready server can use for actual physical I/O.
-        await _acquire_dispatch_lane(self._lane, steer_event)
+        await _acquire_dispatch_lane(self._lane, cell_cancel_event)
         try:
-            await _acquire_dispatch_lane(self._host_lane, steer_event)
+            await _acquire_dispatch_lane(self._host_lane, cell_cancel_event)
         except BaseException:
             self._lane.release()
             raise
         with self._lock:
             try:
                 self._require_permit(permit)
-                if steer_event is not None and steer_event.is_set():
+                if cell_cancel_event is not None and cell_cancel_event.is_set():
                     raise _McpDispatchCancelledBeforeStart
                 if permit.state is not McpDispatchPermitState.ATTEMPT_ACCEPTED:
                     raise RuntimeError("MCP operation permit raced settlement")
@@ -670,7 +670,7 @@ class McpBoundToolExecutor:
         self,
         permit: McpDispatchAdmissionPermit,
         arguments: Mapping[str, object],
-        *, steer_event: asyncio.Event | None = None,
+        *, cell_cancel_event: asyncio.Event | None = None,
     ) -> McpKnownToolResult:
         from .sdk_facade import MCPError, types
 
@@ -682,10 +682,10 @@ class McpBoundToolExecutor:
         ):
             raise RuntimeError("MCP dispatch permit does not exact-join executor")
         try:
-            operation = await permit.acquire_operation(steer_event=steer_event)
+            operation = await permit.acquire_operation(cell_cancel_event=cell_cancel_event)
         except _McpDispatchCancelledBeforeStart:
             permit.release()
-            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "被用户取消".encode("utf-8"),
+            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
                 _mcp_remote_identity(semantic=self.semantic, connection_generation=self.lease.connection_generation))
         except BaseException:
             if permit.state is McpDispatchPermitState.ATTEMPT_ACCEPTED:
@@ -1061,7 +1061,7 @@ class McpInstalledRuntimeGeneration:
         arguments: Mapping[str, object],
         permit: McpDispatchAdmissionPermit | None,
         scope_kind: ModelInputScopeKind,
-        steer_event: asyncio.Event | None = None,
+        cell_cancel_event: asyncio.Event | None = None,
     ) -> McpKnownToolResult:
         from .sdk_facade import MCPError
 
@@ -1080,10 +1080,10 @@ class McpInstalledRuntimeGeneration:
             raise McpSnapshotStale("MCP standard operation generation is stale")
         permit.mark_attempt_accepted()
         try:
-            operation = await permit.acquire_operation(steer_event=steer_event)
+            operation = await permit.acquire_operation(cell_cancel_event=cell_cancel_event)
         except _McpDispatchCancelledBeforeStart:
             permit.release()
-            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "被用户取消".encode("utf-8"),
+            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
                 f"mcp:{candidate.server_id}:{permit.lease.connection_generation}:{tool_name}")
         except BaseException:
             if permit.state is McpDispatchPermitState.ATTEMPT_ACCEPTED:

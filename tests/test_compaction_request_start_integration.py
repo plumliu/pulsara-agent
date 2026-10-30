@@ -19,7 +19,7 @@ from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent, text_part_values
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayCodecKind
 from pulsara_agent.ports.provider_stream import freeze_provider_adapter_completed_replay_payload
-from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from pulsara_agent.workspace_identity import HostWorkspaceInput
@@ -352,19 +352,23 @@ class _WorkModel(_Model):
         self.agent_id = None
         self.first_work_id = None
         self.root_turn_calls = {}
+        self.create_other = False
 
     async def _stream(self, request):
         if request.session_id != self.root_id:
-            self.child_requests.append(request)
-            text = "FIRST_WORK_FINAL" if len(self.child_requests) == 1 else "SECOND_WORK_FINISHED"
+            if self.agent_id is not None and request.session_id != self.agent_id:
+                text = "OTHER_WORK_FINISHED"
+            else:
+                self.child_requests.append(request)
+                text = "FIRST_WORK_FINAL" if len(self.child_requests) == 1 else "SECOND_WORK_FINISHED"
             events = _text(text)
         else:
             index = self.root_turn_calls.get(request.turn_id, 0)
             self.root_turn_calls[request.turn_id] = index + 1
             if index == 0:
-                arguments = {"instruction": ("FIRST_WORK " + "independent evidence " * 1500)
-                    if self.agent_id is None else _INITIAL}
-                if self.agent_id is not None:
+                arguments = {"instruction": "OTHER_WORK" if self.create_other else
+                    ("FIRST_WORK " + "independent evidence " * 1500) if self.agent_id is None else _INITIAL}
+                if self.agent_id is not None and not self.create_other:
                     arguments.update(target={"kind": "AGENT", "agent_id": self.agent_id},
                         materials=[{"kind": "WORK", "work_id": self.first_work_id}])
                 events = _tool_call("run_agent", random_id("call"), arguments)
@@ -425,9 +429,19 @@ def test_subagent_first_summary_uses_full_initial_group_and_current_work(
             queue = _rows(child, "SELECT status,consumed_entry_id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s", (child.session_id, current["work_id"]))[0]
             assert queue == {"status": "CONSUMED", "consumed_entry_id": initial}
             assert _INITIAL not in _render(model.summary.contexts[0].messages)
-            outcome = await core._send_agent_message(child.session_id, _AGENT,
+            model.create_other = True
+            await root.run_turn(PromptContent.text('Create an independent Agent during the summary.'),
+                command_id=random_id('command'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            ids = await root._io.run(root.repository.list_root_agent_session_ids,
+                root_session_id=root.session_id, deadline_monotonic=monotonic()+10)
+            other, = (identity for identity in ids if identity != child.session_id)
+            outcome = await core._send_agent_message(child.session_id, f'{_AGENT}: {other}',
                 SimpleNamespace(session_id=root.session_id, work_id=None))
             assert outcome["delivery"] == "queued"
+            visible = await child._io.run(child.repository.list_query_agent_sessions,
+                root_session_id=root.session_id, observer_session_id=child.session_id,
+                limit=20, deadline_monotonic=monotonic()+10)
+            assert {row['agent_id'] for row in visible} == {child.session_id, other}
             model.summary.release.set()
             async def second_done():
                 row = await child._io.run(child.repository.query_agent_work,
@@ -443,6 +457,15 @@ def test_subagent_first_summary_uses_full_initial_group_and_current_work(
             assert rendered.index(_INITIAL) < rendered.index(_AGENT)
             assert "FIRST_WORK_FINAL" in rendered
             assert len(model.summary.calls) == 1
+            first = model.child_requests[0].compiled_input
+            assert model.summary.contexts[0].system_prompt == first.system_prompt
+            assert tuple(canonical_json_bytes({'name': tool.name, 'description': tool.description,
+                                              'parameters': tool.parameters})
+                         for tool in model.summary.contexts[0].tools) == tuple(tool.canonical_bytes for tool in first.tools)
+            visible = await child._io.run(child.repository.list_query_agent_sessions,
+                root_session_id=root.session_id, observer_session_id=child.session_id,
+                limit=20, deadline_monotonic=monotonic()+10)
+            assert {row['agent_id'] for row in visible} == {child.session_id, other}
         finally:
             model.summary.release.set()
             await core.shutdown()

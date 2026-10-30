@@ -1,4 +1,4 @@
-"""Production gateway/Host/DB regressions for blocking interaction redirects."""
+"""Production gateway/Host/DB regressions for non-preemptive supplements."""
 from __future__ import annotations
 
 import asyncio
@@ -31,10 +31,10 @@ class _BlockingModel(_DetachedDraftModel):
         self.requests.append(request)
         if len(self.requests) == 1:
             first = _tool_call('manage_capability', 'call:configuration', {'action': 'ADD_LOCAL_MCP', 'target': {"kind": "MCP_CONNECTION", 'scope': 'USER', 'source_kind': 'LOCAL', 'server_id': 'steer-fixture'}}) if self.capability else _tool_call('write_file', 'call:first-write', {
-                "target": {"kind": "PATH", "path": str(self.root/'first.txt')}, 'content': 'must not be written',
+                "target": {"kind": "PATH", "path": str(self.root/'first.txt')}, 'content': 'first write completed',
             })
             events = [*first, *_tool_call('write_file', 'call:second-write', {
-                "target": {"kind": "PATH", "path": str(self.root/'second.txt')}, 'content': 'must not run after steer',
+                "target": {"kind": "PATH", "path": str(self.root/'second.txt')}, 'content': 'second write completed',
             })]
         elif len(self.requests) == 2:
             current = request.compiled_input
@@ -42,8 +42,17 @@ class _BlockingModel(_DetachedDraftModel):
             assert current.system_prompt == original.system_prompt
             assert current.tools == original.tools
             rendered = '\n'.join(part for message in current.messages for part in text_part_values(message.content))
-            assert rendered.count('被用户取消') == (1 if self.completed else 2)
-            assert rendered.index('被用户取消') < rendered.index('STEER_KEEP_WORKING')
+            assert '被用户取消' not in rendered
+            assert current.messages[:len(original.messages)] == original.messages
+            suffix = current.messages[len(original.messages):]
+            results = [message for message in suffix if message.role == 'tool_result']
+            assert [message.tool_call_id for message in results] == [
+                'call:configuration' if self.capability else 'call:first-write',
+                'call:second-write',
+            ]
+            supplement_index = next(i for i, message in enumerate(suffix)
+                                    if 'STEER_KEEP_WORKING' in text_part_values(message.content))
+            assert all(suffix.index(message) < supplement_index for message in results)
             assert 'NEXT_FIFO_INPUT' not in rendered
             self.implementation_seen.set()
             events = _text('redirect handled')
@@ -68,7 +77,7 @@ async def _wait_for_card(session):
     [(False, False, False, False, False), (True, False, False, False, False), (False, True, False, False, False),
      (False, False, True, False, False), (False, True, False, True, False), (False, False, True, False, True)],
     ids=['permission', 'capability-form', 'approved-before-dispatch', 'accepted-response-lost', 'physical-result-retained', 'queue-action-response-lost'])
-def test_gateway_steer_closes_old_batch_then_delivers_fifo(tmp_path, monkeypatch, stage2_migrated_postgres_database, capability, approved, detach, completed, redirect):
+def test_gateway_steer_waits_for_real_batch_then_delivers_fifo(tmp_path, monkeypatch, stage2_migrated_postgres_database, capability, approved, detach, completed, redirect):
     async def exercise():
         model = _BlockingModel(tmp_path, capability, completed)
         core, session = await _open_test_session(tmp_path=tmp_path, model=model,
@@ -154,20 +163,55 @@ def test_gateway_steer_closes_old_batch_then_delivers_fifo(tmp_path, monkeypatch
                 publish_release.set()
             response = await gateway._command(state, request)
             assert response.command_outcome.status in (wire.PENDING, wire.SUCCEEDED)
+            if not approved:
+                snapshot = session.live_control.current_snapshot()
+                assert snapshot.current_interaction == original_card
+                assert not running.done()
+                if capability:
+                    await session.resolve_capability_form(
+                        attachment_id=attachment, interaction_id=original_card.interaction_id,
+                        expected_owner_epoch=snapshot.owner_epoch,
+                        expected_live_revision=snapshot.revision, decision='CANCEL',
+                    )
+                else:
+                    await session.resolve_tool_interaction(
+                        expected_writer_generation=session._lease.guard.writer_generation,
+                        expected_owner_epoch=snapshot.owner_epoch, expected_live_revision=snapshot.revision,
+                        interaction_id=original_card.interaction_id, command_id=random_id('command'),
+                        decision='ALLOW', actor_id=attachment,
+                    )
             dispatch_release.set()
+            async with asyncio.timeout(10):
+                while True:
+                    snapshot = session.live_control.current_snapshot()
+                    card = snapshot.current_interaction
+                    if card is not None and card.interaction_id != original_card.interaction_id:
+                        break
+                    if running.done():
+                        await running
+                        pytest.fail('second tool was not offered for permission')
+                    await asyncio.sleep(0.005)
+            await session.resolve_tool_interaction(
+                expected_writer_generation=session._lease.guard.writer_generation,
+                expected_owner_epoch=snapshot.owner_epoch, expected_live_revision=snapshot.revision,
+                interaction_id=card.interaction_id, command_id=random_id('command'),
+                decision='ALLOW', actor_id=attachment,
+            )
             await asyncio.wait_for(running, 10)
             await asyncio.wait_for(model.queued_seen.wait(), 10)
             assert model.implementation_seen.is_set()
             assert session.live_control.current_snapshot().current_interaction is None
-            assert (tmp_path/'first.txt').exists() is completed
-            assert not (tmp_path/'second.txt').exists()
+            assert (tmp_path/'first.txt').exists() is not capability
+            if not capability:
+                assert (tmp_path/'first.txt').read_text() == 'first write completed'
+            assert (tmp_path/'second.txt').read_text() == 'second write completed'
             retry = await gateway._command(state, request)
             assert retry.command_outcome.prompt_delivery.queue_status == 'CONSUMED'
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                 row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
                 rows = connection.execute('SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s ORDER BY observed_at', (session.session_id,)).fetchall()
                 assert [row['result_state'] for row in rows] == [
-                    'SUCCESS' if completed else 'CANCELLED_BEFORE_DISPATCH', 'CANCELLED_BEFORE_DISPATCH']
+                    'CANCELLED_BEFORE_DISPATCH' if capability else 'SUCCESS', 'SUCCESS']
                 assert connection.execute('SELECT count(*) AS n FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND command_id=%s',
                     (session.session_id, command_id)).fetchone()['n'] == 1
         finally:
@@ -182,7 +226,7 @@ def test_gateway_steer_closes_old_batch_then_delivers_fifo(tmp_path, monkeypatch
 
 @pytest.mark.parametrize('meta', [False, True], ids=['native-sdk', 'meta-sdk'])
 @pytest.mark.parametrize('blocked_lane', [None, 'server', 'host'], ids=['permission-card', 'waiting-server-lane', 'waiting-host-lane'])
-def test_real_stdio_mcp_steer_never_dispatches_effect(tmp_path, monkeypatch, stage2_migrated_postgres_database, meta, blocked_lane):
+def test_real_stdio_mcp_supplement_waits_for_effect(tmp_path, monkeypatch, stage2_migrated_postgres_database, meta, blocked_lane):
     import json
     import sys
     from tempfile import TemporaryDirectory
@@ -230,7 +274,7 @@ if __name__ == "__main__":
                 })
             elif not self.called:
                 self.called = True
-                name, arguments = 'mcp__fixture__write_mark', {'value':'must not reach MCP server'}
+                name, arguments = 'mcp__fixture__write_mark', {'value':'effect completed'}
                 if meta:
                     bodies = [text for message in request.compiled_input.messages for text in text_part_values(message.content)]
                     inspected = next(json.loads(json.loads(body)['pulsara_tool_result']['body'])
@@ -246,9 +290,10 @@ if __name__ == "__main__":
                 assert original.system_prompt == current.system_prompt
                 assert original.tools == current.tools
                 rendered = '\n'.join(text for message in current.messages for text in text_part_values(message.content))
-                assert rendered.index('被用户取消') < rendered.index('SDK_STEER_INPUT')
+                assert '被用户取消' not in rendered
+                assert rendered.index('effect completed') < rendered.index('SDK_STEER_INPUT')
                 self.finished.set()
-                events = _text('external action cancelled before dispatch')
+                events = _text('external action completed')
             for event in events:
                 yield event
 
@@ -301,16 +346,32 @@ if __name__ == "__main__":
                 'prompt_content': {'parts': [{'type':'text', 'text':'SDK_STEER_INPUT'}]},
             })
             assert outcome['command_outcome']['status'] in ('PENDING','SUCCEEDED')
+            assert not running.done()
+            assert not marker.exists()
+            if held_lane is None:
+                snapshot = session.live_control.current_snapshot()
+                assert snapshot.current_interaction is not None
+                allowed = await bridge.resolve_interaction(connection['connection_id'], {
+                    'command_id':random_id('command'), 'expected_writer_generation':session._lease.guard.writer_generation,
+                    'expected_owner_epoch':snapshot.owner_epoch, 'expected_live_revision':snapshot.revision,
+                    'interaction_id':snapshot.current_interaction.interaction_id, 'decision':'INTERACTION_ALLOW',
+                })
+                assert allowed['command_outcome']['status'] == 'SUCCEEDED'
+            else:
+                assert held_lane._value == 0
+                assert held_lane._waiters
+                for _ in range(held_count):
+                    held_lane.release()
+                held_count = 0
             await asyncio.wait_for(running,20)
             assert model.finished.is_set()
-            assert not marker.exists()
+            assert marker.read_text() == 'effect completed'
             if held_lane is not None:
-                assert held_lane._value == 0
                 assert not held_lane._waiters
                 assert slot._active_operation_count == 0
                 assert not slot._permits
-                assert slot._lane._value == (0 if blocked_lane == 'server' else server_capacity)
-                assert slot._host_lane._value == (0 if blocked_lane == 'host' else host_capacity)
+                assert slot._lane._value == server_capacity
+                assert slot._host_lane._value == host_capacity
         finally:
             if held_lane is not None:
                 for _ in range(held_count):
@@ -398,6 +459,8 @@ def test_queue_to_plan_question_steer_survives_lost_commit_response(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
     from tests.test_round4_plan_host import _QuestionSteerModel
+    from pulsara_agent.conversation_kernel.repository import PlanQuestionAnswer
+    from pulsara_agent.primitives.plan_workflow import PlanQuestionAnswerKind
 
     async def exercise():
         model = _QuestionSteerModel()
@@ -433,8 +496,29 @@ def test_queue_to_plan_question_steer_survives_lost_commit_response(
             caller.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await caller
-            assert await session._plan_interactions.current_open() is not None
+            opened = await session._plan_interactions.current_open()
+            assert opened is not None
             release.set()
+            retry = await session.steer_queued_prompt(command_id=command_id,
+                source_queue_item_id=queued.prompt_delivery.queue_item_id, target_turn_id=target)
+            assert retry.prompt_delivery.queue_status == 'PENDING'
+            assert await session._plan_interactions.current_open() == opened
+            assert not running.done()
+            with session.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR,
+                row_factory=dict_row, deadline_monotonic=monotonic()+10,
+            ) as connection:
+                question = connection.execute(
+                    'SELECT i.plan_workflow_id,w.workflow_revision FROM pulsara_v3.plan_interactions i '
+                    'JOIN pulsara_v3.plan_workflows w ON w.session_id=i.session_id AND w.id=i.plan_workflow_id '
+                    'WHERE i.session_id=%s AND i.id=%s',
+                    (session.session_id, opened.interaction_id),
+                ).fetchone()
+            await session.resolve_plan_question(
+                command_id=random_id('command'), workflow_id=question['plan_workflow_id'],
+                expected_workflow_revision=question['workflow_revision'], interaction_id=opened.interaction_id,
+                answer=PlanQuestionAnswer(PlanQuestionAnswerKind.FREE_TEXT, free_text='Use the first path'),
+            )
             await asyncio.wait_for(running, 10)
             assert model.implementation_seen.is_set()
             assert await session._plan_interactions.current_open() is None
@@ -443,7 +527,8 @@ def test_queue_to_plan_question_steer_survives_lost_commit_response(
             assert retry.prompt_delivery.queue_status == 'CONSUMED'
             rendered = '\n'.join(text for message in model.requests[-1].compiled_input.messages for text in text_part_values(message.content))
             assert rendered.count('QUEUE_QUESTION_REDIRECT') == 1
-            assert rendered.index('被用户取消') < rendered.index('QUEUE_QUESTION_REDIRECT')
+            assert '被用户取消' not in rendered
+            assert rendered.index('Use the first path') < rendered.index('QUEUE_QUESTION_REDIRECT')
         finally:
             release.set()
             await core.close_session(session.host_session_id)

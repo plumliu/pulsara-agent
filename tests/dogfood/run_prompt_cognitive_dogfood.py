@@ -26,7 +26,6 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    FrozenRootSubagentTaskBoardHandoffFact,
     freeze_compaction_runtime_handoff,
 )
 from pulsara_agent.conversation_kernel.context_sources import (
@@ -38,7 +37,7 @@ from pulsara_agent.conversation_kernel.repository import PlanQuestionAnswer
 from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.model_input.contracts import ContextSourceKind
+from pulsara_agent.model_input.contracts import ContextSourceKind, ModelInputScopeKind
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
@@ -540,24 +539,12 @@ def _install_handoff_source_fixture(session) -> dict[str, object]:
         terminal_processes=(),
         terminal_monitors=(),
         todo=None,
-        subagent_tasks=(
-            FrozenRootSubagentTaskBoardHandoffFact(
-                task_id="fixture-task-visible-pending",
-                task_key="visible_pending",
-                label="Previously queued work",
-                status="PENDING_START",
-                objective_preview="Existing work retained across a handoff",
-                dependency_total=0,
-                dependency_remaining=0,
-                pending_message_count=0,
-                accepted_at=datetime.now(timezone.utc),
-            ),
-        ),
-        subagent_task_totals=(
-            ("ACTIVE", 0),
-            ("PENDING_START", 2),
-            ("WAITING_DEPENDENCY", 1),
-        ),
+        conversation_scope_kind=ModelInputScopeKind.ROOT,
+        agent_work_index=({
+            "agent": {"kind": "AGENT", "agent_id": derive_id("session", "test-fixture", "prompt-cognitive-handoff")},
+            "current_work": None,
+            "queued_count": 1,
+        },),
     )
     if handoff is None:
         raise RuntimeError("diagnostic handoff fixture unexpectedly rendered empty")
@@ -577,12 +564,7 @@ def _install_handoff_source_fixture(session) -> dict[str, object]:
         "fixture_kind": "diagnostic-local ContextSourceCandidate built by the normal handoff source factory",
         "full_text": handoff.full_text,
         "compact_text": handoff.compact_text,
-        "subagent_task_rows": 1,
-        "reported_totals": {
-            "ACTIVE": 0,
-            "PENDING_START": 2,
-            "WAITING_DEPENDENCY": 1,
-        },
+        "agent_rows": 1,
         "not_a_claim": "No corresponding real subagent executions exist in this fixture.",
     }
 
