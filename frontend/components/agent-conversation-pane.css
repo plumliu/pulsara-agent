@@ -1,0 +1,14 @@
+.agent-conversation-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.agent-conversation-pane > header { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.agent-conversation-pane > header span { color: var(--ink); }
+.agent-conversation-reader { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.agent-conversation-reader .thread-scroll { flex: 1; min-height: 0; }
+.agent-conversation-reader .jump-to-bottom { bottom: 12px; }
+.agent-conversation-queue { display: grid; gap: 6px; padding: 8px 12px; max-height: 35%; overflow-y: auto; }
+.agent-conversation-queue:empty { display: none; }
+.agent-conversation-queue article { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
+.agent-conversation-queue article > span { display: block; color: var(--ink); }
+.agent-conversation-queue .todo-dock__header small,
+.agent-conversation-queue .todo-dock__item,
+.agent-conversation-queue .todo-dock__item small { color: var(--ink); font-size: inherit; }
+.agent-pane-status { padding: 16px; color: var(--ink); }

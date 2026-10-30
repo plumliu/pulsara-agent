@@ -1,7 +1,6 @@
 """Read-only browser windows over real canonical rows, with no running Host."""
 
 from time import monotonic
-from datetime import datetime, timezone
 import json
 
 import pytest
@@ -16,8 +15,6 @@ from tests.test_conversation_fork import (
     repo as repo, new_session, turn, rows, fork, compact, final,
 )
 from tests.test_turn_interruption_history import stop, snapshot
-from pulsara_agent.identity import random_id
-from pulsara_agent.conversation_kernel.contracts import InlineContent
 
 
 pytestmark = pytest.mark.postgres
@@ -79,14 +76,14 @@ def test_context_exact_sets_middle_turn_and_canonical_root_neighbours(repo):
     value = context(reader, session, [third[2], first[2]])
     assert value["entry_ids"] == [first[2], third[2]]
     groups = {group["owner_id"]: group for group in value["groups"]}
-    assert groups[first[0]]["next_root_owner_id"] == second[0]
-    assert groups[third[0]]["previous_root_owner_id"] == second[0]
+    assert groups[first[0]]["next_owner_id"] == second[0]
+    assert groups[third[0]]["previous_owner_id"] == second[0]
     assert second[0] not in groups  # Never synthesize continuity across the gap.
     one = context(reader, session, [third[2]])
     assert one["entry_contexts"][0]["segment_id"] == value["entry_contexts"][-1]["segment_id"]
     assert one["entry_contexts"][0]["segment_start_entry_id"] != third[2]
     assert one["entry_contexts"][0]["previous_entry_id"] == groups[third[0]]["initial_entry_id"]
-    assert one["entry_contexts"][0]["root_owner_id"] == third[0]
+    assert one["entry_contexts"][0]["owner_id"] == third[0]
     with pytest.raises(KeyError):
         context(reader, session, ["entry:missing"])
     with pytest.raises(CanonicalProtocolGap):
@@ -211,9 +208,9 @@ def test_imported_history_zero_event_cut_and_no_invented_tasks(repo):
     ids = [entry.entry_id for entry in snap.entries]
     value = context(reader, child.child_session_id, ids, cut_sequence=snap.entry_sequence_cut, event_sequence_cut=0)
     assert all(group["owner_kind"] == "IMPORTED_HISTORY" for group in value["groups"])
-    assert all(entry["root_owner_id"] == entry["owner_id"] for entry in value["entry_contexts"])
+    assert all(entry["owner_id"] for entry in value["entry_contexts"])
     assert len(value["interruption_notices"]) == 1
-    assert value["tasks"] == [] and value["batches"] == [] and value["compactions"] == []
+    assert "tasks" not in value and "batches" not in value and value["compactions"] == []
     with pytest.raises(KeyError):
         window(reader, child.child_session_id, anchor_entry_id=answer)
 

@@ -9,6 +9,7 @@ import {
   FolderCog,
   Globe,
   Info,
+  GitFork,
   ListChecks,
   LoaderCircle,
   Plus,
@@ -18,7 +19,7 @@ import {
   Trash2,
   Wrench,
 } from 'lucide-react';
-import { useContext, useEffect, useId, useState } from 'react';
+import { useContext, useEffect, useId, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { McpEditor } from './mcp-editor';
 import { McpImporter } from './mcp-importer';
@@ -42,6 +43,9 @@ import type { MarkdownNotify } from './markdown-body';
 import { inspectorTab, DesktopWorkspace, useDesktopWorkspace, type WorkspaceTab } from './desktop-workspace';
 import { FileLinkContext } from './file-link-context';
 import { BackgroundTerminalPanel } from './background-terminal-panel';
+import { AgentList, CellGraph, CellList, CellSource, transitionWorkspace } from './agent-cell-workspace';
+import { AgentConversationPane } from './agent-conversation-pane';
+import { prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
 import { AnimatedDisclosure } from './animated-disclosure';
 import { usePromptHover } from '../lib/prompt-hover';
 import type {
@@ -53,11 +57,14 @@ import type {
   CanonicalPromptImagePart,
   UserControlCommandRef,
   UserControlQueryResult,
+  RuntimeAdapter,
 } from '../lib/runtime-adapter';
 
 interface InspectorPanelProps {
+  adapter: Pick<RuntimeAdapter, 'openAgentReader' | 'createAgentContentReader'>;
   projectMcpForms: ProjectMcpForms;
   session: SessionSummary;
+  sessionContentAvailable: boolean;
   isOpen: boolean;
   modelConfigurations?: readonly ModelConfigurationSummary[];
   canControl: boolean;
@@ -484,8 +491,10 @@ function ProjectCapabilityPanel({
 }
 
 export function InspectorPanel({
+  adapter,
   projectMcpForms,
   session,
+  sessionContentAvailable,
   isOpen,
   modelConfigurations,
   canControl,
@@ -523,12 +532,57 @@ export function InspectorPanel({
 }: InspectorPanelProps) {
   const workspace = useDesktopWorkspace();
   const [capabilityKind, setCapabilityKind] = useState<ProjectCapabilityKind>('skills');
+  const workLocationRevision = useRef(0);
+  const currentOwner = useRef({ root: session.id, host: backgroundHostSessionId, visible: workspace?.visible, available: sessionContentAvailable });
+  currentOwner.current = { root: session.id, host: backgroundHostSessionId, visible: workspace?.visible, available: sessionContentAvailable };
 
-  const open = (kind: WorkspaceTab['kind'], title: string, entityId?: string, hostSessionId?: string) => workspace?.open({
+  const open = (kind: Exclude<WorkspaceTab['kind'], 'browser'>, title: string, entityId?: string, hostSessionId?: string, workId?: string) => sessionContentAvailable && workspace?.open({
     ...inspectorTab(session.id, kind, title, entityId, hostSessionId),
+    ...(workId ? { workLocation: { workId, requestId: ++workLocationRevision.current } } : {}),
   });
+  const openPrepared = async (intent: SessionNavigation, source?: HTMLElement, workId?: string, originHost?: string) => {
+    if (!workspace || !sessionContentAvailable) return;
+    workspace.interact();
+    const version = workspace.interactionVersion();
+    const valid = () => currentOwner.current.available && currentOwner.current.visible === true && currentOwner.current.root === intent.rootSessionId
+      && (!('hostSessionId' in intent) || currentOwner.current.host === intent.hostSessionId)
+      && (!originHost || currentOwner.current.host === originHost)
+      && workspace.interactionVersion() === version;
+    let prepared: Awaited<ReturnType<typeof prepareSessionTarget>>;
+    try {
+      prepared = await prepareSessionTarget(intent, valid);
+      if (!valid() || !prepared) return;
+      const tab = prepared.adopt();
+      if (!tab || !valid()) return;
+      if (workId && tab.kind === 'agent') tab.workLocation = { workId, requestId: ++workLocationRevision.current };
+      if (source?.isConnected) transitionWorkspace(source, () => workspace.open(tab));
+      else workspace.open(tab);
+    } catch (error) {
+      if (valid()) onNotify('无法打开内容', error instanceof Error ? error.message : '暂时无法读取。', 'warning');
+    } finally { prepared?.release(); }
+  };
   const renderTab = (tab: WorkspaceTab) => {
-    if (!session.id) return <div className="inspector-empty">创建或选择会话后查看内容</div>;
+    if (!session.id) return <div className="workspace-empty" role="status"><strong>创建或选择会话后查看内容</strong></div>;
+    if (tab.kind === 'subagents') return <AgentList root={session.id} onOpen={(agent, source) => void openPrepared({ kind: 'agent', rootSessionId: session.id, agentSessionId: agent.agent_id }, source)} />;
+    if (tab.kind === 'cells-unavailable') return <div className="inspector-empty" role="status">暂无可用运行实例</div>;
+    if (tab.kind === 'cells') {
+      if (backgroundHostSessionId && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">对象已不可用</div>;
+      return <CellList root={session.id} host={tab.hostSessionId} onOpen={(cell, host, source) => void openPrepared({ kind: 'cell', rootSessionId: session.id, hostSessionId: host, cellId: cell.target.cell_id }, source)} />;
+    }
+    if (tab.kind === 'agent') {
+      tab.view ??= { top: 0, left: 0 };
+      tab.view.agentReadingState ??= { choices: new Map() };
+      return <AgentConversationPane key={`${session.id}:${tab.entityId}`} rootSessionId={session.id} agentSessionId={tab.entityId} agentName={tab.title} adapter={adapter} onNotify={onNotify} readingState={tab.view.agentReadingState} workLocation={tab.workLocation} />;
+    }
+    if (tab.kind === 'cell' || tab.kind === 'cell-graph') {
+      if (backgroundHostSessionId && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">对象已不可用</div>;
+      if (tab.kind === 'cell') return <CellSource root={session.id} host={tab.hostSessionId} cell={tab.entityId} onGraph={source => void openPrepared({ kind: 'cell-graph', rootSessionId: session.id, hostSessionId: tab.hostSessionId, cellId: tab.entityId }, source)} />;
+      tab.view ??= { top: 0, left: 0 };
+      tab.view.graph ??= { top: 0, left: 0 };
+      const root = session.id; const host = tab.hostSessionId;
+      const openAgent = (agentId: string, workId?: string) => { void openPrepared({ kind: 'agent', rootSessionId: root, agentSessionId: agentId }, undefined, workId, host); };
+      return <CellGraph root={root} host={host} cell={tab.entityId} viewport={tab.view.graph} onAgent={agentId => openAgent(agentId)} onWork={work => openAgent(work.agent_id, work.work_id)} />;
+    }
     if ((tab.kind === 'process' || tab.kind === 'mcp') && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">原运行实例已不可用。此标签不会改绑到新的实例。</div>;
     if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
             ownerKey={backgroundOwnerKey}
@@ -541,6 +595,8 @@ export function InspectorPanel({
             terminateProcess={onTerminateBackgroundProcess}
             queryControl={onQueryControl}
           />;
+    if (tab.kind === 'file' || tab.kind === 'visualization' || tab.kind === 'browser') return <div className="inspector-empty" role="status">对象已不可用</div>;
+    if (tab.kind !== 'capabilities' && tab.kind !== 'mcp') { const unhandled: never = tab; return unhandled; }
     return <ProjectCapabilityPanel selectedMcpId={tab.kind === "mcp" ? tab.entityId : undefined} onOpenMcp={server => open("mcp", server.name, server.id, backgroundHostSessionId)}
             canControl={canControl}
             onNotify={onNotify}
@@ -568,10 +624,12 @@ export function InspectorPanel({
             onOpenHomeSettings={onOpenHomeSettings}
           />;
   };
-  return <DesktopWorkspace isOpen={isOpen} onClose={onClose} renderTab={renderTab} toolbar={<nav aria-label="工作区入口">
-    <button type="button" aria-label="项目能力" title="项目能力" onClick={() => open('capabilities', '会话能力')}><Blocks size={13} />能力</button>
+  return <DesktopWorkspace isOpen={isOpen} onClose={onClose} renderTab={renderTab} sessionContentAvailable={sessionContentAvailable} toolbar={<nav aria-label="工作区入口">
+    <button type="button" aria-label="能力" title="能力" onClick={() => open('capabilities', '能力')}><Blocks size={13} />能力</button>
 
-    <button type="button" title="后台进程" onClick={() => open('background', '后台进程')}><TerminalSquare size={13} />后台进程</button>
-    <button type="button" title="新建网页" aria-label="新建网页" disabled={!session.id} onClick={() => workspace?.browserTabs.open(session.id)}><Globe size={13} />新建网页</button>
+    <button type="button" title="进程" onClick={() => open('background', '进程')}><TerminalSquare size={13} />进程</button>
+    <button type="button" title="子代理" onClick={() => open('subagents', '子代理')}><Bot size={13} />子代理</button>
+    <button type="button" title="cell" onClick={() => session.id && backgroundHostSessionId ? open('cells', 'cell', undefined, backgroundHostSessionId) : open('cells-unavailable', 'cell')}><GitFork size={13} />cell</button>
+    <button type="button" title="网页" aria-label="网页" onClick={() => workspace?.browserTabs.open()}><Globe size={13} />网页</button>
   </nav>} />;
 }

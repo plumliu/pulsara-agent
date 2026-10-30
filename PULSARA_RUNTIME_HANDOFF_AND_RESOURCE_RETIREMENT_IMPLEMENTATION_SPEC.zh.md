@@ -6,13 +6,13 @@
 
 ## 0. 权威、范围与不变量
 
-根 [AGENTS.md](AGENTS.md) 与用户当前决议优先。本文承接 [工具查询与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) §15 中与机械 runtime handoff 直接相关的部分；其他 deferred 项不自动转为实施范围。
+根 [AGENTS.md](AGENTS.md) 与用户当前决议优先。本文承接 [工具查询与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) §15 中与机械 runtime handoff 直接相关的部分；其他行为遵循各自的现行规格。
 
 现行相关合同：
 
 - [Code Mode 执行、资源与生命周期](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)。
 - [Agent／Work 与两段退役](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)。
-- [Agent／Code Mode 暂缓表面](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+- [子代理与 Cell 侧边栏规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
 - [工具 schema 兼容性实验](output/tool-schema-compatibility-20261026/REPORT.zh.md)：本轮不修改工具参数 schema 或 provider lowering。
 - 调查证据：[摘要与查询](output/compaction-query-research-20261030/REPORT.zh.md)、[资源计费与退役](output/compaction-query-research-20261030/RESOURCE_RETIREMENT.zh.md)。调查中的候选方案只在本文明确采用后才构成实施要求。
 - 尺寸依据：[状态筛选后摘要的 V3 离线矩阵](output/compaction-query-research-20261030/token-budget/REPORT.zh.md)。本轮上限是单份观察中 PMCA 视图的输入成本边界，不是 TODO、对象数量或执行寿命限制。

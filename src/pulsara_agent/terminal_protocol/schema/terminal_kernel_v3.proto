@@ -261,6 +261,10 @@ message PromptQueueControl {
   string input_origin = 10;
   ScheduledInputProvenance scheduled_input = 11;
   PermissionMode requested_permission_mode = 12;
+  string source_session_id = 13;
+  string source_work_id = 14;
+  repeated string waiting_on = 15;
+  string consumed_entry_id = 16;
 }
 
 message PlanWorkflowControl {

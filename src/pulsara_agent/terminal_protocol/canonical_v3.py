@@ -338,6 +338,75 @@ class CanonicalProtocolReader:
         with self._connection(deadline_monotonic) as connection:
             return self.authorized_session(connection, session_id, memory_domain_id)
 
+    def authorize_agent(self, *, root_session_id: str, agent_session_id: str,
+                        memory_domain_id: str, deadline_monotonic: float):
+        """Authorize the sidebar target without opening or retaining a Host."""
+        with self._connection(deadline_monotonic) as connection:
+            root = self.authorized_session(connection, root_session_id, memory_domain_id)
+            agent = self.authorized_session(connection, agent_session_id, memory_domain_id)
+            if root["root_session_id"] is not None or agent["root_session_id"] != root_session_id:
+                raise KeyError(agent_session_id)
+            return dict(agent)
+
+    def queue_page(self, *, session_id: str, memory_domain_id: str,
+                   root_session_id: str | None, after_sequence: int,
+                   limit: int, deadline_monotonic: float):
+        if type(after_sequence) is not int or after_sequence < 0 or not 1 <= limit <= MAXIMUM_CONTROL_ITEMS:
+            raise ValueError("queue page boundary is invalid")
+        with self._connection(deadline_monotonic) as connection:
+            session = self.authorized_session(connection, session_id, memory_domain_id)
+            if root_session_id is not None:
+                root = self.authorized_session(connection, root_session_id, memory_domain_id)
+                if root["root_session_id"] is not None or session["root_session_id"] != root_session_id:
+                    raise KeyError(session_id)
+            rows = connection.execute(
+                """SELECT * FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id=%s AND status='PENDING' AND queue_sequence>%s
+                   ORDER BY queue_sequence LIMIT %s""", (session_id, after_sequence, limit + 1),
+            ).fetchall()
+            selected = rows[:limit]
+            return (tuple(self._queue_control(row) for row in selected),
+                    int(selected[-1]["queue_sequence"]) if len(rows) > limit else None)
+
+    def queue_item(self, *, session_id: str, memory_domain_id: str,
+                   root_session_id: str | None, queue_item_id: str,
+                   deadline_monotonic: float):
+        with self._connection(deadline_monotonic) as connection:
+            session = self.authorized_session(connection, session_id, memory_domain_id)
+            if root_session_id is not None:
+                root = self.authorized_session(connection, root_session_id, memory_domain_id)
+                if root["root_session_id"] is not None or session["root_session_id"] != root_session_id:
+                    raise KeyError(session_id)
+            row = connection.execute(
+                "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND id=%s",
+                (session_id, queue_item_id),
+            ).fetchone()
+            return None if row is None else self._queue_control(row)
+
+    @staticmethod
+    def _queue_control(row):
+        target = wire.PromptQueueControl(
+            queue_item_id=str(row["id"]), queue_sequence=int(row["queue_sequence"]),
+            status=str(row["status"]), input_origin=str(row["input_origin"]),
+            delivery_mode=str(row["delivery_mode"]), target_turn_id=str(row["target_turn_id"] or ""),
+            content=_content_reference(row), command_id=str(row["command_id"] or ""),
+            accepted_at_utc=_utc(row["accepted_at"]),
+            source_session_id=str(row["source_session_id"] or ""),
+            source_work_id=str(row["source_work_id"] or ""),
+            consumed_entry_id=str(row["consumed_entry_id"] or ""),
+            waiting_on=[str(item["source_work_id"]) for item in row["work_inputs"]
+                        if row["status"] == "PENDING" and item["kind"] == "dependency" and item["body"] is None],
+        )
+        if row["input_origin"] == "SCHEDULED_TASK":
+            target.scheduled_input.CopyFrom(wire.ScheduledInputProvenance(
+                task_id=str(row["scheduled_task_id"]), task_revision=int(row["scheduled_task_revision"]),
+                due_at_utc=_utc(row["scheduled_due_at"]), trigger_source=row["scheduled_trigger_source"]))
+        elif row["input_origin"] == "HUMAN_MESSAGE":
+            target.requested_permission_mode = _permission_mode(str(row["requested_permission_mode"]))
+        if row["permission_snapshot_id"] is not None:
+            target.permission.CopyFrom(_permission_projection(row))
+        return target
+
     @staticmethod
     def authorized_session(connection, session_id: str, memory_domain_id: str):
         row = connection.execute(
@@ -961,13 +1030,12 @@ class CanonicalProtocolReader:
                        WHERE session_id=%s AND id=%s""", (session_id, owner_id),
                 ).fetchone()["interruption_outcome"]
                 imported_interruptions[owner_id] = int(outcome["display_after_entry_sequence"])
-            if value["scope_kind"] == "ROOT":
-                # Ordering is by canonical group starts, not last activity or
-                # adjacency in the browser's partial ROOT array.
-                for direction in ("previous", "next"):
-                    neighbour = boundary[direction + "_root_owner_id"]
-                    if neighbour:
-                        value[direction + "_root_owner_id"] = str(neighbour)
+            # Ordering belongs to the session being read, independently of
+            # whether its scope is ROOT or SUBAGENT.
+            for direction in ("previous", "next"):
+                neighbour = boundary[direction + "_owner_id"]
+                if neighbour:
+                    value[direction + "_owner_id"] = str(neighbour)
             groups[key] = value
             response["groups"].append(value)
             check_budget()
@@ -982,7 +1050,6 @@ class CanonicalProtocolReader:
                 "segment_id": f"{kind}:{owner_id}:initial",
                 "segment_start_entry_id": owner["initial_entry_id"],
             }
-            context["root_owner_id"] = owner_id
             if row["previous_id"]:
                 context["previous_entry_id"] = str(row["previous_id"])
             if row["next_id"]:
@@ -1007,7 +1074,7 @@ class CanonicalProtocolReader:
     @staticmethod
     def _browser_context_group_rows(connection, session_id, cut, owner_keys):
         # Only owners reachable from the already authorized exact entry set
-        # enter Python. PostgreSQL owns ROOT ordering and bounded neighbour reads.
+        # enter Python. PostgreSQL owns session ordering and bounded neighbour reads.
         owner_queries = []
         parameters = [session_id, cut, session_id, cut]
         for kind, owner_table, owner_column, interruption_fields in (
@@ -1030,10 +1097,12 @@ class CanonicalProtocolReader:
                WHERE owner.session_id=%s AND owner.id=ANY(%s)""")
             parameters.extend((cut, cut, session_id, [owner for owner_kind, owner in owner_keys if owner_kind == kind]))
         result = connection.execute(
-            """WITH roots AS (
-                 SELECT t.id AS owner_id, e.entry_sequence FROM pulsara_v3.turns t
-                 JOIN pulsara_v3.transcript_entries e ON e.session_id=t.session_id AND e.id=t.initial_entry_id
-                 WHERE t.session_id=%s AND e.entry_sequence<=%s
+            """WITH owners AS (
+                 SELECT t.id AS owner_id, first_entry.entry_sequence FROM pulsara_v3.turns t
+                 JOIN LATERAL (SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
+                   WHERE e.session_id=t.session_id AND e.turn_id=t.id AND e.entry_owner_kind='EXECUTED_TURN'
+                   ORDER BY e.entry_sequence LIMIT 1) first_entry ON true
+                 WHERE t.session_id=%s AND first_entry.entry_sequence<=%s
                  UNION ALL
                  SELECT g.id AS owner_id, first_entry.entry_sequence FROM pulsara_v3.imported_history_groups g
                  JOIN LATERAL (SELECT e.entry_sequence FROM pulsara_v3.transcript_entries e
@@ -1041,14 +1110,14 @@ class CanonicalProtocolReader:
                    ORDER BY e.entry_sequence LIMIT 1) first_entry ON true
                  WHERE g.session_id=%s AND first_entry.entry_sequence<=%s), boundaries AS ("""
             + " UNION ALL ".join(owner_queries) + """)
-               SELECT boundary.*, previous.owner_id AS previous_root_owner_id,
-                      next.owner_id AS next_root_owner_id
+               SELECT boundary.*, previous.owner_id AS previous_owner_id,
+                      next.owner_id AS next_owner_id
                FROM boundaries boundary
                LEFT JOIN LATERAL (
-                 SELECT owner_id FROM roots WHERE entry_sequence<boundary.first_sequence ORDER BY entry_sequence DESC LIMIT 1
+                 SELECT owner_id FROM owners WHERE entry_sequence<boundary.first_sequence ORDER BY entry_sequence DESC LIMIT 1
                ) previous ON true
                LEFT JOIN LATERAL (
-                 SELECT owner_id FROM roots WHERE entry_sequence>boundary.first_sequence ORDER BY entry_sequence LIMIT 1
+                 SELECT owner_id FROM owners WHERE entry_sequence>boundary.first_sequence ORDER BY entry_sequence LIMIT 1
                ) next ON true""",
             parameters,
         ).fetchall()
@@ -2106,26 +2175,7 @@ class CanonicalProtocolReader:
             if row["permission_snapshot_id"] is not None:
                 target.permission.CopyFrom(_permission_projection(row))
         for row in queue:
-            target = result.prompt_queue.add(
-                queue_item_id=str(row["id"]),
-                queue_sequence=int(row["queue_sequence"]),
-                status=str(row["status"]),
-                input_origin=str(row["input_origin"]),
-                delivery_mode=str(row["delivery_mode"]),
-                target_turn_id=str(row["target_turn_id"] or ""),
-                content=_content_reference(row),
-                command_id=str(row["command_id"] or ""),
-                accepted_at_utc=_utc(row["accepted_at"]),
-            )
-            if row["input_origin"] == "SCHEDULED_TASK":
-                target.scheduled_input.CopyFrom(wire.ScheduledInputProvenance(
-                    task_id=str(row["scheduled_task_id"]), task_revision=int(row["scheduled_task_revision"]),
-                    due_at_utc=_utc(row["scheduled_due_at"]),
-                    trigger_source=row["scheduled_trigger_source"]))
-            elif row["input_origin"] == "HUMAN_MESSAGE":
-                target.requested_permission_mode = _permission_mode(str(row["requested_permission_mode"]))
-            if row["permission_snapshot_id"] is not None:
-                target.permission.CopyFrom(_permission_projection(row))
+            result.prompt_queue.add().CopyFrom(self._queue_control(row))
         if active_plan is not None:
             result.active_plan_workflow.CopyFrom(
                 wire.PlanWorkflowControl(

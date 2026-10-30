@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from pulsara_agent.conversation_kernel.annotations import validate_annotation_sources
+from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
+    pending_work_dependencies,
+    validate_work_inputs,
+)
 
 from datetime import datetime
 from pulsara_agent.identity import derive_id
@@ -834,8 +838,11 @@ class _PromptOperations:
         for i,text in enumerate(item['initial_context']):
             add(text,CanonicalInputOriginKind.AGENT_MATERIAL,'context:'+str(i))
         result.append(instruction)
-        for material in sorted(item['input_materials'],key=lambda x:(0 if x['kind']=='dependency' else 1,x['ordinal'])):
-            add(material['body'],CanonicalInputOriginKind.AGENT_MATERIAL,material['kind']+':'+str(material['ordinal']))
+        for material in validate_work_inputs(item['work_inputs']):
+            if material['body'] is None:
+                raise ConversationKernelConflict('Work input dependency is not materialized')
+            text = material['body'] if material['body'] != '' else '此来源 Work 的结果不含文本内容。'
+            add(text,CanonicalInputOriginKind.AGENT_MATERIAL,material['kind']+':'+str(material['ordinal']))
         return tuple(result)
 
     def prepare_prompt_head_consumption(
@@ -875,7 +882,7 @@ class _PromptOperations:
                 """,
                 (session_id,),
             ).fetchone()
-            if item is None or item['waiting_on'] or self._open_plan_interaction(connection, session_id):
+            if item is None or pending_work_dependencies(item['work_inputs']) or self._open_plan_interaction(connection, session_id):
                 return None
             body_storage = self._content_from_row(item)
             canonical_prompt = hydrate_canonical_prompt_owner(
@@ -1403,7 +1410,7 @@ class _PromptOperations:
                 and self._queue_scheduled_provenance(row) == candidate.scheduled_input
                 and row["target_turn_id"] is None
                 and self._content_from_row(row) == candidate.body_storage
-                and not row['waiting_on']
+                and not pending_work_dependencies(row['work_inputs'])
                 and self._queued_ordered_inputs(connection,row,candidate.canonical_prompt,candidate.body_storage)==candidate.ordered_input_entries
                 and canonical_prompt_owner_is_exact(
                     connection,

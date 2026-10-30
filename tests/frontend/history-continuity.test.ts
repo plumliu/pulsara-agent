@@ -1,6 +1,6 @@
 import {createHash, webcrypto} from 'node:crypto';
 import {afterEach, expect, it, vi} from 'vitest';
-import {CanonicalHistoryView, LocalHttpRuntimeAdapter, mergeRuntimeTaskInventory, type RuntimeConnection} from '../../frontend/lib/runtime-adapter';
+import {CanonicalHistoryView, LocalHttpRuntimeAdapter, type RuntimeConnection} from '../../frontend/lib/runtime-adapter';
 const inline=(text:string)=>({inline_content:Buffer.from(text).toString('base64')});
 const blob=(text:string)=>({digest:`sha256:${createHash('sha256').update(text).digest('hex')}`,size:String(Buffer.byteLength(text)),media_type:'text/plain',codec:'utf-8'});
 const entry=(id:string,n:number,extra:object={})=>({entry_id:id,entry_sequence:String(n),turn_id:'turn:root',entry_kind:'ASSISTANT_MESSAGE',scope_kind:'ROOT',root_final:true,fork_eligible:true,blocks:[{block_id:`block:${id}`,block_kind:'TEXT',content:inline(id)}],...extra});
@@ -9,7 +9,7 @@ const snapshot=(entries:object[],older?:object,cut='20',eventCut='30')=>({sessio
 const payload=(entries:object[],older?:object)=>({connection_id:'connection:test',connection_generation:1,session_id:'session:test',role:'controller',snapshot:{snapshot:snapshot(entries,older)},live_hello:{live_owner_epoch:'1'},live_control_snapshot:{snapshot:{}}});
 const response=(v:unknown)=>new Response(JSON.stringify(v),{status:200,headers:{'Content-Type':'application/json'}});
 function deferred<T>(){let resolve!:(v:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return{promise,resolve};}
-function context(body:any,extra:object={}){return{session_id:'session:test',cut_sequence:body.cut_sequence??'20',event_sequence_cut:body.event_sequence_cut??'30',entry_ids:body.entry_ids,groups:[{owner_id:'turn:root',owner_kind:'EXECUTED_TURN',initial_entry_id:'start'}],entry_contexts:body.entry_ids.map((id:string)=>({entry_id:id,owner_id:'turn:root',owner_kind:'EXECUTED_TURN',root_owner_id:'turn:root',segment_id:'segment:root',segment_start_entry_id:'start'})),tasks:[],batches:[],interruption_notices:[],compactions:[],...extra};}
+function context(body:any,extra:object={}){return{session_id:'session:test',cut_sequence:body.cut_sequence??'20',event_sequence_cut:body.event_sequence_cut??'30',entry_ids:body.entry_ids,groups:[{owner_id:'turn:root',owner_kind:'EXECUTED_TURN',initial_entry_id:'start'}],entry_contexts:body.entry_ids.map((id:string)=>({entry_id:id,owner_id:'turn:root',owner_kind:'EXECUTED_TURN',segment_id:'segment:root',segment_start_entry_id:'start'})),tasks:[],batches:[],interruption_notices:[],compactions:[],...extra};}
 function fixture(route:(url:string,body:any)=>unknown|Promise<unknown>){const calls:Array<{url:string;body:any}>=[];vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('fetch',vi.fn(async(input:string,init:RequestInit={})=>{const url=String(input),body=JSON.parse(String(init.body??'{}'));calls.push({url,body});const v=await route(url,body);return v instanceof Response?v:response(v);}));return calls;}
 const connect=async()=>await new LocalHttpRuntimeAdapter().connect('session:test') as RuntimeConnection;
 const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve();};
@@ -141,28 +141,40 @@ it('rejects an old DOM residence report even when navigation stays in the same c
   expect(reader.current().messages.at(-1)?.id).toBe('e:500');
 });
 
-it('keeps accepted input facts and task inventory current without injecting remote activities into an old reading band', async () => {
+it('keeps accepted input facts current without injecting the tail into an old reading band', async () => {
   const creator = entry('creator', 1, {entry_kind: 'ASSISTANT_TOOL_REQUEST', blocks: [
-    {block_id: 'spawn', block_kind: 'TOOL_CALL', tool_call_id: 'spawn', tool_name: 'spawn_agent'},
+    {block_id: 'delegate', block_kind: 'TOOL_CALL', tool_call_id: 'delegate', tool_name: 'run_agent'},
   ]});
-  const task = {id:'task:one', batchId:'batch:one', parentId:'turn:root', label:'实际子任务', role:'任务', objective:'分析', status:'running' as const, color:'blue', dependencyIds:[], completionAccepted:false};
   fixture((url, body) => {
     if (url.endsWith('/connections')) return payload([
       entry('accepted', 999, {entry_kind: 'USER_MESSAGE', input_source: {command_id:'command:accepted', queue_item_id:'queue:accepted', delivery_mode:'NEW_TURN'}, blocks:[], content:{media_type:'application/vnd.pulsara.prompt+json',...inline(JSON.stringify({schema:'pulsara.prompt/v2',parts:[{type:'text',text:'已接受的输入'}]}))}}),
-      entry('task-tail', 1000, {scope_kind:'SUBAGENT_TASK', scope_subagent_task_id:'task:one'}),
+      entry('latest-tail', 1000),
     ]);
     if (url.endsWith('/window')) return {session_id:'session:test',cut_sequence:'1000',event_sequence_cut:'2000',entries:[creator]};
-    if (url.endsWith('/context')) return context(body, {batches:[{batch_id:'batch:one',parent_turn_id:'turn:root',creator_entry_id:'creator',creator_tool_call_id:'spawn',task_count:'1'}]});
+    if (url.endsWith('/context')) return context(body);
     throw Error(url);
   });
   const reader = await connect(); await flush();
   const p = await reader.locateEntry!('creator', new AbortController().signal);
   expect(p.messages.map(m => m.id)).toEqual(['creator']);
   expect(p.canonicalInputs).toEqual([expect.objectContaining({id:'accepted',inputSource:expect.objectContaining({commandId:'command:accepted'}),contentState:'ready'})]);
-  const merged = mergeRuntimeTaskInventory(p, [task]);
-  expect(merged.messages[0].subagentRuns?.[0].activities).toEqual([]);
-  expect(merged.subagentRuns?.[0].activities.map(activity => activity.id)).toEqual(['task-tail']);
-  expect(merged.agentTasks).toEqual([task]);
+});
+
+it('reconciles a consumed queue item without navigating away from the reading band', async () => {
+  fixture((url, body) => {
+    if (url.endsWith('/connections')) return payload([entry('tail',20)]);
+    if (url.endsWith('/context')) return context(body);
+    if (url.endsWith('/queue')) return {item:{queue_item_id:'queue:item',status:'CONSUMED',consumed_entry_id:'consumed'}};
+    if (url.endsWith('/window')) return {session_id:'session:test',cut_sequence:'30',event_sequence_cut:'30',
+      entries:[entry(body.anchor_entry_id,body.anchor_entry_id === 'old' ? 2 : 21)]};
+    throw Error(url);
+  });
+  const reader=await connect();
+  const old=await reader.locateEntry!('old',new AbortController().signal);
+  const owner=old.history!.readingOwner;
+  await reader.readQueueItem('queue:item');
+  expect(reader.current().history!.readingOwner).toBe(owner);
+  expect(reader.current().messages.map(message => message.id)).toEqual(['old']);
 });
 
 it('hydrates the actual result host before committing a navigation, without reading unrelated entries', async () => {
@@ -356,7 +368,7 @@ it('reuses complete short turns across pages and compactions without narrowing a
   const calls=fixture((url,body)=>{
     if(url.endsWith('/context'))return context(body,{
       groups:Array.from({length:8},(_,i)=>({owner_kind:'EXECUTED_TURN',owner_id:`turn:${i}`,initial_entry_id:`short:${i*23+1}`,final_entry_id:`short:${(i+1)*23}`})),
-      entry_contexts:body.entry_ids.map((id:string)=>{const n=Number(id.split(':')[1]), owner=`turn:${Math.floor((n-1)/23)}`;return{entry_id:id,owner_id:owner,owner_kind:'EXECUTED_TURN',root_owner_id:owner,segment_id:`epoch:${Math.floor(n/7)}`,segment_start_entry_id:`short:${Math.floor((n-1)/23)*23+1}`};}),
+      entry_contexts:body.entry_ids.map((id:string)=>{const n=Number(id.split(':')[1]), owner=`turn:${Math.floor((n-1)/23)}`;return{entry_id:id,owner_id:owner,owner_kind:'EXECUTED_TURN',segment_id:`epoch:${Math.floor(n/7)}`,segment_start_entry_id:`short:${Math.floor((n-1)/23)*23+1}`};}),
     });
     throw Error(`Unexpected read: ${url}`);
   });
@@ -404,8 +416,7 @@ it.each(['current band','selected aperture'] as const)('keeps delayed older pagi
       ],
       entry_contexts:body.entry_ids.map((id:string)=>{
         const previous=Number(id.slice(2))<7,owner=previous?'turn:previous':'turn:short';
-        return {entry_id:id,owner_id:owner,owner_kind:'EXECUTED_TURN',root_owner_id:owner,
-          segment_id:`${owner}:initial`,segment_start_entry_id:previous?'e:1':'e:7'};
+        return {entry_id:id,owner_id:owner,owner_kind:'EXECUTED_TURN',segment_id:`${owner}:initial`,segment_start_entry_id:previous?'e:1':'e:7'};
       }),
     });
     if(url.endsWith('/window')&&body.anchor_entry_id)return olderPage(5,8,true);

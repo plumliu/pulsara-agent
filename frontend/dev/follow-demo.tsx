@@ -69,7 +69,7 @@ function Demo() {
     canControl:true,isObserver:false,permission:'read-only',skills:[],
     onFork:async()=>{},onReconnect:noop,onTakeControl:noop,onNewSession:reset,onToggleInspector:noop,onOpenModelSettings:noop,
     onModelCallBindingChange:async()=>{},onSend:async(content)=>{
-      if(running)setQueue(previous=>[...previous,{queueItemId:crypto.randomUUID(),commandId:crypto.randomUUID(),sequence:previous.length+1,status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:promptContentTextProjection(content)}]},permission:'read-only'}]);
+      if(running)setQueue(previous=>[...previous,{sourceKind:'command',queueItemId:crypto.randomUUID(),commandId:crypto.randomUUID(),sequence:String(previous.length+1),status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:promptContentTextProjection(content)}]},permission:'read-only'}]);
       else setSent(previous=>[...previous,{id:crypto.randomUUID(),role:'user',time:'',body:promptContentTextProjection(content)}]);
       return true;
     },onStop:()=>{setRunning(false);setStreaming(false);},onCompact:async()=>{},onRenameSession:noop,onReopenRuntime:reset,runtimeReopenBusy:false,
@@ -87,7 +87,7 @@ function Demo() {
     <button onClick={()=>setStreaming(value=>!value)} disabled={!running}>{streaming?'暂停输出':'启动流式输出'}</button>
     <button onClick={()=>{setRunning(false);setStreaming(false);}}>完成执行</button>
     <button onClick={()=>{setOldBand(true);setVersion(value=>value+1);}}>切到历史区间</button>
-    <button onClick={()=>setQueue(previous=>previous.length?[]:[{queueItemId:'demo-queue',commandId:'demo-command',sequence:1,status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:longThought}]},permission:'read-only'}])}>增删长队列</button>
+    <button onClick={()=>setQueue(previous=>previous.length?[]:[{sourceKind:'command',queueItemId:'demo-queue',commandId:'demo-command',sequence:'1',status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:longThought}]},permission:'read-only'}])}>增删长队列</button>
     <label><input type="checkbox" checked={failReads} onChange={event=>setFailReads(event.target.checked)}/>读取失败</label>
     <button onClick={reset}>重置／切换会话</button>
     <span role="status">{notice}</span>

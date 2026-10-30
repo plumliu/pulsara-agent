@@ -2,7 +2,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { HostOperations } from './host-operations';
 import type { DesktopResourcePaths } from './resource-paths';
 
-export type RuntimeEvent = {type: string; origin?: string; certificatePem?: string; url?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string};
+export type RuntimeEvent = {type: string; origin?: string; certificatePem?: string; url?: string; error?: string; requestId?: string; activeTasks?: number; scheduledTasks?: number; database_state?: string; phase?: 'startup' | 'runtime' | 'shutdown'; clean?: boolean};
 export interface WslRuntimeOptions {
   distribution: string;
   user: string;
@@ -14,7 +14,7 @@ export class PythonRuntime {
   private child?: ChildProcessWithoutNullStreams;
   private preparing = false;
   private preparation?: Promise<void>;
-  private exit?: Promise<{code: number | null; signal: NodeJS.Signals | null; startSent: boolean; stopped: boolean; failure?: string}>;
+  private exit?: Promise<{code: number | null; signal: NodeJS.Signals | null; startSent: boolean; stopped: boolean; settlementFailure: boolean; cleanStartupSettlement: boolean; failure?: string}>;
   private request = 0;
   private inspections = new Map<string, (value: RuntimeEvent) => void>();
   private certificate?: string;
@@ -39,8 +39,12 @@ export class PythonRuntime {
       let announced = false;
       let startSent = false;
       let stopped = false;
+      let startupFailure = false;
+      let cleanStartupSettlement = false;
+      let settlementFailure = false;
+      let controlFailure = false;
       let failure: string | undefined;
-      this.exit = new Promise(resolve => child.once('close', (code, signal) => { this.child = undefined; resolve({code, signal, startSent, stopped, failure}); }));
+      this.exit = new Promise(resolve => child.once('close', (code, signal) => { this.child = undefined; resolve({code, signal, startSent, stopped, settlementFailure, cleanStartupSettlement, failure}); }));
       child.stdin.on('error', (error: NodeJS.ErrnoException) => {
         // A child closing its inherited pipe is an ordinary exit race. Shutdown
         // still waits for 'close'; a pipe failure never authorizes force-killing.
@@ -65,6 +69,9 @@ export class PythonRuntime {
         const decoder = new TextDecoder('utf-8', {fatal:true});
         const invalidFrame = () => {
           invalid = true;
+          controlFailure = true;
+          cleanStartupSettlement = false;
+          startupFailure = false;
           failure = '内核返回了无效的宿主消息';
           this.send(child, {type:'shutdown'}, true);
           reject(new Error('内核返回了无效的宿主消息，正在关闭该进程。'));
@@ -96,6 +103,7 @@ export class PythonRuntime {
           if (event.requestId !== undefined) { this.inspections.get(event.requestId)?.(event); this.inspections.delete(event.requestId); }
           if (event.type === 'ready' && typeof event.origin === 'string') {
             if (this.wsl && (typeof event.certificatePem !== 'string' || !event.certificatePem.includes('-----BEGIN CERTIFICATE-----'))) {
+              controlFailure = true;
               failure = 'WSL 内核没有提供本次连接证书。';
               this.send(child, {type:'shutdown'}, true);
               reject(new Error(failure));
@@ -103,10 +111,23 @@ export class PythonRuntime {
             }
             this.certificate = event.certificatePem;
             announced = true;
+            startupFailure = false;
+            cleanStartupSettlement = false;
             resolve(event.origin);
           }
-          if (event.type === 'stopped') stopped = true;
-          if (event.type === 'failed') { failure = event.error ?? '内核报告失败。'; reject(new Error(failure)); }
+          if (event.type === 'stopped') {
+            stopped = true;
+            settlementFailure ||= event.clean === false;
+            cleanStartupSettlement = startupFailure && !announced && !controlFailure && !settlementFailure && event.clean === true;
+          }
+          if (event.type === 'failed') {
+            if (!controlFailure) failure = event.error ?? '内核报告失败。';
+            if (!announced && event.phase !== 'startup') controlFailure = true;
+            settlementFailure ||= event.phase === 'shutdown';
+            startupFailure = !announced && !controlFailure && event.phase === 'startup';
+            cleanStartupSettlement = false;
+            reject(new Error(failure));
+          }
           this.onEvent(event);
         };
         child.stdout.on('data', (chunk: Buffer) => {
@@ -179,8 +200,9 @@ export class PythonRuntime {
     const child = this.child;
     if (child) this.send(child, {type:'shutdown'}, true);
     const result = await this.exit;
-    if (result?.startSent && (result.code !== 0 || result.failure || (this.wsl && !result.stopped))) {
-      throw new Error(`内核退出时报告收尾失败 (${result.failure ?? (this.wsl && !result.stopped ? '没有收到完整收尾消息' : result.code ?? result.signal)})；数据库尚未停止，请检查日志。`);
+    const settledStartupFailure = result?.cleanStartupSettlement && result.code === 1 && result.signal === null;
+    if (result?.startSent && !settledStartupFailure && (result.code !== 0 || result.failure || result.settlementFailure || (this.wsl && !result.stopped))) {
+      throw new Error(`内核退出时报告收尾失败 (${result.failure ?? (result.settlementFailure ? '内核报告收尾不完整' : this.wsl && !result.stopped ? '没有收到完整收尾消息' : result.code ?? result.signal)})；数据库尚未停止，请检查日志。`);
     }
   }
 }

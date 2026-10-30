@@ -146,8 +146,52 @@ def test_database_failure_never_announces_ready_or_deletes_data(desktop_home):
         assert result == 1
         assert [item["type"] for item in events] == ["starting", "failed", "stopping", "stopped"]
         assert "pg_search" in events[1]["error"]
+        assert events[1]["phase"] == "startup" and events[-1]["clean"] is True
         assert marker.read_text() == "preserve"
 
+    asyncio.run(exercise())
+
+
+def test_clean_schema_startup_failure_reports_physical_settlement(desktop_home):
+    from pulsara_agent.storage.migrations.errors import PostgresSchemaError, PostgresSchemaFailureCode
+
+    async def exercise():
+        reader = asyncio.StreamReader()
+        reader.feed_data((json.dumps(frame(desktop_home)) + "\n").encode())
+        events = []
+        def failure(*_args, **_kwargs):
+            raise PostgresSchemaError(PostgresSchemaFailureCode.MIGRATION_UNIVERSE_RESET_REQUIRED,
+                                      "migration universe identity does not match this binary")
+        def app_factory(**_kwargs):
+            raise AssertionError("application must not start after schema failure")
+        result = await module.run_desktop_child(reader, events.append, application_factory=app_factory,
+                                                database_preparer=failure)
+        assert result == 1
+        assert [item["type"] for item in events] == ["starting", "failed", "stopping", "stopped"]
+        assert events[1]["phase"] == "startup"
+        assert "schema_migration_universe_reset_required" in events[1]["error"]
+        assert events[-1] == {"type": "stopped", "clean": True}
+        os.close(module.acquire_kernel_lock())
+    asyncio.run(exercise())
+
+
+def test_failed_startup_close_never_reports_clean_settlement(desktop_home):
+    async def exercise():
+        reader = asyncio.StreamReader()
+        reader.feed_data((json.dumps(frame(desktop_home)) + "\n").encode())
+        events = []
+        class App:
+            database_state = DatabaseDataPlaneState.UNAVAILABLE
+            def __init__(self, **_kwargs): pass
+            async def start(self): pass
+            async def aclose(self): raise RuntimeError("physical close failed")
+        result = await module.run_desktop_child(reader, events.append, application_factory=App,
+                                                database_preparer=lambda *_args, **_kwargs: None)
+        assert result == 1
+        assert [(item["type"], item.get("phase")) for item in events] == [
+            ("starting", None), ("failed", "startup"), ("stopping", None),
+            ("failed", "shutdown"), ("stopped", None)]
+        assert events[-1]["clean"] is False
     asyncio.run(exercise())
 
 

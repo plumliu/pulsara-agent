@@ -2,7 +2,7 @@ import { DesktopWorkspaceProvider, DesktopWorkspace } from '../../frontend/compo
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MarkdownBody } from '../../frontend/components/markdown-body';
-import { InlineVisualization } from '../../frontend/components/inline-visualization';
+import { InlineVisualization, VisualizationOwnerContext } from '../../frontend/components/inline-visualization';
 import { visualizationLayoutMessageType } from '../../frontend/lib/visualization-frame';
 import examples from '../fixtures/visualization-markers.json';
 
@@ -20,7 +20,7 @@ beforeEach(() => {
   });
   vi.stubGlobal('matchMedia', () => ({matches: false, addEventListener() {}, removeEventListener() {}}));
 });
-afterEach(() => {cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks();});
+afterEach(() => {cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();});
 const item = {ordinal: 0, state: 'READY' as const, contentDigest: 'sha256:'+'a'.repeat(64), contentSize: 16, sourceFilename: 'chart.html'};
 const marker = '```pulsara-viz\nchart.html\n```';
 
@@ -333,6 +333,28 @@ it('opens frozen occurrences as independent tabs despite equal filenames and con
   fireEvent.click(screen.getByRole('button',{name:'放大可视化'}));
   expect(screen.getAllByRole('tab',{name:'chart.html'})).toHaveLength(2);
   expect(read.mock.calls.every(call => call[0] === 'entry-a')).toBe(true);
+});
+
+it('clears a derived visualization when its Agent owner retires', async () => {
+  vi.spyOn(HTMLElement.prototype,'clientWidth','get').mockReturnValue(800);
+  vi.spyOn(HTMLElement.prototype,'clientHeight','get').mockReturnValue(500);
+  let available = true;
+  const check = vi.fn(async () => available);
+  const view = render(<DesktopWorkspaceProvider sessionId="session-a" onShow={() => {}}>
+    <VisualizationOwnerContext.Provider value={check}><InlineVisualization entryId="entry-a" items={[item]} onRead={async () => '<main>frozen</main>'}/></VisualizationOwnerContext.Provider>
+    <DesktopWorkspace isOpen onClose={() => {}} toolbar={null} renderTab={() => null}/>
+  </DesktopWorkspaceProvider>);
+  await waitFor(() => expect(screen.getByRole('button',{name:'放大可视化'})).toBeTruthy());
+  vi.useFakeTimers();
+  fireEvent.click(screen.getByRole('button',{name:'放大可视化'}));
+  await act(async () => {});
+  const frozen = screen.getByRole('region', {name:'历史可视化：chart.html'});
+  expect(frozen.querySelector('iframe')).toBeTruthy();
+  available = false;
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(frozen.textContent).toContain('子代理已不可用');
+  expect(frozen.querySelector('iframe')).toBeNull();
+  view.unmount();
 });
 
 it('mixes direct saved images and HTML without screenshotting images and releases URLs', async () => {

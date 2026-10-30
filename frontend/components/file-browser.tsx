@@ -249,8 +249,8 @@ export function FilePreviewProvider({
     let target: string;
     try {
       if (classifyFileLink(path) === "external") {
-        if (/^https?:/i.test(path) && workspaceRef.current && tab.sessionId) {
-          workspaceRef.current.browserTabs.open(tab.sessionId, path, { newTab });
+        if (/^https?:/i.test(path) && workspaceRef.current) {
+          workspaceRef.current.browserTabs.open(path, { newTab });
           return;
         }
         const native = desktopHost();

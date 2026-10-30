@@ -1,6 +1,6 @@
 import {createHash, webcrypto} from 'node:crypto';
 import {afterEach, expect, it, vi} from 'vitest';
-import {CanonicalHistoryView, LocalHttpRuntimeAdapter, mergeRuntimeTaskInventory, type RuntimeConnection} from '../../frontend/lib/runtime-adapter';
+import {CanonicalHistoryView, LocalHttpRuntimeAdapter, type RuntimeConnection} from '../../frontend/lib/runtime-adapter';
 const inline=(text:string)=>({inline_content:Buffer.from(text).toString('base64')});
 const blob=(text:string)=>({digest:`sha256:${createHash('sha256').update(text).digest('hex')}`,size:String(Buffer.byteLength(text)),media_type:'text/plain',codec:'utf-8'});
 const entry=(id:string,n:number,extra:object={})=>({entry_id:id,entry_sequence:String(n),turn_id:'turn:root',entry_kind:'ASSISTANT_MESSAGE',scope_kind:'ROOT',root_final:true,fork_eligible:true,blocks:[{block_id:`block:${id}`,block_kind:'TEXT',content:inline(id)}],...extra});
@@ -9,7 +9,7 @@ const snapshot=(entries:object[],older?:object,cut='20',eventCut='30')=>({sessio
 const payload=(entries:object[],older?:object)=>({connection_id:'connection:test',connection_generation:1,session_id:'session:test',role:'controller',snapshot:{snapshot:snapshot(entries,older)},live_hello:{live_owner_epoch:'1'},live_control_snapshot:{snapshot:{}}});
 const response=(v:unknown)=>new Response(JSON.stringify(v),{status:200,headers:{'Content-Type':'application/json'}});
 function deferred<T>(){let resolve!:(v:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return{promise,resolve};}
-function context(body:any,extra:object={}){return{session_id:'session:test',cut_sequence:body.cut_sequence??'20',event_sequence_cut:body.event_sequence_cut??'30',entry_ids:body.entry_ids,groups:[{owner_id:'turn:root',owner_kind:'EXECUTED_TURN',initial_entry_id:'start'}],entry_contexts:body.entry_ids.map((id:string)=>({entry_id:id,owner_id:'turn:root',owner_kind:'EXECUTED_TURN',root_owner_id:'turn:root',segment_id:'segment:root',segment_start_entry_id:'start'})),tasks:[],batches:[],interruption_notices:[],compactions:[],...extra};}
+function context(body:any,extra:object={}){return{session_id:'session:test',cut_sequence:body.cut_sequence??'20',event_sequence_cut:body.event_sequence_cut??'30',entry_ids:body.entry_ids,groups:[{owner_id:'turn:root',owner_kind:'EXECUTED_TURN',initial_entry_id:'start'}],entry_contexts:body.entry_ids.map((id:string)=>({entry_id:id,owner_id:'turn:root',owner_kind:'EXECUTED_TURN',segment_id:'segment:root',segment_start_entry_id:'start'})),tasks:[],batches:[],interruption_notices:[],compactions:[],...extra};}
 function fixture(route:(url:string,body:any)=>unknown|Promise<unknown>){const calls:Array<{url:string;body:any}>=[];vi.stubGlobal('crypto',webcrypto);vi.stubGlobal('fetch',vi.fn(async(input:string,init:RequestInit={})=>{const url=String(input),body=JSON.parse(String(init.body??'{}'));calls.push({url,body});const v=await route(url,body);return v instanceof Response?v:response(v);}));return calls;}
 const connect=async()=>await new LocalHttpRuntimeAdapter().connect('session:test') as RuntimeConnection;
 const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve();};
@@ -124,7 +124,7 @@ it('releases repeated offscreen accepted live and queue handoffs without droppin
   const id=`e:${n}`,ref=blob(`reply:${n}`),canonical=owner.entries.get(id);
   canonical.blocks=[{block_id:`block:${id}`,block_kind:'TEXT',content:ref}];
   canonical.input_source={command_id:`command:${n}`,queue_item_id:`queue:${n}`};
-  owner.knownQueuedContent.set(`command:${n}:queue:${n}`,{parts:[]});
+  owner.knownQueuedContent.set(`queue:${n}`,{parts:[]});
   owner.drafts.set(`d:${n}`,{id:`d:${n}`,committedEntryId:id,turnId:'turn:root',scopeKind:'ROOT',taskId:'',body:'accepted live bytes',reasoning:[],traces:[]});
   owner.liveResults.set(`r:${n}`,{id:`r:${n}`,committedEntryId:id,turnId:'turn:root',scopeKind:'ROOT',taskId:'',text:'accepted result',hasText:true,ended:true});
   reader.retainHistory!({visibleEntryIds:['e:20'],pinnedEntryIds:[]});
@@ -176,10 +176,6 @@ it('keeps result semantic identity when an older assistant becomes its render ho
  const result=entry('result',20,{entry_kind:'TOOL_RESULT',blocks:[],content:inline('完成'),tool_result:{assistant_entry_id:'creator',tool_call_id:'call:1',result_state:'SUCCESS'}});
  fixture((url,body)=>{if(url.endsWith('/connections'))return payload([result],cursor);if(url.endsWith('/context'))return context(body);if(url.endsWith('/history'))return{history_page:{entries:[entry('creator',19,{entry_kind:'ASSISTANT_TOOL_REQUEST',blocks:[{block_id:'call:1',block_kind:'TOOL_CALL',tool_call_id:'call:1',tool_name:'read_file'}]})],has_more:false}};throw Error(url);});
  const reader=await connect();await flush();expect(reader.current().messages[0].id).toBe('result');const p=await reader.readHistory!();expect(p.messages).toHaveLength(1);expect(p.messages[0]).toMatchObject({id:'creator',sourceEntryIds:['creator','result'],traces:[{resultEntryId:'result',resultText:'完成'}]});expect(p.history!.windows[0].lastEntryId).toBe('creator');
-});
-it('attaches task inventory through canonical batch creator metadata without spawn JSON',async()=>{
- fixture((url,body)=>{if(url.endsWith('/connections'))return payload([entry('creator',20,{entry_kind:'ASSISTANT_TOOL_REQUEST',blocks:[{block_id:'spawn',block_kind:'TOOL_CALL',tool_call_id:'spawn',tool_name:'spawn_agent'}]})]);if(url.endsWith('/context'))return context(body,{batches:[{batch_id:'batch:one',parent_turn_id:'turn:root',creator_entry_id:'creator',creator_tool_call_id:'spawn',task_count:'500'}]});throw Error(url);});
- const reader=await connect();await flush();const p=mergeRuntimeTaskInventory(reader.current(),[{id:'task:one',batchId:'batch:one',parentId:'turn:root',label:'实际子任务',role:'任务',objective:'分析',status:'completed',color:'blue',dependencyIds:[],completionAccepted:true}]);expect(p.messages[0].subagentRuns?.[0].id).toBe('task:one');
 });
 it('keeps body integrity errors local and retries in read-only history without a Host',async()=>{
  const text='来源中文',content=blob(text);let fail=true;const calls=fixture((url,body)=>{if(url.endsWith('/context'))return context(body);if(url.endsWith('/read-content'))return{content:{digest:content.digest,complete_size:content.size,offset_bytes:'0',content:Buffer.from(fail?'错误乱码':text).toString('base64'),complete:true}};throw Error(url);});

@@ -1,8 +1,8 @@
 # Pulsara 子代理与 Cell 侧边栏实施规格
 
-日期：2026-10-30。状态：已冻结，待实施。
+日期：2026-10-30。状态：**侧边栏已实施，定向验证及打包完成；视觉效果待用户审阅。** 运行结果和边界见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)。
 
-本文确定两个侧边栏入口、共同阅读链、Work 输入存储 hard cut、Cell 局部编排图及 `open_in_pulsara` 接入。保留原文件路径供现有链接引用。本轮只修订规格，不修改生产代码、测试代码或数据库。
+本文确定两个侧边栏入口、共同阅读链、Work 输入存储 hard cut、Cell 局部编排图及 `open_in_pulsara` 接入。保留原文件路径供现有链接引用。
 
 本规格范围内以本文为准；其余运行时语义沿用 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)、[Code Mode 合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)及[工具查询与 Cell 身份规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md)。不改变 Agent／Work／Cell 身份、执行权限、停止范围、闲置期限或模型输入前缀边界。新 schema／SYSTEM 只在新 cold epoch 或显式采用的 compaction successor 安装；已有 epoch 的 SYSTEM／tools 保持原字节，messages 仅追加。
 
@@ -20,6 +20,12 @@
 
 本轮新增「子代理」「cell」两个入口；各自打开列表 tab，列表项继续打开独立详情 tab。依赖图是从 Cell 打开的详情 tab，不另增顶层入口。本文的 Cell 指运行时对象，界面顶层名称统一为 `cell`；界面名称与既有内部标识按上表映射。
 
+未选择会话时，「能力」「进程」「子代理」「cell」仍可打开，页面以正常可读样式显示「创建或选择会话后查看内容」，不构造会话／Host 身份或发起会话读取。「网页」入口不依赖选中会话；切换会话保留已打开的网页 tab。
+
+右侧栏展开状态属于窗口，不随会话切换；默认宽度和最小宽度为 350px，可向更宽拖动。切换会话的加载期间，会话内容停止读取并显示「正在加载会话…」，网页仍可使用。
+
+网页状态及浏览器 partition 属于用户级浏览器 owner，不绑定 ROOT；清除或删除会话不关闭网页 tab。用户级网页共享该 owner 的 partition。
+
 | 页面 | 展示单位 | 点击后的行为 |
 |---|---|---|
 | 子代理列表 | 一个 Subagent session 一行 | 用类似 MCP 的过渡动画打开该 Agent 的只读会话 tab |
@@ -36,7 +42,7 @@
 - 打开列表、会话、源码或图，不保活对象，不刷新 Agent 的业务空闲时间，不推迟 Cell 输出结算和退役。
 - “源码冻结”只表示显示当次真正执行的内容，不能据此延长 Cell 寿命或建立历史浏览产品。
 
-这里是会话范围内的辅助页面，绑定明确的 ROOT 身份；不扩展成用户级跨会话 Agent／Cell 管理中心。
+子代理与 cell 是会话范围内的辅助页面，绑定明确的 ROOT 身份；不扩展成用户级跨会话管理中心。
 
 “与 ROOT 查询一致”指对象归属与存续集合；界面直接读取同一 owner，不以当前 turn 是否允许调用 Agent 工具作为显示开关。ROOT idle 或输入框切换权限不会让仍存在的对象消失。
 
@@ -151,25 +157,17 @@ Agent A                       Agent B
 
 种子为当前 Cell 接纳的 Work 和已验证的具体参与对象；从已选 Work 沿 dependency 向前置 Work 按需展开，可以包含其他 Cell 或原生派活产生的前置 Work。只读取窄身份／状态／关系，不为绘图 hydrate 全部 instruction／final，不扫描 ROOT 全历史，不设图深或总 Work 数上限。
 
-## 5. 代码调研：复用点与真实缺口
+## 5. 所有权与读取合同
 
-以下给出实施落点和必须替换的耦合路径；不代表功能已经实现。不以最少改动行数为目标，也不重写无关子系统。
-
-| 链路 | 当前事实 | 实施要求 |
-|---|---|---|
-| Tab 容器 | [desktop-workspace.tsx](frontend/components/desktop-workspace.tsx) 已有身份去重、切换、关闭、滚动位置及图视角槽位 | 扩展列表、Agent 会话、Cell 源码与图的页面类型，继续复用同一个容器 |
-| MCP 动画 | [inspector-panel.tsx](frontend/components/inspector-panel.tsx) 的 `openMcpDetail` 使用 `startViewTransition`；[inspector.css](frontend/app/styles/inspector.css) 提供共享元素与正文淡入 | 提取小型共用动画入口，供 Agent 列表点击使用；直接打开详情不强行动画 |
-| 对话主体 | [workbench-view.tsx](frontend/components/workbench-view.tsx) 已导出 `ConversationMessages`，但历史上下文、滚动控制、注释编辑及输入框仍装配在外层 | 按 §5.3 抽出完整阅读主体，不只复用消息 JSX |
-| 观察者模式 | 现有只读 dock 仍关联 `WorkspaceRecoveryDock`、接管和工作区恢复；不是 Subagent 阅读页 | 明确一个只读阅读装配，不伪造 ROOT observer 连接或接管状态 |
-| 排队投影 | [runtime-adapter.ts](frontend/lib/runtime-adapter.ts) 的 `projectQueuedPrompts` 要求 `command_id`；数据库有该列，但 Agent Work 按合同取 NULL。卡片、缓存和状态衔接也依赖 command | 按 §5.1 完整调整共同阅读模型及协议投影；不只放宽过滤，也不给 Work 新增重复身份 |
-| 消息来源 | [canonical_v3.py](src/pulsara_agent/terminal_protocol/canonical_v3.py) 已投影 `source_session_id`／`source_work_id`；前端 `inputSource` 接入仍带有人类 command 前提 | 保留来源身份并用于发送者与引导展示；排队来源和等待原因按必要字段补只读投影 |
-| Agent 清单 | [collaboration_api.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py) 的 `query_agents` 使用共同 repository；[_repository/subagents.py](src/pulsara_agent/conversation_kernel/_repository/subagents.py) 已有列表、Work 与 runtime 查询 | Desktop 调用同一读取 owner，保持 ROOT 清单语义，不使用仅用于压缩摘要的 active Agent 筛选替代完整可见清单 |
-| 子会话读取 | [session_controller.py](src/pulsara_agent/desktop_app/session_controller.py) 已有无 writer 的历史 reader；Desktop connect 会 resume，前端实时投影仍在带命令能力的连接类中 | 按 §5.4 分离读取与执行连接，复用 canonical／live 观察机制 |
-| JS 高亮 | [file-code.tsx](frontend/components/file-code.tsx) 与 [code-highlight.ts](frontend/lib/code-highlight.ts) 已支持 JS、MJS、CJS | 直接复用，数据源接冻结源码；高亮失败不丢失原文 |
-| 冻结源码 | [tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 在 start 前冻结实际源码；[_repository/tools.py](src/pulsara_agent/conversation_kernel/_repository/tools.py) 绑定真实 `exec_cell` attempt 并复用 inline／blob 读取 | 先从存活 Cell 获得 `source_exec_attempt_id`，读取已有内容；不建立历史源码清单 |
-| Cell 清单 | [code_mode/host.py](src/pulsara_agent/code_mode/host.py) 有 `query_cells`、`capture_cell` 与退役 `_collect`；[renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 已有 `code_mode_cells` | 复用当前存活 owner，并补分页、源码与关系读取所需适配；UI 不调用消费输出的 observe／wait |
-| 编排来源 | 派活来源能 join 到父 Cell，但等待条件会结算消失，纯等待／查询也不创建 Work | 按 §5.2 重整依赖输入事实，按 §5.7 单独观察实际参与对象，不从原始参数猜图 |
-| HTML 冻结阅读 | [inline-visualization.tsx](frontend/components/inline-visualization.tsx)、[visualization_preview.py](src/pulsara_agent/desktop_app/visualization_preview.py) 读取 canonical 内容 | 借鉴内容读取和身份绑定方式，保留 Cell 自己的生命周期与源码 owner |
+| 链路 | 当前所有者与职责 |
+|---|---|
+| Tab 与导航 | [desktop-workspace.tsx](frontend/components/desktop-workspace.tsx) 管理承载 ROOT、目标身份、标签去重与阅读视角；[agent-cell-api.ts](frontend/lib/agent-cell-api.ts) 沿共同读取入口核验目标 |
+| 会话阅读 | [workbench-view.tsx](frontend/components/workbench-view.tsx) 复用共同阅读行为；[agent-conversation-pane.tsx](frontend/components/agent-conversation-pane.tsx) 装配只读 Agent 会话 |
+| 排队与来源 | [runtime-adapter.ts](frontend/lib/runtime-adapter.ts) 和 [canonical_v3.py](src/pulsara_agent/terminal_protocol/canonical_v3.py) 投影队列身份、来源与依赖等待；ROOT 操作和 Agent 只读阅读各自装配 |
+| Agent 与 Work | [collaboration_api.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py) 与 [_repository/subagents.py](src/pulsara_agent/conversation_kernel/_repository/subagents.py) 管理当前 ROOT 可见成员、Work 及其输入事实 |
+| 只读打开 | [session_controller.py](src/pulsara_agent/desktop_app/session_controller.py) 与 [renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 校验 ROOT／Agent，沿 canonical reader 和 live observer 读取，不 resume 或取得 writer |
+| Cell、源码与图 | [code_mode/host.py](src/pulsara_agent/code_mode/host.py) 管理当前存活 Cell 与进程内参与观察；[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 复用冻结源码和图读取，Desktop 保留自身存续复核 |
+| 源码展示 | [file-code.tsx](frontend/components/file-code.tsx) 与 [code-highlight.ts](frontend/lib/code-highlight.ts) 显示冻结源码并提供 JS 高亮，不借用文件路径身份 |
 
 ### 5.1 输入身份与共同队列阅读
 
@@ -194,13 +192,13 @@ Agent A                       Agent B
 - 非队列的 ROOT revision 输入可能只有 `command_id`（`canonical_v3.py` 的 revision 来源分支）；显式保留 command-only 来源，不丢弃、不伪造 queue ID。队列输入、revision 来源与本地未接纳提交使用闭合的不同类型。
 - 排队卡片和对话阅读复用；ROOT 的编辑、取消、转 steer 及回执处理由操作层提供，Subagent 阅读装配不传入这些行为。
 
-需要一起调整的实际链路：
+共同阅读链的要求：
 
 1. `projectQueuedPrompts` 按队列身份与状态接纳展示项；`Message.inputSource` 不再因 command 缺失丢弃来源，保留 Agent 发送者信息。
 2. `rememberQueueContent`、`decorateHistory` 的正文衔接缓存按会话／队列身份关联；队列消费后按 `queue_item_id` 找到 entry，读取完成后释放临时正文。
 3. 可见队列、待处理 steer、队列计数和消息去重采用同一输入身份。多个无 command 的 Work 或消息不会共用空 key，也不会被合并或重复展示。
 4. `hydrateQueuedPromptContent` 遇到 `CONTENT_QUEUE_NOT_PENDING` 时，共同阅读路径刷新 canonical 队列／entry 状态并沿真实输入身份核对；有命令的提交路径才继续调用 `queryCommand`。不能让 Agent 输入落入当前 `reconcilePromptQueueTransition` 的“缺少 command 身份”错误，也不另建 Agent 回执机制。
-5. `PromptQueueControl` 当前未投影 Agent 来源及依赖等待说明；按 UI 实际需要从已有字段补充 typed DTO／协议字段。历史 `CanonicalInputSource` 已带来源 session／Work，前端应接收使用。协议字段变更不等于数据库需要新字段。
+5. `PromptQueueControl` 投影 Agent 来源及依赖等待说明；历史 `CanonicalInputSource` 保留来源 session／Work。协议投影不另加数据库身份。
 
 共同组件的目标是同一种输入阅读方式，保留来源之间真实不同的提交／控制流程；不是复制一套 Agent 队列，也不是在 ROOT 组件里散布 `isSubagent` 特判。
 
@@ -208,13 +206,7 @@ Agent A                       Agent B
 
 ### 5.2 Work 输入统一为一个 JSONB 字段
 
-这是本轮确认值得修改数据库 schema 的地方。
-
-现有 `waiting_on` 表示尚未满足的等待条件。成功后，关系移入 `input_materials` 的 `kind: dependency`；失败或取消时，剩余 `waiting_on` 被清空。`_agent_work_value` 也没有提供完整依赖关系。原始 `tool_invocations.original_arguments` 在 Hook 前记录；真正的 `public_arguments` 出现在结算对象中，当前 schema 没有对应的最终参数列。不能靠回读原始参数准确恢复所有已接纳关系。
-
-问题不只是“图缺字段”：同一个 Work 输入的关系身份与正文，分散在两个会互相搬移、删除的 JSON 字段中。调度所需的未满足条件和页面所需的已接纳关系没有共同的完整来源。
-
-在 `prompt_queue_items` 内用单一 **`work_inputs` JSONB 数组**替换 `waiting_on` 和 `input_materials`。沿原队列行锁原子更新，不新建关系表或图数据副本。每项为闭合对象 `{kind, source_work_id, ordinal, body}`：
+`prompt_queue_items` 使用单一 **`work_inputs` JSONB 数组**保存 Work 输入事实。沿原队列行锁原子更新，不建立关系表或图数据副本。每项为闭合对象 `{kind, source_work_id, ordinal, body}`：
 
 | 字段语义 | 写入及变化 |
 |---|---|
@@ -227,10 +219,10 @@ Agent A                       Agent B
 读取规则统一为：
 
 - **图的成功依赖边**：读取 `kind=dependency` 的元素身份，不依赖正文是否已填充。
-- **尚未满足的条件**：对仍 PENDING 的 Work，读取正文尚未物化的 dependency 行，再由共同依赖结算逻辑检查来源 Work；不另存 `waiting_on` 副本。
+- **尚未满足的条件**：对仍 PENDING 的 Work，读取正文尚未物化的 dependency 项，再由共同依赖结算逻辑检查来源 Work；不另存等待条件副本。
 - **可启动**：共同依赖处理已完成，且不存在未物化依赖；实际启动事务仍核对该条件。
 - **模型初始材料**：读取已经物化的正文，沿现有 dependency 优先、ordinal 排序，保持现有独立 entry 及初始输入组边界。
-- **失败／取消**：按既有请求状态结算，保留关系身份；终态请求不再进入依赖调度。失败诊断仍使用现有请求终止原因，不在关系表复制请求状态。
+- **失败／取消**：按既有请求状态结算，保留关系身份；终态请求不再进入依赖调度。失败诊断仍使用现有请求终止原因，不复制请求状态。
 
 接纳与所有输入关系在原共同接纳事务中一次写入；Hook 后的真实请求、batch 解引用和所有权校验完成后才建立关系。确认不确定的接纳结果时，同时核对不可变的来源、种类和顺序。成功材料物化、依赖失败及后继请求处理继续由共同 repository 负责，不引入第二个调度器。
 
@@ -254,7 +246,7 @@ schema 保持 JSON 数组形状检查；共同接纳／读取边界校验闭合�
 
 ### 5.3 会话阅读与 ROOT 操作耦合：抽出完整阅读主体
 
-现有 `ConversationMessages` 不是完整阅读页面。`HistoryHydrationContext`、`HistoryDisclosureContext`、`ThreadFollowController`、历史定位和滚动锚点仍在 `WorkbenchView`；外层还包裹带草稿编辑功能的 `ResponseAnnotations`。只嵌入消息组件会遗漏阅读行为，直接嵌入整个工作台又会带入输入框、接管及控制流程。
+ROOT 与 Agent 共用消息、历史 hydration／disclosure、阅读定位与 `ThreadFollowController`；ROOT 外层负责操作，Agent 外层只读装配。
 
 ROOT 与 Agent 装配同一份 **ConversationReader／ConversationPane**（内部名称可随模块组织调整，职责不能分叉）：
 
@@ -263,13 +255,13 @@ ROOT 与 Agent 装配同一份 **ConversationReader／ConversationPane**（内�
 - ROOT 在外层组合 composer、提交／回执、队列操作、注释编辑和会话控制；Subagent 外层组合身份标题与只读队列，不依赖草稿 store。
 - 阅读引用定位与“添加注释到草稿”分开；复制、展开、链接可以使用，Subagent 页不注册注释编辑行为。
 
-已经发现的 ROOT 专属投影必须同时处理：`projectTodo` 只选 `scope_kind=ROOT`，`orderedRootTurnIdsFromEntries` 过滤 SUBAGENT，canonical 历史上下文只给 ROOT 投影相邻 owner。共同阅读路径改成“当前被阅读 session 的 turn／TODO／历史分组”，相应字段硬切为准确名称，不能在子代理页面把 SUBAGENT 冒充 ROOT。
+共同阅读路径按当前被阅读 session 和真实 scope 投影 turn、TODO 与历史分组，不在子代理页面把 SUBAGENT 冒充 ROOT。
 
-`runtime-adapter.ts` 的 live settlement 当前也只为 ROOT 保留 draft／tool result 到 canonical 正文就绪；改为按真实阅读 session／scope 衔接，避免 SUBAGENT 提交时先闪空。已落库内容仍按原分页与释放策略读取，不把完整历史永久缓存。
+`runtime-adapter.ts` 按真实阅读 session／scope 衔接 live draft／tool result 与 canonical 正文，避免 SUBAGENT 提交时先闪空。已落库内容仍按原分页与释放策略读取，不把完整历史永久缓存。
 
 其中真正 ROOT 专属的能力仍留在 ROOT 操作层，例如自动处理 `open_in_pulsara` 展示请求、分叉入口、Plan 决策和用户停止目标。不要机械删除所有 ROOT 判断；区分业务专属规则与阅读代码的历史假设。
 
-发送者也需改为**每条输入的元数据**。目前 `UserMessage` 普通输入使用整页 `label`，steer 只写“引导”；`CanonicalEntry.input_origin` 已存在但前端消息未完整利用。读取实际来源 session／Work，分别呈现 ROOT instruction、某个 Agent 的引导和 runtime 材料；不得把材料 entry 当成人类或某个队友新发的消息。来源已经删除时显示可用身份说明，不补造活 Agent，也不为保存显示名新建历史成员表。
+发送者依据**每条输入的元数据**。读取实际来源 session／Work，分别呈现 ROOT instruction、某个 Agent 的引导和 runtime 材料；不得把材料 entry 当成人类或某个队友新发的消息。来源已经删除时显示可用身份说明，不补造活 Agent，也不为保存显示名新建历史成员表。
 
 同屏 ROOT 与 Agent 阅读必须隔离 DOM 行为。现有 `ResponseAnnotations` 在 document 上监听选区、pointerup 和 copy；它的选区映射、来源查找、复制处理与定位要限定在自己的 thread 容器。Agent 页面不注册编辑行为仍不够，ROOT 的全局监听也不能捕获 Agent 选区。快捷键、滚动定位和异步 hydration 同样绑定各自 reader。
 
@@ -277,9 +269,9 @@ Workspace 切换 tab 会卸载选中内容，外层 scrollTop 不能恢复内部
 
 ### 5.4 读取与启动／控制连接耦合：显式分离 Reader 和 Controller
 
-[renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 的 `connect` 同时负责 controller／observer 分配和 `resume_session`，观察者路径也会 resume；它不适合充当“看看这个 Agent”的入口。前端 `CanonicalHistoryReader` 已共享历史机制，但 live 合并逻辑在 `LocalRuntimeConnection` 中；`CanonicalHistoryView` 又将 `isRunning` 固定为 false，不能直接充当运行中的 Agent 阅读器。
+[renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 的 Agent 只读入口与负责 resume 和控制的 `connect` 分开；前端沿共同 canonical 与 live 阅读机制装配 Agent 会话。
 
-增加明确的只读打开入口，并把已有公共机制下沉到共同 reader：
+只读打开及共同 reader 遵循：
 
 1. 解析明确的 ROOT／Agent 身份，读取 canonical session，并验证其仍属于该 ROOT 的可见清单。
 2. 直接读取共同 canonical snapshot／history／content。已有 live Host 时，使用现有协议 observer 和 live bus；没有 live Host 时仍能读取存在的会话，不调用 resume、不申请执行槽。
@@ -287,28 +279,28 @@ Workspace 切换 tab 会卸载选中内容，外层 scrollTop 不能恢复内部
 4. Host 卸载时丢弃该 live owner 的临时观察；仍存在的 Agent 继续 canonical 阅读。后续正常调度创建新 Host 时，先撤销旧请求、清空 draft／live result／临时 TODO，再安装新 HELLO、live/control baseline 与 canonical snapshot。不同 Host 的 live epoch 可能都从 1 开始，必须同时按真实 `host_session_id` 和现有 attachment／reader generation 隔离，不能只比 epoch。
 5. Agent 删除后终止该 reader；关闭 tab 只取消读请求、释放观察者和阅读缓存，不停止业务任务。
 
-后端复用 `CanonicalProtocolReader` 和 `v3_gateway` 已有 snapshot／observe／gap 处理，不复制一套事件解释器。只读 observer 在协议层本来就存在；需要调整的是 Desktop 打开方式和前端能力组合，不是新增控制角色、执行会话或数据库 writer。
+后端复用 `CanonicalProtocolReader` 和 `v3_gateway` 已有 snapshot／observe／gap 处理，不复制一套事件解释器。只读 observer 不新增控制角色、执行会话或数据库 writer。
 
 Reader／Controller 是职责划分，可以共享现有物理连接；不要求 ROOT 为此再开一份观察连接，也不增加转发层。未加载的 Agent 没有 live 状态时应明确显示 canonical 状态，不能简单套用历史页的固定 `isRunning=false` 推断业务已结束。
 
 具体接入必须覆盖以下现有边界：
 
-- 协议服务的 `session_provider` 当前只查 Desktop 的 `_by_host`；调度创建的 Agent Host 在 Core 的 `_sessions`。扩展既有 provider 的只读精确定位，核对 ROOT／session／host，不能为读取走 Desktop resume／publish。
-- `BrowserRuntimeConnection.open(role=observer)` 当前有两条只读附件，用于并发观察与请求；复用其必要隔离与清理，不假设已有单一连接即可，也不申请 controller。不得把 reader 纳入业务 admission／retirement gate。
-- 现有 cold history 授权只核对 memory domain。新的 Agent reader 在 snapshot、history、content、queue、observe 入口都核对明确 ROOT 成员关系；不修改既有用户级历史页的范围。
+- 协议服务的 `session_provider` 精确定位 Core 管理的 Agent Host，核对 ROOT／session／host，不为读取走 Desktop resume／publish。
+- `BrowserRuntimeConnection.open(role=observer)` 使用只读附件隔离并发观察与请求，不申请 controller；reader 不纳入业务 admission／retirement gate。
+- Agent reader 在 snapshot、history、content、queue、observe 入口核对明确 ROOT 成员关系；用户级历史页保持原有范围。
 - 普通观察响应丢失沿相同 cursor 重读并幂等合并；GAP／owner 更换沿既有快照恢复。只读 open 的响应丢失时，重试按 browser instance＋精确阅读目标替换并回收旧阅读附件，失败／取消路径释放已建立附件；不新增持久回执或 lease。
 
 ### 5.5 清单与状态摘要耦合：分页和生命周期统一读取
 
 不能把几个现成的“摘要数组”直接当完整列表：
 
-- `CanonicalControl.prompt_queue` 是有界控制快照，有 total count，但没有独立队列翻页入口；只复用这个数组，会让长队列无法完整浏览。
-- Desktop `CodeModeCellsResponse` 当前是未分页数组；模型 `query_cells` 已有分页和可用性检查；`snapshot_cell_index` 又有不同的关闭行为。
+- `CanonicalControl.prompt_queue` 是有界控制快照；完整队列阅读使用按 session／sequence 的只读分页。
+- Desktop 与模型 `query_cells` 复用当前 Cell owner 的分页和可用性规则；`snapshot_cell_index` 不是完整清单。
 - Agent 的 `list_active_agent_sessions` 是压缩交接候选筛选，不能代替 `query_agents` 的全体当前可见成员。
 
 模型工具和 Desktop 读取同一业务查询 owner，各自做响应格式适配。UI 不执行模型工具，不经过 Hook，也不套模型 tool-result envelope 的预算裁剪。
 
-共同队列补按 session／queue sequence 的只读分页，保留已有单页大小约束；ROOT 与 Agent 都能渐进浏览。队列总数、Work 排队数、待处理 steer 数按明确类型计算，不把所有 PENDING 输入都称作 Work。页面使用真实状态与真实身份合并变化，不能把“本页未出现”当作“已退役”。
+共同队列按 session／queue sequence 提供只读分页，保留已有单页大小约束；ROOT 与 Agent 都能渐进浏览。队列总数、Work 排队数、待处理 steer 数按明确类型计算，不把所有 PENDING 输入都称作 Work。页面使用真实状态与真实身份合并变化，不能把“本页未出现”当作“已退役”。
 
 Cell 统一列表和详情的存活／不可用判定；保留展示当前仍存在的终态 Cell。Agent 统一可见性查询；Host 卸载与 session 删除分开。刷新复用现有 session 观察与进程内变化通知，必要时在可见期间做只读刷新；通知只提示重新读取，不变成新的状态来源。
 
@@ -324,7 +316,7 @@ Cell 统一列表和详情的存活／不可用判定；保留展示当前仍存
 
 文件页使用字节 cursor，Cell 使用服务端字符 offset；UI 把下一页位置视为数据源返回的 opaque 值，不用 JS UTF-16 字符数自行计算，不强行统一两种分页单位。
 
-后端把 `_query_cells` 中当前嵌在模型工具路径里的“定位存活 Cell → 源 attempt → 冻结源码读取／分页”抽为共同读取方法。模型层继续负责模型结果 envelope，Desktop 层负责页面传输；不复制冻结、读 blob 或源码分页算法，也不将显示语言写进数据库。
+后端以共同读取方法定位存活 Cell，沿源 attempt 读取和分页冻结源码。模型层继续负责模型结果 envelope，Desktop 层负责页面传输；不复制冻结、读 blob 或源码分页算法，也不将显示语言写进数据库。
 
 源码读取期间 Cell 可能退役。**Desktop 交付层**完成读取后重新检查同一 ROOT Host／Cell 实例及源 attempt 是否仍可查询，再交付页面；不拿缓存的 attempt 作为永久阅读资格。侧车故障与确认对象退役分别报告，不持有锁或 lease。
 
@@ -354,9 +346,7 @@ Python 集合不会自动计入现有 Cell／Host 预算，必须复用现有 re
 
 ### 5.8 Tab 归属与目标身份耦合：区分承载 ROOT 和被查看对象
 
-`DesktopWorkspaceProvider` 按当前 `sessionId` 归组 tab，`WorkspaceTab` 以 `kind` 加可选 `entityId`／`hostSessionId` 表达不同页面。这个 session 当前同时承担页面承载归属；不能在打开 Agent 时把它改成 Agent ID，否则 tab 会跑到另一个会话组，并带动 ROOT 切换。
-
-保留当前工作区容器，改用明确的 discriminated target：
+`DesktopWorkspaceProvider` 按承载 ROOT 的 `sessionId` 归组会话范围 tab，网页 tab 不绑定会话；`WorkspaceTab` 使用明确的 discriminated target，打开 Agent 不切换承载 ROOT：
 
 | 页面 | 承载归属 | 目标身份 |
 |---|---|---|
@@ -364,12 +354,13 @@ Python 集合不会自动计入现有 Cell／Host 预算，必须复用现有 re
 | Agent 会话 | ROOT session | Agent session；不把临时 Host 纳入会话 tab 去重键 |
 | Cell 列表 | ROOT session | 当前明确的 ROOT Host |
 | Cell 源码／图 | ROOT session | Host＋Cell＋视图种类 |
+| 网页 | 用户级，不绑定会话 | 浏览器 tab 自身身份 |
 
 Agent 会话在其 Host 卸载／重载后仍是同一会话；Cell 则必须绑定原 Host。Work 是 Agent 会话中的定位参数，不形成额外顶层页面。对话消息使用 Agent 的内容读取 owner，不能误用承载 ROOT 的 artifact／image reader。
 
 这包括 Markdown 图片经过的嵌套 `FileLinkContext.readImageReference/imageOwnerKey`，不能只替换 `onReadPromptImage`。保留现有工作区文件链接打开行为，图片／artifact／canonical 内容 reader 绑定实际 Agent。任何衍生内容 tab 的闭包也必须绑定这个 owner，退役／切换后丢弃旧响应。
 
-列表点击、图节点点击和 `open_in_pulsara` 都转换为同一种导航意图，经过同一个准备／打开函数。入口只携带动画选项：有列表源元素时使用共享元素过渡；工具或图直接打开。改造现有 `kind` 分支与默认落入 capability 页的路径，使未覆盖页面在类型检查时暴露；不新增动态页面注册框架。
+列表点击、图节点点击和 `open_in_pulsara` 都转换为同一种导航意图，经过同一个准备／打开函数。入口只携带动画选项：有列表源元素时使用共享元素过渡；工具或图直接打开。页面分支保持穷尽，使未覆盖页面在类型检查时暴露；不新增动态页面注册框架。
 
 ### 5.9 活跃观察与退役
 
@@ -437,4 +428,4 @@ Agent／Cell／队列超过一页时仍能完整渐进浏览，缺席一页不�
 
 视觉验收核对五个顶层名称、两个列表的紧凑单行密度、Cell 顶栏仅有「查看工作流图」（无入口时整栏消失），以及所有页面没有附加灰色小字说明。动画验收包括 tab 切换、列表展开、源码到图、条目增减、局部展开收起、图节点直接打开的例外、快速重入／关闭时清理、减少动态效果设置及无 View Transition 降级；不产生重复共享元素名称。必要 build／typecheck 与合同测试完成后，视觉效果交用户审阅；不默认扩大为 Playwright 全站回归。
 
-本轮是文档修订，不执行上述测试，也不把旧报告当作新路径已通过。实施时完成相应聚焦测试、clean-v0／catalog 核对和必要前端构建；工具 schema 通过既有本地校验及 provider schema lowering 测试。仅当实际集成暴露离线测试无法覆盖的问题时追加针对性真实 provider 验证，不为纯只读界面要求无关模型调用。
+定向测试、clean-v0／catalog 核对、前端构建和安装后的本地数据库重置记录见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)。两组后端联合运行各有一项环境相关失败及独立补测，按记录分别报告，不合并为一次全绿。未运行全仓测试或真实 provider；本规格不要求真实 provider。视觉效果待用户审阅。

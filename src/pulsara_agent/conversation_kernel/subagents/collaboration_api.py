@@ -14,6 +14,7 @@ import inspect
 from time import monotonic
 from typing import Callable, Mapping
 
+from pulsara_agent.code_mode.contracts import CellParticipationObserver, CellParticipationReference
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     AGENT_TOOLS,
     agent_target,
@@ -48,6 +49,24 @@ class CollaborationToolPort:
         self.runtime = runtime
         self.admission_facts = admission_facts
         self.io = io
+        self._cell_observer: CellParticipationObserver | None = None
+
+    def bind_cell_observer(self, observer: CellParticipationObserver) -> None:
+        self._cell_observer = observer
+
+    def _observe_cell(self, context, references: tuple[CellParticipationReference, ...]) -> None:
+        cell_id = getattr(context, "code_cell_id", None)
+        observer = self._cell_observer
+        if cell_id is None or observer is None:
+            return
+        try:
+            observer.observe_agent_participation(cell_id, tuple(references))
+        except Exception:
+            # UI observations do not affect the tool's business settlement.
+            try:
+                observer.mark_cell_participation_incomplete(cell_id)
+            except Exception:
+                pass
 
     @property
     def tool_names(self) -> frozenset[str]:
@@ -86,6 +105,14 @@ class CollaborationToolPort:
             for row in rows
         )
 
+    async def resolve_visible_agent(self, agent_id: str):
+        from pulsara_agent.conversation_kernel.presentation_targets import resolve_visible_agent
+        return await self._read(
+            resolve_visible_agent, repository=self.repository,
+            root_session_id=self.root_session_id, agent_session_id=agent_id,
+            deadline_monotonic=self.runtime.read_deadline(),
+        )
+
     async def _facts(self, context, requests=()) -> dict:
         facts = self.admission_facts(context, requests)
         if inspect.isawaitable(facts):
@@ -107,6 +134,27 @@ class CollaborationToolPort:
         if row is None:
             raise ValueError("WORK does not exist in this collaboration")
         return self._public_work(row)
+
+    async def read_cell_work_page(self, *, source_exec_attempt_id, cursor, limit):
+        return await self._read(self.repository.list_cell_agent_works,
+            root_session_id=self.root_session_id, source_exec_attempt_id=source_exec_attempt_id,
+            cursor=cursor, limit=limit, deadline_monotonic=self.runtime.read_deadline())
+
+    async def visible_cell_participants(self, participants):
+        visible = []
+        for item in participants:
+            if item["work_id"] is None:
+                state = await self._read(self.repository.read_agent_runtime_state,
+                    session_id=item["agent_id"], deadline_monotonic=self.runtime.read_deadline())
+                present = state is not None and state["root_session_id"] == self.root_session_id
+            else:
+                fact = await self._read(self.repository.read_agent_work_graph_facts,
+                    root_session_id=self.root_session_id, work_id=item["work_id"],
+                    deadline_monotonic=self.runtime.read_deadline())
+                present = fact is not None and fact["agent_id"] == item["agent_id"]
+            if present:
+                visible.append(item)
+        return visible
 
     @staticmethod
     def _public_work(row: Mapping) -> dict:
@@ -246,6 +294,7 @@ class CollaborationToolPort:
             target = arguments["target"]
             if target["kind"] == "WORK":
                 result = await self._work(target_id(target, "WORK"))
+                self._observe_cell(context, ((result["agent"]["agent_id"], result["target"]["work_id"], "query"),))
             else:
                 identity = target_id(target, "AGENT")
                 limit = arguments.get("max_items", 50)
@@ -253,6 +302,7 @@ class CollaborationToolPort:
                     identity, cursor=arguments.get("cursor"), limit=limit + 1
                 )
                 selected = rows[:limit]
+                self._observe_cell(context, ((identity, None, "query"),))
                 result = {
                     "agent": agent_target(identity),
                     "works": [self._public_work(row) for row in selected],
@@ -265,6 +315,7 @@ class CollaborationToolPort:
             identity = self.root_session_id if identity == "ROOT" else identity
             if identity != self.root_session_id:
                 await self._agent_rows(identity, limit=1)
+                self._observe_cell(context, ((identity, None, "message"),))
             result = await self.runtime.send_agent_steer(
                 agent_id=identity, message=arguments["message"], source_context=context
             )
@@ -316,6 +367,7 @@ class CollaborationToolPort:
         if target["kind"] == "WORK":
             work = await self._work(target_id(target, "WORK"))
             identity, work_id = work["agent"]["agent_id"], work["target"]["work_id"]
+            self._observe_cell(context, ((identity, work_id, "stop"),))
             if work["status"] in TERMINAL:
                 return {
                     "target": target,
@@ -326,6 +378,7 @@ class CollaborationToolPort:
         else:
             identity, work_id = target_id(target, "AGENT"), None
             await self._agent_rows(identity, limit=1)
+            self._observe_cell(context, ((identity, None, "stop"),))
         facts = await self._facts(context)
         guard = facts["root_guard"]
         outcome = await self.io.run_tool_invocation(
@@ -398,6 +451,8 @@ class CollaborationToolPort:
             while True:
                 revision = self.runtime.agent_change_revision()
                 works = [await self._work(identity) for identity in identities]
+                self._observe_cell(context, tuple(
+                    (work["agent"]["agent_id"], work["target"]["work_id"], "wait") for work in works))
                 pending = [
                     work["target"] for work in works if work["status"] not in TERMINAL
                 ]
@@ -473,6 +528,10 @@ class CollaborationToolPort:
         async with self._suspend(context):
             revision = self.runtime.agent_change_revision()
             bindings, unavailable = await self._bind(identities, context)
+            self._observe_cell(context, tuple(
+                (binding["target"]["agent_id"],
+                 None if binding["work"] is None else binding["work"]["work_id"], "wait")
+                for binding in bindings if binding["target"]["agent_id"] != self.root_session_id))
             while True:
                 sources = await self.runtime.pending_message_sources(
                     recipient_session_id=context.session_id,

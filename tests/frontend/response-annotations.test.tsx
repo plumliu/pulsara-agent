@@ -35,6 +35,22 @@ beforeEach(() => {
 afterEach(() => { cleanup(); store.destroy(); window.getSelection()?.removeAllRanges(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('draft annotation UI', () => {
+  it('does not annotate or intercept copying a different conversation', () => {
+    const { container } = render(<><Harness /><div className="thread-scroll" data-agent-reader="">
+      <AnnotationBody entryId="entry:agent" body={body}><MarkdownBody annotationSource body={body} onNotify={() => {}} /></AnnotationBody>
+    </div></>);
+    const text = container.querySelector('[data-agent-reader] [data-source-text]')!.firstChild!;
+    const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, 8);
+    window.getSelection()!.addRange(range);
+    fireEvent(document, new Event('selectionchange'));
+    fireEvent.pointerUp(text.parentElement!);
+    const setData = vi.fn();
+    fireEvent.copy(text.parentElement!, { clipboardData: { setData } });
+    expect(setData).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: '添加注释' })).toBeNull();
+    expect(store.annotations('one')).toEqual([]);
+  });
+
   it.each([false, true])('offers an annotation from the upper margin, reverse=%s', async reverse => {
     const { container } = render(<ResponseAnnotations sessionId="one" store={store} canAnnotate onNotify={() => {}}>
       <div className="thread-scroll"><section className="conversation-run">

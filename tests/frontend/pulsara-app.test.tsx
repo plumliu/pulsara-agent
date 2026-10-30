@@ -272,9 +272,25 @@ describe('PulsaraApp', () => {
 
   it('shows a selected session loading page immediately, including while closing the old connection', async () => {
     const adapter = new FakeAdapter();
+    const createBrowser = vi.fn(async ({tabId}: {tabId: string}) => ({
+      instanceId: `native:${tabId}`, tabId, url: '', pendingUrl: null, title: '', loading: false,
+      canGoBack: false, canGoForward: false, error: null, crashed: false,
+    }));
+    const closeBrowser = vi.fn(async () => {});
+    const hideBrowser = vi.fn(async () => {});
+    window.pulsaraDesktop = { browser: {
+      create: createBrowser, close: closeBrowser, clear: vi.fn(async () => {}),
+      activate: vi.fn(async () => {}), layout: vi.fn(async () => {}), hide: hideBrowser,
+      command: vi.fn(async () => {}), onEvent: () => () => {},
+    } } as unknown as typeof window.pulsaraDesktop;
     adapter.sessions.push({ ...initialSession, id: 'session:hrluejkx3v2ajzf4ec6bb3ierm', title: '历史会话' });
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
+    fireEvent.click(screen.getByRole('button', { name: '切换检查器' }));
+    fireEvent.click(screen.getByRole('button', { name: '网页', exact: true }));
+    const address = await screen.findByRole('textbox', { name: '网页地址' });
+    await waitFor(() => expect(createBrowser).toHaveBeenCalledTimes(1));
+    hideBrowser.mockClear();
     const closing = deferred<void>();
     vi.spyOn(adapter.lastConnection!, 'close').mockImplementation(() => closing.promise);
     const opening = deferred<void>();
@@ -291,7 +307,11 @@ describe('PulsaraApp', () => {
     expect(selected.getAttribute('aria-current')).toBe('page');
     expect(screen.getByText('我已经开始检查。').closest('[hidden]')).toBeTruthy();
     expect(screen.queryByRole('textbox', { name: '发送给 Pulsara' })).toBeNull();
-    expect(screen.queryByRole('complementary', { name: '会话标签工作区' })).toBeNull();
+    expect(screen.getByRole('complementary', { name: '会话标签工作区' })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: '网页地址' })).toBe(address);
+    expect(document.querySelector('main.pulsara-shell')?.classList.contains('has-inspector')).toBe(true);
+    expect(closeBrowser).not.toHaveBeenCalled();
+    expect(hideBrowser).not.toHaveBeenCalled();
     expect(connectSpy).not.toHaveBeenCalled();
     fireEvent.click(selected);
     await act(async () => closing.resolve());
@@ -301,6 +321,9 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('heading', { name: '历史会话' })).toBeTruthy();
     expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();
     expect(screen.getByRole('complementary', { name: '会话标签工作区' })).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: '网页地址' })).toBe(address);
+    expect(createBrowser).toHaveBeenCalledTimes(1);
+    expect(closeBrowser).not.toHaveBeenCalled();
   });
 
   it('keeps the failed target visible and retries it instead of reopening the previous session', async () => {
@@ -454,7 +477,7 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('button', { name: '展开TODO清单' })).toBeTruthy();
     expect(screen.queryByText(/文件已更改|项变更/)).toBeNull();
     expect(screen.queryByRole('button', { name: '添加附件' })).toBeNull();
-    expect(screen.getByRole('button', { name: '能力' })).toBeTruthy();
+    expect(within(screen.getByRole('navigation', {name:'主要功能'})).getByRole('button', {name:'能力'})).toBeTruthy();
     expect(screen.getByRole('button', { name: '记忆' })).toBeTruthy();
   });
 
@@ -469,7 +492,7 @@ describe('PulsaraApp', () => {
     expect((await screen.findByLabelText('技能：pdf')).getAttribute('data-skill-reference')).toBe('/pdf');
     expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('pdf ');
 
-    fireEvent.click(screen.getByRole('button', { name: '能力' }));
+    fireEvent.click(within(screen.getByRole('navigation', {name:'主要功能'})).getByRole('button', {name:'能力'}));
     expect(await screen.findByRole('heading', { name: '能力' })).toBeTruthy();
     expect(await screen.findByText('Personal Tools')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '查看 Personal Tools' }));
@@ -550,9 +573,9 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session:bwpogagzox7onyn52iumyctnkq'));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
 
     expect(await within(inspector).findByText('项目能力')).toBeTruthy();
     expect(within(inspector).getByText('同一目录的所有会话', { exact: false })).toBeTruthy();
@@ -593,8 +616,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
 
     await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalled());
     expect(within(inspector).queryByText(/pdf 使用了优先级更高的版本/)).toBeNull();
@@ -666,8 +689,8 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     const addButton = await within(inspector).findByRole('button', { name: '添加' });
     addButton.focus();
     fireEvent.click(addButton);
@@ -699,7 +722,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     if (kind === 'mcp') fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
     fireEvent.click(await within(inspector).findByRole('button', { name: action, exact: true }));
     await screen.findByRole('dialog', { name: dialogName });
@@ -719,11 +742,11 @@ describe('PulsaraApp', () => {
   it('retargets the scope notice link after the user has already opened another capability tab', async () => {
     renderWorkbench(<PulsaraApp adapter={new FakeAdapter()} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(await within(inspector).findByRole('button', { name: '添加', exact: true }));
     await screen.findByRole('dialog', { name: '导入技能' });
     fireEvent.keyDown(window, { key: 'Escape' });
-    fireEvent.click(screen.getByRole('button', { name: '能力', exact: true }));
+    fireEvent.click(within(screen.getByRole('navigation', {name:'主要功能'})).getByRole('button', {name:'能力', exact:true}));
     await screen.findByRole('heading', { name: '能力' });
     fireEvent.click(screen.getByRole('tab', { name: /^MCP / }));
     fireEvent.click(screen.getByRole('link', { name: '能力页' }));
@@ -755,7 +778,7 @@ describe('PulsaraApp', () => {
 
       renderWorkbench(<PulsaraApp adapter={adapter} />);
       const inspector = await screen.findByLabelText('会话标签工作区');
-      fireEvent.click(within(inspector).getByRole('button', {name: '项目能力'}));
+      fireEvent.click(within(inspector).getByRole('button', {name: '能力'}));
       if (entry !== 'skill') fireEvent.click(await within(inspector).findByRole('tab', {name: /MCP/}));
       fireEvent.click(await within(inspector).findByRole('button', {name: entry === 'mcp-import' ? '导入 MCP' : '添加', exact: true}));
       const dialog = await screen.findByRole('dialog');
@@ -823,8 +846,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     const addButton = await within(inspector).findByRole('button', { name: '添加' });
     fireEvent.click(addButton);
     const dialog = await screen.findByRole('dialog', { name: '导入技能' });
@@ -866,7 +889,7 @@ describe('PulsaraApp', () => {
     const adapter = new FakeAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     await waitFor(() => expect(adapter.inspectCapabilities).toHaveBeenCalledWith('session:bwpogagzox7onyn52iumyctnkq'));
     expect(screen.queryByRole('switch', {name: '关闭 boundary-probe'})).toBeNull();
     adapter.inspectCapabilities.mockResolvedValue({
@@ -909,8 +932,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
     adapter.inspectCapabilities.mockClear();
     fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 项目文档' }));
@@ -958,8 +981,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     expect(await within(inspector).findByText('部分项目连接未载入')).toBeTruthy();
     fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
     expect(await within(inspector).findByText(/服务返回的内容不符合当前 MCP 要求/)).toBeTruthy();
@@ -978,8 +1001,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     expect(await within(inspector).findByText('项目能力配置需要处理')).toBeTruthy();
     expect(within(inspector).getByText(/技能与连接设置/)).toBeTruthy();
   });
@@ -1035,8 +1058,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
     expect(await within(inspector).findByText(/连接中/)).toBeTruthy();
     await waitFor(
@@ -1095,8 +1118,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 project-review' }));
     fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
     await screen.findByRole('heading', { name: '另一个会话' });
@@ -1157,8 +1180,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(await within(inspector).findByRole('tab', { name: /MCP/ }));
     fireEvent.click(await within(inspector).findByRole('switch', { name: '关闭 项目文档' }));
     await waitFor(() => expect(adapter.setProjectMcpEnabled).toHaveBeenCalled());
@@ -1172,7 +1195,7 @@ describe('PulsaraApp', () => {
       sessionId: 'session:hrluejkx3v2ajzf4ec6bb3ierm',
     }));
 
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(await within(inspector).findByRole('button', { name: /继承的能力/ }));
     expect(await within(inspector).findByText('本地文档')).toBeTruthy();
     await waitFor(() => expect(within(inspector).queryByText('正在加载...')).toBeNull());
@@ -1193,8 +1216,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     await within(inspector).findByRole('button', { name: /继承的能力/ });
     expect(within(inspector).queryByText('更改已保存')).toBeNull();
 
@@ -1253,8 +1276,8 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     const inspector = await screen.findByLabelText('会话标签工作区');
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
-    fireEvent.click(within(inspector).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '能力' }));
     fireEvent.click(within(inspector).getByRole('tab', { name: /MCP/ }));
 
     expect(await within(inspector).findByText(/连接中/)).toBeTruthy();
@@ -2139,7 +2162,7 @@ describe('PulsaraApp', () => {
     expect(screen.queryByRole('button', { name: /完全访问/ })).toBeNull();
 
     const inspector = screen.getByRole('complementary', { name: '会话标签工作区' });
-    fireEvent.click(within(inspector).getByRole('button', { name: '后台进程' }));
+    fireEvent.click(within(inspector).getByRole('button', { name: '进程' }));
     expect(within(inspector).getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(within(inspector).queryByText('后台终端不可用')).toBeNull();
     expect(adapter.connectCalls).toHaveLength(0);
@@ -3251,10 +3274,10 @@ describe('PulsaraApp', () => {
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: true, queuedCount: 2,
       queuedPrompts: [{
-        queueItemId: 'queue-1', commandId: 'command-1', sequence: 1, status: 'pending',
+        queueItemId: 'queue-1', sourceKind: 'command', commandId: 'command-1', sequence: '1', status: 'pending',
         deliveryMode: 'steer', targetTurnId: 'turn-1', content: textPrompt('相同\n正文'), permission: 'read-only',
       }, {
-        queueItemId: 'queue-2', commandId: 'command-2', sequence: 2, status: 'pending',
+        queueItemId: 'queue-2', sourceKind: 'command', commandId: 'command-2', sequence: '2', status: 'pending',
         deliveryMode: 'new-turn', content: textPrompt('相同\n正文'),
       }],
     };
@@ -3291,7 +3314,7 @@ describe('PulsaraApp', () => {
       ...projection(''), messages: [], isRunning: true, eventSequence: 1,
       queuedCount: 1,
       queuedPrompts: [{
-        queueItemId: 'queue-observed', commandId: 'command-observed', sequence: 1,
+        queueItemId: 'queue-observed', sourceKind: 'command', commandId: 'command-observed', sequence: '1',
         status: 'pending', deliveryMode: 'steer', targetTurnId: 'turn-observed',
         content: textPrompt('观察者看到的队列正文'), permission: 'ask-permissions',
       }],
@@ -3311,6 +3334,38 @@ describe('PulsaraApp', () => {
     expect(screen.queryByText('目标轮次：turn-observed')).toBeNull();
     expect(screen.queryByText('适用权限：每次询问')).toBeNull();
     expect(screen.getByText('Observed queue item was cancelled.')).toBeTruthy();
+  });
+
+  it('pages ROOT queue by queue identity and confirms an omitted item before removing it', async () => {
+    const adapter = new FakeAdapter();
+    const first = {queueItemId:'queue-page-1',sourceKind:'command' as const,commandId:'command-page-1',
+      sequence: '1',status:'pending' as const,deliveryMode:'new-turn' as const,content:textPrompt('first page')};
+    const second = {queueItemId:'queue-page-2',sourceKind:'command' as const,commandId:'command-page-2',
+      sequence: '2',status:'pending' as const,deliveryMode:'new-turn' as const,content:textPrompt('second page')};
+    adapter.connectionRole = 'observer';
+    adapter.connectionValue = {...projection(''),messages:[],isRunning:true,queuedCount:2,queuedPrompts:[first]};
+    const connect = adapter.connect.bind(adapter);
+    vi.spyOn(adapter, 'connect').mockImplementation(async (...args) => {
+      const reader = await connect(...args);
+      reader.readQueuePage.mockImplementation(async (cursor?:string) => cursor
+        ? {items:[second],nextCursor:null} : {items:[first],nextCursor:'1'});
+      reader.readQueueItem.mockImplementation(async (id:string) => id === second.queueItemId ? second : null);
+      return reader;
+    });
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    expect(await screen.findByText('first page')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', {name:'加载更多排队任务'}));
+    expect(await screen.findByText('second page')).toBeTruthy();
+    const active = adapter.lastConnection!;
+    active.readQueuePage.mockImplementation(async () => ({items:[first],nextCursor:null}));
+    act(() => active.emit({...active.current(),eventSequence:9}));
+    await waitFor(() => expect(active.readQueueItem).toHaveBeenCalledWith('queue-page-2',expect.any(AbortSignal)));
+    expect(screen.getByText('second page')).toBeTruthy();
+    active.readQueueItem.mockResolvedValue(null);
+    act(() => active.emit({...active.current(),eventSequence:10,queuedPrompts:[first,second]}));
+    await waitFor(() => expect(document.querySelector('[data-queue-item-id="queue-page-2"]')).toBeNull());
+    act(() => active.emit({...active.current(),eventSequence:11,queuedPrompts:[first]}));
+    await waitFor(() => expect(document.querySelector('[data-queue-item-id="queue-page-2"]')).toBeNull());
   });
 
   it.each([
@@ -3365,7 +3420,7 @@ describe('PulsaraApp', () => {
       queueItemId: 'idle-queue', queueStatus: 'PENDING', deliveryMode: 'new-turn',
     } }));
     act(() => active.emit({ ...projection(''), messages: [], eventSequence: 2, queuedCount: 1,
-      queuedPrompts: [{ queueItemId: 'idle-queue', commandId, sequence: 1, status: 'pending',
+      queuedPrompts: [{ queueItemId: 'idle-queue', sourceKind: 'command', commandId, sequence: '1', status: 'pending',
         deliveryMode: 'new-turn', content: textPrompt('空闲时直接显示的输入'), permission: 'read-only' }],
     }));
     await waitFor(() => expect(document.querySelector(`[data-pending-message="${commandId}"]`)).toBe(bubble));
@@ -3374,7 +3429,7 @@ describe('PulsaraApp', () => {
     act(() => active.emit({ ...projection(''), eventSequence: 3, messages: [{
       id: 'idle-entry', role: 'user', userKind: 'prompt', turnId: 'turn-1', time: '现在',
       body: '空闲时直接显示的输入',
-      inputSource: { commandId, queueItemId: 'idle-queue', deliveryMode: 'new-turn' },
+      inputSource: { identityKind: 'queue', sourceKind: 'command', commandId, queueItemId: 'idle-queue', deliveryMode: 'new-turn' },
     }] }));
     await waitFor(() => expect(document.querySelector('[data-pending-message]')).toBeNull());
     expect(screen.getAllByText('空闲时直接显示的输入')).toHaveLength(1);
@@ -3442,7 +3497,7 @@ describe('PulsaraApp', () => {
       ...projection(''), messages: [], isRunning: true, eventSequence: 2,
       queuedCount: 1,
       queuedPrompts: [{
-        queueItemId: 'queue-terminal', commandId, sequence: 1, status: 'pending',
+        queueItemId: 'queue-terminal', sourceKind: 'command', commandId, sequence: '1', status: 'pending',
         deliveryMode: 'new-turn', content: textPrompt('随后被取消的输入'), permission: 'accept-edits',
       }],
     });
@@ -3621,7 +3676,7 @@ describe('PulsaraApp', () => {
 
 describe('PR04 atomic queue action ownership', () => {
   const source = {
-    queueItemId: 'queue-source', commandId: 'source-command', sequence: 1, status: 'pending' as const,
+    queueItemId: 'queue-source', sourceKind: 'command', commandId: 'source-command', sequence: '1', status: 'pending' as const,
     deliveryMode: 'new-turn' as const, content: textPrompt('  keep\n原文  '), permission: 'read-only' as const,
     requestedPermission: 'ask-permissions' as const,
   };
@@ -3662,7 +3717,7 @@ describe('PR04 atomic queue action ownership', () => {
     active.emit({ ...projection(''), queuedCount: 0, queuedPrompts: [], eventSequence: 3,
       messages: [{ id: 'canonical-steer', role: 'user', userKind: 'steer', turnId: 'turn-1',
         time: 'now', body: promptContentTextProjection(source.content), status: 'completed',
-        inputSource: { commandId, queueItemId: 'replacement', deliveryMode: 'steer' } }],
+        inputSource: { identityKind: 'queue', sourceKind: 'command', commandId, queueItemId: 'replacement', deliveryMode: 'steer' } }],
     });
     await waitFor(() => expect(container.querySelector('[data-action-command-id]')).toBeNull());
     expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
@@ -3754,7 +3809,7 @@ describe('PR04 atomic queue action ownership', () => {
     const imageSource = {
       ...source,
       queueItemId: 'queue-images',
-      commandId: 'source-images',
+      sourceKind: 'command', commandId: 'source-images',
       content: {
         parts: [
           { type: 'text' as const, text: 'before' },
@@ -3864,7 +3919,7 @@ describe('PR04 atomic queue action ownership', () => {
     next.emit({ ...next.current(), eventSequence: 10, messages: [{
       id: 'other', role: 'user', userKind: 'prompt', time: 'now',
       body: promptContentTextProjection(source.content),
-      inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'new-turn' },
+      inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'new-turn' },
     }] });
     await waitFor(() => expect(next.queryCommand.mock.calls.length).toBeGreaterThan(1));
     expect(composerIsDisabled(input)).toBe(true);
@@ -3872,7 +3927,7 @@ describe('PR04 atomic queue action ownership', () => {
       id: 'consumed-source', turnId: 'turn-next', entrySequence: 20,
       role: 'user', userKind: 'prompt', time: 'now',
       body: promptContentTextProjection(source.content),
-      inputSource: { commandId: source.commandId, queueItemId: source.queueItemId, deliveryMode: 'new-turn' },
+      inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: source.commandId, queueItemId: source.queueItemId, deliveryMode: 'new-turn' },
     }] });
     await waitFor(() => expect(composerIsDisabled(input)).toBe(false));
     expect(input.textContent).toBe('');
@@ -4262,7 +4317,7 @@ it.each(['loading', 'ready'] as const)('keeps known submitted text while groupin
   await typeComposer('下一条尚未发送');
   const metadata: RuntimeProjection = { ...projection(''), eventSequence: 3, messages: [{
     id: 'entry-body', role: 'user', userKind: 'prompt', time: '现在', body: contentState === 'ready' ? '校验后的正式正文' : '', contentState, historyContextState:'loading',
-    inputSource: { commandId, queueItemId: 'queue-body', deliveryMode: 'new-turn' },
+    inputSource: { identityKind: 'queue', sourceKind: 'command', commandId, queueItemId: 'queue-body', deliveryMode: 'new-turn' },
   }] };
   act(() => active.emit(metadata));
   expect(await screen.findByText('本地唯一的已知正文')).toBeTruthy();
@@ -4280,7 +4335,7 @@ it.each(['loading', 'ready'] as const)('keeps known submitted text while groupin
 it.each(['command', 'queue'])('rejects mismatched %s receipts without fetching or replaying a consumed entry', async mismatch => {
   const adapter = new FakeAdapter();
   adapter.connectionValue = { ...projection(''), messages: [], queuedCount: 1, queuedPrompts: [{
-    queueItemId: 'queue-exact', commandId: 'command-exact', sequence: 1, status: 'pending',
+    queueItemId: 'queue-exact', sourceKind: 'command', commandId: 'command-exact', sequence: '1', status: 'pending',
     deliveryMode: 'new-turn', content: textPrompt('保留精确队列正文'),
   }] };
   renderWorkbench(<PulsaraApp adapter={adapter} />);
@@ -4305,7 +4360,7 @@ it('loads the exact consumed entry without snapshot and cancels its read when th
   adapter.sessions = [initialSession, second];
   adapter.connectionValues.set(second.id, projection('新会话的正文'));
   adapter.connectionValue = { ...projection(''), messages: [], queuedCount: 1, queuedPrompts: [{
-    queueItemId: 'queue-consumed', commandId: 'command-consumed', sequence: 1, status: 'pending',
+    queueItemId: 'queue-consumed', sourceKind: 'command', commandId: 'command-consumed', sequence: '1', status: 'pending',
     deliveryMode: 'new-turn', content: textPrompt('待交接正文'),
   }] };
   renderWorkbench(<PulsaraApp adapter={adapter} />);
@@ -4366,6 +4421,7 @@ it('passes an explicit process reasoning read through the active session reader'
 
 
 it('keeps the initial history context in the opening page while subscription and observe already run', async () => {
+  uiPreferences.setItem('pulsara-workspace-open', 'true');
   const adapter = new FakeAdapter();
   const pending: RuntimeProjection = { ...projection('初始正文'), history: {
     initialReady: false, hasOlder: false, loading: true, windows: [], compactions: [],
@@ -4377,6 +4433,9 @@ it('keeps the initial history context in the opening page while subscription and
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByRole('region', { name: '会话加载页' });
     await waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: '网页', exact: true }));
+    const address = screen.getByRole('textbox', { name: '网页地址' });
+    expect(document.querySelector('main.pulsara-shell')?.classList.contains('has-inspector')).toBe(true);
     const active = adapter.lastConnection!;
     expect(active.subscribe).toHaveBeenCalledTimes(1);
     expect(screen.queryByText('正在读取记录分组…')).toBeNull();
@@ -4385,6 +4444,7 @@ it('keeps the initial history context in the opening page while subscription and
     const ready: RuntimeProjection = { ...projection('初始正文'), history: { ...pending.history!, initialReady: true, loading: false } };
     await act(async () => active.publishRead(ready));
     expect(await screen.findByText('初始正文')).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: '网页地址' })).toBe(address);
     expect(screen.queryByRole('region', { name: '会话加载页' })).toBeNull();
     await typeComposer('后续刷新保留草稿');
     await act(async () => active.emit({ ...ready, history: { ...ready.history!, loading: true } }));
@@ -4443,7 +4503,7 @@ it('keeps desktop navigation visible when selecting or creating a session', asyn
   expect(view.container.querySelector('.desktop-shell')?.classList.contains('sidebar-visible')).toBe(true);
 });
 
-it('starts new sessions with the workspace closed and remembers each session independently', async () => {
+it('keeps the workspace open across sessions and remembers the user preference', async () => {
   vi.stubGlobal('matchMedia', vi.fn(() => ({matches:true, addEventListener:vi.fn(), removeEventListener:vi.fn()})));
   const adapter = new FakeAdapter();
   const other = { ...initialSession, id:'session:hk7ud7dvpyxqz4csc3z3hqksuq', title:'另一个会话' };
@@ -4456,7 +4516,7 @@ it('starts new sessions with the workspace closed and remembers each session ind
   expect(isOpen()).toBe(true);
   fireEvent.click(screen.getByRole('button', {name:/另一个会话.*可恢复/}));
   await screen.findByRole('heading', {name:'另一个会话'});
-  expect(isOpen()).toBe(false);
+  expect(isOpen()).toBe(true);
   fireEvent.click(screen.getByRole('button', {name:/准备发布.*已载入/}));
   await screen.findByRole('heading', {name:'准备发布'});
   expect(isOpen()).toBe(true);
@@ -4465,7 +4525,7 @@ it('starts new sessions with the workspace closed and remembers each session ind
   await screen.findByRole('heading', {name:'准备发布'});
   expect(isOpen()).toBe(true);
   fireEvent.click(screen.getByRole('button', {name:'收起工作区'}));
-  expect(uiPreferences.getItem(`pulsara-workspace-open:${initialSession.id}`)).toBe('false');
+  expect(uiPreferences.getItem('pulsara-workspace-open')).toBe('false');
   fireEvent.click(screen.getByRole('button', {name:'创建快速开始会话'}));
   await screen.findByRole('heading', {name:'新会话'});
   expect(isOpen()).toBe(false);
@@ -4520,7 +4580,7 @@ describe('user capability synchronization', () => {
   it('retires an earlier user GET when a successful mutation is adopted', async () => {
     const adapter = new FakeAdapter();
     renderWorkbench(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', {name: '能力'}));
+    fireEvent.click(await within(screen.getByRole('navigation', {name:'主要功能'})).findByRole('button', {name:'能力'}));
     await screen.findByText('Personal Tools');
     fireEvent.click(screen.getByRole('tab', {name: /技能/}));
     const stale = deferred<UserCapabilitySnapshot>();
@@ -4541,7 +4601,7 @@ describe('user capability synchronization', () => {
     const adapter = new FakeAdapter();
     adapter.sessions = [];
     render(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', {name: '能力'}));
+    fireEvent.click(await within(screen.getByRole('navigation', {name:'主要功能'})).findByRole('button', {name:'能力'}));
     await screen.findByText('Personal Tools');
     fireEvent.click(screen.getByRole('tab', {name: /MCP/}));
     adapter.inspectUserCapabilities.mockResolvedValue({...userCapabilitySnapshot, mcp: {
@@ -4579,7 +4639,7 @@ describe('user capability synchronization', () => {
     }};
     adapter.inspectUserCapabilities.mockResolvedValue(connecting);
     render(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', {name: '能力'}));
+    fireEvent.click(await within(screen.getByRole('navigation', {name:'主要功能'})).findByRole('button', {name:'能力'}));
     await screen.findByText('Personal Tools');
     vi.useFakeTimers();
     try {
@@ -4610,14 +4670,14 @@ describe('user capability synchronization', () => {
     adapter.setUserSkillEnabled.mockReturnValueOnce(mutation.promise);
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');
-    fireEvent.click(screen.getByRole('button', {name: '能力'}));
+    fireEvent.click(within(screen.getByRole('navigation', {name:'主要功能'})).getByRole('button', {name:'能力'}));
     await screen.findByText('Personal Tools');
     fireEvent.click(screen.getByRole('tab', {name: /技能/}));
     fireEvent.click(screen.getByRole('switch', {name: '关闭 personal-pdf'}));
     fireEvent.click(screen.getByRole('button', {name: '会话', exact: true}));
     fireEvent.click(screen.getByRole('button', {name: /另一会话.*可恢复/}));
     await screen.findByRole('heading', {name: '另一会话'});
-    fireEvent.click(screen.getByRole('button', {name: '能力'}));
+    fireEvent.click(within(screen.getByRole('navigation', {name:'主要功能'})).getByRole('button', {name:'能力'}));
     await screen.findByText('Personal Tools');
     adapter.inspectUserCapabilities.mockResolvedValue({...userCapabilitySnapshot, skills: {...userCapabilitySnapshot.skills,
       items: userCapabilitySnapshot.skills.items.map(skill => ({...skill, enabled: false})),
@@ -4649,7 +4709,7 @@ describe('user capability synchronization', () => {
     adapter.updatePluginConnection.mockResolvedValue({operation: {status: 'UPDATED', success: true, message: '已保存', details: []}, capabilities: updated});
     adapter.pluginMcpAuthorization.mockResolvedValue({state: 'authorized', error: null});
     render(<PulsaraApp adapter={adapter} />);
-    fireEvent.click(await screen.findByRole('button', {name: '能力'}));
+    fireEvent.click(await within(screen.getByRole('navigation', {name:'主要功能'})).findByRole('button', {name:'能力'}));
     await screen.findByText('Personal Tools');
     const open = async () => {
       fireEvent.click(screen.getByRole('button', {name: '查看 Personal Tools'}));
@@ -4727,7 +4787,7 @@ it('settles a consumed offscreen input before its resident tail retires, without
   }]};
   await act(async () => active.emit({...projection(''),eventSequence:20,isRunning:false,history:oldHistory,
     messages:[{id:'old',role:'assistant',assistantKind:'terminal',rootFinal:true,time:'',body:'正在翻阅的旧消息'}],
-    canonicalInputs:[{id:'accepted-offscreen',inputSource:{commandId,queueItemId:'queue:accepted',deliveryMode:'new-turn'},contentState:'unloaded',historyContextState:'ready'}],
+    canonicalInputs:[{id:'accepted-offscreen',inputSource:{ identityKind: 'queue', sourceKind: 'command',commandId,queueItemId:'queue:accepted',deliveryMode:'new-turn'},contentState:'unloaded',historyContextState:'ready'}],
   }));
   expect(screen.getByText('正在翻阅的旧消息')).toBeTruthy();
   expect(screen.queryByText('远端已接受的旧输入')).toBeNull();

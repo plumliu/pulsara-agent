@@ -33,6 +33,7 @@ import { SessionSuggestionCache, useSessionEphemeralResults } from '../lib/sessi
 import {
   LocalHttpRuntimeAdapter,
   CanonicalHistoryView,
+  compareSequence,
   projectRootStatus,
   type WorkspaceAvailability,
   createUserControlCommandRef,
@@ -264,6 +265,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   // Selection feedback is local UI state; only a connected runtime becomes active.
   const [openingSessionId, setOpeningSessionId] = useState('');
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
+  const [queuePages, setQueuePages] = useState<{owner: RuntimeConnection | CanonicalHistoryView; items: QueuedPrompt[]; nextCursor: string | null; depth: number; absent: Set<string>}>();
+  const queuePagesRef = useRef(queuePages);
+  queuePagesRef.current = queuePages;
+  const queueReadGeneration = useRef(0);
   const [capabilities, setCapabilities] = useState<CapabilitySnapshot>();
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const [capabilityError, setCapabilityError] = useState<string>();
@@ -325,18 +330,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setToolDecisions(next);
   }, []);
   const queueActionsInFlight = useRef(new Set<string>());
-  const [inspectorVisibility, setInspectorVisibility] = useState<Record<string, boolean>>({});
-  const inspectorVisibilityRef = useRef(inspectorVisibility);
-  const inspectorOpen = inspectorVisibility[activeSessionId]
-    ?? (uiPreferences.getItem(`pulsara-workspace-open:${activeSessionId}`) === 'true');
+  const [inspectorOpen, setInspectorOpenState] = useState(() => uiPreferences.getItem('pulsara-workspace-open') === 'true');
+  const inspectorOpenRef = useRef(inspectorOpen);
   const setInspectorOpen = useCallback((next: boolean | ((current: boolean) => boolean)) => {
-    const current = inspectorVisibilityRef.current[activeSessionId]
-      ?? (uiPreferences.getItem(`pulsara-workspace-open:${activeSessionId}`) === 'true');
-    const value = typeof next === 'function' ? next(current) : next;
-    inspectorVisibilityRef.current = { ...inspectorVisibilityRef.current, [activeSessionId]: value };
-    setInspectorVisibility(inspectorVisibilityRef.current);
-    if (activeSessionId) uiPreferences.setItem(`pulsara-workspace-open:${activeSessionId}`, String(value));
-  }, [activeSessionId]);
+    const value = typeof next === 'function' ? next(inspectorOpenRef.current) : next;
+    inspectorOpenRef.current = value;
+    setInspectorOpenState(value);
+    uiPreferences.setItem('pulsara-workspace-open', String(value));
+  }, []);
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
     const desktop = window.matchMedia('(min-width: 1221px)');
@@ -497,6 +498,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       });
       if (!owner) return projected;
       for (const queued of next.queuedPrompts) {
+        if (queued.sourceKind !== 'command') continue;
         if (projected.some((item) => (
           item.sessionId === owner.sessionId && item.commandId === queued.commandId
         ))) continue;
@@ -533,6 +535,50 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, []);
 
   const activeReader = connection ?? historyRef.current;
+  useEffect(() => {
+    const reader = activeReader;
+    if (!reader || !activeSessionId || reader.sessionId !== activeSessionId) return;
+    const controller = new AbortController();
+    const generation = ++queueReadGeneration.current;
+    const previous = queuePagesRef.current?.owner === reader ? queuePagesRef.current : undefined;
+    const depth = previous?.depth ?? 1;
+    void (async () => {
+      const found = new Map<string, QueuedPrompt>();
+      let cursor: string | undefined, nextCursor: string | null = null;
+      for (let index = 0; index < depth; index++) {
+        const page = await reader.readQueuePage(cursor, controller.signal);
+        for (const item of page.items) found.set(item.queueItemId, item);
+        nextCursor = page.nextCursor;
+        if (!nextCursor) break;
+        cursor = nextCursor;
+      }
+      const presentInControl = new Set(projection.queuedPrompts.map(item => item.queueItemId));
+      const absent = new Set([...previous?.absent ?? []].filter(id => presentInControl.has(id)));
+      for (const id of found.keys()) absent.delete(id);
+      const previouslySeen = new Map([...(previous?.items ?? []), ...projection.queuedPrompts].map(item => [item.queueItemId, item]));
+      for (const item of previouslySeen.values()) if (!found.has(item.queueItemId)) {
+        const exact = await reader.readQueueItem(item.queueItemId, controller.signal);
+        if (exact) found.set(exact.queueItemId, exact); else absent.add(item.queueItemId);
+      }
+      if (!controller.signal.aborted && generation === queueReadGeneration.current && ownsHistoryReader(reader)) {
+        setQueuePages({owner:reader, items:[...found.values()], nextCursor, depth, absent});
+      }
+    })().catch(() => { /* A failed read retains the last confirmed queue. */ });
+    return () => controller.abort();
+  }, [activeReader, activeSessionId, ownsHistoryReader, projection.eventSequence, projection.queuedPrompts]);
+
+  const loadMoreQueue = useCallback(() => {
+    const state = queuePagesRef.current;
+    if (!state?.nextCursor || !ownsHistoryReader(state.owner)) return;
+    const generation = ++queueReadGeneration.current;
+    void state.owner.readQueuePage(state.nextCursor).then(page => {
+      if (generation !== queueReadGeneration.current || !ownsHistoryReader(state.owner)) return;
+      const items = new Map(state.items.map(item => [item.queueItemId, item]));
+      for (const item of page.items) items.set(item.queueItemId, item);
+      setQueuePages({owner:state.owner, items:[...items.values()], nextCursor:page.nextCursor,
+        depth:state.depth + 1, absent:state.absent});
+    }).catch(() => { /* Leave the cursor available for retry. */ });
+  }, [ownsHistoryReader]);
   useEffect(() => {
     if (!activeReader || !ownsHistoryReader(activeReader)) return;
     const publish = () => {
@@ -695,12 +741,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const forgetSession = useCallback((sessionId: string) => {
     suggestionCache.forget(sessionId);
     workspaceControl.current?.forgetSession(sessionId);
-    uiPreferences.removeItem(`pulsara-workspace-open:${sessionId}`);
     uiPreferences.removeItem(`pulsara-workspace-width:${sessionId}`);
-    const remainingVisibility = { ...inspectorVisibilityRef.current };
-    delete remainingVisibility[sessionId];
-    inspectorVisibilityRef.current = remainingVisibility;
-    setInspectorVisibility(remainingVisibility);
     changeSessionList(current => current.filter(s => s.id !== sessionId));
     promptDraftStore.removeSession(sessionId);
     setLocalSubmissions(current => current.filter(item => item.sessionId !== sessionId));
@@ -1514,6 +1555,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const canControl = connection?.role === 'controller' && workspaceAvailability?.outcome === 'AVAILABLE' && runtimeStatus === 'online';
   const mergedProjection = projection;
   const renderedMessages = mergedProjection.messages;
+  const visibleQueuePages = queuePages?.owner === activeReader ? queuePages : undefined;
+  const renderedQueuedPrompts = useMemo(() => {
+    const items = new Map(projection.queuedPrompts.map(item => [item.queueItemId, item]));
+    for (const item of visibleQueuePages?.items ?? []) items.set(item.queueItemId, item);
+    for (const id of visibleQueuePages?.absent ?? []) items.delete(id);
+    for (const message of projection.canonicalInputs) if (message.inputSource?.queueItemId) items.delete(message.inputSource.queueItemId);
+    return [...items.values()].sort((a,b) => compareSequence(a.sequence,b.sequence));
+  }, [projection.queuedPrompts, projection.canonicalInputs, visibleQueuePages]);
 
   useEffect(() => {
     if (activeView !== 'workbench' || !activeSessionId || databaseState !== 'ready' || runtimeStatus !== 'online') return;
@@ -1720,6 +1769,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [notify, ownsConnection]);
 
   const actOnQueuedPrompt = async (source: QueuedPrompt, kind: QueuedPromptAction['kind']) => {
+    if (source.sourceKind !== 'command') return;
     const active = connectionRef.current;
     if (!active || active.role !== 'controller' || !ownsConnection(active)) return;
     // CURRENT_CONTROL advances across FIFO ROOTs; the connection's initial
@@ -1830,6 +1880,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     ) && !promptReconciliationInFlight.current.has(queryKey(item))
       && (item.lastCheckedEventSequence !== projection.eventSequence || item.lastCheckedConnectionGeneration !== connection.generation));
     if (!candidate) return;
+    if (candidate.source.sourceKind !== 'command') return;
+    const sourceCommandId = candidate.source.commandId;
     const key = queryKey(candidate);
     promptReconciliationInFlight.current.add(key);
     setQueueActions(current => current.map(item => item === candidate ? {
@@ -1848,14 +1900,15 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         // never subsequently be cancelled/redirected by this action's CAS.
         const sourceConsumed = connection.current().canonicalInputs.some(message => (
           message.userKind === 'prompt'
-          && message.inputSource?.commandId === candidate.source.commandId
+          && message.inputSource?.sourceKind === 'command'
+          && message.inputSource.commandId === sourceCommandId
           && message.inputSource.queueItemId === candidate.source.queueItemId
           && message.inputSource.deliveryMode === 'new-turn'
         ));
-        const sourceReceipt = sourceConsumed ? undefined : await connection.queryCommand(candidate.source.commandId);
+        const sourceReceipt = sourceConsumed ? undefined : await connection.queryCommand(sourceCommandId);
         if (!ownsConnection(connection)) return;
         const delivery = sourceReceipt?.promptDelivery;
-        if (!sourceConsumed && !(sourceReceipt?.commandId === candidate.source.commandId
+        if (!sourceConsumed && !(sourceReceipt?.commandId === sourceCommandId
           && delivery?.queueItemId === candidate.source.queueItemId
           && delivery.deliveryMode === 'new-turn' && delivery.queueStatus === 'CONSUMED')) return;
         setQueueActions(current => current.map(item => item.commandId === candidate.commandId && item.sessionId === candidate.sessionId
@@ -2699,11 +2752,11 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   return (
     <UserAvatarProvider adapter={adapter}>
     <McpAuthorizationContext.Provider value={mcpAuthorizationStatuses}>
-    <DesktopWorkspaceProvider visible={activeView === 'workbench' && !databaseBlocked && !loadingSession} onBrowserShortcut={command => flushSync(() => { if (command === 'search') setSearchOpen(value => !value); else if (canCreateSession) setNewSessionOpen(true); })} controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
+    <DesktopWorkspaceProvider visible={activeView === 'workbench' && !databaseBlocked} onBrowserShortcut={command => flushSync(() => { if (command === 'search') setSearchOpen(value => !value); else if (canCreateSession) setNewSessionOpen(true); })} controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
     <FilePreviewProvider sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
-    <PresentationProvider connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen}>
+    <PresentationProvider connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen} onNotify={notify}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
-    <main data-platform={desktopHost()?.platform} className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked && !loadingSession ? ' has-inspector' : ''}`}>
+    <main data-platform={desktopHost()?.platform} className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
       <DesktopTitlebar workbench={activeView === "workbench"} title={activeView === "workbench" ? activeSession.title : "Pulsara"} onToggleSidebar={() => setSidebarOpen(value => !value)} onToggleWorkspace={() => setInspectorOpen(value => !value)} />
       <div className="desktop-navigation"><ActivityRail activeView={activeView} onNavigate={navigate} />
 
@@ -2778,7 +2831,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           manualCompactionCommandId={projection.manualCompactionCommandId}
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}
-          queuedPrompts={projection.queuedPrompts}
+          queuedPrompts={renderedQueuedPrompts}
+          queueNextCursor={visibleQueuePages?.nextCursor}
+          onLoadMoreQueue={loadMoreQueue}
           queueActions={queueActions.filter(item => item.sessionId === activeSession.id && item.connectionGeneration === connection?.generation)}
           onQueueAction={actOnQueuedPrompt}
           onQueueActionHandled={(commandId) => setQueueActions(current => current.map(item => item.commandId === commandId ? { ...item, handled: true } : item))}
@@ -2787,7 +2842,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             && !item.handledByQueueAction
             && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
             && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
-            && (item.displayAsMessage || !projection.queuedPrompts.some((queued) => queued.commandId === item.commandId))
+            && (item.displayAsMessage || !renderedQueuedPrompts.some((queued) => queued.commandId === item.commandId))
             && !projection.canonicalInputs.some(message => canonicalInputMatches(message, item) && canonicalPromptReady(message, projection))
           ))}
           runtimeStatus={runtimeStatus}
@@ -2845,7 +2900,12 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           permission={turnPermission}
           onPermissionChange={setTurnPermission}
         />
+        </div>
+      )}
+      {activeView === 'workbench' && !databaseBlocked && (
         <InspectorPanel
+          adapter={adapter}
+          sessionContentAvailable={!loadingSession}
           projectMcpForms={{
             preview: (input) => adapter.previewMcpImport(input),
             test: (input) => adapter.testProjectMcp(activeSessionId, input),
@@ -2932,7 +2992,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onNotify={notify}
           onClose={() => setInspectorOpen(false)}
         />
-        </div>
       )}
       {activeView === 'workbench' && databaseBlocked && databaseState && (
         <div className="database-workbench-mask">

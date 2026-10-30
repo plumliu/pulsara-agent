@@ -15,9 +15,15 @@ import json
 from pathlib import Path
 from threading import Condition, Lock, RLock
 from time import monotonic
-from typing import Callable, Mapping, Protocol
+from typing import TYPE_CHECKING, Callable, Mapping, Protocol
 
 from jsonschema import ValidationError, validators
+
+from pulsara_agent.code_mode.contracts import CellParticipationObserver
+
+if TYPE_CHECKING:
+    from pulsara_agent.code_mode.host import CodeModeHost
+
 
 from .capability_management import CapabilityManagementPreparation
 from .capability_management_execution import CapabilityManagementCall
@@ -412,6 +418,15 @@ class KernelSubagentToolPort(Protocol):
         invocation_context: KernelToolInvocationContext,
     ) -> KernelToolResult: ...
 
+    def bind_cell_observer(self, observer: CellParticipationObserver) -> None: ...
+
+    async def read_cell_work_page(self, *, source_exec_attempt_id: str,
+                                  cursor: str | None, limit: int): ...
+
+    async def visible_cell_participants(self, participants): ...
+
+    async def resolve_visible_agent(self, agent_id: str): ...
+
     async def freeze_compaction_handoff(
         self, *, cursor: str | None = None,
     ) -> tuple[dict[str, object], ...]: ...
@@ -778,7 +793,7 @@ class DirectKernelToolPort:
                 pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
-            OpenInPulsaraTool(root, pulsara_home_resolution=frozen_pulsara_home, user_home_resolution=frozen_user_home, host_session_id=host_owner_id),
+            OpenInPulsaraTool(root, pulsara_home_resolution=frozen_pulsara_home, user_home_resolution=frozen_user_home, host_session_id=host_owner_id, root_session_id=session_id),
             TodoTool(),
             _DirectTerminalTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalProcessTool(self._terminal, self._terminal_owner_id),
@@ -890,6 +905,8 @@ class DirectKernelToolPort:
             if self._subagent is not None:
                 raise RuntimeError("subagent tool port is already bound")
             self._subagent = port
+            if self._code_mode is not None:
+                port.bind_cell_observer(self._code_mode)
             self._surface_generation += 1
 
     def bind_memory_port(self, port: KernelMemoryToolPort) -> None:
@@ -906,10 +923,12 @@ class DirectKernelToolPort:
         self._code_mode_archive_output = archive_output
         self._code_mode_read_source = read_source
 
-    def bind_code_mode_port(self, port) -> None:
+    def bind_code_mode_port(self, port: CodeModeHost) -> None:
         with self._surface_lock:
             self._require_builtin_composition_preparing_locked()
             self._code_mode = port
+            if self._subagent is not None:
+                self._subagent.bind_cell_observer(port)
             for name in ("exec_cell", "query_cells", "manage_cell"):
                 self._tools[name] = _DirectCapabilityControlTool(name)
             self._surface_generation += 1
@@ -3052,8 +3071,63 @@ class DirectKernelToolPort:
             effect_class="read_only",
         )
 
+    def query_code_cells(self, *, cursor=None, max_items=50):
+        return self._code_mode.list_cell_snapshots(cursor=cursor, max_items=max_items)
+
+    def capture_code_cell(self, cell_id):
+        return self._code_mode.capture_cell(cell_id)
+
+    async def read_code_cell_source_page(self, *, session_id, capture, offset_chars=0, max_chars=20000):
+        """Read one frozen source page from an already captured Cell fact."""
+        from pulsara_agent.code_mode.contracts import CodeModeError
+        if type(offset_chars) is not int or offset_chars < 0:
+            raise CodeModeError("invalid_arguments", "offset_chars must be a nonnegative integer")
+        if type(max_chars) is not int or not 1 <= max_chars <= 32000:
+            raise CodeModeError("invalid_arguments", "max_chars must be an integer between 1 and 32000")
+        cell = capture.public_value()
+        if self._code_mode_read_source is None:
+            raise RuntimeError("Cell source reader is not bound")
+        try:
+            source = await self._code_mode_read_source(
+                session_id=session_id, attempt_id=capture.source_exec_attempt_id)
+            if source is None:
+                raise LookupError("The frozen code_source is unavailable for this Cell's source attempt.")
+        except Exception as exc:
+            return {"cell": cell, "source": {"status": "UNAVAILABLE", "reason": str(exc)}}
+        available = source[offset_chars:offset_chars + max_chars]
+        end = offset_chars + len(available)
+        has_more = end < len(source)
+        return {"cell": cell, "source": {"status": "AVAILABLE", "text": available,
+            "offset_chars": offset_chars, "returned_chars": len(available),
+            "total_chars": len(source), "has_more": has_more,
+            "next_offset_chars": end if has_more else None}}
+
+    async def read_code_cell_graph(self, *, cell_id, section, cursor=None, max_items=50):
+        """Page the live Cell's actual Work or verified participant seeds."""
+        from pulsara_agent.code_mode.contracts import CodeModeError
+        if self._subagent is None:
+            raise CodeModeError("unavailable", "Agent collaboration is unavailable")
+        if section not in {"works", "participants"}:
+            raise CodeModeError("invalid_arguments", "unknown Cell graph section")
+        if type(max_items) is not int or not 1 <= max_items <= 50:
+            raise CodeModeError("invalid_arguments", "max_items must be in 1..50")
+        snapshot = self.capture_code_cell(cell_id)
+        observed = self._code_mode.query_cell_participants(cell_id, cursor=cursor if section == "participants" else None,
+                                                           max_items=max_items)
+        if section == "works":
+            rows = await self._subagent.read_cell_work_page(
+                source_exec_attempt_id=snapshot.source_exec_attempt_id,
+                cursor=cursor, limit=max_items + 1)
+            items = list(rows[:max_items])
+            next_cursor = items[-1]["work_id"] if len(rows) > max_items else None
+        else:
+            items = await self._subagent.visible_cell_participants(observed["items"])
+            next_cursor = observed["next_cursor"]
+        return {"cell": snapshot.public_value(), "participation_coverage": observed["participation_coverage"],
+                "section": section, "items": items, "next_cursor": next_cursor}
+
     async def _query_cells(self, arguments, context):
-        """Read a live Host fact and its canonical frozen source, never output."""
+        """Adapt shared Cell facts to the model result envelope without consuming output."""
         from pulsara_agent.code_mode.contracts import CodeModeError
         from pulsara_agent.primitives.tool_result_projection import conservative_artifact_page_logical_utf8_bytes
 
@@ -3064,40 +3138,23 @@ class DirectKernelToolPort:
             return self._code_mode.query_cells(
                 cursor=arguments.get("cursor"), max_items=arguments.get("max_items", 50),
                 maximum_page_bytes=maximum)
-        offset = arguments.get("offset_chars", 0)
-        max_chars = arguments.get("max_chars", 20000)
-        if type(offset) is not int or offset < 0:
-            raise CodeModeError("invalid_arguments", "offset_chars must be a nonnegative integer")
-        if type(max_chars) is not int or not 1 <= max_chars <= 32000:
-            raise CodeModeError("invalid_arguments", "max_chars must be an integer between 1 and 32000")
-        snapshot = self._code_mode.capture_cell(arguments["target"]["cell_id"])
-        cell = snapshot.public_value()
-        if self._code_mode_read_source is None:
-            raise RuntimeError("Cell source reader is not bound")
-        try:
-            source = await self._code_mode_read_source(
-                session_id=context.session_id, attempt_id=snapshot.source_exec_attempt_id)
-            if source is None:
-                raise LookupError("The frozen code_source is unavailable for this Cell's source attempt.")
-        except Exception as exc:
-            value = {"cell": cell, "source": {"status": "UNAVAILABLE", "reason": str(exc)}}
-            if len(encode_tool_public_json(value)) > maximum:
-                raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell source availability exceeds the result page budget") from exc
-            return value
-        available = source[offset:offset + max_chars]
-
-        def page(count):
-            end = offset + count
-            has_more = end < len(source)
-            return {"cell": cell, "source": {
-                "status": "AVAILABLE", "text": available[:count], "offset_chars": offset,
-                "returned_chars": count, "total_chars": len(source), "has_more": has_more,
-                "next_offset_chars": end if has_more else None,
-            }}
-
-        value = page(len(available))
+        capture = self.capture_code_cell(arguments["target"]["cell_id"])
+        value = await self.read_code_cell_source_page(
+            session_id=context.session_id, capture=capture,
+            offset_chars=arguments.get("offset_chars", 0),
+            max_chars=arguments.get("max_chars", 20000))
         if len(encode_tool_public_json(value)) <= maximum:
             return value
+        source = value["source"]
+        if source["status"] != "AVAILABLE":
+            raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell source availability exceeds the result page budget")
+        available = source["text"]
+        def page(count):
+            end = source["offset_chars"] + count
+            has_more = end < source["total_chars"]
+            return {"cell": value["cell"], "source": {**source, "text": available[:count],
+                "returned_chars": count, "has_more": has_more,
+                "next_offset_chars": end if has_more else None}}
         low, high = 0, len(available)
         while low < high:
             count = (low + high + 1) // 2
@@ -3683,6 +3740,26 @@ class DirectKernelToolPort:
             arguments=dict(arguments),
             defer_file_observation=invocation_context.code_cell_id is not None,
         )
+        if isinstance(tool, OpenInPulsaraTool):
+            from pulsara_agent.conversation_kernel.presentation_targets import (
+                ResolvedPresentationObject, resolve_visible_cell,
+            )
+
+            async def resolve_object(kind, identity):
+                if kind == "AGENT":
+                    if self._subagent is None:
+                        raise LookupError("Agent reader is unavailable")
+                    await self._subagent.resolve_visible_agent(identity)
+                    return ResolvedPresentationObject("AGENT", identity, self._session_id)
+                resolve_visible_cell(self, cell_id=identity)
+                return ResolvedPresentationObject("CELL", identity, self._session_id, self._host_owner_id)
+
+            result = await tool.execute_async(call, resolve_object=resolve_object)
+            return KernelToolResult(
+                state="SUCCESS", content=result.output.encode("utf-8"),
+                effect_class="read_only",
+                physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
+            )
         if isinstance(tool, ViewImageTool):
             source = parse_view_image_source(arguments)
             if (

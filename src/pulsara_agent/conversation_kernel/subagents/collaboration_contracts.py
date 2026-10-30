@@ -159,6 +159,63 @@ def validate_run_parameters(arguments: Mapping[str, object]) -> None:
             _targets(a[field], "WORK", maximum=16)
 
 
+def validate_work_inputs(value: object) -> tuple[dict, ...]:
+    """Validate the queue-owned input facts without changing their identities."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("Work inputs must be an array")
+    result = []
+    sources = set()
+    positions = set()
+    for item in value:
+        item = closed(
+            item,
+            {"kind", "source_work_id", "ordinal", "body"},
+            {"kind", "source_work_id", "ordinal", "body"},
+        )
+        kind, source, ordinal, body = (
+            item[k] for k in ("kind", "source_work_id", "ordinal", "body")
+        )
+        if kind not in {"dependency", "material"}:
+            raise ValueError("invalid Work input kind")
+        require_id(source, "queue")
+        if type(ordinal) is not int or ordinal < 0:
+            raise ValueError("invalid Work input ordinal")
+        if not isinstance(body, str) and not (kind == "dependency" and body is None):
+            raise ValueError("invalid Work input body")
+        if source in sources or (kind, ordinal) in positions:
+            raise ValueError("duplicate Work input identity")
+        sources.add(source)
+        positions.add((kind, ordinal))
+        result.append(dict(item))
+    return tuple(
+        sorted(result, key=lambda x: (x["kind"] != "dependency", x["ordinal"]))
+    )
+
+
+def pending_work_dependencies(value: object) -> tuple[dict, ...]:
+    return tuple(
+        item
+        for item in validate_work_inputs(value)
+        if item["kind"] == "dependency" and item["body"] is None
+    )
+
+
+def prepared_work_input_refs(
+    request: PreparedAgentRequest,
+) -> tuple[tuple[str, str, int], ...]:
+    return tuple(
+        [
+            ("dependency", work_id, ordinal)
+            for ordinal, work_id in enumerate(request.depends_on)
+        ]
+        + [
+            ("material", work_id, ordinal)
+            for ordinal, work_id in enumerate(request.materials)
+            if work_id not in request.depends_on
+        ]
+    )
+
+
 def validate_collaboration_parameters(
     name: str, arguments: Mapping[str, object]
 ) -> None:

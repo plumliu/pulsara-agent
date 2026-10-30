@@ -226,6 +226,8 @@ def test_clean_catalog_removes_profile_columns_and_origin() -> None:
                 )
             }
             assert {"effective_profile", "profile_text"}.isdisjoint(columns)
+            assert {"waiting_on", "input_materials"}.isdisjoint(columns)
+            assert "work_inputs" in columns
             constraints = connection.execute(
                 "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
                 "WHERE conrelid='pulsara_v3.transcript_entries'::regclass "

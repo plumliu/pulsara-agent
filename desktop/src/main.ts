@@ -363,7 +363,6 @@ else {
     handle('browser-create', value => browser!.create(value));
     handle('browser-command', value => browser!.command(value));
     handle('browser-close', value => browser!.close(value));
-    handle('browser-forget-session', value => browser!.forgetSession(value));
     handle('browser-clear', () => browser!.clear());
     handle('browser-activate', value => browser!.activate(value));
     handle('browser-layout', value => browser!.layout(value));

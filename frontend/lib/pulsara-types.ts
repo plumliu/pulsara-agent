@@ -381,11 +381,14 @@ export interface Message {
   role: 'user' | 'assistant';
   userKind?: 'prompt' | 'scheduled' | 'steer' | 'plan-continuation';
   scheduledInput?: { taskId: string; taskRevision: number; dueAtUtc: string; triggerSource: 'TIMER' | 'RUN_ONCE' };
-  inputSource?: {
-    queueItemId: string;
-    commandId: string;
-    deliveryMode: 'new-turn' | 'steer';
-  };
+  inputOrigin?: string;
+  inputSource?: { deliveryMode: 'new-turn' | 'steer' } & (
+    | { identityKind: 'queue'; queueItemId: string; sourceKind: 'command'; commandId: string }
+    | { identityKind: 'queue'; queueItemId: string; sourceKind: 'agent'; commandId?: never; sourceSessionId?: string; sourceWorkId?: string }
+    | { identityKind: 'queue'; queueItemId: string; sourceKind: 'system'; commandId?: never }
+    | { identityKind: 'revision'; queueItemId?: never; sourceKind: 'command'; commandId: string }
+    | { identityKind: 'origin'; queueItemId?: never; sourceKind: 'agent'; commandId?: never; sourceSessionId?: string; sourceWorkId?: string }
+  );
   assistantKind?: 'terminal' | 'tool-request' | 'live';
   time: string;
   body: string;

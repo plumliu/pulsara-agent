@@ -1835,6 +1835,156 @@ class LocalSessionController:
         )
         return reader
 
+    async def authorize_agent_reader(self, root_session_id: str, agent_session_id: str):
+        repository = await self.core._ensure_resources()
+        reader = CanonicalProtocolReader(repository.connection_provider)
+        await asyncio.to_thread(reader.authorize_agent, root_session_id=root_session_id,
+            agent_session_id=agent_session_id, memory_domain_id=self.memory_domain_id,
+            deadline_monotonic=self.core._canonical_deadline())
+        return reader
+
+    async def _sidebar_root(self, root_session_id: str):
+        reader = await self._history_reader(root_session_id)
+        root = await asyncio.to_thread(reader.authorize_session, session_id=root_session_id,
+            memory_domain_id=self.memory_domain_id, deadline_monotonic=self.core._canonical_deadline())
+        if root["root_session_id"] is not None:
+            raise KeyError(root_session_id)
+        return reader
+
+    async def sidebar_agents(self, root_session_id: str, body: dict):
+        if set(body) - {"cursor", "max_items"}:
+            raise ValueError("Agent page parameters are invalid")
+        await self._sidebar_root(root_session_id)
+        repository = await self.core._ensure_resources()
+        maximum = browser_history_uint64(body.get("max_items", 50), "Agent page size")
+        if not 1 <= maximum <= 50:
+            raise ValueError("Agent page size is invalid")
+        rows = await asyncio.to_thread(repository.list_agent_sessions, root_session_id=root_session_id,
+            cursor=body.get("cursor"), limit=maximum + 1, deadline_monotonic=self.core._canonical_deadline())
+        selected = rows[:maximum]
+        await self._sidebar_root(root_session_id)
+        return {"agents": [self._sidebar_agent_value(row) for row in selected],
+                "next_cursor": str(selected[-1]["agent_id"]) if len(rows) > maximum else None}
+
+    def _sidebar_agent_value(self, row):
+        live = self.core._live_agent_session(str(row["agent_id"]))
+        return {"agent_id": str(row["agent_id"]), "title": row.get("title"),
+                "current_work_id": row.get("current_work_id"), "queued_count": row["queued_count"],
+                "has_pending_work": row["has_pending_work"], "has_running_turn": row["has_running_turn"],
+                "host_session_id": None if live is None else live.host_session_id}
+
+    async def sidebar_agent(self, root_session_id: str, agent_session_id: str):
+        from pulsara_agent.conversation_kernel.presentation_targets import resolve_visible_agent
+        await self.authorize_agent_reader(root_session_id, agent_session_id)
+        repository = await self.core._ensure_resources()
+        try:
+            row = await asyncio.to_thread(resolve_visible_agent, repository, root_session_id=root_session_id,
+                agent_session_id=agent_session_id, deadline_monotonic=self.core._canonical_deadline())
+        except LookupError as error:
+            raise KeyError(agent_session_id) from error
+        await self.authorize_agent_reader(root_session_id, agent_session_id)
+        return {"agent": self._sidebar_agent_value(row)}
+
+    async def sidebar_work(self, root_session_id: str, work_id: str):
+        await self._sidebar_root(root_session_id)
+        repository = await self.core._ensure_resources()
+        value = await asyncio.to_thread(repository.read_agent_work_graph_facts,
+            root_session_id=root_session_id, work_id=work_id, deadline_monotonic=self.core._canonical_deadline())
+        if value is None:
+            raise KeyError(work_id)
+        await self._sidebar_root(root_session_id)
+        value = await asyncio.to_thread(repository.read_agent_work_graph_facts,
+            root_session_id=root_session_id, work_id=work_id, deadline_monotonic=self.core._canonical_deadline())
+        if value is None:
+            raise KeyError(work_id)
+        return {"work": {key: value[key] for key in ("agent_id", "work_id", "status", "terminal_reason", "consumed_entry_id", "turn_id")},
+                "inputs": value["inputs"]}
+
+    async def _sidebar_root_host(self, root_session_id: str, host_session_id: str):
+        await self._sidebar_root(root_session_id)
+        host = self.core._sessions.get(host_session_id)
+        if (host is None or host.session_id != root_session_id or host.root_session_id is not None
+                or host._closing or host._closed):
+            raise KeyError(host_session_id)
+        return host
+
+    async def sidebar_cells(self, root_session_id: str, host_session_id: str, body: dict):
+        if set(body) - {"cursor", "max_items"}:
+            raise ValueError("Cell page parameters are invalid")
+        host = await self._sidebar_root_host(root_session_id, host_session_id)
+        maximum = body.get("max_items", 50)
+        if type(maximum) is not int or not 1 <= maximum <= 50:
+            raise ValueError("Cell page size is invalid")
+        result = host._tools.query_code_cells(cursor=body.get("cursor"), max_items=maximum)
+        if await self._sidebar_root_host(root_session_id, host_session_id) is not host:
+            raise KeyError(host_session_id)
+        return result
+
+    async def sidebar_cell_info(self, root_session_id: str, host_session_id: str, cell_id: str):
+        host = await self._sidebar_root_host(root_session_id, host_session_id)
+        capture = self._sidebar_cell_capture(host, cell_id)
+        if await self._sidebar_root_host(root_session_id, host_session_id) is not host:
+            raise KeyError(host_session_id)
+        current = self._sidebar_cell_capture(host, cell_id)
+        if current.source_exec_attempt_id != capture.source_exec_attempt_id:
+            raise KeyError(cell_id)
+        return {"cell": current.public_value()}
+
+    async def sidebar_cell(self, root_session_id: str, host_session_id: str, cell_id: str,
+                           body: dict, *, graph: bool):
+        host = await self._sidebar_root_host(root_session_id, host_session_id)
+        capture = self._sidebar_cell_capture(host, cell_id)
+        if graph:
+            if set(body) - {"section", "cursor", "max_items"}:
+                raise ValueError("Cell graph parameters are invalid")
+            result = await host._tools.read_code_cell_graph(cell_id=cell_id, section=body.get("section", "works"),
+                cursor=body.get("cursor"), max_items=body.get("max_items", 50))
+        else:
+            if set(body) - {"offset_chars", "max_chars"}:
+                raise ValueError("Cell source parameters are invalid")
+            result = await host._tools.read_code_cell_source_page(session_id=root_session_id, capture=capture,
+                offset_chars=body.get("offset_chars", 0), max_chars=body.get("max_chars", 20000))
+        if await self._sidebar_root_host(root_session_id, host_session_id) is not host:
+            raise KeyError(host_session_id)
+        current = self._sidebar_cell_capture(host, cell_id)
+        if current.source_exec_attempt_id != capture.source_exec_attempt_id:
+            raise KeyError(cell_id)
+        return result
+
+    @staticmethod
+    def _sidebar_cell_capture(host, cell_id):
+        from pulsara_agent.code_mode.contracts import CodeModeError
+        from pulsara_agent.conversation_kernel.presentation_targets import resolve_visible_cell
+        try:
+            return resolve_visible_cell(host._tools, cell_id=cell_id)
+        except CodeModeError as error:
+            if error.code != "unavailable":
+                raise
+            # A successful inventory distinguishes a retired Cell from an
+            # unavailable sidecar; no output observation is reserved.
+            host._tools.query_code_cells(max_items=1)
+            raise KeyError(cell_id) from error
+
+    async def queue_read(self, session_id: str, body: dict, *, root_session_id: str | None = None):
+        from google.protobuf.json_format import MessageToDict
+        repository = await self.core._ensure_resources()
+        reader = CanonicalProtocolReader(repository.connection_provider)
+        common = dict(session_id=session_id, memory_domain_id=self.memory_domain_id,
+                      root_session_id=root_session_id, deadline_monotonic=self.core._canonical_deadline())
+        if "queue_item_id" in body:
+            if set(body) != {"queue_item_id"} or not isinstance(body["queue_item_id"], str):
+                raise ValueError("queue item lookup accepts one identity")
+            item = await asyncio.to_thread(reader.queue_item, queue_item_id=body["queue_item_id"], **common)
+            return {"item": None if item is None else MessageToDict(item, preserving_proto_field_name=True)}
+        if set(body) - {"cursor", "max_items"}:
+            raise ValueError("queue page parameters are invalid")
+        cursor = browser_history_uint64(body.get("cursor", 0), "queue cursor")
+        maximum = browser_history_uint64(body.get("max_items", 50), "queue page size")
+        items, next_cursor = await asyncio.to_thread(reader.queue_page, after_sequence=cursor,
+                                                     limit=maximum, **common)
+        return {"items": [MessageToDict(item, preserving_proto_field_name=True) for item in items],
+                "next_cursor": None if next_cursor is None else str(next_cursor)}
+
     async def history_snapshot(self, session_id: str):
         reader = await self._history_reader(session_id)
         return wire.ServerFrame(snapshot=wire.SnapshotResponse(snapshot=await asyncio.to_thread(
@@ -2179,9 +2329,13 @@ class LocalSessionController:
 
     def session_by_host_id(self, host_session_id: str) -> KernelHostSession:
         handle = self._by_host.get(host_session_id)
-        if handle is None:
+        if handle is not None:
+            return handle.session
+        # Agent Hosts are owned by Core's scheduler, not Desktop's ROOT map.
+        session = self.core._sessions.get(host_session_id)
+        if session is None or session.root_session_id is None or session._closing or session._closed:
             raise KeyError(host_session_id)
-        return handle.session
+        return session
 
     async def read_context_usage(self, session_id: str) -> dict[str, object]:
         # This advisory GET must not own session activation or join a lifecycle

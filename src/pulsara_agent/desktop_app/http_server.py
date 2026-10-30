@@ -26,6 +26,8 @@ from pulsara_agent.desktop_app.memory_controller import LocalMemoryController
 from pulsara_agent.desktop_app.scheduled_controller import ScheduledTaskController
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
 from pulsara_agent.conversation_kernel.memory.management import MemoryManagementError
+from pulsara_agent.code_mode.contracts import CodeModeError
+from pulsara_agent.conversation_kernel.presentation_targets import PresentationReadUnavailable
 
 from pulsara_agent.conversation_kernel.host import KernelHostCoreClosing
 from pulsara_agent.llm.model_catalog import (
@@ -575,6 +577,18 @@ class LocalHttpServer:
         self._app.router.add_get("/api/sessions/{session_id}/history-snapshot", self._history_snapshot)
         for operation in ("history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"):
             self._app.router.add_post("/api/sessions/{session_id}/history/" + operation, self._cold_history_action)
+        self._app.router.add_post("/api/sessions/{session_id}/queue", self._sidebar_queue)
+        self._app.router.add_post("/api/sessions/{session_id}/agents", self._sidebar_agents)
+        self._app.router.add_get("/api/sessions/{session_id}/agents/{agent_id}", self._sidebar_agent)
+        self._app.router.add_post("/api/sessions/{session_id}/agents/{agent_id}/reader", self._sidebar_reader)
+        self._app.router.add_post("/api/sessions/{session_id}/agents/{agent_id}/queue", self._sidebar_queue)
+        for operation in ("snapshot", "history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"):
+            self._app.router.add_post("/api/sessions/{session_id}/agents/{agent_id}/history/" + operation, self._sidebar_history)
+        self._app.router.add_post("/api/sessions/{session_id}/works/{work_id}/inputs", self._sidebar_work)
+        self._app.router.add_post("/api/sessions/{session_id}/hosts/{host_id}/cells", self._sidebar_cells)
+        self._app.router.add_get("/api/sessions/{session_id}/hosts/{host_id}/cells/{cell_id}", self._sidebar_cell_info)
+        for operation in ("source", "graph"):
+            self._app.router.add_post("/api/sessions/{session_id}/hosts/{host_id}/cells/{cell_id}/" + operation, self._sidebar_cell)
 
         self._app.router.add_post("/api/sessions/{session_id}/archive", self._archive_session)
         self._app.router.add_post("/api/sessions/{session_id}/unarchive", self._unarchive_session)
@@ -699,6 +713,12 @@ class LocalHttpServer:
             return self._error_response("RESOURCE_EXHAUSTED", str(exc), status=413, retryable=False)
         except CanonicalProtocolGap as exc:
             return self._error_response("HISTORY_CUT_CONFLICT", str(exc), status=409, retryable=False)
+        except CodeModeError as exc:
+            invalid = exc.code == "invalid_arguments"
+            return self._error_response("BAD_REQUEST" if invalid else "CELL_SERVICE_UNAVAILABLE",
+                str(exc), status=400 if invalid else 503, retryable=not invalid)
+        except PresentationReadUnavailable as exc:
+            return self._error_response("SIDEBAR_SERVICE_UNAVAILABLE", str(exc), status=503, retryable=True)
         except ScheduledTaskError as exc:
             return self._error_response(exc.code, str(exc), status=409 if exc.code in {"REVISION_CONFLICT", "COMMAND_CONFLICT", "TASK_CUT_CHANGED", "ACTIVE_TASK_CONFLICT"} else 400, retryable=False)
         except WorkspaceUnavailable as exc:
@@ -2132,6 +2152,75 @@ class LocalHttpServer:
     async def _history_snapshot(self, request):
         return web.json_response(protobuf_json(await self.sessions.history_snapshot(request.match_info["session_id"])))
 
+    async def _sidebar_agents(self, request):
+        return web.json_response(await self.sessions.sidebar_agents(request.match_info["session_id"], await self._json_body(request)))
+
+    async def _sidebar_agent(self, request):
+        return web.json_response(await self.sessions.sidebar_agent(request.match_info["session_id"], request.match_info["agent_id"]))
+
+    async def _sidebar_reader(self, request):
+        body = await self._json_body(request)
+        if set(body) != {"browser_instance_id"}:
+            raise ValueError("reader requires its browser instance")
+        require_id(body["browser_instance_id"], "transport")
+        payload = await self.bridge.open_agent_reader(request.match_info["session_id"],
+            request.match_info["agent_id"], browser_instance_id=body["browser_instance_id"])
+        if request.transport is None or request.transport.is_closing():
+            if payload.get("connection_id"):
+                await self.bridge.disconnect(payload["connection_id"])
+            raise asyncio.CancelledError
+        return web.json_response(payload)
+
+    async def _sidebar_queue(self, request):
+        root = request.match_info["session_id"]
+        agent = request.match_info.get("agent_id")
+        return web.json_response(await self.sessions.queue_read(agent or root, await self._json_body(request),
+            root_session_id=root if agent else None))
+
+    async def _sidebar_work(self, request):
+        if await self._json_body(request):
+            raise ValueError("Work lookup accepts no parameters")
+        return web.json_response(await self.sessions.sidebar_work(request.match_info["session_id"], request.match_info["work_id"]))
+
+    async def _sidebar_cells(self, request):
+        return web.json_response(await self.sessions.sidebar_cells(request.match_info["session_id"],
+            request.match_info["host_id"], await self._json_body(request)))
+
+    async def _sidebar_cell(self, request):
+        return web.json_response(await self.sessions.sidebar_cell(request.match_info["session_id"],
+            request.match_info["host_id"], request.match_info["cell_id"], await self._json_body(request),
+            graph=request.path.endswith("/graph")))
+
+    async def _sidebar_cell_info(self, request):
+        return web.json_response(await self.sessions.sidebar_cell_info(request.match_info["session_id"],
+            request.match_info["host_id"], request.match_info["cell_id"]))
+
+    async def _sidebar_history(self, request):
+        root, agent = request.match_info["session_id"], request.match_info["agent_id"]
+        await self.sessions.authorize_agent_reader(root, agent)
+        operation = request.path.rsplit("/", 1)[-1]
+        body = await self._json_body(request)
+        if operation == "snapshot":
+            result = protobuf_json(await self.sessions.history_snapshot(agent))
+        elif operation == "window":
+            result = await self.sessions.history_window(agent, body)
+        elif operation == "context":
+            result = await self.sessions.history_context(agent, body)
+        elif operation == "history":
+            if not isinstance(body.get("cursor"), dict):
+                raise ValueError("history cursor is required")
+            result = protobuf_json(await self.sessions.history_page(agent, body["cursor"],
+                browser_history_uint64(body.get("maximum_entries", 128), "history entries"),
+                browser_history_uint64(body.get("maximum_serialized_bytes", MAXIMUM_HISTORY_PAGE_BYTES), "history bytes")))
+        elif operation == "visualization-thumbnail":
+            result = await self._visualization_previews.read_canonical(body,
+                read_content=lambda value: self._cold_content(agent, value),
+                cancelled=lambda: request.transport is None or request.transport.is_closing())
+        else:
+            result = await self._cold_content(agent, body, artifact=operation == "read-tool-artifact")
+        await self.sessions.authorize_agent_reader(root, agent)
+        return web.json_response(result)
+
     async def _cold_content(self, session_id, body, *, artifact=False):
         if artifact:
             content_request = wire.ReadToolArtifactRequest(
@@ -2177,7 +2266,15 @@ class LocalHttpServer:
         if session_id and request.method not in {"GET", "HEAD", "OPTIONS"}:
             suffix = request.path.split("/api/sessions/", 1)[-1].split("/", 1)[-1]
             independent = {session_id, "title", "archive", "unarchive", "archived", "connections", "restore-workspace", "path-candidates"}
-            if suffix not in independent and not suffix.startswith("history/"):
+            parts = suffix.split("/")
+            sidebar_read = (suffix in {"agents", "queue"}
+                or (len(parts) == 3 and parts[0] == "agents" and parts[2] in {"reader", "queue"})
+                or (len(parts) == 4 and parts[0] == "agents" and parts[2] == "history"
+                    and parts[3] in {"snapshot", "history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"})
+                or (len(parts) == 3 and parts[0] == "works" and parts[2] == "inputs")
+                or (len(parts) == 3 and parts[0] == "hosts" and parts[2] == "cells")
+                or (len(parts) == 5 and parts[0] == "hosts" and parts[2] == "cells" and parts[4] in {"source", "graph"}))
+            if suffix not in independent and not suffix.startswith("history/") and not sidebar_read:
                 await self.bridge.require_chat_controller(
                     request.headers.get("X-Pulsara-Connection-Id", ""),
                     int(request.headers.get("X-Pulsara-Connection-Generation", "0")), session_id=session_id)

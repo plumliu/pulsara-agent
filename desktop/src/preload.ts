@@ -2,10 +2,9 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { BrowserCommand, BrowserEvent, BrowserHide, BrowserLayout, BrowserPresentation, DesktopBrowser } from './browser-contract';
 
 const browser: DesktopBrowser = {
-  create: (input: { sessionId: string; tabId: string }) => ipcRenderer.invoke('desktop:browser-create', input),
+  create: (input: { tabId: string }) => ipcRenderer.invoke('desktop:browser-create', input),
   command: (input: BrowserCommand) => ipcRenderer.invoke('desktop:browser-command', input),
   close: (instanceId: string) => ipcRenderer.invoke('desktop:browser-close', instanceId),
-  forgetSession: (sessionId: string) => ipcRenderer.invoke('desktop:browser-forget-session', sessionId),
   clear: () => ipcRenderer.invoke('desktop:browser-clear'),
   activate: (input: BrowserPresentation) => ipcRenderer.invoke('desktop:browser-activate', input),
   layout: (input: BrowserLayout) => ipcRenderer.invoke('desktop:browser-layout', input),

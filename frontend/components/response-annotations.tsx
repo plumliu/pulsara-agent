@@ -13,6 +13,33 @@ import { DraftAnnotationContext } from './annotation-interactions';
 
 const AnnotationContext = createContext<(source: PromptAnnotationSource | null) => void>(() => {});
 
+/** Read-only reference navigation, scoped to the conversation that owns it. */
+export function AnnotationReader({ owner, onLocate, onNotify, children }: {
+  owner: React.RefObject<HTMLElement | null>;
+  onLocate: (entryId: string, signal: AbortSignal) => Promise<void>;
+  onNotify: MarkdownNotify; children: ReactNode;
+}) {
+  const active = useRef<AbortController | undefined>(undefined);
+  const highlight = useRef<(() => void) | undefined>(undefined);
+  useEffect(() => () => { active.current?.abort(); highlight.current?.(); }, []);
+  const locate = useCallback((source: PromptAnnotationSource | null) => {
+    active.current?.abort(); highlight.current?.();
+    if (!source) { onNotify('来源不可定位', '引用内容仍然完整保留。'); return; }
+    const controller = new AbortController(); active.current = controller;
+    void (async () => {
+      try {
+        await onLocate(source.entry_id, controller.signal);
+        if (!owner.current || controller.signal.aborted) return;
+        const root = await waitForAnnotationBody(source.entry_id, controller.signal, owner.current);
+        if (!controller.signal.aborted) highlight.current = highlightAnnotationSource(root, source);
+      } catch (error) {
+        if (!controller.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) onNotify('无法定位原文', error instanceof Error ? error.message : '请重试。', 'warning');
+      }
+    })();
+  }, [onLocate, onNotify, owner]);
+  return <AnnotationContext.Provider value={locate}>{children}</AnnotationContext.Provider>;
+}
+
 export function AnnotationBody({ entryId, body, children }: { entryId?: string; body: string; children: ReactNode }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => { if (ref.current && entryId) return registerAnnotationBody(ref.current, body); }, [body, entryId]);
@@ -70,8 +97,8 @@ function SelectionMenu({ selection, onAdd, onHide }: { selection: MappedSelectio
     onPointerDown={event => event.preventDefault()} onClick={onAdd}><MessageSquarePlus size={14} />添加注释</button>;
 }
 
-function sourceRoot(source: PromptAnnotationSource | null): HTMLElement | undefined {
-  return source ? [...document.querySelectorAll<HTMLElement>('[data-annotation-entry]')].find(node => node.dataset.annotationEntry === source.entry_id) : undefined;
+function sourceRoot(source: PromptAnnotationSource | null, owner: ParentNode | null): HTMLElement | undefined {
+  return source && owner ? [...owner.querySelectorAll<HTMLElement>('[data-annotation-entry]')].find(node => node.dataset.annotationEntry === source.entry_id) : undefined;
 }
 
 function sourceRect(root: HTMLElement, source: PromptAnnotationSource): DOMRect {
@@ -79,14 +106,15 @@ function sourceRect(root: HTMLElement, source: PromptAnnotationSource): DOMRect 
   return range?.getClientRects()[0] ?? root.getBoundingClientRect();
 }
 
-function AnnotationMarker({ item, siblings, active, onEdit, onPreview }: {
+function AnnotationMarker({ item, siblings, active, onEdit, onPreview, owner }: {
   item: DraftAnnotation; siblings: DraftAnnotation[]; active: boolean;
+  owner: React.RefObject<HTMLDivElement | null>;
   onEdit: (id: string) => void; onPreview: (id?: string) => void;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   // Reattach after history hydration or disclosure changes replace a source DOM.
   useLayoutEffect(() => {
-    const floating = ref.current; const source = item.value.source; const root = sourceRoot(source);
+    const floating = ref.current; const source = item.value.source; const root = sourceRoot(source, owner.current);
     if (!floating || !root || !source) return;
     const boundary = root.closest<HTMLElement>('.thread-scroll') ?? root;
     const reference = { contextElement: root, getBoundingClientRect: () => {
@@ -115,8 +143,9 @@ function AnnotationMarker({ item, siblings, active, onEdit, onPreview }: {
     onFocus={() => onPreview(item.id)} onBlur={() => onPreview()} onClick={() => onEdit(item.id)}>{item.number}</button>;
 }
 
-function AnnotationEditor({ item, anchor, store, sessionId, onClose }: {
+function AnnotationEditor({ item, anchor, store, sessionId, onClose, owner }: {
   item: DraftAnnotation; anchor?: HTMLElement; store: PromptDraftStore; sessionId: string;
+  owner: React.RefObject<HTMLDivElement | null>;
   onClose: (focus?: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -136,7 +165,7 @@ function AnnotationEditor({ item, anchor, store, sessionId, onClose }: {
   }, [item.value.comment]);
   useLayoutEffect(() => {
     const floating = ref.current;
-    const root = sourceRoot(item.value.source);
+    const root = sourceRoot(item.value.source, owner.current);
     const target = anchor?.isConnected ? anchor : root;
     if (!floating || !target) return;
     const reference = { contextElement: target, getBoundingClientRect: () =>
@@ -181,6 +210,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
 }) {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
   const items = store.annotations(sessionId);
+  const owner = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ sessionId: string; selection: MappedSelection }>();
   const [editing, setEditing] = useState<{ sessionId: string; id: string; anchor?: HTMLElement }>();
   const [hovered, setHovered] = useState<string>();
@@ -207,7 +237,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
   useLayoutEffect(() => {
     const cleanups: Array<() => void> = [];
     for (const [item, name] of [[active, 'annotation-active'], [preview, 'annotation-hover']] as const) {
-      const root = item && sourceRoot(item.value.source);
+      const root = item && sourceRoot(item.value.source, owner.current);
       if (root && item?.value.source) cleanups.push(showAnnotationHighlight(root, item.value.source, name));
     }
     return () => { cleanups.forEach(cleanup => cleanup()); };
@@ -222,13 +252,14 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     const controller = new AbortController(); locateController.current = controller;
     void (async () => {
       try {
-        if (!sourceRoot(source)) onNotify('正在定位原文');
+        if (!sourceRoot(source, owner.current)) onNotify('正在定位原文');
         if (onLocate) {
           await onLocate(source.entry_id, controller.signal);
 
-        } else if (!sourceRoot(source)) throw new Error('来源消息暂时无法读取。');
+        } else if (!sourceRoot(source, owner.current)) throw new Error('来源消息暂时无法读取。');
         if (controller.signal.aborted) return;
-        const root = await waitForAnnotationBody(source.entry_id, controller.signal);
+        if (!owner.current) throw new DOMException('定位已取消', 'AbortError');
+        const root = await waitForAnnotationBody(source.entry_id, controller.signal, owner.current);
         if (controller.signal.aborted) return;
         sourceHighlight.current = highlightAnnotationSource(root, source);
       } catch (error) {
@@ -240,7 +271,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     const update = () => {
       if (!canAnnotate) { setMenu(undefined); return; }
       const mapped = mapResponseSelection(window.getSelection());
-      if (!mapped) { setMenu(undefined); return; }
+      if (!mapped || !owner.current?.contains(mapped.root)) { setMenu(undefined); return; }
       setMenu({ sessionId, selection: mapped });
     };
     const hide = () => setMenu(undefined);
@@ -256,7 +287,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
       const target = event.target instanceof Element ? event.target : document.activeElement;
       if (target?.closest('input,textarea,[contenteditable="true"],[role="dialog"]')) return;
       const mapped = mapResponseSelection(window.getSelection());
-      if (!mapped) return;
+      if (!mapped || !owner.current?.contains(mapped.root)) return;
       event.clipboardData.setData('text/plain', mapped.annotation.quote); event.preventDefault();
     };
     const pointerup = (event: PointerEvent) => {
@@ -279,16 +310,16 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     };
   }, [sessionId, closeEditor, canAnnotate]);
   return <AnnotationContext.Provider value={locate}><DraftAnnotationContext.Provider value={{ editable: canAnnotate, activeId: active?.id, edit, preview: setHovered }}>
-    {children}
+    <div ref={owner} style={{ display: 'contents' }}>{children}</div>
     {typeof document !== 'undefined' && createPortal(<>
       {canAnnotate && items.filter(item => item.value.source).map(item => <AnnotationMarker key={item.id} item={item}
         siblings={items.filter(other => other.value.source?.entry_id === item.value.source!.entry_id).sort((a, b) => a.value.source!.start - b.value.source!.start || a.number - b.number)}
-        active={item.id === active?.id} onEdit={id => edit(id)} onPreview={setHovered} />)}
-      {active && <AnnotationEditor key={`${active.id}:${editing?.anchor ? 'preview' : 'inline'}`} item={active} anchor={editing?.anchor} store={store} sessionId={sessionId} onClose={closeEditor} />}
+        active={item.id === active?.id} onEdit={id => edit(id)} onPreview={setHovered} owner={owner} />)}
+      {active && <AnnotationEditor key={`${active.id}:${editing?.anchor ? 'preview' : 'inline'}`} item={active} anchor={editing?.anchor} store={store} sessionId={sessionId} onClose={closeEditor} owner={owner} />}
       {canAnnotate && menu?.sessionId === sessionId && <SelectionMenu selection={menu.selection} onHide={hideMenu} onAdd={() => {
         if (!canAnnotate) return;
         const current = mapResponseSelection(window.getSelection());
-        if (!current || current.root !== menu.selection.root || current.annotation.quote !== menu.selection.annotation.quote
+        if (!current || !owner.current?.contains(current.root) || current.root !== menu.selection.root || current.annotation.quote !== menu.selection.annotation.quote
           || current.annotation.source?.start !== menu.selection.annotation.source?.start || current.annotation.source?.end !== menu.selection.annotation.source?.end) { hideMenu(); return; }
         const id = store.addAnnotation(sessionId, current.annotation);
         edit(id);

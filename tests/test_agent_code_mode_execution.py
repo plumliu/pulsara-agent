@@ -624,9 +624,10 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
     async def scenario():
         port = DirectKernelToolPort(workspace_root=tmp_path,host_owner_id='mode-host',session_id=random_id('session'),
             live_bus=LiveAgentEventBus(),authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        from pulsara_agent.code_mode import CodeModeHost
         port.bind_subagent_port(SimpleNamespace(tool_names=frozenset(operations-{'exec_cell','query_cells','manage_cell'}),
-            validate_arguments=lambda **_:None))
-        port.bind_code_mode_port(object())
+            validate_arguments=lambda **_:None, bind_cell_observer=lambda _:None))
+        port.bind_code_mode_port(CodeModeHost())
         try:
             surface = prepare_test_direct_tool_surface(port,conversation_scope_kind=ModelInputScopeKind.ROOT,
                 effective_permission_mode=mode)

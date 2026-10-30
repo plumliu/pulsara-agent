@@ -891,8 +891,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     source_turn_id text,
     source_tool_attempt_id text,
     initial_context jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(initial_context)='array'),
-    input_materials jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(input_materials)='array'),
-    waiting_on jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(waiting_on)='array'),
+    work_inputs jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(work_inputs)='array'),
     CHECK ((input_origin IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL')) = (command_id IS NULL AND client_submission_id IS NULL)),
     CHECK (input_origin NOT IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL') OR source_session_id IS NOT NULL),
     scheduled_task_id text,
@@ -1057,6 +1056,7 @@ CREATE INDEX scheduled_tasks_session ON pulsara_v3.scheduled_tasks(session_id, i
 CREATE UNIQUE INDEX scheduled_tasks_one_active_session ON pulsara_v3.scheduled_tasks(session_id) WHERE status = 'ACTIVE';
 CREATE INDEX scheduled_tasks_due ON pulsara_v3.scheduled_tasks(next_run_at, id) WHERE status = 'ACTIVE';
 CREATE INDEX prompt_queue_scheduled_status ON pulsara_v3.prompt_queue_items(session_id, scheduled_task_id, status);
+CREATE INDEX prompt_queue_agent_source_attempt ON pulsara_v3.prompt_queue_items(source_session_id, source_tool_attempt_id, id) WHERE input_origin = 'AGENT_INSTRUCTION';
 
 CREATE TABLE pulsara_v3.canonical_image_refs (
     session_id text NOT NULL,

@@ -204,6 +204,8 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
             stop.set()
     settings = None
     failed = False
+    ready_announced = False
+    shutdown_clean = True
     kernel_lock = None
     socket_path = diagnostics_path()
     loop = asyncio.get_running_loop()
@@ -355,13 +357,15 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
             reply = {"type": "ready", "origin": application.origin, "database_state": application.database_state.value}
             if tls_identity is not None:
                 reply["certificatePem"] = tls_identity.certificate_pem
+            ready_announced = True
             emit(reply)
         await stop.wait()
         if commands_task.done():
             commands_task.result()
     except Exception as exc:
         failed = True
-        emit({"type": "failed", "error": error_text(exc)})
+        emit({"type": "failed", "error": error_text(exc),
+              "phase": "runtime" if ready_announced else "startup"})
     finally:
         emit({"type": "stopping"})
         if server is not None:
@@ -370,20 +374,27 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
             socket_path.unlink(missing_ok=True)
         if commands_task is not None:
             commands_task.cancel()
-            with suppress(asyncio.CancelledError, Exception):
+            try:
                 await commands_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                shutdown_clean = False
+                failed = True
+                emit({"type": "failed", "error": error_text(exc), "phase": "shutdown"})
         close_oauth_requests()
         if application is not None:
             try:
                 await application.aclose()
             except Exception as exc:
+                shutdown_clean = False
                 failed = True
-                emit({"type": "failed", "error": error_text(exc)})
+                emit({"type": "failed", "error": error_text(exc), "phase": "shutdown"})
         for signum in installed:
             loop.remove_signal_handler(signum)
         if kernel_lock is not None:
             os.close(kernel_lock)
-        emit({"type": "stopped"})
+        emit({"type": "stopped", "clean": shutdown_clean})
     return 1 if failed else 0
 
 

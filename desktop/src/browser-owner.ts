@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { BrowserCommand, BrowserEvent, BrowserHide, BrowserLayout, BrowserPresentation, BrowserState } from './browser-contract';
 import { allowBrowserRequest, browserBounds, browserURL, networkPort } from './browser-policy';
 
-interface Partition { sessionId: string; session: Session; port: string; retired: boolean; contents: Map<WebContents, Promise<void>>; retiring?: Promise<void> }
+interface Partition { session: Session; port: string; retired: boolean; contents: Map<WebContents, Promise<void>>; retiring?: Promise<void> }
 interface Navigation { url: string; stopped: boolean; awaitingStart: boolean; programmatic: boolean }
 interface Page {
   state: BrowserState;
@@ -20,7 +20,7 @@ function identity(value: unknown): asserts value is string {
 
 /** Owns only native browser resources belonging to this trusted workbench. */
 export class BrowserOwner {
-  private partitions = new Map<string, Partition>();
+  private partitionState?: Partition;
   private pages = new Map<string, Page>();
   private presentation: BrowserPresentation | null = null;
   private accepting = true;
@@ -38,15 +38,15 @@ export class BrowserOwner {
     host.once('closed', () => { void this.retireHost().catch(error => console.error('Could not retire browser resources', error)); });
   }
 
-  private partition(sessionId: string): Partition {
-    const existing = this.partitions.get(sessionId);
+  private partition(): Partition {
+    const existing = this.partitionState;
     if (existing) {
       if (existing.retired) throw new Error('网页会话仍在关闭，请等待其结算。');
       return existing;
     }
     const origin = this.origin();
     if (!origin) throw new Error('工作台尚未就绪。');
-    const part: Partition = { sessionId, session: session.fromPartition(`pulsara-browser-${randomUUID()}`), port: networkPort(new URL(origin)), retired: false, contents: new Map() };
+    const part: Partition = { session: session.fromPartition(`pulsara-browser-${randomUUID()}`), port: networkPort(new URL(origin)), retired: false, contents: new Map() };
     const ses = part.session;
     ses.setPermissionRequestHandler((_wc, _permission, done) => done(false));
     ses.setPermissionCheckHandler(() => false);
@@ -59,20 +59,20 @@ export class BrowserOwner {
       const page = [...this.pages.values()].find(page => page.live && page.view.webContents === wc);
       if (page) this.notice(page, '内嵌网页不支持下载；可在系统浏览器中继续。');
     });
-    this.partitions.set(sessionId, part);
+    this.partitionState = part;
     return part;
   }
 
-  create(input: { sessionId: string; tabId: string }): BrowserState {
-    identity(input?.sessionId); identity(input?.tabId);
+  create(input: { tabId: string }): BrowserState {
+    identity(input?.tabId);
     if (!this.accepting || !this.origin()) throw new Error('工作台正在切换，不能创建网页。');
-    if ([...this.pages.values()].some(page => page.state.sessionId === input.sessionId && page.state.tabId === input.tabId)) throw new Error('网页标签已有原生实例。');
-    const part = this.partition(input.sessionId);
+    if ([...this.pages.values()].some(page => page.state.tabId === input.tabId)) throw new Error('网页标签已有原生实例。');
+    const part = this.partition();
     const view = new WebContentsView({ webPreferences: { session: part.session, sandbox: true, contextIsolation: true,
       nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true,
       webviewTag: false, plugins: false, allowRunningInsecureContent: false, navigateOnDragDrop: false, disableDialogs: true } });
     const page: Page = { partition: part, view, live: true, visible: false, navigation: null, firstCommit: true,
-      state: { instanceId: randomUUID(), sessionId: input.sessionId, tabId: input.tabId, url: '', pendingUrl: null,
+      state: { instanceId: randomUUID(), tabId: input.tabId, url: '', pendingUrl: null,
         title: '', loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false } };
     this.pages.set(page.state.instanceId, page);
     const wc = view.webContents;
@@ -113,7 +113,7 @@ export class BrowserOwner {
       try {
         if (details.postBody || (details.frameName && details.frameName !== '_blank')) throw new Error('unsupported popup');
         const url = browserURL(details.url, page.partition.port);
-        this.emit({ kind: 'popup', instanceId: page.state.instanceId, sessionId: page.state.sessionId, url, disposition: details.disposition });
+        this.emit({ kind: 'popup', instanceId: page.state.instanceId, url, disposition: details.disposition });
       } catch { this.notice(page, '此新窗口流程暂不支持；可在系统浏览器中继续。'); }
       return { action: 'deny' };
     });
@@ -254,27 +254,21 @@ export class BrowserOwner {
       wc.close({ waitForBeforeUnload: false });
     } else if (!page.partition.contents.has(wc)) wc.removeAllListeners();
   }
-  async forgetSession(sessionId: string): Promise<void> {
-    identity(sessionId);
-    const part = this.partitions.get(sessionId);
+  async clear(): Promise<void> {
+    this.presentation = null;
+    const part = this.partitionState;
     if (!part) return;
     part.retired = true;
     part.retiring ??= Promise.resolve().then(async () => {
-      for (const page of [...this.pages.values()]) if (page.partition === part) this.close(page.state.instanceId);
-      // Closed tabs leave the presentation map before their native destruction.
-      // Their partition retains ownership until those exact events have joined.
+      for (const page of [...this.pages.values()]) this.close(page.state.instanceId);
+      // Closing a tab removes its presentation before native destruction.
+      // The user browser owner joins those exact resources before clearing data.
       await Promise.all(part.contents.values());
       await part.session.closeAllConnections();
       await part.session.clearData();
-      this.partitions.delete(sessionId);
+      if (this.partitionState === part) this.partitionState = undefined;
     });
     await part.retiring;
-  }
-  async clear(): Promise<void> {
-    this.presentation = null;
-    const parts = [...this.partitions.values()];
-    for (const part of parts) part.retired = true;
-    await Promise.all(parts.map(part => this.forgetSession(part.sessionId)));
   }
   retireHost(): Promise<void> {
     this.accepting = false;

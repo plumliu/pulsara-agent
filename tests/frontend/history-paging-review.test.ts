@@ -25,7 +25,7 @@ function context(body: Request, extra: object = {}) {
   return {
     session_id: session, cut_sequence: body.cut_sequence ?? '21', event_sequence_cut: body.event_sequence_cut ?? '35',
     entry_ids: body.entry_ids ?? [], groups: [], tasks: [], batches: [], interruption_notices: [], compactions: [],
-    entry_contexts: (body.entry_ids ?? []).map(id => ({ entry_id: id, owner_kind: 'EXECUTED_TURN', owner_id: 'turn:root', root_owner_id: 'turn:root', segment_id: 'turn:root:initial', segment_start_entry_id: 'start' })),
+    entry_contexts: (body.entry_ids ?? []).map(id => ({ entry_id: id, owner_kind: 'EXECUTED_TURN', owner_id: 'turn:root', segment_id: 'turn:root:initial', segment_start_entry_id: 'start' })),
     ...extra,
   };
 }

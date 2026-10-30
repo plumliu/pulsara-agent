@@ -7,6 +7,9 @@ import {
   createUserControlCommandRef,
   LocalHttpRuntimeAdapter,
   CanonicalHistoryView,
+  RuntimeApiError,
+  RuntimeGapError,
+  agentReaderRequiresReopen,
   type RuntimeProjection,
 } from '../../frontend/lib/runtime-adapter';
 
@@ -34,12 +37,12 @@ function stubRuntimeFetch(fetcher: typeof fetch) {
       const selected = ids.map(id => entries.get(id) ?? {entry_id: id, turn_id: id});
       const owners = [...new Set(selected.map(entry => String(entry.turn_id ?? entry.entry_id)))];
       return new Response(JSON.stringify({
-        session_id: decodeURIComponent(path.split('/sessions/')[1].split('/')[0]),
+        session_id: decodeURIComponent(path.includes('/agents/') ? path.split('/agents/')[1].split('/')[0] : path.split('/sessions/')[1].split('/')[0]),
         cut_sequence: String(request.cut_sequence ?? '1000'), event_sequence_cut: String(request.event_sequence_cut ?? '1000'),
         entry_ids: ids,
-        groups: owners.map((id, index) => ({owner_kind:'EXECUTED_TURN',owner_id:id,previous_root_owner_id:owners[index - 1],initial_entry_id:String(selected.find(entry => String(entry.turn_id ?? entry.entry_id) === id)!.entry_id)})),
+        groups: owners.map((id, index) => ({owner_kind:'EXECUTED_TURN',owner_id:id,previous_owner_id:owners[index - 1],initial_entry_id:String(selected.find(entry => String(entry.turn_id ?? entry.entry_id) === id)!.entry_id)})),
         entry_contexts: selected.map(entry => ({entry_id:entry.entry_id,owner_kind:'EXECUTED_TURN',owner_id:entry.turn_id ?? entry.entry_id,
-          root_owner_id:entry.turn_id ?? entry.entry_id,segment_id:entry.turn_id ?? entry.entry_id,segment_start_entry_id:entry.entry_id})),
+          segment_id:entry.turn_id ?? entry.entry_id,segment_start_entry_id:entry.entry_id})),
         ...historyOwnerFixture,
       }), {status:200});
     }
@@ -485,6 +488,13 @@ it('preserves pending safe-point adoption from a user capability mutation', asyn
 });
 
 describe('exact prompt projection', () => {
+  it('reopens invalid Agent observation owners while retaining ordinary network retries', () => {
+    for (const error of [new RuntimeGapError('COMMITTED_GAP','gap'),
+      new RuntimeApiError('PROTOCOL_TRANSPORT_CLOSED','closed',true),
+      new RuntimeApiError('LOCAL_RESOURCE_NOT_FOUND','gone',true),
+      new RuntimeApiError('HTTP_404','gone',false)]) expect(agentReaderRequiresReopen(error)).toBe(true);
+    expect(agentReaderRequiresReopen(new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE','network',true))).toBe(false);
+  });
   it('sends one ordered typed prompt body without a text or attachment side channel', async () => {
     const requests: Array<Record<string, unknown>> = [];
     const responses = [
@@ -586,7 +596,7 @@ describe('exact prompt projection', () => {
     const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
     await vi.waitFor(() => expect(connection.current().history?.windows.every(window=>window.contextState==='ready')).toBe(true));
     const projection = connection.current();
-    expect(projection.canonicalRootTurnIds).toEqual(['A', 'B', 'C']);
+    expect(projection.canonicalTurnIds).toEqual(['A', 'B', 'C']);
     expect(projection.messages.find(message => message.id === 'material')?.body).toBe('text');
   });
 
@@ -1712,6 +1722,135 @@ describe('exact prompt projection', () => {
           deliveryMode: 'new-turn',
         }),
       ]);
+  });
+
+  it('preserves queue sequence order beyond JavaScript safe integers', async () => {
+    const control = {prompt_queue:[
+      {queue_item_id:'later',queue_sequence:'9007199254740993',status:'PENDING',input_origin:'AGENT_INSTRUCTION',content:inlinePrompt('later')},
+      {queue_item_id:'earlier',queue_sequence:'9007199254740992',status:'PENDING',input_origin:'AGENT_INSTRUCTION',content:inlinePrompt('earlier')},
+    ]};
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([],control)), {status:200})));
+    const reader = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(reader.current().queuedPrompts.map(item => [item.queueItemId,item.sequence])).toEqual([
+      ['earlier','9007199254740992'], ['later','9007199254740993'],
+    ]);
+  });
+
+  it('reads an Agent with independent command-free queue identities and scoped content', async () => {
+    const agent = 'session-agent';
+    const payload = connectPayload([], {
+      active_turns:[{turn_id:'turn-agent', scope_kind:'SUBAGENT', status:'RUNNING'}],
+      prompt_queue_total_count:'2', prompt_queue:[
+        {queue_item_id:'queue-a', queue_sequence:'1', status:'PENDING', input_origin:'AGENT_INSTRUCTION', delivery_mode:'NEW_TURN', content:inlinePrompt('same'), waiting_on:['queue-dependency']},
+        {queue_item_id:'queue-b', queue_sequence:'2', status:'PENDING', input_origin:'AGENT_MESSAGE', delivery_mode:'STEER_ACTIVE_TURN', source_session_id:'session-sender', source_work_id:'queue-source', content:inlinePrompt('same')},
+      ],
+    }, [], {current_todos:[{todo_run_id:'todo-agent', scope_kind:'SUBAGENT', disposition:'ACTIVE', ordered_items:[{text:'agent step',status:'pending'}]}]});
+    payload.session_id = agent;
+    payload.role = 'observer';
+    payload.snapshot.snapshot.session_id = agent;
+    const requests: string[] = [];
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input); requests.push(url);
+      const data = url.endsWith('/reader') ? {...payload,view:'live'} : {};
+      return new Response(JSON.stringify(data), {status:200});
+    }));
+    const reader = await new LocalHttpRuntimeAdapter().openAgentReader('root', agent);
+    expect(reader.view).toBe('live');
+    expect(reader.current().queuedPrompts).toMatchObject([
+      {queueItemId:'queue-a',sourceKind:'agent',waitingOn:['queue-dependency']},
+      {queueItemId:'queue-b',sourceKind:'agent',sourceSessionId:'session-sender',sourceWorkId:'queue-source'},
+    ]);
+    expect(reader.current().todo?.items[0].label).toBe('agent step');
+    expect(requests[0]).toBe('/api/sessions/root/agents/session-agent/reader');
+    expect(requests.every(url => !url.endsWith('/command'))).toBe(true);
+    await reader.close();
+  });
+
+  it('uses the read Agent session turn order and scoped history context', async () => {
+    const agent='session-agent';
+    const entries=['first','second'].map((id,index) => ({entry_id:`entry-${id}`,turn_id:`turn-${id}`,
+      entry_sequence:String(index+1),entry_kind:'USER_MESSAGE',scope_kind:'SUBAGENT',input_origin:'AGENT_INSTRUCTION',content:inlinePrompt(id)}));
+    const snapshot={session_id:agent,event_sequence_cut:'2',entry_sequence_cut:'2',entries,control:{}};
+    stubRuntimeFetch(vi.fn(async input => new Response(JSON.stringify(String(input).endsWith('/reader')
+      ? {view:'history',session_id:agent,workspace_availability:connectedWorkspaceAvailability,snapshot:{snapshot:{snapshot}}} : {}), {status:200})));
+    const reader=await new LocalHttpRuntimeAdapter().openAgentReader('root',agent);
+    await vi.waitFor(() => expect(reader.current().history?.initialReady).toBe(true));
+    expect(reader.current().canonicalTurnIds).toEqual(['turn-first','turn-second']);
+    expect(reader.current().messages.map(message => message.historyGroupId)).toEqual(['turn-first','turn-second']);
+    await reader.close();
+  });
+
+  it('retains command-only revision identity without inventing a queue item', async () => {
+    const entry = {entry_id:'revision',turn_id:'turn-1',entry_sequence:'1',entry_kind:'USER_MESSAGE',scope_kind:'ROOT',
+      content:inlinePrompt('revised'),input_source:{command_id:'command-revision',delivery_mode:'NEW_TURN'}};
+    stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([entry])), {status:200})));
+    const reader = await new LocalHttpRuntimeAdapter().connect('session-1');
+    expect(reader.current().messages[0].inputSource).toEqual({identityKind:'revision',sourceKind:'command',
+      commandId:'command-revision',deliveryMode:'new-turn'});
+  });
+
+  it('releases an invalid live Agent attachment before rejecting it', async () => {
+    const payload = {...connectPayload(),view:'live',session_id:'wrong-agent',role:'observer'};
+    const calls: Array<[string,string]> = [];
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?:RequestInit) => {
+      calls.push([String(input),init?.method ?? 'GET']);
+      return new Response(JSON.stringify(payload), {status:200});
+    }));
+    await expect(new LocalHttpRuntimeAdapter().openAgentReader('root','agent')).rejects.toMatchObject({code:'READER_IDENTITY_INVALID'});
+    expect(calls).toContainEqual(['/api/connections/connection-fidelity','DELETE']);
+  });
+
+  it('rereads an Agent queue body if a stale page loses authorization but the exact item is still pending', async () => {
+    const agent = 'session-agent';
+    const body = 'pending content';
+    const item = {queue_item_id:'queue-pending',queue_sequence:'4',status:'PENDING',input_origin:'AGENT_INSTRUCTION',
+      delivery_mode:'NEW_TURN',content:blobPrompt(body)};
+    const snapshot = {session_id:agent, event_sequence_cut:'0', entries:[], control:{}};
+    let reads = 0;
+    stubRuntimeFetch(vi.fn(async (input: RequestInfo | URL, init?:RequestInit) => {
+      const url = String(input), request = JSON.parse(String(init?.body ?? '{}'));
+      const data = url.endsWith('/reader') ? {view:'history',session_id:agent,workspace_availability:connectedWorkspaceAvailability,snapshot:{snapshot:{snapshot}}}
+        : url.endsWith('/queue') ? (request.queue_item_id ? {item:structuredClone(item)} : {items:[structuredClone(item)],next_cursor:null})
+        : url.endsWith('/read-content') ? (++reads === 1 ? {error:{stable_code:'CONTENT_QUEUE_NOT_PENDING',public_message:'changed'}} : contentChunk(promptBody(body)))
+        : {};
+      return new Response(JSON.stringify(data), {status:200});
+    }));
+    const reader = await new LocalHttpRuntimeAdapter().openAgentReader('root',agent);
+    const page = await reader.readQueuePage();
+    expect(reads).toBe(2);
+    expect(page.items).toMatchObject([{queueItemId:'queue-pending',sourceKind:'agent',content:textPromptContent(body),contentUnavailable:false}]);
+    await reader.close();
+  });
+
+  it('releases a cached queue body only after the exact item is confirmed cancelled', async () => {
+    const agent = 'session-agent';
+    const item = {queue_item_id:'queue-cancelled',queue_sequence:'1',status:'PENDING',input_origin:'AGENT_INSTRUCTION',
+      delivery_mode:'NEW_TURN',content:inlinePrompt('retained until confirmation')};
+    const snapshot = {session_id:agent,event_sequence_cut:'0',entries:[],control:{}};
+    stubRuntimeFetch(vi.fn(async (input:RequestInfo | URL, init?:RequestInit) => {
+      const url=String(input), body=JSON.parse(String(init?.body ?? '{}'));
+      const data = url.endsWith('/reader') ? {view:'history',session_id:agent,workspace_availability:connectedWorkspaceAvailability,snapshot:{snapshot:{snapshot}}}
+        : url.endsWith('/queue') ? (body.queue_item_id ? {item:{...item,status:'CANCELLED'}} : {items:[item],next_cursor:null}) : {};
+      return new Response(JSON.stringify(data), {status:200});
+    }));
+    const reader = await new LocalHttpRuntimeAdapter().openAgentReader('root',agent);
+    await reader.readQueuePage();
+    const cache = (reader as unknown as {knownQueuedContent:Map<string,unknown>}).knownQueuedContent;
+    expect(cache.has(item.queue_item_id)).toBe(true);
+    expect(await reader.readQueueItem(item.queue_item_id)).toBeNull();
+    expect(cache.has(item.queue_item_id)).toBe(false);
+    await reader.close();
+  });
+
+  it('reads a derived Agent visualization through its scoped owner without opening a Host', async () => {
+    const requests:string[] = [];
+    stubRuntimeFetch(vi.fn(async input => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({image:'data:image/png;base64,AA=='}), {status:200});
+    }));
+    const content = new LocalHttpRuntimeAdapter().createAgentContentReader('root','agent');
+    expect(await content.readVisualizationThumbnail('entry',0,`sha256:${'1'.repeat(64)}`,1,new AbortController().signal)).toBe('data:image/png;base64,AA==');
+    expect(requests).toEqual(['/api/sessions/root/agents/agent/history/visualization-thumbnail']);
   });
 });
 
@@ -3023,6 +3162,41 @@ it('keeps settled live reasoning until the exact canonical reasoning bytes are h
   await connection.hydrateEntries!(['entry-reason'], undefined, true);
   expect(connection.current().messages[0].reasoning?.[0].body).toBe(text);
   expect(connection.current().messages[0]).not.toHaveProperty('pendingAssistant');
+});
+
+it('keeps an Agent live draft until its own canonical reasoning is hydrated', async () => {
+  vi.stubGlobal('crypto', webcrypto);
+  const agent = 'session-agent', text = 'agent reasoning';
+  const bytes = Buffer.from(text), digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`;
+  const entry = {entry_id:'agent-entry',turn_id:'agent-turn',entry_sequence:'1',entry_kind:'ASSISTANT_MESSAGE',scope_kind:'SUBAGENT',
+    blocks:[{block_id:'text',block_kind:'TEXT',content:inlineContent('agent answer')}],
+    reasoning_blocks:[{block_id:'canonical-reason',ordinal:'0',presentation_kind:'REASONING_PRESENTATION_FULL',
+      content:{kind:'CANONICAL_BLOB',digest,size:String(bytes.length),media_type:'text/plain',codec:'utf-8'}}]};
+  const payload = connectPayload([], {active_turns:[{turn_id:'agent-turn',scope_kind:'SUBAGENT',status:'RUNNING'}]}, [
+    {live_revision:'1',event_type:'THINKING_START',draft_identity:'agent-draft',turn_id:'agent-turn',scope_kind:'SUBAGENT',
+      payload:{thinking_start:{block_identity:'live-reason',presentation_kind:'REASONING_PRESENTATION_FULL'}}},
+    {live_revision:'2',event_type:'THINKING_DELTA',draft_identity:'agent-draft',turn_id:'agent-turn',scope_kind:'SUBAGENT',
+      payload:{thinking_delta:{block_identity:'live-reason',delta:text}}},
+  ]);
+  payload.role='observer'; payload.session_id=agent; payload.snapshot.snapshot.session_id=agent;
+  const requests:string[] = [];
+  stubRuntimeFetch(vi.fn(async input => {
+    const url=String(input); requests.push(url);
+    const value = url.endsWith('/reader') ? {...payload,view:'live'}
+      : url.endsWith('/observe') ? {observation:{through_event_sequence:'1',committed:[{projection_kind:'IMMUTABLE_ENTRY',entry}],
+        settlements:[{kind:'LIVE_GENERATION_COMMITTED',draft_identity:'agent-draft',committed_entry_id:'agent-entry'}]}}
+      : url.endsWith('/read-content') ? {content:{digest,complete_size:String(bytes.length),offset_bytes:'0',content:bytes.toString('base64'),complete:true}} : {};
+    return new Response(JSON.stringify(value), {status:200});
+  }));
+  const reader=await new LocalHttpRuntimeAdapter().openAgentReader('root',agent);
+  expect(reader.current().messages[0].reasoning?.[0].body).toBe(text);
+  await reader.observe();
+  await vi.waitFor(() => expect(reader.current().messages[0].historyContextState).toBe('ready'));
+  expect(reader.current().messages[0].pendingAssistant?.reasoning?.[0].body).toBe(text);
+  await reader.hydrateEntries(['agent-entry'],undefined,true);
+  expect(reader.current().messages[0].reasoning?.[0].body).toBe(text);
+  expect(requests.some(url => url === '/api/sessions/root/agents/session-agent/history/read-content')).toBe(true);
+  await reader.close();
 });
 
 it('discovers custom model IDs with a cancellable user-level request', async () => {

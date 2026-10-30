@@ -4,7 +4,6 @@ export interface BrowserTabRecord {
   id: string;
   focusAddressOnOpen?: boolean;
   requestedUrl?: string;
-  sessionId: string;
   state?: BrowserState;
   opening?: object;
   pendingNavigation?: string;
@@ -14,8 +13,8 @@ export interface BrowserTabRecord {
   popup?: string;
 }
 export interface BrowserTabSink {
-  visibleSession(): string;
-  activeId(sessionId: string): string | undefined;
+  visible(): boolean;
+  activeId(): string | undefined;
   insert(record: BrowserTabRecord, foreground: boolean): void;
   changed(record: BrowserTabRecord): void;
   activate(id: string): void;
@@ -54,40 +53,39 @@ export class BrowserTabs {
       if (event.kind === 'state') { record.state = event.state; this.sink.changed(record); }
       if (event.kind === 'notice') { record.notice = event.message; this.sink.changed(record); }
       if (event.kind === 'popup') {
-        if (this.sink.visibleSession() !== record.sessionId) { record.popup = event.url; this.sink.changed(record); }
-        else this.open(record.sessionId, event.url, { newTab: true, background: event.disposition === 'background-tab' });
+        if (!this.sink.visible()) { record.popup = event.url; this.sink.changed(record); }
+        else this.open(event.url, { newTab: true, background: event.disposition === 'background-tab' });
       }
     });
     return () => { this.unsubscribe?.(); this.unsubscribe = undefined; };
   }
-  find(sessionId: string, url: string) {
-    const candidates = [...this.records.values()].filter(item => item.sessionId === sessionId && item.state?.url === url && !item.opening && !item.pendingNavigation && !item.state.loading && !item.state.pendingUrl && !item.state.crashed);
-    return candidates.find(item => item.id === this.sink.activeId(sessionId)) ?? candidates[0];
+  find(url: string) {
+    const candidates = [...this.records.values()].filter(item => item.state?.url === url && !item.opening && !item.pendingNavigation && !item.state.loading && !item.state.pendingUrl && !item.state.crashed);
+    return candidates.find(item => item.id === this.sink.activeId()) ?? candidates[0];
   }
   /** Adopt only at batch publication; native resources are started afterwards. */
-  prepare(sessionId: string, input: string | undefined, batch: Map<string, BrowserTabRecord>) {
+  prepare(input: string | undefined, batch: Map<string, BrowserTabRecord>) {
     let url: string | undefined, error: string | undefined;
     if (input !== undefined) { try { url = browserUrl(input); } catch { error = '请输入有效的 HTTP(S) 网页地址。'; } }
     let created: BrowserTabRecord | undefined;
     return {
       adopt: () => {
-        const match = input === undefined ? batch.get('') : url ? batch.get(url) ?? this.find(sessionId, url) : undefined;
+        const match = input === undefined ? batch.get('') : url ? batch.get(url) ?? this.find(url) : undefined;
         if (match) return match;
-        created = { id: crypto.randomUUID(), sessionId, focusAddressOnOpen: input === undefined, requestedUrl: input, error };
+        created = { id: crypto.randomUUID(), focusAddressOnOpen: input === undefined, requestedUrl: input, error };
         this.records.set(created.id, created); if (!error) batch.set(url ?? '', created);
         return created;
       },
       start: () => { if (created && !error) void this.create(created, url); },
     };
   }
-  open(sessionId: string, input?: string, options: { newTab?: boolean; background?: boolean } = {}) {
-    if (!sessionId) return;
+  open(input?: string, options: { newTab?: boolean; background?: boolean } = {}) {
     const url = input ? browserUrl(input) : undefined;
     if (url && !options.newTab) {
-      const match = this.find(sessionId, url);
+      const match = this.find(url);
       if (match) { if (!options.background) this.sink.activate(match.id); return match; }
     }
-    const record: BrowserTabRecord = { id: crypto.randomUUID(), sessionId, focusAddressOnOpen: !url };
+    const record: BrowserTabRecord = { id: crypto.randomUUID(), focusAddressOnOpen: !url };
     this.records.set(record.id, record);
     this.sink.insert(record, !options.background);
     void this.create(record, url);
@@ -98,7 +96,7 @@ export class BrowserTabs {
     this.sink.changed(record);
     try {
       if (!this.host) throw new Error('桌面网页服务不可用。');
-      const state = await this.host.create({ sessionId: record.sessionId, tabId: record.id });
+      const state = await this.host.create({ tabId: record.id });
       if (this.records.get(record.id) !== record || record.opening !== operation) { await this.host.close(state.instanceId); return; }
       record.opening = undefined; record.state = state; this.sink.changed(record);
       const target = record.pendingNavigation; record.pendingNavigation = undefined;
@@ -125,10 +123,6 @@ export class BrowserTabs {
     const record = this.records.get(id); if (!record) return;
     this.records.delete(id); record.opening = undefined;
     if (record.state) void this.host?.close(record.state.instanceId).catch(() => {});
-  }
-  forgetSession(sessionId: string) {
-    for (const record of this.records.values()) if (record.sessionId === sessionId) this.close(record.id);
-    void this.host?.forgetSession(sessionId).catch(() => {});
   }
   clear() { for (const id of this.records.keys()) this.close(id); void this.host?.clear().catch(() => {}); }
 }

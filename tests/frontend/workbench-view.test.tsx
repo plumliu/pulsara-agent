@@ -124,7 +124,7 @@ function stubClipboard(writeText: (value: string) => Promise<void>) {
 
 describe('PR04 composer queue hard cut', () => {
   const item: QueuedPrompt = {
-    queueItemId: 'source', commandId: 'submission', sequence: 1, status: 'pending',
+    queueItemId: 'source', sourceKind: 'command', commandId: 'submission', sequence: '1', status: 'pending',
     deliveryMode: 'new-turn', content: textPrompt('  original\n原文  '), permission: 'read-only',
     requestedPermission: 'ask-permissions',
   };
@@ -175,7 +175,7 @@ describe('PR04 composer queue hard cut', () => {
     expect(screen.queryByText(/模型已收到|模型已读/)).toBeNull();
     view.rerender(<WorkbenchView {...props({ queueActions: [action], messages: [{
       id: 'entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
-      time: '13:00', status: 'completed', inputSource: { commandId: 'action', queueItemId: 'replacement', deliveryMode: 'steer' },
+      time: '13:00', status: 'completed', inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: 'action', queueItemId: 'replacement', deliveryMode: 'steer' },
     }] })} />);
     expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
     expect(view.container.querySelector('[data-action-command-id]')).toBeNull();
@@ -184,9 +184,27 @@ describe('PR04 composer queue hard cut', () => {
   it('does not deduplicate another command with identical text', () => {
     render(<WorkbenchView {...props({ queueActions: [acceptedAction('send')], messages: [{
       id: 'other-entry', turnId: 'turn-one', role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
-      time: '12:59', status: 'completed', inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'steer' },
+      time: '12:59', status: 'completed', inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'steer' },
     }] })} />);
     expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(2);
+  });
+
+  it('shows an Agent steer to ROOT with its sender while waiting for model acceptance', () => {
+    const steer: QueuedPrompt = { queueItemId: 'agent-steer', sourceKind: 'agent', sourceSessionId: 'session:sender',
+      sourceWorkId: 'queue:work', sequence: '2', status: 'pending', inputOrigin: 'AGENT_MESSAGE',
+      deliveryMode: 'steer', targetTurnId: 'turn-one', content: textPrompt('来自代理的消息') };
+    const view = render(<WorkbenchView {...props({ queuedPrompts: [steer] })} />);
+    const pending = screen.getByRole('article', { name: '引导' });
+    expect(within(pending).getByText('代理 session:sender · 引导')).toBeTruthy();
+    expect(within(pending).getByText('等待模型接收')).toBeTruthy();
+    expect(within(pending).getByText('来自代理的消息')).toBeTruthy();
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [steer], messages: [{
+      id: 'accepted-steer', turnId: 'turn-one', role: 'user', userKind: 'steer', inputOrigin: 'AGENT_MESSAGE',
+      body: '来自代理的消息', time: '', inputSource: {identityKind: 'queue', sourceKind: 'agent',
+        sourceSessionId: 'session:sender', sourceWorkId: 'queue:work', queueItemId: 'agent-steer', deliveryMode: 'steer'},
+    }] })} />);
+    expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
+    expect(screen.queryByText('等待模型接收')).toBeNull();
   });
 
   it('refuses edit with any draft and preserves both texts without sending cancellation', () => {
@@ -222,7 +240,7 @@ describe('PR04 composer queue hard cut', () => {
   });
 
   it('keeps a rejected delete in place and moves successful delete focus to the next row', async () => {
-    const next = { ...item, queueItemId: 'next', commandId: 'next-command', sequence: 2 };
+    const next = { ...item, queueItemId: 'next', commandId: 'next-command', sequence: '2' };
     const action = acceptedAction('delete');
     const view = render(<WorkbenchView {...props({ queuedPrompts: [item, next], queueActions: [{ ...action, status: 'rejected' }] })} />);
     expect(view.container.querySelectorAll('.composer-queue article')).toHaveLength(2);
@@ -373,7 +391,7 @@ describe('PR04 composer queue hard cut', () => {
 
   it('places exact duplicate inputs in composer with three accessible flat actions', () => {
     const queuedPrompts = ['one', 'two'].map((id, index) => ({
-      queueItemId: id, commandId: `command-${id}`, sequence: index + 1,
+      queueItemId: id, sourceKind: 'command' as const, commandId: `command-${id}`, sequence: String(index + 1),
       status: 'pending' as const, deliveryMode: 'new-turn' as const,
       content: textPrompt('same\n原文'), permission: 'read-only' as const,
     }));
@@ -492,7 +510,7 @@ it('reserves the open TODO above tall queues and follows editor growth and viewp
   });
   const view = render(<WorkbenchView {...props({
     todo: { id: 'todo-queue', items: [{ id: 'step', label: '当前步骤', status: 'in-progress' }] },
-    queuedCount: 1, queuedPrompts: [{ queueItemId: 'queue', commandId: 'input', sequence: 1,
+    queuedCount: 1, queuedPrompts: [{ queueItemId: 'queue', sourceKind: 'command', commandId: 'input', sequence: '1',
       status: 'pending', deliveryMode: 'new-turn', permission: 'read-only', content: textPrompt('很长的输入') }],
   })} />);
   const thread = view.container.querySelector('.thread-scroll') as HTMLDivElement;
@@ -574,7 +592,7 @@ describe('prompt delivery and preparation', () => {
     const waiting = screen.getByLabelText('Pulsara 处理状态');
     const user = { id: 'entry:start', turnId: 'turn:start', role: 'user' as const,
       userKind: 'prompt' as const, body: '', time: '12:01', historyWindowId: 'tail',
-      inputSource: { commandId: submission.commandId, queueItemId: submission.queueItemId, deliveryMode: 'new-turn' as const },
+      inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: submission.commandId, queueItemId: submission.queueItemId, deliveryMode: 'new-turn' as const },
       pendingContent: submission.content };
     for (const phase of ['context', 'unloaded', 'loading', 'ready'] as const) {
       const contextState = phase === 'context' ? 'loading' as const : 'ready' as const;
@@ -621,7 +639,7 @@ describe('prompt delivery and preparation', () => {
       localSubmissions: [{ ...submission, status: 'queued' }],
       messages: [{ id: 'other-input', turnId: 'other-turn', role: 'user', body: '', time: '',
         historyWindowId: 'tail', historyContextState: 'loading', contentState: 'unloaded',
-        inputSource: { commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'new-turn' } }],
+        inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: 'other-command', queueItemId: 'other-queue', deliveryMode: 'new-turn' } }],
     })} />);
     expect(screen.getByText('正在加载…')).toBeTruthy();
     expect(screen.getAllByText('开始处理这条消息')).toHaveLength(1);
@@ -867,7 +885,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       // Queue cards are inside the same composer wrapper and move its top.
       composerTop = 430;
       view.rerender(<WorkbenchView {...props({ queuedCount: 1, queuedPrompts: [{
-        queueItemId: 'queued-one', commandId: 'queued-command', sequence: 1,
+        queueItemId: 'queued-one', sourceKind: 'command', commandId: 'queued-command', sequence: '1',
         status: 'pending', deliveryMode: 'new-turn', content: textPrompt('下一轮'), permission: 'read-only',
       }] })} />);
       await waitFor(() => expect(latest.style.bottom).toBe('382px'));
@@ -1319,7 +1337,7 @@ describe('composer + menu', () => {
   it.each([false, true])('reserves queued edit against an open menu and late picker, directory=%s', async directory => {
     const upload = vi.fn(async () => ({ path: '/tmp/imports/id/report.pdf', name: 'report.pdf', bytes: 1 }));
     promptDraftStore.setImporter(upload);
-    const item: QueuedPrompt = { queueItemId: 'source', commandId: 'submitted', sequence: 1, status: 'pending', deliveryMode: 'new-turn', content: textPrompt('queued body'), permission: 'read-only' };
+    const item: QueuedPrompt = { queueItemId: 'source', sourceKind: 'command', commandId: 'submitted', sequence: '1', status: 'pending', deliveryMode: 'new-turn', content: textPrompt('queued body'), permission: 'read-only' };
     const action: QueuedPromptAction = { commandId: 'edit-command', sessionId: 'session-one', connectionGeneration: 1, kind: 'edit', source: item, status: 'submitting', submittedAt: 'now' };
     const onNotify = vi.fn();
     const view = render(<WorkbenchView {...props({ queuedPrompts: [item], onNotify })} />);
@@ -1808,7 +1826,7 @@ describe('bounded history reading and DOM locations', () => {
     });
     const read = vi.fn(async () => {});
     const message = { id: 'input', role: 'user' as const, time: '', body: '', contentState: 'unloaded' as const,
-      inputSource: { commandId: 'command', queueItemId: 'queue', deliveryMode: 'new-turn' as const } };
+      inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: 'command', queueItemId: 'queue', deliveryMode: 'new-turn' as const } };
     const local: import('../../frontend/lib/runtime-adapter').LocalPromptSubmission = {
       sessionId: 'session-one', connectionGeneration: 1, commandId: 'command', queueItemId: 'queue',
       deliveryMode: 'new-turn', status: 'synchronizing', displayAsMessage: true, content: textPrompt('保留本地原文'),
@@ -1931,7 +1949,7 @@ describe('activity and pending-input body demands', () => {
   it('retains reader-held known queue text during canonical and context hydration with no local submission', () => {
     render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [], messages: [{
       id: 'consumed-entry', role: 'user', time: '', body: '', contentState: 'loading', historyContextState: 'loading',
-      pendingContent: textPrompt('已知队列原文'), inputSource: { commandId: 'old-command', queueItemId: 'old-queue', deliveryMode: 'new-turn' },
+      pendingContent: textPrompt('已知队列原文'), inputSource: { identityKind: 'queue', sourceKind: 'command', commandId: 'old-command', queueItemId: 'old-queue', deliveryMode: 'new-turn' },
     }] })} />);
     expect(screen.getAllByText('已知队列原文')).toHaveLength(1);
     expect(screen.getByText('本地已知内容')).toBeTruthy();
@@ -2107,7 +2125,7 @@ it('keeps a streamed final visible until exact canonical grouping and body reads
       value = { session_id: 'session-one', cut_sequence: '3', event_sequence_cut: '3', entry_ids: ids,
         groups: [{ owner_kind: 'EXECUTED_TURN', owner_id: 'turn-final', initial_entry_id: 'request-before-final' }],
         entry_contexts: ids.map(id => ({ entry_id: id, owner_kind: 'EXECUTED_TURN', owner_id: 'turn-final',
-          root_owner_id: 'turn-final', segment_id: 'turn-final', segment_start_entry_id: 'request-before-final' })),
+          segment_id: 'turn-final', segment_start_entry_id: 'request-before-final' })),
         tasks: [], batches: [], interruption_notices: [], compactions: [], };
     } else if (String(url).endsWith('/read-content')) {
       await bodyGate;

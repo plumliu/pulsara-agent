@@ -4,13 +4,13 @@ const bodies = new WeakMap<HTMLElement, string>();
 const bodyListeners = new Set<() => void>();
 
 /** Resolve only after React has registered the actual, verified source body. */
-export function waitForAnnotationBody(entryId: string, signal: AbortSignal): Promise<HTMLElement> {
+export function waitForAnnotationBody(entryId: string, signal: AbortSignal, owner: ParentNode = document): Promise<HTMLElement> {
   return new Promise((resolve, reject) => {
     const cleanup = () => { bodyListeners.delete(check); signal.removeEventListener('abort', abort); };
     const abort = () => { cleanup(); reject(new DOMException('定位已取消', 'AbortError')); };
     const check = () => {
       if (signal.aborted) { abort(); return; }
-      const root = [...document.querySelectorAll<HTMLElement>('[data-annotation-entry]')]
+      const root = [...owner.querySelectorAll<HTMLElement>('[data-annotation-entry]')]
         .find(node => node.dataset.annotationEntry === entryId && node.isConnected && bodies.has(node));
       if (root) { cleanup(); resolve(root); }
     };

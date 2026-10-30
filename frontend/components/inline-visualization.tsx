@@ -1,6 +1,6 @@
 import { WorkspaceLoading } from './workspace-loading';
 import { Images, Maximize2, ImageOff, RotateCcw } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { VisualizationOccurrence } from '../lib/pulsara-types';
 import { visualizationEnvironment, type VisualizationEnvironment } from '../lib/visualization-environment';
 import { usableVisualizationRootRect, visualizationLayoutMessageType, type VisualizationRootRect } from '../lib/visualization-frame';
@@ -11,6 +11,7 @@ import { SandboxedHtmlPreview } from './sandboxed-html-preview';
 export type ReadVisualization = (entry: string, ordinal: number, digest: string, size: number, item?: VisualizationOccurrence, signal?: AbortSignal) => Promise<string | Uint8Array>;
 export type ReadVisualizationThumbnail = (entry: string, ordinal: number, digest: string, size: number, signal: AbortSignal) => Promise<string>;
 export interface InlineVisualizationContext { entryId: string; items: VisualizationOccurrence[]; onRead: ReadVisualization; onReadThumbnail?: ReadVisualizationThumbnail }
+export const VisualizationOwnerContext = createContext<((signal: AbortSignal) => Promise<boolean>) | undefined>(undefined);
 
 function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: {entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization; active: boolean; maximized: boolean; zoomControl: ReactNode}) {
   const [result, setResult] = useState<{html?: string; error?: string}>({});
@@ -173,6 +174,7 @@ function Thumbnail({ item, entryId, enabled, onRead }: {
 
 
 export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: InlineVisualizationContext) {
+  const checkOwner = useContext(VisualizationOwnerContext);
   const [selected, setSelected] = useState(items[0]?.ordinal);
   const [resident, setResident] = useState<number[]>(() => items.length ? [items[0].ordinal] : []);
   const workspace = useDesktopWorkspace();
@@ -224,7 +226,7 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
           aria-label="放大可视化" onClick={() => workspace?.open({
             id: JSON.stringify([workspace.sessionId, 'visualization', entryId, current.ordinal]),
             sessionId: workspace.sessionId, title: visualizationName(current), kind: 'visualization',
-            render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} />,
+            render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} checkOwner={checkOwner} />,
           })}>
           <Maximize2 size={16}/>
 
@@ -233,7 +235,7 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
 
         {current.imageRef && <><button className="inline-visualization__zoom" title="在标签中打开图片" aria-label="在标签中打开图片" onClick={() => workspace?.open({
           id: JSON.stringify([workspace.sessionId, 'visualization', entryId, current.ordinal]), sessionId: workspace.sessionId,
-          title: visualizationName(current), kind: 'visualization', render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} />,
+          title: visualizationName(current), kind: 'visualization', render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} checkOwner={checkOwner} />,
         })}><Maximize2 size={16} /></button><ImagePage key={`${entryId}:${current.ordinal}:${current.contentDigest}`} entryId={entryId} item={current} onRead={onRead}/></>}
       </div>
       {items.length > 1 && <aside className="inline-visualization__controls">
@@ -259,8 +261,26 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
   </section>;
 }
 
-function FrozenVisualization({ sessionId, entryId, item, onRead }: { sessionId: string; entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization }) {
+function FrozenVisualization({ sessionId, entryId, item, onRead, checkOwner }: { sessionId: string; entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization; checkOwner?: (signal: AbortSignal) => Promise<boolean> }) {
   const workspace = useDesktopWorkspace();
+  const [ownerState, setOwnerState] = useState<'checking' | 'available' | 'unavailable' | 'error'>(checkOwner ? 'checking' : 'available');
+  useEffect(() => {
+    if (!checkOwner) return;
+    const abort = new AbortController();
+    let checking = false;
+    let retired = false;
+    const check = () => {
+      if (checking || retired) return;
+      checking = true;
+      void checkOwner(abort.signal).then(available => {
+        if (!abort.signal.aborted) { retired = !available; setOwnerState(available ? 'available' : 'unavailable'); }
+      }).catch(() => { if (!abort.signal.aborted) setOwnerState(value => value === 'available' ? value : 'error'); })
+        .finally(() => { checking = false; });
+    };
+    check();
+    const timer = window.setInterval(check, 3000);
+    return () => { abort.abort(); window.clearInterval(timer); };
+  }, [checkOwner]);
   const currentSession = useRef(workspace?.sessionId); currentSession.current = workspace?.sessionId;
   const read = useCallback<ReadVisualization>(async (...args) => {
     if (currentSession.current !== sessionId) throw new Error('可视化所属会话已改变。');
@@ -269,6 +289,8 @@ function FrozenVisualization({ sessionId, entryId, item, onRead }: { sessionId: 
     return content;
   }, [sessionId, onRead]);
   return <section className="frozen-visualization" aria-label={`历史可视化：${visualizationName(item)}`}>
-    {item.imageRef ? <ImagePage entryId={entryId} item={item} onRead={read} maximized /> : <GalleryPage entryId={entryId} item={item} onRead={read} active maximized zoomControl={null} />}
+    {ownerState === 'unavailable' ? <p role="status">子代理已不可用。</p>
+      : ownerState !== 'available' ? <p role="status">{ownerState === 'checking' ? '正在确认内容所属会话…' : '暂时无法确认内容所属会话。'}</p>
+        : item.imageRef ? <ImagePage entryId={entryId} item={item} onRead={read} maximized /> : <GalleryPage entryId={entryId} item={item} onRead={read} active maximized zoomControl={null} />}
   </section>;
 }

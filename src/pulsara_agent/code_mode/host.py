@@ -18,7 +18,7 @@ from uuid import uuid4
 from pulsara_agent.identity import random_id, require_id
 
 from .contracts import (
-    CellState, CodeModeError, CodeModeInvocation, CodeModeInvoke, CodeModeLimits,
+    CellParticipationReference, CellState, CodeModeError, CodeModeInvocation, CodeModeInvoke, CodeModeLimits,
     CodeModeObservation, CodeModePrepareBatch, CodeModeToolResult, CodeModeCellSnapshot,
 )
 from .targets import cell_target
@@ -114,6 +114,10 @@ class _Cell:
     observation: CodeModeObservation | None = None
     observed_count: int = 0
     terminal_delivered: bool = False
+    participants: dict[tuple[str, str | None], int] = field(default_factory=dict)
+    participation_pending: dict[tuple[str, str | None], int] | None = None
+    participation_task: asyncio.Task[None] | None = None
+    participation_incomplete: bool = False
 
     @property
     def pending_calls(self) -> int:
@@ -214,9 +218,7 @@ class CodeModeHost:
                 elif kind in ("call", "prepare"):
                     self._accept_request(cell, message)
                 elif kind == "retained":
-                    reservation = cell.reservations.pop(message["reservation"], None)
-                    if reservation is not None and not reservation.done():
-                        reservation.set_result(message["accepted"])
+                    self._complete_retention(cell, message)
                 elif kind == "discard_preparation":
                     cell.preparations.pop(message["preparation"], None)
                 elif kind == "delivered":
@@ -421,6 +423,12 @@ class CodeModeHost:
                                    "request_id": pending.request_id,
                                    "keep_preparation": pending.sequence is None})
 
+    @staticmethod
+    def _complete_retention(cell: _Cell, message: Mapping[str, object]) -> None:
+        reservation = cell.reservations.pop(message["reservation"], None)
+        if reservation is not None and not reservation.done():
+            reservation.set_result(message["accepted"])
+
     async def _retain_data(self, cell: _Cell, size: int) -> bool:
         if size <= 0:
             return True
@@ -491,14 +499,97 @@ class CodeModeHost:
             cell.pending_calls, MappingProxyType(dict(cell.error)) if cell.error is not None else None,
             cell.source_exec_attempt_id)
 
+    _PARTICIPATION_BITS = {"query": 1, "wait": 2, "message": 4, "stop": 8}
+
+    def mark_cell_participation_incomplete(self, cell_id: str) -> None:
+        cell = self._cells.get(cell_id)
+        if cell is not None:
+            cell.participation_incomplete = True
+            cell.changed.set()
+
+    def observe_agent_participation(self, cell_id: str, references: tuple[CellParticipationReference, ...]) -> None:
+        """Offer verified identities without waiting for advisory budget admission."""
+        cell = self._cells.get(cell_id)
+        if cell is None or self._closed or self._sidecar_failure is not None:
+            return
+        incoming: dict[tuple[str, str | None], int] = {}
+        for agent_id, work_id, kind in references:
+            bit = self._PARTICIPATION_BITS[kind]
+            key = (agent_id, work_id)
+            incoming[key] = incoming.get(key, 0) | bit
+        new = {}
+        for key, bits in incoming.items():
+            if key in cell.participants:
+                cell.participants[key] |= bits
+            elif cell.participation_pending is not None and key in cell.participation_pending:
+                cell.participation_pending[key] |= bits
+            else:
+                new[key] = bits
+        if not new:
+            cell.changed.set()
+            return
+        if cell.participation_pending is not None:
+            cell.participation_incomplete = True
+            cell.changed.set()
+            return
+        charge = sum(len(_json({"agent_id": agent, "work_id": work,
+                                "kinds": f"{bits:08x}"}).encode("utf-8"))
+                     for (agent, work), bits in new.items())
+        if charge > self.limits.value_bytes:
+            cell.participation_incomplete = True
+            cell.changed.set()
+            return
+        cell.participation_pending = new
+        cell.changed.set()
+        async def reserve():
+            try:
+                accepted = await self._retain_data(cell, charge)
+                if self._cells.get(cell_id) is not cell:
+                    return  # forget releases any accepted reservation
+                if accepted:
+                    cell.participants.update(cell.participation_pending or {})
+                else:
+                    cell.participation_incomplete = True
+            except asyncio.CancelledError:
+                if self._cells.get(cell_id) is cell:
+                    cell.participation_incomplete = True
+                raise
+            except Exception:
+                if self._cells.get(cell_id) is cell:
+                    cell.participation_incomplete = True
+            finally:
+                if self._cells.get(cell_id) is cell:
+                    cell.participation_pending = None
+                    cell.participation_task = None
+                    cell.changed.set()
+        cell.participation_task = asyncio.create_task(reserve(), name=f"cell-participation:{cell_id}")
+
+    def query_cell_participants(self, cell_id: str, *, cursor: str | None = None,
+                                max_items: int = 50) -> dict[str, object]:
+        self._require_query_available()
+        cell = self._cell(cell_id)
+        if type(max_items) is not int or max_items < 1:
+            raise CodeModeError("invalid_arguments", "max_items must be a positive integer")
+        if cursor is not None and not isinstance(cursor, str):
+            raise CodeModeError("invalid_arguments", "participant cursor must be a string")
+        rows = sorted((agent + "|" + (work or ""), agent, work, bits)
+                      for (agent, work), bits in cell.participants.items())
+        rows = [row for row in rows if cursor is None or row[0] > cursor]
+        selected = rows[:max_items]
+        coverage = "incomplete" if cell.participation_incomplete or cell.participation_pending is not None else "complete"
+        return {"participation_coverage": coverage,
+                "items": [{"agent_id": agent, "work_id": work,
+                           "kinds": [kind for kind, bit in self._PARTICIPATION_BITS.items() if bits & bit]}
+                          for _, agent, work, bits in selected],
+                "next_cursor": selected[-1][0] if len(rows) > len(selected) else None}
+
     def _require_query_available(self) -> None:
         if (self._closed or self._sidecar_failure is not None
                 or (self._process is not None and self._process.returncode is not None)):
             raise CodeModeError("unavailable", "Code Mode Host is unavailable")
 
-    def query_cells(self, *, cursor: str | None = None, max_items: int = 50,
-                    maximum_page_bytes: int | None = None) -> dict[str, object]:
-        """Weakly consistent sorted inventory; cursors need not name a live Cell."""
+    def list_cell_snapshots(self, *, cursor: str | None = None, max_items: int = 50) -> dict[str, object]:
+        """Read the current Host inventory without an output reservation."""
         self._require_query_available()
         if cursor is not None:
             try:
@@ -507,21 +598,27 @@ class CodeModeHost:
                 raise CodeModeError("invalid_arguments", "cursor must be a canonical Cell ID") from error
         if type(max_items) is not int or max_items < 1:
             raise CodeModeError("invalid_arguments", "max_items must be a positive integer")
+        cells = sorted((cell for cell in self._cells.values()
+                        if cursor is None or cell.cell_id > cursor), key=lambda cell: cell.cell_id)
+        selected = cells[:max_items]
+        return {"cells": [{"target": cell_target(cell.cell_id), "state": cell.state,
+                           "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
+                          for cell in selected],
+                "has_more": len(cells) > len(selected),
+                "next_cursor": selected[-1].cell_id if len(cells) > len(selected) else None}
+
+    def query_cells(self, *, cursor: str | None = None, max_items: int = 50,
+                    maximum_page_bytes: int | None = None) -> dict[str, object]:
+        """Adapt the shared inventory to the model-result byte boundary."""
         page_bytes = self.limits.page_bytes if maximum_page_bytes is None else maximum_page_bytes
         if type(page_bytes) is not int or not 0 < page_bytes <= self.limits.page_bytes:
             raise CodeModeError("invalid_arguments", "Cell query page must fit the existing model result boundary")
-        # No history snapshot or continuation authority is retained. The tuple
-        # contains only this event-loop observation's small public fields.
-        rows = tuple({"target": cell_target(cell.cell_id), "state": cell.state,
-                      "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
-                     for cell in sorted(self._cells.values(), key=lambda item: item.cell_id)
-                     if cursor is None or cell.cell_id > cursor)
+        page = self.list_cell_snapshots(cursor=cursor, max_items=max_items)
+        rows = page["cells"]
         selected: list[dict[str, object]] = []
         response: dict[str, object] = {"cells": selected, "has_more": False, "next_cursor": None}
         for index, row in enumerate(rows):
-            if len(selected) >= max_items:
-                break
-            has_more = index + 1 < len(rows)
+            has_more = index + 1 < len(rows) or page["has_more"]
             trial = {"cells": [*selected, row], "has_more": has_more,
                      "next_cursor": row["target"]["cell_id"] if has_more else None}
             if len(_json(trial).encode("utf-8")) > page_bytes:
@@ -631,10 +728,14 @@ class CodeModeHost:
 
     async def _collect(self, cell: _Cell) -> None:
         if self._closed and cell.observation is None and not cell.pending:
+            if cell.participation_task is not None:
+                cell.participation_task.cancel()
             self._cells.pop(cell.cell_id, None)
             return
         if (cell.terminal_delivered and cell.state in _TERMINAL and not cell.pending and not cell.output
                 and cell.observation is None and cell.vm_released.is_set()):
+            if cell.participation_task is not None:
+                cell.participation_task.cancel()
             self._cells.pop(cell.cell_id, None)
             await self._safe_send({"type": "forget", "cell_id": cell.cell_id})
 

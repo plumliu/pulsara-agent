@@ -290,8 +290,8 @@ function canonicalInputs(messages: Message[]): CanonicalInput[] {
 }
 
 export interface RuntimeProjection {
-  /** Canonical ROOT order within loaded windows; absence does not establish adjacency. */
-  canonicalRootTurnIds?: readonly string[];
+  /** Canonical session turn order within loaded windows; absence does not establish adjacency. */
+  canonicalTurnIds?: readonly string[];
   messages: Message[];
   /** Input handoff facts across all resident entries, independent of the reading band. */
   canonicalInputs: CanonicalInput[];
@@ -320,13 +320,13 @@ export interface RuntimeProjection {
   interaction?: RuntimeInteractionSummary;
 }
 
-export interface QueuedPrompt {
+interface QueuedPromptBase {
   queueItemId: string;
-  commandId: string;
-  sequence: number;
+  sequence: string;
   status: 'pending';
   contentUnavailable?: boolean;
   inputOrigin?: string;
+  waitingOn?: readonly string[];
   deliveryMode: 'new-turn' | 'steer';
   targetTurnId?: string;
   content: CanonicalPromptContent;
@@ -334,6 +334,12 @@ export interface QueuedPrompt {
   submittedAt?: string;
   requestedPermission?: PermissionMode;
 }
+
+export type QueuedPrompt = QueuedPromptBase & (
+  | { sourceKind: 'command'; commandId: string }
+  | { sourceKind: 'agent'; commandId?: never; sourceSessionId?: string; sourceWorkId?: string }
+  | { sourceKind: 'system'; commandId?: never }
+);
 
 export interface QueuedPromptAction {
   sessionId: string;
@@ -613,6 +619,8 @@ export interface RuntimeAdapter {
     publicCode?: string;
   }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
+  openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader>;
+  createAgentContentReader(rootSessionId: string, agentSessionId: string): AgentContentReader;
   createSession(selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload): Promise<SessionSummary>;
   pickWorkspaceDirectory(signal?: AbortSignal): Promise<string | null>;
   completeWorkspacePaths(sessionId: string, prefix: string, cursor: string | null, signal: AbortSignal): Promise<import('./file-reference').WorkspacePathPage>;
@@ -713,6 +721,33 @@ export interface RuntimeAdapter {
   openCapabilityRoot(root: 'agents' | 'pulsara'): Promise<void>;
 }
 
+export interface AgentConversationReader {
+  readonly view: 'live' | 'history';
+  readonly sessionId: string;
+  current(): RuntimeProjection;
+  snapshot(): Promise<RuntimeProjection>;
+  observe(signal?: AbortSignal): Promise<RuntimeProjection>;
+  subscribe(listener: () => void): () => void;
+  readHistory(windowId?: string, direction?: 'older' | 'newer', signal?: AbortSignal): Promise<RuntimeProjection>;
+  hydrateEntries(ids: string[], signal?: AbortSignal, includeReasoning?: boolean): Promise<RuntimeProjection>;
+  readLatestHistory(signal?: AbortSignal): Promise<RuntimeProjection>;
+  readProcessEnd(entryId: string, signal: AbortSignal): Promise<RuntimeProjection>;
+  retainHistory(interest: HistoryResidence): RuntimeProjection | undefined;
+  locateEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection>;
+  locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection>;
+  readQueuePage(cursor?: string, signal?: AbortSignal): Promise<{items: QueuedPrompt[]; nextCursor: string | null}>;
+  readQueueItem(queueItemId: string, signal?: AbortSignal): Promise<QueuedPrompt | null>;
+  readToolArtifact(resultEntryId: string, offsetChars: number, maxChars?: number): Promise<ToolArtifactPage>;
+  readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
+  readImageReference(imageRef: string, signal?: AbortSignal): Promise<SavedImageData>;
+  readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string>;
+  readVisualizationContent(entryId: string, ordinal: number, digest: string, size: number, item?: VisualizationOccurrence, signal?: AbortSignal): Promise<string | Uint8Array>;
+  close(): Promise<void>;
+}
+
+export type AgentContentReader = Pick<AgentConversationReader,
+  'readToolArtifact' | 'readPromptImage' | 'readImageReference' | 'readVisualizationContent' | 'readVisualizationThumbnail'>;
+
 export interface RuntimeConnection {
   readonly availability: WorkspaceAvailability;
   subscribeMcpAuthorization?: (listener: (request: McpAuthorizationRequest) => void) => () => void;
@@ -724,6 +759,8 @@ export interface RuntimeConnection {
   retainHistory?: (interest: HistoryResidence) => RuntimeProjection | undefined;
   locateEntry?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   subscribe?: (listener: () => void) => () => void;
+  readQueuePage(cursor?: string, signal?: AbortSignal): Promise<{items: QueuedPrompt[]; nextCursor: string | null}>;
+  readQueueItem(queueItemId: string, signal?: AbortSignal): Promise<QueuedPrompt | null>;
   locateAnnotationSource?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   readonly filePreview: FilePreviewApi;
   importFiles(files: readonly File[], signal: AbortSignal): Promise<import('./file-reference').ImportedPath>;
@@ -809,6 +846,14 @@ export class RuntimeGapError extends RuntimeApiError {
   }
 }
 
+/** A discarded observation owner needs a fresh HELLO and canonical baseline. */
+export function agentReaderRequiresReopen(error: unknown): boolean {
+  return error instanceof RuntimeGapError || (error instanceof RuntimeApiError && new Set([
+    'STALE_ATTACHMENT', 'CONNECTION_CLOSED', 'PROTOCOL_TRANSPORT_CLOSED',
+    'LOCAL_RESOURCE_NOT_FOUND', 'HTTP_404', 'SESSION_WRITER_UNAVAILABLE',
+  ]).has(error.code));
+}
+
 interface ProtocolContent {
   kind?: string;
   inline_content?: string;
@@ -854,7 +899,8 @@ interface ProtocolEntry {
     artifact_disposition?: string; source_coverage?: string; display_kind?: string;
     source_coverage_reason?: string; artifact_unavailability_reason?: string;
   };
-  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string };
+  input_origin?: string;
+  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string };
   scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string; trigger_source: 'TIMER' | 'RUN_ONCE' };
   visualizations?: Array<{
     ordinal: string | number; state: string; content_digest?: string;
@@ -889,6 +935,7 @@ export interface ProtocolCanonicalControl {
   prompt_queue?: Array<{
     queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
     status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string; input_origin?: string;
+    source_session_id?: string; source_work_id?: string; waiting_on?: string[];
     content?: ProtocolContent; requested_permission_mode?: string; permission?: { requested_mode?: string; effective_mode?: string };
   }>;
   prompt_queue_total_count?: string | number;
@@ -1020,8 +1067,8 @@ interface BrowserWindow {
 }
 interface BrowserPageContext {
   session_id: string; cut_sequence: string; event_sequence_cut: string; entry_ids: string[];
-  groups: Array<{owner_kind: string; owner_id: string; initial_entry_id: string; final_entry_id?: string; previous_root_owner_id?: string; next_root_owner_id?: string}>;
-  entry_contexts: Array<{entry_id: string; owner_kind: string; owner_id: string; root_owner_id?: string; parent_turn_id?: string; segment_id: string; segment_start_entry_id: string; previous_entry_id?: string; next_entry_id?: string}>;
+  groups: Array<{owner_kind: string; owner_id: string; initial_entry_id: string; final_entry_id?: string; previous_owner_id?: string; next_owner_id?: string}>;
+  entry_contexts: Array<{entry_id: string; owner_kind: string; owner_id: string; parent_turn_id?: string; segment_id: string; segment_start_entry_id: string; previous_entry_id?: string; next_entry_id?: string}>;
   interruption_notices: ProtocolTurnInterruptionNotice[];
   boundary_entries?: Array<{event_id: string; event_sequence: string; entry_id: string; entry_sequence: string}>;
   compactions: Array<{event_id: string; event_sequence: string; turn_id: string; context_binding_revision_id: string; source_through_sequence: string; adopted_after_entry_sequence: string; accepted_at_utc: string}>;
@@ -1806,6 +1853,56 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     if (attempt === this.connectAttempt) this.chatConnection = connection;
     return connection;
   }
+
+  async openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader> {
+    const base = `/api/sessions/${encodeURIComponent(rootSessionId)}/agents/${encodeURIComponent(agentSessionId)}`;
+    const payload = await apiRequest<(ConnectPayload & {view:'live'}) | {
+      view:'history'; session_id:string; workspace_availability:WorkspaceAvailability;
+      snapshot:{snapshot:{snapshot:ProtocolCanonicalSnapshot}};
+    }>(`${base}/reader`, {method:'POST', body:JSON.stringify({browser_instance_id:this.browserInstanceId}), signal});
+    const release = async () => {
+      if ('connection_id' in payload && payload.connection_id) {
+        await apiRequest(`/api/connections/${encodeURIComponent(payload.connection_id)}`, {method:'DELETE', keepalive:true}).catch(() => undefined);
+      }
+    };
+    if (!['live', 'history'].includes(payload.view) || payload.session_id !== agentSessionId
+      || (payload.view === 'live' && (payload.role !== 'observer' || !payload.connection_id
+        || payload.snapshot?.snapshot?.session_id !== agentSessionId)) || signal?.aborted) {
+      await release();
+      signal?.throwIfAborted();
+      throw new RuntimeApiError('READER_IDENTITY_INVALID', '子代理阅读连接身份不一致。', false);
+    }
+    if (payload.view === 'history') {
+      if (payload.snapshot?.snapshot?.snapshot?.session_id !== agentSessionId) throw new RuntimeApiError('READER_IDENTITY_INVALID', '子代理快照身份不一致。', false);
+      const history = new CanonicalHistoryView(payload.session_id, payload.workspace_availability,
+        payload.snapshot.snapshot.snapshot, 'SUBAGENT', `${base}/history`, `${base}/queue`);
+      try { await history.initialize(); signal?.throwIfAborted(); return history; }
+      catch (error) { await history.close(); throw error; }
+    }
+    let connection: LocalRuntimeConnection | undefined;
+    try {
+      connection = new LocalRuntimeConnection(payload, 'SUBAGENT', `${base}/history`, `${base}/queue`);
+      await connection.initialize();
+      signal?.throwIfAborted();
+      return connection;
+    } catch (error) { if (connection) await connection.close(); else await release(); throw error; }
+  }
+
+  createAgentContentReader(rootSessionId: string, agentSessionId: string): AgentContentReader {
+    const base = `/api/sessions/${encodeURIComponent(rootSessionId)}/agents/${encodeURIComponent(agentSessionId)}`;
+    const read = async <T>(operation: (reader: CanonicalHistoryView) => Promise<T>): Promise<T> => {
+      const reader = new CanonicalHistoryView(agentSessionId, {path:'', outcome:'UNAVAILABLE', reason:null},
+        {session_id:agentSessionId, entries:[], event_sequence_cut:'0'}, 'SUBAGENT', `${base}/history`, `${base}/queue`);
+      try { return await operation(reader); } finally { await reader.close(); }
+    };
+    return {
+      readToolArtifact:(id, offset, max) => read(reader => reader.readToolArtifact(id, offset, max)),
+      readPromptImage:image => read(reader => reader.readPromptImage(image)),
+      readImageReference:(ref, signal) => read(reader => reader.readImageReference(ref, signal)),
+      readVisualizationContent:(id, ordinal, digest, size, item, signal) => read(reader => reader.readVisualizationContent(id, ordinal, digest, size, item, signal)),
+      readVisualizationThumbnail:(id, ordinal, digest, size, signal) => read(reader => reader.readVisualizationThumbnail(id, ordinal, digest, size, signal)),
+    };
+  }
 }
 
 abstract class CanonicalHistoryReader {
@@ -1848,8 +1945,67 @@ abstract class CanonicalHistoryReader {
     return mounted.sort((a,b) => a.displayAfterEntrySequence-b.displayAfterEntrySequence || a.ownerId.localeCompare(b.ownerId));
   }
   abstract readonly sessionId: string;
+  protected get queuePath(): string { return `/api/sessions/${encodeURIComponent(this.sessionId)}/queue`; }
+  protected get historyPath(): string { return `/api/sessions/${encodeURIComponent(this.sessionId)}/history`; }
   protected abstract post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T>;
   protected abstract project(): RuntimeProjection;
+
+  async readQueuePage(cursor?: string, signal?: AbortSignal): Promise<{items: QueuedPrompt[]; nextCursor: string | null}> {
+    const page = await apiRequest<{items: NonNullable<ProtocolCanonicalControl['prompt_queue']>; next_cursor: string | null}>(
+      this.queuePath, {method:'POST', body:JSON.stringify(cursor ? {cursor} : {}), signal});
+    const current = [] as NonNullable<ProtocolCanonicalControl['prompt_queue']>;
+    const refreshed: QueuedPrompt[] = [];
+    for (const item of page.items) {
+      if (!item.queue_item_id) continue;
+      try {
+        await this.hydrateContentReference(item.content, {queue_item_id:item.queue_item_id}, '等待处理的输入暂时无法完整读取。', signal);
+      } catch (error) {
+        if (!(error instanceof RuntimeApiError) || error.code !== 'CONTENT_QUEUE_NOT_PENDING') throw error;
+        if (!await this.reconcileReadOnlyQueueItem(item.queue_item_id, signal)) continue;
+        const latest = await this.readQueueItem(item.queue_item_id, signal);
+        if (latest) refreshed.push(latest);
+        continue;
+      }
+      current.push(item);
+    }
+    this.rememberQueueContent({prompt_queue:current});
+    return {items:[...projectQueuedPrompts({prompt_queue:current}), ...refreshed].sort((a,b) => compareSequence(a.sequence,b.sequence)), nextCursor:page.next_cursor};
+  }
+
+  async readQueueItem(queueItemId: string, signal?: AbortSignal): Promise<QueuedPrompt | null> {
+    const result = await apiRequest<{item: (NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] & {consumed_entry_id?:string}) | null}>(
+      this.queuePath, {method:'POST', body:JSON.stringify({queue_item_id:queueItemId}), signal});
+    if (!result.item) { this.knownQueuedContent.delete(queueItemId); return null; }
+    if (result.item.queue_item_id !== queueItemId) throw new RuntimeApiError('PROMPT_TRANSITION_IDENTITY_INVALID', '等待处理的输入返回了不一致的身份。', true);
+    if (result.item.status !== 'PENDING') {
+      if (result.item.status === 'CONSUMED' && result.item.consumed_entry_id) {
+        await this.readLocatedEntry(result.item.consumed_entry_id, signal ?? new AbortController().signal);
+        this.changed();
+      } else if (result.item.status !== 'CONSUMED') this.knownQueuedContent.delete(queueItemId);
+      return null;
+    }
+    try {
+      await this.hydrateContentReference(result.item.content, {queue_item_id:queueItemId}, '等待处理的输入暂时无法完整读取。', signal);
+    } catch (error) {
+      if (!(error instanceof RuntimeApiError) || error.code !== 'CONTENT_QUEUE_NOT_PENDING') throw error;
+      if (await this.reconcileReadOnlyQueueItem(queueItemId, signal)) throw error;
+      return null;
+    }
+    this.rememberQueueContent({prompt_queue:[result.item]});
+    return projectQueuedPrompts({prompt_queue:[result.item]})[0] ?? null;
+  }
+
+  protected async reconcileReadOnlyQueueItem(queueItemId: string, signal?: AbortSignal): Promise<boolean> {
+    const result = await apiRequest<{item: (NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] & {consumed_entry_id?:string}) | null}>(
+      this.queuePath, {method:'POST', body:JSON.stringify({queue_item_id:queueItemId}), signal});
+    if (result.item && result.item.queue_item_id !== queueItemId) throw new RuntimeApiError('PROMPT_TRANSITION_IDENTITY_INVALID', '等待处理的输入返回了不一致的身份。', true);
+    if (!result.item || (result.item.status !== 'PENDING' && result.item.status !== 'CONSUMED')) this.knownQueuedContent.delete(queueItemId);
+    if (result.item?.status === 'CONSUMED' && result.item.consumed_entry_id) {
+      await this.readLocatedEntry(result.item.consumed_entry_id, signal ?? new AbortController().signal);
+      this.changed();
+    }
+    return result.item?.status === 'PENDING';
+  }
   protected pages: BrowserHistoryPage[] = [];
   private listeners = new Set<() => void>();
   private contentReads = new Map<string, Promise<void>>();
@@ -2003,12 +2159,12 @@ abstract class CanonicalHistoryReader {
     let changed = this.releaseSettledHistory(requested) || previousAnchor !== this.readingEntryId;
     const bodies = new Set([...requested, ...this.locatingEntries, ...this.transientHistoryEntries()]);
     for (const key of this.contentReads.keys()) bodies.add(key.replace(/:reasoning$/, ''));
-    for (const entry of this.entries.values()) if (entry.input_source?.command_id && entry.input_source.queue_item_id) {
-      const key = `${entry.input_source.command_id}:${entry.input_source.queue_item_id}`;
+    for (const entry of this.entries.values()) if (entry.input_source?.queue_item_id) {
+      const key = entry.input_source.queue_item_id;
       // Until the current control owner also observes consumption, retain the
       // accepted identity that suppresses its stale pending-queue projection.
-      if (this.control.prompt_queue?.some(item => item.command_id === entry.input_source!.command_id
-        && item.queue_item_id === entry.input_source!.queue_item_id && item.status === 'PENDING')) bodies.add(entry.entry_id);
+      if (this.control.prompt_queue?.some(item => item.queue_item_id === entry.input_source!.queue_item_id
+        && item.status === 'PENDING')) bodies.add(entry.entry_id);
       if (!this.knownQueuedContent.has(key)) continue;
       if (this.hasCanonicalContext(entry.entry_id) && (!requested.has(entry.entry_id) || this.entryContentState(entry.entry_id) === 'ready')) {
         this.knownQueuedContent.delete(key); changed = true;
@@ -2094,7 +2250,7 @@ abstract class CanonicalHistoryReader {
   protected disposeReader() { this.readerClosed = true; this.listeners.clear(); }
   protected historyPost<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T> {
     if (this.readerClosed) throw new RuntimeApiError('HISTORY_CLOSED', '会话已切换。', false);
-    return apiRequest<T>(`/api/sessions/${encodeURIComponent(this.sessionId)}/history/${suffix}`, {
+    return apiRequest<T>(`${this.historyPath}/${suffix}`, {
       method: 'POST', body: JSON.stringify(body), signal,
     });
   }
@@ -2450,8 +2606,8 @@ abstract class CanonicalHistoryReader {
       && membership.has(a) && membership.get(a) === membership.get(b);
   }
   protected rememberQueueContent(control: ProtocolCanonicalControl) {
-    for (const item of control.prompt_queue ?? []) if (item.command_id && item.queue_item_id && item.content?.inline_content !== undefined) {
-      this.knownQueuedContent.set(`${item.command_id}:${item.queue_item_id}`, decodePromptContent(item.content, {kind:'queue', queueItemId: item.queue_item_id}));
+    for (const item of control.prompt_queue ?? []) if (item.queue_item_id && item.content?.inline_content !== undefined) {
+      this.knownQueuedContent.set(item.queue_item_id, decodePromptContent(item.content, {kind:'queue', queueItemId: item.queue_item_id}));
     }
   }
   protected decorateHistory(messages: Message[]): Message[] {
@@ -2492,8 +2648,8 @@ abstract class CanonicalHistoryReader {
         && this.entryContentState(message.id) === 'ready' && message.contentState !== 'ready') {
         message.pendingAssistant = { body: message.body, reasoning: message.reasoning, traces: message.traces };
       }
-      if (message.inputSource) {
-        const key = `${message.inputSource.commandId}:${message.inputSource.queueItemId}`;
+      if (message.inputSource?.queueItemId) {
+        const key = message.inputSource.queueItemId;
         if (message.contentState === 'ready') this.knownQueuedContent.delete(key);
         else message.pendingContent = this.knownQueuedContent.get(key);
       }
@@ -2745,16 +2901,19 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
   readonly view = 'history';
   private closed = false;
   constructor(readonly sessionId: string, readonly availability: WorkspaceAvailability,
-              snapshot: ProtocolCanonicalSnapshot) {
+              snapshot: ProtocolCanonicalSnapshot, private readonly scopeKind: 'ROOT' | 'SUBAGENT' = 'ROOT',
+              private readonly historyRoot?: string, private readonly queueRoot?: string) {
     super();
     this.installTail(snapshot);
     this.control = snapshot.control ?? {};
     this.eventSequence = numeric(snapshot.event_sequence_cut);
     this.controlReadSequence = decimal(snapshot.event_sequence_cut ?? 0);
   }
+  protected get historyPath() { return this.historyRoot ?? super.historyPath; }
+  protected get queuePath() { return this.queueRoot ?? super.queuePath; }
   protected post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T> {
     if (this.closed) throw new RuntimeApiError('HISTORY_CLOSED', '会话已切换。', false);
-    return apiRequest(`/api/sessions/${encodeURIComponent(this.sessionId)}/history/${suffix}`, {
+    return apiRequest(`${this.historyPath}/${suffix}`, {
       method: 'POST', body: JSON.stringify(body), signal,
     });
   }
@@ -2766,22 +2925,49 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
   private async hydrateReadonlyQueue() {
     for (const item of this.control.prompt_queue ?? []) {
       try { await this.hydrateContentReference(item.content, {queue_item_id: item.queue_item_id!}, '待运行输入暂时无法读取。'); }
-      catch { /* An unavailable retired queue body does not resume a Host. */ }
+      catch (error) {
+        if (this.scopeKind === 'SUBAGENT' && item.queue_item_id
+          && error instanceof RuntimeApiError && error.code === 'CONTENT_QUEUE_NOT_PENDING') {
+          try { await this.reconcileReadOnlyQueueItem(item.queue_item_id); await this.refreshSnapshot(false); return; }
+          catch { /* Preserve the last known projection until a successful read. */ }
+        }
+      }
     }
+    this.rememberQueueContent(this.control);
     this.changed();
   }
   current(): RuntimeProjection { return this.project(); }
+  async snapshot(): Promise<RuntimeProjection> {
+    return this.refreshSnapshot(true);
+  }
+  private async refreshSnapshot(hydrate: boolean): Promise<RuntimeProjection> {
+    const frame = await this.post<{snapshot?: {snapshot?: ProtocolCanonicalSnapshot}; error?:ProtocolError}>('snapshot', {});
+    assertProtocolFrame(frame);
+    const snapshot = frame.snapshot?.snapshot;
+    if (!snapshot || snapshot.session_id !== this.sessionId) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '会话快照身份不一致。', true);
+    this.installTail(snapshot);
+    this.control = snapshot.control ?? {};
+    this.eventSequence = numeric(snapshot.event_sequence_cut);
+    this.controlReadSequence = decimal(snapshot.event_sequence_cut ?? 0);
+    if (hydrate) void this.hydrateReadonlyQueue();
+    this.changed();
+    return this.project();
+  }
+  async observe(signal?: AbortSignal): Promise<RuntimeProjection> {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+    return this.snapshot();
+  }
   async close() { this.closed = true; this.disposeReader(); }
   protected project(): RuntimeProjection {
     const canonical = [...this.entries.values()].sort((a,b) => numeric(a.entry_sequence) - numeric(b.entry_sequence));
     const sameWindow = this.windowJoinPredicate();
     const messages = projectEntries(canonical, new Set(), sameWindow);
-    const canonicalRootTurnIds = orderedRootTurnIdsFromEntries(canonical);
+    const canonicalTurnIds = orderedTurnIdsFromEntries(canonical, this.scopeKind);
     this.decorateHistory(messages);
     const readingMessages = this.readingMessages(messages);
-    return {messages: readingMessages, canonicalInputs: canonicalInputs(messages), history: this.presentationHistory(readingMessages), interruptionNotices: this.projectInterruptionNotices(readingMessages), canonicalRootTurnIds,
+    return {messages: readingMessages, canonicalInputs: canonicalInputs(messages), history: this.presentationHistory(readingMessages), interruptionNotices: this.projectInterruptionNotices(readingMessages), canonicalTurnIds,
       presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
-      initialContextBase: this.control.initial_context_base, isRunning: false,
+      initialContextBase: this.control.initial_context_base, isRunning: this.scopeKind === 'SUBAGENT' && Boolean(this.control.active_turns?.length),
       queuedCount: numeric(this.control.prompt_queue_total_count), queuedPrompts: projectQueuedPrompts(this.control),
       promptTransitions: [], planMode: Boolean(this.control.active_plan_workflow),
       control: this.control, liveControl: {}, todo: undefined, eventSequence: this.eventSequence,
@@ -2790,6 +2976,7 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
 }
 
 class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeConnection {
+  readonly view = 'live' as const;
   readonly availability: WorkspaceAvailability;
   readonly sessionId: string;
   readonly role: 'observer' | 'controller';
@@ -2875,7 +3062,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     return {'X-Pulsara-Connection-Id': this.connectionId, 'X-Pulsara-Connection-Generation': String(this.generation)};
   }
 
-  constructor(payload: ConnectPayload) {
+  constructor(payload: ConnectPayload, private readonly scopeKind: 'ROOT' | 'SUBAGENT' = 'ROOT',
+              private readonly historyRoot?: string, private readonly queueRoot?: string) {
     super();
     this.availability = payload.workspace_availability;
     this.connectionId = payload.connection_id;
@@ -2891,6 +3079,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.liveRevision = numeric(payload.live_hello.live_revision ?? live.through_revision);
     this.applyLive(live.events ?? [], live.settlements ?? []);
   }
+  protected get historyPath() { return this.historyRoot ?? super.historyPath; }
+  protected get queuePath() { return this.queueRoot ?? super.queuePath; }
 
   readonly filePreview: FilePreviewApi = {
     open: (path, basePreview, readingRoot) => this.previewRequest('', { path, base_preview: basePreview, reading_root: readingRoot }),
@@ -2933,7 +3123,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
   snapshot(): Promise<RuntimeProjection> {
     return this.ordered(async () => {
-      const frame = await apiRequest<{snapshot?: {snapshot?: ProtocolCanonicalSnapshot}; error?: ProtocolError}>(`/api/sessions/${encodeURIComponent(this.sessionId)}/history-snapshot`);
+      const frame = this.historyRoot
+        ? await this.historyPost<{snapshot?: {snapshot?: ProtocolCanonicalSnapshot}; error?: ProtocolError}>('snapshot', {})
+        : await apiRequest<{snapshot?: {snapshot?: ProtocolCanonicalSnapshot}; error?: ProtocolError}>(`/api/sessions/${encodeURIComponent(this.sessionId)}/history-snapshot`);
       assertProtocolFrame(frame);
       const snapshot = frame.snapshot?.snapshot;
       if (!snapshot) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务返回的数据不完整。', true);
@@ -3569,12 +3761,17 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   ): Promise<void> {
     const commandId = item.command_id ?? '';
     const queueItemId = item.queue_item_id ?? '';
-    if (!commandId || !queueItemId) {
+    if (!queueItemId) {
       throw new RuntimeApiError(
         'PROMPT_TRANSITION_IDENTITY_INVALID',
         '等待处理的输入缺少可核对的身份。',
         true,
       );
+    }
+    if (!commandId) {
+      await this.reconcileReadOnlyQueueItem(queueItemId);
+      await this.snapshot();
+      return;
     }
     const consumed = [...this.entries.values()].some((entry) => (
       entry.input_source?.command_id === commandId
@@ -3779,13 +3976,13 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       if (settlement.channel_kind?.includes('TOOL_RESULT')) {
         for (const [key, result] of this.liveResults) {
           if (!this.liveResultMatches(result, settlement)) continue;
-          if (result.scopeKind === 'ROOT' && settlement.kind === 'LIVE_GENERATION_COMMITTED' && settlement.committed_entry_id) {
+          if (result.scopeKind === this.scopeKind && settlement.kind === 'LIVE_GENERATION_COMMITTED' && settlement.committed_entry_id) {
             result.committedEntryId = settlement.committed_entry_id;
           } else this.liveResults.delete(key);
         }
       } else if (identity) {
         const draft = this.drafts.get(identity);
-        if (draft?.scopeKind === 'ROOT' && settlement.kind === 'LIVE_GENERATION_COMMITTED' && settlement.committed_entry_id) {
+        if (draft?.scopeKind === this.scopeKind && settlement.kind === 'LIVE_GENERATION_COMMITTED' && settlement.committed_entry_id) {
           // Keep already displayed bytes through the asynchronous history read.
           // The exact SDK settlement supplies the binding; this is no live run.
           draft.committedEntryId = settlement.committed_entry_id;
@@ -3916,7 +4113,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       canonical,
       activeTurnIds, sameWindow,
     );
-    const canonicalRootTurnIds = orderedRootTurnIdsFromEntries(canonical);
+    const canonicalTurnIds = orderedTurnIdsFromEntries(canonical, this.scopeKind);
     for (const draft of visibleDrafts) {
       messages.push({
         id: `live:${draft.id}`,
@@ -3953,7 +4150,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const hasActiveDraft = visibleDrafts.length > 0;
     const manualCommandId = this.liveControl.manual_compaction_command_id;
     const activeTurn = manualCommandId ? undefined : this.control.active_turns?.[0];
-    const todo = projectTodo(this.liveControl);
+    const todo = projectTodo(this.liveControl, this.scopeKind);
     const interaction = projectInteraction(this.liveControl, this.control);
     const readingMessages = this.readingMessages(messages);
     return {
@@ -3961,13 +4158,13 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       canonicalInputs: canonicalInputs(messages),
       history: this.presentationHistory(readingMessages),
       interruptionNotices: this.projectInterruptionNotices(readingMessages),
-      canonicalRootTurnIds,
+      canonicalTurnIds,
       presentationNotices: this.presentationNotices,
       contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base,
       isRunning: !manualCommandId && (Boolean(this.liveControl.active_root_turn_id) || Boolean(activeTurn) || hasActiveDraft),
       queuedCount: numeric(this.control.prompt_queue_total_count),
-      queuedPrompts: projectQueuedPrompts(this.control).filter(item => !['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.commandId)?.status ?? '') && !canonical.some(entry => entry.input_source?.command_id === item.commandId && entry.input_source.queue_item_id === item.queueItemId)),
+      queuedPrompts: projectQueuedPrompts(this.control).filter(item => !(item.sourceKind === 'command' && ['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.commandId)?.status ?? '')) && !canonical.some(entry => entry.input_source?.queue_item_id === item.queueItemId)),
       promptTransitions: this.projectPromptTransitions(),
       planMode: Boolean(
         this.control.active_plan_workflow
@@ -4527,13 +4724,8 @@ function projectEntries(
           ? continuationBody ?? ''
           : promptContent ? promptContentTextProjection(promptContent) : '',
         promptContent,
-        inputSource: entry.input_source?.queue_item_id && entry.input_source.command_id
-          ? {
-            queueItemId: entry.input_source.queue_item_id,
-            commandId: entry.input_source.command_id,
-            deliveryMode: deliveryMode(entry.input_source.delivery_mode),
-          }
-          : undefined,
+        inputOrigin: entry.input_origin || undefined,
+        inputSource: projectInputSource(entry.input_source, entry.input_origin),
       });
       continue;
     }
@@ -4763,18 +4955,48 @@ function deliveryMode(value?: string): 'new-turn' | 'steer' {
   return value === 'STEER_ACTIVE_TURN' ? 'steer' : 'new-turn';
 }
 
+type InputSourceIdentity =
+  | { sourceKind: 'command'; commandId: string }
+  | { sourceKind: 'agent'; sourceSessionId?: string; sourceWorkId?: string }
+  | { sourceKind: 'system' };
+
+function inputSourceIdentity(
+  item: { command_id?: string; source_session_id?: string; source_work_id?: string },
+  origin?: string,
+): InputSourceIdentity {
+  if (item.command_id) return {sourceKind: 'command', commandId: item.command_id};
+  if (origin?.startsWith('AGENT_') || item.source_session_id || item.source_work_id) {
+    return {sourceKind: 'agent', sourceSessionId: item.source_session_id || undefined,
+      sourceWorkId: item.source_work_id || undefined};
+  }
+  return {sourceKind: 'system'};
+}
+
+function projectInputSource(
+  item: ProtocolEntry['input_source'], origin?: string,
+): Message['inputSource'] {
+  if (!item) return undefined;
+  const identity = inputSourceIdentity(item, origin);
+  const mode = deliveryMode(item.delivery_mode);
+  if (item.queue_item_id) return {identityKind:'queue', queueItemId:item.queue_item_id, deliveryMode:mode, ...identity};
+  if (identity.sourceKind === 'command') return {identityKind:'revision', deliveryMode:mode, ...identity};
+  if (identity.sourceKind === 'agent') return {identityKind:'origin', deliveryMode:mode, ...identity};
+  return undefined;
+}
+
 function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[] {
   return [...(control.prompt_queue ?? [])]
-    .filter((item) => item.queue_item_id && item.command_id && item.status === 'PENDING')
-    .sort((left, right) => numeric(left.queue_sequence) - numeric(right.queue_sequence))
+    .filter((item) => item.queue_item_id && item.status === 'PENDING')
+    .sort((left, right) => compareSequence(left.queue_sequence, right.queue_sequence))
     .map((item) => {
       const queueItemId = item.queue_item_id!;
       return {
         queueItemId,
-        commandId: item.command_id!,
-        sequence: numeric(item.queue_sequence),
+        ...inputSourceIdentity(item, item.input_origin),
+        sequence: decimal(item.queue_sequence),
         status: 'pending' as const,
         inputOrigin: item.input_origin,
+        waitingOn: item.waiting_on?.length ? item.waiting_on : undefined,
         deliveryMode: deliveryMode(item.delivery_mode),
         targetTurnId: item.target_turn_id || undefined,
         content: item.content?.inline_content !== undefined ? decodePromptContent(item.content, { kind: 'queue', queueItemId }) : {parts: []},
@@ -4949,9 +5171,9 @@ function terminalCommand(name: string, content: string): string | undefined {
   return undefined;
 }
 
-function projectTodo(control: ProtocolLiveControlSnapshot): TodoRun | undefined {
+function projectTodo(control: ProtocolLiveControlSnapshot, scopeKind: 'ROOT' | 'SUBAGENT'): TodoRun | undefined {
   const run = control.current_todos?.find((item) => (
-    item.scope_kind === 'ROOT' && item.disposition !== 'CLOSED'
+    item.scope_kind === scopeKind && item.disposition !== 'CLOSED'
   ));
   if (!run?.ordered_items?.length) return undefined;
   return {
@@ -5024,11 +5246,11 @@ function projectInteraction(
   return undefined;
 }
 
-function orderedRootTurnIdsFromEntries(entries: ProtocolEntry[]): string[] {
+function orderedTurnIdsFromEntries(entries: ProtocolEntry[], scopeKind: 'ROOT' | 'SUBAGENT'): string[] {
   const seen = new Set<string>();
   const ordered: string[] = [];
   for (const entry of entries) {
-    if (entry.scope_kind !== 'ROOT' || !entry.turn_id || seen.has(entry.turn_id)) continue;
+    if (entry.scope_kind !== scopeKind || !entry.turn_id || seen.has(entry.turn_id)) continue;
     seen.add(entry.turn_id);
     ordered.push(entry.turn_id);
   }

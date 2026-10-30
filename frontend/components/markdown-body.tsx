@@ -272,9 +272,9 @@ function MarkdownLink({ href = '', children, onNotify }: { href?: string; childr
   if (kind === 'external') return <a href={href} target="_blank" rel="noreferrer" onClick={event => {
     if (!/^https?:/i.test(href)) return;
     if (context?.basePreview) { event.preventDefault(); context.open(href, event.currentTarget, context.basePreview, event.metaKey || event.ctrlKey); }
-    else if (workspace?.visible && workspace.sessionId) {
+    else if (workspace?.visible) {
       event.preventDefault();
-      try { workspace.browserTabs.open(workspace.sessionId, href, { newTab: event.metaKey || event.ctrlKey }); }
+      try { workspace.browserTabs.open(href, { newTab: event.metaKey || event.ctrlKey }); }
       catch (error) { onNotify('无法打开网页', String(error instanceof Error ? error.message : error), 'warning'); }
     }
   }}>{content}</a>;

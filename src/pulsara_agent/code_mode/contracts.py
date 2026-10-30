@@ -3,12 +3,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import asyncio
-from typing import Awaitable, Callable, Literal, Mapping
+from typing import Awaitable, Callable, Literal, Mapping, Protocol
 
 from pulsara_agent.primitives.tool_observation import MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
 from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 
 from .targets import cell_target, cell_target_schema
+
+
+CellParticipationKind = Literal["query", "wait", "message", "stop"]
+CellParticipationReference = tuple[str, str | None, CellParticipationKind]
+
+
+class CellParticipationObserver(Protocol):
+    def observe_agent_participation(
+        self, cell_id: str, references: tuple[CellParticipationReference, ...],
+    ) -> None: ...
+
+    def mark_cell_participation_incomplete(self, cell_id: str) -> None: ...
 
 
 def _object_schema(properties: dict[str, object], required: list[str]) -> dict[str, object]:

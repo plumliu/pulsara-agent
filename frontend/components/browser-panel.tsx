@@ -38,7 +38,7 @@ export function BrowserPanel({ record, tabs, isOpen }: { record: BrowserTabRecor
       <button type="button" title="在系统浏览器打开" aria-label="在系统浏览器打开" disabled={!state?.url} onClick={() => { void host?.openExternal(state?.url || '').catch(error => setMessage(error.message)); }}><ExternalLink size={14} /></button>
     </form>
     {notice && <div className="browser-notice" role="status">{notice}</div>}
-    {record.popup && <div className="browser-notice"><button type="button" onClick={() => { const url = record.popup; record.popup = undefined; if (url) tabs.open(record.sessionId, url, { newTab: true }); }}>有新页面，点击打开</button></div>}
+    {record.popup && <div className="browser-notice"><button type="button" onClick={() => { const url = record.popup; record.popup = undefined; if (url) tabs.open(url, { newTab: true }); }}>有新页面，点击打开</button></div>}
     <div ref={slot} className="browser-viewport">
       {state?.crashed || failed ? <div className="browser-empty" role="status"><strong>{state?.crashed ? '网页已停止响应' : '无法打开网页'}</strong><p>{failed}</p><small>{state?.error?.url || actualUrl || draft}</small><button type="button" onClick={() => { if (!state && !draft) void tabs.create(record); else navigate(state?.error?.url || actualUrl || draft); }}>重试</button></div>
       : !actualUrl ? <div className="browser-empty"><Globe size={28}/><strong>打开网页</strong><p>在上方输入网址。</p></div> : null}

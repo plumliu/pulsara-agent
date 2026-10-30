@@ -167,6 +167,7 @@ class RendererBridge:
         self.file_previews = FilePreviews()
         self._controller_by_session: dict[str, str] = {}
         self._browser_instance_by_connection: dict[str, str] = {}
+        self._agent_reader_targets: dict[str, tuple[str, str, str]] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._session_gate_users: dict[str, int] = {}
         self._quarantined_sessions: set[str] = set()
@@ -190,17 +191,28 @@ class RendererBridge:
             async with session_lock:
                 yield
         finally:
-            async with self._lock:
-                remaining = self._session_gate_users.get(session_id, 1) - 1
-                if remaining > 0:
-                    self._session_gate_users[session_id] = remaining
-                else:
-                    self._session_gate_users.pop(session_id, None)
-                    if not any(
-                        connection.session_id == session_id
-                        for connection in self._connections.values()
-                    ):
-                        self._session_locks.pop(session_id, None)
+            async def release_gate():
+                async with self._lock:
+                    remaining = self._session_gate_users.get(session_id, 1) - 1
+                    if remaining > 0:
+                        self._session_gate_users[session_id] = remaining
+                    else:
+                        self._session_gate_users.pop(session_id, None)
+                        if not any(
+                            connection.session_id == session_id
+                            for connection in self._connections.values()
+                        ):
+                            self._session_locks.pop(session_id, None)
+            cleanup = asyncio.create_task(release_gate())
+            cancelled = None
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as error:
+                    cancelled = error
+            cleanup.result()
+            if cancelled is not None:
+                raise cancelled
 
     async def connect(
         self,
@@ -300,10 +312,74 @@ class RendererBridge:
                 await connection.aclose()
                 raise
 
+    async def open_agent_reader(self, root_session_id: str, agent_session_id: str,
+                                *, browser_instance_id: str) -> dict[str, object]:
+        published = []
+        try:
+            return await self._open_agent_reader(root_session_id, agent_session_id,
+                browser_instance_id=browser_instance_id, published=published)
+        except BaseException:
+            if published:
+                cleanup = asyncio.create_task(self.disconnect(published[0]))
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        pass
+                cleanup.result()
+            raise
+
+    async def _open_agent_reader(self, root_session_id: str, agent_session_id: str,
+                                 *, browser_instance_id: str, published: list[str]) -> dict[str, object]:
+        if not browser_instance_id:
+            raise ValueError("browser_instance_id is required")
+        async with self._session_gate(agent_session_id):
+            await self.sessions.authorize_agent_reader(root_session_id, agent_session_id)
+            target = (browser_instance_id, root_session_id, agent_session_id)
+            async with self._lock:
+                previous = [identity for identity, value in self._agent_reader_targets.items() if value == target]
+            for identity in previous:
+                await self.disconnect(identity)
+            core = self.sessions.core
+            live = core._live_agent_session(agent_session_id)
+            if live is None or live.root_session_id != root_session_id:
+                snapshot = await self.sessions.history_snapshot(agent_session_id)
+                await self.sessions.authorize_agent_reader(root_session_id, agent_session_id)
+                return {"view": "history", "session_id": agent_session_id,
+                        "snapshot": protobuf_json(snapshot),
+                        "workspace_availability": await self.sessions.workspace_availability(root_session_id)}
+            async with self._lock:
+                if self._closing:
+                    raise RuntimeError("Desktop application is draining")
+                self._next_generation += 1
+                generation = self._next_generation
+            connection = await BrowserRuntimeConnection.open(
+                server=self.protocol_server, session_id=agent_session_id,
+                host_session_id=live.host_session_id, generation=generation, role="observer")
+            connection._agent_reader_target = target
+            try:
+                await self.sessions.authorize_agent_reader(root_session_id, agent_session_id)
+                if core._live_agent_session(agent_session_id) is not live:
+                    raise ProtocolTransportClosed()
+                async with self._lock:
+                    if self._closing:
+                        raise RuntimeError("Desktop application is draining")
+                    self._connections[connection.connection_id] = connection
+                    self._agent_reader_targets[connection.connection_id] = target
+                    self._browser_instance_by_connection[connection.connection_id] = browser_instance_id
+                    published.append(connection.connection_id)
+                return {"view": "live", **self._connection_payload(connection),
+                        "host_session_id": live.host_session_id,
+                        "workspace_availability": observe_workspace(live.workspace.workspace_root).to_dict()}
+            except BaseException:
+                await connection.aclose()
+                raise
+
     async def disconnect(self, connection_id: str) -> None:
         self.file_previews.revoke(connection_id)
         async with self._lock:
             connection = self._connections.pop(connection_id, None)
+            self._agent_reader_targets.pop(connection_id, None)
             self._browser_instance_by_connection.pop(connection_id, None)
             if (
                 connection is not None
@@ -388,6 +464,7 @@ class RendererBridge:
             for connection in connections:
                 self.file_previews.revoke(connection.connection_id)
                 self._connections.pop(connection.connection_id, None)
+                self._agent_reader_targets.pop(connection.connection_id, None)
                 self._browser_instance_by_connection.pop(connection.connection_id, None)
                 if (
                     self._controller_by_session.get(operation.session_id)
@@ -576,7 +653,7 @@ class RendererBridge:
                 maximum_control_items=MAXIMUM_CONTROL_ITEMS,
             ),
         )
-        return protobuf_json(frame)
+        return await self._reader_reply(connection_id, connection, frame)
 
     async def history(
         self, connection_id: str, body: dict[str, object]
@@ -606,9 +683,8 @@ class RendererBridge:
                 maximum=8 << 20,
             ),
         )
-        return protobuf_json(
-            await connection.controller.request("history_page", request)
-        )
+        return await self._reader_reply(connection_id, connection,
+            await connection.controller.request("history_page", request))
 
     async def observe(
         self, connection_id: str, body: dict[str, object]
@@ -649,15 +725,13 @@ class RendererBridge:
                 "after_live_control_revision",
             ),
         )
-        return protobuf_json(await connection.observer.request("observe", request))
+        return await self._reader_reply(connection_id, connection,
+            await connection.observer.request("observe", request))
 
     async def live_control_snapshot(self, connection_id: str) -> dict[str, object]:
         connection = await self._connection(connection_id)
-        return protobuf_json(
-            await connection.observer.request(
-                "live_control_snapshot", wire.LiveControlSnapshotRequest()
-            )
-        )
+        return await self._reader_reply(connection_id, connection,
+            await connection.observer.request("live_control_snapshot", wire.LiveControlSnapshotRequest()))
 
     async def command(
         self, connection_id: str, body: dict[str, object]
@@ -856,9 +930,8 @@ class RendererBridge:
                 body["visualization_ordinal"], "visualization_ordinal"
             )
         setattr(request, targets[0], body[targets[0]])
-        return protobuf_json(
-            await connection.controller.request("read_content", request)
-        )
+        return await self._reader_reply(connection_id, connection,
+            await connection.controller.request("read_content", request))
 
     async def read_tool_artifact(
         self, connection_id: str, body: dict[str, object]
@@ -874,9 +947,8 @@ class RendererBridge:
                 maximum=32_000,
             ),
         )
-        return protobuf_json(
-            await connection.controller.request("read_tool_artifact", request)
-        )
+        return await self._reader_reply(connection_id, connection,
+            await connection.controller.request("read_tool_artifact", request))
 
     async def list_background_processes(
         self, connection_id: str, body: dict[str, object]
@@ -1096,10 +1168,17 @@ class RendererBridge:
             self._connections.clear()
             self._controller_by_session.clear()
             self._browser_instance_by_connection.clear()
+            self._agent_reader_targets.clear()
         await asyncio.gather(
             *(connection.aclose() for connection in connections),
             return_exceptions=True,
         )
+
+    async def _reader_reply(self, connection_id, connection, frame):
+        if hasattr(connection, "_agent_reader_target"):
+            if await self._connection(connection_id) is not connection:
+                raise ProtocolTransportClosed()
+        return protobuf_json(frame)
 
     async def _connection(self, connection_id: str) -> BrowserRuntimeConnection:
         stale: BrowserRuntimeConnection | None = None
@@ -1110,6 +1189,7 @@ class RendererBridge:
             if connection is not None and not connection.is_open:
                 self.file_previews.revoke(connection_id)
                 stale = self._connections.pop(connection_id)
+                self._agent_reader_targets.pop(connection_id, None)
                 self._browser_instance_by_connection.pop(connection_id, None)
                 if (
                     self._controller_by_session.get(connection.session_id)
@@ -1122,6 +1202,18 @@ class RendererBridge:
             raise ProtocolTransportClosed()
         if connection is None:
             raise KeyError(connection_id)
+        target = self._agent_reader_targets.get(connection_id)
+        if target is not None:
+            _, root_id, agent_id = target
+            try:
+                await self.sessions.authorize_agent_reader(root_id, agent_id)
+            except KeyError:
+                await self.disconnect(connection_id)
+                raise
+            live = self.sessions.core._live_agent_session(agent_id)
+            if live is None or live.host_session_id != connection.host_session_id or live.root_session_id != root_id:
+                await self.disconnect(connection_id)
+                raise ProtocolTransportClosed()
         if self.sessions.host_writer_unavailable(connection.host_session_id):
             raise ProtocolBridgeError("SESSION_WRITER_UNAVAILABLE", "连接已中断，正在恢复会话。")
         return connection

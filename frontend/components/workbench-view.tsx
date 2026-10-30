@@ -3,7 +3,7 @@ import { parsePresentationResult } from '../lib/presentation-targets';
 import { PresentationResult } from './presentation-result';
 import { desktopHost, writeClipboardText } from '../lib/desktop-host';
 
-import { collectHistoryResidence, waitForHistoryEntry } from '../lib/history-dom';
+import { captureHistoryAnchor, collectHistoryResidence, restoreHistoryAnchor, waitForHistoryEntry, type HistoryReadingAnchor } from '../lib/history-dom';
 import { ThreadFollowController } from '../lib/thread-follow-controller';
 import { splitSkillReferences } from '../lib/skill-reference';
 
@@ -79,6 +79,7 @@ import {
 import { TurnInterruptionHistoryNotice } from './turn-interruption-notice';
 import { WorkspaceRecoveryDock } from './workspace-recovery-dock';
 import type { TurnInterruptionNotice } from '../lib/runtime-adapter';
+import { compareSequence } from '../lib/runtime-adapter';
 import { ContextUsageIndicator } from './context-usage-indicator';
 import type {
   ContextUsagePreview,
@@ -100,7 +101,7 @@ import type {
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
-import { AnnotationBody, ResponseAnnotations } from './response-annotations';
+import { AnnotationBody, AnnotationReader, ResponseAnnotations } from './response-annotations';
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { WelcomeTypewriter } from './welcome-typewriter';
@@ -153,6 +154,8 @@ interface WorkbenchViewProps {
   inspectorOpen: boolean;
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
+  queueNextCursor?: string | null;
+  onLoadMoreQueue?: () => void;
   localSubmissions: LocalPromptSubmission[];
   queueActions: QueuedPromptAction[];
   onQueueAction: (item: QueuedPrompt, kind: QueuedPromptAction['kind']) => Promise<void>;
@@ -731,6 +734,7 @@ function TodoDock({
   onLayoutChange: () => void;
 }) {
   const [open, setOpen] = useState(true);
+  const todoListId = useId();
   const containerRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLElement>(null);
   const items = todo?.items ?? [];
@@ -785,7 +789,7 @@ function TodoDock({
         <section
           ref={popoverRef}
           className="todo-dock__popover"
-          id="current-todo-list"
+          id={todoListId}
           aria-label="TODO清单"
           aria-live="polite"
           onAnimationEnd={onLayoutChange}
@@ -816,7 +820,7 @@ function TodoDock({
         onClick={() => setOpen((value) => !value)}
         disabled={interactionOpen}
         aria-expanded={expanded}
-        aria-controls="current-todo-list"
+        aria-controls={todoListId}
         aria-label={expanded ? '收起TODO清单' : '展开TODO清单'}
         title={interactionOpen ? '完成当前确认后可查看清单' : undefined}
       >
@@ -891,6 +895,12 @@ const unavailableVisualization = async (): Promise<string> => {
   throw new Error('Visualization content reader is unavailable');
 };
 
+function pendingSteerSender(item: QueuedPrompt): { label: string; senderKind: 'user' | 'agent' } {
+  if (item.sourceKind === 'command') return { label: '你', senderKind: 'user' };
+  if (item.sourceKind === 'agent') return { label: item.sourceSessionId ? `代理 ${item.sourceSessionId}` : '代理消息', senderKind: 'agent' };
+  return { label: '运行时', senderKind: 'agent' };
+}
+
 function UserMessage({
   message,
   label = '你',
@@ -919,13 +929,22 @@ function UserMessage({
       () => onNotify('无法复制消息', '系统剪贴板暂时不可用，请重试'),
     ); }}><Copy size={13} /></button>;
 
+  if (message.inputOrigin === 'AGENT_MATERIAL') {
+    return <article className="agent-input-material" aria-label="任务材料">
+      <strong>任务材料</strong>{copyButton}
+      {content ? <PromptContentView content={content} variant="message" onReadImage={onReadPromptImage} />
+        : <p style={sourceTextStyle}>{message.body}</p>}
+    </article>;
+  }
+
   if (message.userKind === 'steer') {
     const renderSteerBubble = (body: ReactNode) => body ? <div className="user-message">{body}</div> : null;
     return <article className="user-turn user-steer" aria-label="引导">
-      <header className="user-steer__heading"><strong>引导</strong><CornerDownLeft size={13} aria-hidden="true" />{copyButton}</header>
+      <header className="user-steer__heading"><strong>{label === '你' ? '引导' : `${label} · 引导`}</strong><CornerDownLeft size={13} aria-hidden="true" />{copyButton}</header>
       {content ? <PromptContentView content={content} variant="message"
         onReadImage={onReadPromptImage} renderMessageBody={renderSteerBubble} />
         : renderSteerBubble(<p style={sourceTextStyle}>{message.body}</p>)}
+      {deliveryStatus && <span role="status">{deliveryStatus}</span>}
     </article>;
   }
 
@@ -1407,6 +1426,10 @@ export function ConversationMessages({
     : undefined;
   const renderMessage = (message: Message, startsRun: boolean, visible = true) => {
     const pendingContent = knownPromptContent(message);
+    const inputLabel = message.inputOrigin === 'AGENT_INSTRUCTION' ? 'ROOT'
+      : message.inputOrigin === 'AGENT_MATERIAL' ? '任务材料'
+        : message.inputOrigin === 'AGENT_MESSAGE' ? (message.inputSource?.sourceKind === 'agent' && message.inputSource.sourceSessionId ? `代理 ${message.inputSource.sourceSessionId}` : '代理消息') : userLabel;
+    const inputSender = message.inputOrigin?.startsWith('AGENT_') ? 'agent' : userSenderKind;
     const assistant = (value: Message, preview = false) => <AssistantMessage message={value}
       responseActionEligible={!preview && isCompleteAnswer(value)} startsAssistantRun={startsRun}
       joinsPreviousToolChain={toolChainConnections.before.has(value.id)}
@@ -1422,9 +1445,9 @@ export function ConversationMessages({
     }, true);
     return <HistoryMessageHost key={message.id} message={message}
       contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
-      ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onNotify={onNotify} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
+      ? <UserMessage message={message} label={inputLabel} senderKind={inputSender} onNotify={onNotify} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
       {message.role === 'user'
-        ? <UserMessage message={message} label={userLabel} senderKind={userSenderKind} onNotify={onNotify} onReadPromptImage={onReadPromptImage} visible={visible} />
+        ? <UserMessage message={message} label={inputLabel} senderKind={inputSender} onNotify={onNotify} onReadPromptImage={onReadPromptImage} visible={visible} />
         : assistant(message)}
     </HistoryMessageHost>;
   };
@@ -1775,6 +1798,499 @@ function DraftSkillOptions({ store, sessionId, skills, disabled, onSelect }: {
   })}</div>;
 }
 
+export interface AgentReadingState {
+  choices: Map<string, boolean>;
+  anchor?: HistoryReadingAnchor;
+}
+
+interface ConversationReadingOptions extends Pick<WorkbenchViewProps,
+  'history' | 'onLoadHistory' | 'onReadLatestHistory' | 'onReadProcessEnd' | 'onRetainHistory' | 'onLocateAnnotation' | 'onNotify' | 'messages' | 'activeTurnId'> {
+  sessionId: string;
+  savedState?: AgentReadingState;
+}
+
+function useConversationReading({ sessionId, history, onLoadHistory, onReadLatestHistory,
+  onReadProcessEnd, onRetainHistory, onLocateAnnotation, onNotify, messages, activeTurnId,
+  savedState }: ConversationReadingOptions) {
+  const [latestVisible, setLatestVisible] = useState(true);
+  const centeringEntryRef = useRef(false);
+  const threadRef = useRef<HTMLDivElement>(null);
+  const touchPosition = useRef<number | undefined>(undefined);
+  // Page context provides exact marker hosts. A latest control summary alone
+  // cannot place a boundary inside a partially loaded history window.
+  const [locatedFocus, setLocatedFocus] = useState<LocatedEntry>();
+  const currentSessionRef = useRef(sessionId);
+  const currentHistory = useRef(history); currentHistory.current = history;
+  const atLatestHistory = history?.atLatest !== false;
+  const readingOwner = history?.readingOwner;
+  const [jumpingToLatest, setJumpingToLatest] = useState(false);
+  const latestInstallCheck = useRef<(() => void) | undefined>(undefined);
+  useLayoutEffect(() => { latestInstallCheck.current?.(); });
+  const locateRequest = useRef<AbortController | undefined>(undefined);
+  const automaticProcessRead = useRef<{ request: AbortController; turnId?: string } | undefined>(undefined);
+  const loadRequests = useRef(new Map<string, Promise<void>>());
+  const [revealEarlierProcess, setRevealEarlierProcess] = useState<{ key: string }>();
+  const olderReadIntent = useRef(false);
+  const olderAutoRequest = useRef<{ owner?: object; windowId?: string; firstEntryId?: string } | undefined>(undefined);
+  const checkOlderBoundary = useRef<() => void>(() => {});
+  const follow = useMemo(() => new ThreadFollowController(
+    () => currentSessionRef.current === sessionId ? threadRef.current : null,
+    () => currentHistory.current?.atLatest !== false && !(currentHistory.current?.loading && !currentHistory.current.windows.length),
+    setLatestVisible,
+    () => { locateRequest.current?.abort(); setJumpingToLatest(false); },
+    () => checkOlderBoundary.current(),
+  ), [sessionId]);
+  const resetReading = useCallback(() => follow.read(), [follow]);
+  const restoreReadingPosition = useCallback(() => follow.coordinate(), [follow]);
+  const beginUserScroll = useCallback((towardLatest = false) => {
+    olderReadIntent.current = !towardLatest;
+    olderAutoRequest.current = undefined;
+    follow.input(towardLatest ? 'down' : 'up');
+  }, [follow]);
+  useLayoutEffect(() => {
+    currentSessionRef.current = sessionId;
+    follow.activate();
+    locatingEntry.current = undefined;
+    loadRequests.current.clear();
+    olderReadIntent.current = false;
+    olderAutoRequest.current = undefined;
+    setRevealEarlierProcess(undefined);
+    return () => { locateRequest.current?.abort(); follow.dispose(); };
+  }, [sessionId, follow]);
+  const loadHistory = useCallback((windowId?: string, direction: 'older' | 'newer' = 'older'): Promise<void> => {
+    if (!onLoadHistory) return Promise.resolve();
+    locateRequest.current?.abort();
+    setJumpingToLatest(false);
+    // Reveal only the resident slice at the top, without navigating back to
+    // its final. Then normal paging exposes earlier steps instead of silently
+    // draining an arbitrarily long folded turn from the database.
+    const closed = threadRef.current?.querySelector<HTMLButtonElement>('[data-process-edge="bottom"][data-process-earlier="true"][aria-expanded="false"]');
+    if (direction === 'older' && closed?.dataset.processKey) {
+      olderReadIntent.current = true;
+      resetReading();
+      follow.anchor = undefined;
+      setRevealEarlierProcess({ key: closed.dataset.processKey });
+      return Promise.resolve();
+    }
+    const key = `${sessionId}:${windowId ?? ''}:${direction}`;
+    const existing = loadRequests.current.get(key);
+    if (existing) return existing;
+    resetReading();
+    const before = currentHistory.current?.windows[0]?.firstEntryId;
+    const owner = currentHistory.current?.readingOwner;
+    const request = Promise.resolve().then(() => onLoadHistory(windowId, direction)).finally(() => {
+      if (loadRequests.current.get(key) === request) loadRequests.current.delete(key);
+      // A synchronous page/context publication can precede promise settlement.
+      // Resume only after actual edge progress; errors remain explicit retries.
+      if (currentSessionRef.current === sessionId && currentHistory.current?.readingOwner === owner && direction === 'older'
+        && currentHistory.current?.windows[0]?.firstEntryId !== before) checkOlderBoundary.current();
+    });
+    loadRequests.current.set(key, request);
+    return request;
+  }, [onLoadHistory, resetReading, sessionId, follow]);
+  const locateAnnotation = useCallback(async (entryId: string, signal: AbortSignal) => {
+    if (signal.aborted || currentSessionRef.current !== sessionId) throw new DOMException('定位已取消', 'AbortError');
+    locateRequest.current?.abort();
+    setJumpingToLatest(false);
+    const request = new AbortController(); locateRequest.current = request;
+    const abort = () => request.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) request.abort();
+    const owner = sessionId;
+    olderReadIntent.current = false;
+    setRevealEarlierProcess(undefined);
+    locatingEntry.current = entryId;
+    resetReading();
+    try {
+      if (onLocateAnnotation) await onLocateAnnotation(entryId, request.signal);
+      if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
+      follow.anchor = undefined;
+      setLocatedFocus({ sessionId: owner, entryId });
+      const thread = threadRef.current;
+      if (!thread) return;
+      const target = await waitForHistoryEntry(thread, entryId, request.signal);
+      if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
+      centeringEntryRef.current = true;
+      follow.center(target);
+      centeringEntryRef.current = false;
+    } finally {
+      if (locateRequest.current === request) locatingEntry.current = undefined;
+      signal.removeEventListener('abort', abort);
+    }
+  }, [onLocateAnnotation, resetReading, sessionId, follow]);
+
+  useLayoutEffect(restoreReadingPosition);
+  const loadOlderAtBoundary = useCallback(() => {
+    const thread = threadRef.current, current = currentHistory.current;
+    if (!olderReadIntent.current || !thread || thread.clientHeight <= 0 || thread.scrollTop >= 160
+      || follow.intent === 'follow' || follow.hasViewProtection || locatingEntry.current || centeringEntryRef.current || loadRequests.current.size > 0
+      || !current?.hasOlder || current.loading || current.error || current.windows.some(window => window.contextState && window.contextState !== 'ready')) return;
+    const edge = { owner: current.readingOwner, windowId: current.windows[0]?.id, firstEntryId: current.windows[0]?.firstEntryId };
+    const previous = olderAutoRequest.current;
+    if (previous && previous.owner === edge.owner && previous.windowId === edge.windowId && previous.firstEntryId === edge.firstEntryId) return;
+    if (!thread.querySelector('[data-process-edge="bottom"][data-process-earlier="true"][aria-expanded="false"]')) olderAutoRequest.current = edge;
+    void loadHistory(edge.windowId).catch(() => {});
+  }, [loadHistory, follow]);
+  useLayoutEffect(() => { checkOlderBoundary.current = loadOlderAtBoundary; loadOlderAtBoundary(); });
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => checkOlderBoundary.current());
+    observer.observe(thread);
+    if (thread.firstElementChild) observer.observe(thread.firstElementChild);
+    return () => observer.disconnect();
+  }, [sessionId]);
+
+  const jumpToLatest = useCallback(async () => {
+    olderReadIntent.current = false;
+    setRevealEarlierProcess(undefined);
+    locateRequest.current?.abort();
+    locatingEntry.current = undefined;
+    const request = new AbortController(); locateRequest.current = request;
+    const owner = sessionId;
+    setJumpingToLatest(true);
+    follow.beginNavigation();
+    try {
+      if (onReadLatestHistory) await onReadLatestHistory(request.signal);
+      if (request.signal.aborted || currentSessionRef.current !== owner) return;
+      if (locateRequest.current !== request) return;
+      // Reader publication may be React-batched after its promise resolves.
+      // Success belongs to the installed continuous tail, not the read promise.
+      if (currentHistory.current?.atLatest === false) await new Promise<void>((resolve, reject) => {
+        const cleanup = () => { if (latestInstallCheck.current === check) latestInstallCheck.current = undefined; request.signal.removeEventListener('abort', abort); };
+        const abort = () => { cleanup(); reject(new DOMException('定位已取消', 'AbortError')); };
+        const check = () => { if (currentHistory.current?.atLatest !== false) { cleanup(); resolve(); } };
+        latestInstallCheck.current = check;
+        request.signal.addEventListener('abort', abort, { once: true });
+        if (request.signal.aborted) abort(); else check();
+      });
+      if (request.signal.aborted || currentSessionRef.current !== owner || locateRequest.current !== request) return;
+      follow.latest();
+    } catch (error) {
+      if (!request.signal.aborted) onNotify('无法回到最新', error instanceof Error ? error.message : '请重试。', 'warning');
+    } finally { if (locateRequest.current === request) { setJumpingToLatest(false); follow.endNavigation(); } }
+  }, [onReadLatestHistory, onNotify, follow, sessionId]);
+
+  const canAutoCollapse = useCallback(() => follow.canFollow, [follow]);
+  useLayoutEffect(() => {
+    const pending = automaticProcessRead.current;
+    const latestTurn = activeTurnId ?? messages.at(-1)?.turnId;
+    if (pending && latestTurn && latestTurn !== pending.turnId) pending.request.abort();
+  }, [activeTurnId, messages]);
+  useEffect(() => {
+    const selected = () => follow.selectionChanged();
+    document.addEventListener('selectionchange', selected);
+    return () => document.removeEventListener('selectionchange', selected);
+  }, [follow]);
+  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean, disclosureKey?: string) => {
+    if (!onReadProcessEnd) return;
+    signal.throwIfAborted();
+    if (automatic && !canAutoCollapse()) throw new DOMException('阅读位置已改变', 'AbortError');
+    locateRequest.current?.abort();
+    const request = new AbortController(); locateRequest.current = request;
+    if (automatic) automaticProcessRead.current = { request, turnId: messages.find(message => message.id === entryId)?.turnId };
+    const abort = () => request.abort();
+    signal.addEventListener('abort', abort, { once: true });
+    const thread = threadRef.current;
+    const owner = sessionId;
+    const clickedKey = automatic ? undefined : disclosureKey;
+    const protection = follow.pendingDisclosure(clickedKey, true);
+    let succeeded = false;
+    const cancelForSelection = () => {
+      if (automatic && !canAutoCollapse()) request.abort();
+    };
+    thread?.ownerDocument.addEventListener('selectionchange', cancelForSelection);
+    // Do not let old DOM interests repopulate an aperture during its handoff.
+    locatingEntry.current = entryId;
+    try {
+      await onReadProcessEnd(entryId, request.signal);
+      request.signal.throwIfAborted();
+      if (currentSessionRef.current !== owner) throw new DOMException('会话已切换', 'AbortError');
+      if (locateRequest.current !== request) throw new DOMException('读取已取消', 'AbortError');
+      if (thread) await waitForHistoryEntry(thread, entryId, request.signal);
+      request.signal.throwIfAborted();
+      succeeded = true;
+      restoreReadingPosition();
+    } finally {
+      if (protection) follow.pendingDisclosure(clickedKey, false, !succeeded, protection);
+      signal.removeEventListener('abort', abort);
+      thread?.ownerDocument.removeEventListener('selectionchange', cancelForSelection);
+      if (automaticProcessRead.current?.request === request) automaticProcessRead.current = undefined;
+      if (locateRequest.current === request) { locatingEntry.current = undefined; locateRequest.current = undefined; }
+    }
+  }, [onReadProcessEnd, canAutoCollapse, sessionId, restoreReadingPosition, messages, follow]);
+
+  const disclosureChoices = useMemo(() => savedState?.choices ?? new Map<string, boolean>(), [sessionId, savedState]);
+  const locatingEntry = useRef<string | undefined>(undefined);
+  const residenceFrame = useRef<number | undefined>(undefined);
+  const reportResidence = useCallback(() => {
+    if (!onRetainHistory || residenceFrame.current !== undefined || currentSessionRef.current !== sessionId) return;
+    residenceFrame.current = requestAnimationFrame(() => {
+      residenceFrame.current = undefined;
+      if (currentSessionRef.current !== sessionId) return;
+      const thread = threadRef.current;
+      const drawerAnimations = [...thread?.querySelectorAll<HTMLElement>('.conversation-run__drawer') ?? []]
+        .flatMap(drawer => drawer.getAnimations?.() ?? []);
+      if (drawerAnimations.length && follow.canFollow) {
+        // A moving clip must not retire the contents it is revealing. Retry
+        // with the settled DOM and current reading owner after finish/cancel.
+        void Promise.allSettled(drawerAnimations.map(animation => animation.finished)).then(reportResidence);
+        return;
+      }
+      if (!thread) return;
+      if (locatingEntry.current) return;
+      const interest: import('../lib/runtime-adapter').HistoryResidence = collectHistoryResidence(thread);
+      if (currentHistory.current?.readingOwner !== readingOwner) return;
+      interest.readingOwner = readingOwner;
+      interest.followLatest = follow.canFollow;
+      interest.anchorEntryId = follow.residenceAnchor?.entryId;
+      interest.pinnedEntryIds.push(...follow.protectedEntryIds);
+      if (locatingEntry.current) interest.pinnedEntryIds.push(locatingEntry.current);
+      onRetainHistory(interest);
+    });
+  }, [onRetainHistory, readingOwner, sessionId, follow]);
+  useLayoutEffect(reportResidence);
+  useLayoutEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(reportResidence);
+    observer?.observe(thread);
+    if (thread.firstElementChild) observer?.observe(thread.firstElementChild);
+    thread.addEventListener('scroll', reportResidence);
+    thread.addEventListener('focusin', reportResidence);
+    thread.addEventListener('focusout', reportResidence);
+    document.addEventListener('selectionchange', reportResidence);
+    return () => {
+      observer?.disconnect();
+      thread.removeEventListener('scroll', reportResidence);
+      thread.removeEventListener('focusin', reportResidence);
+      thread.removeEventListener('focusout', reportResidence);
+      document.removeEventListener('selectionchange', reportResidence);
+      if (residenceFrame.current !== undefined) cancelAnimationFrame(residenceFrame.current);
+      residenceFrame.current = undefined;
+    };
+  }, [reportResidence, sessionId]);
+
+  useEffect(() => {
+    const thread = threadRef.current;
+    const column = thread?.querySelector('.thread-column');
+    if (!thread || !column || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(restoreReadingPosition);
+    const mutations = new MutationObserver(restoreReadingPosition);
+    mutations.observe(column, {childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'inert', 'hidden', 'data-source-entry']});
+    const release = () => { if (follow.userScrolling) follow.endInput(); };
+    document.addEventListener('pointerup', release);
+    document.addEventListener('pointercancel', release);
+    thread.addEventListener('transitionrun', restoreReadingPosition);
+    thread.addEventListener('transitionend', restoreReadingPosition);
+    thread.addEventListener('transitioncancel', restoreReadingPosition);
+    thread.addEventListener('load', restoreReadingPosition, true);
+    thread.addEventListener('focusin', follow.focusChanged);
+    thread.addEventListener('focusout', follow.focusChanged);
+    document.fonts?.addEventListener('loadingdone', restoreReadingPosition);
+    observer.observe(column);
+    // Queue/composer animations resize the viewport without resizing messages.
+    // Settle the same reading intent before paint, rather than on the next delta.
+    observer.observe(thread);
+    return () => {
+      observer.disconnect();
+      mutations.disconnect();
+      document.removeEventListener('pointerup', release);
+      document.removeEventListener('pointercancel', release);
+      thread.removeEventListener('transitionrun', restoreReadingPosition);
+      thread.removeEventListener('transitionend', restoreReadingPosition);
+      thread.removeEventListener('transitioncancel', restoreReadingPosition);
+      thread.removeEventListener('load', restoreReadingPosition, true);
+      thread.removeEventListener('focusin', follow.focusChanged);
+      thread.removeEventListener('focusout', follow.focusChanged);
+      document.fonts?.removeEventListener('loadingdone', restoreReadingPosition);
+    };
+  }, [sessionId, restoreReadingPosition, follow]);
+
+  useLayoutEffect(() => {
+    if (!savedState) return;
+    const saved = savedState.anchor;
+    const controller = new AbortController();
+    if (saved && onLocateAnnotation) {
+      void (async () => {
+        try {
+          await onLocateAnnotation(saved.entryId, controller.signal);
+          const thread = threadRef.current;
+          if (!thread || controller.signal.aborted) return;
+          await waitForHistoryEntry(thread, saved.entryId, controller.signal);
+          if (controller.signal.aborted) return;
+          follow.read();
+          restoreHistoryAnchor(thread, saved);
+          follow.anchor = saved;
+        } catch (error) {
+          if (!controller.signal.aborted && !(error instanceof DOMException && error.name === 'AbortError')) {
+            onNotify('无法恢复阅读位置', error instanceof Error ? error.message : '请重试。', 'warning');
+          }
+        }
+      })();
+    }
+    return () => {
+      controller.abort();
+      const thread = threadRef.current;
+      if (thread) savedState.anchor = captureHistoryAnchor(thread);
+    };
+  }, [sessionId, savedState]);
+
+  return { latestVisible, centeringEntryRef, threadRef, touchPosition, locatedFocus,
+    currentSessionRef, atLatestHistory, jumpingToLatest, revealEarlierProcess,
+    setRevealEarlierProcess, olderReadIntent, checkOlderBoundary, follow, restoreReadingPosition,
+    beginUserScroll, loadHistory, locateAnnotation, jumpToLatest, canAutoCollapse,
+    readProcessEnd, disclosureChoices };
+}
+
+function ConversationScroll({ reading, children }: { reading: ReturnType<typeof useConversationReading>; children: ReactNode }) {
+  const { threadRef, follow, olderReadIntent, setRevealEarlierProcess, beginUserScroll,
+    touchPosition, centeringEntryRef, checkOlderBoundary } = reading;
+  return (
+    <div
+        className="thread-scroll"
+        ref={threadRef}
+        style={{ overflowAnchor: 'none', scrollBehavior: 'auto' }}
+        onClickCapture={event => {
+          // Only in-flow disclosures move the reading anchor. ARIA expanded
+          // also describes floating file/annotation popovers that add no height.
+          const button = (event.target as HTMLElement).closest<HTMLElement>('button[data-thread-disclosure]');
+          if (!button || !event.currentTarget.contains(button)) return;
+          follow.disclose(button);
+          olderReadIntent.current = false;
+          setRevealEarlierProcess(undefined);
+        }}
+        onWheel={event => {
+          if (nestedScrollConsumes(event.target, event.currentTarget, event.deltaY)) return;
+          if (!event.deltaY) return;
+          beginUserScroll(event.deltaY > 0);
+        }}
+        onTouchStart={event => { touchPosition.current = event.touches[0]?.clientY; }}
+        onTouchMove={event => {
+          const y = event.touches[0]?.clientY, previous = touchPosition.current;
+          touchPosition.current = y;
+          if (y === undefined || previous === undefined || y === previous) return;
+          const delta = previous - y;
+          if (!nestedScrollConsumes(event.target, event.currentTarget, delta)) beginUserScroll(delta > 0);
+        }}
+        onPointerDown={event => {
+          const thread = event.currentTarget;
+          if (event.button !== 0 || event.target !== thread || thread.clientWidth <= 0 || thread.scrollHeight <= thread.clientHeight) return;
+          const left = thread.getBoundingClientRect().left + thread.clientLeft;
+          // A press on the native scrollbar takes ownership before it moves.
+          // Empty margins inside the scrollport are ordinary clicks.
+          if (event.clientX < left || event.clientX >= left + thread.clientWidth) follow.input('drag');
+        }}
+        onPointerUp={() => follow.endInput()}
+        onPointerCancel={() => follow.endInput()}
+        onTouchEnd={() => { touchPosition.current = undefined; follow.endInput(); }}
+        onKeyDown={event => {
+          const target = event.target;
+          if (target instanceof Element && target.closest('input, textarea, select, button, a, [role="button"], [contenteditable="true"]')) return;
+          const upward = ['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey);
+          if (nestedScrollConsumes(target, event.currentTarget, upward ? -1 : 1)) return;
+          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll(['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey));
+        }}
+        onScroll={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (centeringEntryRef.current) return;
+          follow.scroll();
+          if (follow.intent === 'read' && !follow.hasViewProtection) olderReadIntent.current = true;
+          checkOlderBoundary.current();
+        }}
+      >
+      {children}
+    </div>
+  );
+}
+
+export function AgentConversationView({ sessionId, agentName, reader, contentReader, projection, queue, queueCursor,
+  onMoreQueue, readingState, onNotify, entryLocation, terminalWork }: {
+  sessionId: string; agentName: string;
+  reader: import('../lib/runtime-adapter').AgentConversationReader;
+  contentReader: import('../lib/runtime-adapter').AgentContentReader;
+  projection: import('../lib/runtime-adapter').RuntimeProjection;
+  queue: QueuedPrompt[]; queueCursor: string | null;
+  onMoreQueue: () => void; readingState: AgentReadingState; onNotify: MarkdownNotify;
+  entryLocation?: { entryId: string; requestId: number };
+  terminalWork?: { workId: string; status: string; reason?: string | null };
+}) {
+  const onLoadHistory = useCallback(async (windowId?: string, direction?: 'older' | 'newer') => { await reader.readHistory(windowId, direction); }, [reader]);
+  const onHydrateEntries = useCallback(async (ids: string[], includeReasoning?: boolean) => { await reader.hydrateEntries(ids, undefined, includeReasoning); }, [reader]);
+  const onReadLatestHistory = useCallback(async (signal: AbortSignal) => { await reader.readLatestHistory(signal); }, [reader]);
+  const onReadProcessEnd = useCallback(async (entryId: string, signal: AbortSignal) => { await reader.readProcessEnd(entryId, signal); }, [reader]);
+  const onLocateAnnotation = useCallback(async (entryId: string, signal: AbortSignal) => { await reader.locateEntry(entryId, signal); }, [reader]);
+  const onRetainHistory = useCallback((interest: import('../lib/runtime-adapter').HistoryResidence) => { reader.retainHistory(interest); }, [reader]);
+  const reading = useConversationReading({ sessionId, history: projection.history, messages: projection.messages,
+    activeTurnId: projection.activeTurnId, onLoadHistory, onReadLatestHistory, onReadProcessEnd,
+    onRetainHistory, onLocateAnnotation, onNotify, savedState: readingState });
+  useEffect(() => {
+    if (!entryLocation) return;
+    const request = new AbortController();
+    void reading.locateAnnotation(entryLocation.entryId, request.signal).catch(error => {
+      if (!request.signal.aborted) onNotify('无法定位任务', error instanceof Error ? error.message : '请重试。', 'warning');
+    });
+    return () => request.abort();
+  }, [entryLocation?.entryId, entryLocation?.requestId, reading.locateAnnotation, onNotify]);
+  const visibleQueue = queue.filter(item => !projection.canonicalInputs.some(input => input.inputSource?.queueItemId === item.queueItemId));
+  const pending = visibleQueue.filter(item => item.deliveryMode === 'new-turn');
+  const steers = visibleQueue.filter(item => item.deliveryMode === 'steer');
+  return <HistoryDisclosureContext.Provider value={reading.disclosureChoices}>
+    <HistoryHydrationContext.Provider value={onHydrateEntries}>
+      <div className="agent-conversation-reader">
+        <AnnotationReader owner={reading.threadRef} onLocate={reading.locateAnnotation} onNotify={onNotify}>
+        <ConversationScroll reading={reading}>
+          <div className="thread-column conversation-transcript">
+            {projection.initialContextBase?.base_kind === 'SNAPSHOT' && <ContextCompactionDivider inherited />}
+            {projection.history && !projection.messages.length && (projection.history.loading || projection.history.error) && <div className="history-boundary" role="status">
+              {projection.history.loading ? '正在读取最近记录…' : projection.history.error}
+              {projection.history.error && <button type="button" onClick={() => void reading.loadHistory().catch(() => {})}>重试</button>}
+            </div>}
+            <ConversationMessages history={projection.history} onLoadHistory={reading.loadHistory}
+              messages={projection.messages} interruptionNotices={projection.interruptionNotices}
+              activeTurnId={projection.activeTurnId} isRunning={projection.isRunning} assistantLabel={agentName}
+              artifactOwnerKey={sessionId} onReadToolArtifact={contentReader.readToolArtifact}
+              onReadPromptImage={contentReader.readPromptImage} onNotify={onNotify}
+              onReadVisualization={contentReader.readVisualizationContent}
+              onReadVisualizationThumbnail={contentReader.readVisualizationThumbnail}
+              contextCompactionInProgress={reading.atLatestHistory && projection.liveControl?.compaction_in_progress === true}
+              revealEarlierProcess={reading.revealEarlierProcess} canAutoCollapse={reading.canAutoCollapse}
+              onReadProcessEnd={reading.readProcessEnd} onProcessLayout={reading.restoreReadingPosition}
+              focusedEntry={reading.locatedFocus} />
+            {reading.atLatestHistory && projection.isRunning && projection.activeTurnId
+              && !projection.messages.some(message => message.role === 'assistant' && message.turnId === projection.activeTurnId && !isEmptyLiveAssistant(message))
+              && <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label={`${agentName} 处理状态`}>
+                <AssistantHeading message={{id:'agent-preparing', role:'assistant', time:'', body:''}} response={false} label={agentName} />
+                <div className="assistant-progress" role="status"><i />正在处理…</div>
+              </article>}
+            {reading.atLatestHistory && steers.map(item => <div key={item.queueItemId} data-queue-item-id={item.queueItemId}>
+              <UserMessage message={{ id: item.queueItemId, role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content), promptContent: item.content, time: '' }}
+                {...pendingSteerSender(item)} onReadPromptImage={contentReader.readPromptImage} onNotify={onNotify} deliveryStatus="等待模型接收" />
+            </div>)}
+            <div data-thread-tail-end="" aria-hidden="true" />
+          </div>
+        </ConversationScroll>
+        </AnnotationReader>
+        {(!reading.latestVisible || !reading.atLatestHistory) && <button className="jump-to-bottom" disabled={reading.jumpingToLatest} onClick={() => void reading.jumpToLatest()}>回到最新</button>}
+        <div className="agent-conversation-queue">
+          {projection.todo && <TodoDock todo={projection.todo} interactionOpen={false} onLayoutChange={reading.restoreReadingPosition} />}
+          {terminalWork && <article data-queue-item-id={terminalWork.workId} tabIndex={-1}>
+            <strong>任务已结束</strong><span>{terminalWork.status === 'stopped' ? '已停止' : terminalWork.status === 'completed' ? '已完成' : terminalWork.status}{terminalWork.reason ? `：${terminalWork.reason}` : ''}</span>
+          </article>}
+          <AnimatedPromptQueue>
+            {pending.map(item => <article key={item.queueItemId} data-queue-item-id={item.queueItemId} tabIndex={-1}>
+              <CornerDownRight size={13} aria-hidden="true" />
+              <div className="composer-queue__body">{item.contentUnavailable ? <p>正文暂时无法读取。</p> : <PromptContentView content={item.content} variant="queue" onReadImage={contentReader.readPromptImage} />}
+                {item.waitingOn?.length ? <span>等待依赖：{item.waitingOn.join('、')}</span> : <span>排队中</span>}</div>
+            </article>)}
+            {queueCursor && <button key="queue-more" type="button" onClick={onMoreQueue}>加载更多排队任务</button>}
+          </AnimatedPromptQueue>
+        </div>
+      </div>
+    </HistoryHydrationContext.Provider>
+  </HistoryDisclosureContext.Provider>;
+}
+
 export function WorkbenchView({
   history, onLoadHistory, onReadLatestHistory, onReadProcessEnd, onHydrateEntries, onRetainHistory,
   workspace,
@@ -1793,6 +2309,8 @@ export function WorkbenchView({
   inspectorOpen,
   queuedCount,
   queuedPrompts,
+  queueNextCursor,
+  onLoadMoreQueue,
   localSubmissions,
   queueActions,
   onQueueAction,
@@ -1902,14 +2420,10 @@ export function WorkbenchView({
   }
   const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [preparingQueueEdit, setPreparingQueueEdit] = useState<string>();
-  const [latestVisible, setLatestVisible] = useState(true);
   const [jumpBottom, setJumpBottom] = useState(126);
-  const centeringEntryRef = useRef(false);
   const workbenchRef = useRef<HTMLElement>(null);
   const sessionActionsRef = useRef<HTMLDivElement>(null);
   const sessionActionsTriggerRef = useRef<HTMLButtonElement>(null);
-  const threadRef = useRef<HTMLDivElement>(null);
-  const touchPosition = useRef<number | undefined>(undefined);
   const composerWrapRef = useRef<HTMLDivElement>(null);
   const composerEditorRef = useRef<HTMLDivElement>(null);
   const [acceptedDraftLayout, setAcceptedDraftLayout] = useState<{ sessionId: string; height: number; restoreFocus: boolean } | null>(null);
@@ -1938,13 +2452,13 @@ export function WorkbenchView({
   const awaitingFirstActivity = isRunning && runtimeStatus === 'online' && activeTurnId && !interaction
     && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && !isEmptyLiveAssistant(message));
   const conversationCommandIds = new Set(conversationSubmissions.map(item => item.commandId));
-  const queuedDisplayCount = queuedCount - queuedPrompts.filter(item => conversationCommandIds.has(item.commandId)).length;
+  const queuedDisplayCount = queuedCount - queuedPrompts.filter(item => item.sourceKind === 'command' && conversationCommandIds.has(item.commandId)).length;
   const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
-    && !conversationCommandIds.has(item.commandId)
+    && !(item.sourceKind === 'command' && conversationCommandIds.has(item.commandId))
     && !activeQueueActions.some(action => action.status === 'accepted' && action.source.queueItemId === item.queueItemId));
   const pendingSteers = queuedPrompts.filter(item => item.deliveryMode === 'steer'
     && !messages.some(message => message.userKind === 'steer'
-      && message.inputSource?.commandId === item.commandId && message.inputSource.queueItemId === item.queueItemId));
+      && message.inputSource?.queueItemId === item.queueItemId));
   for (const action of activeQueueActions) {
     const delivery = action.receipt?.promptDelivery;
     if (action.kind !== 'send' || action.status !== 'accepted' || !delivery
@@ -1954,7 +2468,7 @@ export function WorkbenchView({
       && message.inputSource.queueItemId === delivery.queueItemId);
     if (consumed || pendingSteers.some(item => item.commandId === action.commandId && item.queueItemId === delivery.queueItemId)) continue;
     pendingSteers.push({ ...action.source, queueItemId: delivery.queueItemId,
-      commandId: action.commandId, deliveryMode: 'steer', targetTurnId: action.targetTurnId,
+      sourceKind: 'command', commandId: action.commandId, deliveryMode: 'steer', targetTurnId: action.targetTurnId,
       submittedAt: action.submittedAt });
   }
   useEffect(() => {
@@ -1974,7 +2488,7 @@ export function WorkbenchView({
       onQueueActionHandled(action.commandId);
       requestAnimationFrame(() => {
         const next = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
-          && item.sequence > action.source.sequence && visibleQueue.some(visible => visible.queueItemId === item.queueItemId))[0];
+          && compareSequence(item.sequence, action.source.sequence) > 0 && visibleQueue.some(visible => visible.queueItemId === item.queueItemId))[0];
         const button = action.kind === 'delete' && next
           ? [...(composerWrapRef.current?.querySelectorAll<HTMLButtonElement>('button[data-delete-queue]') ?? [])]
             .find(item => item.dataset.deleteQueue === next.queueItemId)
@@ -1991,7 +2505,7 @@ export function WorkbenchView({
     queueActions, queuedPrompts, session.id, setRequestPlan, visibleQueue]);
 
   const queueAction = async (item: QueuedPrompt, kind: QueuedPromptAction['kind']) => {
-    if (!canControl || isObserver || editingQueue || queueClicks.current.has('composer-edit') || queueClicks.current.has(item.queueItemId)) return;
+    if (item.sourceKind !== 'command' || !canControl || isObserver || editingQueue || queueClicks.current.has('composer-edit') || queueClicks.current.has(item.queueItemId)) return;
     if (kind === 'edit' && (draft.hasContent || submitting)) {
       onNotify('请先处理当前草稿', '当前草稿和排队输入都会保留。');
       return;
@@ -2040,7 +2554,7 @@ export function WorkbenchView({
               : local?.status === 'cancelled' ? '队列已取消'
                 : local?.status === 'consumed' && local.execution?.status === 'stopped' ? '已接收 · 执行已中断'
                   : undefined;
-        return <article key={item.commandId}
+        return <article key={queued ? queued.sourceKind === 'command' ? queued.commandId : queued.queueItemId : local!.commandId}
           data-queue-item-id={queued?.queueItemId} data-command-id={item.commandId} aria-busy={busy}>
           <CornerDownRight size={13} aria-hidden="true" />
           <div className="composer-queue__body">
@@ -2050,16 +2564,17 @@ export function WorkbenchView({
               : <PromptContentView content={item.content} variant="queue" onReadImage={onReadPromptImage} />}
           </div>
           {!isObserver && <div className="composer-queue__actions">
-            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || (!isRunning && interaction?.kind !== 'plan-draft')}
+            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.sourceKind !== 'command' || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || (!isRunning && interaction?.kind !== 'plan-draft')}
               onClick={() => { if (queued) void queueAction(queued, 'send'); }}><CornerDownRight size={13} />发送</button>
-            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || busy || editingQueue || !canControl}
+            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || queued.sourceKind !== 'command' || busy || editingQueue || !canControl}
               onClick={() => { if (queued) void queueAction(queued, 'edit'); }}><Pencil size={13} />编辑</button>
-            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={!queued || busy || editingQueue || !canControl}
+            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={!queued || queued.sourceKind !== 'command' || busy || editingQueue || !canControl}
               data-delete-queue={queued?.queueItemId} onClick={() => { if (queued) void queueAction(queued, 'delete'); }}><Trash2 size={13} />删除</button>
           </div>}
           {notice && <small className="composer-queue__notice" role="status"><span>{notice}</span>{local?.detail && <>：<span>{local.detail}</span></>}</small>}
         </article>;
       })}
+      {queueNextCursor && onLoadMoreQueue && <button key="queue-more" type="button" onClick={onLoadMoreQueue}>加载更多排队任务</button>}
     </AnimatedPromptQueue>
   );
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
@@ -2134,260 +2649,12 @@ export function WorkbenchView({
       document.removeEventListener('keydown', escape);
     };
   }, [addOpen, modelOpen, reasoningOpen, skillOpen, permissionOpen]);
-  // Page context provides exact marker hosts. A latest control summary alone
-  // cannot place a boundary inside a partially loaded history window.
-  const [locatedFocus, setLocatedFocus] = useState<LocatedEntry>();
-  const currentSessionRef = useRef(session.id);
-  const currentHistory = useRef(history); currentHistory.current = history;
-  const atLatestHistory = history?.atLatest !== false;
-  const readingOwner = history?.readingOwner;
-  const [jumpingToLatest, setJumpingToLatest] = useState(false);
-  const latestInstallCheck = useRef<(() => void) | undefined>(undefined);
-  useLayoutEffect(() => { latestInstallCheck.current?.(); });
-  const locateRequest = useRef<AbortController | undefined>(undefined);
-  const automaticProcessRead = useRef<{ request: AbortController; turnId?: string } | undefined>(undefined);
-  const loadRequests = useRef(new Map<string, Promise<void>>());
-  const [revealEarlierProcess, setRevealEarlierProcess] = useState<{ key: string }>();
-  const olderReadIntent = useRef(false);
-  const olderAutoRequest = useRef<{ owner?: object; windowId?: string; firstEntryId?: string } | undefined>(undefined);
-  const checkOlderBoundary = useRef<() => void>(() => {});
-  const follow = useMemo(() => new ThreadFollowController(
-    () => currentSessionRef.current === session.id ? threadRef.current : null,
-    () => currentHistory.current?.atLatest !== false && !(currentHistory.current?.loading && !currentHistory.current.windows.length),
-    setLatestVisible,
-    () => { locateRequest.current?.abort(); setJumpingToLatest(false); },
-    () => checkOlderBoundary.current(),
-  ), [session.id]);
-  const resetReading = useCallback(() => follow.read(), [follow]);
-  const restoreReadingPosition = useCallback(() => follow.coordinate(), [follow]);
-  const beginUserScroll = useCallback((towardLatest = false) => {
-    olderReadIntent.current = !towardLatest;
-    olderAutoRequest.current = undefined;
-    follow.input(towardLatest ? 'down' : 'up');
-  }, [follow]);
-  useLayoutEffect(() => {
-    currentSessionRef.current = session.id;
-    follow.activate();
-    locatingEntry.current = undefined;
-    loadRequests.current.clear();
-    olderReadIntent.current = false;
-    olderAutoRequest.current = undefined;
-    setRevealEarlierProcess(undefined);
-    return () => { locateRequest.current?.abort(); follow.dispose(); };
-  }, [session.id, follow]);
-  const loadHistory = useCallback((windowId?: string, direction: 'older' | 'newer' = 'older'): Promise<void> => {
-    if (!onLoadHistory) return Promise.resolve();
-    locateRequest.current?.abort();
-    setJumpingToLatest(false);
-    // Reveal only the resident slice at the top, without navigating back to
-    // its final. Then normal paging exposes earlier steps instead of silently
-    // draining an arbitrarily long folded turn from the database.
-    const closed = threadRef.current?.querySelector<HTMLButtonElement>('[data-process-edge="bottom"][data-process-earlier="true"][aria-expanded="false"]');
-    if (direction === 'older' && closed?.dataset.processKey) {
-      olderReadIntent.current = true;
-      resetReading();
-      follow.anchor = undefined;
-      setRevealEarlierProcess({ key: closed.dataset.processKey });
-      return Promise.resolve();
-    }
-    const key = `${session.id}:${windowId ?? ''}:${direction}`;
-    const existing = loadRequests.current.get(key);
-    if (existing) return existing;
-    resetReading();
-    const before = currentHistory.current?.windows[0]?.firstEntryId;
-    const owner = currentHistory.current?.readingOwner;
-    const request = Promise.resolve().then(() => onLoadHistory(windowId, direction)).finally(() => {
-      if (loadRequests.current.get(key) === request) loadRequests.current.delete(key);
-      // A synchronous page/context publication can precede promise settlement.
-      // Resume only after actual edge progress; errors remain explicit retries.
-      if (currentSessionRef.current === session.id && currentHistory.current?.readingOwner === owner && direction === 'older'
-        && currentHistory.current?.windows[0]?.firstEntryId !== before) checkOlderBoundary.current();
-    });
-    loadRequests.current.set(key, request);
-    return request;
-  }, [onLoadHistory, resetReading, session.id, follow]);
-  const locateAnnotation = useCallback(async (entryId: string, signal: AbortSignal) => {
-    if (signal.aborted || currentSessionRef.current !== session.id) throw new DOMException('定位已取消', 'AbortError');
-    locateRequest.current?.abort();
-    setJumpingToLatest(false);
-    const request = new AbortController(); locateRequest.current = request;
-    const abort = () => request.abort();
-    signal.addEventListener('abort', abort, { once: true });
-    if (signal.aborted) request.abort();
-    const owner = session.id;
-    olderReadIntent.current = false;
-    setRevealEarlierProcess(undefined);
-    locatingEntry.current = entryId;
-    resetReading();
-    try {
-      if (onLocateAnnotation) await onLocateAnnotation(entryId, request.signal);
-      if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
-      follow.anchor = undefined;
-      setLocatedFocus({ sessionId: owner, entryId });
-      const thread = threadRef.current;
-      if (!thread) return;
-      const target = await waitForHistoryEntry(thread, entryId, request.signal);
-      if (request.signal.aborted || currentSessionRef.current !== owner) throw new DOMException('定位已取消', 'AbortError');
-      centeringEntryRef.current = true;
-      follow.center(target);
-      centeringEntryRef.current = false;
-    } finally {
-      if (locateRequest.current === request) locatingEntry.current = undefined;
-      signal.removeEventListener('abort', abort);
-    }
-  }, [onLocateAnnotation, resetReading, session.id, follow]);
-
-  useLayoutEffect(restoreReadingPosition);
-  const loadOlderAtBoundary = useCallback(() => {
-    const thread = threadRef.current, current = currentHistory.current;
-    if (!olderReadIntent.current || !thread || thread.clientHeight <= 0 || thread.scrollTop >= 160
-      || follow.intent === 'follow' || follow.hasViewProtection || locatingEntry.current || centeringEntryRef.current || loadRequests.current.size > 0
-      || !current?.hasOlder || current.loading || current.error || current.windows.some(window => window.contextState && window.contextState !== 'ready')) return;
-    const edge = { owner: current.readingOwner, windowId: current.windows[0]?.id, firstEntryId: current.windows[0]?.firstEntryId };
-    const previous = olderAutoRequest.current;
-    if (previous && previous.owner === edge.owner && previous.windowId === edge.windowId && previous.firstEntryId === edge.firstEntryId) return;
-    if (!thread.querySelector('[data-process-edge="bottom"][data-process-earlier="true"][aria-expanded="false"]')) olderAutoRequest.current = edge;
-    void loadHistory(edge.windowId).catch(() => {});
-  }, [loadHistory, follow]);
-  useLayoutEffect(() => { checkOlderBoundary.current = loadOlderAtBoundary; loadOlderAtBoundary(); });
-  useEffect(() => {
-    const thread = threadRef.current;
-    if (!thread || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(() => checkOlderBoundary.current());
-    observer.observe(thread);
-    if (thread.firstElementChild) observer.observe(thread.firstElementChild);
-    return () => observer.disconnect();
-  }, [session.id]);
-
-  const jumpToLatest = useCallback(async () => {
-    olderReadIntent.current = false;
-    setRevealEarlierProcess(undefined);
-    locateRequest.current?.abort();
-    locatingEntry.current = undefined;
-    const request = new AbortController(); locateRequest.current = request;
-    const owner = session.id;
-    setJumpingToLatest(true);
-    follow.beginNavigation();
-    try {
-      if (onReadLatestHistory) await onReadLatestHistory(request.signal);
-      if (request.signal.aborted || currentSessionRef.current !== owner) return;
-      if (locateRequest.current !== request) return;
-      // Reader publication may be React-batched after its promise resolves.
-      // Success belongs to the installed continuous tail, not the read promise.
-      if (currentHistory.current?.atLatest === false) await new Promise<void>((resolve, reject) => {
-        const cleanup = () => { if (latestInstallCheck.current === check) latestInstallCheck.current = undefined; request.signal.removeEventListener('abort', abort); };
-        const abort = () => { cleanup(); reject(new DOMException('定位已取消', 'AbortError')); };
-        const check = () => { if (currentHistory.current?.atLatest !== false) { cleanup(); resolve(); } };
-        latestInstallCheck.current = check;
-        request.signal.addEventListener('abort', abort, { once: true });
-        if (request.signal.aborted) abort(); else check();
-      });
-      if (request.signal.aborted || currentSessionRef.current !== owner || locateRequest.current !== request) return;
-      follow.latest();
-    } catch (error) {
-      if (!request.signal.aborted) onNotify('无法回到最新', error instanceof Error ? error.message : '请重试。', 'warning');
-    } finally { if (locateRequest.current === request) { setJumpingToLatest(false); follow.endNavigation(); } }
-  }, [onReadLatestHistory, onNotify, follow, session.id]);
-
-  const canAutoCollapse = useCallback(() => follow.canFollow, [follow]);
-  useLayoutEffect(() => {
-    const pending = automaticProcessRead.current;
-    const latestTurn = activeTurnId ?? messages.at(-1)?.turnId;
-    if (pending && latestTurn && latestTurn !== pending.turnId) pending.request.abort();
-  }, [activeTurnId, messages]);
-  useEffect(() => {
-    const selected = () => follow.selectionChanged();
-    document.addEventListener('selectionchange', selected);
-    return () => document.removeEventListener('selectionchange', selected);
-  }, [follow]);
-  const readProcessEnd = useCallback(async (entryId: string, signal: AbortSignal, automatic: boolean, disclosureKey?: string) => {
-    if (!onReadProcessEnd) return;
-    signal.throwIfAborted();
-    if (automatic && !canAutoCollapse()) throw new DOMException('阅读位置已改变', 'AbortError');
-    locateRequest.current?.abort();
-    const request = new AbortController(); locateRequest.current = request;
-    if (automatic) automaticProcessRead.current = { request, turnId: messages.find(message => message.id === entryId)?.turnId };
-    const abort = () => request.abort();
-    signal.addEventListener('abort', abort, { once: true });
-    const thread = threadRef.current;
-    const owner = session.id;
-    const clickedKey = automatic ? undefined : disclosureKey;
-    const protection = follow.pendingDisclosure(clickedKey, true);
-    let succeeded = false;
-    const cancelForSelection = () => {
-      if (automatic && !canAutoCollapse()) request.abort();
-    };
-    thread?.ownerDocument.addEventListener('selectionchange', cancelForSelection);
-    // Do not let old DOM interests repopulate an aperture during its handoff.
-    locatingEntry.current = entryId;
-    try {
-      await onReadProcessEnd(entryId, request.signal);
-      request.signal.throwIfAborted();
-      if (currentSessionRef.current !== owner) throw new DOMException('会话已切换', 'AbortError');
-      if (locateRequest.current !== request) throw new DOMException('读取已取消', 'AbortError');
-      if (thread) await waitForHistoryEntry(thread, entryId, request.signal);
-      request.signal.throwIfAborted();
-      succeeded = true;
-      restoreReadingPosition();
-    } finally {
-      if (protection) follow.pendingDisclosure(clickedKey, false, !succeeded, protection);
-      signal.removeEventListener('abort', abort);
-      thread?.ownerDocument.removeEventListener('selectionchange', cancelForSelection);
-      if (automaticProcessRead.current?.request === request) automaticProcessRead.current = undefined;
-      if (locateRequest.current === request) { locatingEntry.current = undefined; locateRequest.current = undefined; }
-    }
-  }, [onReadProcessEnd, canAutoCollapse, session.id, restoreReadingPosition, messages, follow]);
-
-  const disclosureChoices = useMemo(() => ({sessionId: session.id, choices: new Map<string, boolean>()}), [session.id]).choices;
-  const locatingEntry = useRef<string | undefined>(undefined);
-  const residenceFrame = useRef<number | undefined>(undefined);
-  const reportResidence = useCallback(() => {
-    if (!onRetainHistory || residenceFrame.current !== undefined || currentSessionRef.current !== session.id) return;
-    residenceFrame.current = requestAnimationFrame(() => {
-      residenceFrame.current = undefined;
-      if (currentSessionRef.current !== session.id) return;
-      const thread = threadRef.current;
-      const drawerAnimations = [...thread?.querySelectorAll<HTMLElement>('.conversation-run__drawer') ?? []]
-        .flatMap(drawer => drawer.getAnimations?.() ?? []);
-      if (drawerAnimations.length && follow.canFollow) {
-        // A moving clip must not retire the contents it is revealing. Retry
-        // with the settled DOM and current reading owner after finish/cancel.
-        void Promise.allSettled(drawerAnimations.map(animation => animation.finished)).then(reportResidence);
-        return;
-      }
-      if (!thread) return;
-      if (locatingEntry.current) return;
-      const interest: import('../lib/runtime-adapter').HistoryResidence = collectHistoryResidence(thread);
-      if (currentHistory.current?.readingOwner !== readingOwner) return;
-      interest.readingOwner = readingOwner;
-      interest.followLatest = follow.canFollow;
-      interest.anchorEntryId = follow.residenceAnchor?.entryId;
-      interest.pinnedEntryIds.push(...follow.protectedEntryIds);
-      if (locatingEntry.current) interest.pinnedEntryIds.push(locatingEntry.current);
-      onRetainHistory(interest);
-    });
-  }, [onRetainHistory, readingOwner, session.id, follow]);
-  useLayoutEffect(reportResidence);
-  useLayoutEffect(() => {
-    const thread = threadRef.current;
-    if (!thread) return;
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(reportResidence);
-    observer?.observe(thread);
-    if (thread.firstElementChild) observer?.observe(thread.firstElementChild);
-    thread.addEventListener('scroll', reportResidence);
-    thread.addEventListener('focusin', reportResidence);
-    thread.addEventListener('focusout', reportResidence);
-    document.addEventListener('selectionchange', reportResidence);
-    return () => {
-      observer?.disconnect();
-      thread.removeEventListener('scroll', reportResidence);
-      thread.removeEventListener('focusin', reportResidence);
-      thread.removeEventListener('focusout', reportResidence);
-      document.removeEventListener('selectionchange', reportResidence);
-      if (residenceFrame.current !== undefined) cancelAnimationFrame(residenceFrame.current);
-      residenceFrame.current = undefined;
-    };
-  }, [reportResidence, session.id]);
+  const reading = useConversationReading({ sessionId: session.id, history,
+    onLoadHistory, onReadLatestHistory, onReadProcessEnd, onRetainHistory, onLocateAnnotation,
+    onNotify, messages, activeTurnId });
+  const { latestVisible, locatedFocus, currentSessionRef, atLatestHistory, jumpingToLatest,
+    revealEarlierProcess, restoreReadingPosition, loadHistory, locateAnnotation, jumpToLatest,
+    canAutoCollapse, readProcessEnd, disclosureChoices } = reading;
 
   const insertSkill = useCallback((name: string) => {
     if (editingQueue || queueClicks.current.has('composer-edit')) return;
@@ -2579,41 +2846,6 @@ export function WorkbenchView({
     };
   }, [latestVisible, interaction?.id, isObserver, queuedCount, session.id, todo?.id, updateJumpPosition, welcome]);
 
-  useEffect(() => {
-    const thread = threadRef.current;
-    const column = thread?.querySelector('.thread-column');
-    if (!thread || !column || typeof ResizeObserver === 'undefined') return;
-    const observer = new ResizeObserver(restoreReadingPosition);
-    const mutations = new MutationObserver(restoreReadingPosition);
-    mutations.observe(column, {childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'inert', 'hidden', 'data-source-entry']});
-    const release = () => { if (follow.userScrolling) follow.endInput(); };
-    document.addEventListener('pointerup', release);
-    document.addEventListener('pointercancel', release);
-    thread.addEventListener('transitionrun', restoreReadingPosition);
-    thread.addEventListener('transitionend', restoreReadingPosition);
-    thread.addEventListener('transitioncancel', restoreReadingPosition);
-    thread.addEventListener('load', restoreReadingPosition, true);
-    thread.addEventListener('focusin', follow.focusChanged);
-    thread.addEventListener('focusout', follow.focusChanged);
-    document.fonts?.addEventListener('loadingdone', restoreReadingPosition);
-    observer.observe(column);
-    // Queue/composer animations resize the viewport without resizing messages.
-    // Settle the same reading intent before paint, rather than on the next delta.
-    observer.observe(thread);
-    return () => {
-      observer.disconnect();
-      mutations.disconnect();
-      document.removeEventListener('pointerup', release);
-      document.removeEventListener('pointercancel', release);
-      thread.removeEventListener('transitionrun', restoreReadingPosition);
-      thread.removeEventListener('transitionend', restoreReadingPosition);
-      thread.removeEventListener('transitioncancel', restoreReadingPosition);
-      thread.removeEventListener('load', restoreReadingPosition, true);
-      thread.removeEventListener('focusin', follow.focusChanged);
-      thread.removeEventListener('focusout', follow.focusChanged);
-      document.fonts?.removeEventListener('loadingdone', restoreReadingPosition);
-    };
-  }, [session.id, restoreReadingPosition, follow]);
 
   return (
     <HistoryDisclosureContext.Provider value={disclosureChoices}>
@@ -2676,58 +2908,7 @@ export function WorkbenchView({
         </div>
       </header>
 
-      <div
-        className="thread-scroll"
-        ref={threadRef}
-        style={{ overflowAnchor: 'none', scrollBehavior: 'auto' }}
-        onClickCapture={event => {
-          // Only in-flow disclosures move the reading anchor. ARIA expanded
-          // also describes floating file/annotation popovers that add no height.
-          const button = (event.target as HTMLElement).closest<HTMLElement>('button[data-thread-disclosure]');
-          if (!button || !event.currentTarget.contains(button)) return;
-          follow.disclose(button);
-          olderReadIntent.current = false;
-          setRevealEarlierProcess(undefined);
-        }}
-        onWheel={event => {
-          if (nestedScrollConsumes(event.target, event.currentTarget, event.deltaY)) return;
-          if (!event.deltaY) return;
-          beginUserScroll(event.deltaY > 0);
-        }}
-        onTouchStart={event => { touchPosition.current = event.touches[0]?.clientY; }}
-        onTouchMove={event => {
-          const y = event.touches[0]?.clientY, previous = touchPosition.current;
-          touchPosition.current = y;
-          if (y === undefined || previous === undefined || y === previous) return;
-          const delta = previous - y;
-          if (!nestedScrollConsumes(event.target, event.currentTarget, delta)) beginUserScroll(delta > 0);
-        }}
-        onPointerDown={event => {
-          const thread = event.currentTarget;
-          if (event.button !== 0 || event.target !== thread || thread.clientWidth <= 0 || thread.scrollHeight <= thread.clientHeight) return;
-          const left = thread.getBoundingClientRect().left + thread.clientLeft;
-          // A press on the native scrollbar takes ownership before it moves.
-          // Empty margins inside the scrollport are ordinary clicks.
-          if (event.clientX < left || event.clientX >= left + thread.clientWidth) follow.input('drag');
-        }}
-        onPointerUp={() => follow.endInput()}
-        onPointerCancel={() => follow.endInput()}
-        onTouchEnd={() => { touchPosition.current = undefined; follow.endInput(); }}
-        onKeyDown={event => {
-          const target = event.target;
-          if (target instanceof Element && target.closest('input, textarea, select, button, a, [role="button"], [contenteditable="true"]')) return;
-          const upward = ['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey);
-          if (nestedScrollConsumes(target, event.currentTarget, upward ? -1 : 1)) return;
-          if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) beginUserScroll(['ArrowDown', 'PageDown', 'End'].includes(event.key) || (event.key === ' ' && !event.shiftKey));
-        }}
-        onScroll={(event) => {
-          if (event.target !== event.currentTarget) return;
-          if (centeringEntryRef.current) return;
-          follow.scroll();
-          if (follow.intent === 'read' && !follow.hasViewProtection) olderReadIntent.current = true;
-          checkOlderBoundary.current();
-        }}
-      >
+      <ConversationScroll reading={reading}>
         <div className="thread-column conversation-transcript">
           {runtimeStatus !== 'online' && (
             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
@@ -2784,7 +2965,7 @@ export function WorkbenchView({
                 role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
                 promptContent: item.content, status: 'completed',
                 time: item.submittedAt ? new Date(item.submittedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '' }}
-                onNotify={onNotify} onReadPromptImage={onReadPromptImage} />
+                {...pendingSteerSender(item)} deliveryStatus="等待模型接收" onNotify={onNotify} onReadPromptImage={onReadPromptImage} />
             </div>
           ))}
           {atLatestHistory && canControl && interaction && (
@@ -2799,7 +2980,7 @@ export function WorkbenchView({
           )}
           <div data-thread-tail-end="" aria-hidden="true" />
         </div>
-      </div>
+      </ConversationScroll>
 
       {!atLatestHistory && canControl && interaction && <section className="history-current-interaction" aria-label="当前待处理事项">
         <p>当前任务需要你处理</p>

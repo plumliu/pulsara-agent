@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from functools import wraps
+from time import monotonic
 
 from psycopg import IsolationLevel
 from psycopg.rows import dict_row
@@ -14,6 +16,9 @@ from pulsara_agent.conversation_kernel.prompt_storage import (
 )
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     PreparedAgentRequest,
+    pending_work_dependencies,
+    prepared_work_input_refs,
+    validate_work_inputs,
     validate_agent_request_graph,
 )
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
@@ -41,13 +46,81 @@ _RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, w.workspace_k
        JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id WHERE q.session_id=s.id AND t.status='RUNNING' LIMIT 1) AS current_work_id,
     (SELECT count(*) FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN') AS queued_count,
     (SELECT q.id FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.input_origin='AGENT_INSTRUCTION' ORDER BY q.queue_sequence DESC LIMIT 1) AS latest_work_id,
-    coalesce((SELECT q.waiting_on='[]'::jsonb FROM pulsara_v3.prompt_queue_items q
+    coalesce((SELECT NOT EXISTS (SELECT 1 FROM jsonb_array_elements(q.work_inputs) i
+          WHERE i->>'kind'='dependency' AND i->'body'='null'::jsonb) FROM pulsara_v3.prompt_queue_items q
         WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN'
         ORDER BY q.queue_sequence LIMIT 1),false) AS head_ready
     FROM pulsara_v3.sessions s JOIN pulsara_v3.workspaces w ON w.id=s.workspace_id AND w.memory_domain_id=s.memory_domain_id"""
 
 
+class _WorkInputsReplan(Exception):
+    pass
+
+
+def _replan_work_inputs(operation):
+    @wraps(operation)
+    def run(*args, **kwargs):
+        while monotonic() < kwargs["deadline_monotonic"]:
+            try:
+                return operation(*args, **kwargs)
+            except _WorkInputsReplan:
+                continue
+        raise TimeoutError("Work input lock planning deadline expired")
+
+    return run
+
+
 class _SubagentOperations:
+    @staticmethod
+    def _work_input_source_sessions(connection, *, root_session_id, work_ids):
+        if not work_ids:
+            return {}
+        rows = connection.execute(
+            """SELECT q.id, s.id AS session_id FROM pulsara_v3.prompt_queue_items q
+            JOIN pulsara_v3.sessions s ON s.id=q.session_id
+            WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION'
+            AND q.id=ANY(%s::text[])""",
+            (root_session_id, list(work_ids)),
+        ).fetchall()
+        return {str(row["id"]): str(row["session_id"]) for row in rows}
+
+    def _lock_work_input_sources(
+        self, connection, *, root_session_id, additional_ids=()
+    ):
+        rows = connection.execute(
+            """SELECT q.work_inputs FROM pulsara_v3.prompt_queue_items q
+            JOIN pulsara_v3.sessions s ON s.id=q.session_id
+            WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION' AND q.status='PENDING'""",
+            (root_session_id,),
+        ).fetchall()
+        work_ids = set(additional_ids)
+        for row in rows:
+            work_ids.update(
+                item["source_work_id"]
+                for item in pending_work_dependencies(row["work_inputs"])
+            )
+        sources = self._work_input_source_sessions(
+            connection, root_session_id=root_session_id, work_ids=work_ids
+        )
+        locked = set()
+        for source_session_id in sorted(set(sources.values())):
+            row = connection.execute(
+                "SELECT id FROM pulsara_v3.sessions WHERE id=%s AND root_session_id=%s FOR KEY SHARE",
+                (source_session_id, root_session_id),
+            ).fetchone()
+            if row is not None:
+                locked.add(source_session_id)
+        return locked
+
+    def _verify_work_input_source_locks(
+        self, connection, *, root_session_id, work_ids, locked_sessions
+    ):
+        sources = self._work_input_source_sessions(
+            connection, root_session_id=root_session_id, work_ids=work_ids
+        )
+        if not set(sources.values()).issubset(locked_sessions):
+            raise _WorkInputsReplan()
+
     def _agent_work_in_connection(self, connection, *, root_session_id, work_id):
         row = connection.execute(
             _WORK_SELECT + " AND q.id=%s", (root_session_id, work_id)
@@ -70,7 +143,6 @@ class _SubagentOperations:
             "terminal_reason": execution.terminal_reason,
             "turn_id": row["turn_id"],
             "accepted_at": row["accepted_at"],
-            "waiting_on": row["waiting_on"],
             "cursor": str(row["id"]),
             "request_execution": execution,
         }
@@ -109,6 +181,7 @@ class _SubagentOperations:
             p.text for p in prompt.content.parts if isinstance(p, LLMTextPart)
         )
 
+    @_replan_work_inputs
     def admit_agent_requests(
         self,
         root_guard,
@@ -177,7 +250,10 @@ class _SubagentOperations:
                 (
                     str(r["id"]),
                     str(r["session_id"]),
-                    tuple(x["work_id"] for x in r["waiting_on"]),
+                    tuple(
+                        x["source_work_id"]
+                        for x in pending_work_dependencies(r["work_inputs"])
+                    ),
                 )
                 for r in existing_rows
             )
@@ -218,10 +294,28 @@ class _SubagentOperations:
                     raise ConversationKernelConflict(
                         "Agent does not belong to this ROOT or is unavailable"
                     )
-                waiting, materials = [], []
+            locked_sources = self._lock_work_input_sources(
+                connection,
+                root_session_id=root_guard.session_id,
+                additional_ids=(
+                    work_id
+                    for req in requests
+                    for work_id in (*req.depends_on, *req.materials)
+                    if work_id not in batch_ids
+                ),
+            )
+            for req in requests:
+                inputs = []
                 for ordinal, work_id in enumerate(req.depends_on):
                     if work_id in batch_ids:
-                        waiting.append({"work_id": work_id, "ordinal": ordinal})
+                        inputs.append(
+                            {
+                                "kind": "dependency",
+                                "source_work_id": work_id,
+                                "ordinal": ordinal,
+                                "body": None,
+                            }
+                        )
                         continue
                     work = self._agent_work_in_connection(
                         connection,
@@ -232,17 +326,16 @@ class _SubagentOperations:
                         raise ConversationKernelConflict(
                             "prerequisite Work is unavailable"
                         )
-                    if work["status"] == "completed":
-                        materials.append(
-                            {
-                                "source_work_id": work_id,
-                                "kind": "dependency",
-                                "ordinal": ordinal,
-                                "body": work["final"],
-                            }
-                        )
-                    else:
-                        waiting.append({"work_id": work_id, "ordinal": ordinal})
+                    inputs.append(
+                        {
+                            "source_work_id": work_id,
+                            "kind": "dependency",
+                            "ordinal": ordinal,
+                            "body": work["final"]
+                            if work["status"] == "completed"
+                            else None,
+                        }
+                    )
                 for ordinal, work_id in enumerate(req.materials):
                     if work_id in req.depends_on:
                         continue
@@ -257,7 +350,7 @@ class _SubagentOperations:
                         raise ConversationKernelConflict(
                             "material Work must have ended"
                         )
-                    materials.append(
+                    inputs.append(
                         {
                             "source_work_id": work_id,
                             "kind": "material",
@@ -284,13 +377,13 @@ class _SubagentOperations:
                     """INSERT INTO pulsara_v3.prompt_queue_items
                     (id,session_id,workspace_id,queue_sequence,delivery_mode,input_origin,
                      source_session_id,source_turn_id,source_tool_attempt_id,
-                     initial_context,input_materials,waiting_on,model_call_binding,status,
+                     initial_context,work_inputs,model_call_binding,status,
                      inline_content,blob_id,content_digest,content_size,content_media_type,content_codec,
                      permission_snapshot_id,requested_permission_mode,effective_permission_mode,permission_admission_source,
                      permission_overlay,permission_plan_context_ordinal,permission_plan_workflow_id,
                      permission_plan_revision_at_admission,permission_inherited_from_turn_id,permission_contract_id,
                      permission_contract_fingerprint,permission_snapshot_fingerprint)
-                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,%s,'PENDING',
+                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,'PENDING',
                     %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         req.work_id,
@@ -301,8 +394,7 @@ class _SubagentOperations:
                         source_turn_id,
                         source_tool_attempt_id,
                         Jsonb(list(req.initial_context)),
-                        Jsonb(materials),
-                        Jsonb(waiting),
+                        Jsonb(list(validate_work_inputs(inputs))),
                         Jsonb(model_call_binding_to_dict(model_call_binding)),
                         *_content_columns(pub.body),
                         *self._permission_columns(permission_snapshot),
@@ -327,6 +419,7 @@ class _SubagentOperations:
                 guard=root_guard,
                 occurred_at=occurred_at,
                 actor_id=actor_id,
+                locked_sessions=locked_sources | {req.agent_id for req in requests},
             )
             return tuple(
                 self._agent_work_in_connection(
@@ -393,6 +486,11 @@ class _SubagentOperations:
                     or row["input_origin"] != "AGENT_INSTRUCTION"
                     or self._agent_prompt_text(connection, row) != req.instruction
                     or row["initial_context"] != list(req.initial_context)
+                    or tuple(
+                        (x["kind"], x["source_work_id"], x["ordinal"])
+                        for x in validate_work_inputs(row["work_inputs"])
+                    )
+                    != prepared_work_input_refs(req)
                     or req.create_agent
                     and row["title"] != req.name
                     or row["model_call_binding"]
@@ -452,45 +550,69 @@ class _SubagentOperations:
         occurred_at,
         actor_id,
         session_id=None,
+        locked_sessions,
     ):
         changed = []
         # Each iteration only consumes a condition or terminalizes a request. No execution recovery.
         while True:
+            candidates = connection.execute(
+                """SELECT q.* FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.sessions s ON s.id=q.session_id
+                WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION' AND q.status='PENDING'
+                ORDER BY q.session_id,q.queue_sequence""",
+                (root_session_id,),
+            ).fetchall()
+            work_ids = {
+                item["source_work_id"]
+                for row in candidates
+                for item in pending_work_dependencies(row["work_inputs"])
+            }
+            self._verify_work_input_source_locks(
+                connection,
+                root_session_id=root_session_id,
+                work_ids=work_ids,
+                locked_sessions=locked_sessions,
+            )
             rows = connection.execute(
                 """SELECT q.* FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.sessions s ON s.id=q.session_id
                 WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION' AND q.status='PENDING'
-                AND q.waiting_on <> '[]'::jsonb ORDER BY q.session_id,q.queue_sequence FOR UPDATE OF q""",
+                AND EXISTS (SELECT 1 FROM jsonb_array_elements(q.work_inputs) i WHERE i->>'kind'='dependency' AND i->'body'='null'::jsonb)
+                ORDER BY q.session_id,q.queue_sequence FOR UPDATE OF q""",
                 (root_session_id,),
             ).fetchall()
             progressed = False
             for row in rows:
-                waiting = []
-                materials = list(row["input_materials"])
+                inputs = list(validate_work_inputs(row["work_inputs"]))
+                self._verify_work_input_source_locks(
+                    connection,
+                    root_session_id=root_session_id,
+                    work_ids={
+                        x["source_work_id"] for x in pending_work_dependencies(inputs)
+                    },
+                    locked_sessions=locked_sessions,
+                )
                 failure = None
-                for condition in row["waiting_on"]:
+                updated = False
+                for condition in inputs:
+                    if (
+                        condition["kind"] != "dependency"
+                        or condition["body"] is not None
+                    ):
+                        continue
                     work = self._agent_work_in_connection(
                         connection,
                         root_session_id=root_session_id,
-                        work_id=condition["work_id"],
+                        work_id=condition["source_work_id"],
                     )
                     if work is None or work["status"] == "stopped":
-                        failure = condition["work_id"]
+                        failure = condition["source_work_id"]
                         break
                     if work["status"] == "completed":
-                        materials.append(
-                            {
-                                "source_work_id": condition["work_id"],
-                                "kind": "dependency",
-                                "ordinal": condition["ordinal"],
-                                "body": work["final"],
-                            }
-                        )
-                    else:
-                        waiting.append(condition)
+                        condition["body"] = work["final"]
+                        updated = True
                 if failure is not None:
                     reason = "DEPENDENCY_NOT_SUCCESSFUL:" + failure
                     connection.execute(
-                        "UPDATE pulsara_v3.prompt_queue_items SET status='REJECTED',terminal_reason=%s,terminal_at=clock_timestamp(),waiting_on='[]'::jsonb WHERE id=%s AND status='PENDING'",
+                        "UPDATE pulsara_v3.prompt_queue_items SET status='REJECTED',terminal_reason=%s,terminal_at=clock_timestamp() WHERE id=%s AND status='PENDING'",
                         (reason, row["id"]),
                     )
                     self._agent_queue_event(
@@ -504,16 +626,10 @@ class _SubagentOperations:
                         actor_id,
                         {"reason": reason},
                     )
-                elif waiting != row["waiting_on"]:
-                    materials.sort(
-                        key=lambda x: (
-                            0 if x["kind"] == "dependency" else 1,
-                            x["ordinal"],
-                        )
-                    )
+                elif updated:
                     connection.execute(
-                        "UPDATE pulsara_v3.prompt_queue_items SET waiting_on=%s,input_materials=%s WHERE id=%s",
-                        (Jsonb(waiting), Jsonb(materials), row["id"]),
+                        "UPDATE pulsara_v3.prompt_queue_items SET work_inputs=%s WHERE id=%s",
+                        (Jsonb(inputs), row["id"]),
                     )
                 else:
                     continue
@@ -522,6 +638,7 @@ class _SubagentOperations:
             if not progressed:
                 return tuple(changed)
 
+    @_replan_work_inputs
     def resolve_agent_dependencies(self, *, session_id, deadline_monotonic):
         self._begin_event_batch()
         try:
@@ -542,12 +659,16 @@ class _SubagentOperations:
                         (root["root_id"],),
                     ).fetchone()
                     if row is not None:
+                        locked = self._lock_work_input_sources(
+                            connection, root_session_id=str(row["id"])
+                        )
                         result = self._resolve_agent_dependencies_in_connection(
                             connection,
                             root_session_id=str(row["id"]),
                             guard=None,
                             occurred_at=datetime.now(timezone.utc),
                             actor_id="dependency-owner",
+                            locked_sessions=locked,
                         )
             self._finish_event_batch(committed=True)
             return result
@@ -564,6 +685,93 @@ class _SubagentOperations:
         ) as connection:
             return self._agent_work_in_connection(
                 connection, root_session_id=root_session_id, work_id=work_id
+            )
+
+    def read_agent_work_graph_facts(
+        self, *, root_session_id, work_id, deadline_monotonic
+    ):
+        """Read one visible Work's status and input identities without its bodies."""
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                f"""SELECT q.id, q.session_id, {REQUEST_EXECUTION_COLUMNS},
+                COALESCE((SELECT jsonb_agg(i || jsonb_build_object('body', ''))
+                    FROM jsonb_array_elements(q.work_inputs) i), '[]'::jsonb) AS inputs,
+                COALESCE((SELECT bool_and(CASE WHEN jsonb_typeof(i) = 'object' AND i ? 'body'
+                    AND (jsonb_typeof(i->'body')='string' OR
+                         (i->>'kind'='dependency' AND jsonb_typeof(i->'body')='null'))
+                    THEN true ELSE false END) FROM jsonb_array_elements(q.work_inputs) i), true) AS bodies_valid
+                FROM pulsara_v3.prompt_queue_items q
+                JOIN pulsara_v3.sessions s ON s.id=q.session_id
+                LEFT JOIN pulsara_v3.transcript_entries qe ON qe.session_id=q.session_id AND qe.id=q.consumed_entry_id
+                LEFT JOIN pulsara_v3.turns qt ON qt.session_id=qe.session_id AND qt.id=qe.turn_id
+                WHERE s.root_session_id=%s AND q.id=%s AND q.input_origin='AGENT_INSTRUCTION'""",
+                (root_session_id, work_id),
+            ).fetchone()
+            if row is None:
+                return None
+            if not row["bodies_valid"]:
+                raise ConversationKernelConflict("invalid Work input body")
+            execution = request_execution_from_row(row)
+            try:
+                inputs = validate_work_inputs(row["inputs"])
+            except (TypeError, ValueError) as exc:
+                raise ConversationKernelConflict(
+                    "invalid Work input identities"
+                ) from exc
+            return {
+                "agent_id": str(row["session_id"]),
+                "work_id": str(row["id"]),
+                "status": execution.status.value,
+                "terminal_reason": execution.terminal_reason,
+                "consumed_entry_id": row["execution_consumed_entry_id"],
+                "turn_id": row["execution_turn_id"],
+                "inputs": tuple(
+                    {k: x[k] for k in ("kind", "source_work_id", "ordinal")}
+                    for x in inputs
+                ),
+            }
+
+    def list_cell_agent_works(
+        self,
+        *,
+        root_session_id,
+        source_exec_attempt_id,
+        cursor=None,
+        limit=20,
+        deadline_monotonic,
+    ):
+        if limit < 1:
+            raise ValueError("page limit must be positive")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            rows = connection.execute(
+                f"""SELECT q.id, q.session_id, {REQUEST_EXECUTION_COLUMNS}
+                FROM pulsara_v3.tool_invocations i
+                JOIN pulsara_v3.tool_execution_attempts a ON a.session_id=i.session_id AND a.invocation_id=i.id
+                JOIN pulsara_v3.prompt_queue_items q ON q.source_session_id=i.session_id AND q.source_tool_attempt_id=a.id
+                JOIN pulsara_v3.sessions s ON s.id=q.session_id AND s.root_session_id=i.session_id
+                LEFT JOIN pulsara_v3.transcript_entries qe ON qe.session_id=q.session_id AND qe.id=q.consumed_entry_id
+                LEFT JOIN pulsara_v3.turns qt ON qt.session_id=qe.session_id AND qt.id=qe.turn_id
+                WHERE i.session_id=%s AND i.source_exec_attempt_id=%s AND q.input_origin='AGENT_INSTRUCTION'
+                  AND (%s::text IS NULL OR q.id>%s) ORDER BY q.id LIMIT %s""",
+                (root_session_id, source_exec_attempt_id, cursor, cursor, limit),
+            ).fetchall()
+            return tuple(
+                {
+                    "work_id": str(row["id"]),
+                    "agent_id": str(row["session_id"]),
+                    "status": request_execution_from_row(row).status.value,
+                }
+                for row in rows
             )
 
     def list_agent_sessions(
@@ -717,6 +925,7 @@ class _SubagentOperations:
                 (at or datetime.now(timezone.utc), session_id),
             ).fetchone()["idle_since"]
 
+    @_replan_work_inputs
     def cancel_agent_requests(
         self,
         root_guard,
@@ -739,6 +948,9 @@ class _SubagentOperations:
             ).fetchone()
             if session is None or session["root_session_id"] != root_guard.session_id:
                 raise ConversationKernelConflict("Agent does not belong to ROOT")
+            locked_sources = self._lock_work_input_sources(
+                connection, root_session_id=root_guard.session_id
+            )
             rows = connection.execute(
                 _WORK_SELECT
                 + " AND q.session_id=%s AND (%s::text IS NULL OR q.id=%s) AND (q.status='PENDING' OR qt.status='RUNNING' OR %s::text IS NOT NULL) ORDER BY q.queue_sequence FOR UPDATE OF q",
@@ -749,7 +961,7 @@ class _SubagentOperations:
                 ids.append(str(row["id"]))
                 if row["status"] == "PENDING":
                     connection.execute(
-                        "UPDATE pulsara_v3.prompt_queue_items SET status='CANCELLED',terminal_reason=%s,terminal_at=clock_timestamp(),waiting_on='[]'::jsonb WHERE session_id=%s AND id=%s AND status='PENDING'",
+                        "UPDATE pulsara_v3.prompt_queue_items SET status='CANCELLED',terminal_reason=%s,terminal_at=clock_timestamp() WHERE session_id=%s AND id=%s AND status='PENDING'",
                         (reason, agent_id, row["id"]),
                     )
                     self._agent_queue_event(
@@ -769,6 +981,7 @@ class _SubagentOperations:
                 guard=root_guard,
                 occurred_at=occurred_at,
                 actor_id=actor_id,
+                locked_sessions=locked_sources | {agent_id},
             )
             return tuple(
                 self._agent_work_in_connection(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -235,17 +236,17 @@ def test_assistant_settlement_exact_candidate_carries_scope_and_epoch() -> None:
     cut = PreparedProviderInputCut('session:336wrfwkamrr3up6kjtsgvgcte', 'turn:klmmazz67vfgsfsvg6ceqgdsfu', "revision:test", 1)
     content = InlineContent.from_bytes(b"assistant")
     occurred_at = datetime(2026, 8, 17, tzinfo=timezone.utc)
-    root = ProviderInputContinuityScope('session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.ROOT, None)
+    root = ProviderInputContinuityScope('session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.ROOT)
     child = ProviderInputContinuityScope(
-        'session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.SUBAGENT_TASK, 'task:kmz6pl55dsqspcz6dgmhr7sxpy'
+        'session:kmz6pl55dsqspcz6dgmhr7sxpy', ModelInputScopeKind.SUBAGENT
     )
 
     def candidate(
         scope: ProviderInputContinuityScope, nonce: str, revision: int
     ) -> PreparedAssistantMessageSettlement:
         return PreparedAssistantMessageSettlement(
-            guard=HostWriterGuard('session:336wrfwkamrr3up6kjtsgvgcte', 1, 'host:yinyxklzunar54s7objjdbphcy'),
-            cut=cut,
+            guard=HostWriterGuard(scope.session_id, 1, 'host:yinyxklzunar54s7objjdbphcy'),
+            cut=replace(cut, session_id=scope.session_id),
             entry_id='entry:yizmduice57hcs52bz2usckgc4',
             parent_content=content,
             blocks=(),

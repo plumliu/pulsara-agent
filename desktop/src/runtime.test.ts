@@ -38,8 +38,28 @@ lines.on('line', line => {
     if (mode === 'malformed') { process.stdout.write('not JSON\\n'); return; }
     if (mode === 'pre-ready-failure') { output({type:'failed', error:'startup cleanup failed'}); process.exit(0); }
     if (mode === 'pre-ready-exit') process.exit(3);
+    if (mode.startsWith('startup-settlement-')) {
+      output({type:'failed', phase:'startup', error:'database preparation failed'});
+      output({type:'stopping'});
+      if (['startup-settlement-close-failure', 'startup-settlement-close-then-startup'].includes(mode)) output({type:'failed', phase:'shutdown', error:'physical close failed'});
+      if (mode === 'startup-settlement-close-then-startup') output({type:'failed', phase:'startup', error:'later startup failure'});
+      if (mode !== 'startup-settlement-missing') output({type:'stopped', ...(mode === 'startup-settlement-no-clean' ? {} : {clean:mode !== 'startup-settlement-unclean'})});
+      if (mode === 'startup-settlement-drain') {
+        const release = path.join(home, 'release');
+        const finish = () => { if (fs.existsSync(release)) process.exit(1); };
+        fs.watch(home, finish); fs.writeFileSync(path.join(home, 'closing'), 'clean signal sent, process still alive'); finish();
+        return;
+      }
+      if (mode === 'startup-settlement-signal') { process.kill(process.pid, 'SIGTERM'); return; }
+      process.exit(mode === 'startup-settlement-zero' ? 0 : 1);
+    }
+    if (mode === 'runtime-failure-clean') {
+      output({type:'ready', origin:'http://127.0.0.1:12345'});
+      output({type:'failed', phase:'runtime', error:'runtime failed'});
+      output({type:'stopping'}); output({type:'stopped', clean:true}); process.exit(1);
+    }
     if (mode === 'ready-on-shutdown-failure') return;
-    output({type:'ready', origin:'http://127.0.0.1:12345', database_state:'ready', ...(mode.startsWith('wsl') ? {certificatePem:'-----BEGIN CERTIFICATE-----\\nfixture\\n-----END CERTIFICATE-----'} : {})});
+    output({type:'ready', origin:'http://127.0.0.1:12345', database_state:'ready', ...(mode.startsWith('wsl') && mode !== 'wsl-certificate-then-failure' ? {certificatePem:'-----BEGIN CERTIFICATE-----\\nfixture\\n-----END CERTIFICATE-----'} : {})});
     if (mode === 'wsl-oauth') output({type:'open-oauth-browser', requestId:'oauth-1', url:'https://example.com/authorize'});
     if (mode === 'wsl-bad-oauth') output({type:'open-oauth-browser', requestId:'oauth-1', url:'file:///etc/passwd'});
   } else if (message.type === 'open-oauth-browser-result') {
@@ -48,8 +68,11 @@ lines.on('line', line => {
     if (typeof message.requestId !== 'string') throw new Error('requestId must be a string');
     output({type:'quit-state', requestId:message.requestId, activeTasks:1, scheduledTasks:2});
   } else if (message.type === 'shutdown') {
+    if (mode === 'startup-settlement-drain') return;
     if (mode === 'ready-on-shutdown-failure') output({type:'ready', origin:'http://127.0.0.1:12345'});
     output({type:'stopping'});
+    if (mode === 'wsl-certificate-then-failure') { output({type:'failed', phase:'startup', error:'later startup failure'}); output({type:'stopped', clean:true}); process.exit(1); }
+    if (mode === 'explicit-unclean-zero') { output({type:'stopped', clean:false}); process.exit(0); }
     if (mode === 'failed-zero') output({type:'failed', error:'physical settlement failed'});
     if (mode === 'invalid-zero') process.stdout.write('invalid shutdown frame\\n');
     if (mode === 'wsl-no-stopped') process.exit(0);
@@ -165,6 +188,66 @@ for (const mode of ['pre-ready-failure', 'pre-ready-exit']) {
     } finally { await value.close(); }
   });
 }
+
+test('a startup failure with confirmed clean settlement releases the existing process owner', {timeout:10000}, async () => {
+  const value = await fixture('startup-settlement-clean');
+  try {
+    await assert.rejects(value.runtime.start(async () => settings, () => false), /database preparation failed/);
+    await Promise.all([value.runtime.stop(), value.runtime.stop()]);
+    assert.equal(value.runtime.running, false);
+    assert.deepEqual((await value.calls()).map(call => call.type), ['start']);
+  } finally { await value.close(); }
+});
+
+for (const mode of ['startup-settlement-missing', 'startup-settlement-no-clean', 'startup-settlement-unclean', 'startup-settlement-close-failure', 'startup-settlement-close-then-startup', 'startup-settlement-zero', 'startup-settlement-signal']) {
+  test(`startup failure without exact clean settlement remains rejected: ${mode}`, {timeout:10000}, async () => {
+    const value = await fixture(mode);
+    try {
+      await assert.rejects(value.runtime.start(async () => settings, () => false));
+      await assert.rejects(value.runtime.stop(), /收尾失败/);
+    } finally { await value.close(); }
+  });
+}
+
+test('clean startup settlement still waits for physical child exit', {timeout:10000}, async t => {
+  const value = await fixture('startup-settlement-drain');
+  try {
+    await assert.rejects(value.runtime.start(async () => settings, () => false));
+    await waitForFile(path.join(value.home, 'closing'), t.signal);
+    let finished = false;
+    const stopping = value.runtime.stop().then(() => { finished = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(finished, false);
+    assert.equal(value.runtime.running, true);
+    await writeFile(path.join(value.home, 'release'), 'release');
+    await stopping;
+    assert.equal(value.runtime.running, false);
+  } finally { await value.close(); }
+});
+
+test('a cleanly closed runtime failure after ready still rejects shutdown', {timeout:10000}, async () => {
+  const value = await fixture('runtime-failure-clean');
+  try {
+    await value.runtime.start(async () => settings, () => false);
+    await assert.rejects(value.runtime.stop(), /收尾失败/);
+  } finally { await value.close(); }
+});
+
+test('an explicit unclean settlement rejects even with exit zero', {timeout:10000}, async () => {
+  const value = await fixture('explicit-unclean-zero');
+  try {
+    await value.runtime.start(async () => settings, () => false);
+    await assert.rejects(value.runtime.stop(), /收尾不完整/);
+  } finally { await value.close(); }
+});
+
+test('an invalid WSL certificate remains a failure after a later clean startup settlement', {timeout:10000}, async () => {
+  const value = await fixture('wsl-certificate-then-failure', posixHostOperations, wslOptions);
+  try {
+    await assert.rejects(value.runtime.start(async () => settings, () => false), /本次连接证书/);
+    await assert.rejects(value.runtime.stop(), /本次连接证书/);
+  } finally { await value.close(); }
+});
 
 for (const mode of ['wsl-oauth', 'wsl-bad-oauth']) {
   test(`OAuth bridge reports the real browser-open outcome: ${mode}`, {timeout:10000}, async t => {

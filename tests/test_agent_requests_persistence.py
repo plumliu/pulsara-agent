@@ -1,6 +1,7 @@
 """Delegation keeps identity, lifecycle and content in the shared session queue."""
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from time import monotonic
 
 import pytest
@@ -353,6 +354,341 @@ def test_full_results_are_owned_and_ordered_before_first_model_input(source):
         )["status"]
         == "running"
     )
+    facts = repository.read_agent_work_graph_facts(
+        root_session_id=root.guard.session_id,
+        work_id=receiver.work_id,
+        deadline_monotonic=deadline(),
+    )
+    assert facts["status"] == "running"
+    assert facts["consumed_entry_id"] == candidate.exact_initial_entry_id
+    assert facts["turn_id"] == candidate.exact_turn_id
+    assert facts["inputs"] == (
+        {"kind": "dependency", "source_work_id": a.work_id, "ordinal": 0},
+        {"kind": "dependency", "source_work_id": b.work_id, "ordinal": 1},
+    )
+    assert (
+        repository.read_agent_work_graph_facts(
+            root_session_id=root.guard.session_id,
+            work_id=a.work_id,
+            deadline_monotonic=deadline(),
+        )
+        is None
+    )
+
+
+def test_work_input_identities_are_confirmed_and_graph_does_not_hydrate(
+    source, monkeypatch
+):
+    repository, root, admit = source
+    first, second = request(), request()
+    admit(first, second)
+    lease, candidate = start(repository, second)
+    finish(repository, lease, candidate, "material body")
+    receiver = request(
+        depends_on=(first.work_id,), materials=(first.work_id, second.work_id)
+    )
+    admit(receiver)
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline(),
+    ) as connection:
+        turn = connection.execute(
+            "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND status='RUNNING'",
+            (root.guard.session_id,),
+        ).fetchone()
+        attempt = connection.execute(
+            "SELECT id FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s",
+            (root.guard.session_id,),
+        ).fetchone()
+        permission = repository._permission_from_row(turn)
+    from pulsara_agent.llm.model_connections import model_call_binding_from_dict
+
+    confirmation = dict(
+        source_turn_id=turn["id"],
+        source_tool_attempt_id=attempt["id"],
+        model_call_binding=model_call_binding_from_dict(turn["model_call_binding"]),
+        permission_snapshot=permission,
+        deadline_monotonic=deadline(),
+    )
+    assert (
+        repository.confirm_agent_requests(
+            root.guard, requests=(receiver,), **confirmation
+        )[0]["work_id"]
+        == receiver.work_id
+    )
+    with pytest.raises(Exception, match="differs from its prepared"):
+        repository.confirm_agent_requests(
+            root.guard,
+            requests=(replace(receiver, depends_on=(second.work_id,)),),
+            **confirmation,
+        )
+    monkeypatch.setattr(
+        repository,
+        "_agent_prompt_text",
+        lambda *args: pytest.fail("graph hydrated a prompt"),
+    )
+    facts = repository.read_agent_work_graph_facts(
+        root_session_id=root.guard.session_id,
+        work_id=receiver.work_id,
+        deadline_monotonic=deadline(),
+    )
+    assert facts["consumed_entry_id"] is None and facts["turn_id"] is None
+    assert facts["inputs"] == (
+        {"kind": "dependency", "source_work_id": first.work_id, "ordinal": 0},
+        {"kind": "material", "source_work_id": second.work_id, "ordinal": 1},
+    )
+    assert (
+        repository.read_agent_work_graph_facts(
+            root_session_id=random_id("session"),
+            work_id=receiver.work_id,
+            deadline_monotonic=deadline(),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("kind", ["dependency", "material"])
+@pytest.mark.parametrize("body", ["", "  "])
+def test_empty_work_material_is_stored_and_projected_once(source, kind, body):
+    repository, root, admit = source
+    parent = request()
+    admit(parent)
+    lease, candidate = start(repository, parent)
+    finish(repository, lease, candidate, body)
+    receiver = request(
+        **{"depends_on" if kind == "dependency" else "materials": (parent.work_id,)}
+    )
+    admit(receiver)
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        row_factory=dict_row,
+        deadline_monotonic=deadline(),
+    ) as connection:
+        inputs = connection.execute(
+            "SELECT work_inputs FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+            (receiver.work_id,),
+        ).fetchone()["work_inputs"]
+    assert inputs == [
+        {"kind": kind, "source_work_id": parent.work_id, "ordinal": 0, "body": body}
+    ]
+    _, candidate = start(repository, receiver)
+    assert [
+        part.text
+        for entry in candidate.ordered_input_entries
+        for part in entry.canonical_prompt.content.parts
+    ] == [
+        "Investigate.",
+        "此来源 Work 的结果不含文本内容。" if body == "" else body,
+    ]
+    confirmation = repository.confirm_prepared_prompt_head_consumption(
+        candidate=candidate, deadline_monotonic=deadline()
+    )
+    assert confirmation.kind.value == "FULL"
+
+
+def test_source_deletion_before_dependency_scan_does_not_deadlock(source, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    repository, root, admit = source
+    predecessor = request()
+    source_work = request(depends_on=(predecessor.work_id,))
+    receiver = request(depends_on=(source_work.work_id,))
+    admit(predecessor, source_work, receiver)
+    found_sources = Event()
+    original = repository._work_input_source_sessions
+
+    def observed(connection, **kwargs):
+        result = original(connection, **kwargs)
+        if source_work.agent_id in result.values():
+            found_sources.set()
+        return result
+
+    monkeypatch.setattr(repository, "_work_input_source_sessions", observed)
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.HOST_CONTROL,
+        deadline_monotonic=deadline(),
+    ) as deleting:
+        deleting.execute(
+            "SELECT id FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE",
+            (source_work.agent_id,),
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                repository.resolve_agent_dependencies,
+                session_id=receiver.agent_id,
+                deadline_monotonic=deadline(),
+            )
+            assert found_sources.wait(5)
+            deleting.execute(
+                "DELETE FROM pulsara_v3.sessions WHERE id=%s", (source_work.agent_id,)
+            )
+            deleting.execute("SET CONSTRAINTS ALL IMMEDIATE")
+            deleting.commit()
+            future.result(timeout=10)
+    work = repository.query_agent_work(
+        root_session_id=root.guard.session_id,
+        work_id=receiver.work_id,
+        deadline_monotonic=deadline(),
+    )
+    assert work["status"] == "stopped"
+    assert work["terminal_reason"] == "DEPENDENCY_NOT_SUCCESSFUL:" + source_work.work_id
+
+
+def test_materialization_wins_against_concurrent_source_deletion(source, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from pulsara_agent.conversation_kernel._repository import (
+        deletion as deletion_operations,
+    )
+
+    repository, root, admit = source
+    previous = request()
+    admit(previous)
+    lease, candidate = start(repository, previous)
+    finish(repository, lease, candidate, "independent snapshot")
+    repository.release_host_writer(lease.guard, deadline_monotonic=deadline())
+    next_work = request(depends_on=(previous.work_id,))
+    reading, continue_read, deleting = Event(), Event(), Event()
+    original_read = repository._agent_work_in_connection
+    original_lock = deletion_operations.lock_session_admission
+
+    def paused_read(connection, *, root_session_id, work_id):
+        if work_id == previous.work_id:
+            reading.set()
+            assert continue_read.wait(10)
+        return original_read(
+            connection, root_session_id=root_session_id, work_id=work_id
+        )
+
+    def observed_delete_lock(connection, *, session_id):
+        original_lock(connection, session_id=session_id)
+        if session_id == previous.agent_id:
+            deleting.set()
+
+    monkeypatch.setattr(repository, "_agent_work_in_connection", paused_read)
+    monkeypatch.setattr(
+        deletion_operations, "lock_session_admission", observed_delete_lock
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        accepted = pool.submit(admit, next_work)
+        assert reading.wait(5)
+        retired = pool.submit(
+            repository.delete_session,
+            session_id=previous.agent_id,
+            memory_domain_id="u_local",
+            closed_writer=lease.guard,
+            required_lifecycle=None,
+            deadline_monotonic=deadline(),
+        )
+        assert deleting.wait(5)
+        continue_read.set()
+        assert accepted.result(timeout=10)[0]["work_id"] == next_work.work_id
+        assert retired.result(timeout=10) == "DELETED"
+    _, next_candidate = start(repository, next_work)
+    assert (
+        next_candidate.ordered_input_entries[-1].canonical_prompt.content.parts[0].text
+        == "independent snapshot"
+    )
+    assert (
+        repository.read_agent_work_graph_facts(
+            root_session_id=root.guard.session_id,
+            work_id=previous.work_id,
+            deadline_monotonic=deadline(),
+        )
+        is None
+    )
+
+
+def test_reused_agent_source_delete_wins_before_admission(source, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from pulsara_agent.conversation_kernel._repository import subagents as operations
+
+    repository, root, admit = source
+    previous = request()
+    admit(previous)
+    lease, candidate = start(repository, previous)
+    finish(repository, lease, candidate, "completed")
+    repository.release_host_writer(lease.guard, deadline_monotonic=deadline())
+    next_work = request(
+        agent_id=previous.agent_id, create=False, depends_on=(previous.work_id,)
+    )
+    target_lock = Event()
+    original = operations.lock_session_admission
+
+    def observed(connection, *, session_id):
+        original(connection, session_id=session_id)
+        if session_id == previous.agent_id:
+            target_lock.set()
+
+    monkeypatch.setattr(operations, "lock_session_admission", observed)
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.HOST_CONTROL,
+        deadline_monotonic=deadline(),
+    ) as deleting:
+        deleting.execute(
+            "SELECT id FROM pulsara_v3.sessions WHERE id=%s FOR UPDATE",
+            (previous.agent_id,),
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(admit, next_work)
+            assert target_lock.wait(5)
+            deleting.execute(
+                "DELETE FROM pulsara_v3.sessions WHERE id=%s", (previous.agent_id,)
+            )
+            deleting.execute("SET CONSTRAINTS ALL IMMEDIATE")
+            deleting.commit()
+            with pytest.raises(Exception, match="unavailable"):
+                future.result(timeout=10)
+    assert (
+        repository.query_agent_work(
+            root_session_id=root.guard.session_id,
+            work_id=next_work.work_id,
+            deadline_monotonic=deadline(),
+        )
+        is None
+    )
+
+
+def test_input_lock_replan_rolls_back_before_retrying_admission(source, monkeypatch):
+    from pulsara_agent.conversation_kernel._repository.subagents import (
+        _WorkInputsReplan,
+    )
+
+    repository, _root, admit = source
+    work = request()
+    checks = []
+    original = repository._verify_work_input_source_locks
+
+    def replan_once(connection, **kwargs):
+        checks.append(True)
+        if len(checks) == 1:
+            raise _WorkInputsReplan()
+        return original(connection, **kwargs)
+
+    monkeypatch.setattr(repository, "_verify_work_input_source_locks", replan_once)
+    assert admit(work)[0]["work_id"] == work.work_id
+    assert len(checks) >= 2
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR,
+        deadline_monotonic=deadline(),
+    ) as connection:
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM pulsara_v3.prompt_queue_items WHERE id=%s",
+                (work.work_id,),
+            ).fetchone()[0]
+            == 1
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM pulsara_v3.agent_events WHERE subject_queue_item_id=%s AND event_type='PromptQueued'",
+                (work.work_id,),
+            ).fetchone()[0]
+            == 1
+        )
 
 
 def test_waiting_work_is_not_idle_and_cancel_preserves_other_work(source):

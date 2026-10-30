@@ -55,6 +55,7 @@ beforeEach(() => {
   // Each test starts with its own browser selection; remounts within a test
   // still exercise the production preference persistence.
   uiPreferences.removeItem('pulsara-active-session');
+  uiPreferences.removeItem('pulsara-workspace-open');
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} });
 });
 
@@ -310,6 +311,14 @@ class FakeConnection implements RuntimeConnection {
   subscribe = vi.fn((listener: () => void) => {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
+  });
+  readQueuePage = vi.fn(async (_cursor?: string, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    return {items:this.value.queuedPrompts, nextCursor:null};
+  });
+  readQueueItem = vi.fn(async (queueItemId: string, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
+    return this.value.queuedPrompts.find(item => item.queueItemId === queueItemId) ?? null;
   });
   publishRead(value: RuntimeProjection) {
     this.value = {...value, canonicalInputs: [...new Map([

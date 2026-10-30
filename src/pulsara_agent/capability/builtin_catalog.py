@@ -19,6 +19,7 @@ from pulsara_agent.memory.product_contract import (
     memory_kind_product_guide,
 )
 from pulsara_agent.memory.targets import memory_target_schema
+from pulsara_agent.code_mode.targets import cell_target_schema
 
 from pulsara_agent.capability.descriptor import (
     BuiltinToolAdvertisePolicy,
@@ -329,7 +330,8 @@ def _wait_agent_schema() -> dict[str, Any]:
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "open_in_pulsara": _descriptor(
         name="open_in_pulsara", description=("ROOT only. Show targets in this conversation's tabs: PATH files, URL webpages, PROCESS "
- 'terminals, runtime MCP_SERVER connections, or PANEL overview entries. Group related targets; '
+ 'terminals, runtime MCP_SERVER connections, AGENT read-only conversations, CELL frozen source, or PANEL overview entries. '
+ 'PANEL names: capabilities, background, subagents, cells, browser. Group related targets; '
  'the last accepted target is selected. Invalid items '
  'return their zero-based index while valid items proceed. Results acknowledge requests, not '
  "completed display or webpage contents. Copy each result item's target for reuse. "
@@ -389,12 +391,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                  'properties': {'name': {'enum': ['capabilities',
 
                                                                                   'background',
+                                                                                  'subagents',
+                                                                                  'cells',
                                                                                   'browser'],
                                                                          'type': 'string'},
                                                                 'kind': {'type': 'string',
                                                                          'const': 'PANEL'}},
                                                  'required': ['kind', 'name'],
-                                                 'type': 'object'}]},
+                                                 'type': 'object'},
+                                                target_schema('AGENT'),
+                                                cell_target_schema()]},
                             'minItems': 1,
                             'type': 'array'}},
  'required': ['targets'],
