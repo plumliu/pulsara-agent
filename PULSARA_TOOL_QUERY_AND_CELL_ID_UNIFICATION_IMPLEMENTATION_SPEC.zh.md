@@ -10,7 +10,7 @@
 
 - [Subagent／Work 与双入口编排设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)。
 - [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)。
-- [Agent／Code Mode 暂缓范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。其中本规格列明的工具 schema、名称及必要使用指引纳入实施；其他提示词优化和新前端表面仍暂缓。
+- [Agent／Code Mode 待实施事项](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。子代理与 Cell 侧边栏及 `open_in_pulsara` 接入的目标合同以其配套规格为准，尚未实施。
 - [统一身份合同](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)的 canonical ID 编码与唯一 owner 原则。
 - [target 共同规则](archived_docs/PULSARA_TOOL_TARGET_HARD_CUT_OVERVIEW.zh.md)中仍适用的对象身份、角色与参数分离规则。历史文档中的旧 Subagent／Task 表面不复活。
 
@@ -648,7 +648,7 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 
 压缩 runtime handoff 的状态筛选、完整 target、PMCA 3,200-token 预算、独立完整 TODO、空 source、预算省略说明、普通环境 Cell 索引删除与 Monitor／Process 资源退役，统一由 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 定义。本文的查询、权限和 target 合同仍保持，query 不要求 handoff 完整列出所有对象，也不恢复已回收对象。
 
-TODO／Plan 整体文案、工作流及新的前端表面继续按 [暂缓范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md) 处理；不因状态交接修改而顺带扩展。
+子代理与 Cell 侧边栏及 `open_in_pulsara` 展示接入按 [待实施事项](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md) 的配套规格处理。
 
 ## 16. 实施顺序与验收
 

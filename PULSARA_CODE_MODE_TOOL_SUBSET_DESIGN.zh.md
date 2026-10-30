@@ -1,8 +1,8 @@
 # Pulsara Code Mode：ROOT＋bypass、工具子集与执行合同
 
-日期：2026-10-30。状态：本轮运行时已实施；实际验收与边界见 §10，暂缓表面仍按配套范围执行。
+日期：2026-10-30。状态：Code Mode 运行时已实施；实际验收与边界见 §10。子代理与 Cell 侧边栏及其展示接入尚待实施。
 
-提示词与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+子代理与 Cell 侧边栏及其 `open_in_pulsara` 接入见 [待实施事项](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 JS 接入、工具范围、结果、资源与生命周期。协作对象、工具业务语义、Subagent 能力范围与恢复方式以 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) 为准；本文定义它们的 JS 接入，不另设业务合同。两篇共同构成实施基线，工具业务实现只有一套。
 
@@ -71,7 +71,7 @@ console.log({ agent: a.agent, work: a.work });
 | `enter_plan`、`ask_plan_question`、`exit_plan` | runner 接管对话阶段与用户交互 |
 | `exec_cell`、`query_cells`、`manage_cell` | 从脚本外控制 cell，仅 ROOT＋bypass |
 | `view_image` | 通过后续 user message 给模型看图 |
-| `open_in_pulsara` | 为用户打开文件、网页或面板 |
+| `open_in_pulsara` | 为用户打开文件、网页或面板；Agent／Cell 展示接入见待实施的侧边栏规格 |
 | `todo` | 模型直接维护当前进度 |
 | `search_memory`、`get_memory`、`remember`、`mark_memory_relation` | 四项均仅供 ROOT |
 | `manage_capability`、`reload_capabilities` | ROOT 直接管理配置与刷新 |
@@ -284,7 +284,7 @@ cell 已 failed／terminated，而在途结果尚未成功 resolve/reject 给 JS
 
 UI 提供 cell 状态、输出和精确停止，复用 conversation_kernel/user_control.py 的进程内精确目标控制 owner，不增加持久命令日志。当前新 turn 非 bypass 时，模型仍无 code mode，但用户能查看／停止旧 cell。Plan 约束本轮，不表示先前后台工作已停止；呈现真实状态，不另加确认流程。
 
-完成不自动创建 ROOT turn。普通环境观察只提供工作区、时区及 UTC offset 等环境事实，不自动列出 Cell。模型通过工具结果、按需 `query_cells` 及压缩 handoff 取得 Cell 状态。压缩 handoff 由 CodeModeHost 观察 queued／running、终态未确认、未读输出或内部 pending 非空的 Cell，以完整 CELL target 和必要公开状态承接已有工作；观察不消费或确认输出。用户 UI 继续经 `snapshot_cell_index()`、Host、gateway／proto 和桌面 bridge 查看并精确停止同一 Cell。Host 的空闲／archive／reopen 判断纳入运行及结算 Cell，不能因 ROOT final 误关 owner。
+完成不自动创建 ROOT turn。普通环境观察只提供工作区、时区及 UTC offset 等环境事实，不自动列出 Cell。模型通过工具结果、按需 `query_cells` 及压缩 handoff 取得 Cell 状态。压缩 handoff 由 CodeModeHost 观察 queued／running、终态未确认、未读输出或内部 pending 非空的 Cell，以完整 CELL target 和必要公开状态承接已有工作；观察不消费或确认输出。现有用户 UI 经 `snapshot_cell_index()`、Host、gateway／proto 和桌面 bridge 查看 Cell；待实施的侧边栏改用 `query_cells` 的共同读取 owner。用户精确停止同一 Cell 的既有路径不变。Host 的空闲／archive／reopen 判断纳入运行及结算 Cell，不能因 ROOT final 误关 owner。
 
 没有总运行时长、总调用次数或历史量上限。根 Promise 未完成且 guest jobs、宿主请求都为空时，在这个没有 timer／外部事件的环境中已无进展来源，返回 stalled；真实长工具等待不满足此条件。执行只在进程内连续，不承诺跨重启恢复。
 

@@ -1,8 +1,8 @@
 # Pulsara：Subagent／Work 与双入口编排设计
 
-日期：2026-10-30。状态：本轮协作运行时已实施；实际验收与未覆盖边界见 §9，暂缓表面仍按配套范围执行。
+日期：2026-10-30。状态：协作运行时已实施；实际验收与未覆盖边界见 §9。Work 输入存储及侧边栏目标合同见配套实施规格，尚待实施。
 
-提示词与前端暂缓范围，以及 bundled Skill 和 Code Mode 工具 schema 要求，见 [暂缓事项与实施范围](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
+子代理与 Cell 侧边栏及其 `open_in_pulsara` 接入见 [待实施事项](PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md)。
 
 本文负责 AGENT／WORK、连续历史、派活、交流、等待、完成及编排示例。通用 JS 执行、工具子集、结果桥接、计算限制和生命周期由 [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md) 唯一定义；两篇共同构成本轮实施合同；示例中的 ID 仍须替换为运行时真实返回值。
 
@@ -58,11 +58,11 @@ ROOT 与 Subagent 使用同一套 session 请求接纳、排队、turn 执行及
 | 尚未启动、启动前取消／拒绝 | 请求队列状态及实际原因；未启动不创建空 turn |
 | 已启动、完成、中断及具体结束原因 | 共用 `turns`；通过请求的 `consumed_entry_id → transcript entry.turn_id` 定位 |
 | final | `turn.final_entry_id` 指向的 canonical 内容，展示时按需生成预览／artifact |
-| 成功依赖 | 待处理请求中尚未满足的 WORK 等待条件；满足时接纳实际结果正文并清除相应等待条件，不建立跨 session 依赖表或外键 |
+| 成功依赖 | Work 的单列 JSONB `work_inputs` 保留已接纳来源、种类、顺序与正文；尚未物化的 dependency 派生未满足条件，不建立跨 session 依赖表或外键 |
 
 启动沿 ROOT 既有事务同时创建 turn 和本次有序输入 entry，并把请求标记为已消费；`turn.initial_entry_id` 与 `queue.consumed_entry_id` 均指向 instruction 的 entry。`CONSUMED` 只表示请求已进入 turn，不表示工作完成。接纳请求时即可给出稳定 WORK 引用；既有队列 ID 也能确定未来 turn ID，无需提前创建 turn 或另存映射。
 
-调度按 session 选取队首：该 Agent 无活动 turn、成功依赖已满足且有实际执行容量时启动。等待依赖不会阻塞其他 Agent。普通派活与 batch 共用这个接纳和调度 owner，batch 只是一次事务提交多份请求及其等待条件。委派请求保留真实来源，不伪装成人类提交或借用 ROOT 的 Plan 状态。
+调度按 session 选取队首：该 Agent 无活动 turn、成功依赖已满足且有实际执行容量时启动。等待依赖不会阻塞其他 Agent。普通派活与 batch 共用这个接纳和调度 owner，batch 只是一次事务提交多份请求及其输入事实。委派请求保留真实来源，不伪装成人类提交或借用 ROOT 的 Plan 状态。
 
 查询、等待、依赖推进、完成通知和 UI 都读取这组事实；运行中的观察使用进程内通知，通知本身不成为第二份工作状态。ROOT 原有即时请求与 steer 使用共同引擎，steer 仍追加到已有 turn，不因此变成新的 Work。
 
@@ -96,11 +96,11 @@ native tools 位于 provider 请求的工具定义中。复用已有 B 时，本
 
 session 表增加可空的 `root_session_id`，作为指向 session 主键的外键，并建立索引。NULL 表示 ROOT；非 NULL 表示 SUBAGENT，且必须指向一份 ROOT session。每个 Subagent 只属于一个 ROOT，并可在该 ROOT 下连续接活；不单建成员关联表，不单独存 kind。对外需要 kind 时，按这个字段派生。
 
-主侧边栏查询 `root_session_id IS NULL`；ROOT 的 `query_agents` 与协作侧栏查询 `root_session_id = 当前 ROOT 的完整 session ID`。Subagent session 存于数据库，通过协作详情查看和管理。该归属用于成员枚举与协作目标范围判断，不限制既定会话检索范围。会话的用户层管理操作不因此成为 Subagent 的工具。
+主会话列表查询 `root_session_id IS NULL`；ROOT 的 `query_agents` 与子代理列表查询 `root_session_id = 当前 ROOT 的完整 session ID`。Subagent session 存于数据库，侧栏只读详情绑定承载 ROOT，不切换 ROOT；其待实施范围见 [侧边栏规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。该归属用于成员枚举与协作目标范围判断，不限制既定会话检索范围。会话的用户层管理操作不因此成为 Subagent 的工具。
 
 Subagent session 不运行自动标题生成或后续输入建议。显示名称由 ROOT 在新建时通过原生 `run_agent`、`tools.run_agent` 或 `tools.run_agent.batch` 的 `name` 参数填写；复用时沿用已有名称。
 
-不为 Subagent 增设用户侧的工作区选择、手动压缩、上下文用量预览、会话分叉或定时任务入口，也不向其暴露 `query_schedules`、`manage_schedule`。自动压缩和协作详情中的历史、状态展示沿共同引擎处理。用户可以单独停止某份 Work，复用 §4.5 的 WORK 取消与结算链路。
+不为 Subagent 增设用户侧的工作区选择、手动压缩、上下文用量预览、会话分叉或定时任务入口，也不向其暴露 `query_schedules`、`manage_schedule`。自动压缩和协作详情中的历史、状态展示沿共同引擎处理。单份 Work 的停止语义继续复用 §4.5 的 WORK 取消与结算链路；新的只读协作详情不提供停止操作。
 
 Subagent 不提供 `open_in_pulsara`，其 SYSTEM 不注入面向用户的可视化发布说明。它可以按任务生成图片、HTML 或图表，将文件路径和必要说明交给 ROOT 组织展示。
 
@@ -125,7 +125,7 @@ Subagent 不提供 `search_sessions`、`search_session_content`、`read_session_
 
 目标 ID 用于决定发给谁，来源标识用于说明谁发来的；两者都不要求永久保留发送方。接收后的正文由接收方的队列／entry 持有，不通过源 entry 指针临时展开，不因源 session 删除而消失。内容采用既有 inline／blob 存储时，由接收方自己的引用保持可读。
 
-`root_session_id` 只记录 ROOT 对所属 Subagent 的归属；消息、材料和结果传递不建立发送方与接收方之间的跨 session 外键或保留约束。`depends_on` 是待处理请求的启动条件：其中尚未满足的 WORK 标识用于等待确切工作的结果，不是 session 之间的生命周期关系。前置成功时，把实际结果接纳为后继请求的输入材料并清除对应等待条件；全部满足后，沿共同队列开启 turn。前置失败、取消或中断时，按既定失败依赖语义结束后继请求，不创建空 turn。
+`root_session_id` 只记录 ROOT 对所属 Subagent 的归属；消息、材料和结果传递不建立发送方与接收方之间的跨 session 外键或保留约束。`depends_on` 的已接纳来源身份保存在所属 Work 的 `work_inputs`；对待处理请求，正文为 null 的 dependency 派生尚未满足的启动条件，不是 session 之间的生命周期关系。前置成功时正文从 null 物化为实际结果字符串；身份与顺序继续保留，全部满足后沿共同队列开启 turn。空结果正文以空串存储，材料准备时投影为独立 entry：`此来源 Work 的结果不含文本内容。` 前置失败、取消或中断时，按既定失败依赖语义结束后继请求，不创建空 turn；已接纳的依赖身份仍保留，但终态请求不再等待。
 
 查看、等待、停止仍按调用目标定位现存的请求／turn；它们不使目标永久保留。来源删除后，旧目标查询可以返回不存在或不可用，已经交付的正文继续保留在接收方历史中。
 
@@ -282,7 +282,7 @@ monitor 记录注册者 AGENT，投递目标与订阅生命周期绑定注册时
 | `name` | 仅新建时可选的显示名称，由 ROOT 填写；不调用自动标题生成 |
 | `context` | 仅新建时可选：`{"mode":"none"}` 或 `{"mode":"last_n","turns":1}`；turns 沿用 1–3，省略为 none |
 | `materials` | 可选 WORK target 数组，接纳时读取已结束工作的 final 或公开失败材料，作为本请求自己的输入保存 |
-| `depends_on` | 可选 WORK target 数组，作为本请求尚未满足的启动条件；取得成功结果正文后清除相应条件，全部满足才启动 |
+| `depends_on` | 可选 WORK target 数组；来源身份保留在 `work_inputs`，正文未物化时派生尚未满足的启动条件，全部满足才启动 |
 
 原生 run_agent 与 JS／batch 的 instruction、初始 context、依赖结果、显式材料和 Agent 消息均只传纯文本。ROOT 在文本中给出可访问的图片引用或路径，由 Subagent 按需调用原生 `view_image` 查看；引用文字本身不等于模型已经看到了图片。
 
@@ -335,7 +335,7 @@ const { a, b } = await tools.run_agent.batch({
 1. 读取全部成员说明。省略 target 的项预分配新 AGENT 引用；已有 AGENT target 的项复用执行者。为各次新轮请求预分配稳定 ID，作为 WORK 引用。准备阶段只持有临时参数与引用，不创建空 Agent、请求或 turn。
 2. 构造按局部名称索引的引用对象，如 `{a:{agent,work}, b:{agent,work}}`。每项提供将用于接纳的确切引用，不表示新对象已经存在，也不提供尚未产生的结果。
 3. 以同一份引用对象求值延迟参数，生成完整初始请求；检查全部参数、成功依赖以及同一 Agent 的队列先后关系。
-4. 共同请求接纳 owner 在一次事务中写入所需的新 Subagent session 及其 `root_session_id`、整批请求及各请求的等待条件。整批接纳成功后唤醒共同调度；启动遵循实际容量、Agent 队列和成功依赖条件，不建立成员之间的 session 依赖关系。
+4. 共同请求接纳 owner 在一次事务中写入所需的新 Subagent session 及其 `root_session_id`、整批请求及各请求的输入事实。整批接纳成功后唤醒共同调度；启动遵循实际容量、Agent 队列和成功依赖条件，不建立成员之间的 session 依赖关系。
 
 因此，成员第一轮就能看到 ROOT 明确写入的队友身份、职责与交流目的。ROOT 不必先查询 ID、复制到提示词，再发介绍消息。helper 不自动广播全体成员信息，也不自动给双方添加讨论义务。
 
@@ -850,7 +850,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 
 ### SUPERSEDES 范围
 
-本文为本轮协作运行时的实施合同，替代旧方案中以下产品表述。实施及实际验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)。
+本文替代旧方案中以下协作产品表述。既有协作运行时的实施及实际验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)；`work_inputs` 与侧边栏目标合同尚待实施，该记录不作为新合同的验收证据。
 
 | 来源 | 本文负责的新语义 |
 |---|---|
@@ -864,22 +864,22 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 | 责任 | 主要复用基础 | 本合同要求 |
 |---|---|---|
 | 身份／请求 | ROOT session、`prompt_queue_items`、queue identity | `root_session_id` 外键及索引记录归属，kind 派生而不存储；AGENT 使用完整 `session:`，WORK 使用完整 `queue:`，无额外身份映射 |
-| 接纳／调度 | `_repository/prompts.py`、`turn_admission.py`、Host delivery loop | 按 session 选队首，等待条件属于请求；取得前置正文后清除对应条件；instruction 是 initial／consumed entry，初始 context 与各结果独立排列，同一事务提交并确认整组；原生和 JS 共用按需加载 |
+| 接纳／调度 | `_repository/prompts.py`、`turn_admission.py`、Host delivery loop | 按 session 选队首；从请求的 `work_inputs` 派生未满足条件，取得前置正文后保留来源与顺序；instruction 是 initial／consumed entry，初始 context 与各结果独立排列，同一事务提交并确认整组；原生和 JS 共用按需加载 |
 | 上下文／模型切换 | ROOT reader、provider dispatch、continuity、compaction 与 UI 历史投影 | 开启 entry 与完整初始组分别定位；首调用前仅摘要组首之前的前驱并精确保留整组，之后沿原 instruction 保留与普通摘要规则；同 scope 连续追加 |
 | 状态／结果 | `_repository/conversation.py` 的请求联查、assistant settlement、turn final／终止原因 | 统一公开投影，无 Work 状态或结果副本；材料与 final 交付时保存为接收方输入，之后不依赖源 session |
 | 等待／停止 | 共同请求／turn 读取、变化通知、队列取消与 ActiveTurnCancellationIntent | WORK 按 queue→entry→turn 处理；AGENT 停止当前工作并取消本次覆盖的排队工作，历史终态不变；与调度竞态共用 owner，返回实际结果 |
 | 消息 | ROOT steer／补充输入、待输入与完成裁决、Hook 上下文接纳 | ROOT／Subagent 均只向活动 turn 接纳 steer；无活动 turn 则工具结果明确返回未接纳，不暂存、不加载、不开启工作；发送与完成竞态由共同 owner 裁决 |
 | Monitor | ROOT monitor manager、通知接纳／结算、compaction 与 UI | 参数化真实接收 scope；成员订阅绑定当前 turn，终态关闭，进程仍独立 |
 | 工具／提示 | built-in catalogue、caller gating、bundled skill | 五个协作工具，记忆和三个会话检索工具仅 ROOT；Subagent 不隐式注入记忆、历史或响应偏好；monitor 原生可供成员 |
-| 展示／检索 | 侧边栏、会话检索工具及隐式历史召回 | 侧边栏仅 ROOT；检索两种 session 行为一致，不新增 kind 参数；历史检索开关仅控制隐式召回 |
+| 展示／检索 | 主会话列表、子代理只读详情、会话检索工具及隐式历史召回 | 主会话列表仅 ROOT；子代理详情绑定其 ROOT 且只读；检索两种 session 行为一致，不新增 kind 参数；历史检索开关仅控制隐式召回 |
 | 能力／MCP | 共同 capability 查询、planner、MCP supervisor、配置入口与 context sources | ROOT／Subagent 共用发现、查询、启停和执行规则；两种 MCP 来源共用提供范围开关，插件安装时供用户审阅；各受影响 session 正常输入时追加变化观察，保持 epoch 前缀 |
 | 退役／删除 | 现有 session 关闭、删除与内容回收 | 同次连续闲置满 1 小时卸载、满 3 天删除；运行或等待请求不计闲置；重新派活按需加载，不恢复旧执行；单独删除成员不影响其他会话已交付正文，删除 ROOT 一并关闭和删除所属成员 |
 
-Agent 使用 session 身份及 `root_session_id` 归属；委派来源、初始材料和未满足的等待条件是请求的业务信息。其余接纳、turn、历史、完成与结果职责都由共同引擎承担。归属之外，消息、材料与结果不建立跨 session 外键或保留约束；不保留旧 task 状态／报告与 turn 双写，也不为 WORK 建映射表、结果表或独立生命周期。已有 event、subject、guard、job 类别不因“便于验证”增加。
+Agent 使用 session 身份及 `root_session_id` 归属；委派来源与初始材料是请求的业务信息；`work_inputs` 保留依赖及材料，未满足条件从其中派生。其余接纳、turn、历史、完成与结果职责都由共同引擎承担。归属之外，消息、材料与结果不建立跨 session 外键或保留约束；不保留旧 task 状态／报告与 turn 双写，也不为 WORK 建映射表、结果表或独立生命周期。已有 event、subject、guard、job 类别不因“便于验证”增加。
 
 实施验收关注行为：WORK 请求 ID 从排队到完成不变；启动与取消只有一个胜出的实际阶段；失败依赖不创建空 turn；同 Agent 连续请求共用历史与允许的 epoch，压缩后不改写旧内容；batch 第一次模型调用已带正确队友；组合环不启动成员；消息接纳与 turn 交接不转投；容量满时等待者让槽；大 final 直接从原 entry 可读；完成 Hook 续接不提前终态；monitor 终态关闭不杀进程；重新打开只推进未启动请求。与 Code Mode 的跨压缩、取消及 provider 前缀验收一起完成，不新增冻结文案测试。
 
-会话验收同时覆盖：侧边栏仅列 ROOT，ROOT 对两种 session 的主动与隐式历史检索行为一致；关闭历史检索只关闭隐式召回；Subagent 无三个会话检索工具及上述隐式注入；A 长时间执行时，等待 A 的 B 不计入闲置删除；A 已交付后被删除，B 的请求正文和历史仍完整可读。
+会话验收同时覆盖：主会话列表仅列 ROOT，ROOT 对两种 session 的主动与隐式历史检索行为一致；关闭历史检索只关闭隐式召回；Subagent 无三个会话检索工具及上述隐式注入；A 长时间执行时，等待 A 的 B 不计入闲置删除；A 已交付后被删除，B 的请求正文和历史仍完整可读。
 
 本次输入与恢复验收覆盖：新建／复用 Work 均以 instruction 为开启 entry；新建时选取的初始 context 与各前置 final 分别作为同轮 user 消息，复用沿原 Agent 的历史且不接纳新的 context，依赖完成先后不改变声明顺序；整组输入计量、截止位置、提交确认及首次实际 provider 输入一致；压缩不误将初始 context／结果当成人类请求。向已完成、未启动或已卸载的 Agent 发消息明确返回未接纳，ROOT 同样适用；1 小时／3 天共用闲置起点，等待工作不触发两段退役；原生及 JS 给已卸载会话派活可自动加载，旧执行不重跑。
 
@@ -887,4 +887,4 @@ Agent 使用 session 身份及 `root_session_id` 归属；委派来源、初始�
 
 能力验收覆盖 §1.5 的四种变化：手动配置与插件 MCP 使用同一提供范围设置；每个受影响的活动 session 收到相应观察；禁用后阻止新调用，同 epoch 已安装 schema 保持不变；能力查询不扩大原生管理工具权限。
 
-前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。SYSTEM 简短入口与 Skill 教学见 §8，其余 SYSTEM 整体修订和新的前端表面仍按暂缓范围处理。
+前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。SYSTEM 与 Skill 教学见 §8；子代理与 Cell 侧边栏及其展示接入另按待实施规格处理。
