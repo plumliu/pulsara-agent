@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import SplitResult, urlsplit, urlunsplit
+from collections.abc import Callable
 
 from pulsara_agent.primitives.model_call import (
     ProviderErrorSanitizationContractFact,
@@ -16,46 +16,37 @@ from pulsara_agent.primitives.model_call import (
 
 
 _URL_RE = re.compile(r"https?://[^\s\"'<>]+")
-_SECRET_RE = re.compile(
-    r"(?i)(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+|"
-    r"\b(?:authorization|proxy[-_ ]?authorization|api[-_ ]?key|x[-_ ]?api[-_ ]?key|"
-    r"access[-_ ]?token|refresh[-_ ]?token|password|passwd|secret|cookie|set[-_ ]?cookie)"
-    r"\s*[:=]\s*(?:(?:Bearer|Basic)\s+)?[^\s,;}]+"
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)(\b(?:authorization|proxy-authorization)\s*:\s*(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]+"
 )
 
 
 def _contract() -> ProviderErrorSanitizationContractFact:
     payload = {
         "contract_id": "pulsara.provider-error-sanitizer",
-        "contract_version": "v2",
+        "contract_version": "v3",
         "stable_code_mapping_fingerprint": sha256_fingerprint(
-            "provider-error-code-map:v2",
+            "provider-error-code-map:v3",
             {
                 "codes": tuple(item.value for item in ProviderModelStreamErrorCode),
                 "transport_contract_hint": "transport_* -> transport_protocol_error",
+                "provider_transport_error": "provider_connection_error",
             },
         ),
         "sensitive_key_policy_fingerprint": sha256_fingerprint(
-            "provider-error-sensitive-keys:v1",
+            "provider-error-sensitive-keys:v2",
             (
-                "authorization",
-                "proxyauthorization",
-                "apikey",
-                "xapikey",
-                "accesstoken",
-                "refreshtoken",
-                "password",
-                "passwd",
-                "secret",
-                "cookie",
-                "setcookie",
+                "execution-captured-exact-values",
+                "authorization-header-bearer-basic",
+                "url-userinfo",
             ),
         ),
         "secret_pattern_policy_fingerprint": sha256_fingerprint(
-            "provider-error-secret-patterns:v1", _SECRET_RE.pattern
+            "provider-error-secret-patterns:v2", _AUTHORIZATION_RE.pattern
         ),
         "url_redaction_policy_fingerprint": sha256_fingerprint(
-            "provider-error-url-policy:v1", "remove-userinfo-query-fragment"
+            "provider-error-url-policy:v2",
+            "remove-userinfo;preserve-path-query-fragment",
         ),
         "diagnostic_attribute_allowlist_fingerprint": sha256_fingerprint(
             "provider-error-diagnostic-allowlist:v1", ()
@@ -80,19 +71,9 @@ DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT = _contract()
 
 
 def _redact_url(match: re.Match[str]) -> str:
-    raw = match.group(0)
-    trailing = ""
-    while raw and raw[-1] in ".,;:)":
-        trailing = raw[-1] + trailing
-        raw = raw[:-1]
-    try:
-        parsed = urlsplit(raw)
-    except ValueError:
-        return "[redacted-url]" + trailing
-    host = parsed.hostname or ""
-    if parsed.port is not None:
-        host = f"{host}:{parsed.port}"
-    return urlunsplit(SplitResult(parsed.scheme, host, parsed.path, "", "")) + trailing
+    # URL authority userinfo is an authentication carrier. Preserve all other
+    # URL evidence, including ordinary query parameters and fragments.
+    return re.sub(r"^(https?://)[^/?#\s]*@", r"\1", match.group(0))
 
 
 def sanitize_provider_failure(
@@ -100,13 +81,16 @@ def sanitize_provider_failure(
     message: object,
     code_hint: str | None = None,
     retry_summary: ProviderRetrySummaryFact | None = None,
+    scrub_text: Callable[[str], str] | None = None,
 ) -> ProviderSanitizedErrorFact:
     """Map one provider failure to a bounded event-safe fact."""
 
     try:
         raw = str(message)
+        if scrub_text is not None:
+            raw = scrub_text(raw)
         text = _URL_RE.sub(_redact_url, raw)
-        text = _SECRET_RE.sub("[redacted]", text)
+        text = _AUTHORIZATION_RE.sub(r"\1[redacted]", text)
         truncated = (
             len(text) > DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars
         )
@@ -128,6 +112,8 @@ def sanitize_provider_failure(
             stable_code = ProviderModelStreamErrorCode.PERMISSION_DENIED
         elif "rate" in hint or "429" in hint:
             stable_code = ProviderModelStreamErrorCode.RATE_LIMITED
+        elif hint == "provider_transport_error":
+            stable_code = ProviderModelStreamErrorCode.PROVIDER_CONNECTION_ERROR
         elif "timeout" in hint:
             stable_code = ProviderModelStreamErrorCode.PROVIDER_TIMEOUT
         elif "overload" in hint:

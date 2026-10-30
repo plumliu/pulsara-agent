@@ -68,10 +68,12 @@ ${JSON.stringify(caller.agent)}. Use native send_agent_message to coordinate.`
 ${JSON.stringify(parser.agent)}. Use native send_agent_message to coordinate.`
   }
 });
-console.log(pair);
-console.log(await tools.wait_agent.works({
-  targets: [pair.parser.work, pair.caller.work]
-}));
+console.log({ parser: pair.parser.agent, caller: pair.caller.agent });
+await tools.wait_agent.works({ targets: [pair.parser.work, pair.caller.work] });
+const outcomes = await Promise.all([pair.parser.work, pair.caller.work].map(
+  target => tools.query_agents({ target })
+));
+console.log(outcomes.map(work => ({ target: work.target, final: work.final, diagnostic: work.diagnostic })));
 ```
 
 Only `instruction` and `depends_on` accept synchronous parameter functions.
@@ -111,7 +113,7 @@ Subagents can use native messaging and waiting without Code Mode.
 | `tools.wait_agent.works({ targets: [...], settle: "all" })` | Exact WORK targets until all end; ordinary messages do not wake this wait. `all` is the default. |
 | `tools.wait_agent.works({ targets: [...], settle: "first" })` | Any selected Work ending. Read `pending_targets` for the rest. |
 
-WORK waits have no observation timeout; `exec_cell` can yield while the wait continues.
+WORK waits have no observation timeout; `exec_cell` returns acceptance while the wait continues.
 AGENT waits use the native timeout parameter. Waiting does not notify or start
 the target. Waiting for ROOT is useful when a reply has been arranged; an idle
 ROOT may have no work or reply to finish.
@@ -120,7 +122,9 @@ Work states are `queued`, `running`, `completed`, and `stopped`.
 `tools.wait_agent.works` returns `state` (`settled` or `interrupted`), `works`, and
 `pending_targets`. `settled` means the requested wait condition was met, not that
 every Work succeeded. `works` reports all selected Works, including those still
-queued or running, with `final` or `diagnostic` when available.
+queued or running. Waits never include instruction/final/diagnostic bodies;
+query a selected WORK for its actual result. Final completion itself does not
+notify ROOT.
 
 For example, selected fields after a `settle: "first"` wait could be:
 
@@ -130,8 +134,7 @@ For example, selected fields after a `settle: "first"` wait could be:
   "works": [
     {
       "target": {"kind": "WORK", "work_id": "queue:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
-      "status": "completed",
-      "final": "Investigation complete."
+      "status": "completed"
     },
     {
       "target": {"kind": "WORK", "work_id": "queue:bbbbbbbbbbbbbbbbbbbbbbbbbe"},

@@ -303,6 +303,70 @@ def _state(*, role: int) -> _Connection:
     )
 
 
+@pytest.mark.parametrize("role", [wire.ATTACHMENT_ROLE_CONTROLLER, wire.ATTACHMENT_ROLE_OBSERVER])
+def test_provider_retry_current_slot_is_readable_and_wakes_observation(role):
+    from pulsara_agent.desktop_app.renderer_bridge import protobuf_json
+
+    async def scenario():
+        current = None
+        checked = asyncio.Event()
+        bus = LiveAgentEventBus()
+        live_id, epoch, revision = bus.subscribe()
+        control = SessionLiveControlOwner(session_id=_CommandHost.session_id)
+        control_id, control_snapshot = control.snapshot_and_subscribe()
+        def retry():
+            checked.set()
+            return current
+        host = SimpleNamespace(session_id=_CommandHost.session_id, live_bus=bus,
+            live_control=control, provider_retry_observation=retry,
+            take_presentation_notices=lambda _: (), root_compaction_in_progress=lambda: False,
+            active_manual_compaction_command_id=lambda: '', active_root_turn_id=lambda: '')
+        reader = SimpleNamespace(observe_committed=lambda **_: SimpleNamespace(
+            projections=(), through_event_sequence=0, gap_reason=None))
+        state = _Connection(host_session=host, protocol_reader=reader,
+            live_observer_id=live_id, live_epoch=epoch, live_revision=revision,
+            live_control_subscriber_id=control_id, granted_role=role)
+        request = wire.ObserveRequest(wait_ms=1000, maximum_events=8, maximum_bytes=4096,
+            live_owner_epoch=epoch, live_control_owner_epoch=control_snapshot.owner_epoch)
+        observing = asyncio.create_task(_server()._observe(state, request))
+        await checked.wait()
+        assert not observing.done()
+        current = dict(session_id=host.session_id, turn_id='turn:retry', resolved_model_call_id='model:retry',
+            draft_id='draft:retry', attempt=2, retry_number=1, max_retries=5,
+            phase='waiting', reason='provider_connection_error', remaining_seconds=1.6,
+            has_semantic_output=True)
+        first = await asyncio.wait_for(observing, .5)
+        assert first.observation.provider_retry.retry_number == 1
+        assert protobuf_json(first)['observation']['provider_retry']['phase'] == 'waiting'
+
+        # A ticking countdown is a browser concern and does not wake the long poll.
+        checked.clear()
+        observing = asyncio.create_task(_server()._observe(state, request))
+        await checked.wait()
+        current = {**current, 'remaining_seconds': .4}
+        await asyncio.sleep(.08)
+        assert not observing.done()
+        current = {**current, 'phase': 'reconnecting', 'remaining_seconds': 0}
+        reconnecting = await asyncio.wait_for(observing, .5)
+        assert reconnecting.observation.provider_retry.phase == 'reconnecting'
+
+        checked.clear()
+        observing = asyncio.create_task(_server()._observe(state, request))
+        await checked.wait()
+        current = None
+        cleared = await asyncio.wait_for(observing, .5)
+        assert not cleared.observation.HasField('provider_retry')
+        assert protobuf_json(cleared)['observation']['provider_retry'] is None
+
+    asyncio.run(scenario())
+
+
+def test_monitor_protocol_product_is_removed():
+    assert 'MonitorControlResult' not in wire.DESCRIPTOR.message_types_by_name
+    assert 'monitor' not in wire.UserControlOutcome.DESCRIPTOR.fields_by_name
+    assert all('MONITOR' not in value.name for value in wire.LiveEventType.DESCRIPTOR.values)
+
+
 def test_pr02_protocol_carries_exact_result_queue_and_prompt_delivery_identity() -> None:
     tool_result = wire.CanonicalToolResult.DESCRIPTOR.fields_by_name
     assert {

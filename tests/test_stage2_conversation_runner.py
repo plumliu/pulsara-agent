@@ -1216,6 +1216,15 @@ class _DelayedPreparedExecution:
         self._append_candidate = append_candidate
         self._install_authority = install_authority
 
+    def set_draft_identity(self, identity) -> None:
+        self._delegate.set_draft_identity(identity)
+
+    def provider_retry_observation(self):
+        return self._delegate.provider_retry_observation()
+
+    def clear_retry_observation(self) -> None:
+        self._delegate.clear_retry_observation()
+
     def discard(self) -> None:
         self._delegate.discard()
 

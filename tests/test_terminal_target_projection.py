@@ -1,6 +1,5 @@
 """Copyable terminal identities at the existing model projection boundaries."""
 
-from dataclasses import replace
 import json
 
 import pytest
@@ -8,6 +7,7 @@ import pytest
 from pulsara_agent.identity import derive_id
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
 from pulsara_agent.model_input.contracts import (
+    CanonicalInputOriginKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     FrozenRetainedHistoricalRequest,
@@ -18,17 +18,13 @@ from pulsara_agent.model_input.lowering import (
     lower_retained_request_content,
 )
 from pulsara_agent.ports.terminal import (
-    parse_manage_monitor_input,
     parse_manage_process_input,
 )
 from pulsara_agent.ports.terminal_observation import (
-    TerminalDeliveryCoverage,
-    TerminalObservationContentV1,
-    TerminalObservationKind,
+    CellOutputContent,
 )
 from pulsara_agent.ports.user_control_feedback import (
     ProcessControlFeedbackContent,
-    UserControlMonitorFact,
     UserControlProcessFact,
     project_user_control_feedback_for_provider,
 )
@@ -38,68 +34,36 @@ def ident(kind):
     return derive_id(kind, "test", "terminal-target-projection")
 
 
-@pytest.mark.parametrize(
-    "kind,status,code",
-    [
-        (TerminalObservationKind.PROGRESS, "running", None),
-        (TerminalObservationKind.COMPLETION, "success", 0),
-        (TerminalObservationKind.EXPIRY, "running", None),
-    ],
-)
-def test_notification_normal_and_retained_paths_share_copyable_targets(
-    kind, status, code
-):
-    fact = TerminalObservationContentV1(
-        observation_id=ident("observation"),
-        monitor_id=ident("monitor"),
-        process_id=ident("process"),
-        observation_ordinal=1,
-        observation_kind=kind,
-        process_status=status,
-        exit_code=code,
-        output_disposition="EXACT_DELTA",
-        gap_before_output=False,
-        delivery_coverage=TerminalDeliveryCoverage.COMPLETE,
-        available_source_utf8_bytes=2,
-        included_source_utf8_bytes=2,
-        omitted_by_delivery_bound_utf8_bytes=0,
-        output="ok",
+@pytest.mark.parametrize("kind", ("log", "error", "tool_result"))
+def test_cell_normal_and_retained_paths_share_exact_typed_source(kind):
+    fact = CellOutputContent(
+        cell_id=ident("cell"),
+        source_turn_id=ident("turn"),
+        source_exec_attempt_id=ident("attempt"),
+        record_sequence=1,
+        record={"kind": kind, "text": "ok"},
     )
     body = fact.canonical_bytes()
     parts = (LLMTextPart(body.decode()),)
     item = FrozenProviderInputItem(
         FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
-        ident("entry"),
-        1,
-        ident("turn"),
-        parts,
+        ident("entry"), 1, ident("turn"), parts,
+        input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
     )
     normal = lower_canonical_item(
-        item,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
+        item, artifact_read_available=False, limits=StructuredModelInputLimits(),
     ).fixed_message
     retained = FrozenRetainedHistoricalRequest(
-        item.item_kind,
-        None,
-        FrozenPromptContent(parts),
+        item.item_kind, CanonicalInputOriginKind.CELL_OUTPUT, FrozenPromptContent(parts),
     )
     assert normal is not None
     assert normal.content == lower_retained_request_content(retained)
     projected = json.loads(normal.content[0].text)["pulsara_terminal_observation"]
-    process = parse_manage_process_input(
-        {"action": "poll", "target": projected["process_target"]}
-    )
-    monitor = parse_manage_monitor_input(
-        {"action": "cancel", "target": projected["target"]}
-    )
-    assert process.target.process_id == fact.process_id
-    assert monitor.target.monitor_id == fact.monitor_id
-    assert projected["status"] == status and projected["output"] == "ok"
-    assert ("exit_code" in projected) == (code is not None)
-    assert "process_id" not in projected and "monitor_id" not in projected
+    assert projected == fact.canonical_mapping()
+    assert projected["cell_id"] == fact.cell_id
+    assert projected["source_exec_attempt_id"] == fact.source_exec_attempt_id
+    assert projected["record"] == {"kind": kind, "text": "ok"}
     assert fact.canonical_bytes() == body
-    assert json.loads(body)["process_id"] == fact.process_id
 
 
 def test_human_stop_feedback_projects_targets_without_changing_native_control():
@@ -116,7 +80,6 @@ def test_human_stop_feedback_projects_targets_without_changing_native_control():
         process=UserControlProcessFact(
             "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
         ),
-        monitor=UserControlMonitorFact(ident("monitor"), "CANCELLED"),
         public_code="BACKGROUND_CONTROL_COMPLETED",
         public_detail="Stopped.",
     )
@@ -130,22 +93,9 @@ def test_human_stop_feedback_projects_targets_without_changing_native_control():
         ).target.process_id
         == fact.process_id
     )
-    assert (
-        parse_manage_monitor_input(
-            {"action": "cancel", "target": public["monitor_result"]["target"]}
-        ).target.monitor_id
-        == fact.monitor.monitor_id
-    )
-    assert public["monitor_result"]["outcome"] == "CANCELLED"
-    assert "process_id" not in public and "monitor_id" not in public["monitor_result"]
+    assert public["process"]["status"] == "killed"
+    assert public["process"]["exit_code"] == -15
+    assert public["process"]["physical_state"] == "TERMINAL"
+    assert "process_id" not in public
     assert fact.canonical_bytes() == body
-    assert json.loads(body)["monitor"]["monitor_id"] == fact.monitor.monitor_id
-    without_monitor = replace(fact, monitor=None)
-    assert (
-        json.loads(
-            project_user_control_feedback_for_provider(
-                without_monitor.canonical_bytes()
-            )
-        )["pulsara_user_control_feedback"]["monitor_result"]
-        is None
-    )
+    assert "monitor" not in json.loads(body) and "monitor_result" not in public

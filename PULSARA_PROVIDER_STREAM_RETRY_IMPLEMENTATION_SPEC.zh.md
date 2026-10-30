@@ -1,6 +1,6 @@
 # Pulsara：模型流式中断安全重试实施规格
 
-日期：2026-10-30。状态：**并行审查及修订完成，待实施。** 本轮只编写与审查规格，不修改生产代码、测试、数据库或用户配置。
+日期：2026-10-30。状态：**实施与激活完成，2026-10-31 经 ROOT 最终语义验收。** 证据见[激活报告](output/unified-input-retry-20261031/activation-report.zh.md)、[逐项语义矩阵](output/unified-input-retry-20261031/verification-plan.zh.md)与[原始证据索引](output/unified-input-retry-20261031/activation-index.json)。保存生产配置只读。
 
 ## 0. 目标、依据与范围
 
@@ -228,8 +228,8 @@ cause/context 遍历用对象身份去环，不递归无限循环；本轮不设
 
 ## 10. 规格审查结论
 
-本规格由两位 GPT‑6.1 Sol（high）并行只读审查，分别检查执行安全与产品/观察/验收。主代理核对生产代码并纳入审查意见后定稿。
+实现已完成执行安全、产品观察和跨模块独立审阅，并通过 ROOT 对生产代码及原始激活证据的最终语义验收。§8 的每个类别对应实现 owner、聚焦断言、真实 SDK/Provider 场景和证据位置，见[逐项语义矩阵](output/unified-input-retry-20261031/verification-plan.zh.md)。
 
 本规格的权限合同以用户明确决议为准：首次 gate 放行覆盖同一逻辑请求的全部重试，具体合同见 §1、§4.5。安全审查范围包括 typed 网络 EOF 与协议 EOF 区分、成功 terminal 后物理失败结果，以及最终有效 wire 请求的副作用证明。产品审查范围包括 current execution 观察入口、observer 可读及显式 null 清除、30/36 秒口径、超范围 Retry-After、真实重试计数、URL 凭据与停止目标。均沿现有 owner 实现，不增加持久机制。
 
-审查结果只说明本文的产品和实施边界已明确，不代表实现正确性、测试或真实 provider 验收已经通过。代码实施必须逐项满足 §8 后另行报告。
+本地真实 SDK 的 Chat/Responses 八场景、真实 DeepSeek 十一场景及必要回归均已验收。证据保留本地故障注入、usage/计费和源码进程边界，不能将单次本地工具作用解释为单次远端推理或计费；具体见[激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。

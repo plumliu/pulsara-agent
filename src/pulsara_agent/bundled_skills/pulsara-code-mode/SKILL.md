@@ -30,10 +30,11 @@ Top-level `await` is supported. Call available tools as `tools.name(arguments)`,
 using the same parameters as their native tools. The resolved value is the tool's
 public JSON object or text, without an extra `.data` wrapper.
 
-`console.log(...)` exposes selected values to the ROOT model. Internal tool
-results stay inside the script unless you output them; agent messages and
-completion notifications still use their normal channels. Logs are formal
-output, delivered through `exec_cell` or `manage_cell` with `action:"wait"`, including while a script runs.
+`console.log(...)` actively sends selected values to ROOT. Each call is one
+independent input, including repeated text. Internal tool results stay in the
+script; Work finals are not automatically reported to ROOT. Agent messages retain
+their active-turn delivery. ROOT receives script output at a safe point, or as a
+queued new turn when idle. Output requests processing; it does not grant permission.
 
 For example, continue an earlier native investigation using newly read project
 context. Replace the illustrative target with the actual `agent` target from
@@ -51,7 +52,9 @@ Read the relevant source files. This README excerpt is starting context:
 ${readme.content}`
 });
 console.log({ agent: investigation.agent, work: investigation.work });
-console.log(await tools.wait_agent.works({ targets: [investigation.work] }));
+await tools.wait_agent.works({ targets: [investigation.work] });
+const result = await tools.query_agents({ target: investigation.work });
+console.log(result.final ?? result.diagnostic);
 ```
 
 Ordinary tool data becomes an instruction for the same agent. Omit `target` when
@@ -59,24 +62,25 @@ the task instead calls for a new agent. Adapt paths and instructions to the task
 
 ## Follow the running script
 
-- Each `exec_cell` starts an independent script with its own variables. Log identifiers
-  or data you will need in a later script.
-- An observation timeout leaves the script running. Use native `manage_cell` with `action:"wait"` and its
-  complete CELL `target` for subsequent output; do not submit the same script again to continue it.
-  `yield_time_ms` controls observation time, not execution lifetime.
-- Use native `query_cells` without a target to list retained cells, or with a CELL
-  target to read its state and frozen source. This does not consume execution output.
-- Read further pages when `has_more` is true. A terminal state with
-  `pending_calls` still needs later observation for outstanding tool outcomes.
-- `manage_cell` with `action:"stop"` stops further script execution and submissions. Accepted agent work
-  continues; use `stop_agent` when that work should stop too.
+- Each `exec_cell` immediately returns accepted with its CELL target. Its variables
+  are private to that script. Output the actual targets you need in later scripts.
+- Outputs arrive actively. Do not wait repeatedly to fetch logs or submit the same
+  script again. Native `manage_cell` with `action:"wait"` observes terminal state
+  or its observation timeout; output does not finish that wait or appear in it.
+- Native `query_cells` lists retained live cells, or reads a selected CELL's state
+  and frozen source. Reading does not consume output. Historical source remains
+  available through the original exec record after the live Cell retires.
+- `wait_agent` and `tools.wait_agent.works` return states and targets, without
+  instruction/final/diagnostic bodies. Read selected outcomes with `query_agents`;
+  print only the material ROOT needs. Dependencies/materials pass results directly
+  between Work inputs without ROOT acting as a relay.
+- `manage_cell` with `action:"stop"` stops further script execution and submissions.
+  Accepted agent work continues; use `stop_agent` when that work should stop too.
 
-If one output record is too large for a page, `exec_cell` or `manage_cell` with `action:"wait"` gives ROOT an
-`output_artifact.target`. Pass that exact target to native `read_artifact` or
-`export_artifact`. For JS processing, start a new `exec_cell` and explicitly include
-the target in its tool arguments; observation results are not injected into
-script variables. The artifact contains that output record as JSON, not the
-whole script's output.
+Large output retains its complete content through the existing content/artifact
+owner. Use a supplied exact ARTIFACT target with native `read_artifact` or
+`export_artifact` when that is the returned reading route. Output is never replaced
+by a truncated preview presented as complete.
 
 The environment provides JavaScript, Promises, `tools`, and `console.log`.
 Access files, processes, and remote services through tools; Node modules,
@@ -89,7 +93,7 @@ mode. Subagents use their native tools.
 | --- | --- |
 | Available JS tools, sequential and parallel calls, MCP | [Tool patterns](references/tool-calling/patterns.md) |
 | Worked examples: search then read, follow a process, inspect and export its log | [Ordinary tool examples](references/tool-calling/examples.md) |
-| Errors, output pages, artifacts, images | [Results and errors](references/tool-calling/results-and-errors.md) |
+| Errors, active output, artifacts, images | [Results and errors](references/tool-calling/results-and-errors.md) |
 | Agent reuse, batch teammate references, messages, dependencies, waiting and stopping | [Coordination](references/agent-orchestration/coordination.md) |
 | Worked examples: specialists, teammates, dependencies, native → JS reuse and JS → native control | [Agent examples](references/agent-orchestration/examples.md) |
 | Investigation → review → revision → implementation → code review; continuing after interruption | [Workflows](references/agent-orchestration/workflows.md) |

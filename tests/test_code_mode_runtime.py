@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import replace
 import json
 from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,28 +17,48 @@ from pulsara_agent.code_mode import (
 async def _start(host, source, invoke=None, catalog=None, **kwargs):
     async def empty(_):
         return CodeModeToolResult(value={})
-    return await host.start(source=source, source_exec_attempt_id="test-source-attempt",
+    captured = getattr(host, "_test_cells", {})
+    host._test_cells = captured
+    closed = kwargs.pop("on_cell_closed", None)
+    def on_closed(identity):
+        captured[identity] = host._cell(identity)
+        if closed is not None:
+            closed(identity)
+    identity = await host.start(source=source, source_exec_attempt_id="test-source-attempt",
                             turn_id=kwargs.pop("turn_id", "test-turn"), snapshot=object(),
-                            tool_catalog=catalog or {"read_file": {}}, invoke=invoke or empty, **kwargs)
+                            tool_catalog=catalog or {"read_file": {}}, invoke=invoke or empty,
+                            on_cell_closed=on_closed, **kwargs)
+    if identity in host._cells:
+        captured[identity] = host._cell(identity)
+    return identity
 
 
-async def _finish(host, cell, *, archive=None):
+async def _finish(host, cell):
     records = []
+    observed_errors = []
+    owned = host._test_cells[cell]
     async with asyncio.timeout(15):
         while True:
-            page = await host.observe(cell, 100, archive_output=archive)
-            records.extend(page.output)
-            await host.acknowledge(page)
-            if page.state in {"completed", "failed", "terminated"} and not page.has_more and not page.pending_calls:
-                return page, records
+            if cell in host._cells:
+                lease = await host.lease_output(cell)
+                if lease is not None:
+                    if lease.record["kind"] == "error":
+                        observed_errors.append(lease.record["error"])
+                    else:
+                        records.append(dict(lease.record))
+                    await host.acknowledge_output(lease)
+                    continue
+            if owned.state in {"completed", "failed", "terminated"} and not owned.pending and not owned.output:
+                if owned.error is not None and not owned.explicitly_stopped:
+                    assert observed_errors, "An unexpected failure must have delivered its real diagnostic"
+                return SimpleNamespace(state=owned.state, error=owned.error, pending_calls=owned.pending_calls), records
+            await asyncio.sleep(.001)
 
 
 async def _vm_terminal(host, cell):
+    owned = host._test_cells[cell]
     async with asyncio.timeout(15):
-        while True:
-            item = next(item for item in host.snapshot_cell_index() if item['cell_id'] == cell)
-            if item['state'] in {'completed','failed','terminated'}:
-                return
+        while owned.state not in {"completed", "failed", "terminated"}:
             await asyncio.sleep(.001)
 
 
@@ -212,9 +233,7 @@ def test_stop_is_external_and_preserves_actual_late_settlement():
             page, output = await _finish(host, cell)
             assert page.state == "terminated"
             assert len(calls) == 1
-            assert len(output) == 1 and output[0]["kind"] == "tool_result"
-            assert output[0]["sequence"] == 1 and output[0]["result"] == {"actual": "settled"}
-            assert output[0]["result_id"] == "accepted-result"
+            assert not output  # Explicit Stop settles effects without another model input.
         finally:
             settle.set()
             await host.aclose()
@@ -233,9 +252,9 @@ def test_vm_slots_queue_sources_and_stop_queued_cell_without_evaluation():
             first = await _start(host, 'await tools.read_file({});', invoke)
             await dispatched.wait()
             second = await _start(host, 'throw new Error("must not evaluate");')
-            page = await host.observe(second, 0)
-            assert page.state == "queued"
-            await host.acknowledge(page)
+            page = await host.wait_state(second, 0)
+            assert page["state"] == "queued"
+            assert "output" not in page
             assert (await host.stop(second))["state"] == "terminated"
             page, output = await _finish(host, second)
             assert not output and not page.error
@@ -247,41 +266,42 @@ def test_vm_slots_queue_sources_and_stop_queued_cell_without_evaluation():
     asyncio.run(run())
 
 
-def test_output_pages_are_complete_and_only_acknowledged_after_canonical_acceptance():
+def test_each_output_has_immutable_independent_admission_identity():
     async def run():
         host = CodeModeHost()
+        wakes = []
+        host.set_output_ready_callback(lambda: wakes.append(True))
         try:
             cell = await _start(host, 'for(let i=0;i<5;i++)console.log(String(i)+"x".repeat(18000));')
             await _vm_terminal(host, cell)
-            page = await host.observe(cell, 0)
-            assert len(page.output) == 2 and page.has_more
-            assert len(json.dumps(page.public_value()).encode()) <= 40000
-            with pytest.raises(CodeModeError, match="Another reader"):
-                await host.observe(cell, 0)
-            host.abandon(page)
-            repeated = await host.observe(cell, 0)
-            assert repeated.output == page.output
-            await host.acknowledge(repeated)
-            _, output = await _finish(host, cell)
-            assert [row["text"][0] for row in [*page.output, *output]] == list('01234')
+            identities, records = [], []
+            while cell in host.pending_output_cells():
+                lease = await host.lease_output(cell)
+                assert await host.lease_output(cell) is lease
+                identities.append(lease.record_sequence)
+                records.append(lease.record)
+                with pytest.raises(CodeModeError, match="live output"):
+                    await host.acknowledge_output(lease, accepted=False)
+                await host.acknowledge_output(lease)
+            assert identities == list(range(1, 6))
+            assert [record["text"][0] for record in records] == list("01234")
+            assert wakes
         finally:
             await host.aclose()
     asyncio.run(run())
 
 
-def test_large_output_uses_injected_existing_artifact_owner():
+def test_large_output_remains_complete_for_canonical_queue_content_owner():
     async def run():
         host = CodeModeHost()
-        archived = []
-        async def archive(record):
-            archived.append(record)
-            return {"kind": record["kind"], "artifact": {"kind": "ARTIFACT", "artifact_id": "actual-artifact"},
-                    "source_coverage": "COMPLETE"}
         try:
-            page, output = await _finish(host, await _start(host, 'console.log("x".repeat(60000));'), archive=archive)
-            assert page.state == "completed"
-            assert len(archived) == 1 and len(archived[0]["text"]) == 60000
-            assert output[0]["artifact"]["artifact_id"] == "actual-artifact"
+            cell = await _start(host, 'console.log("x".repeat(60000));')
+            await _vm_terminal(host, cell)
+            lease = await host.lease_output(cell)
+            assert lease.record == {"kind": "log", "text": "x" * 60000}
+            assert lease.source_exec_attempt_id == "test-source-attempt"
+            assert lease.source_turn_id == "test-turn"
+            await host.acknowledge_output(lease)
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -406,7 +426,7 @@ def test_external_watchdog_can_terminate_noninterruptible_compile_segment():
     async def run():
         host = CodeModeHost(limits=replace(CodeModeLimits(), segment_ms=5, watchdog_ms=20))
         try:
-            source = '0;' * 750000
+            source = '0;' * 1900000
             page, _ = await _finish(host, await _start(host, source))
             assert page.state == 'failed'
             assert page.error.get('code') == 'watchdog', page.error
@@ -521,45 +541,37 @@ def test_default_five_second_computation_profile_does_not_kill_long_tool_wait():
     asyncio.run(run())
 
 
-def test_archived_output_is_reprepared_after_an_abandoned_canonical_observation():
+def test_unknown_admission_retains_same_complete_output_until_stop_confirmation():
     async def run():
         host = CodeModeHost()
-        archived = []
-        async def archive(record):
-            assert len(record['text']) == 60000
-            archived.append(record)
-            return {'kind':'log','artifact':{'kind':'ARTIFACT','artifact_id':f'outer-result-{len(archived)}'}}
         try:
-            cell = await _start(host, 'console.log("x".repeat(60000));')
+            cell = await _start(host, 'console.log("x".repeat(60000));console.log("other");')
             await _vm_terminal(host, cell)
-            first = await host.observe(cell,0,archive_output=archive)
-            host.abandon(first)
-            second = await host.observe(cell,0,archive_output=archive)
-            assert first.output[0]['artifact']['artifact_id'] == 'outer-result-1'
-            assert second.output[0]['artifact']['artifact_id'] == 'outer-result-2'
-            assert len(archived) == 2
-            await host.acknowledge(second)
+            first = await host.lease_output(cell)
+            assert await host.lease_output(cell) is first
+            await host.stop(cell)
+            assert not host.output_delivery_allowed(first)
+            assert await host.lease_output(cell) is first
+            assert first.record['text'] == 'x' * 60000
+            await host.acknowledge_output(first, accepted=False)
+            assert cell not in host.pending_output_cells()
         finally:
             await host.aclose()
     asyncio.run(run())
 
 
-def test_empty_completed_cell_keeps_terminal_observation_until_canonical_acceptance():
+def test_empty_completed_cell_is_collected_without_any_model_acknowledgement():
     async def run():
         host = CodeModeHost()
         try:
             cell = await _start(host, '')
             await _vm_terminal(host, cell)
-            await asyncio.sleep(.03)
-            page = await host.observe(cell,0)
-            assert page.state == 'completed' and not page.output
-            host.abandon(page)
-            page = await host.observe(cell,0)
-            assert page.state == 'completed'
-            await host.acknowledge(page)
-            await asyncio.sleep(.02)
+            async with asyncio.timeout(5):
+                while any(item['cell_id'] == cell for item in host.snapshot_cell_index()):
+                    await asyncio.sleep(.001)
+            assert not host.pending_output_cells()
             with pytest.raises(CodeModeError, match='unavailable'):
-                await host.observe(cell,0)
+                await host.wait_state(cell, 0)
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -682,14 +694,14 @@ def test_host_close_cancels_waits_and_still_settles_an_existing_output_reservati
             dispatched.set()
             await call.cancelled.wait()
             return CodeModeToolResult(value={'actual':'settled on close'},result_id='close-result')
-        cell=await _start(host,'await tools.read_file({});',invoke)
+        cell=await _start(host,'console.log("accepted pending input");await tools.read_file({});',invoke)
         await dispatched.wait()
-        observation=await host.observe(cell,0)
+        observation=await host.lease_output(cell)
         await host.aclose()
         assert host.snapshot_cell_index()==()
-        await host.acknowledge(observation)
-        with pytest.raises(CodeModeError,match='closed'):
-            await host.observe(cell,0)
+        assert not host.output_delivery_allowed(observation)
+        await host.acknowledge_output(observation, accepted=False)
+        assert not host.pending_output_cells()
     asyncio.run(run())
 
 
@@ -808,5 +820,184 @@ def test_external_delivery_callback_wait_does_not_leave_a_watchdog_active():
             assert page.state=='completed',page.error
             assert output==[{'kind':'log','text':'delivered'}]
         finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_state_wait_ignores_output_and_cannot_consume_independent_records():
+    async def run():
+        host = CodeModeHost()
+        dispatched, release = asyncio.Event(), asyncio.Event()
+        async def invoke(_):
+            dispatched.set()
+            await release.wait()
+            return CodeModeToolResult(value={})
+        try:
+            cell = await _start(host, 'console.log("same");console.log("same");await tools.read_file({});', invoke)
+            await dispatched.wait()
+            waiter = asyncio.create_task(host.wait_state(cell, 20))
+            first = await host.lease_output(cell)
+            assert first.record_sequence == 1 and first.record == {"kind": "log", "text": "same"}
+            state = await waiter
+            assert state["state"] == "running" and "output" not in state and "error" not in state
+            assert await host.lease_output(cell) is first
+            await host.acknowledge_output(first)
+            second = await host.lease_output(cell)
+            assert second.record_sequence == 2 and second.record == first.record
+            await host.acknowledge_output(second)
+            release.set()
+            await _finish(host, cell)
+        finally:
+            release.set()
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_root_diagnostic_survives_cleanup_and_resource_fallout_and_frozen_lease():
+    async def run():
+        host = CodeModeHost()
+        try:
+            cell = await _start(host, 'throw new Error("specific root cause");')
+            await _vm_terminal(host, cell)
+            owner = host._test_cells[cell]
+            host._record_error(owner, {"name": "WorkerError", "message": "Worker exited"})
+            first = await host.lease_output(cell)
+            assert first.record["error"]["message"] == "specific root cause"
+            assert first.record["error"]["secondary_causes"]["WorkerError"]["message"] == "Worker exited"
+            host._record_error(owner, {"name": "ResourceError", "code": "data_boundary", "message": "late result resource failure"})
+            assert first.record["error"]["message"] == "specific root cause"
+            assert "data_boundary" not in first.record["error"]["secondary_causes"]
+            await host.acknowledge_output(first)
+            second = await host.lease_output(cell)
+            assert second.record_sequence > first.record_sequence
+            assert second.record["error"]["message"] == "specific root cause"
+            assert "data_boundary" in second.record["error"]["secondary_causes"]
+            await host.acknowledge_output(second)
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_definite_output_rejection_is_a_local_readable_failure_not_an_ack_or_recursive_input():
+    async def run():
+        host = CodeModeHost()
+        try:
+            cell = await _start(host, 'console.log("cannot accept this");console.log("independent record");')
+            await _vm_terminal(host, cell)
+            rejected = await host.lease_output(cell)
+            failure = await host.reject_output_delivery(rejected, CodeModeError("invalid_cell_content", "Specific queue content rejection"))
+            assert failure["delivery"] == "rejected"
+            assert failure["source_exec_attempt_id"] == "test-source-attempt"
+            assert failure["record_sequence"] == rejected.record_sequence
+            assert failure["error"]["message"] == "Specific queue content rejection"
+            assert host.capture_cell(cell).state == "failed"
+            assert host.capture_cell(cell).error["message"] == "Specific queue content rejection"
+            remaining = await host.lease_output(cell)
+            assert remaining.record == {"kind": "log", "text": "independent record"}
+            assert remaining.record_sequence == rejected.record_sequence + 1
+            await host.acknowledge_output(remaining)
+            assert not host.pending_output_cells()
+            async with asyncio.timeout(5):
+                while any(item["cell_id"] == cell for item in host.snapshot_cell_index()):
+                    await asyncio.sleep(.001)
+            with pytest.raises(CodeModeError, match="unavailable"):
+                host.capture_cell(cell)
+            assert failure["error"]["code"] == "invalid_cell_content"
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_unknown_admission_does_not_dispose_or_replace_the_original_record():
+    async def run():
+        host = CodeModeHost()
+        try:
+            cell = await _start(host, 'console.log("original");console.log("next");')
+            await _vm_terminal(host, cell)
+            original = await host.lease_output(cell)
+            # A repository UNKNOWN is deliberately not a rejection/ACK call.
+            await asyncio.sleep(.01)
+            assert await host.lease_output(cell) is original
+            assert original.record_sequence == 1
+            assert len(host._test_cells[cell].output) == 2
+            assert host.capture_cell(cell).error is None
+            await host.acknowledge_output(original)
+            following = await host.lease_output(cell)
+            assert following.record_sequence == 2
+            await host.acknowledge_output(following)
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("close_host", [False, True])
+def test_scope_stop_marks_all_cells_before_first_async_join(close_host):
+    async def run():
+        host = CodeModeHost()
+        calls = []
+        async def invoke(call):
+            calls.append(call)
+            await call.cancelled.wait()
+            return CodeModeToolResult(value={"actual": "settled after stop"}, result_id="stop-result")
+        first = await _start(host, 'await tools.read_file({});console.log("late first");', invoke)
+        second = await _start(host, 'await tools.read_file({});console.log("late second");', invoke)
+        other = await _start(host, 'await tools.read_file({});', invoke, turn_id="independent-turn")
+        async with asyncio.timeout(5):
+            while len(calls) != 3:
+                await asyncio.sleep(.001)
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_stop = host._stop_cell
+        async def delayed_join(cell):
+            entered.set()
+            await release.wait()
+            return await original_stop(cell)
+        host._stop_cell = delayed_join
+        closing = asyncio.create_task(host.aclose() if close_host else host.stop_turn("test-turn"))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            assert host._test_cells[first].explicitly_stopped
+            assert host._test_cells[second].explicitly_stopped
+            assert host._test_cells[second].cancelled.is_set()
+            assert host._test_cells[other].explicitly_stopped is close_host
+            await asyncio.sleep(.03)
+            assert not host._test_cells[first].output
+            assert not host._test_cells[second].output
+            assert not host.pending_output_cells()
+        finally:
+            release.set()
+            await asyncio.wait_for(closing, 5)
+            host._stop_cell = original_stop
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_stop_during_late_result_retention_cannot_resurrect_output():
+    async def run():
+        host = CodeModeHost()
+        entered, release = asyncio.Event(), asyncio.Event()
+        wakes = []
+        host.set_output_ready_callback(lambda: wakes.append(True))
+        async def retain(_, size):
+            entered.set()
+            await release.wait()
+            return True
+        try:
+            identity = await _start(host, 'console.log("unaccepted record");')
+            await _vm_terminal(host, identity)
+            cell = host._test_cells[identity]
+            host._retain_data = retain
+            pending = SimpleNamespace(sequence=1, tool_name="read_file", charge=0)
+            settlement = asyncio.create_task(host._late_result(cell, pending,
+                CodeModeToolResult(value={"actual": "settled"}, result_id="late-result")))
+            await asyncio.wait_for(entered.wait(), 5)
+            host.mark_turn_stopped("test-turn")
+            baseline = len(wakes)
+            release.set()
+            await asyncio.wait_for(settlement, 5)
+            assert not cell.output
+            assert len(wakes) == baseline
+            assert pending.charge > 0  # Existing pending owner must release retained bytes.
+        finally:
+            release.set()
             await host.aclose()
     asyncio.run(run())

@@ -44,7 +44,7 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore, _RecordingModelRuntime, _RecordingTransport,
 )
 from tests.support.postgres_database import (
-    _load_local_env_if_present, admin_root_dsn,
+    admin_root_dsn,
     create_migrated_postgres_test_database, drop_postgres_test_database,
 )
 
@@ -95,7 +95,6 @@ async def _finished(session, command):
 
 
 def _verify_local_database_roots():
-    _load_local_env_if_present()
     values = []
     for label, dsn in (("admin", admin_root_dsn()), ("runtime", os.environ.get("PULSARA_POSTGRES_DSN"))):
         if not dsn:

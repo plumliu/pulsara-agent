@@ -346,7 +346,7 @@ Plan review continuation、自动 Plan successor 和 NewTurn terminal observatio
 | 自动软触发摘要失败／硬边界失败 | 前者仅在完整原请求仍合法时继续；后者明确结束；取消不被吞掉 |
 | 摘要失败、采用失败、采用 ACK 未知 | 采用前旧上下文有效；未知走原确认；采用成立后不伪造回滚 |
 | 命令重试、关闭、Host 替换与结果查询 | 不重复摘要、不冒充成功、不自动恢复；资源与等待者正确结算 |
-| 后台 Cell、Process、Monitor、Work 及 PMCA／TODO | 不重启或连带停止对象；交接预算、完整 TODO、权限及查询范围保持 |
+| 后台 Cell、Process、Work 及 PCA／TODO | 不重启或连带停止对象；交接预算、完整 TODO、权限及查询范围保持 |
 | Hook／Plan／TODO／memory 及 terminal observation 穿过首次准备与采用 | 启动 gate、force-exit、原子 continuation、一次性 Hook context、TODO 开始／结束及来源相关 memory 语义均保持；Plan／NewTurn terminal 均先真实启动再进入共同准备，不绕过普通调用前 safe point |
 | 前缀与调用所有权 | SYSTEM/tools 不变、messages 只追加；新 suffix 对应新测量；无重复采用、过期 permit 或资源泄漏 |
 

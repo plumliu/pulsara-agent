@@ -145,9 +145,7 @@ from pulsara_agent.primitives.tool_result_projection import (
     classify_tool_result_delivery,
 )
 from pulsara_agent.ports.terminal_observation import (
-    TerminalDeliveryCoverage,
-    TerminalObservationContentV1,
-    TerminalObservationKind,
+    CellOutputContent,
 )
 from pulsara_agent.llm.provider_replay import ProviderReplayTargetCompatibilityFact
 from pulsara_agent.storage.postgres_connection_provider import (
@@ -1047,6 +1045,7 @@ class CanonicalProviderInputReader:
                             source_entry_sequence=sequence,
                             source_turn_id=str(row["turn_id"]),
                             content=(LLMTextPart(text),),
+                            input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
                         )
                     )
                     continue
@@ -2757,93 +2756,11 @@ def _tool_result_metadata(
 
 def _validate_terminal_observation_content(content: bytes) -> None:
     try:
-        payload = json.loads(content)
-        if not isinstance(payload, dict) or set(payload) != {
-            "schema_version",
-            "observation_id",
-            "monitor_id",
-            "process_id",
-            "observation_ordinal",
-            "observation_kind",
-            "process_status",
-            "exit_code",
-            "output_disposition",
-            "gap_before_output",
-            "delivery_coverage",
-            "available_source_utf8_bytes",
-            "included_source_utf8_bytes",
-            "omitted_by_delivery_bound_utf8_bytes",
-            "output",
-            "host_scoped",
-        }:
-            raise ValueError("terminal observation schema is not closed")
-        integer_fields = (
-            "observation_ordinal",
-            "available_source_utf8_bytes",
-            "included_source_utf8_bytes",
-            "omitted_by_delivery_bound_utf8_bytes",
-        )
-        if any(
-            not isinstance(payload[field], int) or isinstance(payload[field], bool)
-            for field in integer_fields
-        ):
-            raise ValueError("terminal observation integer field is invalid")
-        if not isinstance(payload["gap_before_output"], bool) or not isinstance(
-            payload["host_scoped"], bool
-        ):
-            raise ValueError("terminal observation boolean field is invalid")
-        if payload["exit_code"] is not None and (
-            not isinstance(payload["exit_code"], int)
-            or isinstance(payload["exit_code"], bool)
-        ):
-            raise ValueError("terminal observation exit code is invalid")
-        if any(
-            not isinstance(payload[field], str)
-            for field in (
-                "schema_version",
-                "observation_id",
-                "monitor_id",
-                "process_id",
-                "observation_kind",
-                "process_status",
-                "output_disposition",
-                "delivery_coverage",
-                "output",
-            )
-        ):
-            raise ValueError("terminal observation string field is invalid")
-        fact = TerminalObservationContentV1(
-            schema_version=str(payload["schema_version"]),
-            observation_id=str(payload["observation_id"]),
-            monitor_id=str(payload["monitor_id"]),
-            process_id=str(payload["process_id"]),
-            observation_ordinal=int(payload["observation_ordinal"]),
-            observation_kind=TerminalObservationKind(str(payload["observation_kind"])),
-            process_status=str(payload["process_status"]),
-            exit_code=(
-                None if payload["exit_code"] is None else int(payload["exit_code"])
-            ),
-            output_disposition=str(payload["output_disposition"]),
-            gap_before_output=payload["gap_before_output"],
-            delivery_coverage=TerminalDeliveryCoverage(
-                str(payload["delivery_coverage"])
-            ),
-            available_source_utf8_bytes=int(payload["available_source_utf8_bytes"]),
-            included_source_utf8_bytes=int(payload["included_source_utf8_bytes"]),
-            omitted_by_delivery_bound_utf8_bytes=int(
-                payload["omitted_by_delivery_bound_utf8_bytes"]
-            ),
-            output=str(payload["output"]),
-            host_scoped=payload["host_scoped"],
-        )
+        CellOutputContent.from_bytes(content)
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ConversationKernelConflict(
-            "terminal observation canonical envelope is invalid"
+            "Cell output canonical envelope is invalid"
         ) from exc
-    if fact.canonical_bytes() != content:
-        raise ConversationKernelConflict(
-            "terminal observation canonical encoding is not unique"
-        )
 
 
 __all__ = [

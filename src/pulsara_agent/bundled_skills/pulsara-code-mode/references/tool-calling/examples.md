@@ -68,8 +68,9 @@ on its actual process target and reads from its previous output cursor. The
 loop waits on a tool; it does not repeatedly execute the command or spin in JS.
 
 **Read the result:** Use the final status, `exit_code`, and output to assess the
-check. If `exec_cell` yields while this loop is waiting, continue reading the script
-with `manage_cell` with `action:"wait"`. No second terminal command is needed.
+check. `exec_cell` returns its accepted CELL immediately while this loop continues.
+The selected output arrives actively; no second terminal command or log-fetching
+wait is needed.
 
 ## 3. Inspect a long log and keep its complete available archive
 

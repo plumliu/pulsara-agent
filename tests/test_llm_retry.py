@@ -71,7 +71,7 @@ def test_removed_retry_environment_cannot_change_runtime_defaults(monkeypatch) -
 
     runtime = test_model_runtime()
 
-    assert runtime.retry == LLMRetryConfig()
+    assert runtime.retry is None
 
 
 def test_openai_client_max_retries_plumbing(monkeypatch) -> None:
@@ -125,9 +125,7 @@ def test_openai_client_no_auth_does_not_consult_environment_key(monkeypatch) -> 
 
     assert calls[0]["api_key"] == ""
     assert calls[0]["_enforce_credentials"] is False
-    request_options = openai_client.openai_auth_request_options(
-        requires_api_key=False
-    )
+    request_options = openai_client.openai_auth_request_options(requires_api_key=False)
     assert type(request_options["extra_headers"]["Authorization"]).__name__ == "Omit"
     assert "must-not-be-inherited" not in str(calls[0])
 
@@ -145,15 +143,21 @@ def test_retry_config_rejects_invalid_delay_values() -> None:
         LLMRetryConfig(max_retry_after_seconds=0)
 
 
-def test_retry_classifier_treats_connection_error_cause_as_retryable() -> None:
+def test_retry_classifier_treats_typed_sdk_connection_error_cause_as_retryable() -> (
+    None
+):
+    from openai import APIConnectionError
+    import httpx2
+
     try:
         try:
-            raise OSError("socket reset by peer")
-        except OSError as exc:
-            raise RuntimeError("Connection error.") from exc
-    except RuntimeError as exc:
+            raise ConnectionResetError("socket reset by peer")
+        except ConnectionResetError as exc:
+            raise APIConnectionError(
+                request=httpx2.Request("POST", "https://example.test")
+            ) from exc
+    except APIConnectionError as exc:
         decision = classify_llm_error(exc)
-
     assert decision.kind is RetryDecisionKind.RETRY
     assert decision.reason == "transport_error"
 

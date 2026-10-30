@@ -123,6 +123,7 @@ class ContextSourceCollectorPort(Protocol):
         *,
         activation_subject: CapabilityActivationSubjectKind,
         activation_text: str,
+        skill_reference_surfaces: tuple[str, ...],
         tool_surface: FrozenModelToolSurface,
         canonical_facts: FrozenCanonicalCompileSnapshot,
         tool_exposure_plan: FrozenToolCapabilityExposurePlan,
@@ -154,6 +155,7 @@ class ContextSourceCollectorPort(Protocol):
         *,
         activation_subject: CapabilityActivationSubjectKind | None,
         activation_text: str,
+        skill_reference_surfaces: tuple[str, ...],
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources: ...
 
@@ -626,6 +628,7 @@ class KernelContextSourceCollector:
         *,
         activation_subject: CapabilityActivationSubjectKind,
         activation_text: str,
+        skill_reference_surfaces: tuple[str, ...],
         tool_surface: FrozenModelToolSurface,
         canonical_facts: FrozenCanonicalCompileSnapshot,
         tool_exposure_plan: FrozenToolCapabilityExposurePlan,
@@ -651,6 +654,7 @@ class KernelContextSourceCollector:
             frozen,
             activation_subject=activation_subject,
             activation_text=activation_text,
+            skill_reference_surfaces=skill_reference_surfaces,
         )
 
     def freeze_non_trigger_sources(
@@ -943,6 +947,7 @@ class KernelContextSourceCollector:
         *,
         activation_subject: CapabilityActivationSubjectKind | None,
         activation_text: str,
+        skill_reference_surfaces: tuple[str, ...],
         deadline_monotonic: float | None = None,
     ) -> CollectedContextSources:
         del deadline_monotonic
@@ -952,9 +957,9 @@ class KernelContextSourceCollector:
         absent = list(frozen.absent_facts)
         diagnostics = list(frozen.diagnostics)
         user_input = (
-            activation_text
+            skill_reference_surfaces
             if activation_subject is CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT
-            else ""
+            else ()
         )
         output = self._capability.compose(
             view=frozen.skill_dispatch_view,
@@ -1717,7 +1722,7 @@ def _render_run_permission_values(
     text = {
         "read-only": (
             "Read-only mode: File writes, terminal commands and changes to processes are "
-            "denied. You may list, poll or wait on existing processes and list monitors. "
+            "denied. You may list, poll or wait on existing processes. "
             "External-effect MCP calls are denied."
         ),
         "ask-permissions": (
@@ -1727,8 +1732,8 @@ def _render_run_permission_values(
         ),
         "accept-edits": (
             "Accept-edits mode: Workspace file writes are allowed; writes outside the "
-            "workspace, terminal commands, changes to processes, and monitor registration "
-            "or cancellation require approval. External-effect MCP calls require approval. "
+            "workspace, terminal commands and changes to processes "
+            "require approval. External-effect MCP calls require approval. "
             "Runtime requests approval for the tool call."
         ),
         "bypass-permissions": (

@@ -207,7 +207,7 @@ def test_stage2_provider_failure_is_sanitized_at_the_single_boundary(
                     message=(
                         "Upstream closed the stream (request req-123). "
                         "Authorization: Bearer top-secret "
-                        "https://user:pass@example.test/path?q=secret"
+                        "https://user:pass@example.test/path?q=ordinary#details"
                     ),
                     code_hint=code_hint,
                 ),
@@ -220,13 +220,13 @@ def test_stage2_provider_failure_is_sanitized_at_the_single_boundary(
     assert terminal.error is not None
     assert "top-secret" not in terminal.error.message
     assert "user:pass" not in terminal.error.message
-    assert "q=secret" not in terminal.error.message
+    assert "q=ordinary#details" in terminal.error.message
     public_detail = str(ProviderModelExecutionFailed(terminal.error))
     assert "Upstream closed the stream (request req-123)." in public_detail
     assert terminal.error.code.value in public_detail
     assert "top-secret" not in public_detail
     assert "user:pass" not in public_detail
-    assert "q=secret" not in public_detail
+    assert "q=ordinary#details" in public_detail
 
 
 def test_openai_builder_constructs_exact_live_payloads_and_frozen_end() -> None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-from pathlib import Path
 from time import monotonic
 from uuid import uuid4
 
@@ -41,7 +40,6 @@ def create_migrated_postgres_test_database() -> MigratedPostgresTestDatabase:
     return database
 
 def create_empty_postgres_test_database() -> MigratedPostgresTestDatabase:
-    _load_local_env_if_present()
     admin_root_dsn = os.getenv("PULSARA_POSTGRES_ADMIN_DSN") or os.getenv(
         "PULSARA_BENCHMARK_POSTGRES_ADMIN_DSN"
     )
@@ -83,7 +81,6 @@ def drop_postgres_test_database(admin_root_dsn: str, database_name: str) -> None
 
 
 def admin_root_dsn() -> str:
-    _load_local_env_if_present()
     value = os.getenv("PULSARA_POSTGRES_ADMIN_DSN") or os.getenv(
         "PULSARA_BENCHMARK_POSTGRES_ADMIN_DSN"
     )
@@ -96,26 +93,6 @@ def dsn_with_database(dsn: str, database_name: str) -> str:
     parameters = conninfo_to_dict(dsn)
     parameters["dbname"] = database_name
     return make_conninfo(**parameters)
-
-
-def _load_local_env_if_present() -> None:
-    """Load only the test harness DSNs; production has no dotenv reader."""
-
-    path = Path.cwd() / ".env"
-    if path.is_file():
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            name, value = line.split("=", 1)
-            name = name.removeprefix("export ").strip()
-            if name not in {
-                "PULSARA_POSTGRES_ADMIN_DSN",
-                "PULSARA_BENCHMARK_POSTGRES_ADMIN_DSN",
-                "PULSARA_POSTGRES_DSN",
-            }:
-                continue
-            os.environ.setdefault(name, value.strip().strip("'\""))
 
 
 __all__ = [

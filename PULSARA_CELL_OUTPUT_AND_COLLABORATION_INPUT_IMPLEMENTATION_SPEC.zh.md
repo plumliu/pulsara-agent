@@ -1,6 +1,6 @@
 # Pulsara：统一输入队列、Cell 主动输出与协作阅读实施规格
 
-日期：2026-10-31。状态：**产品语义与实施规格已冻结，待实施。** 已明确逐条 Cell 输出、定时 steer/停机不补发、根因诊断与辅助上下文边界；三位 GPT‑6.1 Sol high 对修订后的队列/终态、消息来源/诊断、运行时/辅助状态完成复核，均无阻塞项。未修改代码、测试、数据库或用户配置。
+日期：2026-10-31。状态：**实施与激活完成，已通过 ROOT 最终语义验收。** 逐条 Cell 输出、统一队列、协作阅读、定时触发及源码/图边界已按本规格验收，见[激活报告](output/unified-input-retry-20261031/activation-report.zh.md)、[逐项语义矩阵](output/unified-input-retry-20261031/verification-plan.zh.md)与[原始证据索引](output/unified-input-retry-20261031/activation-index.json)。保存生产配置只读。
 
 ## 0. 目标与权威
 
@@ -12,9 +12,9 @@ monitor 独立产品路径删除。协作/脚本自动反馈中，只有脚本�
 
 根 AGENTS.md 与当前人类决议优先。本规格在本轮范围内替代以下文档中的冲突条款，实施时须同步正文、测试、Skill、示例及开发说明，形成单路径 hard cut：
 
-- [Code Mode 执行与生命周期](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)：输出由 exec/wait 领取、return、终态消费与回收。
-- [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)：Work 完成自动通知 ROOT，以及原生/JS 结果展示。
-- [子代理与 Cell 侧栏](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)：Cell 退役导致源码不可读的合同。
+- [Code Mode 执行与生命周期](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)：逐条正式输出、状态等待、终态与资源回收。
+- [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)：Work 静默终态、原生/JS 轻量等待及显式结果查询。
+- [子代理与 Cell 侧栏](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)：canonical 源码历史阅读与实时图退役。
 - [统一安全点输入与显式停止](PULSARA_UNIFIED_SAFE_POINT_INPUT_AND_EXPLICIT_STOP_IMPLEMENTATION_SPEC.zh.md)：保留其共同安全点、来源身份、输入不抢占及 Stop 边界；删除普通 Work 完成自动输入的接线。
 - [资源退役](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md)：Cell 原输出确认条件改由主动输入交付结算满足，不延长 VM 寿命。
 - [模型流式重试](PULSARA_PROVIDER_STREAM_RETRY_IMPLEMENTATION_SPEC.zh.md)：独立实施范围；重试仍复用已安装输入，新 Cell 输出仅追加到未来安全点，不修改已发送请求。
@@ -276,6 +276,8 @@ Stop 当前 ROOT turn 仍按原范围停止所属 Cell，不扩大到独立 Cell
 
 暂停、删除或切换定时任务，不撤回已经接纳为 exact STEER 的输入，即使尚未到安全点也让目标 turn 正常消费。任务管理先于该次触发接纳生效，则沿原任务状态/版本门禁阻止后续接纳；输入先接纳则管理动作不得悄悄删除它。既有任务管理取消未来 NEW_TURN 项的范围保持，与当前 turn steer 区分；不得把“按task取消所有PENDING”的旧查询直接用于新scheduled steer，也不借这个规则绕过真实用户Stop/目标turn终态的既有结算。
 
+**PAUSED 的一次性任务在原执行时刻到达后自动静默删除。** 到期以数据库时钟为准，复用既有 tick、任务查询和状态 writer 在同一事务内核对 PAUSED、一次性计划、原 due time 与 revision，再沿原删除 owner 收束；不补发输入、不通知模型或用户、不新增 job、事件或恢复账本。清理尚未运行不能让到期后的 resume 复活该任务：管理写入同样先判断数据库中的到期事实，并保留原 command 的已提交结果确认优先级。暂停的周期任务继续遵循原周期规则。到期删除仅沿既有任务管理范围取消未来 NEW_TURN 项，不撤回已接纳的 scheduled steer。
+
 取消与消费使用同一 writer：取消先成立则该项不能开 turn；消费先成立则返回已消费/不可取消，前端呈现真实执行状态，不谎称取消成功或转而停止新 turn。ACK 丢失确认同一次操作，UNKNOWN 保留待确认状态；不允许从 UI 先删掉后默认成功。已取消项不再参与消费，后续 ACK/重连/查询不能恢复它。
 
 编辑和手动转 steer 保持当前允许范围：人类项保留两者；已排 NEW_TURN 的定时输入保留现有“取消原输入并将正文放回输入框”的编辑，之后重新发送是新的人类输入，不修改定时任务定义或后续触发，不新增将该已排项手动转 steer 的能力。接纳时因 ROOT 活动而选择定时 steer 是 §5.2 的自动路由，不是这个队列操作。Cell 输入不新增编辑/手动转 steer。现有 Plan draft review 的 revise 仍是独立真实控制，不能借它绕过来源限制。
@@ -447,7 +449,7 @@ durable oracle 的 event kind、relation、job、subject、append guard 类别�
 | 定时独立触发 | 同task已有pending/running时，新的TIMER时点/独立RUN_ONCE各有新queue ID/序号/完整正文/provenance；活动为exact steer，idle为NEW；取消单项不影响其他触发，无task/正文级合并 |
 | 定时幂等/竞态 | 同occurrence/command重复发现、重传及ACK丢失只确认原项/route；不同真实触发即使同task同正文仍各接纳；TIMER接纳和schedule推进原子，final两种提交顺序及Stop按既有共同边界结算 |
 | 定时UI | 所有定时NEW项完整同序卡片可见；活动定时steer在过程内保留来源；每次新RUN_ONCE反馈本次route，重传不重复显示，不用“合并/旧执行运行中”代替新输入接纳 |
-| 停机与任务管理 | 内核停机未接纳时点不补发，重启不丢已接纳队列；内核运行中ROOT忙不抑制触发；暂停/删除/切换先后与steer接纳线性化，已接纳steer不撤回，未来NEW取消范围不扩至steer |
+| 停机与任务管理 | 内核停机未接纳时点不补发，重启不丢已接纳队列；内核运行中ROOT忙不抑制触发；暂停/删除/切换先后与steer接纳线性化，已接纳steer不撤回，未来NEW取消范围不扩至steer；PAUSED一次性任务按DB时钟到期静默删除，清理延迟不允许resume复活，不补发/不通知，周期PAUSED规则保持 |
 | 辅助/引用保留 | Hook被省略正文不冒充canonical已接纳消息；能力通知只表达实际生效终态不逐操作计数；同Work依赖/material重复引用仍一份，不同Work同文仍两份；last_n范围保持 |
 | 材料UI | 同turn过程不被材料切开；来源不冒充用户；长材料默认折叠、展开Markdown/复制；跳Agent/Work/源码准确 |
 | 引用 | 主正文/comment均有相同候选、光标、IME、撤销、选择和发送表现；排队转steer内容不丢；quote/code/URL/材料不误识别 |
@@ -459,6 +461,6 @@ durable oracle 的 event kind、relation、job、subject、append guard 类别�
 
 先用根 `.venv` 的聚焦单元/真实PostgreSQL集成/前端测试迭代；不弱化断言、加skip/xfail。真实 provider dogfood 使用保存生产设置，经 LocalSettingsStore/require_pulsara_home 只读加载，必要时注入已核实的隔离数据库；不修改用户模型、代理或凭据。秘密只按实际值清理，保留有效输入/输出和失败证据。
 
-激活至少覆盖一次“ROOT启动多阶段Cell后先回复并idle，选定console输出入队再唤醒处理”，一次“ROOT活动且多工具批次进行中输出到达”，一次“中间Work失败由脚本处理但ROOT未收到自动final”，一次“人类/Cell/TIMER/RUN_ONCE混合排队完整同序可见并逐项取消”，以及原生简单任务与完整引用/历史源码阅读路径。视觉部分完成后按仓库纪律优先用户审阅；不因视觉调整无端扩大浏览器自动验证范围。
+激活至少覆盖一次“ROOT启动多阶段Cell后先回复并idle，选定console输出入队再唤醒处理”，一次“ROOT活动且多工具批次进行中输出到达”，一次“中间Work失败由脚本处理但ROOT未收到自动final”，一次“人类/Cell/TIMER/RUN_ONCE混合排队完整同序可见并逐项取消”，以及原生简单任务与完整引用/历史源码阅读路径。
 
-只有实现、所需测试、真实provider证据及用户视觉检查要求均完成后，才将状态改为实施完成。本文的产品/实施规格冻结与代码激活是两个状态；本轮只修订并审阅规格，不启动代码、测试、数据库或配置修改。
+只有实现、交叉审阅、所需测试及真实 provider 证据均完成后，才将状态改为实施完成。按本轮人类决议，无需 Playwright 或视觉验收门禁；必要前端单元测试、静态检查与构建仍须完成。产品/实施规格冻结与代码激活是两个状态。

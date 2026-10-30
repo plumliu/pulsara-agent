@@ -124,7 +124,7 @@ baseline 修改后，同步更新既有 expected catalog 资源的 `observed_cat
 | `test_canonical_request_start_postgres.py` | 完整初始组、initial／consumed 指向 instruction；接纳、确认、取消和接管保持 |
 | `test_compaction_first_call_source_boundary.py`、`test_compaction_request_start_integration.py` | 分层验证真实新建 Work 的前置 context 与完整启动组、真实复用 Work 的前驱历史摘要与 instruction→材料 suffix；保留 summary 排除当前组、当前 turn 采用、首 ordinary wire、steer 和消息检查，不向复用 Work 虚构 context |
 | `test_kernel_image_input_k3.py` | 删除 profile 图片来源；通用投影的合成图片测试可使用 `AGENT_MATERIAL` canonical 类型，但明确为合成 reader／planner 测试，不声称 Subagent 委派接口支持图片；保留前后位置与历史投影边界 |
-| `test_agent_session_host.py`、`test_agent_session_runtime.py`、`test_hook_input_identity.py` | 真实创建／复用、排队完成、停止／关闭和 Hook 仍用 instruction；保留 scope、配置与权限、阻断、完成通知及 SYSTEM／tools／messages 前缀连续性 |
+| `test_agent_session_host.py`、`test_agent_session_runtime.py`、`test_hook_input_identity.py` | 真实创建／复用、排队完成、停止／关闭和 Hook 仍用 instruction；保留 scope、配置与权限、阻断、真实 Work 结果及 SYSTEM／tools／messages 前缀连续性 |
 | `test_conversation_fork.py` 及 Agent canonical 预算测试 | 新合同下 fork 精确复制、无额外执行、ACK 丢失不重复复制；CODE_RESULT 的 UI 可见性及 provider／预算过滤保持 |
 | `test_stage5_clean_migration.py` 及既有 schema drift 测试 | fresh install、二次 migrate、catalog 校验通过；两列不存在，transcript CHECK 拒绝已删来源并接受合法 Agent 来源 |
 | `test_builtin_default_null_contracts.py` | 删除旧可选字段断言，保留其余可选参数省略与 null 的闭合合同 |

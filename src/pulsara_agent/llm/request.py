@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
+from collections.abc import Callable
+
+if TYPE_CHECKING:
+    from pulsara_agent.ports.provider_stream import ProviderRetryUpdate
 
 from pulsara_agent.llm.input import (
     LLMMessage,
@@ -427,6 +431,8 @@ class LLMContext:
     )
     tool_choice: Literal["auto", "none"] | None = None
     ephemeral_wire_input: EphemeralProviderWireInput | None = field(default=None, repr=False)
+    retry_observer: Callable[[ProviderRetryUpdate | None], None] | None = field(default=None, repr=False, compare=False)
+    provider_error_scrubber_observer: Callable[[Callable[[str], str]], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.provider_wire_input_plan is not None and self.ephemeral_wire_input is not None:

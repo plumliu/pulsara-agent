@@ -92,6 +92,7 @@ from pulsara_agent.ports.live_agent_event import (
     TextStartPayload,
 )
 from pulsara_agent.ports.provider_stream import (
+    ProviderGenerationRetry,
     ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
     ProviderOutputIncompleteReason,
@@ -321,7 +322,7 @@ def test_round5_provider_retries_before_semantic_output(
         ("openai_responses", OpenAIResponsesTransport),
     ),
 )
-def test_round5_provider_never_retries_after_semantic_output(
+def test_agent_provider_replaces_partial_generation_before_acceptance(
     api: str,
     transport_type,
 ) -> None:
@@ -360,12 +361,13 @@ def test_round5_provider_never_retries_after_semantic_output(
         ]
 
     items = asyncio.run(collect())
-    assert endpoint.calls == 1
-    assert any(isinstance(item, TextDeltaPayload) for item in items)
-    failures = [item for item in items if isinstance(item, ProviderStreamFailure)]
-    assert len(failures) == 1
-    assert failures[0].retry_summary is not None
-    assert failures[0].retry_summary.skipped_reason == "semantic_output_started"
+    assert endpoint.calls == 2
+    replacement = next(index for index, item in enumerate(items) if isinstance(item, ProviderGenerationRetry))
+    assert any(isinstance(item, TextDeltaPayload) for item in items[:replacement])
+    assert any(isinstance(item, TextDeltaPayload) for item in items[replacement + 1:])
+    assert "attempt-1" not in str(items[replacement + 1:])
+    assert "attempt-2" in str(items[replacement + 1:])
+    assert not any(isinstance(item, ProviderStreamFailure) for item in items)
     request.surface_borrow.close()
 
 

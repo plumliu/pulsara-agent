@@ -1057,3 +1057,15 @@
 }
 
 .prompt-composer .tiptap, .prompt-composer__placeholder { letter-spacing: 0; }
+
+.provider-retry-status { color: var(--text-secondary); font-size: 12px; padding: 8px 12px; }
+.input-source-link { border: 0; background: none; color: var(--text-secondary); font-size: 11px; cursor: pointer; padding: 3px 6px; }
+.input-source-link:hover { color: var(--text-primary); text-decoration: underline; }
+.input-material-disclosure > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; padding: 7px 0; }
+.user-steer--automatic .user-message { max-width: 100%; white-space: normal; }
+.user-steer--automatic.is-error .user-steer__heading, .composer-queue__source--error { color: #b3574d; }
+.composer-queue__source--cell { color: #658d79; }
+.composer-queue__source--scheduled { color: #a7874f; }
+.annotation-comment-editor { min-height: 24px; max-height: 160px; overflow: auto; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.annotation-comment-editor p { margin: 0; }
+.annotation-comment-editor p:only-child:has(> br.ProseMirror-trailingBreak:only-child)::before { content: attr(data-placeholder); color: var(--text-secondary); pointer-events: none; }

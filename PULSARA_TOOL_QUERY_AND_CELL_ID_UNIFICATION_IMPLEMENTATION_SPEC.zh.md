@@ -1,8 +1,8 @@
 # Pulsara：工具查询、命名与 Cell 身份统一实施规格
 
-日期：2026-10-30。状态：本规格实施与要求验收完成；实际证据与未测边界见实施记录。
+日期：2026-10-31。当前接口采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md) 的 hard cut；本轮激活验证进行中。
 
-本文确定本轮目标合同。生产代码、公共消费者与现行设计已按本规格完成 hard cut，不保留旧工具别名、旧参数双读或第二条执行路径。实现落点、验收结果与未测边界见 [实施记录](output/tool-query-cell-unification-20261030/IMPLEMENTATION.zh.md)；该结论不代表全仓测试或全部外部连接均已验证。
+本文确定本轮目标合同。生产代码、公共消费者与现行设计采用当前单路径合同，不保留旧工具别名、旧参数双读或第二条执行路径。实现落点、验收结果与未测边界见 [实施记录](output/tool-query-cell-unification-20261030/IMPLEMENTATION.zh.md)；该结论不代表全仓测试或全部外部连接均已验证。
 
 ## 0. 权威、范围与非目标
 
@@ -21,16 +21,16 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 ### 0.1 本轮必须完成
 
 1. 将对象发现与详情查询收敛为领域级 `query_*`。
-2. 将 Process、Monitor、Cell 的控制动作保留在各自 `manage_*` 中；不逐个动作增加工具。
+2. 将 Process、Cell 的控制动作保留在各自 `manage_*` 中；不逐个动作增加工具。
 3. 保留执行、内容读取、搜索、导出的区别。
-4. 补齐 Process 精确元数据查询、Monitor 实际监听配置查询、Cell 存活列表与实际执行源码查询。
+4. 补齐 Process 精确元数据查询、Cell 存活列表与实际执行源码查询。
 5. Cell 使用 `CELL` target 和现有 canonical ID 编码。
 6. 同步所有 native／Code Mode 消费者、权限分类、结果交付、Hook、SYSTEM、bundled Skills、测试与当前设计中的接口表。
 
 ### 0.2 明确不做
 
 - 压缩后的运行时状态交接与资源退役由 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 单独定义，见 §15；本文不增加该范围。
-- 不改变扫描与能力选择、Agent／Work 调度、进程执行、Monitor 投递、定时触发、记忆检索或 artifact 存储语义。
+- 不改变扫描与能力选择、Agent／Work 调度、进程执行、定时触发、记忆检索或 artifact 存储语义。
 - 不增加历史对象总量、工具调用总次数、运行总时长或重试次数上限。
 - 不新增 Cell 持久表、执行恢复、源码副本库、身份注册表、通用对象查询框架、cursor 注册表或新的指纹。
 - 不改变外部 MCP 工具名称、远端协议、SDK API，亦不把任意第三方工具重命名为本规格的格式。
@@ -56,7 +56,7 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 
 ### 1.2 query 的行为合同
 
-- 不改变目标业务状态，不消费业务输出，不推进 Cell 的输出确认位置，不注册／取消 Monitor，不启动进程或工作。
+- 不改变目标业务状态，不消费业务输出，不推进 Cell 的输出确认位置，不启动进程或工作。
 - 可返回 target、cursor、MCP 调用引用与当前执行资格。继续复用现有引用生成、交付和结算机制；不添加额外确认流程。
 - 查询结果是本次观察，不承诺之后目标仍存活或状态未变化。执行时继续由真实 owner 检查权限、归属和可用性。
 - 保留每个领域的结果结构与业务值，不引入统一 `data` wrapper、跨领域查询 target union 或可交换 cursor。
@@ -77,7 +77,7 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 | `inspect_agent` + AGENT | `query_agents` + AGENT | 调用方可查询范围内的 Subagent | 该 Agent 的 WORK 分页列表 |
 | `inspect_agent` + WORK | `query_agents` + WORK | 调用方可查询范围内 Agent 的委派工作 | 精确状态、instruction、final／diagnostic 等 |
 
-`run_agent`、`send_agent_message`、`wait_agent`、`stop_agent`、`tools.run_agent.batch`、`tools.wait_agent.works` 不改名、不改变语义。`list_agent_models` 不是当前工具，不重新引入。
+协作工具保留现名；run_agent 仅返回接纳状态/target，wait_agent 与 tools.wait_agent.works 只返回状态/target/终态原因，完整 final/diagnostic 通过 query_agents(WORK) 显式读取。`list_agent_models` 不是当前工具，不重新引入。
 
 ### 2.2 Process 执行、查询与管理
 
@@ -95,21 +95,12 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 
 `manage_process` 不再接收 `list`。不添加独立 `poll_process`、`wait_process`、`read_process_output` 或 stdin 工具。`process` 始终是当前终端 owner 管理的操作系统进程／进程组，不是任意系统 PID，也不是动词“处理”。
 
-### 2.3 Monitor
-
-| 当前入口／action | 目标入口／action | 输入 | 含义 |
-|---|---|---|---|
-| `terminal_monitor.list` | `query_monitors` 无 target | `{}` | 当前可见的未关闭登记 |
-| 无独立精确查询 | `query_monitors` 有 target | MONITOR target | 当前登记状态、绑定进程、实际生效的监听／投递／寿命配置 |
-| `terminal_monitor.register` | `manage_monitor.register` | PROCESS target；可选 `conditions`、`delivery`、`lifetime` | 沿当前注册与结算 owner 创建监听 |
-| `terminal_monitor.cancel` | `manage_monitor.cancel` | MONITOR target | 停止后续监听投递；不停止进程 |
-
 ### 2.4 Cell
 
 | 当前入口 | 目标入口／action | 输入 | 含义 |
 |---|---|---|---|
-| `exec` | `exec_cell` | `code`／`path` 恰一；可选 `yield_time_ms=1000` | 执行一次独立 JS 脚本并返回本次输出观察 |
-| `wait_exec` | `manage_cell.wait` | CELL target；可选 `yield_time_ms=1000` | 等待并交付同一 Cell 的后续输出 |
+| `exec` | `exec_cell` | `code`／`path` 恰一 | 接纳独立 JS 脚本，立即返回 accepted 和 CELL target |
+| `wait_exec` | `manage_cell.wait` | CELL target；可选 `yield_time_ms=1000` | 等待同一 Cell 终态/观察超时，仅返回状态 |
 | `stop_exec` | `manage_cell.stop` | CELL target | 停后续 JS 与工具提交；不自动取消已接纳 Work |
 | 无 | `query_cells` 无 target | 可选 `cursor`、`max_items` | 当前 Host 仍持有的 Cell 分页清单 |
 | 无 | `query_cells` 有 target | CELL target；可选源码页参数 | 元数据与实际冻结源码；不读取执行输出队列 |
@@ -141,7 +132,6 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 | `search_session_content` | 不变 | SESSION、query 或 continuation cursor | 内容搜索不并入对象 query |
 | `read_session_content` | 不变 | SESSION／SESSION_ENTRY 或 continuation cursor | 内容读取不并入对象 query |
 
-18 个对照入口变为 19 个：能力 2→1、Agent 2→1、Process 2→3、Monitor 1→2、Schedule 1→2、Cell 3→3、artifact／memory 4→4、session 3→3。真正改变名称／拆并的旧入口为 15 个，目标入口为 16 个；三个 session 工具仅作保留对照。统计不包含未改动的其他工具及动态 MCP 工具。
 
 ## 3. target 矩阵与输入分支
 
@@ -151,8 +141,7 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 |---|---|---|
 | Agent | `{"kind":"AGENT","agent_id":"session:…"}` | query_agents；已有协作工具按各自合同 |
 | Work | `{"kind":"WORK","work_id":"queue:…"}` | query_agents 精确工作查询；不把 ROOT 人类输入变成 WORK |
-| Process | `{"kind":"PROCESS","process_id":"process:…"}` | query／manage_process；注册 monitor |
-| Monitor | `{"kind":"MONITOR","monitor_id":"monitor:…"}` | query_monitors；cancel |
+| Process | `{"kind":"PROCESS","process_id":"process:…"}` | query／manage_process |
 | Cell | `{"kind":"CELL","cell_id":"cell:…"}` | query／manage_cell；新对象类型但无新注册表 |
 | Schedule | `{"kind":"SCHEDULE","task_id":"schedule:…"}` | query_schedules、manage_schedule |
 | Session | `{"kind":"SESSION","session_id":"session:…"}` | 定时计划的 session 角色及原会话工具 |
@@ -227,14 +216,12 @@ target.kind 继续判别对象类型，管理工具的 action 判别操作；查
 | query_capabilities | 概览／列子项：省略 target，允许 kind?、scope?、source_kind?、parent?、offset?、limit?；对象自身详情：仅 target。parent 是父范围，根 kind 是类别过滤，均不与详情 target 同传 |
 | query_agents | 列 Agent：省略 target，允许 cursor?、max_items?；列某 Agent 的 Work：AGENT target、cursor?、max_items?；单个 Work 详情：仅 WORK target，禁止分页字段 |
 | query_processes | 列进程：省略 target，允许 include_running?、include_finished?；单个进程元数据：仅 PROCESS target，禁止列表过滤；输出通过 manage_process 观察 |
-| query_monitors | 列可见登记：空参数；单个登记状态／配置：仅 MONITOR target；两者均不接收分页参数 |
 | query_cells | 列存活 Cell：省略 target，允许 cursor?、max_items?；状态／源码页：CELL target、offset_chars?、max_chars?；列表页参数与源码页参数不得混用，执行输出通过 manage_cell.wait 获取 |
 | query_schedules | 列计划：省略 target，允许 cursor?、status?、session?；单个计划详情：仅 SCHEDULE target，禁止列表字段。session 省略／null 表当前会话；列表 status 省略表示不过滤，显式值只允许 ACTIVE／PAUSED |
 | manage_process | poll／wait／write／submit／close_stdin／kill 各自签名按 §2.2；只有 wait 使用 timeout_seconds，只有 stdin 写操作使用 data |
-| manage_monitor | register：PROCESS、conditions?、delivery?、lifetime?；cancel：仅 MONITOR |
 | manage_cell | wait：CELL、yield_time_ms?；stop：仅 CELL |
 | manage_schedule | create／update／pause／resume／delete／switch 各自签名按 §2.5；保留 revision 与 replacement 两分支要求 |
-| exec_cell | code／path 恰一、yield_time_ms?；不能两个都传，也不能都省略 |
+| exec_cell | code／path 恰一；不能两个都传，也不能都省略 |
 
 仅改名的单分支工具不为统一形式增加 action。签名文字必须与 schema／parser 做行为核对，不能仅靠字符串快照保证准确。不同层不重复长篇解释，不通过删掉必要互斥说明来制造 token 下降。
 
@@ -258,16 +245,10 @@ Query agents and their delegated work. To list agents, omit target; optional fie
 Query managed process metadata without returning logs or consuming output. To list processes, omit target; optional fields: include_running, include_finished. To inspect one process's command and current metadata, pass only its PROCESS target, without list filters. For output, use manage_process with poll or wait. Omit unused fields; target does not accept null.
 ```
 
-**query_monitors**
-
-```text
-Query visible monitor registrations. Use no arguments to list registrations. To inspect one registration's state and effective monitoring policy, pass only its MONITOR target. Neither branch accepts pagination fields. This query does not register, cancel, or refresh a monitor. Omit target for the list; do not pass null.
-```
-
 **query_cells**
 
 ```text
-Query cells still held by the current Host without consuming execution output. To list cells, omit target; optional fields: cursor, max_items. To inspect one cell's state and frozen source, pass its CELL target; optional fields: offset_chars, max_chars. List cursors and source offsets are separate: do not mix their fields. Continue source pages with the same CELL target. Use manage_cell with wait for execution output. Omit unused fields; target does not accept null.
+Query cells still held by the current Host without consuming execution output. To list cells, omit target; optional fields: cursor, max_items. To inspect one cell's state and frozen source, pass its CELL target; optional fields: offset_chars, max_chars. List cursors and source offsets are separate: do not mix their fields. Continue source pages with the same CELL target. Use manage_cell with wait to observe terminal state; formal output is delivered through the ROOT input queue. Omit unused fields; target does not accept null.
 ```
 
 **query_schedules**
@@ -356,48 +337,20 @@ write 原样写入 data；submit **无条件额外追加一个 LF**，不增加�
 
 保持 wait 的 timeout_seconds=1–30、stdin 操作 yield_time_ms=0–30000 等现有边界。返回的执行／观察字段继续沿当前终端 carrier，包括 `terminal_process_action`；本轮改工具入口，不顺带重命名已有业务结果字段或内部 DTO。
 
-## 7. Monitor 查询与控制
-
-### 7.1 query_monitors
-
-集合 `{}` 返回当前可见的未关闭登记，沿现有 monitor ID 排序；`{"target":MONITOR}` 返回其中一个登记的详情。两分支不接收 cursor 或分页参数，本轮沿现有物理登记容量，不创造 Monitor 历史列表。
-
-集合保留 `status=INVENTORY`、`monitors`，每项含 target、process_target、state、observation_ordinal、pending。精确详情形状为 `{"monitor":{...}}`，在上述字段外增加实际生效配置：
-
-| 字段 | 内容与来源 |
-|---|---|
-| conditions.completion | true，注册均含完成监听 |
-| conditions.output | 未启用时 null；否则 min_new_output_chars、quiet_period_ms |
-| conditions.heartbeat_interval_seconds | 实际配置值或 null |
-| delivery | max_output_chars、minimum_progress_observation_interval_seconds |
-| lifetime | maximum_duration_seconds，表示注册时配置，不是查询重置后的寿命 |
-
-从现有 `_Registration.policy` 和登记事实生成，不能读历史注册参数冒充当前配置，也不创建 policy 副本表。查询不得重新注册、刷新过期时间、采样并消费输出或结算 pending 通知。取消／到期／关闭后不再列为可操作对象；精确查询沿 owner 返回不可用。
-
-### 7.2 manage_monitor
-
-只保留 register／cancel。默认完成监听、输出与 heartbeat 条件、投递间距、现有最长监控寿命均保持。register 使用 PROCESS target，结果返回 MONITOR target 与 process_target；cancel 使用 MONITOR target，不取消进程。
-
-ROOT 与 Subagent 都有原生入口，但范围不同：ROOT 沿既有全局管理可见范围；Subagent 仅当前真实 Work 绑定的登记。注册者、接收 session、Work 与权限来自调用上下文，不允许模型自报。query 的详情分支与列表、cancel 使用同一可见性规则，不能用已知 MONITOR target 绕过范围。
-
-Code Mode 不获得 Monitor 工具。沿原登记的准备、提交／放弃、事件投递与关闭 owner；不将监控升级成持久 job。
-
 ## 8. Cell 执行、查询与控制
 
 ### 8.1 exec_cell 与 manage_cell
 
-exec_cell 的 code／path 恰一、yield_time_ms 及实际执行语义沿原 exec。path 使用文件 owner 解析并读取一次；Hook 修改后重新校验，随后冻结实际源码。VM、Promise、未捕获错误、在途调用、正式输出、观察超时与资源边界全部保持。
+exec_cell 只接受 code／path 恰一，源码冻结和接纳后立即返回 accepted/CELL target，不隐式观察输出或终态。path 使用文件 owner 解析并读取一次；Hook 修改后重新校验，随后冻结实际源码。VM、Promise、未捕获错误、在途调用、正式输出、观察超时与资源边界全部保持。
 
 manage_cell 仅两个封闭分支：
 
 | action | 必需字段 | 可选字段 | 结果与结算 |
 |---|---|---|---|
-| wait | target=CELL | yield_time_ms，默认 1000，范围 0–30000 | 原 wait_exec；一次输出观察，成功交付后确认消费 |
+| wait | target=CELL | yield_time_ms，默认 1000，范围 0–30000 | 等待终态或本次观察超时，仅返回 target/state/pending_calls 等状态；输出不满足等待条件 |
 | stop | target=CELL | 无 | 原 stop_exec；停止后续执行／提交，保留在途作用与已接纳 Work 的真实结算 |
 
-exec_cell／manage_cell 的业务结果以 `target:CELL` 代替原裸 cell_id；不同时输出同一身份的两个镜像。state、output、has_more、pending_calls、error 等沿原分支：wait／exec 返回输出页，stop 返回停止结果及尚待读／待结算状态，不偷偷读取输出。
-
-同步更新现有输出页大小计算与最终载荷：Host 的 `_public_page` 和 `CodeModeObservation.public_value()` 必须使用同一 CELL target 形状，按包含 target、状态、输出及其余字段的完整实际 envelope 计算 UTF-8 字节数，不能按旧裸 cell_id 格式选取输出前缀后再增加包装。复用现有页面预算、预留、观察与交付结算链，不增加预算、确认机制或第二套分页器。输出观察仅在完整成功交付后按原 owner 确认消费；报价、序列化或交付失败均不得确认该页消费。
+exec_cell/manage_cell 业务结果使用完整 CELL target；exec/wait 无 output/has_more 正文领取字段。正式 console.log 每条独立进入共同队列，接纳时 ROOT 活动为精确 steer、idle 为 NEW_TURN，route 固定；FULL 后释放本地输出前缀，transcript 消费不再次 ACK。异常诊断与非 Stop 失败的晚到工具结算沿同一接纳 owner，显式 Stop 不借晚到结果另开 turn。原单值/16 MiB Cell/64 MiB Host 与输入预算边界保持，不以截断页替代完整接纳正文。
 
 内部 Node IPC、`CodeModeInvocation.cell_id`、数据库来源字段可以继续叫 cell_id；值须使用同一 canonical ID，不能为 native、JS、UI 再造映射 ID。公开 tools 调用使用 target，内部 owner 可继续接收校验后的字符串。
 
@@ -484,7 +437,7 @@ CodeModeHost 只负责证明本次有这个 Cell 并给出内部源执行关联�
 
 ### 8.5 生命周期保持
 
-完成或停止不保证可以立即释放；terminal 输出成功交付、pending 清零、输出排空且 VM 已释放后，沿现有回收条件删除进程内记录。query 不设置 terminal_delivered，也不阻止回收。
+完成或停止不保证立即释放；物理终态、VM 已释放、内部 pending/结算完成且无未 FULL 输出/UNKNOWN 接纳/借用前缀后回收。静默成功无需模型 ACK，query/source 阅读不消费输出、不延迟回收。Desktop 按 ROOT/session＋canonical attempt 在 Cell/Host 回收或重启后继续读源码，沿侧边栏合同校验访问范围；模型 query_cells 仍为 live scope。
 
 观察超时不是脚本超时；新消息、普通新 turn、ROOT final、压缩不重启脚本。进入 Plan 或设置变化不追溯修改旧 Cell 的源执行快照。当前非 bypass turn 仍不提供 Cell 工具；用户 UI 的既有查看／停止能力不由模型工具可见性决定。
 
@@ -526,7 +479,6 @@ Session 工具三项参数的“可省略 target 时使用当前 session”等�
 | query_agents AGENT | next_cursor（queue 位置） | 同一 AGENT target、cursor、可调 max_items | 同 Agent 的 queue_sequence，归属检查不省略 |
 | query_agents WORK | 无 | WORK target | 单份工作；大结果沿原输出投影 |
 | query_processes | 无列表分页 | filters 或 target 二选一 | 当前 Host 的已有 retained inventory，不扫描 OS 全局 |
-| query_monitors | 无列表分页 | `{}` 或 target | 当前可见未关闭登记；详情不延长登记寿命 |
 | query_cells 集合 | next_cursor（cell ID 排序边界） | cursor、可调 max_items | 当前 Host 弱一致页；不要求 cursor 对象仍存活 |
 | query_cells 源码 | next_offset_chars | 同一 target、offset_chars、可调 max_chars | 冻结文本；Cell 回收后后续页明确不可用 |
 | query_schedules 集合 | next_cursor（schedule ID） | 原 session／status + cursor；无状态过滤仍省略 status，禁止 status:null | 原 owner 的当前页面，无新快照存储 |
@@ -534,11 +486,11 @@ Session 工具三项参数的“可省略 target 时使用当前 session”等�
 | read_artifact | next_offset_chars | 同一 ARTIFACT target、offset_chars | 已保存正文，coverage 仍可能仅 retained |
 | 会话三工具 | 自包含 next_cursor | cursor + 允许的页预算 | 不重复 target、query、lifecycle、include_tools 等首请求条件 |
 | manage_process poll／wait | output_cursor | 同一 PROCESS target、since_cursor | 输出观察位置，不是对象列表分页；保留 gap／省略语义 |
-| exec_cell／manage_cell.wait | 无模型侧分页 cursor | 同一 CELL target继续 wait | Host 在成功交付时推进输出队列；不通过 query 读取 |
+| exec_cell／manage_cell.wait | 无模型侧输出分页 cursor | wait 使用同一 live CELL target | 仅接纳/状态观察；正式记录经共同输入队列独立交付 |
 
-已有页面数字限制不得移植成对象总量限制。Process／Monitor 本轮没有新列表分页，工具结果过大时按既有可恢复 artifact 读取路径处理；若既有结果投影无法提供可恢复读取，实施必须暴露明确资源错误并修正同一投影链，不能静默丢行或新设总量常量。
+已有页面数字限制不得移植成对象总量限制。Process 本轮没有新列表分页，工具结果过大时按既有可恢复 artifact 读取路径处理；若既有结果投影无法提供可恢复读取，实施必须暴露明确资源错误并修正同一投影链，不能静默丢行或新设总量常量。
 
-现有 exec／wait_exec／stop_exec 成功结果的 `CODE_MODE_OUTPUT_PAGE`／FULL_REQUIRED 分类分别映射到 exec_cell、manage_cell.wait、manage_cell.stop，保留原交付要求。exec_cell 与 manage_cell.wait 的输出观察必须完整交付后才确认消费；manage_cell.stop 保持停止结果语义，不因 FULL 分类而读取或消费输出。
+exec_cell/manage_cell 的接纳和状态回执使用既有 FULL_REQUIRED 投影，完整交付协议工具结果；该投影不消费/确认正式输出。Cell 每条正式记录由共同队列 FULL 接纳完成所有权转移，wait/stop/query 都不替代这一边界。
 
 query_cells 的列表和源码页新增 FULL_REQUIRED 交付需求，使用既有页报价与交付机制，目的只为保证后续 cursor／offset 与实际交付一致。其新增枚举仅属于既有结果投影分类，不是 durable event／receipt。页面在接受前不能适配实际预算时明确 typed 失败，不在接受后再把页面降级为不完整预览。
 
@@ -551,7 +503,6 @@ query_cells 的列表和源码页新增 FULL_REQUIRED 交付需求，使用既�
 | query_capabilities | 原范围，非仅 bypass | 是，沿共同来源查询；MCP 运行目录仍按分配范围 | 是，ROOT＋bypass |
 | query_agents | 仅 bypass | 是，bypass，限自身及已知成员 | 是，ROOT＋bypass |
 | exec_process／query_processes／manage_process | 原终端权限 | 原终端权限与 Host 范围 | 是，ROOT＋bypass |
-| query_monitors／manage_monitor | 原可见与管理范围 | 仅当前真实 Work 的 Monitor 范围 | 否 |
 | exec_cell／query_cells／manage_cell | 仅 bypass | 否 | **否，包括 query_cells** |
 | query_schedules／manage_schedule | 原定时权限与会话范围 | 否 | 否 |
 | read_artifact／export_artifact | 原 artifact／文件权限 | 原范围 | 是，ROOT＋bypass |
@@ -562,10 +513,9 @@ query_cells 仅原生是本轮明确选择：不借增加查询扩大 JS 子集�
 
 ### 12.1 逐动作权限
 
-- query_capabilities／query_agents／query_processes／query_monitors／query_schedules／query_cells 是只读查询，但 ROOT-only／bypass／terminal access 等原限制仍有效。
+- query_capabilities／query_agents／query_processes／query_schedules／query_cells 是只读查询，但 ROOT-only／bypass／terminal access 等原限制仍有效。
 - manage_process 的 poll／wait 保持原只读分类；write／submit／close_stdin／kill 保持原效果与终端授权。
 - manage_cell.wait 沿原 wait_exec 的观察权限；stop 沿原 stop_exec。两者工具表面仍仅 ROOT＋bypass。
-- manage_monitor register／cancel 保持原非查询授权；注册成功仍由现有 effect settlement 决定。
 - manage_schedule 的所有 action 都沿原写权限及 revision 合同；query_schedules 继承原 list／get 的读权限。
 - read_artifact 为读，export_artifact 为文件写；get_memory／search_memory 保持 memory_read。
 
@@ -601,14 +551,13 @@ Node 协议把 ID 当 opaque string，不重新生成 ID；所有可能把 ID �
 
 ### 14.1 唯一 owner 与最小适配
 
-本轮以改名、拆分／合并工具入口和调整参数／结果投影为主，沿用已有执行、校验、授权、分页和交付机制。已有能力直接复用，不因统一名称重新实现。新增代码主要集中在 Cell 列表与冻结源码查询；Process 详情复用 `_info`，Monitor 详情投影现有登记及 policy，只补必要的只读入口，不引入新的运行或存储机制。
+本轮以改名、拆分／合并工具入口和调整参数／结果投影为主，沿用已有执行、校验、授权、分页和交付机制。已有能力直接复用，不因统一名称重新实现。新增代码主要集中在 Cell 列表与冻结源码查询；Process 详情复用 `_info`，只补必要的只读入口，不引入新的运行或存储机制。
 
 | 领域 | 复用的真实 owner | 允许的最小新增工作 | 禁止新增 |
 |---|---|---|---|
 | Capability | CapabilitySourceQuery、MCP runtime／引用 owner | 合并参数分支、列表／详情投影和新名路由 | 第二目录、调用资格缓存、query 通用执行 |
 | Agent／Work | CollaborationToolPort 与 session／queue／turn repository | 合并查询工具入口 | Work 状态表、复制结果、查询全局协作图 |
 | Process | TerminalManager、当前 Host 身份、原输出流与 `_info` | 复用 `_info` 及其只读快照，补精确查询入口 | OS 进程扫描器、第二进程库存、输出重放、另造元数据读取机制 |
-| Monitor | 当前 monitor coordinator 与 `_Registration` | 在相同 visible 规则下投影有效 policy | 登记副本、重新注册式 inspect、持久 job |
 | Cell | CodeModeHost、源 attempt、canonical content／blob reader | live 查询快照、有限页面、现有源内容读取 | 持久 Cell 表、源码副本、执行恢复、cursor registry |
 | Schedule | ScheduledTaskService、原 repository／接纳事务 | 分开读写入口并保持默认范围 | 第二调度器、自动补建计划、额外执行回执 |
 | Artifact／Memory | 原读写端口与 owner | 公共名称替换 | 内容镜像、统一对象数据库 |
@@ -646,7 +595,7 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 
 ## 15. 压缩后的运行时摘要边界
 
-压缩 runtime handoff 的状态筛选、完整 target、PMCA 3,200-token 预算、独立完整 TODO、空 source、预算省略说明、普通环境 Cell 索引删除与 Monitor／Process 资源退役，统一由 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 定义。本文的查询、权限和 target 合同仍保持，query 不要求 handoff 完整列出所有对象，也不恢复已回收对象。
+压缩 runtime handoff 的状态筛选、完整 target、PCA 3,200-token 预算、独立完整 TODO、空 source、预算省略说明、普通环境 Cell 索引删除与 Process 资源退役，统一由 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 定义。本文的查询、权限和 target 合同仍保持，query 不要求 handoff 完整列出所有对象，也不恢复已回收对象。
 
 子代理与 Cell 侧边栏及 `open_in_pulsara` 展示接入按 [侧边栏规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md) 处理。
 
@@ -656,7 +605,7 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 
 1. 固定本规格的矩阵、canonical schema 分支、function.description 签名和既有 wire 投影路径；阅读兼容性报告并建立当前 durable oracle 与 prefix 测试基线，不记录代码／文档哈希。
 2. 增加 CELL canonical kind 与公开 target；完成 Host／IPC／native 消费者一致切换。
-3. 在既有 owner 上实现窄查询能力：Process metadata、Monitor policy、Cell inventory／源码页；不先做泛型查询框架。
+3. 在既有 owner 上实现窄查询能力：Process metadata、Cell inventory／源码页；不先做泛型查询框架。
 4. 原生 query／manage／exec 入口及权限、投影一次性替换；同步 JS 目录、MCP 查询引用与 Hook 名称。
 5. 同步 SYSTEM、bundled Skills、当前设计及现有 UI 消费者；删除被替代的公共入口和兼容分支。
 6. 执行下列验收；若有具体失败再扩测，摘要变更仍遵循其独立规格。
@@ -670,7 +619,6 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 | Capability | 空概览、父过滤、精确详情、来源不可用、MCP 未发现、分页重复筛选；native DIRECT／META 和 JS 冻结目录变化；schema 与调用引用完整交付 |
 | Agent | ROOT 成员分页、AGENT Work 分页、WORK 无分页；不串 cursor、scope或Agent；已完成和队列中对象可查；已知target无需先枚举 |
 | Process | 新 shell、TTY、输入与观察默认值；列表／详情复用 `_info`，允许其只读快照但不返回或消费日志；列表保留 terminal_process_action；poll/wait游标与coverage；write/submit/EOF/kill及取消结算不变 |
-| Monitor | ROOT与当前Subagent Work隔离；详情准确投影effective policy；query不注册、不改过期、不消费pending；cancel不停止进程；关闭后不可操作 |
 | Cell ID | canonical格式及padding bits；错误kind/旧hex/大小写/截短拒绝；同脚本两次不同ID；Host／Node／输出／UI同值，无映射表 |
 | Cell 输出交付 | 新 target 包装计入完整页预算；近字节边界页报价与实际序列化一致；exec_cell／manage_cell.wait/stop 保留既有 FULL 分类；输出页完整成功交付才确认消费，失败不确认；stop不消费输出 |
 | Cell 列表 | 超过默认50条仍可续页；字节预算缩页不漏游标；静止库存完整遍历；边界对象回收后可续；并发新增的弱一致语义；只见当前Host |
@@ -724,7 +672,7 @@ HTTP 200 + response.failed 不能记为成功，预算耗尽或 thinking／tool_
 | Provider schema 与兼容性证据 | [function_tools.py](src/pulsara_agent/llm/adapters/openai/function_tools.py)、[参数与默认值合同测试](tests/test_builtin_default_null_contracts.py)、[兼容性报告](output/tool-schema-compatibility-20261026/REPORT.zh.md) |
 | Capability查询与分页 | [source_query.py](src/pulsara_agent/capability/source_query.py)、[capability_query.py](src/pulsara_agent/conversation_kernel/capability_query.py) |
 | Agent／Work查询 | [collaboration_contracts.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_contracts.py)、[collaboration_api.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py)、[subagents repository](src/pulsara_agent/conversation_kernel/_repository/subagents.py) |
-| Process与Monitor | [terminal.py](src/pulsara_agent/ports/terminal.py)、[manager.py](src/pulsara_agent/terminal_process/manager.py)、[models.py](src/pulsara_agent/terminal_process/models.py)、[monitor.py](src/pulsara_agent/terminal_process/monitor.py) |
+| Process | [terminal.py](src/pulsara_agent/ports/terminal.py)、[manager.py](src/pulsara_agent/terminal_process/manager.py)、[models.py](src/pulsara_agent/terminal_process/models.py) |
 | Cell与源码 | [host.py](src/pulsara_agent/code_mode/host.py)、[contracts.py](src/pulsara_agent/code_mode/contracts.py)、[tool_execution.py](src/pulsara_agent/conversation_kernel/tool_execution.py)、[tools repository](src/pulsara_agent/conversation_kernel/_repository/tools.py)、[reader.py](src/pulsara_agent/conversation_kernel/reader.py) |
 | 统一身份 | [identity.py](src/pulsara_agent/identity.py) |
 | JS目录与结果 | [tool_surface.py](src/pulsara_agent/conversation_kernel/tool_surface.py)、[tool_result_projection.py](src/pulsara_agent/primitives/tool_result_projection.py) |

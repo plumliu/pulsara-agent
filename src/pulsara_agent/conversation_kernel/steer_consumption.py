@@ -6,7 +6,6 @@ import asyncio
 from datetime import datetime, timezone
 
 from pulsara_agent.conversation_kernel.contracts import WriterLease
-from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelWatchdogOwner,
@@ -27,6 +26,7 @@ from pulsara_agent.conversation_kernel.steer import (
     PreparedSteerPlanConflictInterruption,
     PreparedSteerResourceRejection,
     PreparedSteerSuffixAdmissionPlan,
+    QueuedInputContent,
     SteerConsumptionConfirmationKind,
     SteerPlanConflictConfirmationKind,
     SteerResourceRejectionConfirmationKind,
@@ -60,8 +60,8 @@ class SteerConsumptionCoordinator:
         facts: tuple[PendingPromptSteerFact, ...],
         *,
         deadline: float,
-    ) -> tuple[tuple[PendingPromptSteerFact, FrozenCanonicalPrompt], ...]:
-        result: list[tuple[PendingPromptSteerFact, FrozenCanonicalPrompt]] = []
+    ) -> tuple[tuple[PendingPromptSteerFact, QueuedInputContent], ...]:
+        result: list[tuple[PendingPromptSteerFact, QueuedInputContent]] = []
         used = 0
         for fact in facts:
             if (

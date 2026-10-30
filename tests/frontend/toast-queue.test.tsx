@@ -2,10 +2,20 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, expect, it, vi } from 'vitest';
 import PulsaraApp from '../../frontend/app/pulsara-app';
 import { ToastStack } from '../../frontend/components/overlays';
-import { deferred, FakeAdapter, initialSession, renderWorkbench, userCapabilitySnapshot } from './pulsara-app-fixture';
+import { deferred, FakeAdapter, initialSession, renderWorkbench } from './pulsara-app-fixture';
+
+async function failDirectoryOpen(adapter: FakeAdapter) {
+  fireEvent.click(screen.getByRole('button', {name:'浏览目录'}));
+  await act(async () => fireEvent.click(screen.getByRole('button', {name:/^\.agents/})));
+  expect(adapter.openCapabilityRoot).toHaveBeenLastCalledWith('agents');
+}
 
 const titles = () => [...document.querySelectorAll('.toast strong')].map(node => node.textContent);
-afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+const originalAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'animate');
+afterEach(() => {
+  if (originalAnimate) Object.defineProperty(HTMLElement.prototype, 'animate', originalAnimate);
+  else Reflect.deleteProperty(HTMLElement.prototype, 'animate');
+  cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it('queues every toast from the bottom and keeps a persistent item in place through progress updates', () => {
   const persistent = { id: -1, title: '正在删除归档会话 0/1', onClick: vi.fn() };
@@ -57,23 +67,44 @@ it('smoothly drops the persistent item after a lower toast leaves without replay
 });
 
 it('retains more than three real application notifications until their own expiry', async () => {
+  vi.spyOn(Math, 'random').mockReturnValue(0);
   const adapter = new FakeAdapter();
   adapter.sessions = [];
+  adapter.openCapabilityRoot.mockRejectedValue(new Error('fixture目录不可用'));
   render(<PulsaraApp adapter={adapter} />);
   fireEvent.click(await screen.findByRole('button', { name: '能力' }));
   await waitFor(() => expect(adapter.inspectUserCapabilities).toHaveBeenCalled());
   vi.useFakeTimers();
+  Object.defineProperty(HTMLElement.prototype, 'animate', {configurable:true,value:vi.fn((_frames, options) => {
+    let timer: ReturnType<typeof setTimeout>;
+    const finished = new Promise<void>(resolve => {timer = setTimeout(resolve, (options as KeyframeAnimationOptions).duration as number);});
+    return {finished,cancel:() => clearTimeout(timer)};
+  })});
+  const liveToasts = () => document.querySelectorAll('.toast:not(.is-exiting)');
   for (let i = 0; i < 6; i++) {
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' })));
+    await failDirectoryOpen(adapter);
+    if (i < 5) await act(async () => vi.advanceTimersByTimeAsync(100));
   }
-  expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(6);
+  expect(adapter.openCapabilityRoot).toHaveBeenCalledTimes(6);
+  expect(titles()).toEqual(Array(6).fill('无法打开目录'));
   expect(document.querySelectorAll('.toast')).toHaveLength(6);
-  await act(async () => vi.advanceTimersByTimeAsync(4200));
+  await act(async () => vi.advanceTimersByTimeAsync(3699));
+  expect(document.querySelectorAll('.toast')).toHaveLength(6);
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(liveToasts()).toHaveLength(5);
+  expect(document.querySelectorAll('.toast.is-exiting')).toHaveLength(1);
+  for (let remaining = 4; remaining >= 0; remaining--) {
+    await act(async () => vi.advanceTimersByTimeAsync(100));
+    expect(liveToasts()).toHaveLength(remaining);
+  }
+  expect(document.querySelector('.toast.is-exiting')).toBeTruthy();
+  await act(async () => vi.advanceTimersByTimeAsync(220));
   expect(document.querySelectorAll('.toast')).toHaveLength(0);
 });
 
 it('keeps the archive deletion notice in the same queue without expiry; swiping clears only the notice through completion', async () => {
   const adapter = new FakeAdapter();
+  adapter.openCapabilityRoot.mockRejectedValue(new Error('fixture目录不可用'));
   adapter.archived = [{ ...initialSession, id: 'archived-toast', title: '归档提示测试', lifecycle: 'ARCHIVED', live: false }];
   const pending = deferred<Awaited<ReturnType<typeof adapter.deleteArchivedSession>>>();
   adapter.deleteArchivedSession.mockImplementation(() => pending.promise);
@@ -87,8 +118,9 @@ it('keeps the archive deletion notice in the same queue without expiry; swiping 
   fireEvent.click(screen.getByRole('button', { name: '能力' }));
   await waitFor(() => expect(adapter.inspectUserCapabilities).toHaveBeenCalled());
   vi.useFakeTimers();
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' })));
-  expect(notice.closest('.toast-stack')).toBe(screen.getByText('会话能力已重新加载').closest('.toast-stack'));
+  await failDirectoryOpen(adapter);
+  expect(adapter.openCapabilityRoot).toHaveBeenCalledTimes(1);
+  expect(notice.closest('.toast-stack')).toBe(screen.getByText('无法打开目录').closest('.toast-stack'));
   await act(async () => vi.advanceTimersByTimeAsync(30_000));
   expect(screen.getByRole('button', { name: /正在删除归档会话/ })).toBe(notice);
   expect(document.querySelectorAll('.toast')).toHaveLength(1);

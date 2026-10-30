@@ -26,6 +26,8 @@ from pulsara_agent.conversation_kernel.contracts import (
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
+from pulsara_agent.ports.terminal_observation import CellOutputContent
+
 from pulsara_agent.conversation_kernel.vocabulary import (
     CommittedEventType,
     SubjectSlot,
@@ -59,6 +61,9 @@ from pulsara_agent.llm.request import FrozenProviderWireInputQuote
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.context import context_fingerprint
 from pulsara_agent.primitives.permission import PermissionMode
+
+
+QueuedInputContent = FrozenCanonicalPrompt | CellOutputContent
 
 
 MAXIMUM_STEER_ITEMS_PER_SAFE_POINT = 128
@@ -303,6 +308,26 @@ def _predecessor_value(
 
 
 @dataclass(frozen=True, slots=True)
+class PreparedCellOutputIngress:
+    session_id: str
+    workspace_id: str
+    content: CellOutputContent
+    occurred_at: datetime
+    actor_id: str
+
+    def __post_init__(self) -> None:
+        require_id(self.session_id, "session")
+        require_id(self.workspace_id, "workspace")
+        if not isinstance(self.content, CellOutputContent) or not self.actor_id:
+            raise ValueError("Cell ingress requires its frozen content and actor")
+
+    @property
+    def queue_item_id(self) -> str:
+        return derive_id("queue", "cell-output", self.session_id,
+                         self.content.source_exec_attempt_id, str(self.content.record_sequence))
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedPromptIngressCommand:
     session_id: str
     command_id: str
@@ -321,9 +346,9 @@ class PreparedPromptIngressCommand:
         if not isinstance(self.canonical_prompt, FrozenCanonicalPrompt):
             raise TypeError("prompt ingress content must be canonical and frozen")
         if self.scheduled is not None and (
-            self.delivery_mode is not PromptDeliveryMode.NEW_TURN
-            or self.scheduled.session_id != self.session_id
-            or self.scheduled.permission_mode != self.requested_permission_mode
+            self.scheduled.session_id != self.session_id
+            or (self.delivery_mode is PromptDeliveryMode.NEW_TURN
+                and self.scheduled.permission_mode != self.requested_permission_mode)
         ):
             raise ValueError("scheduled admission does not join prompt ingress")
         new_turn = self.delivery_mode is PromptDeliveryMode.NEW_TURN
@@ -375,6 +400,8 @@ class PromptIngressAccepted:
     model_call_binding: ModelCallBinding | None
     reasoning_preference_reset: bool = False
     queue_item_id: str | None = None
+    delivery_mode: PromptDeliveryMode | None = None
+    target_turn_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.queue_sequence < 1:
@@ -402,6 +429,8 @@ class PromptIngressConfirmation:
     queue_sequence: int | None = None
     status: str | None = None
     rejection: PromptIngressWriteRejection | None = None
+    delivery_mode: PromptDeliveryMode | None = None
+    target_turn_id: str | None = None
 
     def __post_init__(self) -> None:
         full = self.kind is PromptIngressConfirmationKind.FULL_COMPATIBLE
@@ -416,7 +445,7 @@ class PromptIngressConfirmation:
 class PreparedQueuedInputEntry:
     entry_id: str
     body_storage: CanonicalContent = field(repr=False)
-    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
+    canonical_prompt: QueuedInputContent = field(repr=False)
     input_origin: CanonicalInputOriginKind
 
 
@@ -435,7 +464,7 @@ class PreparedQueuedRootTurnAdmission:
     command_id: str | None
     client_submission_id: str | None
     body_storage: CanonicalContent = field(repr=False)
-    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
+    canonical_prompt: QueuedInputContent = field(repr=False)
     permission_snapshot: FrozenRunPermissionSnapshot
     model_call_binding: ModelCallBinding
     pending_plan_handoff_workflow_id: str | None
@@ -468,7 +497,7 @@ class PreparedQueuedRootTurnAdmission:
             or self.queue_sequence < 1
         ):
             raise ValueError("queued ROOT admission identity is incomplete")
-        if self.input_origin is CanonicalInputOriginKind.AGENT_INSTRUCTION:
+        if self.input_origin in {CanonicalInputOriginKind.AGENT_INSTRUCTION, CanonicalInputOriginKind.CELL_OUTPUT}:
             if self.command_id is not None or self.client_submission_id is not None:
                 raise ValueError(
                     "delegated request cannot impersonate a human submission"
@@ -515,7 +544,7 @@ def build_queued_root_turn_admission(
     command_id: str | None,
     client_submission_id: str | None,
     content: CanonicalContent,
-    canonical_prompt: FrozenCanonicalPrompt,
+    canonical_prompt: QueuedInputContent,
     permission_snapshot: FrozenRunPermissionSnapshot,
     model_call_binding: ModelCallBinding,
     pending_plan_handoff_workflow_id: str | None,
@@ -550,17 +579,20 @@ def build_queued_root_turn_admission(
         occurred_at=occurred_at,
         payload={"entry_id": entry_id},
     )
+    accepted_type = (CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED
+                     if input_origin is CanonicalInputOriginKind.CELL_OUTPUT
+                     else CommittedEventType.USER_MESSAGE_ACCEPTED)
     accepted = CommittedEventDraft(
         event_id=derive_id(
             "event",
             "accepted",
             session_id,
-            CommittedEventType.USER_MESSAGE_ACCEPTED.name,
+            accepted_type.name,
             SubjectSlot.ENTRY.name,
             entry_id,
             "",
         ),
-        event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
+        event_type=accepted_type,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
         actor_kind="runtime"
         if scheduled_input is not None
@@ -667,6 +699,12 @@ def prompt_ingress_semantic_digest(
         return context_fingerprint(
             "pulsara:run-scheduled-task:v1", candidate.scheduled.action_value()
         )
+    if candidate.scheduled is not None:
+        return context_fingerprint("pulsara:scheduled-input:v1", {
+            "queue_item_id": candidate.queue_item_id,
+            "scheduled_input": candidate.scheduled.provenance(),
+            "content_digest": "sha256:" + sha256(candidate.canonical_prompt.body).hexdigest(),
+        })
     if (candidate.delivery_mode is PromptDeliveryMode.NEW_TURN) != (
         model_call_binding is not None
     ):
@@ -709,6 +747,7 @@ class PendingPromptSteerFact:
     body_storage: CanonicalContent = field(repr=False)
     canonical_expanded_bytes: int
     input_origin: CanonicalInputOriginKind = CanonicalInputOriginKind.HUMAN_STEER
+    scheduled_input: ScheduledProvenance | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -731,6 +770,7 @@ def build_pending_prompt_steer_fact(
     content: CanonicalContent,
     canonical_expanded_bytes: int,
     input_origin: CanonicalInputOriginKind = CanonicalInputOriginKind.HUMAN_STEER,
+    scheduled_input: ScheduledProvenance | None = None,
 ) -> PendingPromptSteerFact:
     return PendingPromptSteerFact(
         session_id=session_id,
@@ -742,6 +782,7 @@ def build_pending_prompt_steer_fact(
         body_storage=content,
         canonical_expanded_bytes=canonical_expanded_bytes,
         input_origin=input_origin,
+        scheduled_input=scheduled_input,
     )
 
 
@@ -800,7 +841,7 @@ class PreparedSteerConsumptionCandidate:
     command_id: str | None
     exact_target_turn_id: str
     body_storage: CanonicalContent = field(repr=False)
-    canonical_prompt: FrozenCanonicalPrompt = field(repr=False)
+    canonical_prompt: QueuedInputContent = field(repr=False)
     new_entry_id: str
     expected_entry_sequence: int
     occurred_at: datetime
@@ -810,6 +851,7 @@ class PreparedSteerConsumptionCandidate:
     prompt_consumed_occurrence: CommittedEventDraft
     input_origin: CanonicalInputOriginKind
     user_steer_accepted_occurrence: CommittedEventDraft
+    scheduled_input: ScheduledProvenance | None = None
 
     def __post_init__(self) -> None:
         if self.expected_entry_sequence < 1:
@@ -854,17 +896,20 @@ def build_steer_consumption_occurrences(
         occurred_at=occurred_at,
         payload={"entry_id": entry_id},
     )
+    accepted_type = (CommittedEventType.TERMINAL_OBSERVATION_ACCEPTED
+                     if fact.input_origin is CanonicalInputOriginKind.CELL_OUTPUT
+                     else CommittedEventType.USER_STEER_ACCEPTED)
     steer_event = CommittedEventDraft(
         event_id=derive_id(
             "event",
             "accepted",
             fact.session_id,
-            CommittedEventType.USER_STEER_ACCEPTED.name,
+            accepted_type.name,
             SubjectSlot.ENTRY.name,
             entry_id,
             "",
         ),
-        event_type=CommittedEventType.USER_STEER_ACCEPTED,
+        event_type=accepted_type,
         subject=CommittedEventSubject(SubjectSlot.ENTRY, entry_id),
         actor_kind="human"
         if fact.input_origin is CanonicalInputOriginKind.HUMAN_STEER
@@ -881,7 +926,7 @@ def build_steer_consumption_occurrences(
 def build_steer_consumption_candidate(
     *,
     fact: PendingPromptSteerFact,
-    canonical_prompt: FrozenCanonicalPrompt,
+    canonical_prompt: QueuedInputContent,
     expected_entry_sequence: int,
     predecessor: FrozenProviderInputAppendPlanningInput,
     canonical_base_fence: PreparedSteerCanonicalBaseFence,
@@ -893,6 +938,7 @@ def build_steer_consumption_candidate(
     )
     return PreparedSteerConsumptionCandidate(
         input_origin=fact.input_origin,
+        scheduled_input=fact.scheduled_input,
         session_id=fact.session_id,
         queue_item_id=fact.queue_item_id,
         queue_sequence=fact.queue_sequence,
@@ -1426,6 +1472,8 @@ __all__ = [
     "MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
     "PendingPromptSteerFact",
     "PreparedPromptIngressCommand",
+    "PreparedCellOutputIngress",
+    "QueuedInputContent",
     "PreparedQueuedRootTurnAdmission",
     "PreparedActiveRootInputAdmission",
     "PreparedActiveRootInputCandidate",

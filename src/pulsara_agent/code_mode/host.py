@@ -6,12 +6,14 @@ submission calls the kernel's shared executor with the admitted exec snapshot.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
-from typing import Awaitable, Callable, Mapping
+from typing import Callable, Mapping
 from types import MappingProxyType
 
 from uuid import uuid4
@@ -19,13 +21,12 @@ from pulsara_agent.identity import random_id, require_id
 
 from .contracts import (
     CellParticipationReference, CellState, CodeModeError, CodeModeInvocation, CodeModeInvoke, CodeModeLimits,
-    CodeModeObservation, CodeModePrepareBatch, CodeModeToolResult, CodeModeCellSnapshot,
+    CodeModeOutputLease, CodeModePrepareBatch, CodeModeToolResult, CodeModeCellSnapshot,
 )
 from .targets import cell_target
 
 _TERMINAL = frozenset({"completed", "failed", "terminated"})
 _SAFE_INTEGER = 9_007_199_254_740_991
-ArchiveOutput = Callable[[Mapping[str, object]], Awaitable[Mapping[str, object]]]
 
 
 def _json(value: object) -> str:
@@ -75,6 +76,7 @@ class _Output:
     result: CodeModeToolResult | None = None
     sequence: int | None = None
     tool_name: str | None = None
+    record_sequence: int = 0
 
 
 @dataclass(slots=True)
@@ -111,9 +113,14 @@ class _Cell:
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event)
     reservations: dict[str, asyncio.Future[bool]] = field(default_factory=dict)
-    observation: CodeModeObservation | None = None
-    observed_count: int = 0
-    terminal_delivered: bool = False
+    output_lease: CodeModeOutputLease | None = None
+    next_output_sequence: int = 0
+    output_borrowing: bool = False
+    output_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    explicitly_stopped: bool = False
+    output_delivery_rejected: bool = False
+    discarded_output_charge: int = 0
+    diagnostic_output: _Output | None = None
     participants: dict[tuple[str, str | None], int] = field(default_factory=dict)
     participation_pending: dict[tuple[str, str | None], int] | None = None
     participation_task: asyncio.Task[None] | None = None
@@ -140,6 +147,68 @@ class CodeModeHost:
         self._configured: asyncio.Future[None] | None = None
         self._closed = False
         self._sidecar_failure: str | None = None
+        self._output_ready: Callable[[], None] | None = None
+
+    def set_output_ready_callback(self, callback: Callable[[], None]) -> None:
+        self._output_ready = callback
+        if self.pending_output_cells():
+            self._wake_output()
+
+    def _wake_output(self) -> None:
+        if self._output_ready is not None:
+            self._output_ready()
+
+    def _append_output(self, cell: _Cell, output: _Output) -> None:
+        cell.next_output_sequence += 1
+        output.record_sequence = cell.next_output_sequence
+        cell.output.append(output)
+        cell.changed.set()
+        self._wake_output()
+
+    def _record_error(self, cell: _Cell, error: Mapping[str, object] | None) -> None:
+        if error is None:
+            return
+        incoming = dict(error)
+        generic_exit = "Code Mode sidecar exited; VM state cannot be resumed"
+        if (cell.error is not None and cell.error.get("message") == generic_exit
+                and incoming.get("name") == "SidecarError" and incoming.get("message") != generic_exit
+                and (cell.diagnostic_output is None or
+                     (any(item is cell.diagnostic_output for item in cell.output)
+                      and (cell.output_lease is None or cell.output[0] is not cell.diagnostic_output)))):
+            incoming["secondary_causes"] = {"SidecarExit": dict(cell.error)}
+            cell.error = None
+        if cell.error is None:
+            cell.error = incoming
+        elif dict(cell.error) != incoming:
+            # A terminal fact has one primary cause. Transport/cleanup fallout
+            # supplements that cause instead of replacing it with a generic exit.
+            combined = dict(cell.error)
+            causes = dict(combined.get("secondary_causes", {}))
+            key = str(incoming.get("code") or incoming.get("name") or "Error")
+            primary_key = str(combined.get("code") or combined.get("name") or "Error")
+            if key != primary_key or incoming.get("message") != combined.get("message"):
+                causes.setdefault(key, incoming)
+            if causes:
+                combined["secondary_causes"] = causes
+            cell.error = combined
+        if (cell.state not in _TERMINAL or cell.explicitly_stopped or self._closed
+                or cell.output_delivery_rejected):
+            return
+        record = {"kind": "error", "error": dict(cell.error)}
+        previous = cell.diagnostic_output
+        if previous is not None and any(item is previous for item in cell.output):
+            if cell.output_lease is None or cell.output[0] is not previous:
+                previous.value = record
+                return
+            # An in-flight canonical candidate is immutable. Necessary new
+            # causal information may only be appended after the original record.
+            if dict(cell.output_lease.record) == record:
+                return
+        elif previous is not None and previous.value == record:
+            return
+        output = _Output(record)
+        cell.diagnostic_output = output
+        self._append_output(cell, output)
 
     async def _ensure_started(self) -> None:
         async with self._startup:
@@ -188,9 +257,9 @@ class CodeModeHost:
                 del tail[:-min(4096, self.limits.control_bytes - self.limits.page_bytes)]
         if tail:
             diagnostic = tail.decode("utf-8", errors="replace")
-            for cell in self._cells.values():
-                if cell.state not in _TERMINAL:
-                    cell.error = {"name": "SidecarError", "message": diagnostic}
+            for cell in tuple(self._cells.values()):
+                if cell.state not in _TERMINAL or (cell.error or {}).get("name") == "SidecarError":
+                    self._record_error(cell, {"name": "SidecarError", "message": diagnostic})
 
     async def _read_messages(self) -> None:
         assert self._process is not None and self._process.stdout is not None
@@ -214,7 +283,10 @@ class CodeModeHost:
                     if cell.state not in _TERMINAL:
                         cell.state = "running"
                 elif kind == "output":
-                    cell.output.append(_Output(message["record"], message["charge"]))
+                    if cell.explicitly_stopped:
+                        await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": message["charge"]})
+                    else:
+                        self._append_output(cell, _Output(message["record"], message["charge"]))
                 elif kind in ("call", "prepare"):
                     self._accept_request(cell, message)
                 elif kind == "retained":
@@ -229,8 +301,9 @@ class CodeModeHost:
                         if pending.handshake is not None and not pending.handshake.done():
                             pending.handshake.set_result(None)
                 elif kind == "terminal":
-                    cell.state = message["state"]
-                    cell.error = message.get("error")
+                    cell.state = ("failed" if cell.output_delivery_rejected and not cell.explicitly_stopped
+                                  else message["state"])
+                    self._record_error(cell, message.get("error"))
                     self._notify_closed(cell)
                     cell.terminal_event.set()
                     cell.cancelled.set()
@@ -240,8 +313,8 @@ class CodeModeHost:
                             pending.handshake.set_exception(CodeModeError("unavailable", "Cell stopped before Promise delivery"))
                 elif kind == "vm_released":
                     cell.vm_released.set()
-                    asyncio.create_task(self._collect(cell))
                 cell.changed.set()
+                await self._collect(cell)
         except (ValueError, KeyError, asyncio.LimitOverrunError) as error:
             failure = f"Code Mode sidecar protocol failed: {error}"
         finally:
@@ -258,7 +331,7 @@ class CodeModeHost:
                     cell.admitted.set_exception(CodeModeError("runtime_unavailable", failure))
                 if cell.state not in _TERMINAL:
                     cell.state = "failed"
-                    cell.error = {"name": "SidecarError", "message": failure}
+                    self._record_error(cell, {"name": "SidecarError", "message": failure})
                 for pending in cell.pending.values():
                     if pending.handshake is not None and not pending.handshake.done():
                         pending.handshake.set_exception(CodeModeError("unavailable", failure))
@@ -272,14 +345,13 @@ class CodeModeHost:
                 cell.reservations.clear()
                 cell.changed.set()
 
-    @staticmethod
-    def _notify_closed(cell: _Cell) -> None:
+    def _notify_closed(self, cell: _Cell) -> None:
         if cell.terminal_event.is_set() or cell.on_cell_closed is None:
             return
         try:
             cell.on_cell_closed(cell.cell_id)
         except Exception as error:
-            cell.error = {**(cell.error or {}), "cleanup_error": str(error)[:512]}
+            self._record_error(cell, {"name": "CleanupError", "message": str(error)[:512]})
 
     async def start(self, *, source: str, source_exec_attempt_id: str, turn_id: str,
                     snapshot: object, tool_catalog: Mapping[str, object], invoke: CodeModeInvoke,
@@ -447,6 +519,10 @@ class CodeModeHost:
             cell.reservations.pop(key, None)
 
     async def _late_result(self, cell: _Cell, pending: _Pending, result: CodeModeToolResult) -> None:
+        # Explicit cancellation keeps canonical effects readable without
+        # scheduling a new model turn for a stopped script.
+        if cell.explicitly_stopped or self._closed:
+            return
         # Preserve canonical identity and lazily read its accepted projection.
         retained = replace(result, delivery_succeeded=None, error_message=None)
         if result.read_undelivered is not None:
@@ -466,13 +542,18 @@ class CodeModeHost:
             # Pending-call admission already reserved its small canonical locator.
             # Never retain the raw value when additional data cannot be admitted.
             retained = replace(retained, value=None, artifact=None)
-            cell.error = {"name": "ResourceError", "code": "data_boundary",
+            self._record_error(cell, {"name": "ResourceError", "code": "data_boundary",
                           "message": "Accepted late result exceeds the cell data boundary",
-                          "result_id": result.result_id, "result_entry_id": result.result_entry_id}
+                          "result_id": result.result_id, "result_entry_id": result.result_entry_id})
         else:
             charge = max(charge, size)
+        # Stop may have fenced this Cell while retain waited for the sidecar.
+        # Its existing pending owner releases the complete retained charge.
+        pending.charge = charge
+        if cell.explicitly_stopped or self._closed:
+            return
         pending.charge = 0
-        cell.output.append(_Output(None, charge=charge, result=retained,
+        self._append_output(cell, _Output(None, charge=charge, result=retained,
                                    sequence=pending.sequence, tool_name=pending.tool_name))
 
     async def _safe_send(self, message: Mapping[str, object]) -> None:
@@ -632,120 +713,152 @@ class CodeModeHost:
             raise CodeModeError("output_resource_error", "Cell inventory envelope exceeds the model result boundary")
         return response
 
-    async def observe(self, cell_id: str, yield_time_ms: int = 1_000, *,
-                      archive_output: ArchiveOutput | None = None,
-                      maximum_page_bytes: int | None = None) -> CodeModeObservation:
-        if self._closed:
-            raise CodeModeError("unavailable", "Code Mode Host is closed")
+    def pending_output_cells(self) -> tuple[str, ...]:
+        return tuple(cell.cell_id for cell in self._cells.values() if cell.output)
+
+    async def lease_output(self, cell_id: str) -> CodeModeOutputLease | None:
+        cell = self._cell(cell_id)
+        async with cell.output_lock:
+            cell.output_borrowing = True
+            try:
+                return await self._lease_output(cell_id)
+            finally:
+                cell.output_borrowing = False
+                if cell.explicitly_stopped and cell.output_lease is None:
+                    await self._stop_cell(cell)
+
+    async def _lease_output(self, cell_id: str) -> CodeModeOutputLease | None:
+        """Borrow only the head record; UNKNOWN keeps this exact object owned."""
+        cell = self._cell(cell_id)
+        if cell.output_lease is not None:
+            return cell.output_lease
+        if not cell.output or cell.explicitly_stopped or self._closed:
+            return None
+        item = cell.output[0]
+        record = item.value
+        if record is None:
+            result = item.result
+            assert result is not None
+            body = (await result.read_undelivered() if result.read_undelivered else
+                    {"result": result.value, "artifact": dict(result.artifact) if result.artifact else None,
+                     "result_id": result.result_id, "result_entry_id": result.result_entry_id})
+            record = {"kind": "tool_result", "sequence": item.sequence,
+                      "tool_name": item.tool_name, "state": result.state, **body}
+        # Freeze the full typed value rather than aliasing a mutable diagnostic.
+        frozen = deepcopy(dict(record))
+        lease = CodeModeOutputLease(cell.cell_id, cell.turn_id, cell.source_exec_attempt_id,
+                                    item.record_sequence, MappingProxyType(frozen), cell.snapshot,
+                                    datetime.now(timezone.utc))
+        cell.output_lease = lease
+        return lease
+
+    def output_delivery_allowed(self, lease: CodeModeOutputLease) -> bool:
+        cell = self._cell(lease.cell_id)
+        return not self._closed and not cell.explicitly_stopped
+
+    async def acknowledge_output(self, lease: CodeModeOutputLease, *, accepted: bool = True) -> None:
+        cell = self._cell(lease.cell_id)
+        if cell.output_lease is not lease:
+            raise CodeModeError("invalid_observation", "Output is not the current admission owner")
+        if not accepted and self.output_delivery_allowed(lease):
+            raise CodeModeError("invalid_observation", "A live output must remain pending until accepted")
+        item = cell.output.popleft()
+        assert item.record_sequence == lease.record_sequence
+        cell.output_lease = None
+        if item.charge:
+            await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": item.charge})
+        await self._collect(cell)
+        if cell.output:
+            self._wake_output()
+
+    async def reject_output_delivery(self, lease: CodeModeOutputLease, error: CodeModeError) -> dict[str, object]:
+        """Settle a definitively rejected queue input, never an unknown write.
+
+        The caller has proved this candidate was not accepted. Return its actual
+        failure for the existing logger without another queue input or tombstone.
+        """
+        cell = self._cell(lease.cell_id)
+        if cell.output_lease is not lease:
+            raise CodeModeError("invalid_observation", "Output is not the current admission owner")
+        if not isinstance(error, CodeModeError):
+            raise TypeError("Rejected Cell output requires a typed CodeModeError")
+        item = cell.output.popleft()
+        assert item.record_sequence == lease.record_sequence
+        cell.output_lease = None
+        cell.output_delivery_rejected = True
+        cell.cancelled.set()
+        cell.state = "failed"
+        self._record_error(cell, {"name": "OutputDeliveryError", "code": error.code, "message": str(error)})
+        if item.charge:
+            await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": item.charge})
+        await self._safe_send({"type": "fail", "cell_id": cell.cell_id, "error": dict(cell.error or {})})
+        cell.changed.set()
+        failure = {"cell_id": cell.cell_id, "source_turn_id": cell.turn_id,
+                   "source_exec_attempt_id": cell.source_exec_attempt_id,
+                   "record_sequence": lease.record_sequence,
+                   "delivery": "rejected", "error": deepcopy(dict(cell.error or {}))}
+        await self._collect(cell)
+        if cell.output:
+            self._wake_output()
+        return failure
+
+    async def wait_state(self, cell_id: str, yield_time_ms: int = 1_000) -> dict[str, object]:
         if type(yield_time_ms) is not int or not 0 <= yield_time_ms <= 30_000:
             raise CodeModeError("invalid_arguments", "yield_time_ms must be between 0 and 30000")
-        page_bytes = self.limits.page_bytes if maximum_page_bytes is None else maximum_page_bytes
-        if type(page_bytes) is not int or page_bytes <= 0 or page_bytes > self.limits.page_bytes:
-            raise CodeModeError("invalid_arguments", "Observation page must fit the existing model result boundary")
         cell = self._cell(cell_id)
-        if cell.observation is not None:
-            raise CodeModeError("busy", "Another reader owns this cell's output observation")
-        # Reserve output consumption before waiting; stop() never needs this owner.
-        reservation = CodeModeObservation(cell_id, cell.state, (), False, cell.pending_calls, cell.error)
-        cell.observation = reservation
-        try:
-            if not cell.output and (cell.state not in _TERMINAL or cell.pending) and yield_time_ms:
-                cell.changed.clear()
-                try:
-                    await asyncio.wait_for(cell.changed.wait(), yield_time_ms / 1000)
-                except TimeoutError:
-                    pass
-            records: list[Mapping[str, object]] = []
-            selected = 0
-            archived = False
-            for item in cell.output:
-                candidate = item.value
-                if candidate is None:
-                    result = item.result
-                    assert result is not None
-                    body = (await result.read_undelivered() if result.read_undelivered else
-                            {"result": result.value, "artifact": dict(result.artifact) if result.artifact else None,
-                             "result_id": result.result_id, "result_entry_id": result.result_entry_id})
-                    candidate = {"kind": "tool_result", "sequence": item.sequence,
-                                 "tool_name": item.tool_name, "state": result.state, **body}
-                trial = self._public_page(cell, [*records, candidate], False)
-                if len(_json(trial).encode("utf-8")) > page_bytes:
-                    if records:
-                        break
-                    if archive_output is None:
-                        raise CodeModeError("output_resource_error", "Output record requires the existing artifact owner before it can fit a model result page")
-                    candidate = dict(await archive_output(candidate))
-                    archived = True
-                    if len(_json(self._public_page(cell, [candidate], False)).encode("utf-8")) > page_bytes:
-                        raise CodeModeError("output_resource_error", "Archived output reference exceeds the model result boundary")
-                # The one-page observation is bounded by its pre-admitted control
-                # scratch. Keep original records/accepted-result readers until ACK;
-                # an abandoned artifact must be prepared for the next outer result.
-                records.append(candidate)
-                selected += 1
-                if archived:
-                    break
-            observation = CodeModeObservation(cell_id, cell.state, tuple(records),
-                selected < len(cell.output), cell.pending_calls, cell.error)
-            if len(_json(observation.public_value()).encode("utf-8")) > page_bytes:
-                raise CodeModeError("output_resource_error", "Cell output envelope exceeds the model result boundary")
-            cell.observation = observation
-            cell.observed_count = selected
-            return observation
-        except BaseException:
-            if cell.observation is reservation:
-                cell.observation = None
-            raise
-
-    @staticmethod
-    def _public_page(cell: _Cell, records: list[Mapping[str, object]], has_more: bool) -> dict[str, object]:
-        return CodeModeObservation(cell.cell_id, cell.state, tuple(records),
-            has_more, cell.pending_calls, cell.error).public_value()
-
-    async def acknowledge(self, observation: CodeModeObservation) -> None:
-        cell = self._cell(observation.cell_id)
-        if cell.observation is not observation:
-            raise CodeModeError("invalid_observation", "Observation is not the current output owner")
-        if observation.state in _TERMINAL:
-            cell.terminal_delivered = True
-        charge = 0
-        for _ in range(cell.observed_count):
-            charge += cell.output.popleft().charge
-        cell.observed_count = 0
-        cell.observation = None
-        if charge:
-            await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": charge})
-        await self._collect(cell)
-
-    def abandon(self, observation: CodeModeObservation) -> None:
-        cell = self._cell(observation.cell_id)
-        if cell.observation is not observation:
-            raise CodeModeError("invalid_observation", "Observation is not the current output owner")
-        cell.observation = None
-        cell.observed_count = 0
-        if self._closed:
-            self._cells.pop(cell.cell_id, None)
+        if cell.state not in _TERMINAL and yield_time_ms:
+            try:
+                await asyncio.wait_for(cell.terminal_event.wait(), yield_time_ms / 1000)
+            except TimeoutError:
+                pass
+        value: dict[str, object] = {"target": cell_target(cell.cell_id), "state": cell.state,
+                                    "pending_calls": cell.pending_calls}
+        if cell.error is not None:
+            value["error_code"] = cell.error.get("code", cell.error.get("name", "Error"))
+        return value
 
     async def _collect(self, cell: _Cell) -> None:
-        if self._closed and cell.observation is None and not cell.pending:
-            if cell.participation_task is not None:
-                cell.participation_task.cancel()
-            self._cells.pop(cell.cell_id, None)
-            return
-        if (cell.terminal_delivered and cell.state in _TERMINAL and not cell.pending and not cell.output
-                and cell.observation is None and cell.vm_released.is_set()):
+        if (self._cells.get(cell.cell_id) is cell and cell.state in _TERMINAL and not cell.pending and not cell.output
+                and cell.output_lease is None and not cell.output_borrowing and cell.vm_released.is_set()):
             if cell.participation_task is not None:
                 cell.participation_task.cancel()
             self._cells.pop(cell.cell_id, None)
             await self._safe_send({"type": "forget", "cell_id": cell.cell_id})
 
+    @staticmethod
+    def _mark_cell_stopped(cell: _Cell) -> None:
+        # No await: every member of a turn/Host scope is fenced before any VM
+        # join, database observation or resource release can suspend Stop.
+        cell.explicitly_stopped = True
+        cell.cancelled.set()
+        retained = cell.output[0] if cell.output and (cell.output_lease is not None or cell.output_borrowing) else None
+        cell.discarded_output_charge += sum(item.charge for item in cell.output if item is not retained)
+        cell.output = deque(() if retained is None else (retained,))
+
+    def mark_turn_stopped(self, turn_id: str) -> None:
+        for cell in tuple(self._cells.values()):
+            if cell.turn_id == turn_id:
+                self._mark_cell_stopped(cell)
+
+    def mark_all_stopped(self) -> None:
+        for cell in tuple(self._cells.values()):
+            self._mark_cell_stopped(cell)
+
     async def _stop_cell(self, cell: _Cell) -> dict[str, object]:
+        self._mark_cell_stopped(cell)
+        released, cell.discarded_output_charge = cell.discarded_output_charge, 0
+        if released:
+            await self._safe_send({"type": "release", "cell_id": cell.cell_id, "bytes": released})
         if cell.state not in _TERMINAL:
             cell.cancelled.set()
             await self._safe_send({"type": "stop", "cell_id": cell.cell_id})
             await cell.terminal_event.wait()
-        return {"target": cell_target(cell.cell_id), "state": cell.state,
-                "has_more": bool(cell.output), "pending_calls": cell.pending_calls}
+        value = {"target": cell_target(cell.cell_id), "state": cell.state,
+                 "pending_calls": cell.pending_calls}
+        await self._collect(cell)
+        if cell.output_lease is not None:
+            self._wake_output()
+        return value
 
     async def stop(self, cell_id: str) -> dict[str, object]:
         if self._closed:
@@ -753,6 +866,7 @@ class CodeModeHost:
         return await self._stop_cell(self._cell(cell_id))
 
     async def stop_turn(self, turn_id: str) -> None:
+        self.mark_turn_stopped(turn_id)
         for cell in tuple(self._cells.values()):
             if cell.turn_id == turn_id:
                 await self._stop_cell(cell)
@@ -771,8 +885,7 @@ class CodeModeHost:
             {"target": cell_target(cell.cell_id), "state": cell.state,
              "has_unread_output": bool(cell.output), "pending_calls": cell.pending_calls}
             for cell in sorted(self._cells.values(), key=lambda item: item.cell_id)
-            if (cell.state not in _TERMINAL or not cell.terminal_delivered
-                or cell.output or cell.pending)
+            if (cell.state not in _TERMINAL or cell.output or cell.pending)
         )
 
     def has_live_cells(self) -> bool:
@@ -782,6 +895,7 @@ class CodeModeHost:
         if self._closed:
             return
         self._closed = True
+        self.mark_all_stopped()
         for cell in tuple(self._cells.values()):
             await self._stop_cell(cell)
         if self._process is not None:
@@ -799,6 +913,6 @@ class CodeModeHost:
             await self._reader
         if self._stderr_reader is not None:
             await self._stderr_reader
-        # Existing outer canonical settlements may still ACK/abandon their
-        # reserved page. A closed Host accepts no new handle observations.
-        self._cells = {key: cell for key, cell in self._cells.items() if cell.observation is not None}
+        # An ambiguous queue admission still owns its original record until
+        # exact confirmation. Closing never manufactures another delivery.
+        self._cells = {key: cell for key, cell in self._cells.items() if cell.output_lease is not None}

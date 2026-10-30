@@ -451,23 +451,12 @@ async def run(admin_dsn, runtime_dsn, label):
 
                                     async def all_pending():
                                         rows = queue_rows(root, turn_id)
-                                        if any(
-                                            r["input_origin"] == "AGENT_MATERIAL"
-                                            for r in rows
-                                        ) and not any(
-                                            r["input_origin"] == "AGENT_MESSAGE"
-                                            for r in rows
-                                        ):
-                                            raise AssertionError(
-                                                f"sender completed without the required message: {rows!r}"
-                                            )
                                         return (
                                             rows
                                             if [r["input_origin"] for r in rows]
                                             == [
                                                 "HUMAN_STEER",
                                                 "AGENT_MESSAGE",
-                                                "AGENT_MATERIAL",
                                             ]
                                             else None
                                         )
@@ -535,12 +524,12 @@ async def run(admin_dsn, runtime_dsn, label):
                                         await asyncio.wait_for(running, 180)
                                     ).final_text
                                     case["queue_after"] = queue_rows(root, turn_id)
+                                    assert not any(row["input_origin"] == "AGENT_MATERIAL" for row in case["queue_after"]), "Work final must not automatically enter ROOT input"
                                     assert [
                                         r["input_origin"] for r in case["queue_after"]
                                     ] == [
                                         "HUMAN_STEER",
                                         "AGENT_MESSAGE",
-                                        "AGENT_MATERIAL",
                                     ]
                                     assert all(
                                         r["status"] == "CONSUMED"
@@ -579,7 +568,7 @@ async def run(admin_dsn, runtime_dsn, label):
                                             in json.dumps(
                                                 x["provider_input"], ensure_ascii=False
                                             )
-                                            for marker in (HUMAN, MESSAGE, FINAL)
+                                            for marker in (HUMAN, MESSAGE)
                                         )
                                     ]
                                     assert later, (
@@ -597,7 +586,7 @@ async def run(admin_dsn, runtime_dsn, label):
                                     suffix_text = json.dumps(suffix, ensure_ascii=False)
                                     positions = [
                                         suffix_text.find(marker)
-                                        for marker in (HUMAN, MESSAGE, FINAL)
+                                        for marker in (HUMAN, MESSAGE)
                                     ]
                                     case["provider_calls"] = {
                                         "batch": first["sequence"],

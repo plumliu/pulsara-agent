@@ -90,7 +90,8 @@ from pulsara_agent.llm.input import (
     join_text_content,
     prompt_text_projection,
 )
-from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
+from pulsara_agent.llm.explicit_references import explicit_skill_reference_surfaces
+from pulsara_agent.conversation_kernel.steer import QueuedInputContent
 from pulsara_agent.llm.request import (
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     FrozenProviderWireInputQuote,
@@ -2451,6 +2452,7 @@ class ProviderDispatchCoordinator:
                         frozen_sources,
                         activation_subject=None,
                         activation_text="",
+                        skill_reference_surfaces=(),
                         deadline_monotonic=deadline,
                     )
                 except StructuredModelInputCompileError:
@@ -2569,6 +2571,9 @@ class ProviderDispatchCoordinator:
                     frozen_sources,
                     activation_subject=activation_subject,
                     activation_text=activation_text,
+                    skill_reference_surfaces=_skill_reference_surfaces_for_anchor(
+                        base_input, base_anchor
+                    ),
                     deadline_monotonic=deadline,
                 )
             except StructuredModelInputCompileError:
@@ -3096,6 +3101,9 @@ class ProviderDispatchCoordinator:
             frozen,
             activation_subject=activation,
             activation_text=text,
+            skill_reference_surfaces=_skill_reference_surfaces_for_anchor(
+                canonical, base.planning.dispatch_anchor
+            ),
             deadline_monotonic=deadline,
         )
         policy = inherited_memory_use_policy
@@ -3288,7 +3296,7 @@ class ProviderDispatchCoordinator:
         *,
         base_read: FrozenCanonicalProviderDispatchRead,
         base_anchor: NewTriggerAnchor | NoNewTriggerAnchor,
-        hydrated: tuple[tuple[PendingPromptSteerFact, FrozenCanonicalPrompt], ...],
+        hydrated: tuple[tuple[PendingPromptSteerFact, QueuedInputContent], ...],
         handle: PreparedProviderInputHandle,
         borrow: ProcessLocalToolSurfaceBorrow,
         hook_context_reservation: HookContextReservation | None,
@@ -3507,6 +3515,12 @@ class ProviderDispatchCoordinator:
                             frozen_sources,
                             activation_subject=activation_subject,
                             activation_text=activation_text,
+                            skill_reference_surfaces=(
+                                explicit_skill_reference_surfaces(human_prefix[-1].content)
+                                if human_prefix else _skill_reference_surfaces_for_anchor(
+                                    base_input, base_anchor
+                                )
+                            ),
                             deadline_monotonic=deadline,
                         )
                     except StructuredModelInputCompileError:
@@ -5020,6 +5034,32 @@ def _without_prebound_activation(
     )
 
 
+def _skill_reference_surfaces_for_anchor(
+    canonical_input: CanonicalModelInputSnapshot,
+    anchor: NewTriggerAnchor | NoNewTriggerAnchor,
+) -> tuple[str, ...]:
+    if not isinstance(anchor, NewTriggerAnchor):
+        return ()
+    matches = tuple(
+        item
+        for item in canonical_input.items
+        if item.source_entry_id == anchor.source_entry_id
+        and provider_input_item_fingerprint(item)
+        == anchor.provider_input_item_fingerprint
+    )
+    if len(matches) != 1:
+        raise StructuredModelInputCompileError(
+            ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+        )
+    item = matches[0]
+    if item.input_origin not in {
+        CanonicalInputOriginKind.HUMAN_MESSAGE,
+        CanonicalInputOriginKind.HUMAN_STEER,
+    }:
+        return ()
+    return explicit_skill_reference_surfaces(FrozenPromptContent(item.content))
+
+
 def _activation_subject_for_anchor(
     canonical_input: CanonicalModelInputSnapshot,
     anchor: NewTriggerAnchor | NoNewTriggerAnchor,
@@ -5340,7 +5380,7 @@ def _prospective_steer_compile_snapshot(
     base: FrozenCanonicalCompileSnapshot,
     *,
     facts: tuple[PendingPromptSteerFact, ...],
-    prompts: tuple[FrozenCanonicalPrompt, ...],
+    prompts: tuple[QueuedInputContent, ...],
     deadline_monotonic: float | None = None,
 ) -> FrozenCanonicalCompileSnapshot:
     if not facts or len(facts) != len(prompts):
@@ -5360,7 +5400,9 @@ def _prospective_steer_compile_snapshot(
             raise ValueError("prospective steer fact target differs from input cut")
         appended.append(
             FrozenProviderInputItem(
-                item_kind=FrozenProviderInputItemKind.USER,
+                item_kind=(FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+                           if fact.input_origin is CanonicalInputOriginKind.CELL_OUTPUT
+                           else FrozenProviderInputItemKind.USER),
                 source_entry_id=derive_id(
                     "entry", "steer", fact.session_id, fact.queue_item_id
                 ),
@@ -5368,6 +5410,7 @@ def _prospective_steer_compile_snapshot(
                 source_turn_id=identity.turn_id,
                 content=prompt.content.parts,
                 input_origin=fact.input_origin,
+                scheduled_input=fact.scheduled_input,
             )
         )
     return _prospective_provider_input_suffix_compile_snapshot(

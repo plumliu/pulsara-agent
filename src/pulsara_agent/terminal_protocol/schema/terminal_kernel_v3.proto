@@ -80,9 +80,7 @@ enum LiveEventType {
   INTERACTION_REPLACED = 17;
   INTERACTION_CLOSED = 18;
   TERMINAL_PROCESS_COMPLETED = 19;
-  TERMINAL_MONITOR_OPENED = 20;
-  TERMINAL_MONITOR_OBSERVATION = 21;
-  TERMINAL_MONITOR_CLOSED = 22;
+  reserved 20 to 22;
   TODO_SNAPSHOT_UPDATED = 24;
 }
 
@@ -194,6 +192,8 @@ message CanonicalInputSource {
   string queue_item_id = 1;
   string command_id = 2;
   string delivery_mode = 3;
+  string source_turn_id = 7;
+  string source_tool_attempt_id = 8;
 }
 
 message CanonicalVisualization {
@@ -265,6 +265,8 @@ message PromptQueueControl {
   string source_work_id = 14;
   repeated string waiting_on = 15;
   string consumed_entry_id = 16;
+  string source_turn_id = 17;
+  string source_tool_attempt_id = 18;
 }
 
 message PlanWorkflowControl {
@@ -347,6 +349,10 @@ message CanonicalControl {
   InitialContextBase initial_context_base = 14;
   uint64 active_turn_total_count = 17;
   uint64 tool_attempt_total_count = 18;
+  uint64 pending_steer_total_count = 19;
+  optional uint64 pending_steer_next_cursor = 20;
+  optional uint64 prompt_queue_next_cursor = 21;
+  string pending_steer_target_turn_id = 22;
 }
 
 message InitialContextBase {
@@ -532,15 +538,6 @@ message LiveTerminalProcessCompletedPayload {
   string process_id = 1; string status = 2; optional sint32 exit_code = 3;
   uint64 output_utf8_bytes = 4; string output_digest = 5;
 }
-message LiveTerminalMonitorOpenedPayload { string monitor_id = 1; string process_id = 2; }
-message LiveTerminalMonitorObservationPayload {
-  string monitor_id = 1; string process_id = 2; string observation_kind = 3;
-  string public_preview = 4; uint64 complete_utf8_bytes = 5;
-  string complete_digest = 6;
-}
-message LiveTerminalMonitorClosedPayload {
-  string monitor_id = 1; string process_id = 2; string reason = 3;
-}
 message LiveTodoItemProjection {
   uint32 ordinal = 1; string text = 2; string status = 3;
 }
@@ -572,9 +569,6 @@ message LiveEventPayload {
     LiveInteractionReplacedPayload interaction_replaced = 17;
     LiveInteractionClosedPayload interaction_closed = 18;
     LiveTerminalProcessCompletedPayload terminal_process_completed = 19;
-    LiveTerminalMonitorOpenedPayload terminal_monitor_opened = 20;
-    LiveTerminalMonitorObservationPayload terminal_monitor_observation = 21;
-    LiveTerminalMonitorClosedPayload terminal_monitor_closed = 22;
     LiveTodoSnapshotUpdatedPayload todo_snapshot_updated = 24;
   }
 }
@@ -710,6 +704,20 @@ message ObserveRequest {
   uint64 after_live_control_revision = 11;
 }
 
+message ProviderRetryObservation {
+  string session_id = 1;
+  string turn_id = 2;
+  string resolved_model_call_id = 3;
+  string draft_id = 4;
+  uint32 attempt = 5;
+  uint32 retry_number = 6;
+  uint32 max_retries = 7;
+  string phase = 8;
+  string reason = 9;
+  double remaining_seconds = 10;
+  bool has_semantic_output = 11;
+}
+
 message ObservationResponse {
   string request_id = 1;
   uint64 through_event_sequence = 2;
@@ -726,6 +734,7 @@ message ObservationResponse {
   bool root_compaction_in_progress = 13;
   string manual_compaction_command_id = 14;
   string active_root_turn_id = 15;
+  ProviderRetryObservation provider_retry = 16;
 }
 
 message LiveControlSnapshotRequest {
@@ -884,13 +893,6 @@ message ProcessControlResult {
   optional bool group_alive = 5;
 }
 
-message MonitorControlResult {
-  string monitor_id = 1;
-  string outcome = 2;
-  repeated string in_flight_observation_ids = 3;
-  string detail = 4;
-}
-
 message UserControlFeedbackState {
   string canonical_status = 1;
   string inclusion_status = 2;
@@ -914,7 +916,6 @@ message UserControlOutcome {
   UserControlExecution execution = 6;
   RootControlResult root = 7;
   ProcessControlResult process = 9;
-  MonitorControlResult monitor = 10;
   UserControlFeedbackState feedback = 11;
   CodeModeControlResult cell = 12;
 }

@@ -31,6 +31,28 @@ if TYPE_CHECKING:
     from pulsara_agent.llm.resolution import ResolvedModelCall
 
 
+class ProviderRetryReason(StrEnum):
+    CONNECTION_RECOVERY = "connection_recovery"
+    PROVIDER_RECOVERY = "provider_recovery"
+    TOOL_ARGUMENT_REGENERATION = "tool_argument_regeneration"
+
+
+class ProviderRetryPhase(StrEnum):
+    WAITING = "waiting"
+    RECONNECTING = "reconnecting"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRetryUpdate:
+    attempt: int
+    retry_number: int
+    max_retries: int
+    phase: ProviderRetryPhase
+    reason: ProviderRetryReason
+    delay_seconds: float
+    has_semantic_output: bool
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderGenerationRetry:
     """Discard unaccepted output after its physical stream has closed.
@@ -38,6 +60,8 @@ class ProviderGenerationRetry:
     This process-local control value is not a live event or a model terminal.
     The installed request and its single retry budget remain unchanged.
     """
+
+    reason: ProviderRetryReason = ProviderRetryReason.TOOL_ARGUMENT_REGENERATION
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +236,9 @@ __all__ = [
     "ProviderModelExecutionFailed",
     "ProviderModelOutputIncomplete",
     "ProviderGenerationRetry",
+    "ProviderRetryPhase",
+    "ProviderRetryReason",
+    "ProviderRetryUpdate",
     "ProviderNormalizedStreamItem",
     "ProviderNormalizedTerminalKind",
     "ProviderOutputIncompleteReason",

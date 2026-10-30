@@ -1,6 +1,6 @@
 # Pulsara：Subagent／Work 与双入口编排设计
 
-日期：2026-10-30。状态：协作运行时与 Work 输入存储已实施；侧边栏定向验证见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)，视觉效果待用户审阅。既有验收与未覆盖边界见 §9。
+日期：2026-10-31。当前合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)。本轮实现与激活验证进行中；既往证据仅说明其原有范围。
 
 子代理与 Cell 侧边栏及其 `open_in_pulsara` 接入见 [侧边栏实施规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
 
@@ -8,7 +8,7 @@
 
 当前工具名、查询分支与 CELL 身份以 [工具查询、命名与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 为准。本文接口表与示例采用该合同；所链接的既往实验与实施记录保留其原验证范围，不作为新接口已验证的证据。
 
-运行时状态交接与资源退役以 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 为准。handoff 只主动展示物理存活 Process、当前范围未关闭 Monitor、需要继续执行或交付的 Cell，以及有当前／排队 Work 的 Agent；PMCA 状态视图受 3,200 个 V3 启发式 token 约束，完整 TODO 独立保留。未展示的保留对象仍由既有 query 按执行时权限读取；不改变两段退役、请求执行或 provider 前缀边界。
+运行时状态交接与资源退役以 [runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 为准。handoff 只主动展示物理存活 Process、需要继续执行或接纳输出的 Cell，以及有当前／排队 Work 的 Agent；Process/Cell/Agent 状态视图受 3,200 个 V3 启发式 token 约束，完整 TODO 独立保留。未展示的保留对象仍由既有 query 按执行时权限读取；不改变两段退役、请求执行或 provider 前缀边界。
 
 ## 1. 核心语义
 
@@ -64,7 +64,7 @@ ROOT 与 Subagent 使用同一套 session 请求接纳、排队、turn 执行及
 
 调度按 session 选取队首：该 Agent 无活动 turn、成功依赖已满足且有实际执行容量时启动。等待依赖不会阻塞其他 Agent。普通派活与 batch 共用这个接纳和调度 owner，batch 只是一次事务提交多份请求及其输入事实。委派请求保留真实来源，不伪装成人类提交或借用 ROOT 的 Plan 状态。
 
-查询、等待、依赖推进、完成通知和 UI 都读取这组事实；运行中的观察使用进程内通知，通知本身不成为第二份工作状态。ROOT 原有即时请求与 steer 使用共同引擎，steer 仍追加到已有 turn，不因此变成新的 Work。
+查询、等待、依赖推进和 UI 都读取这组事实；运行中的观察使用进程内通知，通知本身不成为第二份工作状态。ROOT 原有即时请求与 steer 使用共同引擎，steer 仍追加到已有 turn，不因此变成新的 Work。
 
 停止 ROOT 当前 turn 不取消独立排队的 NEW_TURN，后者按共同调度继续；Subagent 的单份 WORK 停止与整个 AGENT 停止范围见 §4.5。
 
@@ -160,7 +160,7 @@ A 因失败或停止结束时，沿共同执行链路结算并解除 B 的等待
 
 ROOT 与 Subagent 共用能力发现、`query_capabilities` 查询、刷新、启停、执行检查及 runtime observation 链路。Skill、Hook 与安装来源查询采用共同规则，不另设 Subagent 专用查询禁令。读取目录不授予管理权限，原生工具仍按本文的调用方范围暴露。
 
-文件查找、文本读取与修改、终端执行及进程交互、todo、Skill 发现与使用，以及 `view_image`、`read_artifact`／`export_artifact` 均复用 ROOT 的工具语义和现有执行链路。ROOT 可在 instruction 中提供图片引用或路径，由 Subagent 按需查看。terminal monitor 的投递与生命周期按 §3.4 绑定当前 Work。
+文件查找、文本读取与修改、终端执行及进程交互、todo、Skill 发现与使用，以及 `view_image`、`read_artifact`／`export_artifact` 均复用 ROOT 的工具语义和现有执行链路。ROOT 可在 instruction 中提供图片引用或路径，由 Subagent 按需查看。进程日志和显式 poll/wait 保持原工具 owner。
 
 扩展、连接和授权配置由用户能力页或 ROOT 的能力管理工具操作。Subagent 不暴露这些管理工具及 `reload_capabilities`；共同刷新、启停链路负责把配置变化反映到各受影响 session，不要求 Subagent 自己修改配置。
 
@@ -233,58 +233,34 @@ Code mode 仅供 ROOT 的 bypass-permissions 调用使用，Subagent 没有 JS �
 
 | 工具 | 参数 | 作用 |
 |---|---|---|
-| `exec_cell` | `code`／`path` 恰一；可选 `yield_time_ms` | 启动一次 JS 执行 |
+| `exec_cell` | `code`／`path` 恰一 | 接纳后立即返回 accepted 和完整 CELL target |
 | `query_cells` | 无 target：可选 `cursor`、`max_items`；CELL target：可选 `offset_chars`、`max_chars` | 分页列存活 Cell，或读取状态与冻结源码；不消费执行输出 |
-| `manage_cell` | `action:"wait"`、CELL target，可选 `yield_time_ms`；或 `action:"stop"`、CELL target | 等待后续输出或停止脚本后续执行 |
+| `manage_cell` | `action:"wait"`、CELL target，可选 `yield_time_ms`；或 `action:"stop"`、CELL target | 等待终态/观察超时，仅返回状态；或停止脚本后续执行 |
 
 这三个工具不通过 `tools.*` 嵌套调用。终止脚本不等于取消已接纳的 Work；需要取消工作时调用 `stop_agent`。
 
-Cell 使用 `{"kind":"CELL","cell_id":"cell:…"}` target，ID 是现有 canonical 编码的完整 `cell:` 值；不截短、转换大小写或生成别名。Cell 是脚本执行对象，Agent／Work 仍是协作领域的两个对象。exec_cell／manage_cell.wait 到观察时间后返回，原脚本持续执行；压缩不暂停它，manage_cell.wait 不负责恢复它。每个 cell 独立持有自己的变量和 Promise。跨 cell 使用已经返回的 target 查询真实对象。
+Cell 使用 `{"kind":"CELL","cell_id":"cell:…"}` target，ID 是现有 canonical 编码的完整 `cell:` 值；不截短、转换大小写或生成别名。Cell 是脚本执行对象，Agent／Work 仍是协作领域的两个对象。exec_cell 接纳即返回，manage_cell.wait 到终态/观察时间后返回，原脚本持续执行；压缩不暂停它，manage_cell.wait 不负责恢复它。每个 cell 独立持有自己的变量和 Promise。跨 cell 使用已经返回的 target 查询真实对象。
 
 ### 3.3 只有 JS 环境入口：编排与输出
 
 | API | 作用 | 与原生工具的关系 |
 |---|---|---|
 | `tools.run_agent.batch(specs)` | 按局部名称声明一批工作，先准备身份，再生成包含队友引用的初始请求，最后接纳工作 | ROOT 专用的 JS 组合扩展，复用 `run_agent` 的创建与派活语义，不是新的原生工具 |
-| `tools.wait_agent.works({targets, settle?})` | 持续等待一个或多个指定 WORK 结束；默认等全部，也可等任意一个 | ROOT＋bypass 的 JS 专属扩展，复用工作状态观察与结果读取，不接收 AGENT |
-| `console.log(...values)` | 将脚本选择的文本或结构化结果作为正式输出返回给调用模型 | 不可丢弃的模型输出通道，不创建工作，不代表业务完成 |
+| `tools.wait_agent.works({targets, settle?})` | 持续等待一个或多个指定 WORK 结束；默认等全部，也可等任意一个 | ROOT＋bypass 的 JS 专属扩展，复用工作状态观察，不接收 AGENT |
+| `console.log(...values)` | 将脚本选择的文本或结构化结果作为独立正式输入主动交给 ROOT | 不可丢弃的模型输出通道，不创建工作，不代表业务完成 |
 | `Promise.all`／`Promise.allSettled`、变量、条件、循环 | 标准 JS 组合能力 | 不新增工具 schema 或 workflow DSL |
 
-`console.log` 是正式输出，按顺序由 exec_cell／manage_cell.wait 交给 ROOT；不静默丢弃。序列化、结果分页、artifact 与资源失败由 Code Mode 接入合同规定，协作接口不另设输出通道。
+`console.log` 每次调用是一条独立正式输入，沿共同 prompt_queue_items 接纳：活动 ROOT 为精确 steer，idle 为 NEW_TURN，route 一经接纳固定；exec/wait 不重复正文。序列化、结果分页、artifact 与资源失败由 Code Mode 接入合同规定，协作接口不另设输出通道。
 
 `tools.wait_agent.works` 直接订阅工作状态，不后台轮询原生工具。等待期间没有 JS 计算，也不占模型调用、Agent 执行名额或旧 provider surface。Work 结束后 Promise 正常完成，脚本立即执行下一行，不需要 ROOT 再调用 manage_cell.wait。
 
-### 3.4 记忆、终端监控与完成方式
+### 3.4 记忆与真实完成结果
 
-这些是 Subagent 的公共工具暴露规则，不增加协作对象或另一套 JS 权限。
+Subagent 不提供记忆、会话检索工具或隐式记忆/历史/响应偏好注入；ROOT 提供任务所需背景。ROOT 的相关原生工具和 Code Mode 子集保持原范围。已经进入 Agent 有效历史的内容按普通 reader 和压缩合同保留。
 
-| 能力 | ROOT | Subagent | 两种入口 |
-|---|---|---|---|
-| `search_memory`、`get_memory` | 原生保留 | 不提供 | 不进入 JS |
-| `remember`、`mark_memory_relation` | 原生保留 | 不提供 | 不进入 JS |
-| `search_sessions`、`search_session_content`、`read_session_content` | 原生保留；两种 session 同等检索与读取 | 不提供 | JS 暴露沿配套 Code Mode 合同，调用方仅 ROOT |
-| `query_monitors`、`manage_monitor` | 原生保留全局查询与管理能力 | 原生查询、注册、取消当前 Work 的监控 | 不进入 JS |
-| 工作完成 | ROOT 接收并判断结果 | 普通 final 完成本次 Work | 不需要额外结果提交调用 |
+普通 final 使用共同 assistant settlement 与完成 Hook 链路，完成后 Work 从原 turn.final_entry_id 读取结果；失败、取消、中断读取真实原因。Work 的所有终态均不自动向 ROOT 入队或唤醒 ROOT。依赖推进、状态观察、query、materials 与显式 Agent 消息保持；不复制一份 Work 报告，不增加完成通知。
 
-Subagent 不自动注入记忆、历史会话和响应偏好。ROOT 提供任务所需背景；已经进入 Agent 有效历史的记忆文字与工具结果照常保留，不因工具暴露变化改写历史。ROOT 的记忆能力与设置规则保持，历史检索覆盖两种 session，见 §1.2。
-
-monitor 记录注册者 AGENT，投递目标与订阅生命周期绑定注册时的当前 WORK，归属由实际调用上下文确定。模型不填写任意接收 Work。公开参数继续使用已有 PROCESS／MONITOR target；AGENT／WORK 是协作对象范围，不替代终端工具自己的目标类型。
-
-监控继续使用 ROOT 已有的 manager、注册容量与重复订阅裁决、采样／过滤、通知接纳与结算、压缩状态读取和 UI 投影。仅把接收范围参数化为真实 Agent／turn，并按该请求的 turn 终态关闭成员订阅；不另建 Subagent monitor manager 或通知记录链。
-
-- Subagent 查看、取消自己当前 Work 的 monitor；ROOT 保持同 Host 全部 monitor 的查看、取消能力。
-- 进程来源与监控注册者是两回事。注册仍遵循原有进程可访问范围，不额外限制只能监控自己启动的进程。
-- 通知在注册 Work 的正常输入准备点追加；模型调用和已冻结输入不被临时改写。压缩交接保留当前 Work 的监控状态。
-- 注册 monitor 不阻止 final。Work 真正完成、失败、取消或中断后关闭订阅；既有完成 Hook 要求继续时，仍按活动 Work 处理。
-- 关闭订阅不停止被监控进程。未接纳通知不再投递，已接纳通知保留在历史；已冻结的 immutable attempt 先沿原精确确认路径结算，不转投下一份 Work。UNKNOWN 保留原 attempt，结束该次投递尝试；注册 token、关闭处理与 in-flight 全部结算后由原 coordinator 删除 CLOSED 登记，不保留关闭历史。
-- 同一 Agent 开始下一份 Work，继续使用本 session 的有效历史，不接管上一份 Work 的活跃订阅；需要时重新注册。
-- Subagent 的 monitor 不自动创建新 Work。ROOT 原有活动轮投递与空闲时开启新轮的行为保持。
-
-例子：同一 Agent 在第一份 Work 注册进程监控并接收进展；本轮 final 后订阅结束，进程可以继续运行。它在下一份 Work 中能看到已经进入历史的进展，但需要新的订阅才能接收后续通知。
-
-普通 final 使用 ROOT 的 assistant settlement 与 turn 完成链路：共同完成 Hook 和待交付输入裁决后，写入真实 final entry 并更新 turn。完成通知、等待和成功依赖读取这一已接纳结果，不再次写一份 Work 成功报告。Hook 的适用范围与 matcher 保留真实调用方；Hook 要求继续时 turn 仍活动。`report_agent_result` 的工具定义、专用执行／结算和 Skill 指导随 hard cut 一并移除，完成不需要额外入口。
-
-查询、依赖和 materials 读取确切 Work 的真实完成内容，不能把有界 summary 改名为完整 final。展示预览和完整材料区分；跨 session 交付时接收方保存完整正文，较大正文复用自己的既有内容存储，不以源会话的 artifact 链接替代实际交付。
+查询、依赖和 materials 读取确切 Work 的完整 final/公开诊断。跨 session 交付的正文归接收方持有，不以源 artifact 预览代替完整内容。monitor 工具、订阅、通知及独立自动唤醒产品路径删除；共享进程日志与显式 poll/wait 保留。
 
 ## 4. 参数与结果合同
 
@@ -313,7 +289,7 @@ monitor 记录注册者 AGENT，投递目标与订阅生命周期绑定注册时
 }
 ```
 
-返回时已完成可以附带 final；调用者仍按实际 status 判断。公开状态是共同请求与 turn 的只读投影，不持久化另一份 Work.status：
+接纳回执不附带历史 final；显式 query_agents(WORK) 读取结果。调用者按实际 status 判断。公开状态是共同请求与 turn 的只读投影，不持久化另一份 Work.status：
 
 | 公开 status | 事实来源 |
 |---|---|
@@ -366,7 +342,7 @@ const { a, b } = await tools.run_agent.batch({
 
 沿用现有单次接纳边界：每批至多 16 项，每项 depends_on／materials 各至多 16 项，单批显式依赖至多 64 条。它们约束一次请求，不限制累计 Agent／Work 数；后续可继续派活。目标在参数准备期间消失或状态改变时，事务接纳按最新真实事实裁决，不预先启动成员。
 
-真实结果仍由等待或查询取得。普通 `tools.run_agent(...)` 和原生 schema 只接收具体字符串与 JSON 值。所有工具与 batch 的最终参数使用同一严格本地校验；不依靠 provider 是否完整实施 JSON Schema。
+真实结果由显式 query_agents(WORK) 取得，wait 只给状态。普通 `tools.run_agent(...)` 和原生 schema 只接收具体字符串与 JSON 值。所有工具与 batch 的最终参数使用同一严格本地校验；不依靠 provider 是否完整实施 JSON Schema。
 
 队友身份引用不等于成功依赖。两份 instruction 可以相互引用 agent 而并行执行。启动顺序同时受 depends_on 和同一 Agent 的串行队列约束：同一 Agent 按接纳顺序追加，同批按 Object.entries(specs) 顺序确定位置，不因依赖自动调换顺序。将两种先后关系合起来会形成等待环的请求，在接纳前拒绝。
 
@@ -473,7 +449,7 @@ ROOT 与 Subagent 都可以调用原生 `wait_agent`；ROOT＋bypass 还可以�
 |---|---|---|
 | 原生 `wait_agent`／JS `tools.wait_agent` | `AGENT`，普通 Subagent | 对方发来新消息，或本次等待绑定的工作结束 |
 | 原生 `wait_agent`／JS `tools.wait_agent` | `AGENT`，`agent_id:"ROOT"` | 等 ROOT 发给调用者的新消息；ROOT 不被虚构成一份可等待的 Work |
-| JS `tools.wait_agent.works` | `WORK` | 精确等待指定工作结束并取得结果，不随 agent 后续工作变化 |
+| JS `tools.wait_agent.works` | `WORK` | 精确等待指定工作结束，仅返回状态、目标与终态原因，不随 agent 后续工作变化 |
 
 等待消息或结果：
 
@@ -487,9 +463,11 @@ ROOT 与 Subagent 都可以调用原生 `wait_agent`；ROOT＋bypass 还可以�
 在 JS 中精确等待一份工作：
 
 ```javascript
-console.log(await tools.wait_agent.works({
+const waited = await tools.wait_agent.works({
   targets: [{ kind: "WORK", work_id: "queue:aaaaaaaaaaaaaaaaaaaaaaaaaa" }]
-}));
+});
+const selected = await tools.query_agents({ target: waited.works[0].target });
+console.log(selected.final ?? selected.diagnostic ?? "The work ended without text.");
 ```
 
 等待多份工作中的任意一份结束：
@@ -502,10 +480,11 @@ const result = await tools.wait_agent.works({
   ],
   settle: "first"
 });
-console.log(result);
+const selected = await tools.query_agents({ target: result.works[0].target });
+console.log(selected.final ?? selected.diagnostic ?? "The selected work ended without text.");
 ```
 
-**目标绑定。** 开始等待时，用共同请求／turn 读取将普通 AGENT 绑定到其当前 turn 对应的 WORK；若没有活动 Work、工作已排队但尚未启动，立即返回 `state:"unavailable"`，在该目标的诊断中给出 `reason:"not_started"`，不挂起等待、不启动对方。若没有未结束工作，则可以返回最近一次已结束 Work 的实际结果。既没有工作也没有待交付消息时，立即返回该 Agent 无工作可等待的状态。已有匹配消息先按新消息条件交付，不因对方已经结束而漏掉。
+**目标绑定。** 开始等待时，用共同请求／turn 读取将普通 AGENT 绑定到其当前 turn 对应的 WORK；若没有活动 Work、工作已排队但尚未启动，立即返回 `state:"unavailable"`，在该目标的诊断中给出 `reason:"not_started"`，不挂起等待、不启动对方。若没有未结束工作，则可以返回最近一次已结束 Work 的实际状态。既没有工作也没有待交付消息时，立即返回该 Agent 无工作可等待的状态。已有匹配消息先按新消息条件交付，不因对方已经结束而漏掉。
 
 返回所绑定的 WORK 引用，不在一次等待中追随下一份工作。需要精确等待已排队或指定的工作时，在 JS 中调用 `tools.wait_agent.works`；它可以等该 Work 按正常调度启动并结束，但等待本身不改变其启动条件。ROOT 只作为消息来源，没有 Subagent Work，不套用上述 not_started 判断。
 
@@ -517,7 +496,7 @@ console.log(result);
 
 例如等待 `[ROOT, AGENT B]`，B 绑定的工作已结束但 ROOT 没有消息：all 继续等待 ROOT 消息或超时，first 可以因 B 的工作结束而返回。纯 ROOT 等待只由 ROOT 新消息、超时或执行中断结束，不因空工作集合自动完成。任何模式下，一条匹配消息都立即唤醒，不要求收齐所有人的消息。
 
-state 为 message_available／settled／timeout／interrupted／unavailable。返回保留所解析的引用和真实结果；not_started 等目标诊断不混入 Work.status。示例字段如下：
+state 为 message_available／settled／timeout／interrupted／unavailable。返回保留所解析的引用、真实状态和终态原因；not_started 等目标诊断不混入 Work.status。示例字段如下：
 
 ```json
 {
@@ -533,14 +512,14 @@ state 为 message_available／settled／timeout／interrupted／unavailable。�
       "target": {"kind":"WORK","work_id":"queue:bbbbbbbbbbbbbbbbbbbbbbbbba"},
       "agent": {"kind":"AGENT","agent_id":"session:bbbbbbbbbbbbbbbbbbbbbbbbba"},
       "status": "completed",
-      "final": "The interface includes an errors array."
+      "terminal_reason": null
     }
   ],
   "pending_targets": []
 }
 ```
 
-message_available 另给 `message_sources`（匹配的 AGENT target 数组），实际正文由正常消息投递。works 是已绑定工作的当前状态和可用结果；ROOT 不占一个伪造的 work 项。失败、取消、中断、依赖失败等终态满足“工作结束”，但不冒充 completed。pending_targets 列出当前尚未满足的目标；发生消息唤醒后由模型判断是否继续等待。
+message_available 另给 `message_sources`（匹配的 AGENT target 数组），实际正文由正常消息投递。works 仅包含已绑定工作的目标、状态和 terminal_reason，不含 final、diagnostic、instruction 正文；ROOT 不占一个伪造的 work 项。失败、取消、中断、依赖失败等终态满足“工作结束”，但不冒充 completed。pending_targets 列出当前尚未满足的目标；发生消息唤醒后由模型判断是否继续等待。
 
 **等待期间。** timeout_seconds 默认 30，范围 0–300，沿用当前单次观察边界；0 为立即查询；超时只结束这次等待，不停止当前 Work 或目标 Work，也不重新发送问题。调用者可以再次等待。等待期间不空转模型，不占用模型调用与普通工具执行资源；让出物理执行名额，使需要回复的队友可以推进。调用者仍占据自己 Agent 的当前 Work 串行位置，同一 Agent 的下一份 Work 不得越过它；恢复时重新取得执行名额。不能通过把等待中的 Work 当成已结束来腾出容量。Subagent 调用者的 Work 进入任一终态时，结束归属于它的尚存等待；同一 Agent 的后续 Work 不接管该等待。ROOT 没有这里的 Subagent Work 生命周期，不能据此把 ROOT 的普通 final 当成删除 code mode cell 的指令。
 
@@ -554,9 +533,9 @@ message_available 另给 `message_sources`（匹配的 AGENT target 数组），
 
 **JS 专属 WORK 等待。** `tools.wait_agent.works({targets, settle?})` 仅向 ROOT＋bypass 开放，targets 必填且非空，只接受一个或多个 WORK。每个引用始终指向确切的一次派活；已排队、等待依赖的工作也可以等待，启动仍由正常调度与依赖条件决定。等待本身不通知或启动对方。
 
-默认 `settle:"all"`，所有指定工作进入终态后返回；`settle:"first"` 在任意一个指定工作进入终态后返回，其余工作继续运行。成功、失败、取消、中断和依赖失败都算结束，结果保留真实状态与可用 final。已经满足条件时立即返回。普通消息不使这个 Promise 完成。
+默认 `settle:"all"`，所有指定工作进入终态后返回；`settle:"first"` 在任意一个指定工作进入终态后返回，其余工作继续运行。成功、失败、取消、中断和依赖失败都算结束，结果保留真实状态与 terminal_reason，不附正文。已经满足条件时立即返回。普通消息不使这个 Promise 完成。
 
-该接口订阅共同请求／turn 的变化，醒来重新读取其真实状态；不设 timeout_seconds，也不在后台循环调用 wait_agent。订阅只负责唤醒，不保存另一份 Work 状态或结果。正常返回 `state:"settled"`、`works`（指定工作的状态与可用结果）及 `pending_targets`（尚未结束的 WORK 引用）。它不解析 AGENT 当前工作，不需要 AGENT bindings 或 message_sources。first 判断的是当前集合状态，不消费完成事件；继续等待剩余工作时，使用返回的非空 pending_targets。
+该接口订阅共同请求／turn 的变化，醒来重新读取其真实状态；不设 timeout_seconds，也不在后台循环调用 wait_agent。订阅只负责唤醒，不保存另一份 Work 状态或结果。正常返回 `state:"settled"`、`works`（指定工作的状态、目标及 terminal_reason）及 `pending_targets`（尚未结束的 WORK 引用）。它不解析 AGENT 当前工作，不需要 AGENT bindings 或 message_sources。first 判断的是当前集合状态，不消费完成事件；继续等待剩余工作时，使用返回的非空 pending_targets。
 
 JS 的 AGENT 等待匹配消息后立即解决 Promise，脚本继续；消息正文仍走 ROOT 正常输入链，不要求模型先读取。为了连续脚本不会反复收到同一个唤醒，每个 cell 按发送者保存已返回的消息序号，并结合 ROOT 已进入上下文的消息位置过滤。这个游标仅在进程内存在，不是阅读回执或新的消息确认状态。
 
@@ -603,7 +582,7 @@ WORK 从接纳到结束始终使用同一个 `queue:` ID。未启动时直接读
 
 共同请求／调度 owner 裁决停止与派活、启动、完成的先后关系，确定本次覆盖范围；停止 AGENT 时不能在结束当前工作后又启动本次已覆盖的排队请求。返回实际停止、取消的 WORK 及各自状态，已经结束或未能停止的情况如实说明，不把请求停止等同于所有执行已经结束。停止操作之后新接纳的工作仍可正常执行，不为 Agent 设置永久停用状态。
 
-停止 WORK 不隐含取消同一 Agent 的其他工作；显式依赖该工作成功的后继沿既定依赖失败语义处理。停止 AGENT 会取消其本次覆盖的排队工作。两者都保留 session 和历史，不撤销已发生的修改，也不一律杀死后台终端进程；工具取消与副作用结算沿共同链路，当前 Work 的 monitor 随其真实终态关闭。没有运行或待处理请求后，Agent 开始闲置计时；以后可继续派活。
+停止 WORK 不隐含取消同一 Agent 的其他工作；显式依赖该工作成功的后继沿既定依赖失败语义处理。停止 AGENT 会取消其本次覆盖的排队工作。两者都保留 session 和历史，不撤销已发生的修改，也不一律杀死后台终端进程；工具取消与副作用结算沿共同链路。没有运行或待处理请求后，Agent 开始闲置计时；以后可继续派活。
 
 ## 5. 单 Subagent：全部使用原生工具
 
@@ -638,7 +617,7 @@ WORK 从接纳到结束始终使用同一个 `queue:` ID。未启动时直接读
 }
 ```
 
-成员发来消息时 ROOT 处理并回复，然后可再次等待；成员先完成时直接取得相应 Work 的 final。超时后工作继续，ROOT 可以继续其他工作，再等待。
+成员发来消息时 ROOT 处理并回复，然后可再次等待；成员先完成时取得相应 Work 的状态，再通过 query_agents(WORK) 读取 final/诊断。超时后工作继续，ROOT 可以继续其他工作，再等待。
 
 ### 5.2 复用原执行者
 
@@ -673,8 +652,10 @@ const { a, b } = await tools.run_agent.batch({
   }
 });
 
-console.log({ moduleA: a, moduleB: b });
-console.log(await tools.wait_agent.works({ targets: [a.work, b.work] }));
+await tools.wait_agent.works({ targets: [a.work, b.work] });
+const aResult = await tools.query_agents({ target: a.work });
+const bResult = await tools.query_agents({ target: b.work });
+console.log({ moduleA: aResult.final, moduleB: bResult.final });
 ```
 
 两名成员在第一次模型输入中就看到对方的真实 target、职责和具体协作问题。后续讨论直接调用原生 `send_agent_message`，无需为发消息编写脚本，也无需 ROOT 再补发介绍。
@@ -701,7 +682,7 @@ A 需要 B 确认接口时，直接连续使用两个原生工具，不需要自
 }
 ```
 
-A 的 Work 保持活动。B 回复时，A 收到新消息后继续；B 先完成时，A 读取其 final。超时可以再次等待，不重复发送问题。等待本身不通知 B；前一条消息已接纳意味着问题会沿消息链路交给 B，不代表 B 已经阅读。A 只有完成自己的工作才输出 final。
+A 的 Work 保持活动。B 回复时，A 收到新消息后继续；B 先完成时，A 用 query_agents(WORK) 显式读取其 final。超时可以再次等待，不重复发送问题。等待本身不通知 B；前一条消息已接纳意味着问题会沿消息链路交给 B，不代表 B 已经阅读。A 只有完成自己的工作才输出 final。
 
 若 B 尚未开始执行，send_agent_message 返回目标 not_started，消息不接纳；若 B 已完成或已卸载，返回 inactive 并说明未发送，A 不应把该问题当作已交付。以尚未启动的 B 的 AGENT target 调用 wait_agent 同样立即返回目标 not_started，不靠发消息或等待启动 B。JS 中使用 tools.wait_agent.works 可以等待确切的已排队工作，执行由原有调度和依赖条件决定。
 
@@ -741,10 +722,9 @@ const research = await tools.run_agent.batch({
   }
 });
 
-console.log({ research });
-console.log(await tools.wait_agent.works({
-  targets: [research.schema.work, research.runtime.work, research.critic.work]
-}));
+await tools.wait_agent.works({ targets: [research.critic.work] });
+const critique = await tools.query_agents({ target: research.critic.work });
+console.log({ critic: research.critic.agent, result: critique.final ?? critique.diagnostic });
 ```
 
 schema 与 runtime 从第一轮起知道对方是谁，可以用原生消息工具直接核对调查中的问题。critic 在两项调查成功结束后才启动，前置工作的结果由依赖机制提供，不重复填写 materials。
@@ -755,7 +735,7 @@ critic 的 session 虽然已经存在，但等待依赖时只有待处理请求�
 
 ### 7.2 第二批：修订、实现、原 critic 审查代码
 
-ROOT 已决定统一缺失参数处理、保留显式 null 语义。以下 `research` 使用第一批实际返回的对象；若是另一个 cell，ROOT 将前一段正式输出的该对象作为输入写入脚本。代码示例中的完整格式示意 ID 必须替换为真实返回值，不按局部名称猜 ID。这个跨 cell 传入已有对象的步骤不同于批次内部互相填写尚不存在的成员 ID；批次内部仍由 helper 自动解析。
+ROOT 已决定统一缺失参数处理、保留显式 null 语义。以下 `research` 使用第一批实际返回的对象；若是另一个 Cell，先用 query_agents 找到已有成员及精确 Work，或沿已知完整 target 复用；变量不跨 Cell 共享。代码示例中的完整格式示意 ID 必须替换为真实返回值，不按局部名称猜 ID。这个跨 cell 传入已有对象的步骤不同于批次内部互相填写尚不存在的成员 ID；批次内部仍由 helper 自动解析。
 
 ```javascript
 const research = {
@@ -791,10 +771,9 @@ const delivery = await tools.run_agent.batch({
   }
 });
 
-console.log({ delivery });
-console.log(await tools.wait_agent.works({
-  targets: [delivery.revision.work, delivery.implementation.work, delivery.review.work]
-}));
+await tools.wait_agent.works({ targets: [delivery.review.work] });
+const reviewResult = await tools.query_agents({ target: delivery.review.work });
+console.log(reviewResult.final ?? reviewResult.diagnostic ?? "Review ended without text.");
 ```
 
 revision 复用原调查者，review 复用原 critic，各自的旧历史保持原样。implementation 是新 agent。批次内通过局部名称引用 WORK 依赖，helper 准备真实引用；启动顺序为修订成功、实现成功、代码审查。review 同时取得定稿与实现结果。这里不再手写一连串等待与下一步派活。
@@ -839,7 +818,7 @@ ROOT 先用 `query_agents` 找到已有成员及当前／排队概览，再用 `
 | 后续工作尚未接纳 | 只补派缺少的工作 |
 | Agent 已卸载、session 仍存在 | 派活时沿 §1.4 按需加载；旧 Work 不复活 |
 
-若旧 cell 仍存活，ROOT 可用 `query_cells` 查当前库存或持有 target 的状态和源码，再通过 `manage_cell.wait` 读取输出。保留原安排就继续观察；要替换安排时先 `manage_cell.stop` 停止后续派发，再查询已接纳的 Work。脚本终止不取消这些 Work，所需停止仍由 `stop_agent` 完成。宿主崩溃后旧 VM 不恢复，执行与排队事实由共同 Host 接管链路结算。
+若旧 cell 仍存活，ROOT 可用 `query_cells` 查当前库存或持有 target 的状态和源码，再通过 `manage_cell.wait` 等待状态；正式输出沿共同队列主动交付。保留原安排就继续观察；要替换安排时先 `manage_cell.stop` 停止后续派发，再查询已接纳的 Work。脚本终止不取消这些 Work，所需停止仍由 `stop_agent` 完成。宿主崩溃后旧 VM 不恢复，执行与排队事实由共同 Host 接管链路结算。
 
 复杂 workflow 的继续方式如下：
 
@@ -874,7 +853,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 | `archived_docs/ROUND_10_HIERARCHICAL_SUBAGENT_ORCHESTRATION_IMPLEMENTATION_SPEC.zh.md` 及现有 bundled subagent skill | 本文的五个共享操作、AGENT／WORK 身份、普通 final 完成、原生消息和 ROOT 统一协调。 |
 | `experiment/quickjs-code-mode` 分支的 Code Mode 规格 | 本文的原生／JS 暴露矩阵、等待合同及正式模型输出接口；`console.log` 承担不可丢弃的正式输出，不采用原实验的 best-effort 诊断日志语义。 |
 
-记忆工具、monitor 和普通 final 的目标合同见 §3.4。旧文件保留为上下文，不作为新对象与接口的定义来源。
+记忆工具与普通 final 的合同见 §3.4。旧文件保留为上下文，不作为新对象与接口的定义来源。
 
 ### 实施落点与完成条件
 
@@ -886,15 +865,14 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 | 状态／结果 | `_repository/conversation.py` 的请求联查、assistant settlement、turn final／终止原因 | 统一公开投影，无 Work 状态或结果副本；材料与 final 交付时保存为接收方输入，之后不依赖源 session |
 | 等待／停止 | 共同请求／turn 读取、变化通知、队列取消与 ActiveTurnCancellationIntent | WORK 按 queue→entry→turn 处理；AGENT 停止当前工作并取消本次覆盖的排队工作，历史终态不变；与调度竞态共用 owner，返回实际结果 |
 | 消息 | ROOT steer／补充输入、待输入与完成裁决、Hook 上下文接纳 | ROOT／Subagent 均只向活动 turn 接纳 steer；无活动 turn 则工具结果明确返回未接纳，不暂存、不加载、不开启工作；发送与完成竞态由共同 owner 裁决 |
-| Monitor | ROOT monitor manager、通知接纳／结算、compaction 与 UI | 参数化真实接收 scope；成员订阅绑定当前 turn，终态关闭，进程仍独立 |
-| 工具／提示 | built-in catalogue、caller gating、bundled skill | 五个协作工具，记忆和三个会话检索工具仅 ROOT；Subagent 不隐式注入记忆、历史或响应偏好；monitor 原生可供成员 |
+| 工具／提示 | built-in catalogue、caller gating、bundled skill | 五个协作工具，记忆和三个会话检索工具仅 ROOT；Subagent 不隐式注入记忆、历史或响应偏好 |
 | 展示／检索 | 主会话列表、子代理只读详情、会话检索工具及隐式历史召回 | 主会话列表仅 ROOT；子代理详情绑定其 ROOT 且只读；检索两种 session 行为一致，不新增 kind 参数；历史检索开关仅控制隐式召回 |
 | 能力／MCP | 共同 capability 查询、planner、MCP supervisor、配置入口与 context sources | ROOT／Subagent 共用发现、查询、启停和执行规则；两种 MCP 来源共用提供范围开关，插件安装时供用户审阅；各受影响 session 正常输入时追加变化观察，保持 epoch 前缀 |
 | 退役／删除 | 现有 session 关闭、删除与内容回收 | 同次连续闲置满 1 小时卸载、满 3 天删除；运行或等待请求不计闲置；重新派活按需加载，不恢复旧执行；单独删除成员不影响其他会话已交付正文，删除 ROOT 一并关闭和删除所属成员 |
 
 Agent 使用 session 身份及 `root_session_id` 归属；委派来源与初始材料是请求的业务信息；`work_inputs` 保留依赖及材料，未满足条件从其中派生。其余接纳、turn、历史、完成与结果职责都由共同引擎承担。归属之外，消息、材料与结果不建立跨 session 外键或保留约束；不保留旧 task 状态／报告与 turn 双写，也不为 WORK 建映射表、结果表或独立生命周期。已有 event、subject、guard、job 类别不因“便于验证”增加。
 
-实施验收关注行为：WORK 请求 ID 从排队到完成不变；启动与取消只有一个胜出的实际阶段；失败依赖不创建空 turn；同 Agent 连续请求共用历史与允许的 epoch，压缩后不改写旧内容；batch 第一次模型调用已带正确队友；组合环不启动成员；消息接纳与 turn 交接不转投；容量满时等待者让槽；大 final 直接从原 entry 可读；完成 Hook 续接不提前终态；monitor 终态关闭不杀进程；重新打开只推进未启动请求。与 Code Mode 的跨压缩、取消及 provider 前缀验收一起完成，不新增冻结文案测试。
+实施验收关注行为：WORK 请求 ID 从排队到完成不变；启动与取消只有一个胜出的实际阶段；失败依赖不创建空 turn；同 Agent 连续请求共用历史与允许的 epoch，压缩后不改写旧内容；batch 第一次模型调用已带正确队友；组合环不启动成员；消息接纳与 turn 交接不转投；容量满时等待者让槽；大 final 直接从原 entry 可读；完成 Hook 续接不提前终态；重新打开只推进未启动请求。与 Code Mode 的跨压缩、取消及 provider 前缀验收一起完成，不新增冻结文案测试。
 
 会话验收同时覆盖：主会话列表仅列 ROOT，ROOT 对两种 session 的主动与隐式历史检索行为一致；关闭历史检索只关闭隐式召回；Subagent 无三个会话检索工具及上述隐式注入；A 长时间执行时，等待 A 的 B 不计入闲置删除；A 已交付后被删除，B 的请求正文和历史仍完整可读。
 

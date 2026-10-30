@@ -149,6 +149,9 @@ def protobuf_json(message: Message) -> dict[str, object]:
     )
     if not isinstance(value, dict):
         raise RuntimeError("Protocol-v3 JSON projection lost its object shape")
+    if (message.DESCRIPTOR.full_name == "pulsara.terminal.v3.ServerFrame"
+            and message.HasField("observation")):
+        value["observation"].setdefault("provider_retry", None)
     return value
 
 

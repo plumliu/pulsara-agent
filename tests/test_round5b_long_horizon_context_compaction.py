@@ -3,6 +3,7 @@
 from __future__ import annotations
 from tests.support.images import bound_test_image
 from pulsara_agent.identity import derive_id
+from pulsara_agent.ports.terminal_observation import CellOutputContent
 
 import ast
 import asyncio
@@ -70,7 +71,6 @@ from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.memory.contracts import MemoryUsePolicy
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     freeze_compaction_runtime_handoff,
 )
@@ -207,7 +207,6 @@ def _manual_host() -> KernelHostSession:
     host._query_command_row = AsyncMock(return_value=None)
     host._lock = asyncio.Lock()
     host._queue_wake = asyncio.Event()
-    host._monitor_wake = asyncio.Event()
     return host
 
 
@@ -532,7 +531,14 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             "entry:rzpgakg2p7mvgv7qynfvsvkinu",
             2,
             "turn:26orapncpvxkk3y5pgostrckxy",
-            (LLMTextPart(json.dumps({"output": terminal_marker})),),
+            CellOutputContent(
+                cell_id=derive_id("cell", "destination-history", "cell"),
+                source_turn_id="turn:26orapncpvxkk3y5pgostrckxy",
+                source_exec_attempt_id=derive_id("attempt", "destination-history", "exec"),
+                record_sequence=1,
+                record={"kind": "log", "text": terminal_marker},
+            ).content.parts,
+            input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
         ),
         FrozenProviderInputItem(
             FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
@@ -2045,14 +2051,6 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
                 status="running",
             ),
         ),
-        terminal_monitors=(
-            FrozenTerminalMonitorHandoffFact(
-                monitor_id="monitor:3d3bq2eakczykk4u53umgmejge",
-                process_id="process:nfei6gwtp3dcs62w3tvew5w34i",
-                state="active",
-                pending_observation=True,
-            ),
-        ),
         todo=None,
         agent_work_index=(
             {
@@ -2091,7 +2089,6 @@ def test_round5b_runtime_handoff_reports_a_bounded_pmca_projection() -> None:
             )
             for index in range(200)
         ),
-        terminal_monitors=(),
         todo=None,
     )
     assert handoff is not None
@@ -2636,7 +2633,8 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
 
 def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 20
+    assert not {"TerminalMonitorOpened", "TerminalMonitorObservation", "TerminalMonitorClosed"} & set(LIVE_EVENT_TYPES)
     assert len(SUBJECT_SLOTS) == 8
     assert APPEND_GUARDS == ("HostWriterGuard",)
     assert len(CONVERSATION_KERNEL_RELATIONS) == 30

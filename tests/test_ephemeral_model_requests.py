@@ -646,7 +646,7 @@ def test_suggestion_retains_previous_opaque_native_replay_and_final_native_repla
         cut = freeze_provider_replay_manifest_cut(
             session_id=request.session_id,
             scope=ProviderInputContinuityScope(
-                request.session_id, identity.conversation_scope_kind, None
+                request.session_id, identity.conversation_scope_kind
             ),
             context_binding_revision_id=identity.context_binding_revision_id,
             provider_input_through_sequence=identity.provider_input_through_sequence,

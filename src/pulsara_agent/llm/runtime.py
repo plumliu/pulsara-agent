@@ -100,7 +100,7 @@ class ModelRuntime:
     settings: LocalSettingsStore
     catalog: ModelCatalogOwner
     route_wires: RouteWireRegistry
-    retry: LLMRetryConfig = LLMRetryConfig()
+    retry: LLMRetryConfig | None = None
     _borrow_lock: Lock = field(default_factory=Lock, init=False, repr=False)
     _active_borrows: dict[int, tuple[BorrowedProviderTransport, str, str]] = field(
         default_factory=dict, init=False, repr=False

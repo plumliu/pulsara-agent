@@ -6,8 +6,6 @@ import type { UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
 import { deferred, FakeAdapter, userCapabilitySnapshot } from './pulsara-app-fixture';
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
-const attention = { updatedSessions: 0, pendingSessions: 0, attentionSessions: 1 };
-const attentionText = '1 个已打开会话需要稍后重试。';
 
 async function openCapabilities(adapter: FakeAdapter) {
   adapter.sessions = [];
@@ -17,7 +15,7 @@ async function openCapabilities(adapter: FakeAdapter) {
   await waitFor(() => expect((screen.getByRole('button', { name: '刷新能力' }) as HTMLButtonElement).disabled).toBe(false));
 }
 
-it.each([650, 30_000])('serializes a slow explicit reload across the %ims cadence and a subsequent toolbar GET', async cadence => {
+it.each([650, 30_000])('serializes a slow inventory GET across the %ims cadence and a subsequent toolbar refresh', async cadence => {
   const adapter = new FakeAdapter();
   adapter.inspectUserCapabilities.mockResolvedValue({ ...userCapabilitySnapshot, mcp: {
     ...userCapabilitySnapshot.mcp,
@@ -27,82 +25,91 @@ it.each([650, 30_000])('serializes a slow explicit reload across the %ims cadenc
   vi.useFakeTimers();
   await act(async () => fireEvent.focus(window));
   const before = adapter.inspectUserCapabilities.mock.calls.length;
-  const reload = deferred<UserCapabilitySnapshot>();
-  adapter.refreshUserCapabilities.mockReturnValueOnce(reload.promise);
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' })));
-  await act(async () => vi.advanceTimersByTimeAsync(cadence * 2));
-  fireEvent.click(screen.getByRole('button', { name: '刷新能力' })); // Disabled until POST settles.
-  expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before);
-  expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
-
-  await act(async () => reload.resolve({ ...userCapabilitySnapshot, adoption: attention }));
-  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
-  expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 1);
+  const pending = deferred<UserCapabilitySnapshot>();
+  let inFlight = 0; let maxInFlight = 0;
+  const observe = async (value: Promise<UserCapabilitySnapshot>) => {
+    inFlight += 1; maxInFlight = Math.max(maxInFlight, inFlight);
+    try { return await value; } finally { inFlight -= 1; }
+  };
+  adapter.inspectUserCapabilities.mockImplementation(() => observe(Promise.resolve(userCapabilitySnapshot)))
+    .mockImplementationOnce(() => observe(pending.promise));
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '刷新能力' })));
+  expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 1);
+  await act(async () => vi.advanceTimersByTimeAsync(cadence * 2));
+  const refresh = screen.getByRole('button', {name:'刷新能力'});
+  expect(refresh.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(refresh);
+  expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 1);
+  await act(async () => pending.resolve(userCapabilitySnapshot));
+  expect(refresh.hasAttribute('disabled')).toBe(false);
+  // The cadence expired while the toolbar GET was pending: exactly one
+  // periodic GET must drain through the same admission lane after it settles.
   expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 2);
-  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
-  await act(async () => vi.advanceTimersByTimeAsync(4200));
-  expect(screen.queryByText(attentionText)).toBeNull();
-  await act(async () => fireEvent.focus(window));
-  expect(screen.queryByText(attentionText)).toBeNull();
-  expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
+  const settled = adapter.inspectUserCapabilities.mock.calls.length;
+  await act(async () => fireEvent.click(refresh));
+  expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(settled + 1);
+  expect(maxInFlight).toBe(1);
+  expect(adapter.refreshUserCapabilities).not.toHaveBeenCalled();
+  expect(adapter.connectCalls).toHaveLength(0);
 });
 
-it('settles one real HTTP reload across navigation and cancels queued old-page reads', async () => {
+it('aborts a real HTTP inventory GET on navigation and reads fresh user inventory on return without POST or connection headers', async () => {
   const http = new LocalHttpRuntimeAdapter();
   const wire = { roots: [], skills: { status: 'ready', items: [], issues: [], roots: [] },
     plugins: { status: 'ready', items: [], details: [] }, mcp: { servers: [] } };
-  const post = deferred<Response>();
+  const aborted = deferred<void>(); let slowNext = false; let slowSignal: AbortSignal | undefined;
   const fetcher = vi.fn<typeof fetch>(async (path, init) => {
-    if (String(path) === '/api/capabilities/refresh') return post.promise;
     expect(String(path)).toBe('/api/capabilities');
+    expect(init?.method ?? 'GET').toBe('GET');
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+    expect(new Headers(init?.headers).get('X-Pulsara-Connection-Id')).toBeNull();
+    if (slowNext) {
+      slowNext = false; slowSignal = init!.signal!;
+      return new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener('abort', () => {
+        aborted.resolve(); reject(init!.signal!.reason);
+      }, {once:true}));
+    }
     return new Response(JSON.stringify(wire), { status: 200 });
   });
   vi.stubGlobal('fetch', fetcher);
   const adapter = new FakeAdapter();
   adapter.inspectUserCapabilities.mockImplementation((signal?: AbortSignal) => http.inspectUserCapabilities(signal));
-  adapter.refreshUserCapabilities.mockImplementation(() => http.refreshUserCapabilities());
   await openCapabilities(adapter);
   vi.useFakeTimers();
-  await act(async () => fireEvent.focus(window));
-  const before = fetcher.mock.calls.length;
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' })));
-  await act(async () => vi.advanceTimersByTimeAsync(30_000));
-  await act(async () => fireEvent.focus(window));
-  fireEvent.click(screen.getByRole('button', { name: '总览' }));
-  fireEvent.click(screen.getByRole('button', { name: '能力' }));
-  await act(async () => vi.advanceTimersByTimeAsync(20));
-  await act(async () => fireEvent.focus(window));
+  const before = fetcher.mock.calls.length; slowNext = true;
+  await act(async () => fireEvent.click(screen.getByRole('button', {name:'刷新能力'})));
   expect(fetcher).toHaveBeenCalledTimes(before + 1);
-  const [path, request] = fetcher.mock.calls[before];
-  expect(path).toBe('/api/capabilities/refresh');
-  expect(request).toEqual(expect.objectContaining({ method: 'POST', body: '{}' }));
-  expect(request?.signal).toBeUndefined();
-  expect(request?.headers).not.toHaveProperty('X-Pulsara-Connection-Id');
-
-  await act(async () => post.resolve(new Response(JSON.stringify({ ...wire, adoption: {
-    updated_sessions: 0, pending_sessions: 0, attention_sessions: 1,
-  } }), { status: 200 })));
-  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
-  expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
-  expect((screen.getByRole('button', { name: '刷新能力' }) as HTMLButtonElement).disabled).toBe(false);
-  expect(fetcher.mock.calls.filter(([url]) => String(url) === '/api/capabilities/refresh')).toHaveLength(1);
+  expect(slowSignal).toBeInstanceOf(AbortSignal);
+  expect(screen.getByRole('button', {name:'刷新能力'}).hasAttribute('disabled')).toBe(true);
+  await act(async () => { fireEvent.click(screen.getByRole('button', {name:'总览'})); await aborted.promise; });
+  expect(slowSignal?.aborted).toBe(true);
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', {name:'能力'}));
+    await vi.advanceTimersByTimeAsync(20);
+  });
+  expect(fetcher).toHaveBeenCalledTimes(before + 2);
+  expect(screen.getByRole('button', {name:'刷新能力'}).hasAttribute('disabled')).toBe(false);
+  expect(adapter.refreshUserCapabilities).not.toHaveBeenCalled();
+  expect(adapter.connectCalls).toHaveLength(0);
 });
 
-it('does not roll back an intervening mutation when an earlier reload settles', async () => {
+it('does not roll back an intervening user mutation when an earlier toolbar GET settles', async () => {
   const adapter = new FakeAdapter();
   await openCapabilities(adapter);
-  const reload = deferred<UserCapabilitySnapshot>();
-  adapter.refreshUserCapabilities.mockReturnValueOnce(reload.promise);
-  fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' }));
-  await waitFor(() => expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1));
-  fireEvent.click(screen.getByRole('tab', { name: /技能/ }));
-  fireEvent.click(screen.getByRole('switch', { name: '关闭 personal-pdf' }));
-  await screen.findByRole('switch', { name: '开启 personal-pdf' });
-  await act(async () => reload.resolve({ ...userCapabilitySnapshot, adoption: attention }));
-  expect(screen.getByRole('switch', { name: '开启 personal-pdf' })).toBeTruthy();
-  expect(screen.getByText(attentionText).closest('.toast')).toBeTruthy();
+  const pending = deferred<UserCapabilitySnapshot>();
+  adapter.inspectUserCapabilities.mockReturnValueOnce(pending.promise);
+  const before = adapter.inspectUserCapabilities.mock.calls.length;
+  fireEvent.click(screen.getByRole('button', {name:'刷新能力'}));
+  await waitFor(() => expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 1));
+  adapter.inspectUserCapabilities.mockResolvedValue({...userCapabilitySnapshot, skills:{...userCapabilitySnapshot.skills,
+    items:userCapabilitySnapshot.skills.items.map(skill=>({...skill,enabled:false}))}});
+  fireEvent.click(screen.getByRole('tab', {name:/技能/}));
+  fireEvent.click(screen.getByRole('switch', {name:'关闭 personal-pdf'}));
+  await screen.findByRole('switch', {name:'开启 personal-pdf'});
+  await act(async () => pending.resolve(userCapabilitySnapshot));
+  expect(screen.getByRole('switch', {name:'开启 personal-pdf'})).toBeTruthy();
+  expect(adapter.refreshUserCapabilities).not.toHaveBeenCalled();
+  expect(adapter.connectCalls).toHaveLength(0);
 });
 
 it('reports a real HTTP MCP mutation once in the existing toast without keeping a page banner', async () => {
@@ -147,26 +154,23 @@ it('reports a real HTTP MCP mutation once in the existing toast without keeping 
   expect(fetcher).toHaveBeenCalledTimes(1);
 });
 
-it('shows an explicit reload failure once as a toast without masking queued GET results or replaying the POST', async () => {
+it('shows a failed inventory GET on the page and clears it after the next successful GET without a reload toast or POST', async () => {
   const adapter = new FakeAdapter();
   await openCapabilities(adapter);
   vi.useFakeTimers();
-  await act(async () => fireEvent.focus(window));
-  const reload = deferred<UserCapabilitySnapshot>();
-  adapter.refreshUserCapabilities.mockReturnValueOnce(reload.promise);
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' })));
-  await act(async () => vi.advanceTimersByTimeAsync(30_000));
+  const before = adapter.inspectUserCapabilities.mock.calls.length;
   adapter.inspectUserCapabilities.mockRejectedValueOnce(new Error('目录暂时读取失败。'));
-  await act(async () => reload.reject(new Error('显式能力重载失败，请稍后重试。')));
-  expect(screen.getByText('显式能力重载失败，请稍后重试。').closest('.toast')).toBeTruthy();
-  expect(screen.getByText('目录暂时读取失败。').closest('.capability-page-notice')).toBeTruthy();
-  await act(async () => vi.advanceTimersByTimeAsync(30_000));
-  expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(1);
-  expect(screen.queryByText('显式能力重载失败，请稍后重试。')).toBeNull();
+  await act(async () => fireEvent.click(screen.getByRole('button', {name:'刷新能力'})));
+  const error = screen.getByText('目录暂时读取失败。');
+  expect(error.closest('.capability-page-notice')).toBeTruthy();
+  expect(error.closest('.toast')).toBeNull();
+  expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 1);
+  await act(async () => fireEvent.click(screen.getByRole('button', {name:'刷新能力'})));
+  expect(adapter.inspectUserCapabilities).toHaveBeenCalledTimes(before + 2);
   expect(screen.queryByText('目录暂时读取失败。')).toBeNull();
-  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新加载会话能力' })));
-  expect(adapter.refreshUserCapabilities).toHaveBeenCalledTimes(2);
-  expect(screen.queryByText('显式能力重载失败，请稍后重试。')).toBeNull();
+  expect(document.querySelector('.toast')).toBeNull();
+  expect(adapter.refreshUserCapabilities).not.toHaveBeenCalled();
+  expect(adapter.connectCalls).toHaveLength(0);
 });
 
 it('cancels an active toolbar GET on hide and releases loading after returning', async () => {

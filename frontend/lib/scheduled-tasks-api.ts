@@ -35,7 +35,7 @@ export class LocalScheduledTasksApi {
   update(task: ScheduledTask, values: ScheduledValues) { return this.request<ScheduledTask>(`/${encodeURIComponent(task.id)}`, 'PATCH', { expected_revision: task.revision, values }); }
   action(task: ScheduledTask, action: 'pause' | 'resume' | 'delete') { return this.request<{task: ScheduledTask | null}>(`/${encodeURIComponent(task.id)}/${action}`, 'POST', { expected_revision: task.revision }); }
   switch(task: ScheduledTask, replacement: ScheduledReplacement) { return this.request<{paused: ScheduledTask; active: ScheduledTask}>(`/${encodeURIComponent(task.id)}/switch`, 'POST', { expected_revision: task.revision, replacement }); }
-  runNow(request: ScheduledRunRequest) { return this.request<{queue_item_id: string; execution: RequestExecution; coalesced: boolean}>(`/${encodeURIComponent(request.task_id)}/run-now`, 'POST', request); }
+  runNow(request: ScheduledRunRequest) { return this.request<{queue_item_id: string; execution: RequestExecution | null; delivery_mode: 'NEW_TURN' | 'STEER_ACTIVE_TURN'; target_turn_id: string | null}>(`/${encodeURIComponent(request.task_id)}/run-now`, 'POST', request); }
   preview(schedule: ScheduleRule, timezone: string, signal?: AbortSignal) { return this.request<{next_run_at: string; local_time_fold: 0 | 1 | null}>('/preview', 'POST', { schedule, timezone }, signal); }
   localOnce(run_at_local: string, timezone: string, signal?: AbortSignal) { return this.request<{schedule: ScheduleRule}>('/local-once', 'POST', { run_at_local, timezone }, signal); }
 }

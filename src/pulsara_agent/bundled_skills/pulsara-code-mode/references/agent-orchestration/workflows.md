@@ -45,8 +45,9 @@ Ask an investigator for clarification if it is still active; otherwise state the
     context: { mode: "last_n", turns: 1 }
   }
 });
-console.log({ phase1 });
-console.log(await tools.wait_agent.works({ targets: [phase1.critic.work] }));
+console.log({ design: phase1.design.agent, critic: phase1.critic });
+await tools.wait_agent.works({ targets: [phase1.critic.work] });
+console.log(await tools.query_agents({ target: phase1.critic.work }));
 ```
 
 This template copies the latest ROOT turn as starting context. Instructions can
@@ -55,7 +56,7 @@ to assess findings and decide how to continue.
 
 ## Phase 2: revise, implement, and reuse the critic
 
-Each `exec_cell` has fresh variables. Copy the actual `phase1` object printed above
+Each `exec_cell` has fresh variables. Copy the actual design agent and critic targets printed above
 into the next script; the example IDs below are illustrative and must be replaced
 with the tool-provided targets.
 
@@ -86,8 +87,8 @@ const phase2 = await tools.run_agent.batch({
     instruction: "Review the implemented code against the agreed plan and the implementation report. Inspect the actual files. Report actionable findings or explain why the change is ready."
   }
 });
-console.log({ phase2 });
-console.log(await tools.wait_agent.works({ targets: [phase2.review.work] }));
+await tools.wait_agent.works({ targets: [phase2.review.work] });
+console.log(await tools.query_agents({ target: phase2.review.work }));
 ```
 
 The revision instruction can include ROOT's conclusions from the first phase.
@@ -113,7 +114,8 @@ new Work targets; old terminal Works do not become running again. Previously
 completed effects stay in place. Inspect the current files or other tool results
 when the interrupted operation's effects are uncertain.
 
-Logging agent/work targets makes them available to later scripts. `manage_cell` with `action:"wait"`
-can reveal progress in a script that is still running. If its host has closed,
+Logging selected agent/work targets makes them available to later scripts.
+Progress arrives only when the script outputs it; `manage_cell` with `action:"wait"`
+observes execution state without fetching progress or result bodies. If its host has closed,
 the old script cannot be resumed; agent state remains queryable, and further work
 can be assigned through a new script or native tools.

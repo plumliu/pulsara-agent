@@ -30,7 +30,6 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace
-from tests.dogfood.run_pr03_user_control_dogfood import _rows
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
     _binding,
@@ -79,13 +78,9 @@ async def run(args, report):
                 "pty": f"Start {repl!r} with tty=true and yield_time_ms=100. Submit delayed and obtain ANSWER:delayed, not merely the echoed input. Then submit quit. Use the advertised submit defaults. Report the answer.",
                 "long": 'Start the exact command "sleep 1.2; printf LONG_DONE" with yield_time_ms=0. Follow the returned process until it finishes and report its output and exit code.',
                 "truncation": f"Run {python} -c \"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\" with max_output_chars=512. Recover the exact MIDDLE marker from the omitted output using read_artifact; do not rerun the command.",
-                "monitor_race": 'Run "printf RACE_DONE" with yield_time_ms=0. Attempt to register a completion monitor for that exact process. If already finished, read its final state via manage_process. Report the outcome without restarting it.',
-                "monitor": 'Start "sleep 2; printf MONITOR_DONE" with yield_time_ms=0 and register its completion monitor. End this turn after registration. When resumed by its completion, report MONITOR_DONE.',
                 "capacity": 'Start eight separate "sleep 120" terminal commands with yield_time_ms=0. Then attempt one additional "printf SHOULD_NOT_START" command. Report whether it was admitted and the exact failure reason if blocked. Use query_processes, then kill the eight sleep processes you started, using their exact IDs. Do not start replacements.',
                 "submit_then_wait": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=0, then call wait with timeout_seconds=1. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
                 "submit_window": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=1000. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
-                "monitor_wake": 'Start "sleep 30; printf MONITOR_WAKE_DONE" with yield_time_ms=0. Register its completion monitor, then finish the turn immediately. When the monitor resumes the conversation, report the completion output and do not start another command. If registration says PROCESS_ALREADY_TERMINAL, poll that exact process and report the final output.',
-                "monitor_long_wake": 'Start "sleep 120; printf MONITOR_LONG_DONE" with yield_time_ms=0. Register a completion-only monitor using its returned PROCESS target, then finish this turn immediately. Do not poll or send another command. When the monitor resumes the conversation, report MONITOR_LONG_DONE and the exit code.',
             }
             selected = args.cases.split(",") if args.cases else list(prompts)
             report["prompts"] = {name: prompts[name] for name in selected}
@@ -96,7 +91,7 @@ async def run(args, report):
                         workspace_root=workspace,
                         trust_workspace_mcp_config=False,
                     ),
-                    system_prompt="Carry out the requested terminal experiment exactly. Use only exec_process, query_processes, manage_process, query_monitors, manage_monitor and read_artifact. Keep final answers brief. Never inspect credentials or environment values other than COGNITIVE_FLAG.",
+                    system_prompt="Carry out the requested terminal experiment exactly. Use only exec_process, query_processes, manage_process and read_artifact. Keep final answers brief. Never inspect credentials or environment values other than COGNITIVE_FLAG.",
                 )
                 await session.update_model_call_binding(_binding(runtime, connection))
                 print("Provider owner ready", flush=True)
@@ -114,111 +109,8 @@ async def run(args, report):
                         "reply": outcome.final_text,
                     }
                     report["cases"].append(case)
-                    if name in {"monitor_wake", "monitor_long_wake"}:
-                        marker = (
-                            "MONITOR_LONG_DONE"
-                            if name == "monitor_long_wake"
-                            else "MONITOR_WAKE_DONE"
-                        )
-                        if name == "monitor_long_wake":
-                            initial_trace = (
-                                await asyncio.to_thread(_tool_trace, session)
-                            )[trace_before:]
-                            starts = [
-                                item
-                                for item in initial_trace
-                                if item["tool_name"] == "exec_process"
-                            ]
-                            monitors = [
-                                item
-                                for item in initial_trace
-                                if item["tool_name"] == "manage_monitor"
-                            ]
-                            if (
-                                len(starts) != 1
-                                or starts[0]["result"].get("status") != "running"
-                                or len(monitors) != 1
-                                or monitors[0]["result"].get("status") != "REGISTERED"
-                                or monitors[0]["result"].get("process_target")
-                                != starts[0]["result"].get("target")
-                                or len(initial_trace) != 2
-                                or case["elapsed_seconds"] >= 120
-                            ):
-                                raise RuntimeError(
-                                    "Long monitor case did not register and end its initial turn before process completion"
-                                )
-                            case["registered_process_id"] = starts[0]["result"]["target"]["process_id"]
-                            case["registered_monitor_id"] = monitors[0]["result"]["target"]["monitor_id"]
-                            case["manual_followup_turns"] = 0
-                        # Experiment deadline only; no runtime monitor/lifetime cap.
-                        deadline = monotonic() + (
-                            210 if name == "monitor_long_wake" else 90
-                        )
-                        while True:
-                            rows = await asyncio.to_thread(
-                                _rows,
-                                session,
-                                "SELECT e.entry_sequence, e.entry_kind, "
-                                "convert_from(e.inline_content,'UTF8') AS content, "
-                                "(SELECT string_agg(convert_from(b.inline_content,'UTF8'),'' ORDER BY b.block_ordinal) "
-                                "FROM pulsara_v3.assistant_message_blocks b "
-                                "WHERE b.session_id=e.session_id AND b.assistant_entry_id=e.id "
-                                "AND b.block_kind='TEXT') AS assistant_text, "
-                                "t.status AS turn_status, t.final_entry_id "
-                                "FROM pulsara_v3.transcript_entries e "
-                                "JOIN pulsara_v3.turns t ON t.id=e.turn_id AND t.session_id=e.session_id "
-                                "WHERE e.session_id=%s AND e.turn_id IN "
-                                "(SELECT turn_id FROM pulsara_v3.transcript_entries "
-                                "WHERE session_id=%s AND entry_kind='TERMINAL_OBSERVATION') "
-                                "ORDER BY e.entry_sequence",
-                                (session.session_id, session.session_id),
-                            )
-                            if rows and any(row["final_entry_id"] for row in rows):
-                                case["wake_transcript"] = rows
-                                case["wake_elapsed_seconds"] = monotonic() - start
-                                if not any(
-                                    marker in (row["assistant_text"] or "")
-                                    for row in rows
-                                ):
-                                    raise RuntimeError(
-                                        "Monitor wake reply did not report the completion output"
-                                    )
-                                if name == "monitor_long_wake":
-                                    observations = [
-                                        json.loads(row["content"])
-                                        for row in rows
-                                        if row["entry_kind"] == "TERMINAL_OBSERVATION"
-                                    ]
-                                    if not any(
-                                        item.get("observation_kind") == "COMPLETION"
-                                        and item.get("process_id")
-                                        == case["registered_process_id"]
-                                        and item.get("monitor_id")
-                                        == case["registered_monitor_id"]
-                                        and item.get("output") == marker
-                                        and item.get("exit_code") == 0
-                                        for item in observations
-                                    ):
-                                        raise RuntimeError(
-                                            "Long monitor completion did not match the registered process"
-                                        )
-                                    if case["wake_elapsed_seconds"] < 120:
-                                        raise RuntimeError(
-                                            "Long monitor wake happened before the intended sleep interval"
-                                        )
-                                break
-                            if monotonic() >= deadline:
-                                case["wake_transcript"] = rows
-                                raise TimeoutError(
-                                    "Monitor did not complete an autonomous model turn"
-                                )
-                            await asyncio.sleep(0.1)
                     report["trace"] = await asyncio.to_thread(_tool_trace, session)
                     case["tool_call_count"] = len(report["trace"]) - trace_before
-                    if name == "monitor_long_wake" and case["tool_call_count"] != 2:
-                        raise RuntimeError(
-                            "Long monitor case used an extra tool call after registration"
-                        )
                     save(args.output, report, saved)
                     print("Completed " + name, flush=True)
                 report["status"] = "completed"

@@ -393,6 +393,7 @@ def _collect_context_sources(
     return collector.collect(
         activation_subject=activation_subject,
         activation_text=activation_text,
+        skill_reference_surfaces=(activation_text,),
         tool_surface=tool_surface,
         canonical_facts=canonical_facts,
         tool_exposure_plan=tool_plan,
@@ -2924,7 +2925,7 @@ def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work()
 
 class _Capability:
     def __init__(self) -> None:
-        self.inputs: list[tuple[str, frozenset[str]]] = []
+        self.inputs: list[tuple[tuple[str, ...], frozenset[str]]] = []
         self._owner_authenticity = object()
 
     def resolve_projection(self, *, user_input: str, available_tool_names):
@@ -3152,7 +3153,7 @@ def test_round3_temporal_capture_is_single_and_dst_consistent(tmp_path: Path) ->
     assert clock_calls == 1
     # Round 9 Skill discovery is independent from the startup Tool allowlist;
     # Tool capability routing is owned by the sibling Tool view.
-    assert capability.inputs == [("/skill demo", frozenset())]
+    assert capability.inputs == [(("/skill demo",), frozenset())]
     by_kind = {candidate.source_kind: candidate for candidate in collected.candidates}
     environment = by_kind[ContextSourceKind.RUNTIME_ENVIRONMENT].variants[0].text
     clock_text = by_kind[ContextSourceKind.RUNTIME_CLOCK].variants[0].text
@@ -3620,7 +3621,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
     asyncio.run(scenario())
 
 
-def test_round3_tool_surface_includes_member_monitor_and_schema_is_frozen(
+def test_round3_tool_surface_includes_member_process_and_schema_is_frozen(
     tmp_path: Path,
 ) -> None:
     port = DirectKernelToolPort(
@@ -3638,8 +3639,8 @@ def test_round3_tool_surface_includes_member_monitor_and_schema_is_frozen(
         port,
         conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
     )
-    assert "manage_monitor" in {tool.name for tool in root.model_surface.tool_specs}
-    assert "manage_monitor" in {tool.name for tool in child.model_surface.tool_specs}
+    assert "exec_process" in {tool.name for tool in root.model_surface.tool_specs}
+    assert "exec_process" in {tool.name for tool in child.model_surface.tool_specs}
     assert not hasattr(port._terminal, "_sessions")  # noqa: SLF001
     assert port.snapshot_workspace_root() == tmp_path.resolve()
     assert not hasattr(port._terminal, "_sessions")  # noqa: SLF001

@@ -176,7 +176,7 @@ def test_network_then_malformed_then_success_share_budget_and_preserve_input():
     assert completions.payloads[0] == completions.payloads[1] == completions.payloads[2]
     assert sleeps == [0.5, 1.0]
     assert malformed.close_calls == accepted.close_calls == 1
-    assert sum(isinstance(item, ProviderGenerationRetry) for item in output) == 1
+    assert sum(isinstance(item, ProviderGenerationRetry) for item in output) == 2
     assert sum(isinstance(item, ToolCallStartPayload) for item in output) == 2
     ends = [item for item in output if isinstance(item, ToolCallEndPayload)]
     assert len(ends) == 1
@@ -234,7 +234,6 @@ def test_malformed_generation_requires_agent_purpose_and_enabled_retries(
 @pytest.mark.parametrize(
     "chunks",
     [
-        [_chunk({"content": "partial"}), ConnectionError("network interrupted")],
         [_chunk({"content": "partial"})],
         [
             _chunk(
@@ -318,25 +317,24 @@ def test_invalid_argument_diagnostics_scrub_escaped_credentials(caplog):
     assert "synthetic-secret" not in "\n".join(messages)
 
 
-def test_diagnostic_settings_failure_does_not_prevent_generation_retry(
-    monkeypatch, caplog
-):
+def test_saved_settings_are_read_once_before_retry(monkeypatch):
     from tests.support.model_config import StaticTestSettingsStore
 
     invalid = _SDKStream(_tool_chunks('{"path":'))
     accepted = _SDKStream(_tool_chunks('{"path":"accepted.txt"}'))
     execution, completions, _ = _execution([invalid, accepted])
-
-    def fail_read(_self):
-        raise RuntimeError("diagnostic settings access unavailable")
-
-    monkeypatch.setattr(StaticTestSettingsStore, "read", fail_read)
+    read = StaticTestSettingsStore.read
+    observations = []
+    def read_once(store):
+        observations.append(store)
+        if len(observations) > 1:
+            raise AssertionError("retry re-read saved settings")
+        return read(store)
+    monkeypatch.setattr(StaticTestSettingsStore, "read", read_once)
     output = asyncio.run(_drain(execution))
     assert _terminal(output).terminal_kind is ProviderNormalizedTerminalKind.COMPLETED
-    assert len(completions.payloads) == 2
+    assert len(completions.payloads) == 2 and len(observations) == 1
     assert invalid.closed and accepted.closed
-    assert "diagnostic_unavailable" in caplog.text
-    assert "diagnostic settings access unavailable" not in caplog.text
 
 
 def test_normalizer_clears_abandoned_usage_on_generation_retry():

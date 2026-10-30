@@ -217,13 +217,16 @@ def test_started_root_summary_preserves_exact_target_and_first_wire(
                 source_queue_item_id=q2.prompt_delivery.queue_item_id, target_turn_id=active)
             assert converted.status == "PENDING"
             assert (await root.query_command(q2_command)).prompt_delivery.execution.terminal_reason == "USER_REDIRECTED_TO_STEER"
+            selected = await core._send_agent_message(root.session_id, _COMPLETION,
+                SimpleNamespace(session_id=child_id, work_id=work_id))
+            assert selected["delivery"] == "queued"
             model.child_release.set()
 
-            async def completion_queued():
-                return bool(_rows(root, "SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND target_turn_id=%s AND input_origin='AGENT_MATERIAL' AND source_work_id=%s AND status='PENDING'", (root.session_id, active, work_id)))
-            await _eventually(completion_queued)
+            async def selected_message_queued():
+                return len(_rows(root, "SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND target_turn_id=%s AND input_origin='AGENT_MESSAGE' AND source_work_id=%s AND status='PENDING'", (root.session_id, active, work_id))) == 2
+            await _eventually(selected_message_queued)
             queued = _rows(root, "SELECT input_origin,source_session_id,source_work_id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND target_turn_id=%s AND status='PENDING' ORDER BY queue_sequence", (root.session_id, active))
-            assert [r["input_origin"] for r in queued] == ["AGENT_MESSAGE", "HUMAN_STEER", "AGENT_MATERIAL"]
+            assert [r["input_origin"] for r in queued] == ["AGENT_MESSAGE", "HUMAN_STEER", "AGENT_MESSAGE"]
             assert queued[0]["source_session_id"] == child_id
             assert queued[2]["source_work_id"] == work_id
             assert len(model.summary.calls) == 1 and len(model.root_requests) == baseline_opens
@@ -243,13 +246,13 @@ def test_started_root_summary_preserves_exact_target_and_first_wire(
             wire = model.root_requests[baseline_opens].compiled_input
             rendered = _render(wire.messages)
             assert rendered.index(_INITIAL) < rendered.index(_AGENT) < rendered.index(_HUMAN) < rendered.index(_COMPLETION)
-            # Memory may independently recall the completed source Work. Count
+            # Memory may independently recall the source Work. Count
             # exact delivered parts, rather than matching text inside recall JSON.
             parts = [text for message in wire.messages for text in text_part_values(message.content)]
             counts = {marker: parts.count(marker) for marker in (_INITIAL, _AGENT, _HUMAN, _COMPLETION)}
             assert all(count == 1 for count in counts.values()), counts
             consumed = _rows(root, "SELECT input_origin,entry_sequence FROM pulsara_v3.transcript_entries WHERE session_id=%s AND turn_id=%s ORDER BY entry_sequence", (root.session_id, active))
-            assert [r["input_origin"] for r in consumed[:4]] == ["HUMAN_MESSAGE", "AGENT_MESSAGE", "HUMAN_STEER", "AGENT_MATERIAL"]
+            assert [r["input_origin"] for r in consumed[:4]] == ["HUMAN_MESSAGE", "AGENT_MESSAGE", "HUMAN_STEER", "AGENT_MESSAGE"]
             assert len(model.summary.calls) == 1
         finally:
             model.child_release.set()

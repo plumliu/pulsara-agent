@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import json
 from threading import Lock
+from time import monotonic
 from typing import TYPE_CHECKING, AsyncIterator, Awaitable, Callable
 
 from pulsara_agent.conversation_kernel.tool_surface import (
@@ -109,6 +110,8 @@ from pulsara_agent.model_input.provider_replay import (
 )
 from pulsara_agent.ports.live_agent_event import ProviderStreamPayload
 from pulsara_agent.ports.provider_stream import (
+    ProviderRetryUpdate,
+    ProviderRetryPhase,
     ProviderAdapterCompletedReplayPayload,
     ProviderModelExecutionFailed,
     ProviderModelOutputIncomplete,
@@ -433,6 +436,14 @@ class AcceptedProviderFinalSource:
             raise ValueError("final replay differs from accepted answer")
 
 
+class KernelProviderModelExecutionFailed(ProviderModelExecutionFailed):
+    """Provider failure whose final public detail used this execution's scrub set."""
+
+    def __init__(self, error, public_detail: str):
+        super().__init__(error)
+        self.public_detail = public_detail
+
+
 class PreparedKernelModelExecution:
     """Transport-bearing one-shot produced without opening the transport."""
 
@@ -455,7 +466,9 @@ class PreparedKernelModelExecution:
         ),
     ) -> None:
         self.request = request
-        self.final_context = final_context
+        self.final_context = replace(
+            final_context, retry_observer=self._observe_retry,
+            provider_error_scrubber_observer=self._bind_provider_error_scrubber)
         self.append_candidate = append_candidate
         self._transport_timeout_policy_fingerprint = (
             transport_timeout_policy_fingerprint
@@ -469,6 +482,68 @@ class PreparedKernelModelExecution:
         self._completed_taken = False
         self._state = _PreparedExecutionState.PREFLIGHTED
         self._lock = Lock()
+        self._retry_update: ProviderRetryUpdate | None = None
+        self._retry_deadline: float | None = None
+        self._draft_identity: str | None = None
+        self._provider_error_scrubber: Callable[[str], str] = lambda text: text
+
+    def _bind_provider_error_scrubber(self, scrub_text: Callable[[str], str]) -> None:
+        self._provider_error_scrubber = scrub_text
+
+    def scrub_provider_detail(self, detail: str) -> str:
+        return self._provider_error_scrubber(detail)
+
+    def _provider_failure(self, error) -> KernelProviderModelExecutionFailed:
+        detail = f"{error.code.value}: {error.message}"
+        summary = error.retry_summary
+        if summary is not None:
+            detail += (
+                f"; retries={summary.retry_count}/{max(0, summary.max_attempts - 1)}"
+                f"; decision={summary.skipped_reason or ('exhausted' if summary.exhausted else 'non_retryable')}"
+                f"; reason={summary.final_reason}")
+        for diagnostic in error.diagnostics:
+            detail += f"; {diagnostic.diagnostic_kind.value}=" + json.dumps(
+                diagnostic.attributes, ensure_ascii=False, separators=(",", ":"))
+        return KernelProviderModelExecutionFailed(error, self.scrub_provider_detail(detail))
+
+    def set_draft_identity(self, draft_identity: str) -> None:
+        with self._lock:
+            self._draft_identity = draft_identity
+
+    def _observe_retry(self, update: ProviderRetryUpdate | None) -> None:
+        with self._lock:
+            if self._state in {_PreparedExecutionState.PHYSICALLY_CLOSED,
+                               _PreparedExecutionState.DISCARDED}:
+                return
+            self._retry_update = update
+            self._retry_deadline = (
+                monotonic() + update.delay_seconds
+                if update is not None and update.phase is ProviderRetryPhase.WAITING else None)
+
+    def clear_retry_observation(self) -> None:
+        with self._lock:
+            self._retry_update = None
+            self._retry_deadline = None
+
+    def provider_retry_observation(self) -> dict[str, object] | None:
+        with self._lock:
+            update = self._retry_update
+            if update is None:
+                return None
+            return {
+                "session_id": self.request.session_id,
+                "turn_id": self.request.turn_id,
+                "resolved_model_call_id": self.request.prepared_call.call.resolved_model_call_id,
+                "draft_id": self._draft_identity,
+                "attempt": update.attempt,
+                "retry_number": update.retry_number,
+                "max_retries": update.max_retries,
+                "phase": update.phase.value,
+                "reason": update.reason.value,
+                "remaining_seconds": max(0.0, self._retry_deadline - monotonic())
+                    if self._retry_deadline is not None else 0.0,
+                "has_semantic_output": update.has_semantic_output,
+            }
 
     @property
     def state(self) -> str:
@@ -589,7 +664,7 @@ class PreparedKernelModelExecution:
                         )
                     else:
                         assert item.error is not None
-                        semantic_error = ProviderModelExecutionFailed(item.error)
+                        semantic_error = self._provider_failure(item.error)
                     break
                 yield item
         except BaseException as exc:
@@ -629,6 +704,7 @@ class PreparedKernelModelExecution:
                         raise
                 except Exception:
                     logging.getLogger(__name__).warning("provider_usage_observation_failed")
+        self.clear_retry_observation()
         if operation_error is not None:
             raise operation_error
         if semantic_error is not None:

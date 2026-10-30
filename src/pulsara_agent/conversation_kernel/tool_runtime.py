@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from threading import Condition, Lock, RLock
 from time import monotonic
-from typing import TYPE_CHECKING, Callable, Mapping, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol
 
 from jsonschema import ValidationError, validators
 
@@ -80,14 +80,11 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.mcp_config import McpServerConfig
-from pulsara_agent.ports.artifact import ToolArtifactReadPort, ToolResultDisplayKind
+from pulsara_agent.ports.artifact import ToolArtifactReadPort
 from pulsara_agent.ports.terminal import (
-    TerminalMonitorRegisterInput,
     parse_exec_process_input,
-    parse_manage_monitor_input,
     parse_manage_process_input,
     parse_query_processes_input,
-    parse_query_monitors_input,
 )
 from pulsara_agent.ports.tool_execution import (
     Tool,
@@ -113,12 +110,6 @@ from pulsara_agent.terminal_process import (
 from pulsara_agent.terminal_process.output import (
     InvalidTerminalOutputCursor,
     TerminalOutputSnapshot,
-)
-from pulsara_agent.terminal_process.monitor import (
-    PreparedTerminalMonitorRegistration,
-    TerminalMonitorCoordinator,
-    TerminalMonitorPolicy,
-    TerminalMonitorRejected,
 )
 from pulsara_agent.tools.builtins.filesystem import (
     EditFileTool,
@@ -171,10 +162,8 @@ from pulsara_agent.conversation_kernel.io import (
 )
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenCompactionRuntimeHandoff,
-    FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     CompactionRuntimeHandoffBuilder,
-    handoff_monitor_rows,
     handoff_process_rows,
 )
 from pulsara_agent.conversation_kernel.capability_composition import (
@@ -643,15 +632,6 @@ class _DirectTerminalQueryTool:
         })
 
 
-@dataclass(slots=True)
-class _DirectTerminalMonitorTool:
-    coordinator: TerminalMonitorCoordinator
-    name: str = "manage_monitor"
-
-    def execute(self, call: ToolCall) -> ToolExecutionResult:
-        raise RuntimeError(
-            "Monitor tools require the closed kernel invocation context"
-        )
 
 
 @dataclass(slots=True)
@@ -704,10 +684,6 @@ class _PreparedMcpMetaInvocation:
     arguments: FrozenJsonObjectFact
 
 
-@dataclass(frozen=True, slots=True)
-class _CodeModeObservationSettlement:
-    owner: object
-    observation: object
 
 
 class DirectKernelToolPort:
@@ -723,7 +699,6 @@ class DirectKernelToolPort:
         live_bus: LiveAgentEventBus,
         artifact_read_port: ToolArtifactReadPort | None = None,
         image_reference_read_port: CanonicalImageReferenceReadPort | None = None,
-        terminal_monitor_wake_scheduler: Callable[[], None] | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
         user_home_resolution: UserHomeResolution | None = None,
@@ -753,16 +728,10 @@ class DirectKernelToolPort:
             self._terminal = TerminalManager(workspace_root=root,
                 completion_subscriber=self._terminal_process_completed)
             self._terminal.activate_owner(self._terminal_owner_id)
-            self._terminal_monitor = TerminalMonitorCoordinator(
-                session_id=session_id, owner_epoch=host_owner_id,
-                registry=self._terminal.process_registry, live_bus=live_bus,
-                wake_scheduler=terminal_monitor_wake_scheduler or (lambda: None))
         else:
             self._terminal = shared_terminal_owner._terminal
-            self._terminal_monitor = shared_terminal_owner._terminal_monitor
             self._terminal_live_buses = shared_terminal_owner._terminal_live_buses
             self._terminal_live_buses[session_id] = live_bus
-            self._terminal_monitor.bind_live_bus(session_id, live_bus)
         tools: tuple[Tool, ...] = (
             ReadFileTool(
                 root,
@@ -799,8 +768,6 @@ class DirectKernelToolPort:
             _DirectTerminalTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalProcessTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalQueryTool(self._terminal, self._terminal_owner_id),
-            _DirectTerminalMonitorTool(self._terminal_monitor),
-            _DirectTerminalMonitorTool(self._terminal_monitor, name="query_monitors"),
             _DirectPlanControlTool("enter_plan"),
             _DirectPlanControlTool("ask_plan_question"),
             _DirectPlanControlTool("exit_plan"),
@@ -851,10 +818,6 @@ class DirectKernelToolPort:
         self._terminal_physically_closed = False
         self._close_async_lock = asyncio.Lock()
         self._terminal_release_task: asyncio.Task[object] | None = None
-        self._terminal_monitor_close_task: asyncio.Task[object] | None = None
-        self._process_local_settlements: dict[
-            str, ProcessLocalEffectSettlementToken
-        ] = {}
         self._todo_settlements: dict[str, ProcessLocalEffectSettlementToken] = {}
         self._mcp_ref_settlements: dict[str, ProcessLocalEffectSettlementToken] = {}
         self._todo_owner = TodoRunStateOwner(
@@ -866,8 +829,6 @@ class DirectKernelToolPort:
         self._code_mode_invoke = None
         self._code_mode_freeze_source = None
         self._code_mode_read_source = None
-        self._code_mode_archive_output = None
-        self._code_observation_settlements = {}
         self._memory: KernelMemoryToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
         self._capability_reload: KernelCapabilityReloadPort | None = None
@@ -918,10 +879,9 @@ class DirectKernelToolPort:
             self._memory = port
             self._surface_generation += 1
 
-    def bind_code_mode_executor(self, *, invoke, freeze_source, archive_output, read_source) -> None:
+    def bind_code_mode_executor(self, *, invoke, freeze_source, read_source) -> None:
         self._code_mode_invoke = invoke
         self._code_mode_freeze_source = freeze_source
-        self._code_mode_archive_output = archive_output
         self._code_mode_read_source = read_source
 
     def bind_code_mode_port(self, port: CodeModeHost) -> None:
@@ -1209,9 +1169,6 @@ class DirectKernelToolPort:
                 self._mcp_meta_invocations.pop(key, None)
         return changed
 
-    @property
-    def terminal_monitor_coordinator(self) -> TerminalMonitorCoordinator:
-        return self._terminal_monitor
 
     def list_background_terminal_processes(self):
         return self._terminal.list_background_processes(
@@ -1442,16 +1399,6 @@ class DirectKernelToolPort:
             )
             if is_root or item.origin.session_id == session_id
         )
-        monitor_scope = {} if is_root else {"agent_id": session_id, "work_turn_id": work_turn_id}
-        monitor_facts = tuple(
-            FrozenTerminalMonitorHandoffFact(
-                monitor_id=str(item["monitor_id"]),
-                process_id=str(item["process_id"]),
-                state=str(item["state"]),
-                pending_observation=bool(item["pending_observation"]),
-            )
-            for item in self._terminal_monitor.freeze_compaction_handoff(**monitor_scope)
-        )
         todo = self._todo_owner.freeze_compaction_handoff(scope_kind=conversation_scope_kind)
         code_cells = (
             self._code_mode.freeze_compaction_handoff()
@@ -1462,7 +1409,6 @@ class DirectKernelToolPort:
         )
         streams = {
             "terminal_processes": iter(handoff_process_rows(process_facts)),
-            "terminal_monitors": iter(handoff_monitor_rows(monitor_facts)),
             "code_cells": iter(code_cells),
         }
 
@@ -1480,11 +1426,11 @@ class DirectKernelToolPort:
 
         agent_rows = agents()
         agents_done = False
-        # Process/Monitor/Cell/Agent is the specified display order. No next
+        # Process/Cell/Agent is the specified display order. No next
         # page is read until its next Agent entry is actually needed.
         try:
             while streams or not agents_done:
-                for key in ("terminal_processes", "terminal_monitors", "code_cells", "agents"):
+                for key in ("terminal_processes", "code_cells", "agents"):
                     if key == "agents":
                         if agents_done:
                             continue
@@ -1991,14 +1937,10 @@ class DirectKernelToolPort:
             )
         if tool_name == "open_in_pulsara" and surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
             return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED, "open_in_pulsara_root_only", "open_in_pulsara requires ROOT scope")
-        if tool_name in {"view_image", "manage_monitor", "query_monitors", "exec_process", "manage_process", "query_processes", "exec_cell", "query_cells", "manage_cell"}:
+        if tool_name in {"view_image", "exec_process", "manage_process", "query_processes", "exec_cell", "query_cells", "manage_cell"}:
             try:
                 if tool_name == "view_image":
                     parse_view_image_source(arguments)
-                elif tool_name == "manage_monitor":
-                    parse_manage_monitor_input(arguments)
-                elif tool_name == "query_monitors":
-                    parse_query_monitors_input(arguments)
                 elif tool_name == "exec_process":
                     parse_exec_process_input(arguments)
                 elif tool_name == "manage_process":
@@ -3172,18 +3114,6 @@ class DirectKernelToolPort:
 
     async def _invoke_code_mode_control(self, tool_name, arguments, context):
         from pulsara_agent.code_mode.contracts import CodeModeError
-        from pulsara_agent.primitives.tool_result_projection import conservative_artifact_page_logical_utf8_bytes
-        archived = []
-        async def archive(record):
-            if archived:
-                raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Only one archived record can be accepted per observation")
-            prepared = await self._code_mode_archive_output(context=context, record=record)
-            archived.append(prepared)
-            return {"kind": record.get("kind", "log"), "output_artifact": {
-                "disposition": prepared.artifact_disposition.value,
-                "target": {"kind": "ARTIFACT", "artifact_id": prepared.artifact_id},
-                "source_coverage": prepared.source_coverage.value}}
-        observation = None
         try:
             if self._code_mode is None:
                 raise CodeModeError("unavailable", "Code Mode Host is unavailable")
@@ -3191,53 +3121,36 @@ class DirectKernelToolPort:
                 value = await self._query_cells(arguments, context)
             elif tool_name == "manage_cell" and arguments["action"] == "stop":
                 value = await self._code_mode.stop(arguments["target"]["cell_id"])
-            else:
-                if tool_name == "exec_cell":
-                    if self._code_mode_invoke is None or context.code_mode_snapshot is None:
-                        raise RuntimeError("exec_cell lost its common execution snapshot")
-                    if "code" in arguments:
-                        source = arguments["code"]
-                    else:
-                        reader = self._tools["read_file"]
-                        source = await asyncio.to_thread(reader.read_code_mode_source,
-                            arguments["path"], maximum_bytes=self._code_mode.limits.value_bytes)
-                    await self._code_mode_freeze_source(attempt_id=context.attempt_id, source=source)
-                    directory = context.code_mode_snapshot.tool_directory
-                    catalog = {spec.name: {"parameters": thaw_json(spec.parameters)}
-                        for spec in directory.tool_specs}
-                    cell_id = await self._code_mode.start(source=source, source_exec_attempt_id=context.attempt_id,
-                        turn_id=context.turn_id, snapshot=context.code_mode_snapshot,
-                        tool_catalog=catalog, invoke=self._code_mode_invoke,
-                        on_cell_closed=self.release_code_cell_mcp_refs)
+            elif tool_name == "exec_cell":
+                if self._code_mode_invoke is None or context.code_mode_snapshot is None:
+                    raise RuntimeError("exec_cell lost its common execution snapshot")
+                if "code" in arguments:
+                    source = arguments["code"]
                 else:
-                    cell_id = arguments["target"]["cell_id"]
-                observation = await self._code_mode.observe(cell_id,
-                    yield_time_ms=arguments.get("yield_time_ms", 1000), archive_output=archive,
-                    maximum_page_bytes=(MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-                        - conservative_artifact_page_logical_utf8_bytes(tool_call_id=context.tool_call_id,
-                            body="", model_visible_memory_ids=())))
-                value = observation.public_value()
-            encoded = encode_tool_public_json(value)
-            projection = None
-            if archived:
-                from pulsara_agent.conversation_kernel.contracts import InlineContent
-                projection = replace(archived[0], canonical_preview=InlineContent.from_bytes(encoded),
-                    display_kind=ToolResultDisplayKind.COMPLETE)
-            token = None
-            if observation is not None:
-                token = ProcessLocalEffectSettlementToken(random_id("settlement"),
-                    _CodeModeObservationSettlement(self._code_mode, observation))
-                self._code_observation_settlements[token.token_id] = token
-            return KernelToolResult(state="SUCCESS", content=encoded,
+                    source = await asyncio.to_thread(
+                        self._tools["read_file"].read_code_mode_source,
+                        arguments["path"], maximum_bytes=self._code_mode.limits.value_bytes)
+                await self._code_mode_freeze_source(attempt_id=context.attempt_id, source=source)
+                directory = context.code_mode_snapshot.tool_directory
+                catalog = {spec.name: {"parameters": thaw_json(spec.parameters)}
+                    for spec in directory.tool_specs}
+                cell_id = await self._code_mode.start(
+                    source=source, source_exec_attempt_id=context.attempt_id,
+                    turn_id=context.turn_id, snapshot=context.code_mode_snapshot,
+                    tool_catalog=catalog, invoke=self._code_mode_invoke,
+                    on_cell_closed=self.release_code_cell_mcp_refs)
+                value = {"accepted": True, "target": {"kind": "CELL", "cell_id": cell_id}}
+            else:
+                value = await self._code_mode.wait_state(
+                    arguments["target"]["cell_id"], arguments.get("yield_time_ms", 1000))
+            return KernelToolResult(
+                state="SUCCESS", content=encode_tool_public_json(value),
                 public_format=ToolOutputSourceFormatHint.JSON,
-                artifact_inline_result=not bool(archived),
-                process_local_settlement=token, prepared_output_projection=projection,
                 physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
         except (CodeModeError, ValueError, OSError, UnicodeError) as exc:
-            if observation is not None:
-                self._code_mode.abandon(observation)
             value = {"error": getattr(exc, "code", "CODE_MODE_ERROR"), "message": str(exc)}
-            return KernelToolResult(state="APPLICATION_ERROR", content=json.dumps(value, ensure_ascii=False).encode(),
+            return KernelToolResult(
+                state="APPLICATION_ERROR", content=encode_tool_public_json(value),
                 public_format=ToolOutputSourceFormatHint.JSON,
                 physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
 
@@ -3265,7 +3178,7 @@ class DirectKernelToolPort:
             != invocation_context.permission_snapshot_fingerprint
         ):
             # This check precedes every adapter dispatch.  A mismatched
-            # process-local authority must never create a monitor, process or
+            # process-local authority must never create a process or
             # any other physical effect before being rejected.
             raise RuntimeError("tool invocation context does not exact-join request")
         if (
@@ -4032,14 +3945,7 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
-        settlement_token: ProcessLocalEffectSettlementToken | None = None
-        if isinstance(tool, _DirectTerminalMonitorTool):
-            result, settlement_token = self._invoke_terminal_monitor(
-                tool=tool,
-                call=call,
-                context=invocation_context,
-            )
-        elif isinstance(tool, (_DirectTerminalTool, _DirectTerminalProcessTool)):
+        if isinstance(tool, (_DirectTerminalTool, _DirectTerminalProcessTool)):
             origin = TerminalProcessOrigin(
                 turn_id=turn_id,
                 conversation_scope_kind=(invocation_context.conversation_scope_kind),
@@ -4080,28 +3986,27 @@ class DirectKernelToolPort:
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 ),
             )
-        if not isinstance(tool, _DirectTerminalMonitorTool):
-            if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
-                assert physical.error is not None
-                effect_class = _physical_effect_class(tool_name, arguments)
-                observation = (
-                    None
-                    if physical.observation is None
-                    else replace(
-                        physical.observation,
-                        observation_origin_kind=observation_origin,
-                    )
+        if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
+            assert physical.error is not None
+            effect_class = _physical_effect_class(tool_name, arguments)
+            observation = (
+                None
+                if physical.observation is None
+                else replace(
+                    physical.observation,
+                    observation_origin_kind=observation_origin,
                 )
-                raise KernelToolPhysicalInvocationError(
-                    effect_class=effect_class,
-                    error=physical.error,
-                    timing=physical.timing.value,
-                    caller_cancelled=physical.caller_cancelled,
-                    physical_observation=observation,
-                )
-            result = physical.value
-            if not isinstance(result, ToolExecutionResult):
-                raise TypeError("physical tool returned an invalid result carrier")
+            )
+            raise KernelToolPhysicalInvocationError(
+                effect_class=effect_class,
+                error=physical.error,
+                timing=physical.timing.value,
+                caller_cancelled=physical.caller_cancelled,
+                physical_observation=observation,
+            )
+        result = physical.value
+        if not isinstance(result, ToolExecutionResult):
+            raise TypeError("physical tool returned an invalid result carrier")
         encoded = (
             result.output.encode("utf-8")
             if isinstance(result.output, str)
@@ -4137,27 +4042,10 @@ class DirectKernelToolPort:
             remote_identity=remote_identity,
             output_artifact_candidate=result.output_artifact_candidate,
             artifact_inline_result=result.artifact_inline_result,
-            process_local_settlement=settlement_token,
-            physical_timing=(
-                "ON_TIME"
-                if isinstance(tool, _DirectTerminalMonitorTool)
-                else physical.timing.value
-            ),
-            caller_cancelled_while_running=(
-                False
-                if isinstance(tool, _DirectTerminalMonitorTool)
-                else physical.caller_cancelled
-            ),
-            physical_observation=(
-                _freeze_physical_observation(invocation_started, observation_origin)
-                if isinstance(tool, _DirectTerminalMonitorTool)
-                else None
-                if physical.observation is None
-                else replace(
-                    physical.observation,
-                    observation_origin_kind=observation_origin,
-                )
-            ),
+            physical_timing=physical.timing.value,
+            caller_cancelled_while_running=physical.caller_cancelled,
+            physical_observation=(None if physical.observation is None else replace(
+                physical.observation, observation_origin_kind=observation_origin)),
             trusted_observation=_validated_terminal_observation_supplement(
                 tool=tool,
                 tool_name=tool_name,
@@ -4169,113 +4057,6 @@ class DirectKernelToolPort:
             delivery_succeeded=result.delivery_succeeded,
         )
 
-    def _invoke_terminal_monitor(
-        self,
-        *,
-        tool: _DirectTerminalMonitorTool,
-        call: ToolCall,
-        context: KernelToolInvocationContext,
-    ) -> tuple[ToolExecutionResult, ProcessLocalEffectSettlementToken | None]:
-        agent_id = context.session_id if context.conversation_scope_kind == "SUBAGENT" else None
-        work_turn_id = context.turn_id if agent_id is not None else None
-        if call.name == "query_monitors":
-            request = parse_query_monitors_input(call.arguments)
-            if "target" in call.arguments:
-                monitor = tool.coordinator.inspect_current(
-                    request.target.monitor_id, agent_id=agent_id, work_turn_id=work_turn_id)
-                if monitor is None:
-                    return _terminal_monitor_rejected(call, "MONITOR_UNAVAILABLE"), None
-                return _success(call, {"monitor": _terminal_monitor_payload(monitor)}), None
-            return (
-                _success(
-                    call,
-                    {
-                        "status": "INVENTORY",
-                        "monitors": [
-                            _terminal_monitor_payload(item)
-                            for item in tool.coordinator.list_current(agent_id=agent_id, work_turn_id=work_turn_id)
-                        ],
-                    },
-                ),
-                None,
-            )
-        request = parse_manage_monitor_input(call.arguments)
-        if request.action == "cancel":
-            outcome = tool.coordinator.cancel(request.target.monitor_id, agent_id=agent_id, work_turn_id=work_turn_id)
-            return (
-                _success(
-                    call,
-                    {
-                        "status": "CANCELLED" if outcome == "cancelled" else "REJECTED",
-                        "target": request.target.model_dump(),
-                        "cancellation_outcome": outcome,
-                        **({"message": _MONITOR_UNAVAILABLE_MESSAGE} if outcome == "not_found" else {}),
-                    },
-                ),
-                None,
-            )
-        if not isinstance(request, TerminalMonitorRegisterInput):
-            raise AssertionError("terminal monitor action union is invalid")
-        output_condition = request.conditions.output
-        try:
-            prepared = tool.coordinator.prepare_registration(
-                recipient_session_id=context.session_id,
-                registering_agent_id=agent_id,
-                work_turn_id=work_turn_id,
-                process_id=request.target.process_id,
-                origin_turn_id=context.turn_id,
-                origin_attempt_id=context.attempt_id,
-                origin_result_entry_id=context.result_entry_id,
-                writer_generation=context.host_owner_epoch,
-                authorization_reference=context.authorization_reference,
-                policy=TerminalMonitorPolicy(
-                    min_new_output_chars=(
-                        None
-                        if output_condition is None
-                        else output_condition.min_new_output_chars
-                    ),
-                    quiet_period_ms=(
-                        500
-                        if output_condition is None
-                        else output_condition.quiet_period_ms
-                    ),
-                    heartbeat_interval_seconds=(
-                        request.conditions.heartbeat_interval_seconds
-                    ),
-                    max_output_chars=request.delivery.max_output_chars,
-                    minimum_progress_interval_seconds=(
-                        request.delivery.minimum_progress_observation_interval_seconds
-                    ),
-                    maximum_duration_seconds=request.lifetime.maximum_duration_seconds,
-                ),
-            )
-        except TerminalMonitorRejected as exc:
-            return _terminal_monitor_rejected(call, exc.reason.value), None
-        token = ProcessLocalEffectSettlementToken(
-            prepared.token_id,
-            prepared,
-        )
-        self._process_local_settlements[token.token_id] = token
-        return (
-            _success(
-                call,
-                {
-                    "status": "REGISTERED",
-                    "target": {"kind": "MONITOR", "monitor_id": prepared.monitor_id},
-                    "process_target": request.target.model_dump(),
-                    "baseline_cursor": prepared.baseline_cursor,
-                    "expires_at": prepared.expires_at.isoformat(),
-                    "policy": {
-                        "completion": True,
-                        "output": output_condition is not None,
-                        "heartbeat_interval_seconds": (
-                            request.conditions.heartbeat_interval_seconds
-                        ),
-                    },
-                },
-            ),
-            token,
-        )
 
     def _terminal_process_completed(
         self,
@@ -4306,24 +4087,12 @@ class DirectKernelToolPort:
             block_ordinal=0,
             block_kind=LiveBlockKind.OPERATIONAL,
             )
-        self._terminal_monitor.process_completed(
-            process_id, status=info.status, exit_code=info.exit_code
-        )
 
     async def settle_process_local_effect(
         self,
         token: ProcessLocalEffectSettlementToken,
         disposition: ProcessLocalEffectSettlementDisposition,
     ) -> ProcessLocalEffectSettlementResult:
-        if isinstance(token.prepared, _CodeModeObservationSettlement):
-            retained = self._code_observation_settlements.pop(token.token_id, None)
-            if retained is not token:
-                raise RuntimeError("Code Mode observation settlement is not current")
-            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
-                await token.prepared.owner.acknowledge(token.prepared.observation)
-                return ProcessLocalEffectSettlementResult(ProcessLocalEffectSettlementOutcome.INSTALLED)
-            token.prepared.owner.abandon(token.prepared.observation)
-            return ProcessLocalEffectSettlementResult(ProcessLocalEffectSettlementOutcome.DISCARDED)
         if isinstance(token.prepared, PreparedNewMcpToolRefSettlement):
             retained = self._mcp_ref_settlements.get(token.token_id)
             if retained is not token:
@@ -4363,29 +4132,7 @@ class DirectKernelToolPort:
             if installation is not None:
                 self.offer_todo_installation(installation)
             return ProcessLocalEffectSettlementResult(outcome)
-        if not isinstance(token.prepared, PreparedTerminalMonitorRegistration):
-            raise TypeError("process-local settlement token kind is unknown")
-        retained = self._process_local_settlements.get(token.token_id)
-        if retained is None:
-            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
-                raise RuntimeError("committed process-local settlement token is absent")
-            return ProcessLocalEffectSettlementResult(
-                ProcessLocalEffectSettlementOutcome.DISCARDED
-            )
-        if retained is not token:
-            raise RuntimeError("process-local settlement token conflicts")
-        self._process_local_settlements.pop(token.token_id, None)
-        self._terminal_monitor.settle_registration(
-            token.prepared,
-            committed=(
-                disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
-            ),
-        )
-        return ProcessLocalEffectSettlementResult(
-            ProcessLocalEffectSettlementOutcome.INSTALLED
-            if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED
-            else ProcessLocalEffectSettlementOutcome.DISCARDED
-        )
+        raise TypeError("process-local settlement token kind is unknown")
 
     def offer_todo_close(self, projection: FrozenTodoCloseProjection | None) -> None:
         """Best-effort projection of an exact owner-controlled run closure."""
@@ -4474,7 +4221,6 @@ class DirectKernelToolPort:
             if self._physically_closed:
                 return
             self._terminal_live_buses.pop(self._session_id, None)
-            self._terminal_monitor.unbind_live_bus(self._session_id)
             deadline = monotonic() + timeout_seconds
             with self._surface_condition:
                 self._closed = True
@@ -4535,7 +4281,7 @@ class DirectKernelToolPort:
     async def stop_terminal_physical_owners(
         self, *, timeout_seconds: float = 5.0
     ) -> None:
-        """Stop monitor/process owners before awaiting cancelled tool threads.
+        """Stop process owners before awaiting cancelled tool threads.
 
         ``asyncio`` cannot cancel a thread blocked in a foreground Terminal
         wait.  Host close calls this seam first so process-group termination
@@ -4563,24 +4309,6 @@ class DirectKernelToolPort:
         with self._surface_condition:
             self._closed = True
             self._surface_condition.notify_all()
-        for token_id, token in tuple(self._process_local_settlements.items()):
-            prepared = token.prepared
-            if not isinstance(prepared, PreparedTerminalMonitorRegistration):
-                raise RuntimeError("terminal settlement carrier kind drifted")
-            self._terminal_monitor.settle_registration(
-                prepared,
-                committed=False,
-            )
-            self._process_local_settlements.pop(token_id, None)
-        if self._terminal_monitor_close_task is None:
-            self._terminal_monitor_close_task = asyncio.create_task(
-                self._close_terminal_monitor_worker(deadline_monotonic)
-            )
-        monitor_late = await _join_close_task(
-            self._terminal_monitor_close_task,
-            deadline_monotonic=deadline_monotonic,
-        )
-        self._terminal_monitor_close_task.result()
         if self._terminal_release_task is None:
             self._terminal_release_task = asyncio.create_task(
                 self._release_terminal_owner_worker(deadline_monotonic)
@@ -4591,18 +4319,9 @@ class DirectKernelToolPort:
         )
         self._terminal_release_task.result()
         self._terminal_physically_closed = True
-        if monitor_late or release_late:
+        if release_late:
             raise TimeoutError("Terminal owner exited after close deadline")
 
-    async def _close_terminal_monitor_worker(self, deadline_monotonic: float) -> None:
-        try:
-            await asyncio.to_thread(
-                self._terminal_monitor.stop_admission_and_close,
-                timeout_seconds=max(0.001, deadline_monotonic - monotonic()),
-            )
-        except TimeoutError:
-            await asyncio.to_thread(self._terminal_monitor.join_physical_after_close)
-            raise
 
     async def _release_terminal_owner_worker(self, deadline_monotonic: float) -> None:
         try:
@@ -4821,11 +4540,6 @@ def _terminal_process_payload(native: Mapping[str, object]) -> dict[str, object]
     return payload
 
 
-def _terminal_monitor_payload(native: Mapping[str, object]) -> dict[str, object]:
-    payload = dict(native)
-    payload["target"] = {"kind": "MONITOR", "monitor_id": payload.pop("monitor_id")}
-    payload["process_target"] = {"kind": "PROCESS", "process_id": payload.pop("process_id")}
-    return payload
 
 
 def _terminal_execution_result(
@@ -4926,30 +4640,6 @@ def _success(
         output_artifact_candidate=output_artifact_candidate,
     )
 
-
-_MONITOR_UNAVAILABLE_MESSAGE = (
-    "The monitor is unavailable in the current scope. It may have been "
-    "cancelled, expired, or reclaimed. Use query_monitors without a target "
-    "to list currently visible monitors."
-)
-
-
-def _terminal_monitor_rejected(call: ToolCall, reason: str) -> ToolExecutionResult:
-    return ToolExecutionResult(
-        call_id=call.id,
-        tool_name=call.name,
-        status=ToolResultState.ERROR,
-        public_format=ToolOutputSourceFormatHint.JSON,
-        output=json.dumps(
-            {
-                "status": "REJECTED",
-                "reason": reason,
-                **({"message": _MONITOR_UNAVAILABLE_MESSAGE} if reason == "MONITOR_UNAVAILABLE" else {}),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-    )
 
 
 def _validate_builtin_call_schema(

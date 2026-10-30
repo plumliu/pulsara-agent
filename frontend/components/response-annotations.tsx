@@ -1,3 +1,7 @@
+import { UserReferenceText } from './user-reference-text';
+import { ReferenceCommentEditor } from './reference-comment-editor';
+import type { SkillCapability } from '../lib/pulsara-types';
+import type { CompleteWorkspacePaths } from '../lib/file-reference';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { autoUpdate, computePosition, flip, hide, offset, shift } from '@floating-ui/dom';
 import type { MappedSelection } from '../lib/response-selection';
@@ -63,7 +67,7 @@ export function AnnotationCard({ value }: { value: PromptAnnotationPart }) {
   return <div className="prompt-annotation prompt-annotation--saved">
     <AnnotationSourceButton source={value.source} />
     <AnnotationQuote quote={value.quote} />
-    {value.comment && <p>{value.comment}</p>}
+    {value.comment && <p><UserReferenceText text={value.comment} /></p>}
   </div>;
 }
 
@@ -143,26 +147,17 @@ function AnnotationMarker({ item, siblings, active, onEdit, onPreview, owner }: 
     onFocus={() => onPreview(item.id)} onBlur={() => onPreview()} onClick={() => onEdit(item.id)}>{item.number}</button>;
 }
 
-function AnnotationEditor({ item, anchor, store, sessionId, onClose, owner }: {
-  item: DraftAnnotation; anchor?: HTMLElement; store: PromptDraftStore; sessionId: string;
+function AnnotationEditor({ item, anchor, store, sessionId, onClose, owner, skills, completePaths }: {
+  item: DraftAnnotation; anchor?: HTMLElement; store: PromptDraftStore; sessionId: string; skills: readonly SkillCapability[]; completePaths?: CompleteWorkspacePaths;
   owner: React.RefObject<HTMLDivElement | null>;
   onClose: (focus?: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const input = useRef<HTMLTextAreaElement>(null);
   const preview = Boolean(anchor);
   useLayoutEffect(() => {
     const editor = store.getEditor(sessionId);
     editor.view.dispatch(closeHistory(editor.state.tr));
-    input.current?.focus({ preventScroll: true });
   }, [item.id, sessionId, store]);
-  useLayoutEffect(() => {
-    const node = input.current;
-    if (node) {
-      node.style.height = 'auto';
-      node.style.height = `${Math.min(160, Math.max(24, node.scrollHeight + node.offsetHeight - node.clientHeight))}px`;
-    }
-  }, [item.value.comment]);
   useLayoutEffect(() => {
     const floating = ref.current;
     const root = sourceRoot(item.value.source, owner.current);
@@ -191,21 +186,14 @@ function AnnotationEditor({ item, anchor, store, sessionId, onClose, owner }: {
     </div></div>
     <AnnotationSourceButton source={item.value.source} beforeLocate={() => onClose()} />
     <AnnotationQuote quote={item.value.quote} /></>}
-    <textarea ref={input} rows={1} aria-label="批注内容" placeholder="添加评论…" value={item.value.comment ?? ''}
-      onChange={event => store.updateAnnotation(sessionId, item.id, event.target.value)}
-      onKeyDown={event => {
-        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
-          event.preventDefault(); event.stopPropagation();
-          if (event.shiftKey) store.getEditor(sessionId).commands.redo(); else store.getEditor(sessionId).commands.undo();
-        }
-      }} />
+    <ReferenceCommentEditor value={item.value.comment ?? ''} onChange={value => store.updateAnnotation(sessionId, item.id, value)} skills={skills} completePaths={completePaths} />
     {!preview && <button type="button" className="annotation-editor__delete" aria-label="删除此批注" title="删除此批注"
       onClick={() => { store.removeAnnotation(sessionId, item.id); onClose(true); }}><Trash2 size={14} /></button>}
   </div>;
 }
 
-export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, onNotify, children }: {
-  sessionId: string; store: PromptDraftStore; canAnnotate: boolean; children: ReactNode; onNotify: MarkdownNotify;
+export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, onNotify, children, skills = [], completePaths }: {
+  sessionId: string; store: PromptDraftStore; canAnnotate: boolean; children: ReactNode; onNotify: MarkdownNotify; skills?: readonly SkillCapability[]; completePaths?: CompleteWorkspacePaths;
   onLocate?: (entryId: string, signal: AbortSignal) => Promise<void>;
 }) {
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
@@ -276,7 +264,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     };
     const hide = () => setMenu(undefined);
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { hide(); closeEditor(); locateController.current?.abort(); sourceHighlight.current?.(); }
+      if (event.key === 'Escape' && !event.defaultPrevented) { hide(); closeEditor(); locateController.current?.abort(); sourceHighlight.current?.(); }
     };
     const pointerdown = (event: PointerEvent) => {
       const target = event.target instanceof Element ? event.target : null;
@@ -315,7 +303,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
       {canAnnotate && items.filter(item => item.value.source).map(item => <AnnotationMarker key={item.id} item={item}
         siblings={items.filter(other => other.value.source?.entry_id === item.value.source!.entry_id).sort((a, b) => a.value.source!.start - b.value.source!.start || a.number - b.number)}
         active={item.id === active?.id} onEdit={id => edit(id)} onPreview={setHovered} owner={owner} />)}
-      {active && <AnnotationEditor key={`${active.id}:${editing?.anchor ? 'preview' : 'inline'}`} item={active} anchor={editing?.anchor} store={store} sessionId={sessionId} onClose={closeEditor} owner={owner} />}
+      {active && <AnnotationEditor key={`${active.id}:${editing?.anchor ? 'preview' : 'inline'}`} item={active} anchor={editing?.anchor} store={store} sessionId={sessionId} onClose={closeEditor} owner={owner} skills={skills} completePaths={completePaths} />}
       {canAnnotate && menu?.sessionId === sessionId && <SelectionMenu selection={menu.selection} onHide={hideMenu} onAdd={() => {
         if (!canAnnotate) return;
         const current = mapResponseSelection(window.getSelection());

@@ -10,7 +10,7 @@ from yaml.parser import ParserError
 
 from pulsara_agent.capability.change_observation import CapabilityUiChange
 from pulsara_agent.conversation_kernel.host import KernelHostSession
-from pulsara_agent.primitives.context import thaw_json
+from pulsara_agent.primitives.context import thaw_json, freeze_json
 from tests.test_capability_management_preparation import preparation, install_plugin
 from tests.test_app_capability_boundary import invoke, query_sources, skill_source
 
@@ -24,12 +24,50 @@ def change(name="demo"):
     )
 
 
+@pytest.mark.parametrize('human', [True, False])
+def test_context_collection_preserves_separate_human_skill_reference_surfaces(human):
+    from pulsara_agent.conversation_kernel.context_sources import (
+        ContextSourceRegistry, KernelContextSourceCollector,
+    )
+    from pulsara_agent.model_input.contracts import CapabilityActivationSubjectKind
+
+    class ActivationReached(Exception):
+        pass
+
+    surfaces = ('````\n/quoted-skill', '/comment-skill')
+    registry = ContextSourceRegistry()
+    frozen = SimpleNamespace(registry_fingerprint=registry.fingerprint,
+        candidates=(), absent_facts=(), diagnostics=(),
+        skill_dispatch_view=object(), skill_owner_snapshot=object())
+    received = []
+    def activation_context(*, user_input):
+        received.append(user_input)
+        raise ActivationReached
+    collector = object.__new__(KernelContextSourceCollector)
+    collector._registry = registry
+    collector._capability = SimpleNamespace(activation_context=activation_context, compose=lambda **kwargs: None)
+    collector.freeze_non_trigger_sources = lambda **kwargs: frozen
+    with pytest.raises(ActivationReached):
+        collector.collect(
+            activation_subject=(CapabilityActivationSubjectKind.ROOT_HUMAN_PROMPT if human
+                else CapabilityActivationSubjectKind.ROOT_NON_HUMAN_TRIGGER),
+            # This joined text deliberately has a different delimiter scope.
+            # Skills must receive the original independent surfaces instead.
+            activation_text='\n'.join(surfaces), skill_reference_surfaces=surfaces,
+            tool_surface=object(), canonical_facts=object(), tool_exposure_plan=object(),
+            skill_dispatch_view=object(), skill_owner_snapshot=object())
+    assert received == [surfaces if human else ()]
+    if human:
+        assert received[0] is surfaces
+
+
 def test_capability_snapshot_can_be_read_by_a_lock_owning_context_preview():
     async def run():
         host = SimpleNamespace(
             _lock=asyncio.Lock(),
             _require_open=lambda: None,
-            _pending_capability_change=None,
+            _capability_notification_revision=None,
+            _freeze_effective_capability_state=lambda: freeze_json({"skills": ["one", "two"]}),
             _capability_refresh_requested_revision=0,
             _capability_refresh_applied_revision=0,
             _capability_refresh_attention=None,
@@ -41,13 +79,13 @@ def test_capability_snapshot_can_be_read_by_a_lock_owning_context_preview():
             ) is None
         await KernelHostSession.request_capability_refresh(host, change())
         await KernelHostSession._adopt_capabilities_if_requested(host)
-        pending = host._pending_capability_change
+        pending = host._capability_notification_revision
         async with host._lock:
             frozen = await asyncio.wait_for(
                 KernelHostSession.freeze_capability_change(host), timeout=1,
             )
-        assert frozen == pending
-        assert host._pending_capability_change is pending
+        assert frozen.revision == pending
+        assert host._capability_notification_revision == pending
 
     asyncio.run(run())
 
@@ -57,7 +95,8 @@ def test_pending_facts_fold_at_the_existing_refresh_cut_and_keep_newer_changes()
         host = SimpleNamespace(
             _lock=asyncio.Lock(),
             _require_open=lambda: None,
-            _pending_capability_change=None,
+            _capability_notification_revision=None,
+            _freeze_effective_capability_state=lambda: freeze_json({"skills": ["one", "two"]}),
             _capability_refresh_requested_revision=0,
             _capability_refresh_applied_revision=0,
             _capability_refresh_attention=None,
@@ -69,20 +108,19 @@ def test_pending_facts_fold_at_the_existing_refresh_cut_and_keep_newer_changes()
         await KernelHostSession.request_capability_refresh(host, change("last"))
         await KernelHostSession._adopt_capabilities_if_requested(host)
         frozen = await KernelHostSession.freeze_capability_change(host)
-        assert frozen.changes == 2
-        assert json.loads(frozen.render())["target"]["skill_path"].endswith(
-            "last/SKILL.md"
-        )
+        payload = json.loads(frozen.render())
+        assert payload["effective_state"] == {"skills": ["one", "two"]}
+        assert "action" not in payload and "changes" not in payload and "target" not in payload
         await KernelHostSession.request_capability_refresh(host, change("newer"))
         await KernelHostSession.consume_capability_change(host, frozen)
-        assert host._pending_capability_change.changes == 1
+        assert host._capability_notification_revision == 3
         assert await KernelHostSession.freeze_capability_change(host) is None
         host.reload_capabilities.side_effect = ValueError("unavailable")
         await KernelHostSession._adopt_capabilities_if_requested(host)
         latest = await KernelHostSession.freeze_capability_change(host)
         assert json.loads(latest.render())["adoption"] == "PARTIAL"
         await KernelHostSession.consume_capability_change(host, latest)
-        assert host._pending_capability_change is None
+        assert host._capability_notification_revision is None
 
     asyncio.run(run())
 

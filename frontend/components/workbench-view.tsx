@@ -1,3 +1,7 @@
+import { LocalScheduledTasksApi } from '../lib/scheduled-tasks-api';
+import { useDesktopWorkspace } from './desktop-workspace';
+import { prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
+import { ProviderRetryStatus } from './provider-retry-status';
 import { PresentationContext } from './presentation-provider';
 import { parsePresentationResult } from '../lib/presentation-targets';
 import { PresentationResult } from './presentation-result';
@@ -7,8 +11,6 @@ import { captureHistoryAnchor, collectHistoryResidence, restoreHistoryAnchor, wa
 import { ThreadFollowController } from '../lib/thread-follow-controller';
 import { splitSkillReferences } from '../lib/skill-reference';
 
-import { createPortal } from 'react-dom';
-import { usePromptHover } from '../lib/prompt-hover';
 import { AgentInputAvatar, UserAvatar } from './user-avatar';
 
 import { InteractionCardHeader } from './interaction-card-header';
@@ -148,6 +150,7 @@ interface WorkbenchViewProps {
   onFork: (entryId: string) => Promise<void>;
   todo?: TodoRun;
   activePlanMode: boolean;
+  providerRetry?: import('../lib/runtime-adapter').ProviderRetry | null;
   isRunning: boolean;
   activeTurnId?: string;
   manualCompactionCommandId?: string;
@@ -155,6 +158,10 @@ interface WorkbenchViewProps {
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
   queueNextCursor?: string | null;
+  steerNextCursor?: string | null;
+  steerLoading?: boolean;
+  steerReadError?: string;
+  onLoadMoreSteers?: () => void;
   onLoadMoreQueue?: () => void;
   localSubmissions: LocalPromptSubmission[];
   queueActions: QueuedPromptAction[];
@@ -198,6 +205,7 @@ interface WorkbenchViewProps {
   onCompact: () => Promise<void>;
   onRenameSession: () => void;
   onOpenScheduledTask?: () => void;
+  onLocateScheduledTask?: (taskId: string) => void;
   onReopenRuntime: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
@@ -484,6 +492,8 @@ function TraceCard({
   const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
   const parsedResult = parseJsonObject(trace.resultText);
   const showTargets = useContext(PresentationContext);
+  const sourceWorkspace = useDesktopWorkspace();
+  const openSource = useInputNavigation(onNotify);
   const presentation = trace.toolName === 'open_in_pulsara' && trace.status === 'completed' && trace.artifact?.sourceCoverage === 'COMPLETE' && trace.artifact?.displayKind === 'COMPLETE'
     ? parsePresentationResult(trace.resultText ?? '') : undefined;
   const terminalOutput = trace.toolName === 'exec_process'
@@ -583,6 +593,7 @@ function TraceCard({
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
         ) : <div data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary">{summary}</div>}
+        {trace.toolName === 'exec_cell' && trace.attemptId && sourceWorkspace && <button type="button" className="input-source-link" onClick={() => void openSource({ kind: 'cell', rootSessionId: sourceWorkspace.sessionId, sourceExecAttemptId: trace.attemptId! })}>查看源码</button>}
         {expandable && <AnimatedDisclosure unmountOnClose open={expanded} className="trace-card__disclosure">
           {trace.programCalls?.map(call => <TraceCard key={call.id} trace={call} disclosureOwnerId={disclosureOwnerId}
             skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey}
@@ -896,10 +907,63 @@ const unavailableVisualization = async (): Promise<string> => {
   throw new Error('Visualization content reader is unavailable');
 };
 
+const ScheduledSourceContext = createContext<((taskId: string) => void) | undefined>(undefined);
+const sourceScheduledApi = new LocalScheduledTasksApi();
+function ScheduledSource({ taskId, trigger, onNotify }: { taskId: string; trigger?: string; onNotify: MarkdownNotify }) {
+  const navigate = useContext(ScheduledSourceContext);
+  const [name, setName] = useState(taskId);
+  const [unavailable, setUnavailable] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    void sourceScheduledApi.get(taskId, controller.signal).then(task => { if (!controller.signal.aborted) { setName(task.name); setUnavailable(false); } })
+      .catch(() => { if (!controller.signal.aborted) setUnavailable(true); });
+    return () => controller.abort();
+  }, [taskId]);
+  return <><span>定时任务 · {name} · {trigger === 'RUN_ONCE' ? '手动触发' : '自动触发'}</span>{navigate && <button type="button" className="input-source-link" onClick={() => {
+    if (unavailable) onNotify('无法定位任务', '任务当前不可用，已接纳的输入正文仍可阅读。', 'warning');
+    else navigate(taskId);
+  }}>定位任务</button>}</>;
+}
+function cellOutputLabel(kind?: string) {
+  return kind === 'error' ? '脚本错误' : kind === 'tool_result' ? '脚本结算' : '脚本输出';
+}
+function inputLabel(item: { inputOrigin?: string; scheduledInput?: Message['scheduledInput']; cellOutput?: Message['cellOutput']; sourceKind?: string; sourceSessionId?: string; sourceExecAttemptId?: string }) {
+  if (item.inputOrigin === 'CELL_OUTPUT') return `${cellOutputLabel(item.cellOutput?.kind)} · ${item.cellOutput?.cellId ?? item.sourceExecAttemptId ?? 'Cell'}`;
+  if (item.inputOrigin === 'SCHEDULED_TASK') return `定时任务 · ${item.scheduledInput?.taskId ?? '任务'} · ${item.scheduledInput?.triggerSource === 'RUN_ONCE' ? '手动触发' : '自动触发'}`;
+  if (item.sourceKind === 'agent') return item.sourceSessionId ? `代理 ${item.sourceSessionId}` : item.inputOrigin === 'AGENT_MATERIAL' ? '任务材料' : '代理消息';
+  if (item.inputOrigin === 'AGENT_MATERIAL') return '任务材料';
+  if (item.inputOrigin === 'AGENT_MESSAGE') return '代理消息';
+  return item.sourceKind === 'command' ? '你' : '运行时';
+}
+function useInputNavigation(onNotify: MarkdownNotify) {
+  const workspace = useDesktopWorkspace();
+  const current = useRef(workspace); current.current = workspace;
+  return async (intent: SessionNavigation, workId?: string) => {
+    const owner = current.current;
+    if (!owner) return;
+    owner.interact(); const version = owner.interactionVersion();
+    const valid = () => current.current === owner && owner.interactionVersion() === version && owner.visible;
+    let prepared: Awaited<ReturnType<typeof prepareSessionTarget>>;
+    try {
+      prepared = await prepareSessionTarget(intent, valid);
+      const tab = prepared?.adopt();
+      if (tab && valid()) owner.open(workId && tab.kind === 'agent' ? { ...tab, workLocation: { workId, requestId: Date.now() } } : tab);
+    } catch (error) { if (valid()) onNotify('无法定位来源', error instanceof Error ? error.message : '来源当前不可用。', 'warning'); }
+    finally { prepared?.release(); }
+  };
+}
+function InputSourceLink({ item, onNotify }: { item: Pick<Message, 'inputOrigin' | 'inputSource' | 'cellOutput' | 'scheduledInput'>; onNotify: MarkdownNotify }) {
+  const workspace = useDesktopWorkspace(); const navigate = useInputNavigation(onNotify);
+  const identity = item.inputSource;
+  const attempt = item.cellOutput?.sourceExecAttemptId ?? (identity?.sourceKind === 'cell' ? identity.sourceExecAttemptId : undefined);
+  if (attempt && workspace) return <button type="button" className="input-source-link" onClick={() => void navigate({ kind: 'cell', rootSessionId: workspace.sessionId, sourceExecAttemptId: attempt })}>查看源码</button>;
+  if (identity?.sourceKind === 'agent' && identity.sourceSessionId === workspace?.sessionId) return null;
+  if (identity?.sourceKind === 'agent' && identity.sourceSessionId && workspace) return <button type="button" className="input-source-link" onClick={() => void navigate({ kind: 'agent', rootSessionId: workspace.sessionId, agentSessionId: identity.sourceSessionId! }, identity.sourceWorkId)}>定位{identity.sourceWorkId ? '工作' : '代理'}</button>;
+  return null;
+}
+
 function pendingSteerSender(item: QueuedPrompt): { label: string; senderKind: 'user' | 'agent' } {
-  if (item.sourceKind === 'command') return { label: '你', senderKind: 'user' };
-  if (item.sourceKind === 'agent') return { label: item.sourceSessionId ? `代理 ${item.sourceSessionId}` : '代理消息', senderKind: 'agent' };
-  return { label: '运行时', senderKind: 'agent' };
+  return { label: inputLabel(item), senderKind: item.sourceKind === 'command' ? 'user' : 'agent' };
 }
 
 function UserMessage({
@@ -910,7 +974,6 @@ function UserMessage({
   deliveryStatus,
   onNotify,
   onReadPromptImage = unavailablePromptImage,
-  visible = true,
 }: {
   message: Message;
   label?: string;
@@ -921,6 +984,7 @@ function UserMessage({
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
   visible?: boolean;
 }) {
+  const sourceWorkspace = useDesktopWorkspace();
   const content = pendingContent ?? message.promptContent;
   const sourceTextStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
   const copyText = content ? promptContentTextProjection(content) : message.body;
@@ -930,11 +994,18 @@ function UserMessage({
       () => onNotify('无法复制消息', '系统剪贴板暂时不可用，请重试'),
     ); }}><Copy size={13} /></button>;
 
-  if (message.inputOrigin === 'AGENT_MATERIAL') {
-    return <article className="agent-input-material" aria-label="任务材料">
-      <strong>任务材料</strong>{copyButton}
-      {content ? <PromptContentView content={content} variant="message" onReadImage={onReadPromptImage} />
-        : <p style={sourceTextStyle}>{message.body}</p>}
+  const automatic = message.inputOrigin === 'CELL_OUTPUT' || message.inputOrigin === 'SCHEDULED_TASK' || message.inputOrigin === 'AGENT_MESSAGE'
+    || message.inputOrigin === 'AGENT_MATERIAL';
+  if (automatic) {
+    const sourceLabel = sourceWorkspace && message.inputSource?.sourceKind === 'agent' && message.inputSource.sourceSessionId === sourceWorkspace?.sessionId
+      ? 'ROOT' : inputLabel({ ...message, ...message.inputSource });
+    const title = message.inputOrigin === 'AGENT_MATERIAL' && sourceLabel !== '任务材料' ? `${sourceLabel} · 任务材料` : sourceLabel;
+    return <article className={`user-turn user-steer user-steer--automatic${message.cellOutput?.kind === 'error' ? ' is-error' : ''}`} aria-label={title}>
+      <header className="user-steer__heading"><strong>{message.inputOrigin === 'SCHEDULED_TASK' && message.scheduledInput ? <ScheduledSource taskId={message.scheduledInput.taskId} trigger={message.scheduledInput.triggerSource} onNotify={onNotify} /> : title}</strong>{message.userKind === 'steer' && <CornerDownLeft size={13} aria-hidden="true" />}<InputSourceLink item={message} onNotify={onNotify} />{copyButton}</header>
+      <details className="input-material-disclosure"><summary>{message.userKind === 'steer' ? '补充材料' : '查看输入正文'}</summary>
+        <div className="user-message assistant-markdown"><MarkdownBody body={copyText ?? ''} onNotify={onNotify} /></div>
+      </details>
+      {deliveryStatus && <span role="status">{deliveryStatus}</span>}
     </article>;
   }
 
@@ -2206,12 +2277,13 @@ function ConversationScroll({ reading, children }: { reading: ReturnType<typeof 
 }
 
 export function AgentConversationView({ sessionId, agentName, reader, contentReader, projection, queue, queueCursor,
-  onMoreQueue, readingState, onNotify, entryLocation, terminalWork }: {
+  onMoreQueue, readingState, onNotify, entryLocation, terminalWork, steerNextCursor, steerLoading, steerReadError, onMoreSteers }: {
   sessionId: string; agentName: string;
   reader: import('../lib/runtime-adapter').AgentConversationReader;
   contentReader: import('../lib/runtime-adapter').AgentContentReader;
   projection: import('../lib/runtime-adapter').RuntimeProjection;
   queue: QueuedPrompt[]; queueCursor: string | null;
+  steerNextCursor?: string | null; steerLoading?: boolean; steerReadError?: string; onMoreSteers?: () => void;
   onMoreQueue: () => void; readingState: AgentReadingState; onNotify: MarkdownNotify;
   entryLocation?: { entryId: string; requestId: number };
   terminalWork?: { workId: string; status: string; reason?: string | null };
@@ -2235,7 +2307,7 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
   }, [entryLocation?.entryId, entryLocation?.requestId, reading.locateAnnotation, onNotify]);
   const visibleQueue = queue.filter(item => !projection.canonicalInputs.some(input => input.inputSource?.queueItemId === item.queueItemId));
   const pending = visibleQueue.filter(item => item.deliveryMode === 'new-turn');
-  const steers = visibleQueue.filter(item => item.deliveryMode === 'steer');
+  const steers = visibleQueue.filter(item => item.deliveryMode === 'steer' && item.targetTurnId === projection.activeTurnId);
   return <HistoryDisclosureContext.Provider value={reading.disclosureChoices}>
     <HistoryHydrationContext.Provider value={onHydrateEntries}>
       <div className="agent-conversation-reader">
@@ -2258,6 +2330,7 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
               revealEarlierProcess={reading.revealEarlierProcess} canAutoCollapse={reading.canAutoCollapse}
               onReadProcessEnd={reading.readProcessEnd} onProcessLayout={reading.restoreReadingPosition}
               focusedEntry={reading.locatedFocus} />
+            {reading.atLatestHistory && <ProviderRetryStatus retry={projection.providerRetry} />}
             {reading.atLatestHistory && projection.isRunning && projection.activeTurnId
               && !projection.messages.some(message => message.role === 'assistant' && message.turnId === projection.activeTurnId && !isEmptyLiveAssistant(message))
               && <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label={`${agentName} 处理状态`}>
@@ -2265,9 +2338,11 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
                 <div className="assistant-progress" role="status"><i />正在处理…</div>
               </article>}
             {reading.atLatestHistory && steers.map(item => <div key={item.queueItemId} data-queue-item-id={item.queueItemId}>
-              <UserMessage message={{ id: item.queueItemId, role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content), promptContent: item.content, time: '' }}
+              <UserMessage message={{ id: item.queueItemId, role: 'user', userKind: 'steer', inputOrigin: item.inputOrigin, scheduledInput: item.scheduledInput, cellOutput: item.cellOutput, inputSource: { identityKind: 'queue', ...item }, body: promptContentTextProjection(item.content), promptContent: item.content, time: '' }}
                 {...pendingSteerSender(item)} onReadPromptImage={contentReader.readPromptImage} onNotify={onNotify} />
             </div>)}
+            {reading.atLatestHistory && steerReadError && <div role="status">补充输入刷新失败：{steerReadError}</div>}
+            {reading.atLatestHistory && steerNextCursor && onMoreSteers && <button type="button" disabled={steerLoading} onClick={onMoreSteers}>加载更多补充输入</button>}
             <div data-thread-tail-end="" aria-hidden="true" />
           </div>
         </ConversationScroll>
@@ -2305,6 +2380,7 @@ export function WorkbenchView({
   todo,
   activePlanMode,
   isRunning,
+  providerRetry,
   activeTurnId,
   manualCompactionCommandId,
   inspectorOpen,
@@ -2312,6 +2388,7 @@ export function WorkbenchView({
   queuedPrompts,
   queueNextCursor,
   onLoadMoreQueue,
+  steerNextCursor, steerLoading, steerReadError, onLoadMoreSteers,
   localSubmissions,
   queueActions,
   onQueueAction,
@@ -2350,6 +2427,7 @@ export function WorkbenchView({
   onCompact,
   onRenameSession,
   onOpenScheduledTask,
+  onLocateScheduledTask,
   onReopenRuntime,
   runtimeReopenBusy,
   onReadInteraction,
@@ -2446,18 +2524,17 @@ export function WorkbenchView({
     ));
   const canonicalSubmission = (item: LocalPromptSubmission) => messages.some(message => message.inputSource?.commandId === item.commandId
     && (!item.queueItemId || message.inputSource.queueItemId === item.queueItemId));
-  const conversationSubmissions = localSubmissions.filter(item => !canonicalSubmission(item) && item.displayAsMessage
+  const conversationSubmissions = localSubmissions.filter(item => !canonicalSubmission(item) && !queuedPrompts.some(queued => queued.commandId === item.commandId) && item.displayAsMessage
     && item.deliveryMode === 'new-turn' && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER');
   const preparingSubmission = !isRunning && runtimeStatus === 'online'
     && conversationSubmissions.find(item => ['synchronizing', 'queued'].includes(item.status));
   const awaitingFirstActivity = isRunning && runtimeStatus === 'online' && activeTurnId && !interaction
     && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && !isEmptyLiveAssistant(message));
   const conversationCommandIds = new Set(conversationSubmissions.map(item => item.commandId));
-  const queuedDisplayCount = queuedCount - queuedPrompts.filter(item => item.sourceKind === 'command' && conversationCommandIds.has(item.commandId)).length;
+  const queuedDisplayCount = queuedCount;
   const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
-    && !(item.sourceKind === 'command' && conversationCommandIds.has(item.commandId))
     && !activeQueueActions.some(action => action.status === 'accepted' && action.source.queueItemId === item.queueItemId));
-  const pendingSteers = queuedPrompts.filter(item => item.deliveryMode === 'steer'
+  const pendingSteers = queuedPrompts.filter(item => item.deliveryMode === 'steer' && item.targetTurnId === activeTurnId
     && !messages.some(message => message.userKind === 'steer'
       && message.inputSource?.queueItemId === item.queueItemId));
   for (const action of activeQueueActions) {
@@ -2506,7 +2583,7 @@ export function WorkbenchView({
     queueActions, queuedPrompts, session.id, setRequestPlan, visibleQueue]);
 
   const queueAction = async (item: QueuedPrompt, kind: QueuedPromptAction['kind']) => {
-    if (item.sourceKind !== 'command' || !canControl || isObserver || editingQueue || queueClicks.current.has('composer-edit') || queueClicks.current.has(item.queueItemId)) return;
+    if ((kind === 'send' && (item.sourceKind !== 'command' || item.inputOrigin === 'SCHEDULED_TASK')) || (kind === 'edit' && item.sourceKind !== 'command' && item.inputOrigin !== 'SCHEDULED_TASK') || !canControl || isObserver || editingQueue || queueClicks.current.has('composer-edit') || queueClicks.current.has(item.queueItemId)) return;
     if (kind === 'edit' && (draft.hasContent || submitting)) {
       onNotify('请先处理当前草稿', '当前草稿和排队输入都会保留。');
       return;
@@ -2530,7 +2607,7 @@ export function WorkbenchView({
   // an accepted queue item; only the existing action availability changes.
   const queueCards = [
     ...visibleQueue.map(queued => ({ queued, local: undefined })),
-    ...localSubmissions.filter(item => !canonicalSubmission(item) && !conversationCommandIds.has(item.commandId) && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER')
+    ...localSubmissions.filter(item => !canonicalSubmission(item) && !conversationCommandIds.has(item.commandId) && !visibleQueue.some(queued => queued.commandId === item.commandId) && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER')
       .map(local => ({ queued: undefined, local })),
   ];
   const composerQueue = (
@@ -2559,17 +2636,18 @@ export function WorkbenchView({
           data-queue-item-id={queued?.queueItemId} data-command-id={item.commandId} aria-busy={busy}>
           <CornerDownRight size={13} aria-hidden="true" />
           <div className="composer-queue__body">
-            {queued?.inputOrigin === 'SCHEDULED_TASK' && <small className="composer-queue__source">定时任务</small>}
-            {local?.contentUnavailable || !item.content
+            {queued && <small className={`composer-queue__source composer-queue__source--${queued.inputOrigin === 'CELL_OUTPUT' ? queued.cellOutput?.kind === 'error' ? 'error' : 'cell' : queued.inputOrigin === 'SCHEDULED_TASK' ? 'scheduled' : 'human'}`}>{queued.inputOrigin === 'SCHEDULED_TASK' && queued.scheduledInput ? <ScheduledSource taskId={queued.scheduledInput.taskId} trigger={queued.scheduledInput.triggerSource} onNotify={onNotify} /> : inputLabel(queued)}<InputSourceLink item={{ ...queued, inputSource: { identityKind: 'queue', ...queued } }} onNotify={onNotify} /></small>}
+            {queued?.contentUnavailable ? <p role="status">输入正文暂时无法完整读取，正在核对…</p> : local?.contentUnavailable || !item.content
               ? <p>正文未能在队列终止前完成读取。</p>
-              : <PromptContentView content={item.content} variant="queue" onReadImage={onReadPromptImage} />}
+              : <PromptContentView content={item.content} variant="queue" markdown={queued && queued.sourceKind !== 'command'} onNotify={onNotify} onReadImage={onReadPromptImage} />}
           </div>
+          {queued && <button type="button" className="user-message-copy" aria-label="复制排队输入" title="复制完整原文" onClick={() => { void writeClipboardText(promptContentTextProjection(queued.content)).then(() => onNotify('已复制输入'), () => onNotify('无法复制输入')); }}><Copy size={13} /></button>}
           {!isObserver && <div className="composer-queue__actions">
             <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.sourceKind !== 'command' || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || (!isRunning && interaction?.kind !== 'plan-draft')}
               onClick={() => { if (queued) void queueAction(queued, 'send'); }}><CornerDownRight size={13} />发送</button>
-            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || queued.sourceKind !== 'command' || busy || editingQueue || !canControl}
+            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || (queued.sourceKind !== 'command' && queued.inputOrigin !== 'SCHEDULED_TASK') || busy || editingQueue || !canControl}
               onClick={() => { if (queued) void queueAction(queued, 'edit'); }}><Pencil size={13} />编辑</button>
-            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={!queued || queued.sourceKind !== 'command' || busy || editingQueue || !canControl}
+            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={!queued || busy || editingQueue || !canControl}
               data-delete-queue={queued?.queueItemId} onClick={() => { if (queued) void queueAction(queued, 'delete'); }}><Trash2 size={13} />删除</button>
           </div>}
           {notice && <small className="composer-queue__notice" role="status"><span>{notice}</span>{local?.detail && <>：<span>{local.detail}</span></>}</small>}
@@ -2659,9 +2737,8 @@ export function WorkbenchView({
 
   const insertSkill = useCallback((name: string) => {
     if (editingQueue || queueClicks.current.has('composer-edit')) return;
-    const marker = `/${name}`;
     if (splitSkillReferences(draftStore.summary(session.id).text).some(reference => typeof reference !== 'string' && reference.name === name)) return;
-    draftStore.insertText(session.id, `${marker} `, true);
+    draftStore.insertSkillReference(session.id, name);
     setSkillOpen(false);
     setAddOpen(false);
     window.requestAnimationFrame(() => draftStore.focus(session.id));
@@ -2851,7 +2928,8 @@ export function WorkbenchView({
   return (
     <HistoryDisclosureContext.Provider value={disclosureChoices}>
     <HistoryHydrationContext.Provider value={onHydrateEntries}>
-    <ResponseAnnotations sessionId={session.id} store={draftStore} onLocate={locateAnnotation} onNotify={onNotify}
+    <ScheduledSourceContext.Provider value={onLocateScheduledTask}>
+    <ResponseAnnotations skills={skills} completePaths={onCompletePaths} sessionId={session.id} store={draftStore} onLocate={locateAnnotation} onNotify={onNotify}
       canAnnotate={canControl && !isObserver && runtimeStatus === 'online' && Boolean(session.id) && !editingQueue}>
     <section className={`workbench${welcome ? ' is-welcome' : ''}${fileDrop.dragging ? ' is-file-dragging' : ''}`} aria-label="会话工作台" ref={workbenchRef} {...fileDrop.handlers}>
       {fileDrop.dragging && <div className="workbench-file-drop" role="status">
@@ -2865,6 +2943,7 @@ export function WorkbenchView({
           </div><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
         </div>
         <div className="topbar-actions">
+          <ProviderRetryStatus retry={providerRetry} />
           {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
           <div className="popover-anchor session-actions" ref={sessionActionsRef}>
             <button
@@ -2963,12 +3042,14 @@ export function WorkbenchView({
             <div key={item.queueItemId} data-queue-item-id={item.queueItemId} data-action-command-id={item.commandId}
               aria-description="引导已提交，等待当前任务接收">
               <UserMessage message={{ id: item.queueItemId, turnId: item.targetTurnId,
-                role: 'user', userKind: 'steer', body: promptContentTextProjection(item.content),
+                role: 'user', userKind: 'steer', inputOrigin: item.inputOrigin, scheduledInput: item.scheduledInput, cellOutput: item.cellOutput, inputSource: { identityKind: 'queue', ...item }, body: promptContentTextProjection(item.content),
                 promptContent: item.content, status: 'completed',
                 time: item.submittedAt ? new Date(item.submittedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '' }}
                 {...pendingSteerSender(item)} onNotify={onNotify} onReadPromptImage={onReadPromptImage} />
             </div>
           ))}
+          {atLatestHistory && steerReadError && <div role="status">补充输入刷新失败：{steerReadError}</div>}
+          {atLatestHistory && steerNextCursor && onLoadMoreSteers && <button type="button" disabled={steerLoading} onClick={onLoadMoreSteers}>加载更多补充输入</button>}
           {atLatestHistory && canControl && interaction && (
             <InteractionCard
               key={`${interaction.id}:${'workflowRevision' in interaction ? interaction.workflowRevision : 'live'}`}
@@ -3183,6 +3264,7 @@ export function WorkbenchView({
       )}
     </section>
     </ResponseAnnotations>
+    </ScheduledSourceContext.Provider>
     </HistoryHydrationContext.Provider>
     </HistoryDisclosureContext.Provider>
   );

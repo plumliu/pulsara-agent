@@ -495,16 +495,11 @@ export function InspectorPanel({
   session,
   sessionContentAvailable,
   isOpen,
-  modelConfigurations,
   canControl,
   capabilities,
   capabilityLoading,
   capabilityError,
   capabilityBusy,
-  onReadToolArtifact,
-  onReadPromptImage,
-  onReadVisualization,
-  onReadVisualizationThumbnail,
   backgroundOwnerKey,
   backgroundHostSessionId,
   backgroundControlAdmissionDeadlineMs,
@@ -566,7 +561,7 @@ export function InspectorPanel({
     if (tab.kind === 'cells-unavailable') return <div className="inspector-empty" role="status">暂无可用运行实例</div>;
     if (tab.kind === 'cells') {
       if (backgroundHostSessionId && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">对象已不可用</div>;
-      return <CellList root={session.id} host={tab.hostSessionId} onOpen={(cell, host, source) => void openPrepared({ kind: 'cell', rootSessionId: session.id, hostSessionId: host, cellId: cell.target.cell_id }, source)} />;
+      return <CellList root={session.id} host={tab.hostSessionId} onOpen={(cell, host, source) => void openPrepared({ kind: 'cell', rootSessionId: session.id, hostSessionId: host, cellId: cell.target.cell_id, sourceExecAttemptId: cell.source_exec_attempt_id }, source)} />;
     }
     if (tab.kind === 'agent') {
       tab.view ??= { top: 0, left: 0 };
@@ -574,8 +569,7 @@ export function InspectorPanel({
       return <AgentConversationPane key={`${session.id}:${tab.entityId}`} rootSessionId={session.id} agentSessionId={tab.entityId} agentName={tab.title} adapter={adapter} onNotify={onNotify} readingState={tab.view.agentReadingState} workLocation={tab.workLocation} />;
     }
     if (tab.kind === 'cell' || tab.kind === 'cell-graph') {
-      if (backgroundHostSessionId && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">对象已不可用</div>;
-      if (tab.kind === 'cell') return <CellSource root={session.id} host={tab.hostSessionId} cell={tab.entityId} onGraph={source => void openPrepared({ kind: 'cell-graph', rootSessionId: session.id, hostSessionId: tab.hostSessionId, cellId: tab.entityId }, source)} />;
+      if (tab.kind === 'cell') return <CellSource root={session.id} attempt={tab.sourceExecAttemptId} host={tab.hostSessionId} cell={tab.entityId} onGraph={tab.hostSessionId && tab.entityId ? source => void openPrepared({ kind: 'cell-graph', rootSessionId: session.id, hostSessionId: tab.hostSessionId!, cellId: tab.entityId! }, source) : undefined} />;
       tab.view ??= { top: 0, left: 0 };
       tab.view.graph ??= { top: 0, left: 0 };
       const root = session.id; const host = tab.hostSessionId;

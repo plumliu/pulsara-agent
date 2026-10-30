@@ -1631,7 +1631,7 @@ def _hooks_command(args: argparse.Namespace) -> dict[str, object]:
                 "argument_rewrite": False,
                 "tool_result_rewrite_or_suppression": False,
                 "filesystem_alias": "edit_file/write_file expose apply_patch matcher aliases but retain Pulsara arguments",
-                "terminal_transport": "only exec_process exposes Bash; query_processes, manage_process, query_monitors and manage_monitor remain independent",
+                "terminal_transport": "only exec_process exposes Bash; query_processes and manage_process remain independent",
                 "permission_allow": "PermissionRequest only",
                 "post_tool_exit_2_replacement": False,
                 "context_channel": "untrusted user-role append-only suffix",

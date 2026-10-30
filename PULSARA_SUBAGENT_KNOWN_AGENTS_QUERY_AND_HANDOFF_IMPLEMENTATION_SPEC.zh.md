@@ -173,7 +173,7 @@ ROOT 是通信目标别名，不是 Subagent，也没有委派 Work。为了单�
 - 在共同范围上继续筛选 `current_work_id IS NOT NULL OR queued_count > 0`，沿用现有身份、当前 Work、排队数投影。不是把 query 的完整 instruction／final 塞入快照。
 - 已知但 idle 的对象不必列入快照，仍可 query 找回。集合不是快照反序列化得到的，也不被快照内容覆盖。
 - ROOT 别名不伪造活跃 Work。无 target query 总能给出它；当前 runtime 身份说明／工具说明应明确可使用 ROOT，不为单独列出别名强行生成一份非空 PMCA。
-- Subagent 仍没有 Cell 快照，其 Process、Monitor、TODO 作用域保持现有语义；只打开按范围读取 Agent 的路径。
+- Subagent 仍没有 Cell 快照，其 Process、TODO 作用域保持现有语义；只打开按范围读取 Agent 的路径。
 - 复用 3,200 V3 启发式 tokens 的 PMCA 预算、惰性分页和整项省略机制；TODO 完整追加、不占 PMCA 预算的规则保持。
 - 省略提示应匹配当前作用域的实际工具：Subagent 可被引导使用 query_agents，不提示它使用不可用的 query_cells。同一实际提示须参与 builder 的初始预留、逐项测量、溢出回退和最终正文，不能只在输出后替换文案。无需另造摘要机制或专用恢复工具。
 - 保留 coordinator 的实际时序：模型摘要完成后采集 runtime handoff；采用后在既有 safe point 还会重采集当前 runtime source，并做后续调用的实际预算测量。不要把采集提前到摘要前，也不要以“已冻结”为由删除合法的采用后重采集。

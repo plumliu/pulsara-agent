@@ -42,14 +42,10 @@ from pulsara_agent.primitives.todo import (
 )
 from pulsara_agent.ports.terminal import (
     EXEC_PROCESS_TOOL_DESCRIPTION,
-    MANAGE_MONITOR_TOOL_DESCRIPTION,
     MANAGE_PROCESS_TOOL_DESCRIPTION,
-    QUERY_MONITORS_TOOL_DESCRIPTION,
     QUERY_PROCESSES_TOOL_DESCRIPTION,
     exec_process_input_schema,
-    manage_monitor_input_schema,
     manage_process_input_schema,
-    query_monitors_input_schema,
     query_processes_input_schema,
 )
 from pulsara_agent.code_mode.contracts import (
@@ -871,21 +867,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_destructive=True,
         is_open_world=True,
     ),
-    "query_monitors": _descriptor(
-        name="query_monitors",
-        description=QUERY_MONITORS_TOOL_DESCRIPTION,
-        input_schema=query_monitors_input_schema(),
-        is_read_only=True,
-        permission_category="terminal_process_observe",
-    ),
-    "manage_monitor": _descriptor(
-        name="manage_monitor",
-        description=MANAGE_MONITOR_TOOL_DESCRIPTION,
-        input_schema=manage_monitor_input_schema(),
-        is_read_only=False,
-        permission_category="terminal",
-        is_destructive=True,
-    ),
     "search_sessions": _descriptor(
         name="search_sessions",
         description=(
@@ -1036,7 +1017,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "wait_agent": _descriptor(
         name="wait_agent",
-        description="Wait for a known subagent's message or current work result. Do not wait for ROOT unless ROOT has explicitly asked you to wait for its reply. Targets are AGENT references; an unstarted target returns unavailable. Waiting binds current work and never follows its next request. Timeout ends this observation only.",
+        description="Wait for a known subagent's message or current work result. Do not wait for ROOT unless ROOT has explicitly asked you to wait for its reply. Targets are AGENT references; an unstarted target returns unavailable. Waiting binds current work and never follows its next request. Returns status, targets and message sources only; use query_agents for final or diagnostic text. Timeout ends this observation only.",
         input_schema=_wait_agent_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
@@ -1050,21 +1031,21 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "exec_cell": _descriptor(
         name="exec_cell",
-        description="Start an independent JavaScript script and return observed output and state. Pass exactly one of code or path; optional yield_time_ms. Use only the selected branch's fields; omit unused fields. Top-level await is supported. Observation timeout does not stop the script. ROOT with bypass permissions only.",
+        description="Start an independent JavaScript script and immediately return accepted with its CELL target. Pass exactly one of code or path. Top-level await is supported. Each console.log actively sends one selected input to ROOT; script tool results stay inside JavaScript. ROOT with bypass permissions only.",
         input_schema=exec_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
     "query_cells": _descriptor(
         name="query_cells",
-        description="Query cells still held by the current Host without consuming execution output. To list cells, omit target; optional fields: cursor, max_items. To inspect one cell's state and frozen source, pass its CELL target; optional fields: offset_chars, max_chars. List cursors and source offsets are separate: do not mix their fields. Continue source pages with the same CELL target. Use manage_cell with wait for execution output. Omit unused fields; target does not accept null.",
+        description="Query cells still held by the current Host without consuming execution output. To list cells, omit target; optional fields: cursor, max_items. To inspect one cell's state and frozen source, pass its CELL target; optional fields: offset_chars, max_chars. List cursors and source offsets are separate: do not mix their fields. Continue source pages with the same CELL target. Execution output is delivered actively to ROOT. Omit unused fields; target does not accept null.",
         input_schema=query_cells_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
     ),
     "manage_cell": _descriptor(
         name="manage_cell",
-        description="Control one cell. Set action and use only its listed fields: wait: target (CELL); optional yield_time_ms. stop: target (CELL) only. Omit unused fields; target does not accept null. wait reads subsequent output and state without executing code again; observation timeout leaves it running. stop stops further JavaScript execution and tool submissions. Already accepted Work is not automatically cancelled; use stop_agent for that work. ROOT with bypass permissions only.",
+        description="Control one cell. Set action and use only its listed fields: wait: target (CELL); optional yield_time_ms. stop: target (CELL) only. Omit unused fields; target does not accept null. wait observes only terminal state or timeout, without consuming output or executing code again. Output delivery does not complete this state wait; timeout leaves it running. stop stops further JavaScript execution and tool submissions. Already accepted Work is not automatically cancelled; use stop_agent for that work. ROOT with bypass permissions only.",
         input_schema=manage_cell_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
@@ -1276,7 +1257,6 @@ class BuiltinToolBindingKind(StrEnum):
     PLAN_WORKFLOW = "plan_workflow"
     TERMINAL_COMMAND = "terminal_command"
     TERMINAL_PROCESS = "terminal_process"
-    TERMINAL_MONITOR = "terminal_monitor"
     SCHEDULED_TASK_CONTROL = "scheduled_task_control"
     TODO_LOCAL_STATE = "todo_local_state"
     SUBAGENT_CONTROL = "subagent_control"
@@ -1391,7 +1371,6 @@ _TERMINAL_PROCESS_ACTIONS = (
     "wait",
     "write",
 )
-_TERMINAL_MONITOR_ACTIONS = ("cancel", "register")
 
 
 def builtin_tool_catalog() -> tuple[BuiltinToolCatalogEntry, ...]:
@@ -1596,13 +1575,6 @@ def _catalog_shape(name: str):
             both,
             "terminal",
         )
-    if name in {"query_monitors", "manage_monitor"}:
-        return (
-            BuiltinToolBindingKind.TERMINAL_MONITOR,
-            BuiltinToolAvailabilityKind.REQUIRES_TERMINAL_PORTS,
-            both,
-            "terminal",
-        )
     if name in {"query_schedules", "manage_schedule"}:
         return (BuiltinToolBindingKind.SCHEDULED_TASK_CONTROL,
                 BuiltinToolAvailabilityKind.REQUIRES_SCHEDULED_TASK_PORT,
@@ -1684,17 +1656,13 @@ def _permission_contract(
         terminal_kind = BuiltinTerminalPermissionRuleKind.ALL_ACTIONS
         access_actions: tuple[str, ...] = ()
         scheduling_actions: tuple[str, ...] = ()
-    elif name in {"query_processes", "query_monitors"}:
+    elif name in {"query_processes"}:
         terminal_kind = BuiltinTerminalPermissionRuleKind.ALL_ACTIONS
         access_actions = ()
         scheduling_actions = ()
     elif binding_kind is BuiltinToolBindingKind.TERMINAL_PROCESS:
         terminal_kind = BuiltinTerminalPermissionRuleKind.CLOSED_ACTION_SET
         access_actions = _TERMINAL_PROCESS_ACTIONS
-        scheduling_actions = ()
-    elif binding_kind is BuiltinToolBindingKind.TERMINAL_MONITOR:
-        terminal_kind = BuiltinTerminalPermissionRuleKind.CLOSED_ACTION_SET
-        access_actions = _TERMINAL_MONITOR_ACTIONS
         scheduling_actions = ()
     else:
         terminal_kind = BuiltinTerminalPermissionRuleKind.NOT_APPLICABLE
@@ -1712,7 +1680,7 @@ def _permission_contract(
 
 
 def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
-    if name in {"exec_process", "manage_monitor", "manage_process"}:
+    if name in {"exec_process", "manage_process"}:
         severity = "terminal"
     elif name in {"edit_file", "write_file", "export_artifact"}:
         severity = "bounded_write"
@@ -1722,7 +1690,6 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "query_capabilities",
         "query_agents",
         "query_processes",
-        "query_monitors",
         "query_schedules",
         "query_cells",
         "get_mcp_prompt",

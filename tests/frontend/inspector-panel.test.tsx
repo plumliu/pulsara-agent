@@ -1,9 +1,10 @@
+import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BackgroundProcess } from '../../frontend/lib/runtime-adapter';
 import type { CapabilitySnapshot } from '../../frontend/lib/pulsara-types';
-import { DesktopWorkspaceProvider } from '../../frontend/components/desktop-workspace';
+import { DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
 import { InspectorPanel } from '../../frontend/components/inspector-panel';
 
 afterEach(cleanup);
@@ -120,6 +121,8 @@ const capabilitySnapshot: CapabilitySnapshot = {
 
 function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): ComponentProps<typeof InspectorPanel> {
   return {
+    adapter: {openAgentReader: vi.fn(), createAgentContentReader: vi.fn()},
+    sessionContentAvailable: true,
     projectMcpForms: {
       preview: vi.fn(async () => []),
       import: vi.fn(async () => true),
@@ -181,7 +184,7 @@ describe('InspectorPanel PR03 production navigation', () => {
     };
     const base = props({ capabilities: snapshot, capabilityLoading: false });
     const view = render(<Panel {...base} />);
-    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
     const empty = screen.getByText('这个目录还没有技能');
     const warning = screen.getByText('部分技能目录暂时无法完整读取');
     for (const loading of [true, false, true, false]) {
@@ -196,7 +199,7 @@ describe('InspectorPanel PR03 production navigation', () => {
 
   it('shows loading rather than an empty result before the first capability snapshot arrives', () => {
     render(<Panel {...props()} />);
-    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
     expect(screen.getByText('正在加载...')).toBeTruthy();
     expect(screen.queryByText('这个目录还没有技能')).toBeNull();
   });
@@ -207,7 +210,7 @@ describe('InspectorPanel PR03 production navigation', () => {
       skills: { ...capabilitySnapshot.skills, status: 'attention', items: [], details: ['Plugin Skill definitions are unavailable'] },
     };
     render(<Panel {...props({ capabilities: snapshot, capabilityLoading: false })} />);
-    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
     expect(screen.getByText('部分技能目录暂时无法完整读取')).toBeTruthy();
     expect(screen.queryByText('这个目录还没有技能')).toBeNull();
   });
@@ -215,7 +218,7 @@ describe('InspectorPanel PR03 production navigation', () => {
   it('closes capability editing on control loss and keeps it closed after control returns', () => {
     const base = props({ capabilities: capabilitySnapshot, capabilityLoading: false, canControl: true });
     const view = render(<Panel {...base} />);
-    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
     fireEvent.click(screen.getByRole('button', { name: '添加' }));
     expect(screen.getByRole('dialog')).toBeTruthy();
 
@@ -238,17 +241,17 @@ describe('InspectorPanel PR03 production navigation', () => {
       capabilityLoading: false,
     });
     const panel = render(<Panel {...emptyProps} />);
-    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
     expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '添加' })).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: '后台进程' }));
+    fireEvent.click(screen.getByRole('button', { name: '进程' }));
     expect(screen.getByText('创建或选择会话后查看内容')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
     expect(loadBackground).not.toHaveBeenCalled();
 
     panel.rerender(<Panel {...props({ onLoadBackgroundProcesses: loadBackground })} />);
-    fireEvent.click(screen.getByRole('button', { name: '后台进程' }));
+    fireEvent.click(screen.getByRole('button', { name: '进程' }));
     expect(await screen.findByText('sleep 30')).toBeTruthy();
     expect(loadBackground).toHaveBeenCalledWith(undefined);
 
@@ -263,25 +266,25 @@ describe('InspectorPanel PR03 production navigation', () => {
 
     const navigation = screen.getByRole('navigation', { name: '工作区入口' });
     expect(within(navigation).getAllByRole('button').map((button) => button.textContent?.trim() || button.getAttribute('aria-label'))).toEqual([
-      '能力', '后台进程', '新建网页',
+      '能力', '进程', '子代理', 'cell', '网页',
     ]);
     expect(screen.queryAllByRole('tab')).toHaveLength(0);
-    fireEvent.click(within(navigation).getByRole('button', { name: '项目能力' }));
-    expect(screen.getByRole('tab', { name: '会话能力' })).toBeTruthy();
+    fireEvent.click(within(navigation).getByRole('button', { name: '能力' }));
+    expect(screen.getByRole('tab', { name: '能力' })).toBeTruthy();
     expect(screen.getByText('正在加载...')).toBeTruthy();
 
-    fireEvent.click(within(navigation).getByRole('button', { name: '后台进程' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: '进程' }));
     await waitFor(() => expect(loadBackground).toHaveBeenCalledWith(undefined));
     expect(await screen.findByText('sleep 30')).toBeTruthy();
     expect(screen.queryByRole('button', { name: '终止 sleep 30' })).toBeNull();
 
-    fireEvent.click(within(navigation).getByRole('button', { name: '项目能力' }));
+    fireEvent.click(within(navigation).getByRole('button', { name: '能力' }));
     expect(await screen.findByText('正在加载...')).toBeTruthy();
   });
 
   it('keeps capability tabs on the left, groups MCP actions on the right, and shows effective totals', () => {
     render(<Panel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
-    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
 
     const tabs = screen.getByRole('tablist', { name: '能力类型' });
     expect(within(tabs).getByRole('tab', { name: '技能 2' })).toBeTruthy();
@@ -300,7 +303,7 @@ describe('InspectorPanel PR03 production navigation', () => {
 
   it('animates the inherited list and opens MCP details in a separate flat tab', () => {
     const view = render(<Panel {...props({ capabilities: capabilitySnapshot, capabilityLoading: false })} />);
-    fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+    fireEvent.click(screen.getByRole('button', { name: '能力' }));
     fireEvent.click(screen.getByRole('tab', { name: 'MCP 2' }));
 
     const inheritedToggle = screen.getByRole('button', { name: '继承的能力1' });
@@ -330,7 +333,7 @@ describe('InspectorPanel PR03 production navigation', () => {
 it('keeps the original MCP identity unavailable after removal or Host replacement without reconnecting', () => {
   const base = props({ capabilities: capabilitySnapshot, capabilityLoading: false, canControl: true });
   const view = render(<Panel {...base} />);
-  fireEvent.click(screen.getByRole('button', { name: '项目能力' }));
+  fireEvent.click(screen.getByRole('button', { name: '能力' }));
   fireEvent.click(screen.getByRole('tab', { name: 'MCP 2' }));
   fireEvent.click(screen.getByRole('button', { name: /^工作区 MCP/ }));
   expect(screen.getByRole('tab', { name: '工作区 MCP' })).toBeTruthy();
@@ -341,7 +344,7 @@ it('keeps the original MCP identity unavailable after removal or Host replacemen
   expect(screen.queryByRole('button', { name: '收起详情' })).toBeNull();
   expect(screen.getByRole('button', { name: '重新连接' })).toBeTruthy();
   expect(screen.getByRole('button', { name: '移除' })).toBeTruthy();
-  fireEvent.click(screen.getByRole('tab', { name: '会话能力' }));
+  fireEvent.click(screen.getByRole('tab', { name: '能力' }));
   fireEvent.click(screen.getByRole('button', { name: /^工作区 MCP/ }));
   expect(screen.getAllByRole('tab', { name: '工作区 MCP' })).toHaveLength(1);
   expect(base.onReconnectProjectMcp).not.toHaveBeenCalled();
@@ -352,4 +355,18 @@ it('keeps the original MCP identity unavailable after removal or Host replacemen
   fireEvent.click(screen.getByRole('button', { name: '关闭 工作区 MCP' }));
   expect(base.onReconnectProjectMcp).not.toHaveBeenCalled();
   expect(base.onTerminateBackgroundProcess).not.toHaveBeenCalled();
+});
+
+it('reads an already-open canonical Cell source after the active Host changes',async()=>{
+ const read=vi.spyOn(agentCellApi,'source').mockResolvedValue({source_exec_attempt_id:'attempt:stable',source:{status:'AVAILABLE',text:'canonical source',offset_chars:0,returned_chars:16,total_chars:16,has_more:false,next_offset_chars:null}});
+ vi.spyOn(agentCellApi,'graph').mockResolvedValue({status:'CLOSED',message:'实时工作流视图已关闭'});
+ const live=vi.spyOn(agentCellApi,'cell');
+ const properties=props({backgroundHostSessionId:'host:new'});
+ function OpenSource(){const workspace=useDesktopWorkspace();return <button onClick={()=>workspace?.open({id:'source:stable',kind:'cell',sessionId:properties.session.id,title:'历史源码',entityId:'cell:a',hostSessionId:'host:old',sourceExecAttemptId:'attempt:stable'})}>打开历史源码</button>;}
+ const view=render(<DesktopWorkspaceProvider sessionId={properties.session.id} onShow={()=>{}}><OpenSource/><InspectorPanel {...properties}/></DesktopWorkspaceProvider>);
+ fireEvent.click(screen.getByRole('button',{name:'打开历史源码'}));
+ await waitFor(()=>expect(view.container.textContent).toContain('canonical source'));
+ expect(read).toHaveBeenCalledWith(properties.session.id,'attempt:stable',0,expect.any(AbortSignal));expect(live).not.toHaveBeenCalled();
+ expect(screen.queryByText('对象已不可用')).toBeNull();
+ vi.restoreAllMocks();
 });

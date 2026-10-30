@@ -57,11 +57,15 @@ class ScheduledTaskService:
         self._io = KernelSessionIO()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._run_started_at = datetime.now(utc_timezone.utc)
         # Advisory details only. No durable run-result or execution recovery.
         self._prepare_errors: dict[str, tuple[int, str]] = {}
 
     async def start(self):
         if self._task is None:
+            # Use the database clock shared by schedule admission. This cutoff
+            # stays fixed for the entire kernel run, including timer delays.
+            self._run_started_at, _due = await self._read("scheduled_next_time")
             self._task = asyncio.create_task(self._loop(), name="scheduled-tasks")
         self.wake()
 
@@ -324,11 +328,15 @@ class ScheduledTaskService:
         }
 
     @staticmethod
-    def _run_result(row, request):
+    def _run_result(row):
         return {
             "queue_item_id": row["id"],
-            "execution": row["request_execution"].to_dict(),
-            "coalesced": row["command_id"] != request["client_command_id"],
+            "delivery_mode": row["delivery_mode"],
+            "target_turn_id": row["target_turn_id"],
+            "execution": (
+                None if row["request_execution"] is None
+                else row["request_execution"].to_dict()
+            ),
         }
 
     async def run_now(self, request):
@@ -342,10 +350,18 @@ class ScheduledTaskService:
         prior = await self._read("confirm_scheduled_action", request=request)
         if prior is not None:
             self.wake()
-            return self._run_result(prior, request)
+            return self._run_result(prior)
         task = await self.get(request["task_id"])
         if task["session_id"] != request["session_id"]:
             raise ScheduledTaskError("INVALID_REQUEST", "任务不属于指定会话。")
+        if task["status"] == "PAUSED" and task["schedule"]["kind"] == "once":
+            retired = await self._manage(
+                "retire_expired_paused_once", session_id=task["session_id"],
+                task_id=task["id"], expected_revision=task["revision"],
+            )
+            if retired == "RETIRED":
+                self._prepare_errors.pop(task["id"], None)
+                raise ScheduledTaskError("TASK_NOT_FOUND", "任务不存在。")
         a = ScheduledAdmission(
             task["id"],
             task["session_id"],
@@ -356,15 +372,6 @@ class ScheduledTaskService:
             trigger_source=ScheduledTriggerSource.RUN_ONCE,
             client_command_id=request["client_command_id"],
         )
-        merged = await self._manage(
-            "merge_scheduled_manual", session_id=a.session_id, admission=a
-        )
-        if merged is not None:
-            self.wake()
-            confirmed = await self._read("confirm_scheduled_action", request=request)
-            if confirmed is None:
-                raise RuntimeError("merged run-once command has no queue target")
-            return self._run_result(confirmed, request)
         host = (
             await self.sessions.resume_session(a.session_id, scheduled=True)
         ).session
@@ -378,7 +385,7 @@ class ScheduledTaskService:
         accepted = await self._read("confirm_scheduled_action", request=request)
         if accepted is None:
             raise RuntimeError("accepted run-once command has no queue target")
-        return self._run_result(accepted, request)
+        return self._run_result(accepted)
 
     async def _submit(self, host, admission):
         command = admission.client_command_id or derive_id("command", "scheduled-tick", admission.task_id, str(admission.revision), admission.due_at.astimezone(utc_timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))
@@ -401,6 +408,12 @@ class ScheduledTaskService:
             PermissionMode(row["permission_mode"]),
         )
         try:
+            if a.due_at < self._run_started_at:
+                await self._manage(
+                    "retire_missed_scheduled_due", session_id=a.session_id,
+                    admission=a, run_started_at=self._run_started_at,
+                )
+                return
             state = await self._manage(
                 "observe_scheduled_due", session_id=a.session_id, admission=a
             )
@@ -451,22 +464,42 @@ class ScheduledTaskService:
             self._prepare_errors[admission.task_id] = (admission.revision + 1, detail)
 
     async def tick(self):
-        cursor = None
         while True:
-            rows, cursor = await self._read(
-                "list_scheduled_tasks", cursor=cursor, due_only=True
-            )
-            for row in rows:
-                try:
-                    await self._dispatch(row)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    # No provider body/credential or fabricated durable failure.
-                    _LOG.warning(
-                        "Scheduled tick waiting for resource: %s", type(exc).__name__
-                    )
-            if cursor is None:
+            advanced = False
+            cursor = None
+            while True:
+                rows, cursor = await self._read(
+                    "list_scheduled_tasks", cursor=cursor, due_only=True
+                )
+                for row in rows:
+                    try:
+                        if row["status"] == "PAUSED":
+                            state = await self._manage(
+                                "retire_expired_paused_once", session_id=row["session_id"],
+                                task_id=row["id"], expected_revision=row["revision"],
+                            )
+                            if state == "RETIRED":
+                                self._prepare_errors.pop(row["id"], None)
+                        else:
+                            await self._dispatch(row)
+                        current = await self._read("read_scheduled_task", task_id=row["id"])
+                        if (
+                            current is None or current["status"] != row["status"]
+                            or current["next_run_at"] != row["next_run_at"]
+                        ):
+                            advanced = True
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # No provider body/credential or fabricated durable failure.
+                        _LOG.warning(
+                            "Scheduled tick waiting for resource: %s", type(exc).__name__
+                        )
+                if cursor is None:
+                    break
+            # Revisit every overdue task once per pass. Each occurrence remains
+            # independent, while one delayed task cannot monopolize catch-up.
+            if not advanced:
                 break
         # Accepted once/manual rows must wake even when no ACTIVE plan remains.
         cursor = None

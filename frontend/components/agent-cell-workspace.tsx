@@ -110,46 +110,57 @@ export function CellList({ root, host, onOpen }: { root: string; host: string; o
     {page.next && <button className="agent-cell-more" type="button" onClick={page.more}>加载更多</button>}
   </section>;
 }
-export function CellSource({ root, host, cell, onGraph }: { root: string; host: string; cell: string; onGraph: (source: HTMLElement) => void }) {
+export function CellSource({ root, attempt, host, cell, onGraph }: { root: string; attempt: string; host?: string; cell?: string; onGraph?: (source: HTMLElement) => void }) {
   const [text, setText] = useState(''); const [next, setNext] = useState<number | null>(null); const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(''); const [unavailable, setUnavailable] = useState(false); const [graph, setGraph] = useState(false);
-  const owner = useRef<AbortController | null>(null); const expired = useRef(false); const morePending = useRef(false);
-  const expire = useCallback(() => { expired.current = true; owner.current?.abort(); setUnavailable(true); setText(''); setNext(null); setGraph(false); }, []);
+  const [error, setError] = useState(''); const [graph, setGraph] = useState(false);
+  const owner = useRef<AbortController | null>(null); const morePending = useRef(false);
   useEffect(() => {
-    const controller = new AbortController(); owner.current = controller; expired.current = false; let first = true; let timer: ReturnType<typeof setTimeout>;
+    const controller = new AbortController(); owner.current = controller;
+    setText(''); setNext(null); setLoading(true); setGraph(false); setError('');
+    void agentCellApi.source(root, attempt, 0, controller.signal).then(result => {
+      if (controller.signal.aborted) return;
+      if (result.source.status !== 'AVAILABLE') setError(result.source.reason);
+      else { setText(result.source.text); setNext(result.source.next_offset_chars); }
+    }).catch(failure => { if (!controller.signal.aborted) setError(errorText(failure)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => { controller.abort(); if (owner.current === controller) owner.current = null; };
+  }, [root, attempt]);
+  const graphEnabled = Boolean(onGraph);
+  useEffect(() => {
+    if (!host || !cell || !graphEnabled) return;
+    const controller = new AbortController(); let timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
       try {
-        if (first) {
-          const result = await agentCellApi.source(root, host, cell, 0, controller.signal);
-          if (controller.signal.aborted || expired.current || owner.current !== controller) return;
-          if (result.source.status !== 'AVAILABLE') setError(result.source.reason);
-          else { setText(result.source.text); setNext(result.source.next_offset_chars); first = false; setError(''); }
-        } else {
-          await agentCellApi.cell(root, host, cell, controller.signal);
-          if (controller.signal.aborted || expired.current || owner.current !== controller) return;
-          setError('');
-        }
-        setLoading(false);
-        const [works, participants] = await Promise.allSettled([agentCellApi.graph(root, host, cell, 'works', undefined, controller.signal), agentCellApi.graph(root, host, cell, 'participants', undefined, controller.signal)]);
-        if (controller.signal.aborted || expired.current || owner.current !== controller) return;
-        if ([works, participants].some(item => item.status === 'rejected' && retired(item.reason))) { expire(); return; }
-        setGraph(works.status === 'rejected' || participants.status === 'rejected' || works.value.items.length > 0 || participants.value.items.length > 0 || Boolean(works.value.next_cursor) || Boolean(participants.value.next_cursor) || works.value.participation_coverage !== 'complete' || participants.value.participation_coverage !== 'complete');
-        setUnavailable(false);
-      } catch (failure) { if (controller.signal.aborted || expired.current || owner.current !== controller) return; if (retired(failure)) expire(); else setError(errorText(failure)); }
-      finally { if (!controller.signal.aborted && !expired.current && owner.current === controller) { setLoading(false); timer = setTimeout(() => void refresh(), 3000); } }
+        const result = await agentCellApi.graph(root, host, cell, 'works', undefined, controller.signal);
+        if (controller.signal.aborted) return;
+        if ('status' in result) { setGraph(false); return; }
+        setGraph(true);
+      } catch { /* A temporary graph read failure does not invalidate canonical source. */ }
+      if (!controller.signal.aborted) timer = setTimeout(() => void refresh(), 3000);
     };
-    void refresh();
-    return () => { controller.abort(); if (owner.current === controller) owner.current = null; clearTimeout(timer); };
-  }, [root, host, cell, expire]);
-  const more = async () => { const controller = owner.current; if (next === null || !controller || controller.signal.aborted || expired.current || morePending.current) return; morePending.current = true; try { const result = await agentCellApi.source(root, host, cell, next, controller.signal); if (controller.signal.aborted || expired.current || owner.current !== controller) return; if (result.source.status !== 'AVAILABLE') { setError(result.source.reason); return; } const page = result.source; setText(current => current + page.text); setNext(page.next_offset_chars); } catch (failure) { if (controller.signal.aborted || expired.current || owner.current !== controller) return; if (retired(failure)) expire(); else setError(errorText(failure)); } finally { morePending.current = false; } };
-  if (unavailable) return <div className="inspector-empty" role="status">对象已不可用</div>;
+    void refresh(); return () => { controller.abort(); clearTimeout(timer); };
+  }, [root, host, cell, graphEnabled]);
+  const more = async () => {
+    const controller = owner.current;
+    if (next === null || !controller || controller.signal.aborted || morePending.current) return;
+    morePending.current = true;
+    try {
+      const result = await agentCellApi.source(root, attempt, next, controller.signal);
+      if (controller.signal.aborted || owner.current !== controller) return;
+      if (result.source.status !== 'AVAILABLE') { setError(result.source.reason); return; }
+      const page = result.source; setText(current => current + page.text); setNext(page.next_offset_chars); setError('');
+    } catch (failure) { if (!controller.signal.aborted) setError(errorText(failure)); }
+    finally { morePending.current = false; }
+  };
   return <section className="agent-cell-source">
-    {graph && <div className="agent-cell-source-toolbar"><button type="button" onClick={event => onGraph(event.currentTarget)}><GitFork size={14}/>查看工作流图</button></div>}
+    {graph && onGraph && <div className="agent-cell-source-toolbar"><button type="button" onClick={event => onGraph(event.currentTarget)}><GitFork size={14}/>查看工作流图</button></div>}
     {error && <div className="agent-cell-error" role="status">{error}</div>}
     {loading ? <div className="agent-cell-empty"><LoaderCircle size={16} className="spin"/></div> : <FileCode source={text} filename="cell.js"/>}
     {next !== null && <button type="button" className="agent-cell-more" onClick={() => void more()}>加载更多</button>}
   </section>;
 }
+
+class GraphClosed extends Error {}
 
 type GraphWork = WorkFact & { dependencies: string[] };
 export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { root: string; host: string; cell: string; onAgent: (agentId: string) => void; onWork: (work: WorkFact) => void; viewport?: { top: number; left: number; zoom?: number; expandedWorkIds?: string[]; expandedParents?: string[]; worksPages?: number; participantsPages?: number } }) {
@@ -168,13 +179,14 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
   const owner = useRef<AbortController | null>(null); const expired = useRef(false);
   const [lines, setLines] = useState<Array<{x1:number;y1:number;x2:number;y2:number}>>([]);
   const setZoom = (value: number) => { const nextZoom = Math.max(.5, Math.min(2, value)); setZoomState(nextZoom); if (viewport) viewport.zoom = nextZoom; };
-  const expire = useCallback(() => { expired.current = true; owner.current?.abort(); seeds.current.clear(); if (viewport) { viewport.top = 0; viewport.left = 0; delete viewport.zoom; delete viewport.expandedWorkIds; delete viewport.expandedParents; delete viewport.worksPages; delete viewport.participantsPages; } setWorks({}); setParticipants([]); setNames({}); setExpandedParents(new Set()); setUnavailable(true); }, [viewport]);
+  const expire = useCallback(() => { expired.current = true; owner.current?.abort(); seeds.current.clear(); if (viewport) { viewport.top = 0; viewport.left = 0; delete viewport.zoom; delete viewport.expandedWorkIds; delete viewport.expandedParents; delete viewport.worksPages; delete viewport.participantsPages; } setWorks({}); setParticipants([]); setNames({}); setExpandedParents(new Set()); setLines([]); setNext({ works: null, participants: null }); setError(''); setUnavailable(true); }, [viewport]);
   useEffect(() => {
     const controller = new AbortController(); owner.current = controller; expired.current = false; let timer: ReturnType<typeof setTimeout>; let busy = false; let requested = false;
     const scan = async (section: 'works' | 'participants') => {
       let cursor: string | undefined; let nextCursor: string | null = null; let coverage: CellGraphPage['participation_coverage'] = 'complete'; let items: CellGraphPage['items'] = [];
       for (let i = 0; i < pageCounts.current[section]; i++) {
         const page = await agentCellApi.graph(root, host, cell, section, cursor, controller.signal);
+        if ('status' in page) throw new GraphClosed(page.message);
         items = [...items, ...page.items]; if (page.participation_coverage !== 'complete') coverage = page.participation_coverage;
         nextCursor = page.next_cursor; if (!nextCursor) break; cursor = nextCursor;
       }
@@ -214,7 +226,7 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
       setCoverage(ws.participation_coverage !== 'complete' ? ws.participation_coverage : ps.participation_coverage);
       setNext({ works: ws.next_cursor, participants: ps.next_cursor });
       setError(partialRead ? '部分对象暂时无法刷新。' : ''); setUnavailable(false); setLoaded(true);
-    } catch (failure) { if (!controller.signal.aborted && !expired.current && owner.current === controller) { if (retired(failure)) expire(); else setError(errorText(failure)); setLoaded(true); } }
+    } catch (failure) { if (!controller.signal.aborted && !expired.current && owner.current === controller) { if (failure instanceof GraphClosed) expire(); else setError(`刷新失败：${errorText(failure)}`); setLoaded(true); } }
       busy = false;
       if (!controller.signal.aborted && !expired.current && owner.current === controller) {
         if (requested) { requested = false; void load(); } else timer = setTimeout(() => void load(), 3000);
@@ -237,7 +249,7 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
   const groups = useMemo(() => { const ids = new Set([...visibleWorks.map(w => w.agent_id), ...participants.map(p => p.agent_id)]); return [...ids].map(id => ({ id, works: visibleWorks.filter(w => w.agent_id === id), kinds: [...new Set(participants.filter(p => p.agent_id === id).flatMap(p => p.kinds))] })); }, [visibleWorks, participants]);
   useEffect(() => { if (scroll.current && viewport) { scroll.current.scrollTop = viewport.top; scroll.current.scrollLeft = viewport.left; } }, [viewport]);
   useEffect(() => { const element = canvas.current; if (!element) return; const update = () => { const base = element.getBoundingClientRect(); const found: typeof lines = []; const rows = [...element.querySelectorAll<HTMLElement>('[data-work]')]; for (const work of Object.values(works)) for (const source of work.dependencies) { const start = rows.find(row => row.dataset.work === source); const end = rows.find(row => row.dataset.work === work.work_id); if (!start || !end) continue; const a = start.getBoundingClientRect(), b = end.getBoundingClientRect(); found.push({ x1:(a.right-base.left)/zoom, y1:(a.top+a.height/2-base.top)/zoom, x2:(b.left-base.left)/zoom, y2:(b.top+b.height/2-base.top)/zoom }); } setLines(found); }; update(); if (typeof ResizeObserver === 'undefined') return; const observer = new ResizeObserver(update); observer.observe(element); return () => observer.disconnect(); }, [works, groups, zoom]);
-  if (unavailable) return <div className="inspector-empty" role="status">对象已不可用</div>;
+  if (unavailable) return <div className="inspector-empty" role="status">实时工作流视图已关闭</div>;
   return <section className="agent-cell-graph"><div className="agent-cell-graph-header"><strong>工作流图</strong><div><button title="缩小" onClick={() => setZoom(zoom-.1)}>−</button><button title="适配" onClick={() => setZoom(scroll.current && canvas.current ? Math.min(1, (scroll.current.clientWidth - 24) / canvas.current.scrollWidth) : 1)}>{Math.round(zoom*100)}%</button><button title="放大" onClick={() => setZoom(zoom+.1)}>＋</button></div></div>
     {error && <div className="agent-cell-error" role="status">{error}</div>}{coverage !== 'complete' && <div className="agent-cell-error" role="status">部分参与信息暂不可用</div>}
     {loaded && !error && !groups.length && coverage === 'complete' && !next.works && !next.participants && <div className="agent-cell-empty">暂无子代理编排</div>}

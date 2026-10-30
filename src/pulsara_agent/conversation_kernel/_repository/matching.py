@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Mapping
-from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, ConversationScopeKind, EntryKind, InlineContent, PromptDeliveryMode
+from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, CommittedEventDraft, EntryKind, InlineContent, PromptDeliveryMode
 from pulsara_agent.conversation_kernel.vocabulary import SubjectSlot
+from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
 from pulsara_agent.conversation_kernel.steer import PreparedSteerConsumptionCandidate, PreparedSteerResourceRejection
 
 from .contracts import (
@@ -102,7 +103,7 @@ def _accepted_steer_entry_matches(
         str(row["id"]) == candidate.new_entry_id
         and str(row["turn_id"]) == candidate.exact_target_turn_id
         and int(row["entry_sequence"]) == candidate.expected_entry_sequence
-        and str(row["entry_kind"]) == EntryKind.USER_STEER.value
+        and str(row["entry_kind"]) == (EntryKind.TERMINAL_OBSERVATION.value if candidate.input_origin is CanonicalInputOriginKind.CELL_OUTPUT else EntryKind.USER_STEER.value)
         and row['input_origin'] == candidate.input_origin.value
         and str(row["content_digest"]) == content.digest
         and int(row["content_size"]) == content.size

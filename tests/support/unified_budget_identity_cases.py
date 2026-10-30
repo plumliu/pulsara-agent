@@ -76,7 +76,7 @@ def append_identity_digests():
         )
         planning = owner.freeze_planning_input(
             scope=ProviderInputContinuityScope(
-                'session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.ROOT, None
+                'session:336wrfwkamrr3up6kjtsgvgcte', ModelInputScopeKind.ROOT
             ),
             canonical_frontier=_append_frontier(next_request),
             dispatch_anchor=_append_anchor(next_request),

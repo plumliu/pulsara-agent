@@ -16,7 +16,7 @@ function setup() {
  vi.spyOn(api,'get').mockResolvedValue(task);
  vi.spyOn(api,'update').mockResolvedValue(task);
  vi.spyOn(api,'action').mockResolvedValue({task:null});
- vi.spyOn(api,'runNow').mockResolvedValue({queue_item_id:'queue:a',execution:{status:'queued',terminal_reason:null},coalesced:false});
+ vi.spyOn(api,'runNow').mockResolvedValue({queue_item_id:'queue:a',execution:{status:'queued',terminal_reason:null},delivery_mode:'NEW_TURN',target_turn_id:null});
  return api;
 }
 const notify = vi.fn();
@@ -100,7 +100,7 @@ it('removes an accepted once plan and shows submission feedback',async()=>{
  await screen.findByRole('heading',{name:'每日报告'});
  vi.mocked(api.list).mockResolvedValue({tasks:[],next_cursor:null});
  fireEvent.click(screen.getByRole('button',{name:'运行一次'}));
- await waitFor(()=>expect(notify).toHaveBeenCalledWith('已提交','可在会话中查看','success'));
+ await waitFor(()=>expect(notify).toHaveBeenCalledWith('已加入队列','可在会话中查看','success'));
  expect(screen.queryByText('已提交，可在会话中查看')).toBeNull();
  await waitFor(()=>expect(screen.queryByRole('heading',{name:'每日报告'})).toBeNull());
  fireEvent.change(screen.getByRole('combobox',{name:'任务状态'}),{target:{value:'ACTIVE'}});
@@ -234,29 +234,28 @@ it('keeps the previous active plan visible after an atomic switch conflict',asyn
 it.each([
  {pending_queue_item_id:'queue:a',last_turn_status:null,label:'已排队'},
  {pending_queue_item_id:null,last_turn_status:'RUNNING',label:'运行中'},
-])('blocks another run while $label, then allows a new run after settlement',async(state)=>{
+])('accepts an independent run while the same task is $label',async(state)=>{
  const api=setup();vi.mocked(api.list).mockResolvedValue({tasks:[{...task,...state}],next_cursor:null});
  show(api);
- const button=await screen.findByRole('button',{name:state.label});
- expect(button.hasAttribute('disabled')).toBe(true);
- fireEvent.click(button);expect(api.runNow).not.toHaveBeenCalled();
- vi.mocked(api.get).mockResolvedValue({...task,pending_queue_item_id:null,last_turn_status:'COMPLETED'});
- fireEvent.focus(window);
  const run=await screen.findByRole('button',{name:'运行一次'});
  expect(run.hasAttribute('disabled')).toBe(false);
  fireEvent.click(run);await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(1));
+ await waitFor(()=>expect(run.hasAttribute('disabled')).toBe(false));
+ fireEvent.click(run);await waitFor(()=>expect(api.runNow).toHaveBeenCalledTimes(2));
+ const [first,second]=vi.mocked(api.runNow).mock.calls.map(call=>call[0]);
+ expect(first.client_command_id).not.toBe(second.client_command_id);
 });
 
 it('prevents rapid repeated submission while the request is unresolved',async()=>{
- const api=setup();let resolve!: (value:{queue_item_id:string;execution:{status:'running';terminal_reason:null};coalesced:boolean})=>void;
+ const api=setup();let resolve!: (value:{queue_item_id:string;execution:{status:'running';terminal_reason:null};delivery_mode:'NEW_TURN';target_turn_id:null})=>void;
  vi.mocked(api.runNow).mockImplementation(()=>new Promise(done=>{resolve=done;}));
  show(api);const run=await screen.findByRole('button',{name:'运行一次'});
  fireEvent.click(run);fireEvent.click(run);fireEvent.click(run);
  expect(api.runNow).toHaveBeenCalledTimes(1);
  vi.mocked(api.list).mockResolvedValue({tasks:[{...task,last_turn_status:'RUNNING'}],next_cursor:null});
- resolve({queue_item_id:'queue:a',execution:{status:'running',terminal_reason:null},coalesced:false});
- expect((await screen.findByRole('button',{name:'运行中'})).hasAttribute('disabled')).toBe(true);
- await waitFor(()=>expect(notify).toHaveBeenCalledWith('任务正在运行','可在会话中查看','success'));
+ resolve({queue_item_id:'queue:a',execution:{status:'running',terminal_reason:null},delivery_mode:'NEW_TURN',target_turn_id:null});
+ await waitFor(()=>expect(screen.getByRole('button',{name:'运行一次'}).hasAttribute('disabled')).toBe(false));
+ await waitFor(()=>expect(notify).toHaveBeenCalledWith('已加入队列','可在会话中查看','success'));
  await waitFor(()=>expect(screen.queryByRole('status')).toBeNull());
 });
 
@@ -399,4 +398,10 @@ it('ignores a stale task-list failure after a newer filter response',async()=>{
  await act(async()=>{reject(new Error('过期任务错误'));});
  expect(notify).not.toHaveBeenCalled();expect(screen.queryByRole('alert')).toBeNull();
  expect(screen.getByRole('heading',{name:task.name})).toBeTruthy();
+});
+
+it('reports a new scheduled steer without borrowing the old execution state', async () => {
+ const api=setup();vi.mocked(api.runNow).mockResolvedValue({queue_item_id:'queue:new',delivery_mode:'STEER_ACTIVE_TURN',target_turn_id:'turn:active',execution:null});
+ show(api);fireEvent.click(await screen.findByRole('button',{name:'运行一次'}));
+ await waitFor(()=>expect(notify).toHaveBeenCalledWith('已作为补充发送到当前任务','可在会话中查看','success'));
 });

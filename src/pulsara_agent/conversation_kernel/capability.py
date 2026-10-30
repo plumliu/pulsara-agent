@@ -245,7 +245,7 @@ class KernelSkillProjectionComposer:
             inspection=owner.inspection,
         )
 
-    def activation_context(self, *, user_input: str) -> SkillProjectionResolveContext:
+    def activation_context(self, *, user_input: tuple[str, ...]) -> SkillProjectionResolveContext:
         return SkillProjectionResolveContext(
             user_input=user_input,
             active_skill_names=self._configured,

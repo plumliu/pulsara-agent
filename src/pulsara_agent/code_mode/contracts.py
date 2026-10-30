@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import asyncio
 from typing import Awaitable, Callable, Literal, Mapping, Protocol
 
@@ -34,8 +35,7 @@ def _yield_schema() -> dict[str, object]:
 
 def exec_cell_parameters_schema() -> dict[str, object]:
     return {"oneOf": [
-        _object_schema({field: {"type": "string", **({"minLength": 1} if field == "path" else {})},
-                        "yield_time_ms": _yield_schema()}, [field])
+        _object_schema({field: {"type": "string", **({"minLength": 1} if field == "path" else {})}}, [field])
         for field in ("code", "path")
     ]}
 
@@ -140,23 +140,16 @@ class CodeModeError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
-class CodeModeObservation:
-    cell_id: str
-    state: CellState
-    output: tuple[Mapping[str, object], ...]
-    has_more: bool
-    pending_calls: int
-    error: Mapping[str, object] | None
+class CodeModeOutputLease:
+    """One immutable local record retained until its canonical queue admission settles."""
 
-    def public_value(self) -> dict[str, object]:
-        result: dict[str, object] = {
-            "target": cell_target(self.cell_id), "state": self.state,
-            "output": list(self.output), "has_more": self.has_more,
-            "pending_calls": self.pending_calls,
-        }
-        if self.error is not None:
-            result["error"] = dict(self.error)
-        return result
+    cell_id: str
+    source_turn_id: str
+    source_exec_attempt_id: str
+    record_sequence: int
+    record: Mapping[str, object]
+    snapshot: object
+    occurred_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

@@ -318,6 +318,13 @@ class FakeConnection implements RuntimeConnection {
     signal?.throwIfAborted();
     return {items:this.value.queuedPrompts, nextCursor:null};
   });
+  readQueueStatus = vi.fn<RuntimeConnection['readQueueStatus']>(async (queueItemId, signal) => {
+    signal?.throwIfAborted();
+    const consumed = this.value.canonicalInputs.find(item=>item.inputSource?.queueItemId===queueItemId);
+    if (consumed?.inputSource) return {queueItemId,status:'CONSUMED',deliveryMode:consumed.inputSource.deliveryMode,consumedEntryId:consumed.id};
+    const pending=this.value.queuedPrompts.find(item=>item.queueItemId===queueItemId);
+    return pending ? {queueItemId,status:'PENDING',deliveryMode:pending.deliveryMode,targetTurnId:pending.targetTurnId} : null;
+  });
   readQueueItem = vi.fn(async (queueItemId: string, signal?: AbortSignal) => {
     signal?.throwIfAborted();
     return this.value.queuedPrompts.find(item => item.queueItemId === queueItemId) ?? null;

@@ -3311,8 +3311,8 @@ describe('PulsaraApp', () => {
       },
     };
     adapter.connectionValue = {
-      ...projection(''), messages: [], isRunning: true, eventSequence: 1,
-      queuedCount: 1,
+      ...projection(''), messages: [], isRunning: true, activeTurnId: 'turn-observed', eventSequence: 1,
+      queuedCount: 0,
       queuedPrompts: [{
         queueItemId: 'queue-observed', sourceKind: 'command', commandId: 'command-observed', sequence: '1',
         status: 'pending', deliveryMode: 'steer', targetTurnId: 'turn-observed',
@@ -3397,7 +3397,7 @@ describe('PulsaraApp', () => {
     expect(screen.getByText(`Queue ${status} before hydration completed.`)).toBeTruthy();
   });
 
-  it('shows an idle submission in the conversation through pending receipt and canonical adoption', async () => {
+  it('moves an accepted idle submission into the real ordered queue until canonical adoption', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''), messages: [], isRunning: false, activeTurnId: undefined,
@@ -3423,9 +3423,10 @@ describe('PulsaraApp', () => {
       queuedPrompts: [{ queueItemId: 'idle-queue', sourceKind: 'command', commandId, sequence: '1', status: 'pending',
         deliveryMode: 'new-turn', content: textPrompt('空闲时直接显示的输入'), permission: 'read-only' }],
     }));
-    await waitFor(() => expect(document.querySelector(`[data-pending-message="${commandId}"]`)).toBe(bubble));
-    expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
-    expect(screen.queryByText(/1 条等待处理/)).toBeNull();
+    await waitFor(() => expect(document.querySelector(`[data-pending-message="${commandId}"]`)).toBeNull());
+    expect(screen.getByRole('region', { name: '等待处理的输入' }).textContent).toContain('空闲时直接显示的输入');
+    expect(screen.getByText(/1 条等待处理/)).toBeTruthy();
+    expect(screen.getAllByText('空闲时直接显示的输入')).toHaveLength(1);
     act(() => active.emit({ ...projection(''), eventSequence: 3, messages: [{
       id: 'idle-entry', role: 'user', userKind: 'prompt', turnId: 'turn-1', time: '现在',
       body: '空闲时直接显示的输入',
@@ -3903,6 +3904,43 @@ describe('PR04 atomic queue action ownership', () => {
     ));
   });
 
+  it('rechecks its own action after a terminal source read and restores an edit committed between the two reads', async () => {
+    const { active, adapter } = await setup();
+    const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockRejectedValue(new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE', 'ACK lost', true));
+    fireEvent.click(screen.getByRole('button', {name:'编辑'}));
+    await waitFor(()=>expect(adapter.connectCalls).toHaveLength(2));
+    const next = adapter.lastConnection!;
+    await waitFor(()=>expect(next.readQueueStatus).toHaveBeenCalledWith(source.queueItemId));
+    const commandId = cancel.mock.calls[0][0];
+    const missingRead = deferred<void>();
+    const terminalRead = deferred<Awaited<ReturnType<typeof next.readQueueStatus>>>();
+    const order: string[] = []; let reads = 0;
+    next.queryCommand.mockImplementation(async id => {
+      if (id !== commandId) return undefined;
+      reads++;
+      if (reads === 1) { order.push('action absent'); missingRead.resolve(); return undefined; }
+      order.push('action succeeded');
+      return {commandId:id,status:'succeeded',publicCode:'PROMPT_CANCELLED',promptDelivery:{queueItemId:source.queueItemId,queueStatus:'CANCELLED',deliveryMode:'new-turn'}};
+    });
+    next.readQueueStatus.mockImplementation(async id => {
+      expect(id).toBe(source.queueItemId); await missingRead.promise;
+      const terminal = await terminalRead.promise; order.push('source cancelled'); return terminal;
+    });
+    act(()=>next.emit({...next.current(),eventSequence:20}));
+    await missingRead.promise;
+    const composer = screen.getByLabelText('发送给 Pulsara');
+    expect(composerIsDisabled(composer)).toBe(true);
+    await act(async()=>terminalRead.resolve({queueItemId:source.queueItemId,status:'CANCELLED',deliveryMode:'new-turn'}));
+    await waitFor(()=>expect(order).toEqual(['action absent','source cancelled','action succeeded']));
+    await waitFor(()=>expect(composerIsDisabled(screen.getByLabelText('发送给 Pulsara'))).toBe(false));
+    const restoredComposer = screen.getByLabelText('发送给 Pulsara');
+    expect(restoredComposer.textContent).toContain('keep');expect(restoredComposer.textContent).toContain('原文');
+    expect(screen.queryByText('这条输入已被取消，无法继续操作。')).toBeNull();
+    expect(cancel).toHaveBeenCalledTimes(1);expect(next.submitPrompt).not.toHaveBeenCalled();
+    fireEvent.keyDown(restoredComposer,{key:'Enter'});
+    await waitFor(()=>expect(next.submitPrompt).toHaveBeenCalledWith(expect.any(String),source.content,'ask-permissions'));
+  });
+
   it('releases an unknown edit when its exact source has been canonically consumed', async () => {
     const { active, adapter } = await setup();
     const cancel = vi.spyOn(active, 'cancelQueuedPrompt').mockImplementation(async () => {
@@ -3991,14 +4029,11 @@ describe('PR04 atomic queue action ownership', () => {
     await waitFor(() => expect(adapter.connectCalls).toHaveLength(2));
     const next = adapter.lastConnection!;
     await waitFor(() => expect(next.queryCommand).toHaveBeenCalledWith(cancel.mock.calls[0][0]));
-    next.queryCommand.mockImplementation(async id => id === source.commandId ? {
-      commandId: id, status: 'succeeded', publicCode: 'PROMPT_CONSUMED',
-      promptDelivery: { queueItemId: source.queueItemId, queueStatus: 'CONSUMED', deliveryMode: 'new-turn' },
-    } : undefined);
+    next.readQueueStatus.mockResolvedValue({queueItemId:source.queueItemId,status:'CONSUMED',deliveryMode:'new-turn',consumedEntryId:'entry:outside-visible-window'});
     next.emit({ ...next.current(), eventSequence: 20, messages: [], queuedPrompts: [], queuedCount: 0 });
     const input = screen.getByLabelText('发送给 Pulsara');
     await waitFor(() => expect(composerIsDisabled(input)).toBe(false));
-    expect(next.queryCommand).toHaveBeenCalledWith(source.commandId);
+    expect(next.readQueueStatus).toHaveBeenCalledWith(source.queueItemId);
     expect(input.textContent).toBe('');
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(next.submitPrompt).not.toHaveBeenCalled();
@@ -4799,4 +4834,19 @@ it('settles a consumed offscreen input before its resident tail retires, without
   await screen.findByText('最新回复');
   expect(screen.queryByText('远端已接受的旧输入')).toBeNull();
   expect(document.querySelector('[data-pending-message]')).toBeNull();
+});
+
+it.each(['CELL_OUTPUT','SCHEDULED_TASK'] as const)('settles lost cancellation rejection from exact %s row outside the history window without a source command',async origin=>{
+ const adapter=new FakeAdapter();const source:QueuedPrompt={queueItemId:'queue:nonhuman',sequence:'1',status:'pending',deliveryMode:'new-turn',inputOrigin:origin,sourceKind:origin==='CELL_OUTPUT'?'cell':'system',content:textPrompt('source body')};
+ adapter.connectionValue={...projection(''),messages:[],canonicalInputs:[],queuedPrompts:[source],queuedCount:1};
+ renderWorkbench(<PulsaraApp adapter={adapter}/>);await screen.findByText('source body');const active=adapter.lastConnection!;const stop=vi.spyOn(active,'stopActiveTurn');
+ const cancel=vi.spyOn(active,'cancelQueuedPrompt').mockRejectedValue(new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE','rejection ACK lost',true));
+ fireEvent.click(screen.getByRole('button',{name:'删除'}));await waitFor(()=>expect(adapter.connectCalls).toHaveLength(2));
+ const next=adapter.lastConnection!;const nextStop=vi.spyOn(next,'stopActiveTurn');next.readQueueStatus.mockResolvedValue({queueItemId:source.queueItemId,status:'CONSUMED',deliveryMode:'new-turn',consumedEntryId:'entry:outside-window'});
+ act(()=>next.emit({...next.current(),eventSequence:30,queuedPrompts:[],queuedCount:0,messages:[],canonicalInputs:[]}));
+ await waitFor(()=>expect(next.readQueueStatus).toHaveBeenCalledWith(source.queueItemId));
+ expect(await screen.findByText('这条输入已开始处理，无法再编辑、删除或改为引导。')).toBeTruthy();
+ expect(document.querySelector('.composer-queue__notice')?.textContent ?? '').not.toContain('正在核对操作状态');expect(next.current().messages).toEqual([]);
+ expect(cancel).toHaveBeenCalledTimes(1);expect(next.submitPrompt).not.toHaveBeenCalled();
+ expect(stop).not.toHaveBeenCalled();expect(nextStop).not.toHaveBeenCalled();
 });

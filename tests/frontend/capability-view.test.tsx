@@ -124,15 +124,12 @@ it('updates the active count after a complete source is trusted', async () => {
   expect(hooks.trust).toHaveBeenCalledWith(source);
 });
 
-it('groups toolbar actions while keeping display refresh separate from explicit reload', () => {
-  const onRefresh = vi.fn(), onReload = vi.fn();
-  const view = render(<CapabilityView {...callbacks} loading={false} snapshot={snapshot} onRefresh={onRefresh} onReload={onReload} />);
+it('keeps the toolbar refresh on the current read-only inventory callback', () => {
+  const onRefresh = vi.fn();
+  const view = render(<CapabilityView {...callbacks} loading={false} snapshot={snapshot} onRefresh={onRefresh} />);
   const controls = view.container.querySelector('.capability-page-controls')! as HTMLElement;
   fireEvent.click(within(controls).getByRole('button', { name: '刷新能力' }));
   expect(onRefresh).toHaveBeenCalledOnce();
-  expect(onReload).not.toHaveBeenCalled();
-  fireEvent.click(within(controls).getByRole('button', { name: '重新加载会话能力' }));
-  expect(onReload).toHaveBeenCalledOnce();
 });
 
 

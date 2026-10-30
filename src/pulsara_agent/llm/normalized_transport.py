@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from collections.abc import Callable
 from typing import TYPE_CHECKING, AsyncIterator
 
 from pulsara_agent.llm.provider_sanitization import (
@@ -62,8 +63,10 @@ class NormalizedProviderTransportExecution:
         stream: AsyncIterator[object],
         *,
         local_diagnostics: tuple[ModelCallDiagnosticFact, ...] = (),
+        error_scrubber: Callable[[str], str] | None = None,
     ) -> None:
         self._stream = stream
+        self._error_scrubber = error_scrubber
         self._local_diagnostics = local_diagnostics
         self._open: dict[str, _OpenBlock] = {}
         self._seen: set[str] = set()
@@ -234,6 +237,7 @@ class NormalizedProviderTransportExecution:
                 message=message,
                 code_hint=code_hint,
                 retry_summary=retry_summary,
+                scrub_text=self._error_scrubber,
             ),
         )
 
@@ -340,6 +344,17 @@ class NormalizedLLMTransport:
     def open_stream(
         self, *, call: ResolvedModelCall, context: LLMContext
     ) -> NormalizedProviderTransportExecution:
+        def scrub_text(value: str) -> str:
+            return value
+        observer = context.provider_error_scrubber_observer
+
+        def capture_scrubber(value: Callable[[str], str]) -> None:
+            nonlocal scrub_text
+            scrub_text = value
+            if observer is not None:
+                observer(value)
+
+        context = replace(context, provider_error_scrubber_observer=capture_scrubber)
         try:
             stream = self._adapter.stream(
                 call=call,
@@ -365,6 +380,7 @@ class NormalizedLLMTransport:
         return NormalizedProviderTransportExecution(
             stream,
             local_diagnostics=diagnostics,
+            error_scrubber=lambda value: scrub_text(value),
         )
 
 

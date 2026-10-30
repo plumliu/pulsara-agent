@@ -1992,8 +1992,9 @@ def test_scheduled_http_uses_shared_run_once_and_exposes_atomic_switch(tmp_path)
             run_now=AsyncMock(
                 return_value={
                     "queue_item_id": 'queue:go2sr4bw2g7jcnyhej4mv6lowy',
-                    "status": "PENDING",
-                    "coalesced": False,
+                    "delivery_mode": "NEW_TURN",
+                    "target_turn_id": None,
+                    "execution": {"status": "QUEUED"},
                 }
             ),
             switch=AsyncMock(return_value={"paused": {}, "active": {}}),

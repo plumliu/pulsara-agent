@@ -23,7 +23,6 @@ describe('builtin tool summaries', () => {
     ['read_artifact', { returned_chars: 300, has_more: true, source_coverage: 'RETAINED_SNAPSHOT', text: 'RAW OUTPUT' }, {}, '读取完整输出', '已读取 300 个字符，还有后续内容 · 仅保留了部分原始输出'],
     ['exec_process', { status: 'running', exit_code: -1, yielded_to_background: true, output: 'RAW STDOUT' }, {}, '运行命令', '命令仍在后台运行'],
     ['manage_process', { status: 'success', exit_code: 0, output: 'RAW OUTPUT' }, { action: 'poll' }, '查看命令状态', '命令执行完成'],
-    ['manage_monitor', { status: 'REGISTERED' }, { action: 'register' }, '关注命令进展', '已开启进展通知'],
     ['todo', { status: 'UPDATED', counts: { total: 5, completed: 2 } }, {}, '更新工作清单', '2/5 项已完成'],
     ['enter_plan', { plan_control: 'ENTERED_PLAN' }, {}, '开始规划', '已进入规划模式'],
     ['ask_plan_question', { plan_control: 'QUESTION_ANSWERED' }, {}, '确认方案细节', '已记录你的选择'],

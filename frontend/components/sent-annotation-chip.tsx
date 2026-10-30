@@ -1,3 +1,4 @@
+import { UserReferenceText } from './user-reference-text';
 import { autoUpdate, computePosition, flip, offset, shift } from '@floating-ui/dom';
 import { MessageSquare } from 'lucide-react';
 import { useId, useLayoutEffect } from 'react';
@@ -48,7 +49,7 @@ export function SentAnnotationChip({ value, number }: { value: PromptAnnotationP
       <div id={`${id}-title`} className="sent-annotation-preview__title">Annotation {number}</div>
       <AnnotationSourceButton source={value.source} beforeLocate={dismiss} />
       <AnnotationQuote quote={value.quote} />
-      {value.comment && <p className="sent-annotation-preview__comment">{value.comment}</p>}
+      {value.comment && <p className="sent-annotation-preview__comment"><UserReferenceText text={value.comment} /></p>}
     </div>, document.body)}
   </>;
 }

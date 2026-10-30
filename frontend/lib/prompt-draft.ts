@@ -13,8 +13,8 @@ import { UndoRedo } from '@tiptap/extensions';
 import { FileReferenceNode } from '../components/file-reference-node';
 import { PromptImageNode } from '../components/prompt-image-node';
 import { SkillReferenceNode } from '../components/skill-reference-node';
-import { fileReference, formatFileReference, formatWorkspaceReference, splitFileReferences, type ImportFiles } from './file-reference';
-import { skillReference, splitSkillReferences } from './skill-reference';
+import { fileReference, formatFileReference, formatWorkspaceReference, splitUserFileReferences, type ImportFiles } from './file-reference';
+import { skillReference } from './skill-reference';
 import type { EditablePromptContent, LocalPromptImagePart } from './prompt-content';
 
 const acceptedImageMediaTypes = new Set(['image/jpeg', 'image/png', 'image/webp']);
@@ -288,6 +288,16 @@ export class PromptDraftStore {
     chain.insertContent(nodes).run();
   }
 
+  insertSkillReference(sessionId: string, name: string): void {
+    const raw = `/${name}`;
+    if (!skillReference(raw)) throw new Error('技能引用格式不正确。');
+    const editor = this.getEditor(sessionId);
+    let start = 1;
+    editor.state.doc.forEach(node => { if (node.type.name === 'annotation') start += node.nodeSize; });
+    editor.chain().focus(undefined, { scrollIntoView: false }).setTextSelection(start)
+      .insertContent([skillReferenceNode(raw), { type: 'text', text: ' ' }]).run();
+  }
+
   insertInternalHtml(sessionId: string, value: string, position?: number): boolean {
     const session = this.requireSession(sessionId);
     const template = document.createElement('template');
@@ -556,9 +566,8 @@ function paragraphDocument(content: JSONContent[]): JSONContent {
 }
 
 function plainTextNodes(value: string): JSONContent[] {
-  return splitFileReferences(value).flatMap(part => typeof part === 'string'
-    ? splitSkillReferences(part).flatMap(piece => typeof piece === 'string'
-      ? literalTextNodes(piece) : [skillReferenceNode(piece.raw)])
+  return splitUserFileReferences(value).flatMap(part => typeof part === 'string'
+    ? literalTextNodes(part)
     : [referenceNode(part.raw)]);
 }
 

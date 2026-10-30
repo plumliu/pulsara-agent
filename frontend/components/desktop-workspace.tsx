@@ -28,7 +28,7 @@ export type WorkspaceTab = WorkspaceTabBase & (
   | { kind: 'cells-unavailable'; entityId?: never; hostSessionId?: never }
   | { kind: 'cells'; entityId?: never; hostSessionId: string }
   | { kind: 'agent'; entityId: string; hostSessionId?: never }
-  | { kind: 'cell'; entityId: string; hostSessionId: string }
+  | { kind: 'cell'; sourceExecAttemptId: string; entityId?: string; hostSessionId?: string }
   | { kind: 'cell-graph'; entityId: string; hostSessionId: string })));
 export type BackgroundControlMemory = Map<string, { reference?: UserControlCommandRef; control?: CommandReceipt; error?: string }>;
 export interface PreparedWorkspaceTab { adopt: () => WorkspaceTab | undefined; release: () => void; start?: () => void }
@@ -269,7 +269,8 @@ export function inspectorTab(sessionId: string, kind: Exclude<WorkspaceTabKind, 
     if (!entityId || hostSessionId) throw new Error('Agent tab requires its session identity');
     return { id, sessionId, kind, title, entityId };
   }
-  if (kind === 'cell' || kind === 'cell-graph') {
+  if (kind === 'cell') throw new Error('Source tab requires its canonical attempt identity');
+  if (kind === 'cell-graph') {
     if (!entityId || !hostSessionId) throw new Error('Cell tab requires its Cell and Host identities');
     return { id, sessionId, kind, title, entityId, hostSessionId };
   }

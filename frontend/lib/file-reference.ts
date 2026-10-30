@@ -1,3 +1,4 @@
+import { explicitReferenceExcludedRanges } from './skill-reference';
 /** File references remain ordinary text in the canonical prompt and provider input. */
 export interface ImportedPath {
   path: string;
@@ -73,4 +74,16 @@ export function fileAppearance(name: string, directory: boolean): { type: string
   if (extension === 'ppt' || extension === 'pptx') return { type: 'slides', label: 'PPT' };
   if (extension === 'xls' || extension === 'xlsx') return { type: 'sheet', label: 'XLS' };
   return { type: 'file', label: '文件' };
+}
+
+/** Only ordinary user text can display an active file reference; code/quotes stay literal. */
+export function splitUserFileReferences(text: string): ReturnType<typeof splitFileReferences> {
+  let offset = 0;
+  const excluded = explicitReferenceExcludedRanges(text, false);
+  return splitFileReferences(text).map(part => {
+    const raw = typeof part === 'string' ? part : part.raw;
+    const allowed = !excluded.some(([start, end]) => offset >= start && offset < end);
+    offset += raw.length;
+    return typeof part === 'string' || allowed ? part : raw;
+  });
 }

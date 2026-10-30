@@ -11,6 +11,9 @@ from pulsara_agent.llm.adapters.openai.client import (
     openai_auth_request_options,
     prepare_openai_sdk,
 )
+from pulsara_agent.llm.adapters.openai.retrying import (
+    expand_provider_diagnostic_scrubber, provider_diagnostic_await,
+)
 from pulsara_agent.llm.model_target import canonicalize_endpoint
 from pulsara_agent.llm.stream_limits import MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
@@ -30,7 +33,7 @@ async def discover_model_ids(*, base_url: str, api_key: str | None) -> list[str]
     from openai import APIConnectionError, APIStatusError, APITimeoutError
 
     boundary = ProcessCredentialBoundary(api_key or "")
-    scrubber = boundary.capture_scrub_set()
+    scrubber = expand_provider_diagnostic_scrubber(boundary.capture_scrub_set(), endpoint)
     try:
         async with build_async_openai_client(
             api_key=api_key,
@@ -41,9 +44,9 @@ async def discover_model_ids(*, base_url: str, api_key: str | None) -> list[str]
             response_hooks=[bounded_json_response_hook(MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES)],
         ) as client:
             async with asyncio.timeout(_DISCOVERY_TIMEOUT.total_seconds):
-                page = await client.models.list(
+                page = await provider_diagnostic_await(client.models.list(
                     **openai_auth_request_options(requires_api_key=bool(api_key))
-                )
+                ), scrubber)
             rows = getattr(page, "data", None)
             if not isinstance(rows, list):
                 raise ValueError("模型列表响应缺少 data 数组。")

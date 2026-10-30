@@ -1917,6 +1917,9 @@ class LocalSessionController:
         if type(maximum) is not int or not 1 <= maximum <= 50:
             raise ValueError("Cell page size is invalid")
         result = host._tools.query_code_cells(cursor=body.get("cursor"), max_items=maximum)
+        for item in result["cells"]:
+            item["source_exec_attempt_id"] = self._sidebar_cell_capture(
+                host, item["target"]["cell_id"]).source_exec_attempt_id
         if await self._sidebar_root_host(root_session_id, host_session_id) is not host:
             raise KeyError(host_session_id)
         return result
@@ -1929,27 +1932,92 @@ class LocalSessionController:
         current = self._sidebar_cell_capture(host, cell_id)
         if current.source_exec_attempt_id != capture.source_exec_attempt_id:
             raise KeyError(cell_id)
-        return {"cell": current.public_value()}
+        return {"cell": {**current.public_value(),
+                         "source_exec_attempt_id": current.source_exec_attempt_id}}
 
-    async def sidebar_cell(self, root_session_id: str, host_session_id: str, cell_id: str,
-                           body: dict, *, graph: bool):
-        host = await self._sidebar_root_host(root_session_id, host_session_id)
-        capture = self._sidebar_cell_capture(host, cell_id)
-        if graph:
-            if set(body) - {"section", "cursor", "max_items"}:
-                raise ValueError("Cell graph parameters are invalid")
-            result = await host._tools.read_code_cell_graph(cell_id=cell_id, section=body.get("section", "works"),
-                cursor=body.get("cursor"), max_items=body.get("max_items", 50))
-        else:
-            if set(body) - {"offset_chars", "max_chars"}:
-                raise ValueError("Cell source parameters are invalid")
-            result = await host._tools.read_code_cell_source_page(session_id=root_session_id, capture=capture,
-                offset_chars=body.get("offset_chars", 0), max_chars=body.get("max_chars", 20000))
-        if await self._sidebar_root_host(root_session_id, host_session_id) is not host:
-            raise KeyError(host_session_id)
-        current = self._sidebar_cell_capture(host, cell_id)
-        if current.source_exec_attempt_id != capture.source_exec_attempt_id:
-            raise KeyError(cell_id)
+    async def cell_source(self, root_session_id: str, source_exec_attempt_id: str, body: dict):
+        if set(body) - {"offset_chars", "max_chars"}:
+            raise ValueError("Cell source parameters are invalid")
+        offset = browser_history_uint64(body.get("offset_chars", 0), "Cell source offset")
+        maximum = browser_history_uint64(body.get("max_chars", 20000), "Cell source page size")
+        if not 1 <= maximum <= 32000:
+            raise ValueError("Cell source page size is invalid")
+        await self._sidebar_root(root_session_id)
+        repository = await self.core._ensure_resources()
+        source = await asyncio.to_thread(repository.read_code_mode_source,
+            session_id=root_session_id, attempt_id=source_exec_attempt_id,
+            deadline_monotonic=self.core._canonical_deadline())
+        await self._sidebar_root(root_session_id)
+        if source is None:
+            raise KeyError(source_exec_attempt_id)
+        text = source[offset:offset + maximum]
+        end = offset + len(text)
+        return {"source_exec_attempt_id": source_exec_attempt_id,
+            "live_cell": self._live_cell_for_source(root_session_id, source_exec_attempt_id), "source": {
+            "status": "AVAILABLE", "text": text, "offset_chars": offset,
+            "returned_chars": len(text), "total_chars": len(source),
+            "has_more": end < len(source), "next_offset_chars": end if end < len(source) else None}}
+
+    def _live_cell_for_source(self, root_session_id: str, source_exec_attempt_id: str):
+        from pulsara_agent.code_mode.contracts import CodeModeError
+        for host in tuple(self.core._sessions.values()):
+            if (host.session_id != root_session_id or host.root_session_id is not None
+                    or host._closing or host._closed):
+                continue
+            cursor = None
+            while True:
+                try:
+                    page = host._tools.query_code_cells(cursor=cursor, max_items=50)
+                    for item in page["cells"]:
+                        cell_id = item["target"]["cell_id"]
+                        capture = host._tools.capture_code_cell(cell_id)
+                        if capture.source_exec_attempt_id == source_exec_attempt_id:
+                            return {"host_session_id": host.host_session_id, "cell_id": cell_id}
+                except CodeModeError:
+                    # Canonical source reading never depends on live runtime
+                    # availability, and this observation does not revive it.
+                    break
+                cursor = page["next_cursor"]
+                if cursor is None:
+                    break
+        return None
+
+    async def sidebar_cell_graph(self, root_session_id: str, host_session_id: str,
+                                 cell_id: str, body: dict):
+        if set(body) - {"section", "cursor", "max_items"}:
+            raise ValueError("Cell graph parameters are invalid")
+        await self._sidebar_root(root_session_id)
+        closed = {"status": "CLOSED", "message": "实时工作流视图已关闭"}
+        try:
+            host = await self._sidebar_root_host(root_session_id, host_session_id)
+            capture = self._sidebar_cell_capture(host, cell_id)
+        except KeyError:
+            await self._sidebar_root(root_session_id)
+            return closed
+        try:
+            result = await host._tools.read_code_cell_graph(cell_id=cell_id,
+                section=body.get("section", "works"), cursor=body.get("cursor"),
+                max_items=body.get("max_items", 50))
+        except Exception:
+            # An operation failure alone cannot establish retirement. Check
+            # the original live target, and retain a transient error if alive.
+            try:
+                await self._sidebar_root_host(root_session_id, host_session_id)
+                self._sidebar_cell_capture(host, cell_id)
+            except KeyError:
+                await self._sidebar_root(root_session_id)
+                return closed
+            raise
+        try:
+            current_host = await self._sidebar_root_host(root_session_id, host_session_id)
+            current = self._sidebar_cell_capture(current_host, cell_id)
+            if current_host is not host or current.source_exec_attempt_id != capture.source_exec_attempt_id:
+                return closed
+        except KeyError:
+            # Reauthorize independently: a deleted/inaccessible ROOT is not a
+            # retired runtime. Sidecar/network errors keep their real failure.
+            await self._sidebar_root(root_session_id)
+            return closed
         return result
 
     @staticmethod
@@ -1977,12 +2045,13 @@ class LocalSessionController:
                 raise ValueError("queue item lookup accepts one identity")
             item = await asyncio.to_thread(reader.queue_item, queue_item_id=body["queue_item_id"], **common)
             return {"item": None if item is None else MessageToDict(item, preserving_proto_field_name=True)}
-        if set(body) - {"cursor", "max_items"}:
+        if set(body) - {"cursor", "max_items", "delivery_mode", "target_turn_id"}:
             raise ValueError("queue page parameters are invalid")
         cursor = browser_history_uint64(body.get("cursor", 0), "queue cursor")
         maximum = browser_history_uint64(body.get("max_items", 50), "queue page size")
         items, next_cursor = await asyncio.to_thread(reader.queue_page, after_sequence=cursor,
-                                                     limit=maximum, **common)
+            limit=maximum, delivery_mode=body.get("delivery_mode", "NEW_TURN"),
+            target_turn_id=body.get("target_turn_id"), **common)
         return {"items": [MessageToDict(item, preserving_proto_field_name=True) for item in items],
                 "next_cursor": None if next_cursor is None else str(next_cursor)}
 

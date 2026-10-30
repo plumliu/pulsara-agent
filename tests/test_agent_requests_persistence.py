@@ -9,6 +9,7 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id, derive_id
 from pulsara_agent.conversation_kernel.blob import CanonicalContentPublisher
+from pulsara_agent.conversation_kernel.repository_errors import ConversationKernelConflict
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
@@ -925,7 +926,7 @@ def test_root_deletion_cascades_only_owned_members(source):
     )
 
 
-def test_material_delivery_is_independent_of_deleted_sender_and_exactly_confirmed(
+def test_explicit_agent_message_survives_sender_deletion_and_confirms_exact_target(
     source,
 ):
     repository, root, admit = source
@@ -940,7 +941,7 @@ def test_material_delivery_is_independent_of_deleted_sender_and_exactly_confirme
     )["final"]
     assert final == "Complete real final body."
     delivery_id = derive_id(
-        "queue", "agent-completion", root.guard.session_id, child.work_id
+        "queue", "explicit-agent-message", root.guard.session_id, child.work_id
     )
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR, deadline_monotonic=deadline()
@@ -956,7 +957,6 @@ def test_material_delivery_is_independent_of_deleted_sender_and_exactly_confirme
         source_session_id=child.agent_id,
         source_work_id=child.work_id,
         text=final,
-        input_origin="AGENT_MATERIAL",
         occurred_at=now(),
         actor_id="test",
         deadline_monotonic=deadline(),
@@ -972,12 +972,11 @@ def test_material_delivery_is_independent_of_deleted_sender_and_exactly_confirme
     )
     confirmed = repository.enqueue_agent_steer(
         root.guard,
-        target_turn_id=random_id("turn"),
+        target_turn_id=root_turn,
         queue_item_id=delivery_id,
         source_session_id=child.agent_id,
         source_work_id=child.work_id,
         text=final,
-        input_origin="AGENT_MATERIAL",
         occurred_at=now(),
         actor_id="test",
         deadline_monotonic=deadline(),
@@ -985,6 +984,18 @@ def test_material_delivery_is_independent_of_deleted_sender_and_exactly_confirme
     assert (
         confirmed["id"] == delivered["id"] and confirmed["target_turn_id"] == root_turn
     )
+    with pytest.raises(ConversationKernelConflict, match="message request identity was reused"):
+        repository.enqueue_agent_steer(
+            root.guard,
+            target_turn_id=random_id("turn"),
+            queue_item_id=delivery_id,
+            source_session_id=child.agent_id,
+            source_work_id=child.work_id,
+            text=final,
+            occurred_at=now(),
+            actor_id="test",
+            deadline_monotonic=deadline(),
+        )
     facts = repository.read_pending_prompt_steer_facts(
         session_id=root.guard.session_id,
         target_turn_id=root_turn,
@@ -992,7 +1003,7 @@ def test_material_delivery_is_independent_of_deleted_sender_and_exactly_confirme
         deadline_monotonic=deadline(),
     )
     fact = next(x for x in facts if x.queue_item_id == delivery_id)
-    assert fact.command_id is None and fact.input_origin.value == "AGENT_MATERIAL"
+    assert fact.command_id is None and fact.input_origin.value == "AGENT_MESSAGE"
     actual = repository.hydrate_pending_prompt_steer(
         fact=fact, deadline_monotonic=deadline()
     )

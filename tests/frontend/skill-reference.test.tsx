@@ -31,11 +31,11 @@ it('keeps SVG source literal through composer capture and message display alongs
   const content = {parts: [{type: 'text' as const, text: raw}]};
   const value = store();
   value.restoreIfEmpty('svg', content);
-  expect(value.getEditor('svg').getJSON().content?.[0].content?.filter(node => node.type === 'skillReference')).toHaveLength(1);
+  expect(value.getEditor('svg').getJSON().content?.[0].content?.filter(node => node.type === 'skillReference')).toHaveLength(0);
   expect((await value.capture('svg')).content).toEqual(content);
   const view = render(<PromptContentView variant="message" content={content} onReadImage={vi.fn()}/>);
-  expect(view.container.querySelectorAll('[data-skill-reference]')).toHaveLength(1);
-  expect(screen.getByLabelText('技能：pdf')).toBeTruthy();
+  expect(view.container.querySelectorAll('[data-skill-reference]')).toHaveLength(0);
+  expect(view.container.textContent).toContain('/pdf');
   expect(view.container.textContent).toContain('<svg><g><circle/></g><text>示例</text></svg>');
 });
 
@@ -48,7 +48,7 @@ it('keeps exact Text/Image order, file paths, and slash markers on capture and r
     { type: 'text' as const, text: ' /huggingface-best  ' },
   ] };
   value.restoreIfEmpty('s', content);
-  expect(value.getEditor('s').getJSON().content?.[0].content?.filter(node => node.type === 'skillReference')).toHaveLength(2);
+  expect(value.getEditor('s').getJSON().content?.[0].content?.filter(node => node.type === 'skillReference')).toHaveLength(0);
   expect(value.summary('s').text).toBe(`  /hf-cli ${file}\n /huggingface-best  `);
   const snapshot = await value.capture('s');
   expect(snapshot.content).toEqual(content);
@@ -58,9 +58,10 @@ it('keeps exact Text/Image order, file paths, and slash markers on capture and r
 
 it('deletes and undoes a selected skill atom and pastes it through the actual editor handler', async () => {
   const value = store();
-  render(<PromptComposer store={value} sessionId="s" disabled={false} placeholder="input" onSubmit={() => {}} onNotify={() => {}} />);
+  render(<PromptComposer store={value} sessionId="s" disabled={false} placeholder="input" onSubmit={() => {}} onNotify={() => {}} skills={[{name:'hf-cli'} as import('../../frontend/lib/pulsara-types').SkillCapability]} />);
   const editor = value.getEditor('s');
-  await act(async () => value.insertText('s', '/hf-cli ', true));
+  await act(async () => value.insertText('s', '/', true));
+  fireEvent.click(await screen.findByRole('button', {name:'hf-cli'}));
   expect(await screen.findByLabelText('技能：hf-cli')).toBeTruthy();
   const snapshot = await value.capture('s');
   await act(async () => {
@@ -81,17 +82,31 @@ it('deletes and undoes a selected skill atom and pastes it through the actual ed
   expect((await value.capture('s')).content).toEqual(snapshot.content);
 });
 
-it.each(['message', 'queue'] as const)('shows the same skill card in %s and copies its original marker', variant => {
+it.each(['message', 'queue'] as const)('keeps sent skill markers literal in %s without claiming current catalog validation', variant => {
   const raw = '先用 /huggingface-best 再用 /pdf。';
   const view = render(<PromptContentView variant={variant} content={{ parts: [{ type: 'text', text: raw }] }} onReadImage={vi.fn()} />);
-  expect(screen.getByLabelText('技能：huggingface-best').textContent).toBe('huggingface-best');
-  expect(screen.getByLabelText('技能：pdf')).toBeTruthy();
+  expect(view.container.querySelector('[data-skill-reference]')).toBeNull();
+  expect(view.container.textContent).toBe(raw);
   const body = view.container.querySelector('.prompt-content-body')!;
   const selection = window.getSelection()!;
   const range = document.createRange(); range.selectNodeContents(body);
   selection.removeAllRanges(); selection.addRange(range);
   const setData = vi.fn();
   fireEvent.copy(body, { clipboardData: { setData } });
-  expect(setData).toHaveBeenCalledWith('text/plain', raw);
+  expect(selection.toString()).toBe(raw);
+  expect(setData).not.toHaveBeenCalled();
   selection.removeAllRanges();
+});
+
+it('excludes code, block quotes, URLs and link destinations from explicit skill intent', () => {
+ const raw = 'use /pdf\n`/hidden`\n```js\n/pdf\n```\n> /quoted\n[link](/target) https://example.com/pdf\n/final';
+ expect(splitSkillReferences(raw).filter(part=>typeof part!=='string')).toEqual([{name:'pdf',raw:'/pdf'},{name:'final',raw:'/final'}]);
+ expect(splitSkillReferences(raw).map(part=>typeof part==='string'?part:part.raw).join('')).toBe(raw);
+});
+
+it.each(['HTTPS://example.com?q=/alpha','HtTpS://example.com?q=/alpha','【本地文件："/alpha"】','【本地文件（只读副本，12 bytes）："/alpha"】'])('does not activate a slash inside URL or normalized file text %s',raw=>{
+ expect(splitSkillReferences(raw).filter(part=>typeof part!=='string')).toEqual([]);
+});
+it.each([['> /hidden\r\n/alpha',['alpha']],['> /hidden\r/alpha',['alpha']],['> /hidden\u2028/alpha',[]]])('uses CommonMark line boundaries for %s',(raw,names)=>{
+ expect(splitSkillReferences(raw).filter(part=>typeof part!=='string').map(part=>typeof part==='string'?part:part.name)).toEqual(names);
 });

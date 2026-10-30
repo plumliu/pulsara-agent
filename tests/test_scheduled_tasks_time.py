@@ -203,3 +203,89 @@ def test_preview_reports_actual_ambiguous_fold(
         assert set(preview) == {"next_run_at", "local_time_fold"}
 
     asyncio.run(scenario())
+
+
+def test_timer_tick_drains_runtime_delay_without_collapsing_occurrences(monkeypatch):
+    import asyncio
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from pulsara_agent.identity import derive_id
+    from pulsara_agent.scheduling.service import ScheduledTaskService
+
+    async def scenario():
+        service = ScheduledTaskService(SimpleNamespace())
+        service._run_started_at = instant("2030-01-01T00:00:00Z")
+        now = instant("2030-01-01T00:03:30Z")
+        row = {
+            "id": derive_id("schedule", "test", "runtime-delayed"),
+            "session_id": derive_id("session", "test", "runtime-delayed"),
+            "revision": 1, "next_run_at": instant("2030-01-01T00:01:00Z"),
+            "status": "ACTIVE", "prompt": "identical saved task", "permission_mode": "ask-permissions",
+        }
+        submitted = []
+
+        async def read(method, **kwargs):
+            if method == "list_scheduled_tasks":
+                return [dict(row)], None
+            if method == "read_scheduled_task":
+                return dict(row)
+            if method == "scheduled_pending_sessions":
+                return []
+            raise AssertionError(method)
+
+        async def manage(method, **kwargs):
+            assert method == "observe_scheduled_due"
+            return "PREPARE" if kwargs["admission"].due_at <= now else "STALE"
+
+        async def resume(*args, **kwargs):
+            return SimpleNamespace(session=object())
+
+        async def submit(_host, admission):
+            submitted.append(admission)
+            row["next_run_at"] += timedelta(minutes=1)
+            return SimpleNamespace(status="ACCEPTED")
+
+        monkeypatch.setattr(service, "_read", read)
+        monkeypatch.setattr(service, "_manage", manage)
+        monkeypatch.setattr(service, "_submit", submit)
+        service.sessions.resume_session = resume
+        await service.tick()
+        assert [a.due_at for a in submitted] == [
+            instant("2030-01-01T00:01:00Z"), instant("2030-01-01T00:02:00Z"), instant("2030-01-01T00:03:00Z"),
+        ]
+        assert all(a.prompt == "identical saved task" for a in submitted)
+        assert service._run_started_at == instant("2030-01-01T00:00:00Z")
+
+    asyncio.run(scenario())
+
+
+def test_timer_restart_uses_one_fixed_cutoff_before_attempting_submission(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from pulsara_agent.identity import derive_id
+    from pulsara_agent.scheduling.service import ScheduledTaskService
+
+    async def scenario():
+        service = ScheduledTaskService(SimpleNamespace())
+        service._run_started_at = instant("2030-01-01T00:03:30Z")
+        calls = []
+
+        async def manage(method, **kwargs):
+            calls.append((method, kwargs))
+            return "ADVANCED"
+
+        async def forbidden(*args, **kwargs):
+            raise AssertionError("shutdown occurrence must not reach prompt submission")
+
+        monkeypatch.setattr(service, "_manage", manage)
+        monkeypatch.setattr(service, "_submit", forbidden)
+        await service._dispatch({
+            "id": derive_id("schedule", "test", "missed"),
+            "session_id": derive_id("session", "test", "missed"),
+            "revision": 1, "next_run_at": instant("2030-01-01T00:01:00Z"),
+            "status": "ACTIVE", "prompt": "missed", "permission_mode": "ask-permissions",
+        })
+        assert [method for method, _ in calls] == ["retire_missed_scheduled_due"]
+        assert calls[0][1]["run_started_at"] == service._run_started_at
+
+    asyncio.run(scenario())

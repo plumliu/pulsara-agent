@@ -109,7 +109,7 @@ async def call(api, context, name, args):
 
 
 @async_test
-async def test_public_batch_atomic_rejection_and_wait_reads_exact_real_finals(
+async def test_public_batch_atomic_rejection_and_wait_then_query_exact_real_finals(
     api_source,
 ):
     repository, root, api, runtime, context = api_source
@@ -179,8 +179,21 @@ async def test_public_batch_atomic_rejection_and_wait_reads_exact_real_finals(
     result = await asyncio.wait_for(waiting, 3)
     assert result["state"] == "settled"
     assert [work["status"] for work in result["works"]] == ["completed", "completed"]
-    assert result["works"][0]["final"] == final_a
-    assert result["works"][1]["final"] == "comparison final"
+    assert all(not {"final", "diagnostic", "instruction"}.intersection(work)
+               for work in result["works"])
+    # Exact Work targets remain usable from a subsequent CODE caller context;
+    # the wait value carries status, while explicit query reads full content.
+    subsequent = SimpleNamespace(**vars(context))
+    subsequent.agent_message_cursors = {}
+    subsequent.cell_cancel_event = asyncio.Event()
+    selected_a = await call(api, subsequent, "query_agents", {"target": result["works"][0]["target"]})
+    selected_b = await call(api, subsequent, "query_agents", {"target": result["works"][1]["target"]})
+    assert selected_a["target"] == peers["a"]["work"]
+    assert selected_a["agent"] == peers["a"]["agent"]
+    assert selected_a["final"] == final_a
+    assert selected_b["target"] == peers["b"]["work"]
+    assert selected_b["agent"] == peers["b"]["agent"]
+    assert selected_b["final"] == "comparison final"
     assert result["pending_targets"] == []
 
 

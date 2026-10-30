@@ -137,7 +137,7 @@ def test_model_runtime(
     model_id: str = "test-model",
     wire_api: str = "openai_responses",
     route_wire_profile: RouteWireProfile | None = None,
-    retry: LLMRetryConfig = LLMRetryConfig(),
+    retry: LLMRetryConfig | None = None,
     limits: ModelContextLimits | None = None,
     postgres_dsn: str | None = None,
     connection_id: ModelConnectionId | None = None,

@@ -149,7 +149,14 @@ async function checkCompletion() {
         const error = segment(() => JSON.parse(vm.callFunction(diagnose, vm.undefined, reason)
           .consume(handle => handle.toString())), true);
         reason.dispose(); reason = null;
-        finish('failed', clippedError(error));
+        const related = [];
+        for (const record of unhandled.values()) {
+          const detail = segment(() => JSON.parse(vm.callFunction(diagnose, vm.undefined, record.reason)
+            .consume(handle => handle.toString())), true);
+          if (detail.name !== error.name || detail.message !== error.message || detail.code !== error.code)
+            related.push(detail);
+        }
+        finish('failed', clippedError(related.length ? {...error, related_errors: related} : error));
       } finally { reason?.dispose(); }
       return;
     }

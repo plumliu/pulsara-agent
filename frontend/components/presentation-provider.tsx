@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useLayoutEffect, useRef, type ReactNode } from 'react';
 import { compareSequence, type RuntimeConnection } from '../lib/runtime-adapter';
-import { prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
+import { agentCellApi, prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
 import { browserTitle, type BrowserTabRecord } from '../lib/browser-tabs';
 import { presentationLabel, type PresentationTarget } from '../lib/presentation-targets';
 import type { MarkdownNotify } from './markdown-body';
@@ -38,7 +38,7 @@ export function PresentationProvider({ connection, visible, isOpen, onNotify, ch
             const intent: SessionNavigation = target.type === 'agent'
               ? { kind: 'agent', rootSessionId: target.root_session_id, agentSessionId: target.agent_id }
               : target.type === 'cell'
-                ? { kind: 'cell', rootSessionId: target.root_session_id, hostSessionId: target.host_session_id, cellId: target.cell_id }
+                ? { kind: 'cell', rootSessionId: target.root_session_id, hostSessionId: target.host_session_id, cellId: target.cell_id, sourceExecAttemptId: (await agentCellApi.cell(target.root_session_id, target.host_session_id, target.cell_id)).cell.source_exec_attempt_id }
                 : target.name === 'cells'
                   ? { kind: 'cells', rootSessionId: target.root_session_id, hostSessionId: target.host_session_id }
                   : { kind: 'subagents', rootSessionId: target.root_session_id };

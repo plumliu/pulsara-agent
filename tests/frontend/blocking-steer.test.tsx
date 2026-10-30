@@ -53,7 +53,7 @@ describe('blocking input production conversation path', () => {
     expect(steer).not.toHaveBeenCalled();
     const commandId = connection.submitPrompt.mock.calls[0][0];
     act(() => connection.emit({...current, queuedCount:1, queuedPrompts:[{
-      queueItemId:'permission-queue', commandId, sequence:1, status:'pending', inputOrigin:'HUMAN_MESSAGE',
+      queueItemId:'permission-queue', sourceKind:'command', commandId, sequence:'1', status:'pending', inputOrigin:'HUMAN_MESSAGE',
       deliveryMode:'new-turn', content:textPrompt('keep the files unchanged'),
     }]}));
     const queueSend = within(screen.getByRole('region', {name:'等待处理的输入'})).getByRole('button', {name:'发送', exact:true});
@@ -66,7 +66,7 @@ describe('blocking input production conversation path', () => {
 
   it('converts an existing queued input to review revision without sending a copy', async () => {
     const adapter = reviewAdapter();
-    const source = {queueItemId:'review-queue', commandId:'original-command', sequence:1, status:'pending' as const,
+    const source = {queueItemId:'review-queue', sourceKind:'command' as const, commandId:'original-command', sequence:'1', status:'pending' as const,
       inputOrigin:'HUMAN_MESSAGE', deliveryMode:'new-turn' as const, content:textPrompt('revise from queued input')};
     adapter.connectionValue = {...pendingReview(), queuedCount:1, queuedPrompts:[source]};
     renderWorkbench(<PulsaraApp adapter={adapter} />);

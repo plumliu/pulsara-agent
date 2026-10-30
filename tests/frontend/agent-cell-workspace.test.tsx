@@ -4,7 +4,7 @@ import { agentCellApi, AgentCellError, prepareSessionTarget, type CellGraphPage 
 import { AgentList, CellGraph, CellList, CellSource, mergeParticipants } from '../../frontend/components/agent-cell-workspace';
 vi.mock('../../frontend/components/file-code', () => ({ FileCode: ({ source }: { source: string }) => <pre>{source}</pre> }));
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
-const cell = { target: { kind: 'CELL' as const, cell_id: 'cell:a' }, state: 'running', has_unread_output: false, pending_calls: 0 };
+const cell = { target: { kind: 'CELL' as const, cell_id: 'cell:a' }, state: 'running', has_unread_output: false, pending_calls: 0, source_exec_attempt_id: 'attempt:a' };
 function page(section: 'works' | 'participants', items: CellGraphPage['items'], coverage: CellGraphPage['participation_coverage'] = 'complete'): CellGraphPage {
   return { cell, section, items, participation_coverage: coverage, next_cursor: null };
 }
@@ -56,20 +56,21 @@ it('merges growing participation kinds by the exact Agent and Work identities', 
     { agent_id: 'agent:a', work_id: null, kinds: ['wait'] },
   ]);
 });
-it('clears source after confirmed retirement and ignores an older page returned afterward', async () => {
-  const late = deferred<Awaited<ReturnType<typeof agentCellApi.source>>>();
-  vi.spyOn(agentCellApi, 'source').mockResolvedValueOnce({ cell, source: { status: 'AVAILABLE', text: 'const x = 1;', offset_chars: 0, returned_chars: 12, total_chars: 18, has_more: true, next_offset_chars: 12 } }).mockReturnValueOnce(late.promise);
-  vi.spyOn(agentCellApi, 'cell').mockRejectedValue(new AgentCellError(404, 'retired'));
-  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => page(section, section === 'works' ? [{ agent_id: 'agent:a', work_id: 'work:a', status: 'running' }] : []));
-  render(<CellSource root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
+it('continues canonical source paging after the live graph closes', async () => {
+  const late = deferred<Awaited<ReturnType<typeof agentCellApi.source>>>(); let closed = false;
+  vi.spyOn(agentCellApi, 'source').mockResolvedValueOnce({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'const x = 1;', offset_chars: 0, returned_chars: 12, total_chars: 18, has_more: true, next_offset_chars: 12 } }).mockReturnValueOnce(late.promise);
+  const live = vi.spyOn(agentCellApi, 'cell');
+  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => closed ? { status: 'CLOSED', message: '实时工作流视图已关闭' } : page(section, []));
+  render(<CellSource attempt="attempt:a" root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
   expect(await screen.findByText('const x = 1;')).toBeTruthy();
-  fireEvent.click(screen.getByRole('button', { name: '加载更多' }));
+  expect(await screen.findByRole('button', { name: '查看工作流图' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: '加载更多' })); closed = true;
   await new Promise(resolve => setTimeout(resolve, 3100));
-  expect(await screen.findByText('对象已不可用')).toBeTruthy();
-  expect(agentCellApi.source).toHaveBeenCalledTimes(2);
-  expect(agentCellApi.cell).toHaveBeenCalledWith('root:a', 'host:a', 'cell:a', expect.any(AbortSignal));
-  await act(async () => { late.resolve({ cell, source: { status: 'AVAILABLE', text: 'OLD', offset_chars: 12, returned_chars: 3, total_chars: 15, has_more: false, next_offset_chars: null } }); await late.promise; });
-  expect(screen.queryByText('OLD')).toBeNull(); expect(screen.queryByText('const x = 1;')).toBeNull();
+  await waitFor(() => expect(screen.queryByRole('button', { name: '查看工作流图' })).toBeNull());
+  expect(screen.getByText('const x = 1;')).toBeTruthy(); expect(live).not.toHaveBeenCalled();
+  await act(async () => { late.resolve({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'MORE', offset_chars: 12, returned_chars: 4, total_chars: 16, has_more: false, next_offset_chars: null } }); await late.promise; });
+  expect(screen.getByText('const x = 1;MORE')).toBeTruthy();
+  expect(agentCellApi.source).toHaveBeenNthCalledWith(2, 'root:a', 'attempt:a', 12, expect.any(AbortSignal));
 });
 it('expands exact predecessor Work and preserves the directed dependency between agents', async () => {
   vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => page(section, section === 'works' ? [{ agent_id: 'agent:b', work_id: 'work:b', status: 'running' }] : []));
@@ -106,9 +107,9 @@ it('retains a participant name on temporary failure and clears it after confirme
   await waitFor(() => expect(screen.queryByText('Researcher')).toBeNull());
 }, 10000);
 it('keeps the graph entry and avoids an empty conclusion when a filtered page has a continuation', async () => {
-  vi.spyOn(agentCellApi, 'source').mockResolvedValue({ cell, source: { status: 'AVAILABLE', text: 'code', offset_chars: 0, returned_chars: 4, total_chars: 4, has_more: false, next_offset_chars: null } });
+  vi.spyOn(agentCellApi, 'source').mockResolvedValue({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'code', offset_chars: 0, returned_chars: 4, total_chars: 4, has_more: false, next_offset_chars: null } });
   vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => ({ ...page(section, []), next_cursor: section === 'participants' ? 'more' : null }));
-  const source = render(<CellSource root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
+  const source = render(<CellSource attempt="attempt:a" root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
   expect(await screen.findByRole('button', { name: '查看工作流图' })).toBeTruthy(); source.unmount();
   render(<CellGraph root="root:a" host="host:a" cell="cell:a" onAgent={() => {}} onWork={() => {}} />);
   expect(await screen.findByRole('button', { name: '加载更多' })).toBeTruthy();
@@ -150,7 +151,7 @@ it('retries a Work from a later graph page after a transient detail failure', as
 it('does not resurrect a graph from a late predecessor read after Cell retirement', async () => {
   const late = deferred<Awaited<ReturnType<typeof agentCellApi.work>>>(); let isRetired = false;
   vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => {
-    if (isRetired) throw new AgentCellError(404, 'retired');
+    if (isRetired) return { status: 'CLOSED', message: '实时工作流视图已关闭' };
     return page(section, section === 'works' ? [{ agent_id: 'agent:b', work_id: 'work:b', status: 'running' }] : []);
   });
   vi.spyOn(agentCellApi, 'work').mockImplementation(async (_r, id) => id === 'work:a' ? late.promise : { work: { agent_id: 'agent:b', work_id: id, status: 'running' }, inputs: [{ kind: 'dependency', source_work_id: 'work:a', ordinal: 0 }] });
@@ -160,7 +161,7 @@ it('does not resurrect a graph from a late predecessor read after Cell retiremen
   fireEvent.click(screen.getByTitle('展开前置工作'));
   isRetired = true;
   await new Promise(resolve => setTimeout(resolve, 3100));
-  expect(await screen.findByText('对象已不可用')).toBeTruthy();
+  expect(await screen.findByText('实时工作流视图已关闭')).toBeTruthy();
   await act(async () => { late.resolve({ work: { agent_id: 'agent:a', work_id: 'work:a', status: 'completed' }, inputs: [] }); await late.promise; });
   expect(screen.queryByText('work:a')).toBeNull(); expect(screen.queryByText('work:b')).toBeNull();
 });
@@ -175,4 +176,29 @@ it('binds a Cell list tab to the exact Host that supplied the request', async ()
   const current = await prepareSessionTarget({ kind: 'cells', rootSessionId: 'root:a', hostSessionId: 'host:new' }, () => true);
   expect(old?.adopt()).toMatchObject({ kind: 'cells', sessionId: 'root:a', hostSessionId: 'host:old' });
   expect(current?.adopt()?.id).not.toBe(old?.adopt()?.id);
+});
+
+it('opens a source tab using the canonical attempt without live Cell authorization',async()=>{
+ const source=vi.spyOn(agentCellApi,'source').mockResolvedValue({source_exec_attempt_id:'attempt:historical',source:{status:'AVAILABLE',text:'actual hook code',offset_chars:0,returned_chars:16,total_chars:16,has_more:false,next_offset_chars:null}});
+ const live=vi.spyOn(agentCellApi,'cell');
+ const prepared=await prepareSessionTarget({kind:'cell',rootSessionId:'root:a',sourceExecAttemptId:'attempt:historical'},()=>true);
+ expect(source).toHaveBeenCalledWith('root:a','attempt:historical');expect(live).not.toHaveBeenCalled();
+ expect(prepared?.adopt()).toMatchObject({kind:'cell',sourceExecAttemptId:'attempt:historical'});
+ expect(prepared?.adopt()).not.toHaveProperty('hostSessionId','host:a');
+});
+it('preserves the live graph through a temporary refresh failure without calling it closed',async()=>{
+ vi.useFakeTimers();let fail=false;
+ vi.spyOn(agentCellApi,'graph').mockImplementation(async(_r,_h,_c,section)=>{if(fail)throw new AgentCellError(503,'network');return page(section,section==='participants'?[{agent_id:'agent:a',work_id:null,kinds:['query']}]:[]);});
+ vi.spyOn(agentCellApi,'agent').mockResolvedValue({agent:{agent_id:'agent:a',title:'Researcher',current_work_id:null,queued_count:0}});
+ render(<CellGraph root="root:a" host="host:a" cell="cell:a" onAgent={()=>{}} onWork={()=>{}}/>);
+ await act(async()=>{});expect(screen.getByText('Researcher')).toBeTruthy();fail=true;
+ await act(async()=>{await vi.advanceTimersByTimeAsync(3000);});
+ expect(screen.getByText('刷新失败：network')).toBeTruthy();expect(screen.getByText('Researcher')).toBeTruthy();
+ expect(screen.queryByText('实时工作流视图已关闭')).toBeNull();
+});
+
+it('opens historical source with the live graph locator of that exact source attempt only',async()=>{
+ vi.spyOn(agentCellApi,'source').mockResolvedValue({source_exec_attempt_id:'attempt:live',live_cell:{host_session_id:'host:exact',cell_id:'cell:exact'},source:{status:'AVAILABLE',text:'live code',offset_chars:0,returned_chars:9,total_chars:9,has_more:false,next_offset_chars:null}});
+ const prepared=await prepareSessionTarget({kind:'cell',rootSessionId:'root:a',sourceExecAttemptId:'attempt:live'},()=>true);
+ expect(prepared?.adopt()).toMatchObject({kind:'cell',sourceExecAttemptId:'attempt:live',hostSessionId:'host:exact',entityId:'cell:exact'});
 });

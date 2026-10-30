@@ -4,9 +4,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
-from pulsara_agent.code_mode import CodeModeError, CodeModeHost, CodeModeToolResult
+from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
 from pulsara_agent.identity import random_id
@@ -22,8 +20,6 @@ def _runtime(host, read_source):
     port._session_id = random_id("session")
     port._code_mode = host
     port._code_mode_read_source = read_source
-    port._code_mode_archive_output = None
-    port._code_observation_settlements = {}
     port._validate_surface_borrow = lambda *args: None
     borrow = SimpleNamespace(
         prepared=SimpleNamespace(access=SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)),
@@ -66,8 +62,8 @@ def test_cell_source_query_dispatch_pages_unicode_without_taking_output_owner():
             async with asyncio.timeout(5):
                 while host.capture_cell(cell_id).state not in {"completed", "failed", "terminated"}:
                     await asyncio.sleep(.001)
-            observation = await host.observe(cell_id, 0)
-            assert observation.output
+            lease = await host.lease_output(cell_id)
+            assert lease is not None and lease.record == {"kind": "log", "text": "retained output"}
             target = {"kind": "CELL", "cell_id": cell_id}
             inventory = (await _dispatch(port, context, "query_cells", {})).public_value()
             assert inventory["cells"][0]["target"] == target
@@ -94,10 +90,14 @@ def test_cell_source_query_dispatch_pages_unicode_without_taking_output_owner():
             assert "".join(parts) == frozen_source
             assert reads and all(values == {"session_id": context.session_id, "attempt_id": source_attempt}
                                  for values in reads)
-            # The existing reserved output page remains owned and unchanged.
-            with pytest.raises(CodeModeError, match="Another reader owns"):
-                await host.observe(cell_id, 0)
-            await host.acknowledge(observation)
+            # Query and state waiting leave the original immutable queue
+            # admission candidate owned until its single FULL acknowledgement.
+            assert await host.lease_output(cell_id) is lease
+            state = await host.wait_state(cell_id, 0)
+            assert state["state"] == "completed"
+            assert not {"output", "has_more"}.intersection(state)
+            assert await host.lease_output(cell_id) is lease
+            await host.acknowledge_output(lease)
             async with asyncio.timeout(5):
                 while host.snapshot_cell_index():
                     await asyncio.sleep(.001)
@@ -135,17 +135,21 @@ def test_source_read_failure_preserves_live_metadata_and_manage_stop_does_not_re
             stopped = await _dispatch(port, context, "manage_cell", {"action": "stop", "target": target})
             assert stopped.state == "SUCCESS" and stopped.process_local_settlement is None
             assert stopped.public_value()["target"] == target
-            assert host.capture_cell(cell_id).has_unread_output is True
+            assert host.capture_cell(cell_id).has_unread_output is False
+            assert host.pending_output_cells() == ()
             finish.set()
+            async with asyncio.timeout(5):
+                while host.snapshot_cell_index():
+                    await asyncio.sleep(.001)
+            assert host.pending_output_cells() == ()
         finally:
             finish.set()
             await host.aclose()
     asyncio.run(run())
 
 
-def test_process_and_monitor_query_dispatch_reuses_live_owners(tmp_path):
+def test_process_query_dispatch_reuses_live_owner_without_consuming_logs(tmp_path):
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-    from pulsara_agent.conversation_kernel.tool_contracts import ProcessLocalEffectSettlementDisposition
     from pulsara_agent.primitives.permission import PermissionMode
 
     async def run():
@@ -174,26 +178,6 @@ def test_process_and_monitor_query_dispatch_reuses_live_owners(tmp_path):
             inventory = (await _dispatch(port, context, "query_processes", {})).public_value()
             assert inventory["terminal_process_action"] == "list"
             assert [item["target"] for item in inventory["processes"]] == [target]
-            registered = await _dispatch(port, context, "manage_monitor", {
-                "action": "register", "target": target,
-                "conditions": {"output": {"min_new_output_chars": 19, "quiet_period_ms": 77}},
-            })
-            assert registered.process_local_settlement is not None
-            await port.settle_process_local_effect(
-                registered.process_local_settlement, ProcessLocalEffectSettlementDisposition.COMMITTED)
-            monitor_target = registered.public_value()["target"]
-            registration = port._terminal_monitor._registrations[monitor_target["monitor_id"]]
-            before = (registration.expires_at_monotonic, registration.last_accepted_cursor,
-                      registration.observation_ordinal)
-            monitor = (await _dispatch(port, context, "query_monitors", {"target": monitor_target})).public_value()["monitor"]
-            assert monitor["target"] == monitor_target and monitor["process_target"] == target
-            assert monitor["conditions"]["output"] == {"min_new_output_chars": 19, "quiet_period_ms": 77}
-            assert before == (registration.expires_at_monotonic, registration.last_accepted_cursor,
-                              registration.observation_ordinal)
-            cancelled = await _dispatch(port, context, "manage_monitor", {"action": "cancel", "target": monitor_target})
-            assert cancelled.public_value()["status"] == "CANCELLED"
-            missing = await _dispatch(port, context, "query_monitors", {"target": monitor_target})
-            assert missing.state == "APPLICATION_ERROR"
             assert (await _dispatch(port, context, "query_processes", {"target": target})).public_value()["process"]["status"] == "running"
         finally:
             await port.aclose()

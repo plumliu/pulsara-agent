@@ -6,9 +6,8 @@ from copy import deepcopy
 from functools import lru_cache
 from typing import Annotated, Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from pulsara_agent.identity import require_id
 
 
 DEFAULT_MAX_OUTPUT_CHARS = 32_000
@@ -19,7 +18,7 @@ EXEC_PROCESS_TOOL_DESCRIPTION = (
     "Run one local shell command. Each call starts a new shell, so its directory and "
     "environment changes stay within that call. A running command returns a PROCESS "
     "target for query_processes metadata or manage_process output and interaction. "
-    "manage_monitor can resume work on completion or configured progress. Response "
+    "Response "
     "size and initial wait settings do not limit the command's lifetime. Use "
     "read_artifact for omitted output or export_artifact for extensive processing."
 )
@@ -47,34 +46,9 @@ MANAGE_PROCESS_TOOL_DESCRIPTION = (
     "the command and its children and waits for exit. Omitted optional fields use "
     "their defaults; only since_cursor accepts null. status and exit_code describe "
     "process completion; output or echo alone does not establish completion. Use "
-    "manage_monitor for later updates, read_artifact for omitted logs, and "
+    "manage_process wait for later updates, read_artifact for omitted logs, and "
     "export_artifact for extensive retrieval."
 )
-
-QUERY_MONITORS_TOOL_DESCRIPTION = (
-    "Query visible monitor registrations. Use no arguments to list registrations. "
-    "To inspect one registration's state and effective monitoring policy, pass only "
-    "its MONITOR target. Neither branch accepts pagination fields. This query does "
-    "not register, cancel, or refresh a monitor. Omit target for the list; do not "
-    "pass null."
-)
-
-MANAGE_MONITOR_TOOL_DESCRIPTION = (
-    "Resume work when a running command completes or meets configured progress "
-    "conditions. ROOT manages Host-wide registrations; a Subagent manages only its "
-    "current Work's registrations. Fields are required unless marked optional; use "
-    "only the selected action's fields.\n"
-    "register: target (PROCESS); optional conditions, delivery, lifetime.\n"
-    "cancel: target (MONITOR).\n"
-    "Copy a PROCESS target from process results and a MONITOR target from "
-    "registration or query results. register returns immediately; the current turn "
-    "may end while monitoring continues. Omitting conditions requests completion "
-    "only; configured progress updates also resume work. cancel stops updates while "
-    "the command continues. Monitoring also ends on expiry or when its terminal "
-    "environment closes. Use manage_process poll for current output or status, "
-    "and kill to stop a command."
-)
-
 
 class _StrictInput(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -131,19 +105,6 @@ class TerminalProcessTarget(_StrictInput):
         min_length=1,
         description="Exact process_id from this terminal environment.",
     )
-
-
-class TerminalMonitorTarget(_StrictInput):
-    kind: Literal["MONITOR"]
-    monitor_id: str = Field(
-        min_length=1,
-        description="Exact monitor_id from this terminal environment.",
-    )
-
-    @field_validator("monitor_id")
-    @classmethod
-    def canonical_monitor_id(cls, value: str) -> str:
-        return require_id(value, "monitor")
 
 
 class _ProcessInput(_StrictInput):
@@ -244,100 +205,6 @@ ManageProcessInput: TypeAlias = Annotated[
 _MANAGE_PROCESS_ADAPTER = TypeAdapter(ManageProcessInput)
 
 
-class TerminalMonitorOutputCondition(_StrictInput):
-    min_new_output_chars: int = Field(
-        default=200,
-        ge=1,
-        le=65_536,
-        description="New-output threshold for a progress update.",
-    )
-    quiet_period_ms: int = Field(
-        default=500,
-        ge=0,
-        le=10_000,
-        description=("Required pause in output before a progress update."),
-    )
-
-
-class TerminalMonitorConditions(_StrictInput):
-    output: TerminalMonitorOutputCondition | None = Field(
-        default=None,
-    )
-    heartbeat_interval_seconds: int | None = Field(
-        default=None,
-        ge=5,
-        le=1800,
-        description=("Progress interval even when there is little new output."),
-    )
-
-
-class TerminalMonitorDelivery(_StrictInput):
-    max_output_chars: int = Field(
-        default=4000,
-        ge=512,
-        le=32_000,
-        description="Maximum command-output characters in each update.",
-    )
-    minimum_progress_observation_interval_seconds: int = Field(
-        default=5,
-        ge=5,
-        le=1800,
-        description="Minimum spacing between progress updates.",
-    )
-
-
-class TerminalMonitorLifetime(_StrictInput):
-    maximum_duration_seconds: int = Field(
-        default=36_000,
-        ge=1,
-        le=36_000,
-        description=("Monitoring duration; expiry does not stop the command."),
-    )
-
-
-class TerminalMonitorRegisterInput(_StrictInput):
-    action: Literal["register"]
-    target: TerminalProcessTarget
-    conditions: TerminalMonitorConditions = Field(
-        default=TerminalMonitorConditions(),
-        description=(
-            "Progress triggers in addition to completion; omit for completion only."
-        ),
-    )
-    delivery: TerminalMonitorDelivery = Field(
-        default=TerminalMonitorDelivery(),
-    )
-    lifetime: TerminalMonitorLifetime = Field(
-        default=TerminalMonitorLifetime(),
-    )
-
-
-class QueryMonitorsListInput(_StrictInput):
-    pass
-
-
-class QueryMonitorInput(_StrictInput):
-    target: TerminalMonitorTarget
-
-
-QueryMonitorsInput: TypeAlias = QueryMonitorsListInput | QueryMonitorInput
-_QUERY_MONITORS_ADAPTER = TypeAdapter(QueryMonitorsInput)
-
-
-class TerminalMonitorCancelInput(_StrictInput):
-    action: Literal["cancel"]
-    target: TerminalMonitorTarget
-
-
-ManageMonitorInput: TypeAlias = Annotated[
-    TerminalMonitorRegisterInput
-    | TerminalMonitorCancelInput,
-    Field(discriminator="action"),
-]
-
-_MANAGE_MONITOR_ADAPTER = TypeAdapter(ManageMonitorInput)
-
-
 def parse_exec_process_input(arguments: object) -> TerminalInput:
     return _TERMINAL_ADAPTER.validate_python(arguments, strict=True)
 
@@ -348,14 +215,6 @@ def parse_query_processes_input(arguments: object) -> QueryProcessesInput:
 
 def parse_manage_process_input(arguments: object) -> ManageProcessInput:
     return _MANAGE_PROCESS_ADAPTER.validate_python(arguments, strict=True)
-
-
-def parse_query_monitors_input(arguments: object) -> QueryMonitorsInput:
-    return _QUERY_MONITORS_ADAPTER.validate_python(arguments, strict=True)
-
-
-def parse_manage_monitor_input(arguments: object) -> ManageMonitorInput:
-    return _MANAGE_MONITOR_ADAPTER.validate_python(arguments, strict=True)
 
 
 @lru_cache(maxsize=1)
@@ -370,16 +229,6 @@ def query_processes_input_schema() -> dict[str, Any]:
 
 def manage_process_input_schema() -> dict[str, Any]:
     return _inline_schema_references(_MANAGE_PROCESS_ADAPTER.json_schema())
-
-
-@lru_cache(maxsize=1)
-def query_monitors_input_schema() -> dict[str, Any]:
-    return _inline_schema_references(_QUERY_MONITORS_ADAPTER.json_schema())
-
-
-@lru_cache(maxsize=1)
-def manage_monitor_input_schema() -> dict[str, Any]:
-    return _inline_schema_references(_MANAGE_MONITOR_ADAPTER.json_schema())
 
 
 def _inline_schema_references(schema: dict[str, Any]) -> dict[str, Any]:
@@ -451,25 +300,15 @@ __all__ = [
     "EXEC_PROCESS_TOOL_DESCRIPTION",
     "QUERY_PROCESSES_TOOL_DESCRIPTION",
     "MANAGE_PROCESS_TOOL_DESCRIPTION",
-    "QUERY_MONITORS_TOOL_DESCRIPTION",
-    "MANAGE_MONITOR_TOOL_DESCRIPTION",
     "TerminalInput",
     "ManageProcessInput",
-    "ManageMonitorInput",
     "QueryProcessesInput",
-    "QueryMonitorsInput",
     "QueryProcessesListInput",
     "QueryProcessInput",
-    "QueryMonitorsListInput",
-    "QueryMonitorInput",
     "parse_exec_process_input",
     "parse_query_processes_input",
     "parse_manage_process_input",
-    "parse_query_monitors_input",
-    "parse_manage_monitor_input",
     "exec_process_input_schema",
     "query_processes_input_schema",
     "manage_process_input_schema",
-    "query_monitors_input_schema",
-    "manage_monitor_input_schema",
 ]

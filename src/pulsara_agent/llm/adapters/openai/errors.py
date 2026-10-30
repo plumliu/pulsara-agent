@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import re
+import math
+import ssl
+import sys
+import errno
+import httpx
+import httpx2
 from collections.abc import Iterable, Mapping
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -12,50 +18,48 @@ from pulsara_agent.llm.retry import LLMRetryDecision, RetryDecisionKind
 
 _RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504, 529}
 _NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404, 413}
-_RETRYABLE_EXCEPTION_NAMES = {
-    "APIConnectionError",
-    "APITimeoutError",
-    "TimeoutException",
-    "TimeoutError",
-    "ConnectTimeout",
-    "ReadTimeout",
-    "WriteTimeout",
-    "PoolTimeout",
-    "NetworkError",
-    "ConnectError",
-    "ReadError",
-    "WriteError",
-    "RemoteProtocolError",
-    "ConnectionError",
-    "ConnectionResetError",
-    "ConnectionAbortedError",
-    "BrokenPipeError",
-    "SSLError",
-    "SSLWantReadError",
-    "SSLWantWriteError",
-    "SSLZeroReturnError",
-    "ConnectionTerminated",
-}
-_TRANSPORT_MESSAGE_MARKERS = (
-    "connection error",
-    "connection reset",
-    "connection aborted",
-    "connection refused",
-    "broken pipe",
-    "read timeout",
-    "write timeout",
-    "connect timeout",
-    "timed out",
-    "timeout",
-    "remote protocol",
-    "stream closed",
-    "server disconnected",
-    "network is unreachable",
-    "temporarily unavailable",
-    "tls",
-    "ssl",
-    "socket",
+_TRANSPORT_ERROR_TYPES = (
+    ConnectionError,
+    TimeoutError,
+    httpx.NetworkError,
+    httpx.TimeoutException,
+    httpx.RemoteProtocolError,
+    httpx.ProxyError,
+    httpx2.NetworkError,
+    httpx2.TimeoutException,
+    httpx2.RemoteProtocolError,
+    httpx2.ProxyError,
+    ssl.SSLWantReadError,
+    ssl.SSLWantWriteError,
+    ssl.SSLZeroReturnError,
+    ssl.SSLEOFError,
 )
+_RETRYABLE_NETWORK_ERRNOS = frozenset(
+    {
+        errno.ECONNRESET,
+        errno.ECONNABORTED,
+        errno.ECONNREFUSED,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+        errno.ENETRESET,
+        errno.ENETUNREACH,
+        errno.EHOSTUNREACH,
+    }
+)
+_TRANSIENT_PROVIDER_CODES = {
+    "server_error",
+    "internal_server_error",
+    "internal_error",
+    "overloaded_error",
+    "rate_limit_exceeded",
+    "temporarily_unavailable",
+    "request_timeout",
+}
+_DETERMINISTIC_LOCAL_NAMES = {
+    "InvalidURL",
+    "UnsupportedProtocol",
+    "LocalProtocolError",
+}
 _DETERMINISTIC_BAD_REQUEST_MARKERS = (
     "unknown parameter",
     "unsupported parameter",
@@ -81,12 +85,14 @@ _NON_RETRYABLE_CODES = {
     "invalid_schema",
     "authentication",
     "insufficient_quota",
+    "quota_exceeded",
+    "insufficient_balance",
     "model_not_found",
     "context_length_exceeded",
 }
 _RETRY_AFTER_PATTERN = re.compile(
     r"(?:retry|try again|rate limit|too many requests).{0,80}?"
-    r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>ms|millisecond|milliseconds|s|sec|secs|second|seconds)?",
+    r"(?P<value>[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(?P<unit>ms|millisecond|milliseconds|s|sec|secs|second|seconds)?",
     re.IGNORECASE,
 )
 
@@ -94,6 +100,12 @@ _RETRY_AFTER_PATTERN = re.compile(
 def classify_llm_error(exc: BaseException) -> LLMRetryDecision:
     """Classify an OpenAI-compatible exception for transport retry."""
 
+    from pulsara_agent.llm.errors import LLMTransportContractError
+
+    if isinstance(exc, LLMTransportContractError):
+        return LLMRetryDecision(
+            kind=RetryDecisionKind.DO_NOT_RETRY, reason=exc.reason_code
+        )
     status_code = _extract_status_code(exc)
     provider_code = _extract_provider_code(exc)
     retry_after_seconds = parse_retry_after_seconds(
@@ -103,6 +115,13 @@ def classify_llm_error(exc: BaseException) -> LLMRetryDecision:
     )
     text = _chain_text(exc).lower()
 
+    if _is_deterministic_local_error(exc):
+        return LLMRetryDecision(
+            kind=RetryDecisionKind.DO_NOT_RETRY,
+            reason="deterministic_local_configuration",
+            status_code=status_code,
+            provider_code=provider_code,
+        )
     if _is_deterministic_bad_request(text, provider_code=provider_code):
         return LLMRetryDecision(
             kind=RetryDecisionKind.DO_NOT_RETRY,
@@ -127,10 +146,24 @@ def classify_llm_error(exc: BaseException) -> LLMRetryDecision:
             retry_after_seconds=retry_after_seconds,
             provider_code=provider_code,
         )
+    if provider_code in _TRANSIENT_PROVIDER_CODES:
+        return LLMRetryDecision(
+            kind=RetryDecisionKind.RETRY,
+            reason="transient_provider_error",
+            status_code=status_code,
+            retry_after_seconds=retry_after_seconds,
+            provider_code=provider_code,
+        )
     if _has_retryable_transport_signal(exc):
         return LLMRetryDecision(
             kind=RetryDecisionKind.RETRY,
-            reason="transport_error",
+            reason=(
+                "transport_timeout"
+                if any(
+                    "Timeout" in type(item).__name__ for item in _exception_chain(exc)
+                )
+                else "transport_error"
+            ),
             status_code=status_code,
             retry_after_seconds=retry_after_seconds,
             provider_code=provider_code,
@@ -169,11 +202,13 @@ def parse_retry_after_seconds(
     if message:
         match = _RETRY_AFTER_PATTERN.search(message)
         if match:
-            value = float(match.group("value"))
             unit = (match.group("unit") or "s").lower()
-            if unit.startswith("ms") or unit.startswith("millisecond"):
-                return value / 1000.0
-            return value
+            multiplier = (
+                0.001
+                if unit.startswith("ms") or unit.startswith("millisecond")
+                else 1.0
+            )
+            return _parse_float_seconds(match.group("value"), multiplier=multiplier)
     return None
 
 
@@ -229,9 +264,10 @@ def _extract_provider_code(exc: BaseException) -> str | None:
 
 def _provider_code_from_body(body: Any) -> str | None:
     if isinstance(body, Mapping):
-        code = body.get("code")
-        if isinstance(code, str) and code:
-            return code
+        for key in ("code", "type"):
+            code = body.get(key)
+            if isinstance(code, str) and code:
+                return code
         error = body.get("error")
         if isinstance(error, Mapping):
             for key in ("code", "type"):
@@ -243,11 +279,45 @@ def _provider_code_from_body(body: Any) -> str | None:
 
 def _exception_chain(exc: BaseException) -> Iterable[BaseException]:
     seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
+    pending = [exc]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         yield current
-        current = current.__cause__ or current.__context__
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+
+
+def _is_deterministic_local_error(exc: BaseException) -> bool:
+    for item in _exception_chain(exc):
+        if (
+            isinstance(item, ssl.SSLCertVerificationError)
+            or type(item).__name__ in _DETERMINISTIC_LOCAL_NAMES
+        ):
+            return True
+        text = str(item).casefold()
+        if type(item).__name__ == "ProxyError" and any(
+            marker in text
+            for marker in (
+                "unsupported",
+                "invalid proxy",
+                "407",
+                "authentication",
+                "credentials",
+            )
+        ):
+            return True
+        if (
+            "certificate_verify_failed" in text
+            or "certificate verify failed" in text
+            or "hostname mismatch" in text
+        ):
+            return True
+    return False
 
 
 def _chain_text(exc: BaseException) -> str:
@@ -272,11 +342,15 @@ def _is_deterministic_bad_request(text: str, *, provider_code: str | None) -> bo
 
 
 def _has_retryable_transport_signal(exc: BaseException) -> bool:
-    for item in _exception_chain(exc):
-        if type(item).__name__ in _RETRYABLE_EXCEPTION_NAMES:
-            return True
-    text = _chain_text(exc).lower()
-    return any(marker in text for marker in _TRANSPORT_MESSAGE_MARKERS)
+    # The SDK has already been prepared before an SDK exception can exist.
+    # Read its public type without importing the SDK on the event-loop thread.
+    sdk = sys.modules.get("openai")
+    sdk_type = None if sdk is None else getattr(sdk, "APIConnectionError", None)
+    return (
+        isinstance(exc, _TRANSPORT_ERROR_TYPES)
+        or (isinstance(sdk_type, type) and isinstance(exc, sdk_type))
+        or (isinstance(exc, OSError) and exc.errno in _RETRYABLE_NETWORK_ERRNOS)
+    )
 
 
 def _header_value(headers: Mapping[str, Any] | None, name: str) -> Any:
@@ -296,12 +370,14 @@ def _parse_float_seconds(value: Any, *, multiplier: float = 1.0) -> float | None
     if value is None:
         return None
     if isinstance(value, int | float):
-        return max(float(value) * multiplier, 0.0)
+        parsed = float(value) * multiplier
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
     text = str(value).strip()
     if not text:
         return None
     try:
-        return max(float(text) * multiplier, 0.0)
+        parsed = float(text) * multiplier
+        return parsed if math.isfinite(parsed) and parsed >= 0 else None
     except ValueError:
         return None
 

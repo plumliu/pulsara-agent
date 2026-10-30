@@ -127,7 +127,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
     return () => { controller.abort(); clearTimeout(timer); window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onFocus); };
   }, [api, ready, busy, items]);
   const act = async (task: ScheduledTask, action: 'pause' | 'resume' | 'delete' | 'run') => {
-    if (actionInFlight.current || (action === 'run' && runState(task) && !runRequests.current.has(task.id))) return;
+    if (actionInFlight.current) return;
     actionInFlight.current = true;
     setBusy(true);
     try {
@@ -145,9 +145,9 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
         const result = await api.runNow(request);
         if (!mounted.current) return;
         runRequests.current.delete(task.id); setUncertainRun(null);
-        const state = result.execution.status;
-        const title = { queued: result.coalesced ? '任务已在队列中' : '已提交', running: '任务正在运行', completed: '任务已完成', stopped: '任务已停止' }[state];
-        onNotify(title, result.execution.terminal_reason ?? '可在会话中查看', state === 'stopped' ? 'warning' : 'success');
+        const state = result.execution?.status;
+        const title = result.delivery_mode === 'STEER_ACTIVE_TURN' ? '已作为补充发送到当前任务' : '已加入队列';
+        onNotify(title, result.execution?.terminal_reason ?? '可在会话中查看', state === 'stopped' ? 'warning' : 'success');
       }
       else await api.action(task, action);
       if (!mounted.current) return;
@@ -190,7 +190,6 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
           {!status && !selectedSession && <button className="secondary-action" onClick={() => setEditor({})}><Plus size={14} aria-hidden="true" />创建第一个任务</button>}
         </div> : <div className="scheduled-list">{items.map(task => {
           const open = expanded === task.id;
-          const execution = runState(task);
           const sessionTitle = task.session_title ?? sessions.find(s => s.id === task.session_id)?.title ?? '打开会话';
           const detailId = `scheduled-detail-${task.id}`;
           return <article key={task.id} ref={task.id === focusTaskId ? focusedRow : undefined} tabIndex={-1}
@@ -216,7 +215,7 @@ export function ScheduledTasksView({ onNotify, focusTaskId, modelConfigurations,
                 </div>
                 <div className="scheduled-row-actions">
                   <button disabled={busy} onClick={() => setEditor({task})}><Pencil size={13} aria-hidden="true" />编辑</button>
-                  <button className="scheduled-run" disabled={busy || Boolean(execution)} onClick={() => void act(task,'run')}><Play size={13} aria-hidden="true" />{execution ?? '运行一次'}</button>
+                  <button className="scheduled-run" disabled={busy} onClick={() => void act(task,'run')}><Play size={13} aria-hidden="true" />运行一次</button>
                   <button className="scheduled-danger" disabled={busy} onClick={() => setConfirmDelete(task)}><Trash2 size={13} aria-hidden="true" />删除任务</button>
                 </div>
               </footer>

@@ -115,8 +115,9 @@ def test_request_lifecycle_and_independent_delivery(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("active", [False, True])
 def test_scheduled_submission_confirmed_after_request_stops(
-    tmp_path, stage2_migrated_postgres_database, monkeypatch
+    tmp_path, stage2_migrated_postgres_database, monkeypatch, active
 ):
     from datetime import datetime, timezone
     from tests.test_scheduled_tasks_host import create
@@ -129,8 +130,12 @@ def test_scheduled_submission_confirmed_after_request_stops(
         )
         session = handle.session
         try:
-            await session.submit_prompt(command_id=random_id("command"), content=PromptContent.text("Running request"))
-            await asyncio.wait_for(model.started.wait(), 5)
+            if active:
+                await session.submit_prompt(command_id=random_id("command"), content=PromptContent.text("Running request"))
+                await asyncio.wait_for(model.started.wait(), 5)
+            else:
+                session._delivery_task.cancel()
+                await asyncio.gather(session._delivery_task, return_exceptions=True)
             task = await create(service, session)
             request = dict(
                 client_command_id=random_id("command"), session_id=session.session_id,
@@ -141,19 +146,38 @@ def test_scheduled_submission_confirmed_after_request_stops(
 
             async def settled_submission(host, admission):
                 accepted = await submit(host, admission)
-                await host.cancel_queued_prompt(
-                    command_id=random_id("command"), source_queue_item_id=accepted.prompt_delivery.queue_item_id
-                )
-                # The accepted request ended before submit confirmation reached its caller.
+                if active:
+                    original = await service._read("confirm_scheduled_action", request=admission.action_value())
+                    await host.request_stop_turn(
+                        command_id=random_id("command"), admission_deadline_ms=host.control_admission_deadline_ms(),
+                        expected_session_id=host.session_id, expected_host_session_id=host.host_session_id,
+                        target_turn_id=original["target_turn_id"],
+                    )
+
+                    async def stopped():
+                        return (await host.query_command(admission.client_command_id)).status == "REJECTED"
+                    await settled(stopped)
+                else:
+                    await host.cancel_queued_prompt(
+                        command_id=random_id("command"), source_queue_item_id=accepted.prompt_delivery.queue_item_id
+                    )
+                # Admission survives its exact input reaching a terminal state
+                # before the run-once caller obtains its confirmation.
                 confirmed = await host.query_command(admission.client_command_id)
                 assert confirmed.status == "REJECTED"
                 return confirmed
 
             monkeypatch.setattr(service, "_submit", settled_submission)
             result = await service.run_now(request)
-            assert result["execution"]["status"] == "stopped"
-            assert result["execution"]["terminal_reason"]
-            assert not result["coalesced"]
+            if active:
+                assert result["delivery_mode"] == "STEER_ACTIVE_TURN"
+                assert result["target_turn_id"] is not None
+                assert result["execution"] is None
+            else:
+                assert result["delivery_mode"] == "NEW_TURN"
+                assert result["target_turn_id"] is None
+                assert result["execution"]["status"] == "stopped"
+                assert result["execution"]["terminal_reason"]
             assert await service.run_now(request) == result
         finally:
             model.release.set()

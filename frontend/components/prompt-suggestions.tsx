@@ -7,6 +7,7 @@ import { Suggestion, exitSuggestion, type SuggestionProps } from '@tiptap/sugges
 import { BookOpenText, ChevronRight, File, Folder } from 'lucide-react';
 import { forwardRef, useEffect, useId, useImperativeHandle, useRef, useState } from 'react';
 import { formatWorkspaceReference, type CompleteWorkspacePaths, type WorkspacePathCandidate } from '../lib/file-reference';
+import { explicitReferenceAllowedAt } from '../lib/skill-reference';
 import type { SkillCapability } from '../lib/pulsara-types';
 
 type Candidate = { kind: 'skill'; name: string } | WorkspacePathCandidate;
@@ -89,7 +90,7 @@ const CandidatePopup = forwardRef<PopupHandle, PopupProps>(function CandidatePop
   } }));
 
   if (!visible) return null;
-  return <div className="prompt-candidates" onMouseDown={event => event.preventDefault()}>
+  return <div className="prompt-candidates" data-annotation-ui="" onMouseDown={event => event.preventDefault()}>
     <div ref={list} id={id} role="listbox" aria-label={kind === 'skill' ? '技能候选' : '文件和目录候选'} aria-busy={loading || pending}>
       {page.rows.map((item, index) => {
         const Icon = item.kind === 'skill' ? BookOpenText : item.kind === 'directory' ? Folder : File;
@@ -154,6 +155,8 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
         floatingUi: { strategy: 'fixed', middleware: [shift({ padding: 8 })] },
         allow: ({ state, range }) => {
           if (!editor.isEditable || (kind === 'path' && !current.current.completePaths)) return false;
+          const prefix = state.doc.textBetween(0, range.from, '\n', node => node.type.name === 'image' ? '\n' : node.type.name === 'annotation' ? '' : node.attrs.raw ?? '\ufffc');
+          if (!explicitReferenceAllowedAt(prefix + (kind === 'skill' ? '/' : '@'), prefix.length)) return false;
           const before = state.doc.textBetween(Math.max(0, range.from - 1), range.from, '\n', '\ufffc');
           if ((kind === 'skill' ? /[\p{L}\p{N}_/@.$:\\-]/u : /[A-Za-z0-9_/@.$-]/).test(before)) return false;
           const query = state.doc.textBetween(range.from + 1, range.to);

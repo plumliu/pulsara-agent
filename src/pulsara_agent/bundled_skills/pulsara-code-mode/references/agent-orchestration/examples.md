@@ -15,15 +15,16 @@ const investigation = await tools.run_agent({
   name: "Parser investigator",
   instruction: "Trace how the parser handles an empty input. Identify the relevant source and tests, and explain the observable behavior. Do not edit files."
 });
-console.log(investigation);
-console.log(await tools.wait_agent.works({ targets: [investigation.work] }));
+console.log({ agent: investigation.agent, work: investigation.work });
+await tools.wait_agent.works({ targets: [investigation.work] });
+console.log(await tools.query_agents({ target: investigation.work }));
 ```
 
 **How it works:** `run_agent` accepts one assignment and supplies both targets.
 The WORK wait follows that exact assignment, even if the agent later receives
 another one. The log preserves the agent target for reuse.
 
-**Read the result:** The wait's `works` contains the final or stopped outcome.
+**Read the result:** The wait reports states only; the explicit query reads the final or stopped diagnostic.
 The findings can inform a follow-up. For example, `run_agent` with the same
 agent target continues the investigation:
 
@@ -32,8 +33,9 @@ const followup = await tools.run_agent({
   target: { kind: "AGENT", agent_id: "session:<actual-agent-id>" },
   instruction: "Using your investigation, explain whether the current tests distinguish an empty string from whitespace-only input. Read additional tests if needed."
 });
-console.log(followup);
-console.log(await tools.wait_agent.works({ targets: [followup.work] }));
+console.log({ agent: followup.agent, work: followup.work });
+await tools.wait_agent.works({ targets: [followup.work] });
+console.log(await tools.query_agents({ target: followup.work }));
 ```
 
 Replace the illustrative target with `investigation.agent` from the actual output.
@@ -68,10 +70,11 @@ Report the agreed fields and unresolved differences. Do not edit files.`,
     context: { mode: "last_n", turns: 1 }
   }
 });
-console.log(team);
-console.log(await tools.wait_agent.works({
-  targets: [team.backend.work, team.client.work]
-}));
+await tools.wait_agent.works({ targets: [team.backend.work, team.client.work] });
+const findings = await Promise.all([team.backend.work, team.client.work].map(
+  target => tools.query_agents({ target })
+));
+console.log(findings.map(work => ({ target: work.target, final: work.final, diagnostic: work.diagnostic })));
 ```
 
 **How it works:** Batch parameter functions put the real teammate targets into
@@ -102,8 +105,8 @@ const review = await tools.run_agent({
   instruction: "Review the prerequisite plan against the user's request and the actual code. Identify concrete gaps and explain what is ready to implement.",
   context: { mode: "last_n", turns: 1 }
 });
-console.log({ investigation, review });
-console.log(await tools.wait_agent.works({ targets: [review.work] }));
+await tools.wait_agent.works({ targets: [review.work] });
+console.log(await tools.query_agents({ target: review.work }));
 ```
 
 **How it works:** Each call supplies usable targets immediately after acceptance.
@@ -160,8 +163,9 @@ Report compatibility requirements and any unresolved differences.`
     instruction: "Implement whitespace-only input handling using the prerequisite plan and assessment. Add relevant tests. If the prerequisites leave a material behavior decision unresolved, report it for ROOT to decide before making that change. Report actual modifications and checks."
   }
 });
-console.log(phase);
-console.log(await tools.wait_agent.works({ targets: [phase.implementation.work] }));
+console.log({ implementation: phase.implementation });
+await tools.wait_agent.works({ targets: [phase.implementation.work] });
+console.log(await tools.query_agents({ target: phase.implementation.work }));
 ```
 
 **How it works:** The reused investigator receives a new Work in its existing
@@ -175,7 +179,7 @@ not the investigator's identity or access to its previous conversation.
 
 ## 5. Use native tools while a scripted workflow runs
 
-**Situation:** The script above has yielded, and its implementer is still working.
+**Situation:** The script above has returned acceptance, and its implementer is still working.
 The user adds a concrete requirement. ROOT can send it directly through native
 `send_agent_message`, using `phase.implementation.agent` from the logged output.
 Replace the illustrative target below with that actual target:
@@ -203,5 +207,5 @@ waiting for. No script restart or additional `exec_cell` is needed.
 **Read the result:** A message with `delivery: "queued"` was accepted for the
 active work; `inactive` or `not_started` means it was not delivered. If the agent
 has finished and the new requirement calls for more work, assign it a new Work
-through native `run_agent` or JS, using the same agent target. Continue observing
-the existing script with `manage_cell` with `action:"wait"` when its output is needed.
+through native `run_agent` or JS, using the same agent target. Selected script output arrives actively. Use `manage_cell` with `action:"wait"`
+only when you need its execution state.

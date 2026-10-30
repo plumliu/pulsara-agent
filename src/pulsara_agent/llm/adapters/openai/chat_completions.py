@@ -7,8 +7,8 @@ import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 import json
-import logging
-import os
+import random
+import sys
 from typing import Any, AsyncIterator
 
 from pulsara_agent.llm.adapters.openai.client import (
@@ -34,10 +34,21 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
 )
 from pulsara_agent.llm.adapters.openai.retrying import (
     build_provider_retry_summary,
-    log_retry_attempt,
     make_retry_trace,
     provider_failure_code_hint,
+    provider_failure_message,
+    log_invalid_tool_arguments,
     sdk_max_retries_for_transport,
+    provider_diagnostic_await,
+    capture_retry_scrubber,
+    closed_sdk_stream,
+    close_sdk_resource,
+    _SDKStreamClosure,
+    PhysicalStreamCloseError,
+    replay_is_safe,
+    log_provider_decision,
+    retry_reason,
+    observe_retry,
 )
 from pulsara_agent.llm.errors import LLMTransportContractError
 from pulsara_agent.llm.provider_replay import chat_reasoning_detail_parts
@@ -71,6 +82,8 @@ from pulsara_agent.ports.provider_stream import (
     ProviderAdapterTerminalKind,
     ProviderOutputIncompleteReason,
     ProviderStreamFailure,
+    ProviderRetryUpdate,
+    ProviderRetryPhase,
     ProviderGenerationRetry,
     freeze_provider_adapter_completed_replay_payload,
 )
@@ -89,12 +102,10 @@ from pulsara_agent.llm.retry import (
     RetryDecisionKind,
     apply_retry_after_cap,
     compute_retry_delay,
+    retry_config_for_purpose,
 )
 from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.primitives.model_call import ModelCallPurpose
-
-
-LOGGER = logging.getLogger(__name__)
 
 
 _CHAT_LIVE_THINKING_FIELDS = frozenset(
@@ -113,12 +124,13 @@ class OpenAIChatCompletionsTransport:
     api: str = OPENAI_CHAT_COMPLETIONS_API
     binding_id: str = "pulsara.openai.chat_completions"
     contract_version: str = "v8-connection-reasoning-profiles-and-tool-correlation"
-    retry_config: LLMRetryConfig = field(default_factory=LLMRetryConfig)
+    retry_config: LLMRetryConfig | None = None
     retry_sleep: Callable[[float], Awaitable[None]] = field(
         default=asyncio.sleep, repr=False
     )
     _mock_chunks: list[dict[str, Any]] = field(default_factory=list)
     _client: Any | None = None
+    retry_rng: random.Random | None = field(default=None, repr=False)
 
     async def stream(
         self,
@@ -150,35 +162,44 @@ class OpenAIChatCompletionsTransport:
             return
 
         payload = build_chat_completions_payload(call=call, context=context)
+        retry_config = retry_config_for_purpose(self.retry_config, call.fact.purpose)
+        agent_loop = call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP
+        safe_to_replay = replay_is_safe(api=self.api, payload=payload)
+        # Freeze saved settings and credentials once for this admitted logical call.
+        saved_settings = self.settings.read()
         should_close_client = self._client is None
-        api_key: str | None = None
+        api_key = (
+            saved_settings.require_model_api_key(call.binding.connection_id)
+            if call.target.connection.requires_api_key
+            else None
+        )
+        credential_boundary = ProcessCredentialBoundary(api_key or "")
+        error_scrubber = capture_retry_scrubber(
+            saved_settings, credential_boundary, model.base_url
+        )
+        if context.provider_error_scrubber_observer is not None:
+            context.provider_error_scrubber_observer(error_scrubber.scrub_text)
         if self._client is None:
             await prepare_openai_sdk()
-            if call.target.connection.requires_api_key:
-                api_key = self.settings.read().require_model_api_key(
-                    call.binding.connection_id
-                )
-            credential_boundary = ProcessCredentialBoundary(api_key or "")
             client = build_async_openai_client(
                 api_key=api_key,
                 base_url=model.base_url,
                 timeout_policy=self.timeout_policy,
                 credential_boundary=credential_boundary,
                 max_retries=sdk_max_retries_for_transport(
-                    retry_config=self.retry_config, purpose=call.fact.purpose,
+                    retry_config=retry_config, purpose=call.fact.purpose
                 ),
             )
         else:
-            credential_boundary = ProcessCredentialBoundary()
             client = self._client
-        error_scrubber = credential_boundary.capture_scrub_set()
         retry_traces: list[RetryAttemptTrace] = []
-        completed_model_identity: str | None = None
+        attempt = 1
+        max_attempts = retry_config.attempts if retry_config.enabled else 1
+        pending_failure = None
+        pending_exception = None
+        final_decision = None
+        terminal = None
         try:
-            attempt = 1
-            max_attempts = (
-                self.retry_config.attempts if self.retry_config.enabled else 1
-            )
             while True:
                 model_identity = ReportedModelIdentityObserver(
                     requested_model_id=model.id,
@@ -188,97 +209,152 @@ class OpenAIChatCompletionsTransport:
                     builder=ProviderLiveItemBuilder(),
                     route_wire_profile=model.route_wire_profile,
                 )
-                stream_closed = False
-                stream_close_failed = False
+                phase = "opening"
+                stream_closed = True  # no physical stream exists until open succeeds
+                closure = None
                 try:
-                    stream = await admit_provider_request(
-                        credential_boundary=credential_boundary,
-                        payload=payload,
-                        operation=lambda: client.chat.completions.create(
-                            **payload,
-                            stream=True,
-                            **openai_auth_request_options(
-                                requires_api_key=(
-                                    call.target.connection.requires_api_key
-                                )
+                    stream = await provider_diagnostic_await(
+                        admit_provider_request(
+                            credential_boundary=credential_boundary,
+                            payload=payload,
+                            operation=lambda: client.chat.completions.create(
+                                **payload,
+                                stream=True,
+                                **openai_auth_request_options(
+                                    requires_api_key=call.target.connection.requires_api_key
+                                ),
                             ),
                         ),
+                        error_scrubber,
                     )
-                    try:
-                        async for raw_chunk in stream:
-                            model_identity.observe(
-                                chat_completion_reported_model(raw_chunk)
-                            )
-                            for event in accumulator.apply(raw_chunk):
-                                yield event
-                    finally:
-                        # SDK AsyncStream owns the HTTP response lifecycle.
-                        # Async generators used by injected transports own
-                        # the standard aclose() lifecycle instead.
-                        closer = getattr(stream, "close", None) or getattr(stream, "aclose", None)
-                        if closer is not None:
+                    stream_closed = False
+                    phase = "streaming"
+                    async with closed_sdk_stream(
+                        stream, scrub=error_scrubber
+                    ) as closure:
+                        while True:
                             try:
-                                await closer()
-                            except BaseException:
-                                stream_close_failed = True
-                                raise
-                            stream_closed = True
-                    completed_model_identity = model_identity.reported_model_id
+                                raw_item = await provider_diagnostic_await(
+                                    anext(stream), error_scrubber
+                                )
+                            except StopAsyncIteration:
+                                break
+                            model_identity.observe(
+                                chat_completion_reported_model(raw_item)
+                            )
+                            for item in accumulator.apply(raw_item):
+                                if accumulator.builder.has_semantic_output:
+                                    observe_retry(context, None)
+                                yield item
+                        phase = "closing"
+                    stream_closed = True
                     break
+                except asyncio.CancelledError as exc:
+                    stream_closed = stream_closed or (
+                        closure is not None and closure.closed
+                    )
+                    if closure is not None and closure.closing:
+                        phase = "closing"
+                    log_provider_decision(
+                        api=self.api,
+                        model=model,
+                        scrub=error_scrubber,
+                        config=retry_config,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        phase=phase,
+                        exc=exc,
+                        decision=None,
+                        skipped_reason="cancelled",
+                        semantic=accumulator.builder.has_semantic_output,
+                        terminal=accumulator.terminal is not None,
+                        closed=stream_closed,
+                        outcome="cancelled",
+                    )
+                    raise
                 except Exception as exc:
+                    close_failed = isinstance(exc, PhysicalStreamCloseError)
+                    # A raised iteration exception has already joined SDK close.
+                    stream_closed = not close_failed
                     regenerate = (
-                        call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP
+                        agent_loop
                         and stream_closed
                         and isinstance(exc, LLMTransportContractError)
                         and exc.reason_code == "transport_tool_arguments_invalid"
                     )
                     if regenerate:
-                        try:
-                            # Scrub before serializing. Arguments are themselves
-                            # JSON text, so include JSON-escaped credential values.
-                            scrub = self.settings.read().credential_scrub_set()
-                            for value in error_scrubber.values:
-                                scrub.observe(value)
-                            for value in scrub.values:
-                                for ensure_ascii in (False, True):
-                                    scrub.observe(json.dumps(os.fsdecode(value), ensure_ascii=ensure_ascii)[1:-1])
-                            diagnostic = scrub.scrub_json({
-                                "arguments": {
-                                    key: "".join(parts)
-                                    for key, parts in accumulator.builder.tool_call_argument_parts.items()
-                                },
-                                "terminal_chunk": sdk_event_to_dict(raw_chunk),
-                                "parse_error": str(exc.__cause__ or exc),
-                            })
-                            LOGGER.warning(
-                                "Invalid tool arguments attempt=%s diagnostic=%s",
-                                attempt, json.dumps(diagnostic, ensure_ascii=False),
-                            )
-                        except Exception:
-                            # Diagnostic failure cannot authorize unsafe output
-                            # or prevent the original recovery decision.
-                            LOGGER.warning("Invalid tool arguments attempt=%s diagnostic_unavailable", attempt)
+                        log_invalid_tool_arguments(
+                            scrub=error_scrubber,
+                            attempt=attempt,
+                            arguments={
+                                key: "".join(parts)
+                                for key, parts in accumulator.builder.tool_call_argument_parts.items()
+                            },
+                            terminal_chunk=sdk_event_to_dict(raw_item),
+                            exc=exc,
+                        )
                     decision = apply_retry_after_cap(
-                        LLMRetryDecision(kind=RetryDecisionKind.DO_NOT_RETRY, reason="stream_close_failed")
-                        if stream_close_failed else
-                        LLMRetryDecision(kind=RetryDecisionKind.RETRY, reason="tool_arguments_invalid")
-                        if regenerate else classify_llm_error(exc),
-                        config=self.retry_config,
+                        LLMRetryDecision(
+                            kind=RetryDecisionKind.DO_NOT_RETRY,
+                            reason="completed_stream_close_failed"
+                            if accumulator.terminal is not None
+                            else "physical_close_unconfirmed",
+                        )
+                        if close_failed
+                        else LLMRetryDecision(
+                            kind=RetryDecisionKind.RETRY,
+                            reason="tool_arguments_invalid",
+                        )
+                        if regenerate
+                        else classify_llm_error(exc),
+                        config=retry_config,
                     )
-                    can_retry = (
-                        self.retry_config.enabled
-                        and not stream_close_failed
-                        and decision.kind is RetryDecisionKind.RETRY
-                        and (regenerate or not accumulator.builder.has_semantic_output)
-                        and accumulator.terminal is None
-                        and attempt < max_attempts
+                    skipped_reason = (
+                        decision.reason
+                        if close_failed
+                        else "terminal_already_observed"
+                        if accumulator.terminal is not None
+                        else "retry_disabled"
+                        if not retry_config.enabled
+                        else decision.reason
+                        if decision.kind is not RetryDecisionKind.RETRY
+                        else "unsafe_to_replay"
+                        if agent_loop and not safe_to_replay
+                        else "semantic_output_started"
+                        if not agent_loop and accumulator.builder.has_semantic_output
+                        else "attempts_exhausted"
+                        if attempt >= max_attempts
+                        else None
+                    )
+                    can_retry = skipped_reason is None
+                    delay = (
+                        compute_retry_delay(
+                            attempt_index=attempt,
+                            config=retry_config,
+                            retry_after_seconds=decision.retry_after_seconds,
+                            rng=self.retry_rng,
+                        )
+                        if can_retry
+                        else None
+                    )
+                    log_provider_decision(
+                        api=self.api,
+                        model=model,
+                        scrub=error_scrubber,
+                        config=retry_config,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        phase="closing" if close_failed else phase,
+                        exc=exc,
+                        decision=decision,
+                        skipped_reason=skipped_reason,
+                        semantic=accumulator.builder.has_semantic_output,
+                        terminal=accumulator.terminal is not None,
+                        closed=stream_closed,
+                        delay=delay,
+                        outcome="waiting" if can_retry else "failed",
                     )
                     if can_retry:
-                        delay = compute_retry_delay(
-                            attempt_index=attempt,
-                            config=self.retry_config,
-                            retry_after_seconds=decision.retry_after_seconds,
-                        )
                         trace = make_retry_trace(
                             exc=exc,
                             decision=decision,
@@ -286,95 +362,227 @@ class OpenAIChatCompletionsTransport:
                             max_attempts=max_attempts,
                             delay_seconds=delay,
                         )
-                        retry_traces.append(trace)
-                        log_retry_attempt(
-                            api=self.api,
-                            model=model,
-                            trace=trace,
+                        reason = retry_reason(decision)
+                        # The normalized boundary clears every disposable accumulator;
+                        # Runner replaces the draft without accepting old tool calls.
+                        yield ProviderGenerationRetry(reason=reason)
+                        update = ProviderRetryUpdate(
+                            attempt=attempt + 1,
+                            retry_number=attempt,
+                            max_retries=max_attempts - 1,
+                            phase=ProviderRetryPhase.WAITING,
+                            reason=reason,
+                            delay_seconds=delay,
                             has_semantic_output=accumulator.builder.has_semantic_output,
                         )
-                        if regenerate:
-                            yield ProviderGenerationRetry()
-                        await self.retry_sleep(delay)
+                        observe_retry(context, update)
+                        try:
+                            await self.retry_sleep(delay)
+                        except asyncio.CancelledError as cancelled:
+                            log_provider_decision(
+                                api=self.api,
+                                model=model,
+                                scrub=error_scrubber,
+                                config=retry_config,
+                                attempt=attempt,
+                                max_attempts=max_attempts,
+                                phase="waiting",
+                                exc=cancelled,
+                                decision=decision,
+                                skipped_reason="cancelled",
+                                semantic=accumulator.builder.has_semantic_output,
+                                terminal=False,
+                                closed=True,
+                                delay=delay,
+                                outcome="cancelled",
+                            )
+                            raise
+                        observe_retry(
+                            context,
+                            replace(
+                                update,
+                                phase=ProviderRetryPhase.RECONNECTING,
+                                delay_seconds=0,
+                            ),
+                        )
+                        # Only entering the next transport attempt counts as a retry.
+                        retry_traces.append(trace)
                         attempt += 1
                         continue
-
-                    skipped_reason = _retry_skipped_reason(
-                        retry_config=self.retry_config,
-                        decision=decision,
-                        has_semantic_output=accumulator.builder.has_semantic_output and not regenerate,
-                        attempt=attempt,
-                        max_attempts=max_attempts,
-                    )
-                    failure_report = accumulator.usage_report
-                    if (
-                        failure_report is not None
-                        or model_identity.reported_model_id is not None
+                    message = provider_failure_message(exc)
+                    if accumulator.terminal is not None and (
+                        close_failed
+                        or decision.reason in {"transport_error", "transport_timeout"}
                     ):
-                        yield replace(
-                            failure_report
-                            or TransportUsageReport(usage_status="missing", usage=None),
-                            reported_model_id=model_identity.reported_model_id,
-                        )
-                    yield ProviderStreamFailure(
-                        message=error_scrubber.scrub_text(str(exc)),
-                        code_hint=(
-                            exc.reason_code
-                            if isinstance(exc, LLMTransportContractError)
-                            else provider_failure_code_hint(decision)
-                        ),
+                        message = "已收到结果，但连接收尾失败。 " + message
+                    observe_retry(context, None)
+                    pending_failure = ProviderStreamFailure(
+                        message=error_scrubber.scrub_text(message),
+                        code_hint=exc.reason_code
+                        if isinstance(exc, LLMTransportContractError)
+                        else provider_failure_code_hint(decision),
                         retry_summary=build_provider_retry_summary(
-                            config=self.retry_config,
+                            config=retry_config,
                             traces=retry_traces,
                             final_decision=decision,
                             final_attempt=attempt,
                             has_semantic_output=accumulator.builder.has_semantic_output,
-                            exhausted=(
-                                self.retry_config.enabled
-                                and decision.kind is RetryDecisionKind.RETRY
-                                and (regenerate or not accumulator.builder.has_semantic_output)
-                                and attempt >= max_attempts
-                            ),
+                            exhausted=skipped_reason == "attempts_exhausted",
                             skipped_reason=skipped_reason,
                         ),
                     )
-                    return
+                    pending_exception = exc
+                    final_decision = decision
+                    break
+            if pending_failure is None:
+                terminal = accumulator.finish()
+                if isinstance(terminal, ProviderStreamFailure):
+                    pending_failure = terminal
+                    pending_exception = LLMTransportContractError(
+                        terminal.message,
+                        reason_code=terminal.code_hint or "transport_protocol_error",
+                    )
+                    final_decision = LLMRetryDecision(
+                        kind=RetryDecisionKind.DO_NOT_RETRY,
+                        reason=terminal.code_hint or "transport_protocol_error",
+                    )
+                    log_provider_decision(
+                        api=self.api,
+                        model=model,
+                        scrub=error_scrubber,
+                        config=retry_config,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        phase="closing",
+                        exc=pending_exception,
+                        decision=final_decision,
+                        skipped_reason="non_retryable",
+                        semantic=accumulator.builder.has_semantic_output,
+                        terminal=False,
+                        closed=True,
+                        outcome="failed",
+                    )
         finally:
+            active_error = sys.exception()
+            observe_retry(context, None)
             api_key = None
             if should_close_client:
+                client_closure = _SDKStreamClosure()
                 try:
-                    await client.close()
-                except Exception as exc:
-                    raise RuntimeError(
-                        error_scrubber.scrub_text(f"{type(exc).__name__}: {exc}")
-                    ) from None
+                    await close_sdk_resource(
+                        client,
+                        scrub=error_scrubber,
+                        primary=pending_exception or active_error,
+                        closure=client_closure,
+                    )
+                except asyncio.CancelledError as cancelled:
+                    log_provider_decision(
+                        api=self.api,
+                        model=model,
+                        scrub=error_scrubber,
+                        config=retry_config,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        phase="closing",
+                        exc=cancelled,
+                        decision=None,
+                        skipped_reason="cancelled",
+                        semantic=accumulator.builder.has_semantic_output,
+                        terminal=accumulator.terminal is not None,
+                        closed=stream_closed,
+                        outcome="cancelled",
+                        close_scope="sdk_client",
+                        client_close_confirmed=client_closure.closed,
+                    )
+                    raise
+                except PhysicalStreamCloseError as close_error:
+                    close_decision = replace(
+                        final_decision
+                        or LLMRetryDecision(
+                            kind=RetryDecisionKind.DO_NOT_RETRY,
+                            reason="physical_close_unconfirmed",
+                        ),
+                        kind=RetryDecisionKind.DO_NOT_RETRY,
+                        reason="completed_stream_close_failed"
+                        if accumulator.terminal is not None
+                        else "physical_close_unconfirmed",
+                    )
+                    log_provider_decision(
+                        api=self.api,
+                        model=model,
+                        scrub=error_scrubber,
+                        config=retry_config,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        phase="closing",
+                        exc=close_error,
+                        decision=close_decision,
+                        skipped_reason=close_decision.reason,
+                        semantic=accumulator.builder.has_semantic_output,
+                        terminal=accumulator.terminal is not None,
+                        closed=stream_closed,
+                        outcome="failed",
+                        close_scope="sdk_client",
+                        client_close_confirmed=False,
+                        original_classification=None
+                        if final_decision is None
+                        else final_decision.reason,
+                    )
+                    if active_error is not None:
+                        raise
+                    message = provider_failure_message(close_error)
+                    if accumulator.terminal is not None:
+                        message = "已收到结果，但连接收尾失败。 " + message
+                    pending_failure = ProviderStreamFailure(
+                        message=error_scrubber.scrub_text(message),
+                        code_hint=(
+                            pending_failure.code_hint
+                            if pending_failure is not None
+                            else provider_failure_code_hint(close_decision)
+                        ),
+                        retry_summary=build_provider_retry_summary(
+                            config=retry_config,
+                            traces=retry_traces,
+                            final_decision=close_decision,
+                            final_attempt=attempt,
+                            has_semantic_output=accumulator.builder.has_semantic_output,
+                            exhausted=False,
+                            skipped_reason=close_decision.reason,
+                        ),
+                    )
 
         report = accumulator.usage_report
-        if report is not None or completed_model_identity is not None:
+        if report is not None or model_identity.reported_model_id is not None:
             yield replace(
                 report or TransportUsageReport(usage_status="missing", usage=None),
-                reported_model_id=completed_model_identity,
+                reported_model_id=model_identity.reported_model_id,
             )
-        yield accumulator.finish()
-
-
-def _retry_skipped_reason(
-    *,
-    retry_config: LLMRetryConfig,
-    decision: Any,
-    has_semantic_output: bool,
-    attempt: int,
-    max_attempts: int,
-) -> str | None:
-    if not retry_config.enabled:
-        return "retry_disabled"
-    if has_semantic_output:
-        return "semantic_output_started"
-    if decision.kind is not RetryDecisionKind.RETRY:
-        return decision.reason
-    if attempt >= max_attempts:
-        return "attempts_exhausted"
-    return None
+        if pending_failure is not None:
+            yield replace(
+                pending_failure,
+                message=error_scrubber.scrub_text(pending_failure.message),
+            )
+            return
+        assert terminal is not None
+        log_provider_decision(
+            api=self.api,
+            model=model,
+            scrub=error_scrubber,
+            config=retry_config,
+            attempt=attempt,
+            max_attempts=max_attempts,
+            phase="closing",
+            exc=None,
+            decision=None,
+            skipped_reason=None,
+            semantic=accumulator.builder.has_semantic_output,
+            terminal=True,
+            closed=True,
+            outcome="success"
+            if terminal.terminal_kind is ProviderAdapterTerminalKind.COMPLETED
+            else "output_incomplete",
+        )
+        yield terminal
 
 
 def build_chat_completions_payload(
@@ -394,8 +602,11 @@ def build_chat_completions_payload(
             raise TypeError("Chat context projection must be an object")
         if context_fields.get("tool_choice") != context.tool_choice:
             raise ValueError("Chat context tool choice changed after wire planning")
-        wire_input_tokens = (plan.budget_input_tokens if context.ephemeral_wire_input is not None
-                             else plan.quote.budget_input_tokens)
+        wire_input_tokens = (
+            plan.budget_input_tokens
+            if context.ephemeral_wire_input is not None
+            else plan.quote.budget_input_tokens
+        )
     else:
         items_with_sources = _chat_message_items_with_sources(context.messages)
         ordered_items = tuple(item for item, _source in items_with_sources)
@@ -406,15 +617,23 @@ def build_chat_completions_payload(
             tool_items=tuple(_tool_to_chat_tool(tool) for tool in context.tools),
             tool_choice=context.tool_choice,
         )
-        wire_input_tokens = call.target.token_estimator.estimate_final_wire_json_components(
-            fixed_context=materialize_chat_context_bearing_wire_projection(
-                call=call, root_policy=context.system_prompt, ordered_input_items=(),
-                tool_items=tuple(_tool_to_chat_tool(tool) for tool in context.tools),
-                tool_choice=context.tool_choice,
-            ),
-            ordered_input_items=ordered_items,
-            ordered_input_sources=tuple(source for _item, source in items_with_sources),
-        ).total_input_tokens
+        wire_input_tokens = (
+            call.target.token_estimator.estimate_final_wire_json_components(
+                fixed_context=materialize_chat_context_bearing_wire_projection(
+                    call=call,
+                    root_policy=context.system_prompt,
+                    ordered_input_items=(),
+                    tool_items=tuple(
+                        _tool_to_chat_tool(tool) for tool in context.tools
+                    ),
+                    tool_choice=context.tool_choice,
+                ),
+                ordered_input_items=ordered_items,
+                ordered_input_sources=tuple(
+                    source for _item, source in items_with_sources
+                ),
+            ).total_input_tokens
+        )
 
     payload: dict[str, Any] = dict(context_fields)
     extra_body: dict[str, Any] = {}
@@ -434,7 +653,8 @@ def build_chat_completions_payload(
     for key, value in route_wire_profile.request_defaults.items():
         payload.setdefault(key, mutable_provider_value(value))
     payload["max_completion_tokens"] = resolve_wire_output_tokens(
-        target=call.target, final_wire_input_tokens=wire_input_tokens,
+        target=call.target,
+        final_wire_input_tokens=wire_input_tokens,
     )
     reasoning = reasoning_wire_fields(call.target.contract, call.selected_reasoning)
     for key, value in reasoning.root.items():

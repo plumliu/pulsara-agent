@@ -21,6 +21,7 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope, decode_runtime_observation
 from pulsara_agent.llm.input import join_text_content
+from pulsara_agent.primitives.context import freeze_json
 from tests.support.postgres_database import (
     admin_root_dsn, create_migrated_postgres_test_database, drop_postgres_test_database,
 )
@@ -100,9 +101,12 @@ def test_notice_pending_follows_actual_dispatch_install(notice_database, boundar
         repository.update_session_model_call_binding(lease.guard, binding=model_binding(runtime), deadline_monotonic=monotonic() + 30)
         model._model_runtime = runtime
         model._preparer = DirectKernelModelPort(model_runtime=runtime)
+        current_state = {"skills": {"available": [{"name": "demo"}]}}
         host = SimpleNamespace(
             _lock=asyncio.Lock(), _require_open=lambda: None,
-            _pending_capability_change=None, _capability_refresh_requested_revision=0,
+            _capability_notification_revision=None,
+            _freeze_effective_capability_state=lambda: freeze_json(current_state),
+            _capability_refresh_requested_revision=0,
             _capability_refresh_applied_revision=0, _capability_refresh_attention=None,
             reload_capabilities=AsyncMock(return_value={"status": "RELOADED"}),
         )
@@ -115,13 +119,15 @@ def test_notice_pending_follows_actual_dispatch_install(notice_database, boundar
             capability_change_reader=lambda: KernelHostSession.freeze_capability_change(host),
             capability_change_installed=lambda frozen: KernelHostSession.consume_capability_change(host, frozen),
         )
-        scope = ProviderInputContinuityScope(session_id, ModelInputScopeKind.ROOT, None)
+        scope = ProviderInputContinuityScope(session_id, ModelInputScopeKind.ROOT)
         await runner.run_turn(frozen_test_prompt("baseline"))
         baseline = runner._continuity.current_view(scope)
-        fact = change("large-" + "x" * 300_000) if boundary == "budget_fallback" else change()
-        await KernelHostSession.request_capability_refresh(host, fact)
+        if boundary == "budget_fallback":
+            current_state["skills"]["available"] = [{"name": "large-" + "x" * 300_000}]
+        await KernelHostSession.request_capability_refresh(host, change())
         await KernelHostSession._adopt_capabilities_if_requested(host)
-        pending = host._pending_capability_change
+        pending = await KernelHostSession.freeze_capability_change(host)
+        assert pending is not None
         dispatch = runner._provider_dispatch
         original_install = dispatch.install_provider_open
         original_preflight = model.preflight_execution
@@ -145,6 +151,7 @@ def test_notice_pending_follows_actual_dispatch_install(notice_database, boundar
                 entered.set()
                 await release.wait()
             elif boundary == "newer_after_freeze":
+                current_state["skills"]["available"] = [{"name": "newer"}]
                 await KernelHostSession.request_capability_refresh(host, change("newer"))
             return await original_install(**kwargs)
 
@@ -173,29 +180,36 @@ def test_notice_pending_follows_actual_dispatch_install(notice_database, boundar
         assert installed.tools == baseline.tools
         assert installed.messages[:len(baseline.messages)] == baseline.messages
         if boundary in {"preflight_failure", "cancel_before_install"}:
-            assert host._pending_capability_change == pending
+            assert host._capability_notification_revision == pending.revision
+            assert await KernelHostSession.freeze_capability_change(host) == pending
             assert installed == baseline
             assert not _notices(installed)
             await runner.run_turn(frozen_test_prompt("retry naturally"))
-            assert host._pending_capability_change is None
+            assert host._capability_notification_revision is None
             assert len(_notices(runner._continuity.current_view(scope))) == 1
         elif boundary == "budget_fallback":
-            assert host._pending_capability_change == pending
+            assert host._capability_notification_revision == pending.revision
+            assert await KernelHostSession.freeze_capability_change(host) == pending
             decision = next(d for d in model.requests[-1].compiled_input.source_decisions if d.source_kind is ContextSourceKind.CAPABILITY_CHANGE)
             assert decision.selected_mode is ContextRenderMode.UNAVAILABLE_MINIMAL
             assert all(not n.body for n in _notices(installed))
             assert "large-" not in str(installed.messages)
         elif boundary == "newer_after_freeze":
-            assert host._pending_capability_change.revision > pending.revision
-            assert host._pending_capability_change.changes == 1
-            assert "newer" in host._pending_capability_change.render()
+            assert host._capability_notification_revision > pending.revision
+            # New state cannot be reported before its adoption completes; the
+            # older installed snapshot must not clear the newer pending slot.
+            assert await KernelHostSession.freeze_capability_change(host) is None
             assert len(_notices(installed)) == 1
             await KernelHostSession._adopt_capabilities_if_requested(host)
-            await runner.run_turn(frozen_test_prompt("observe the newer operation"))
-            assert host._pending_capability_change is None
+            newer = await KernelHostSession.freeze_capability_change(host)
+            assert newer.revision > pending.revision
+            assert "newer" in newer.render()
+            assert "newer" not in pending.render()
+            await runner.run_turn(frozen_test_prompt("observe the newer state"))
+            assert host._capability_notification_revision is None
             assert len(_notices(runner._continuity.current_view(scope))) == 2
         else:
-            assert host._pending_capability_change is None
+            assert host._capability_notification_revision is None
             assert len(_notices(installed)) == 1
             await runner.run_turn(frozen_test_prompt("continue after transport failure"))
             assert len(_notices(runner._continuity.current_view(scope))) == 1

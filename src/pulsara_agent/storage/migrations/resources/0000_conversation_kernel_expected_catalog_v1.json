@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:d02a12e04febabfc7587568f7eb0460d4d4fc5c8f5b371cdb97748c502aea743",
+  "observed_catalog_fingerprint": "sha256:628ace14a1a8bc0cf2a72a37e377133fc9d5b0ad690bf9c8f084999e9ebd783c",
   "required_extensions": [
     {
       "extension_name": "vector",

@@ -7,6 +7,8 @@ from enum import StrEnum
 from hashlib import sha256
 import re
 
+from pulsara_agent.llm.explicit_references import explicit_reference_excluded_ranges
+
 from pulsara_agent.capability.bundled_skills import (
     BundledSkillDefinitionsDisposition,
     FrozenBundledSkillDefinitions,
@@ -59,7 +61,7 @@ from pulsara_agent.capability.types import (
 
 
 _EXPLICIT_SLASH = re.compile(
-    r"(?<![\w/@.$:<\\-])/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w./\\-])"
+    r"(?<![\w/@.$:<\\-])/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w/\\-]|\.\w)"
 )
 _EXPLICIT_PREFIX = re.compile(
     r"(?<![A-Za-z0-9_-])skill:([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_-])",
@@ -464,14 +466,14 @@ def _catalog_entry(skill: SkillManifest) -> ResolvedSkillCatalogEntry:
 def _active_injections(
     skills_by_name: dict[str, SkillManifest],
     *,
-    user_input: str,
+    user_input: tuple[str, ...],
     active_skill_names: frozenset[str],
 ) -> tuple[
     tuple[ActiveSkillInjection, ...],
     tuple[SkillDiagnostic, ...],
     ActiveSkillProjectionUnavailableReason | None,
 ]:
-    explicit = _explicit_skill_names(user_input)
+    explicit = tuple(name for name in _explicit_skill_names(user_input) if name in skills_by_name)
     selected = tuple(sorted(set(active_skill_names) | set(explicit)))
     if any(name not in skills_by_name for name in selected):
         return (
@@ -509,10 +511,15 @@ def _active_injections(
     return tuple(injections), (), None
 
 
-def _explicit_skill_names(user_input: str) -> tuple[str, ...]:
+def _explicit_skill_names(user_input: str | tuple[str, ...]) -> tuple[str, ...]:
+    if isinstance(user_input, tuple):
+        return tuple(sorted({name for surface in user_input for name in _explicit_skill_names(surface)}))
+    excluded = explicit_reference_excluded_ranges(user_input)
+    def allowed(match: re.Match[str]) -> bool:
+        return not any(start <= match.start() < end for start, end in excluded)
     values = {
-        *(_match.group(1) for _match in _EXPLICIT_SLASH.finditer(user_input)),
-        *(_match.group(1).lower() for _match in _EXPLICIT_PREFIX.finditer(user_input)),
+        *(match.group(1) for match in _EXPLICIT_SLASH.finditer(user_input) if allowed(match)),
+        *(match.group(1).lower() for match in _EXPLICIT_PREFIX.finditer(user_input) if allowed(match)),
     }
     return tuple(sorted(values))
 

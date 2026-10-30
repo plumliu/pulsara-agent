@@ -455,7 +455,7 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                                 await asyncio.sleep(0.01)
                     if stage == 2:
                         scope = ProviderInputContinuityScope(
-                            session_id, ModelInputScopeKind.ROOT, None
+                            session_id, ModelInputScopeKind.ROOT
                         )
                         before = runner._continuity.current_view(scope)
                         fail_preflight = True

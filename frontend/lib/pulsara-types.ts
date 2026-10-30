@@ -382,13 +382,16 @@ export interface Message {
   role: 'user' | 'assistant';
   userKind?: 'prompt' | 'scheduled' | 'steer' | 'plan-continuation';
   scheduledInput?: { taskId: string; taskRevision: number; dueAtUtc: string; triggerSource: 'TIMER' | 'RUN_ONCE' };
+  cellOutput?: { cellId: string; sourceTurnId: string; sourceExecAttemptId: string; recordSequence: number; kind: string };
   inputOrigin?: string;
   inputSource?: { deliveryMode: 'new-turn' | 'steer' } & (
     | { identityKind: 'queue'; queueItemId: string; sourceKind: 'command'; commandId: string }
     | { identityKind: 'queue'; queueItemId: string; sourceKind: 'agent'; commandId?: never; sourceSessionId?: string; sourceWorkId?: string }
+    | { identityKind: 'queue'; queueItemId: string; sourceKind: 'cell'; commandId?: never; sourceSessionId?: string; sourceTurnId?: string; sourceExecAttemptId?: string }
     | { identityKind: 'queue'; queueItemId: string; sourceKind: 'system'; commandId?: never }
     | { identityKind: 'revision'; queueItemId?: never; sourceKind: 'command'; commandId: string }
     | { identityKind: 'origin'; queueItemId?: never; sourceKind: 'agent'; commandId?: never; sourceSessionId?: string; sourceWorkId?: string }
+    | { identityKind: 'origin'; queueItemId?: never; sourceKind: 'cell'; commandId?: never; sourceSessionId?: string; sourceTurnId?: string; sourceExecAttemptId?: string }
   );
   assistantKind?: 'terminal' | 'tool-request' | 'live';
   time: string;

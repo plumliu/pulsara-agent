@@ -116,7 +116,7 @@ def _resolve_skill_projection(
     inspection = _inspect(producer, workspace)
     return SkillCatalogCapabilityProvider().resolve_projection_from_snapshot(
         SkillProjectionResolveContext(
-            user_input=user_input,
+            user_input=(user_input,),
             active_skill_names=active_skill_names,
         ),
         inspection=inspection,

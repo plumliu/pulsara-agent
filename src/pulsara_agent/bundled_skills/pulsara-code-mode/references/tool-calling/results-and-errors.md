@@ -47,15 +47,17 @@ actual ARTIFACT target with `read_artifact`; check its disposition and coverage.
 An artifact marked complete covers the reported selection, which may be less
 than the process's entire lifetime.
 
-Large individual log records are delivered through an artifact. An output page
-with `has_more: true` has further records to read through `manage_cell` with `action:"wait"`. A script
-can log summaries, full responses, or selected fields, depending on what ROOT
-needs. File or artifact locations also give access to the saved content.
+Each log is actively delivered as its own input; ROOT does not use `exec_cell`
+or `manage_cell.wait` to fetch output pages. Large records retain full content
+through the existing content/artifact owner. Read any supplied exact content
+entry or artifact when ROOT needs the full body.
 
-If a stopped or failed script still has pending calls, later `manage_cell` with `action:"wait"` output
-can contain their real outcomes as `kind: "tool_result"` records. These describe
-already submitted operations; the script is not executing again. These outcomes
-can help clarify whether an interrupted operation took effect.
+A Cell that fails unexpectedly reports a combined diagnostic preserving its
+specific cause. Tools already accepted but not delivered to JS still settle and
+report their actual `kind: "tool_result"` records; they do not execute again.
+Explicit Stop keeps real effects readable without using late results to wake the
+stopped execution. Ordinary results already delivered to JS stay inside the script
+unless it explicitly outputs them.
 
 ## Show an image through the native tool
 

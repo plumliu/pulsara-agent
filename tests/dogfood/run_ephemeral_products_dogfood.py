@@ -309,7 +309,7 @@ async def run():
                         ),
                     )
                     scope = ProviderInputContinuityScope(
-                        session.session_id, ModelInputScopeKind.ROOT, None
+                        session.session_id, ModelInputScopeKind.ROOT
                     )
                     cohort = session._input_continuity.current_cohort(scope)
                     anchor = session._input_continuity.current_usage_anchor(scope)

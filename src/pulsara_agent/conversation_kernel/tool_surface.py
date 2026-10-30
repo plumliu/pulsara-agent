@@ -32,7 +32,7 @@ _MCP_STANDARD_TOOL_NAMES = frozenset(
     }
 )
 _TERMINAL_TOOL_NAMES = frozenset(
-    {"exec_process", "query_processes", "manage_process", "query_monitors", "manage_monitor"}
+    {"exec_process", "query_processes", "manage_process"}
 )
 _PLAN_CONTROL_TOOL_NAMES = frozenset(
     {"enter_plan", "ask_plan_question", "exit_plan"}

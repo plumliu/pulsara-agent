@@ -618,8 +618,8 @@ class LocalHttpServer:
         self._app.router.add_post("/api/sessions/{session_id}/works/{work_id}/inputs", self._sidebar_work)
         self._app.router.add_post("/api/sessions/{session_id}/hosts/{host_id}/cells", self._sidebar_cells)
         self._app.router.add_get("/api/sessions/{session_id}/hosts/{host_id}/cells/{cell_id}", self._sidebar_cell_info)
-        for operation in ("source", "graph"):
-            self._app.router.add_post("/api/sessions/{session_id}/hosts/{host_id}/cells/{cell_id}/" + operation, self._sidebar_cell)
+        self._app.router.add_post("/api/sessions/{session_id}/hosts/{host_id}/cells/{cell_id}/graph", self._sidebar_cell_graph)
+        self._app.router.add_post("/api/sessions/{session_id}/cell-sources/{source_exec_attempt_id}", self._cell_source)
 
         self._app.router.add_post("/api/sessions/{session_id}/archive", self._archive_session)
         self._app.router.add_post("/api/sessions/{session_id}/unarchive", self._unarchive_session)
@@ -2220,10 +2220,13 @@ class LocalHttpServer:
         return web.json_response(await self.sessions.sidebar_cells(request.match_info["session_id"],
             request.match_info["host_id"], await self._json_body(request)))
 
-    async def _sidebar_cell(self, request):
-        return web.json_response(await self.sessions.sidebar_cell(request.match_info["session_id"],
-            request.match_info["host_id"], request.match_info["cell_id"], await self._json_body(request),
-            graph=request.path.endswith("/graph")))
+    async def _sidebar_cell_graph(self, request):
+        return web.json_response(await self.sessions.sidebar_cell_graph(request.match_info["session_id"],
+            request.match_info["host_id"], request.match_info["cell_id"], await self._json_body(request)))
+
+    async def _cell_source(self, request):
+        return web.json_response(await self.sessions.cell_source(request.match_info["session_id"],
+            request.match_info["source_exec_attempt_id"], await self._json_body(request)))
 
     async def _sidebar_cell_info(self, request):
         return web.json_response(await self.sessions.sidebar_cell_info(request.match_info["session_id"],
@@ -2307,7 +2310,8 @@ class LocalHttpServer:
                     and parts[3] in {"snapshot", "history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"})
                 or (len(parts) == 3 and parts[0] == "works" and parts[2] == "inputs")
                 or (len(parts) == 3 and parts[0] == "hosts" and parts[2] == "cells")
-                or (len(parts) == 5 and parts[0] == "hosts" and parts[2] == "cells" and parts[4] in {"source", "graph"}))
+                or (len(parts) == 2 and parts[0] == "cell-sources")
+                or (len(parts) == 5 and parts[0] == "hosts" and parts[2] == "cells" and parts[4] == "graph"))
             if suffix not in independent and not suffix.startswith("history/") and not sidebar_read:
                 await self.bridge.require_chat_controller(
                     request.headers.get("X-Pulsara-Connection-Id", ""),

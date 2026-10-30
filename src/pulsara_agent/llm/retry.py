@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -98,14 +99,19 @@ def compute_retry_delay(
     """
 
     rng = rng or random
-    if retry_after_seconds is not None:
+    delay = min(
+        config.base_delay_seconds * (2 ** max(attempt_index - 1, 0)),
+        config.max_delay_seconds,
+    )
+    if (
+        retry_after_seconds is not None
+        and math.isfinite(retry_after_seconds)
+        and retry_after_seconds >= 0
+    ):
         if retry_after_seconds > config.max_retry_after_seconds:
             raise ValueError("retry_after_seconds exceeds max_retry_after_seconds")
-        jitter = retry_after_seconds * config.jitter_ratio * rng.random()
-        return retry_after_seconds + jitter
-
-    delay = config.base_delay_seconds * (2 ** max(attempt_index - 1, 0))
-    delay = min(delay, config.max_delay_seconds)
+        floor = max(delay, retry_after_seconds)
+        return floor * (1 + config.jitter_ratio * rng.random())
     if config.jitter_ratio <= 0:
         return delay
     spread = delay * config.jitter_ratio
@@ -131,3 +137,14 @@ def apply_retry_after_cap(
             provider_code=decision.provider_code,
         )
     return decision
+
+
+def retry_config_for_purpose(config: LLMRetryConfig | None, purpose) -> LLMRetryConfig:
+    """Only the ordinary agent loop adopts the five-retry product policy."""
+    from pulsara_agent.primitives.model_call import ModelCallPurpose
+
+    if config is not None:
+        return config
+    if purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
+        return LLMRetryConfig(attempts=6, base_delay_seconds=2, max_delay_seconds=30)
+    return LLMRetryConfig()

@@ -27,12 +27,12 @@ describe('query and cell tool consumers', () => {
   it('does not confuse completed cell observations with completed scripts', () => {
     const target = { kind: 'CELL', cell_id: 'cell:aaaaaaaaaaaaaaaaaaaaaaaaaa' };
     expect(builtinToolSummary(trace('exec_cell', { code: 'console.log("started");' }, {
-      target, state: 'running', output: [], pending_calls: 1, has_more: false,
-    }))?.subtitle).toBe('脚本仍在运行');
+      target, status: 'accepted',
+    }))?.subtitle).toBe('脚本已接纳');
     const stopped = builtinToolSummary(trace('manage_cell', { action: 'stop', target }, {
-      target, state: 'terminated', pending_calls: 1, has_more: true,
+      target, state: 'terminated', pending_calls: 1,
     }));
-    expect(stopped).toEqual({ title: '停止脚本', subtitle: '脚本已停止 · 还有后续输出' });
+    expect(stopped).toEqual({ title: '停止脚本', subtitle: '脚本已停止' });
     expect(builtinToolSummary(trace('query_cells', {}, { cells: [{ target, state: 'running' }] }))?.subtitle)
       .toBe('本次列出 1 个脚本');
   });

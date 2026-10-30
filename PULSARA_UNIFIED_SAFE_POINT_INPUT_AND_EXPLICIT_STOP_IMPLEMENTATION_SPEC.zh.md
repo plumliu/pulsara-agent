@@ -4,9 +4,9 @@
 
 ## 1. 目标与范围
 
-人类转为当前 turn 引导的输入、其他 Agent 主动消息、普通 Agent 完成通知，统一按各自真实来源接纳到目标 turn 的现有队列，按接纳顺序在共同输入安全点交付。输入到达本身不取消未派发工具、不打断模型或工具批次，也不人为中断批次以制造安全点。只有显式 Stop 才按现有停止合同停止 turn；其他独立资源的显式控制、真实超时、失败和权限拒绝仍按其各自合同生效。ROOT 与 Subagent 使用同一交付原则，不由来源或执行者 kind 决定是否抢占。
+人类转为当前 turn 引导的输入、其他 Agent 主动消息、Cell 正式输出和活动定时触发，统一按各自真实来源接纳到目标 turn 的现有队列，按接纳顺序在共同输入安全点交付。输入到达本身不取消未派发工具、不打断模型或工具批次，也不人为中断批次以制造安全点。只有显式 Stop 才按现有停止合同停止 turn；其他独立资源的显式控制、真实超时、失败和权限拒绝仍按其各自合同生效。ROOT 与 Subagent 使用同一交付原则，不由来源或执行者 kind 决定是否抢占。
 
-普通发送仍是未来的新 turn；只有用户明确将排队输入转为当前 turn 引导，才成为当前 turn 的补充。Agent 消息只在真实目标活动 turn 接纳；idle／not_started 返回原有未接纳结果，不唤醒或转投后续 Work。通知、消息和引导保留各自真实身份、sender、queue ID、来源及 entry 边界；不能把 Agent 输入冒充用户授权或批准。完成通知不因是 runtime 发出的就获得中断权限。
+普通发送仍是未来的新 turn；只有用户明确将排队输入转为当前 turn 引导，才成为当前 turn 的补充。Agent 消息只在真实目标活动 turn 接纳；idle／not_started 返回原有未接纳结果，不唤醒或转投后续 Work。各项输入保留各自真实身份、sender、queue ID、来源及 entry 边界；不能把 Agent 输入冒充用户授权或批准。Work 终态不自动生成 ROOT 输入；Cell/定时输入按共同接纳事务固定 route，详见 [统一输入规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)。
 
 不新增产品关系、持久事件类别、live event kind、subject、guard、receipt、队列、兼容路径或总量 cap。既有 canonical 队列、accepted 输入 occurrence、资源边界、确认与停止结算各自保留产品用途；这里删除的是仅为补充输入抢占执行而存在的进程内信号和分支，不删除表示已接纳输入的事实。保留用户原有排队编辑、取消和转引导行为，不增 UI 入口。
 
@@ -43,11 +43,11 @@ ENTER、空 EXIT 和 DRAFT 按原 Plan 语义正常结算，不因补充输入�
 在 `accept_plan_tool_batch` 原有 `_writer_transaction` 内，由已有 session writer 锁串行化输入接纳、控制结算和 turn 终态，采用以下一次提交的唯一顺序：
 
 1. 验证既有 candidate、writer、RUNNING origin、权限、workflow 和 assistant blocks；按原 Plan 规则写 workflow／interaction 及选中和兄弟工具结果，保持 Plan barrier 的真实 no-attempt 结果。无效或被权限／Hook 拒绝的控制沿原结果结算，不伪造成功；未终结 origin 的分支回到普通安全点处理输入。
-2. 对要终结的原 turn，使用当前连接按 `(queue_sequence, id)` 分页锁定实际 `PENDING / STEER_ACTIVE_TURN` 队首，包括 Plan candidate 准备后、writer 锁取得前接纳的项。每项沿现有 canonical owner 和单条资源边界完整校验／hydration，核对真实 session、target、状态、canonical content／图片引用及其原来源；复制正文与图片引用后释放临时材料，再处理下一项，不同时水合一页大图片。抽取 `consume_prepared_prompt_steer` 中实际写入职责为可在当前连接调用的内部 owner：为每项分配原 turn 的 `USER_STEER` entry，复制原 canonical 内容及图片引用，按现有 queue CAS 设 `CONSUMED` 和 `consumed_entry_id`，生成既有 `PromptConsumed`、`UserSteerAccepted` occurrence，保留真实 actor／origin。原控制基底和权限在 Plan 变更前精确校验，之后只接受本事务自己的已知状态变化；复用原身份构造与约束，不在事务内调用独立提交的 `consume_prepared_prompt_steer`，不把 provider suffix planner 当作未结算工具批次的提前 dispatch。
+2. 对要终结的原 turn，使用当前连接按 `(queue_sequence, id)` 分页锁定实际 `PENDING / STEER_ACTIVE_TURN` 队首，包括 Plan candidate 准备后、writer 锁取得前接纳的项。每项沿现有 canonical owner 和单条资源边界完整校验／hydration，核对真实 session、target、状态、canonical content／图片引用及其原来源；复制正文与图片引用后释放临时材料，再处理下一项，不同时水合一页大图片。抽取 `consume_prepared_prompt_steer` 中实际写入职责为可在当前连接调用的内部 owner：按真实来源为每项分配原 turn 的 canonical entry（Cell 为 `TERMINAL_OBSERVATION`，其他来源沿现行 typed owner），复制原 canonical 内容及图片引用，按现有 queue CAS 设 `CONSUMED` 和 `consumed_entry_id`，生成既有 `PromptConsumed` 及该真实来源的 accepted occurrence，保留真实 actor／origin。原控制基底和权限在 Plan 变更前精确校验，之后只接受本事务自己的已知状态变化；复用原身份构造与约束，不在事务内调用独立提交的 `consume_prepared_prompt_steer`，不把 provider suffix planner 当作未结算工具批次的提前 dispatch。
 3. 继续有界分页直到目标 lane 为空；既有 128 项单次读取与 16 MiB 单次展开边界只约束每段操作，不是可丢弃余项的总量边界，不将 128 项全部无界水合。持有同一 writer 锁下完成最后空检查，随后在同一事务终结 origin，并按原规则创建 successor／Plan interaction、其 binding 和初始 cut。先后确定写入的工具结果、补充 entry 与事件、终态及 successor 在一个事务提交，不能只处理首个截面后让后续已接纳输入落到 terminal target。
 4. 提交前发生的任何校验、图片引用、容量或数据库失败使整个控制／消费事务回滚；以原控制和输入身份沿既有冲突重规划与确认路径处理，不重复发布结果、不生成半成品 successor，也不把失败伪装为工具成功或用户取消。提交结果未知时复用现有 Plan batch candidate 的身份确认：确认该原子事务已提交即确认整组提交；缺失或冲突按原明确结果处理。不得独立重放输入，也不新增逐项确认协议、receipt、指纹或索引。事务 deadline 和既有资源边界保留，不增加新的累计上限、后台修复、收件箱或持久中间态。
 
-输入在 writer 锁前已经接纳时属于本次原 turn 队列；终态事务先胜出时，后续针对原 turn 的接纳按既有终态规则失败，不补投 successor。当前 Plan owner 将结果事件先积累、最后一次追加；若输入 owner 提前追加事件会颠倒顺序。因此同事务内须先追加原 Plan open/control 和全部 `ToolResultAccepted`，再依队列顺序追加输入消费的两项 occurrence，最后追加 `TurnCompleted` 与 `PlanContinuationAccepted`；可复用现有事件 draft 聚合或分段追加，不新增事件批次类别。无输入时原事件顺序、Plan sibling barrier、既有事件类别与身份保持；观察者只在事务提交后看到完整结果。后继的真实调用按其实际 SYSTEM／tools／权限进行完整输入预算测量，必要时使用现有 compaction 或 typed resource failure；不借旧 surface 冒充 provider 已读，也不因 DRAFT 没有 successor 而伪造调用。
+输入在 writer 锁前已经接纳时属于本次原 turn 队列；终态事务先胜出时，后续针对原 turn 的接纳按既有终态规则失败，不补投 successor。当前 Plan owner 将结果事件先积累、最后一次追加；若输入 owner 提前追加事件会颠倒顺序。因此同事务内须先追加原 Plan open/control 和全部 `ToolResultAccepted`，再依队列顺序追加输入消费和各来源 accepted occurrence，最后追加 `TurnCompleted` 与 `PlanContinuationAccepted`；可复用现有事件 draft 聚合或分段追加，不新增事件批次类别。无输入时原事件顺序、Plan sibling barrier、既有事件类别与身份保持；观察者只在事务提交后看到完整结果。后继的真实调用按其实际 SYSTEM／tools／权限进行完整输入预算测量，必要时使用现有 compaction 或 typed resource failure；不借旧 surface 冒充 provider 已读，也不因 DRAFT 没有 successor 而伪造调用。
 
 ## 5. 压缩、首次准备与停止
 
@@ -76,10 +76,10 @@ ENTER、空 EXIT 和 DRAFT 按原 Plan 语义正常结算，不因补充输入�
 至少覆盖：
 
 1. 使用真实 Host 与 PostgreSQL 的代表性可控屏障：混合三类输入验证同一目标 FIFO、source、entry、精确一次、cut 前后及 prefix 字节；分别覆盖模型流、批次未派发项、MCP lane、交互等待和 final 提交关键边界。工具按原授权、Plan barrier、显式 Stop 及真实失败规则执行／结算，不凭消失的取消结果推断成功。
-2. ROOT 与 Subagent 的相同输入语义；Agent A 发送及普通完成通知不冒充人类，不扩展已有通信权限或已知对象集合语义。选中 wait 目标自然唤醒，未选消息／人类 steer 不抢占；真实 timeout 与 turn／Cell Stop 仍可结束相应等待，Cell Stop 不停止目标 Work。
+2. ROOT 与 Subagent 的相同输入语义；Agent A 主动消息、Cell/定时补充不冒充人类，不扩展已有通信权限或已知对象集合语义。选中 wait 目标自然唤醒，未选消息／人类 steer 不抢占；真实 timeout 与 turn／Cell Stop 仍可结束相应等待，Cell Stop 不停止目标 Work。
 3. Plan question 保持 OPEN 直到真实答案并在结果后按序处理补充，保留答案提交失败与丢失 ACK 的原强度；覆盖 ENTER、空 EXIT 与 DRAFT 在控制批次／终态竞争中不丢失、不改投输入，DRAFT 补充不代替审批。验证超过 128 项跨页、最后一项含图片、candidate 准备后接纳、途中失败整体回滚，以及提交 ACK 丢失时由原 Plan 确认恢复；保留 Plan batch barrier、权限约束、显式取消和原有限制，不得弱化以换取通过。
 4. 首调用前与 turn 内摘要中接纳输入，采用前后真实截面与 late 输入，调用时序、memory／Hook source、SYSTEM/tools、suffix、原资源报价与 Stop 结算保持；同时验证真实 provider final 与输入接纳两种事务顺序。
 5. 明确 Stop 与多项工具、已派发效果、未派发步骤、Cell 自身关闭、MCP lane、interaction 以及输入接纳并发；实际 side effect／attempt／reservation／结果按原 owner 结算；独立 Cell 和被等待 Work 不误停。
 6. 资源不足、连接故障、Host close／writer replacement 保持真实失败和已提交内容，保留单次限制、不新增总量限制。更新 `test_blocking_steer_host.py`、`test_agent_session_host.py`、`test_round4_plan_host.py`、`test_agent_wait_controls_host.py`、`test_agent_collaboration_api.py`、`test_capability_management_execution.py` 的受影响场景和原 `CANCELLED_BEFORE_DISPATCH` 重试 fixture；保留真实 Stop／Cell Stop、Plan barrier、OAuth 和实际错误断言。
 
-真实 provider 验证合同：通过 `LocalSettingsStore` 和 `require_pulsara_home()` 只读用户保存配置，使用内存配置覆盖与核实后的本地隔离数据库；在模型真实发出多工具批次时用屏障于中途接纳用户引导、Agent 消息及完成通知，保存实际模型请求、工具参数、真实结果、canonical 消费顺序和后续输入，证明未发生普通输入诱发的 no-attempt 取消，并保留显式 Stop 对照。实际协议、模型、reasoning、失败和凭据清理按真实运行记录，不用模拟模型输出冒充 provider 验证。实际双协议运行结果及边界见 [验收记录](output/unified-safe-point-20261030/verification.zh.md)。
+真实 provider 验证合同：通过 `LocalSettingsStore` 和 `require_pulsara_home()` 只读用户保存配置，使用内存配置覆盖与核实后的本地隔离数据库；在模型真实发出多工具批次时用屏障于中途接纳用户引导、Agent 消息及 Cell 正式输出，保存实际模型请求、工具参数、真实结果、canonical 消费顺序和后续输入，证明未发生普通输入诱发的 no-attempt 取消，并保留显式 Stop 对照。实际协议、模型、reasoning、失败和凭据清理按真实运行记录，不用模拟模型输出冒充 provider 验证。实际双协议运行结果及边界见 [验收记录](output/unified-safe-point-20261030/verification.zh.md)。

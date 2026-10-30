@@ -1,3 +1,4 @@
+import { usePendingSteerPages } from '../lib/pending-steer-pages';
 import { McpAuthorizationContext, mcpAuthorizationKey, useMcpAuthorization, useModelMcpAuthorization } from '../components/mcp-authorization';
 import { PresentationProvider } from '../components/presentation-provider';
 import { flushSync } from 'react-dom';
@@ -50,7 +51,6 @@ import {
   type QueuedPrompt,
   type QueuedPromptAction,
   type CommandReceipt,
-  type UserControlCommandRef,
   type EditablePromptContent,
   type CanonicalPromptImagePart,
 } from '../lib/runtime-adapter';
@@ -535,6 +535,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, []);
 
   const activeReader = connection ?? historyRef.current;
+  const pendingSteerReading = usePendingSteerPages(activeReader, projection);
   useEffect(() => {
     const reader = activeReader;
     if (!reader || !activeSessionId || reader.sessionId !== activeSessionId) return;
@@ -555,7 +556,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
       const presentInControl = new Set(projection.queuedPrompts.map(item => item.queueItemId));
       const absent = new Set([...previous?.absent ?? []].filter(id => presentInControl.has(id)));
       for (const id of found.keys()) absent.delete(id);
-      const previouslySeen = new Map([...(previous?.items ?? []), ...projection.queuedPrompts].map(item => [item.queueItemId, item]));
+      const previouslySeen = new Map([...(previous?.items ?? []), ...projection.queuedPrompts.filter(item=>item.deliveryMode==='new-turn')].map(item => [item.queueItemId, item]));
       for (const item of previouslySeen.values()) if (!found.has(item.queueItemId)) {
         const exact = await reader.readQueueItem(item.queueItemId, controller.signal);
         if (exact) found.set(exact.queueItemId, exact); else absent.add(item.queueItemId);
@@ -1544,10 +1545,11 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const renderedQueuedPrompts = useMemo(() => {
     const items = new Map(projection.queuedPrompts.map(item => [item.queueItemId, item]));
     for (const item of visibleQueuePages?.items ?? []) items.set(item.queueItemId, item);
+    for (const item of pendingSteerReading.items) items.set(item.queueItemId, item);
     for (const id of visibleQueuePages?.absent ?? []) items.delete(id);
     for (const message of projection.canonicalInputs) if (message.inputSource?.queueItemId) items.delete(message.inputSource.queueItemId);
     return [...items.values()].sort((a,b) => compareSequence(a.sequence,b.sequence));
-  }, [projection.queuedPrompts, projection.canonicalInputs, visibleQueuePages]);
+  }, [projection.queuedPrompts, projection.canonicalInputs, visibleQueuePages, pendingSteerReading.items]);
 
   useEffect(() => {
     if (activeView !== 'workbench' || !activeSessionId || databaseState !== 'ready' || runtimeStatus !== 'online') return;
@@ -1754,7 +1756,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [notify, ownsConnection]);
 
   const actOnQueuedPrompt = async (source: QueuedPrompt, kind: QueuedPromptAction['kind']) => {
-    if (source.sourceKind !== 'command') return;
+    if (source.deliveryMode !== 'new-turn' || (kind === 'send' && (source.sourceKind !== 'command' || source.inputOrigin === 'SCHEDULED_TASK')) || (kind === 'edit' && source.sourceKind !== 'command' && source.inputOrigin !== 'SCHEDULED_TASK')) return;
     const active = connectionRef.current;
     if (!active || active.role !== 'controller' || !ownsConnection(active)) return;
     // CURRENT_CONTROL advances across FIFO ROOTs; the connection's initial
@@ -1865,8 +1867,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     ) && !promptReconciliationInFlight.current.has(queryKey(item))
       && (item.lastCheckedEventSequence !== projection.eventSequence || item.lastCheckedConnectionGeneration !== connection.generation));
     if (!candidate) return;
-    if (candidate.source.sourceKind !== 'command') return;
-    const sourceCommandId = candidate.source.commandId;
     const key = queryKey(candidate);
     promptReconciliationInFlight.current.add(key);
     setQueueActions(current => current.map(item => item === candidate ? {
@@ -1883,24 +1883,22 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         // Rejections happen before the action command is inserted. A missing
         // command alone is not proof, but a consumed exact NEW_TURN source can
         // never subsequently be cancelled/redirected by this action's CAS.
-        const sourceConsumed = connection.current().canonicalInputs.some(message => (
-          message.userKind === 'prompt'
-          && message.inputSource?.sourceKind === 'command'
-          && message.inputSource.commandId === sourceCommandId
-          && message.inputSource.queueItemId === candidate.source.queueItemId
-          && message.inputSource.deliveryMode === 'new-turn'
-        ));
-        const sourceReceipt = sourceConsumed ? undefined : await connection.queryCommand(sourceCommandId);
+        const source = await connection.readQueueStatus(candidate.source.queueItemId);
         if (!ownsConnection(connection)) return;
-        const delivery = sourceReceipt?.promptDelivery;
-        if (!sourceConsumed && !(sourceReceipt?.commandId === sourceCommandId
-          && delivery?.queueItemId === candidate.source.queueItemId
-          && delivery.deliveryMode === 'new-turn' && delivery.queueStatus === 'CONSUMED')) return;
+        if (!source || source.deliveryMode !== 'new-turn' || source.status === 'PENDING') return;
+        // The action may have committed between the first command read and
+        // the source read. Its receipt wins over interpreting that terminal row.
+        const settledReceipt = await connection.queryCommand(candidate.commandId);
+        if (!ownsConnection(connection)) return;
+        if (settledReceipt) {
+          settleQueueAction(candidate, settledReceipt, connection);
+          return;
+        }
         setQueueActions(current => current.map(item => item.commandId === candidate.commandId && item.sessionId === candidate.sessionId
           ? { ...item, status: 'rejected', connectionGeneration: connection.generation }
           : item));
         queueActionsInFlight.current.delete(`${candidate.sessionId}:${candidate.source.queueItemId}`);
-        notify('操作未完成', '这条输入已开始处理，无法再编辑、删除或改为引导。', 'warning');
+        notify('操作未完成', source.status === 'CONSUMED' ? '这条输入已开始处理，无法再编辑、删除或改为引导。' : source.status === 'CANCELLED' ? '这条输入已被取消，无法继续操作。' : '这条输入已被拒绝，无法继续操作。', 'warning');
       } catch {
         // Keep unknown facts unknown; only query again on a new cut/connection.
       } finally {
@@ -2811,14 +2809,19 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onFork={forkConversation}
           todo={projection.todo}
           activePlanMode={projection.planMode}
+          providerRetry={projection.providerRetry}
           isRunning={projection.isRunning}
           activeTurnId={projection.activeTurnId}
           manualCompactionCommandId={projection.manualCompactionCommandId}
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}
           queuedPrompts={renderedQueuedPrompts}
-          queueNextCursor={visibleQueuePages?.nextCursor}
+          queueNextCursor={visibleQueuePages ? visibleQueuePages.nextCursor : projection.futureQueueNextCursor}
           onLoadMoreQueue={loadMoreQueue}
+          steerNextCursor={pendingSteerReading.nextCursor}
+          steerLoading={pendingSteerReading.loading}
+          steerReadError={pendingSteerReading.error}
+          onLoadMoreSteers={pendingSteerReading.more}
           queueActions={queueActions.filter(item => item.sessionId === activeSession.id && item.connectionGeneration === connection?.generation)}
           onQueueAction={actOnQueuedPrompt}
           onQueueActionHandled={(commandId) => setQueueActions(current => current.map(item => item.commandId === commandId ? { ...item, handled: true } : item))}
@@ -2866,6 +2869,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onStop={() => void stopRun()}
           onCompact={compact}
           onRenameSession={() => setRenameTarget(activeSession)}
+          onLocateScheduledTask={taskId => { setFocusScheduledTaskId(taskId); setActiveView('scheduled'); if (!window.matchMedia?.('(min-width: 1151px)').matches) setSidebarOpen(false); }}
           onOpenScheduledTask={runtimeStatus === 'online' && activeSchedule?.sessionId === activeSession.id ? () => {
             setFocusScheduledTaskId(activeSchedule.taskId);
             setActiveView('scheduled'); if (!window.matchMedia?.('(min-width: 1151px)').matches) setSidebarOpen(false);

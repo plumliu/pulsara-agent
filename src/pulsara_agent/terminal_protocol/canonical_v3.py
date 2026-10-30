@@ -217,12 +217,16 @@ class CanonicalProtocolReader:
             # The repeatable-read transaction fixes every control field except
             # the unresolved attempts admitted by the growing entry window.
             # Read the session-wide sections once, then update only that slice.
+            empty_snapshot = self._snapshot_value(session=session, session_id=session_id,
+                cut=cut, entries=(), control=wire.CanonicalControl(), has_older=bool(rows), notices=())
             control = self._control(
                 connection,
                 session_id=session_id,
                 lifecycle=str(session["lifecycle"]),
                 maximum_items=maximum_control_items,
                 entry_sequence_floor=cut + 1,
+                maximum_serialized_bytes=max(0, maximum_serialized_bytes
+                    - empty_snapshot.ByteSize() - _SNAPSHOT_FINGERPRINT_WIRE_BYTES - 8),
             )
             snapshot = self._snapshot_value(
                 session=session,
@@ -350,9 +354,17 @@ class CanonicalProtocolReader:
 
     def queue_page(self, *, session_id: str, memory_domain_id: str,
                    root_session_id: str | None, after_sequence: int,
-                   limit: int, deadline_monotonic: float):
+                   limit: int, deadline_monotonic: float,
+                   delivery_mode: str = "NEW_TURN", target_turn_id: str | None = None):
         if type(after_sequence) is not int or after_sequence < 0 or not 1 <= limit <= MAXIMUM_CONTROL_ITEMS:
             raise ValueError("queue page boundary is invalid")
+        if delivery_mode not in {"NEW_TURN", "STEER_ACTIVE_TURN"} or (
+            delivery_mode == "NEW_TURN" and target_turn_id is not None
+        ):
+            raise ValueError("queue page delivery target is invalid")
+        if delivery_mode == "STEER_ACTIVE_TURN":
+            from pulsara_agent.identity import require_id
+            require_id(target_turn_id, "turn")
         with self._connection(deadline_monotonic) as connection:
             session = self.authorized_session(connection, session_id, memory_domain_id)
             if root_session_id is not None:
@@ -361,12 +373,23 @@ class CanonicalProtocolReader:
                     raise KeyError(session_id)
             rows = connection.execute(
                 """SELECT * FROM pulsara_v3.prompt_queue_items
-                   WHERE session_id=%s AND status='PENDING' AND queue_sequence>%s
-                   ORDER BY queue_sequence LIMIT %s""", (session_id, after_sequence, limit + 1),
+                   WHERE session_id=%s AND status='PENDING' AND delivery_mode=%s
+                     AND (%s::text IS NULL OR target_turn_id=%s) AND queue_sequence>%s
+                   ORDER BY queue_sequence LIMIT %s""",
+                (session_id, delivery_mode, target_turn_id, target_turn_id, after_sequence, limit + 1),
             ).fetchall()
-            selected = rows[:limit]
-            return (tuple(self._queue_control(row) for row in selected),
-                    int(selected[-1]["queue_sequence"]) if len(rows) > limit else None)
+            selected, used = [], 0
+            for row in rows[:limit]:
+                item = self._queue_control(row)
+                size = item.ByteSize() + 8
+                if used + size > MAXIMUM_SNAPSHOT_BYTES:
+                    break
+                selected.append(item)
+                used += size
+            if rows and not selected:
+                raise CanonicalProtocolResourceExhausted("one queue item cannot fit its page byte bound")
+            return (tuple(selected),
+                    selected[-1].queue_sequence if len(rows) > len(selected) else None)
 
     def queue_item(self, *, session_id: str, memory_domain_id: str,
                    root_session_id: str | None, queue_item_id: str,
@@ -393,6 +416,8 @@ class CanonicalProtocolReader:
             accepted_at_utc=_utc(row["accepted_at"]),
             source_session_id=str(row["source_session_id"] or ""),
             source_work_id=str(row["source_work_id"] or ""),
+            source_turn_id=str(row["source_turn_id"] or ""),
+            source_tool_attempt_id=str(row["source_tool_attempt_id"] or ""),
             consumed_entry_id=str(row["consumed_entry_id"] or ""),
             waiting_on=[str(item["source_work_id"]) for item in row["work_inputs"]
                         if row["status"] == "PENDING" and item["kind"] == "dependency" and item["body"] is None],
@@ -1220,11 +1245,14 @@ class CanonicalProtocolReader:
                     projection.entry.CopyFrom(self._entry(connection, row))
                 elif event_type in _CONTROL_TYPES:
                     if control is None:
+                        projection.projection_kind = wire.CURRENT_CONTROL
+                        projection.control_read_event_sequence = high_water
                         control = self._control(
                             connection,
                             session_id=session_id,
                             lifecycle=str(session["lifecycle"]),
                             maximum_items=MAXIMUM_CONTROL_ITEMS,
+                            maximum_serialized_bytes=max(0, maximum_bytes - total - projection.ByteSize() - 8),
                             entry_sequence_floor=max(
                                 1,
                                 int(session["latest_entry_sequence"])
@@ -1232,9 +1260,7 @@ class CanonicalProtocolReader:
                                 + 1,
                             ),
                         )
-                        projection.projection_kind = wire.CURRENT_CONTROL
                         projection.current_control.CopyFrom(control)
-                        projection.control_read_event_sequence = high_water
                     else:
                         # The event remains ordered and visible; only its
                         # duplicate derived snapshot is coalesced in this batch.
@@ -1688,6 +1714,7 @@ class CanonicalProtocolReader:
                       result.output_display_kind, result.output_source_coverage_reason,
                       result.output_artifact_unavailability_reason,
                       queue.id AS queue_item_id, queue.command_id, queue.delivery_mode, queue.source_session_id, queue.source_work_id,
+                      queue.source_turn_id, queue.source_tool_attempt_id,
                       revision.command_id AS revision_command_id,
                       CASE e.entry_owner_kind
                         WHEN 'EXECUTED_TURN' THEN t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id=e.id
@@ -1712,8 +1739,8 @@ class CanonicalProtocolReader:
                LEFT JOIN pulsara_v3.tool_invocations invocation
                  ON invocation.session_id=result.session_id AND invocation.id=result.invocation_id
                LEFT JOIN LATERAL (
-                 SELECT id, command_id, delivery_mode, source_session_id, source_work_id FROM pulsara_v3.prompt_queue_items
-                 WHERE e.entry_owner_kind='EXECUTED_TURN' AND e.entry_kind IN ('USER_MESSAGE', 'USER_STEER')
+                 SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id FROM pulsara_v3.prompt_queue_items
+                 WHERE e.entry_owner_kind='EXECUTED_TURN' AND e.entry_kind IN ('USER_MESSAGE', 'USER_STEER', 'TERMINAL_OBSERVATION')
                    AND session_id=e.session_id AND consumed_entry_id=e.id LIMIT 1
                ) queue ON true
                LEFT JOIN LATERAL (
@@ -1847,13 +1874,13 @@ class CanonicalProtocolReader:
             ))
         if (
             row["entry_owner_kind"] == "EXECUTED_TURN"
-            and row["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}
+            and row["entry_kind"] in {"USER_MESSAGE", "USER_STEER", "TERMINAL_OBSERVATION"}
         ):
             source = related if related is not None and related["queue_item_id"] is not None else None
             if related is None:
                 source = connection.execute(
                     """
-                    SELECT id, command_id, delivery_mode, source_session_id, source_work_id
+                    SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id
                     FROM pulsara_v3.prompt_queue_items
                     WHERE session_id = %s AND consumed_entry_id = %s
                     """,
@@ -1866,6 +1893,8 @@ class CanonicalProtocolReader:
                     delivery_mode=str(source["delivery_mode"]),
                     source_session_id=str(source["source_session_id"] or ""),
                     source_work_id=str(source["source_work_id"] or ""),
+                    source_turn_id=str(source["source_turn_id"] or ""),
+                    source_tool_attempt_id=str(source["source_tool_attempt_id"] or ""),
                 ))
             elif row["entry_kind"] == "USER_MESSAGE":
                 revision = (
@@ -2019,15 +2048,8 @@ class CanonicalProtocolReader:
         lifecycle: str,
         maximum_items: int,
         entry_sequence_floor: int,
+        maximum_serialized_bytes: int = MAXIMUM_SNAPSHOT_BYTES,
     ) -> wire.CanonicalControl:
-        def bounded(sql: str, parameters: tuple[object, ...]) -> tuple[Any, ...]:
-            rows = connection.execute(sql, (*parameters, maximum_items + 1)).fetchall()
-            if len(rows) > maximum_items:
-                raise CanonicalProtocolResourceExhausted(
-                    "canonical control section exceeds negotiated limit"
-                )
-            return tuple(rows)
-
         active_turn_total = int(connection.execute(
             "SELECT count(*) AS total FROM pulsara_v3.turns WHERE session_id = %s AND status = 'RUNNING'",
             (session_id,),
@@ -2040,16 +2062,16 @@ class CanonicalProtocolReader:
         queue_total = int(
             connection.execute(
                 """SELECT count(*) AS total FROM pulsara_v3.prompt_queue_items
-                   WHERE session_id = %s AND status = 'PENDING'""",
+                   WHERE session_id = %s AND status = 'PENDING' AND delivery_mode = 'NEW_TURN'""",
                 (session_id,),
             ).fetchone()["total"]
         )
-        queue = bounded(
-            """SELECT * FROM pulsara_v3.prompt_queue_items
-               WHERE session_id = %s AND status = 'PENDING'
-               ORDER BY queue_sequence, id LIMIT %s""",
-            (session_id,),
-        )
+        active_target = str(turns[0]["id"]) if turns else None
+        steer_total = int(connection.execute(
+            """SELECT count(*) AS total FROM pulsara_v3.prompt_queue_items
+               WHERE session_id=%s AND status='PENDING' AND delivery_mode='STEER_ACTIVE_TURN'
+                 AND target_turn_id=%s""", (session_id, active_target),
+        ).fetchone()["total"])
         active_plan = connection.execute(
             """
             SELECT * FROM pulsara_v3.plan_workflows
@@ -2144,6 +2166,8 @@ class CanonicalProtocolReader:
             session_lifecycle=lifecycle,
             prompt_queue_total_count=queue_total,
             active_turn_total_count=active_turn_total,
+            pending_steer_total_count=steer_total,
+            pending_steer_target_turn_id=active_target or "",
         )
         genesis = connection.execute(
             "SELECT base_kind, source_through_sequence FROM pulsara_v3.session_context_genesis WHERE session_id = %s",
@@ -2174,8 +2198,6 @@ class CanonicalProtocolReader:
             )
             if row["permission_snapshot_id"] is not None:
                 target.permission.CopyFrom(_permission_projection(row))
-        for row in queue:
-            result.prompt_queue.add().CopyFrom(self._queue_control(row))
         if active_plan is not None:
             result.active_plan_workflow.CopyFrom(
                 wire.PlanWorkflowControl(
@@ -2282,6 +2304,44 @@ class CanonicalProtocolReader:
             result, connection, session_id=session_id,
             maximum_items=maximum_items, entry_sequence_floor=entry_sequence_floor,
         )
+        # The negotiated item/frame bounds limit this read, never the number
+        # of accepted inputs. Each lane gets its own half of the remaining wire
+        # budget, so future inputs cannot displace current-turn supplements.
+        # Complete records beyond the section remain available by exact lane
+        # and queue_sequence through queue_page; no body is clipped.
+        result.prompt_queue_next_cursor = (1 << 64) - 1
+        result.pending_steer_next_cursor = (1 << 64) - 1
+        lane_bytes = max(0, maximum_serialized_bytes - result.ByteSize()) // 2
+        future_limit = min(queue_total, (maximum_items + 1) // 2)
+        steer_limit = min(steer_total, maximum_items - future_limit)
+        future_limit = min(queue_total, maximum_items - steer_limit)
+        selected = []
+        for mode, target, total, item_limit, cursor_field in (
+            ("NEW_TURN", None, queue_total, future_limit, "prompt_queue_next_cursor"),
+            ("STEER_ACTIVE_TURN", active_target, steer_total, steer_limit, "pending_steer_next_cursor"),
+        ):
+            rows = connection.execute(
+                """SELECT * FROM pulsara_v3.prompt_queue_items
+                   WHERE session_id=%s AND status='PENDING' AND delivery_mode=%s
+                     AND (%s::text IS NULL OR target_turn_id=%s)
+                   ORDER BY queue_sequence LIMIT %s""",
+                (session_id, mode, target, target, item_limit),
+            ).fetchall() if total else ()
+            used, loaded, cursor = 0, 0, 0
+            for row in rows:
+                item = self._queue_control(row)
+                size = item.ByteSize() + 8
+                if used + size > lane_bytes:
+                    break
+                selected.append(item)
+                used += size
+                loaded += 1
+                cursor = item.queue_sequence
+            if loaded < total:
+                setattr(result, cursor_field, cursor)
+            else:
+                result.ClearField(cursor_field)
+        result.prompt_queue.extend(sorted(selected, key=lambda item: item.queue_sequence))
         return result
 
     @staticmethod

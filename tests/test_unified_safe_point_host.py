@@ -104,18 +104,23 @@ def test_mixed_inputs_wait_for_real_batch_then_arrive_in_fifo_order(
             assert message['delivery'] == 'queued'
             model.child_release.set()
 
-            async def completion_queued():
-                return bool(rows("""SELECT id FROM pulsara_v3.prompt_queue_items
-                    WHERE session_id=%s AND target_turn_id=%s AND input_origin='AGENT_MATERIAL'
-                    AND source_work_id=%s AND status='PENDING'""", (root.session_id, turn_id, work_id)))
+            async def child_completed():
+                work = await root._io.run(root.repository.query_agent_work,
+                    root_session_id=root.session_id, work_id=work_id,
+                    deadline_monotonic=monotonic() + 10)
+                return work if work['status'] == 'completed' else None
 
-            await eventually(completion_queued)
+            await eventually(child_completed)
+            completed_work = await child_completed()
+            assert completed_work['final'] == 'FIFO_AGENT_COMPLETION'
             pending = rows("""SELECT id, input_origin, source_session_id, source_work_id
                 FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND target_turn_id=%s
                 AND status='PENDING' ORDER BY queue_sequence""", (root.session_id, turn_id))
-            assert [r['input_origin'] for r in pending] == ['HUMAN_STEER', 'AGENT_MESSAGE', 'AGENT_MATERIAL']
+            assert [r['input_origin'] for r in pending] == ['HUMAN_STEER', 'AGENT_MESSAGE']
             assert pending[1]['source_session_id'] == child_id
-            assert pending[2]['source_work_id'] == work_id
+            assert pending[1]['source_work_id'] == work_id
+            assert not rows("""SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s
+                AND input_origin='AGENT_MATERIAL' AND source_work_id=%s""", (root.session_id, work_id))
             assert not running.done()
             model.batch_release.set()
             result = await asyncio.wait_for(running, 15)
@@ -142,7 +147,8 @@ def test_mixed_inputs_wait_for_real_batch_then_arrive_in_fifo_order(
             assert after.system_prompt == first.system_prompt and after.tools == first.tools
             assert after.messages[:len(first.messages)] == first.messages
             parts = [text for m in after.messages for text in text_part_values(m.content)]
-            markers = ['FIFO_HUMAN_STEER', 'FIFO_AGENT_MESSAGE', 'FIFO_AGENT_COMPLETION']
+            markers = ['FIFO_HUMAN_STEER', 'FIFO_AGENT_MESSAGE']
+            assert 'FIFO_AGENT_COMPLETION' not in parts
             assert all(parts.count(marker) == 1 for marker in markers)
             assert [parts.index(marker) for marker in markers] == sorted(parts.index(marker) for marker in markers)
         finally:

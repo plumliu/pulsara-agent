@@ -1115,10 +1115,8 @@ class _SubagentOperations:
         occurred_at,
         actor_id,
         deadline_monotonic,
-        input_origin="AGENT_MESSAGE",
     ):
-        if input_origin not in {"AGENT_MESSAGE", "AGENT_MATERIAL"}:
-            raise ValueError("invalid Agent steer origin")
+        input_origin = "AGENT_MESSAGE"
         with self._writer_transaction(
             guard, deadline_monotonic=deadline_monotonic
         ) as connection:
@@ -1131,10 +1129,7 @@ class _SubagentOperations:
                     existing["session_id"] != guard.session_id
                     or existing["source_session_id"] != source_session_id
                     or existing["source_work_id"] != source_work_id
-                    or (
-                        existing["target_turn_id"] != target_turn_id
-                        and input_origin != "AGENT_MATERIAL"
-                    )
+                    or existing["target_turn_id"] != target_turn_id
                     or existing["input_origin"] != input_origin
                     or self._agent_prompt_text(connection, existing) != text
                 ):
@@ -1164,16 +1159,15 @@ class _SubagentOperations:
             ).fetchone()
             if turn is None:
                 return None
-            if input_origin == "AGENT_MESSAGE":
-                pairs = {
-                    (guard.session_id, candidate)
-                    for candidate in _session_ids_in_text(text)
-                }
-                pairs.add((guard.session_id, source_session_id))
-                pairs.add((source_session_id, guard.session_id))
-                self._merge_known_agents(
-                    connection, root_session_id=source["root_id"], pairs=pairs
-                )
+            pairs = {
+                (guard.session_id, candidate)
+                for candidate in _session_ids_in_text(text)
+            }
+            pairs.add((guard.session_id, source_session_id))
+            pairs.add((source_session_id, guard.session_id))
+            self._merge_known_agents(
+                connection, root_session_id=source["root_id"], pairs=pairs
+            )
             prompt = freeze_canonical_prompt(FrozenPromptContent((LLMTextPart(text),)))
             pub = materialize_canonical_prompt(
                 connection,

@@ -1,9 +1,10 @@
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentConversationView } from '../../frontend/components/workbench-view';
 import type { AgentConversationReader, QueuedPrompt, RuntimeProjection } from '../../frontend/lib/runtime-adapter';
 import { RuntimeApiError, RuntimeGapError } from '../../frontend/lib/runtime-adapter';
 import { AgentConversationPane } from '../../frontend/components/agent-conversation-pane';
+import type { CanonicalPromptImagePart } from '../../frontend/lib/prompt-content';
 import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 
 const reader = {
@@ -29,6 +30,48 @@ describe('Agent conversation reader', () => {
     view.unmount();
     await waitFor(() => expect(close).toHaveBeenCalledOnce());
     vi.restoreAllMocks();
+  });
+  it('reads a canonical Agent tool image only on disclosure and releases its scoped URL and reader on unmount', async () => {
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:null}});
+    const image: CanonicalPromptImagePart = {type:'image',source:'canonical',owner:{kind:'entry',entryId:'agent:image-result'},
+      refOrdinal:0,digest:`sha256:${'a'.repeat(64)}`,encodedBytes:4,mediaType:'image/png',width:2,height:1};
+    const projection = {messages:[{id:'agent:image-request',turnId:'agent:turn',role:'assistant',assistantKind:'tool-request',time:'',body:'',status:'completed',
+      traces:[{id:'agent:image-trace',kind:'read',toolName:'view_image',title:'读取图片',subtitle:'已完成',status:'completed',
+        resultEntryId:'agent:image-result',resultText:'Image loaded.',resultContent:{parts:[image]}}]},
+      {id:'agent:answer',turnId:'agent:turn',role:'assistant',assistantKind:'terminal',time:'',body:'图片已核对。',status:'completed',rootFinal:true}],
+      canonicalInputs:[],queuedPrompts:[],queuedCount:0,isRunning:false} as unknown as RuntimeProjection;
+    const close = vi.fn(async () => {});
+    const wrongReader = vi.fn();
+    const scoped = {...reader,view:'history',current:() => projection,snapshot:async () => projection,subscribe:() => () => {},
+      readPromptImage:wrongReader,readQueuePage:async () => ({items:[],nextCursor:null}),close} as unknown as AgentConversationReader;
+    let resolve!: (value: Uint8Array) => void;
+    const bytes = new Promise<Uint8Array>(done => {resolve = done;});
+    const readImage = vi.fn(() => bytes);
+    const content = {...reader,readPromptImage:readImage};
+    const open = vi.fn(async () => scoped);
+    const create = vi.fn(() => content);
+    const createUrl = vi.spyOn(URL,'createObjectURL');
+    const revokeUrl = vi.spyOn(URL,'revokeObjectURL');
+    const view = render(<AgentConversationPane rootSessionId="session:root" agentSessionId="session:agent" agentName="Researcher"
+      adapter={{openAgentReader:open,createAgentContentReader:create}} readingState={{choices:new Map()}} onNotify={() => {}} />);
+    await screen.findByText('图片已核对。');
+    expect(open).toHaveBeenCalledExactlyOnceWith('session:root','session:agent',expect.any(AbortSignal));
+    expect(create).toHaveBeenCalledExactlyOnceWith('session:root','session:agent');
+    expect(readImage).not.toHaveBeenCalled();
+    await act(async () => fireEvent.click(screen.getByRole('button',{name:'展开处理过程'})));
+    expect(readImage).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole('button',{name:'展开工具详情：view_image'}));
+    await waitFor(() => expect(readImage).toHaveBeenCalledExactlyOnceWith(image));
+    expect(wrongReader).not.toHaveBeenCalled();
+    expect(screen.getByText('正在读取图片…')).toBeTruthy();
+    await act(async () => {resolve(new Uint8Array([137,80,78,71]));await bytes;});
+    const preview = screen.getByRole('button',{name:'放大图片'});
+    const url = preview.querySelector('img')?.getAttribute('src');
+    expect(url).toMatch(/^blob:/);
+    expect(createUrl).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({type:'image/png',size:4}));
+    view.unmount();
+    expect(revokeUrl).toHaveBeenCalledExactlyOnceWith(url);
+    expect(close).toHaveBeenCalledOnce();
   });
   it('removes the old live draft before a replacement Host opens, even at the same epoch', async () => {
     vi.useFakeTimers();
@@ -258,7 +301,7 @@ describe('Agent conversation reader', () => {
       readingState={{choices:new Map()}} onNotify={() => {}} />);
     expect(screen.getByText('ROOT')).toBeTruthy();
     expect(screen.getByRole('article', {name:'任务材料'}).textContent).toContain('Prior context.');
-    expect(screen.getByText('代理 session:other · 引导')).toBeTruthy();
+    expect(screen.getByText('代理 session:other')).toBeTruthy();
     const cards = container.querySelectorAll('.agent-conversation-queue article');
     expect(cards).toHaveLength(2);
     expect(within(cards[0] as HTMLElement).getByText('等待依赖：queue:dependency')).toBeTruthy();

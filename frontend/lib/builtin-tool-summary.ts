@@ -15,9 +15,7 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   exec_process: ['运行命令', '命令正在执行', '已执行命令'],
   query_processes: ['查看命令', '正在读取命令状态', '已读取命令状态'],
   manage_process: ['管理命令', '正在处理命令进程', '已查看命令状态'],
-  query_monitors: ['查看进展通知', '正在读取通知设置', '已读取通知设置'],
-  manage_monitor: ['关注命令进展', '正在设置进展通知', '已处理通知设置'],
-  exec_cell: ['运行脚本', '脚本正在执行', '已观察脚本执行'],
+  exec_cell: ['运行脚本', '正在接纳脚本', '脚本已接纳'],
   query_cells: ['查看脚本', '正在读取脚本状态与源码', '已读取脚本信息'],
   manage_cell: ['管理脚本', '正在处理脚本', '已处理脚本'],
   query_agents: ['查看任务', '正在读取任务状态', '已读取任务状态'],
@@ -61,9 +59,6 @@ function compact(value: string): string {
 const processActions: Record<string, string> = {
   poll: '查看命令状态', wait: '等待命令结束',
   write: '向命令输入内容', submit: '向命令提交输入', close_stdin: '结束命令输入', kill: '停止命令',
-};
-const monitorActions: Record<string, string> = {
-  register: '关注命令进展', cancel: '取消进展通知',
 };
 
 function runningProcessDetail(name: string, action: string): string {
@@ -137,8 +132,7 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
   const result = parse(trace.resultText);
   const action = text(args.action);
   const title = (name === 'manage_process' ? processActions[action]
-    : name === 'manage_monitor' ? monitorActions[action]
-    : name === 'manage_cell' ? ({ wait: '等待脚本输出', stop: '停止脚本' } as Record<string, string>)[action]
+    : name === 'manage_cell' ? ({ wait: '等待脚本结束', stop: '停止脚本' } as Record<string, string>)[action]
     : name === 'query_capabilities' && Object.hasOwn(args, 'target') ? '查看能力详情' : undefined) ?? label[0];
   let target = '';
   if (['read_file', 'view_image', 'edit_file', 'write_file', 'search_content', 'find_files'].includes(name)) {
@@ -213,17 +207,9 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
       case 'manage_cell':
         detail = ({ queued: '脚本等待执行', running: '脚本仍在运行', completed: '脚本执行完成',
           failed: '脚本执行失败', terminated: '脚本已停止' } as Record<string, string>)[text(result.state)] ?? detail;
-        if (result.has_more === true) detail += ' · 还有后续输出';
         break;
       case 'query_cells':
         if (Array.isArray(result.cells)) detail = `本次列出 ${result.cells.length} 个脚本`;
-        break;
-      case 'query_monitors':
-      case 'manage_monitor':
-        detail = status === 'registered' ? '已开启进展通知'
-          : status === 'cancelled' ? '已取消进展通知'
-          : status === 'rejected' ? '未能更改进展通知'
-          : Array.isArray(result.monitors) ? `本次列出 ${result.monitors.length} 项进展通知` : detail;
         break;
       case 'todo': {
         const counts = object(result.counts);

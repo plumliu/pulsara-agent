@@ -1,10 +1,9 @@
+import { MarkdownBody, type MarkdownNotify } from './markdown-body';
 import { AnnotationCard } from './response-annotations';
 import { SentAnnotationChip } from './sent-annotation-chip';
-import { splitFileReferences } from '../lib/file-reference';
+import { splitUserFileReferences } from '../lib/file-reference';
 import { FileReferenceChip } from './file-reference-chip';
 import { PromptImageChip } from './prompt-image-chip';
-import { splitSkillReferences } from '../lib/skill-reference';
-import { SkillReferenceChip } from './skill-reference-chip';
 
 import {
   useCallback,
@@ -30,6 +29,8 @@ interface PromptContentViewProps {
   variant: 'message' | 'queue' | 'tool';
   onReadImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
   renderMessageBody?: (body: ReactNode) => ReactNode;
+  markdown?: boolean;
+  onNotify?: MarkdownNotify;
 }
 
 type ImagePart = CanonicalPromptImagePart | LocalPromptImagePart;
@@ -45,6 +46,8 @@ export function PromptContentView({
   variant,
   onReadImage,
   renderMessageBody,
+  markdown = false,
+  onNotify = () => {},
 }: PromptContentViewProps) {
   const images = useMemo(
     () => content.parts.filter((part): part is ImagePart => part.type === 'image'),
@@ -155,7 +158,7 @@ export function PromptContentView({
       event.clipboardData.setData('text/plain', fragment.textContent ?? '');
       event.preventDefault();
     }}>
-      {renderPromptBody(content, index => <PromptImageChip number={index + 1}
+      {markdown ? <MarkdownBody body={content.parts.filter(part => part.type === 'text').map(part => part.text).join('\n')} onNotify={onNotify} /> : renderPromptBody(content, index => <PromptImageChip number={index + 1}
         state={states[index]?.kind} reason={states[index]?.kind === 'failed' ? states[index].reason : undefined}
         previewSrc={states[index]?.kind === 'ready' ? states[index].url : undefined} onPreview={() => void load(index)}
         onClick={event => open(index, event.currentTarget)} />, variant !== 'message')}
@@ -347,9 +350,8 @@ function renderPromptBody(
   return content.parts.map((part, partIndex) => {
     if (part.type === 'annotation') return showAnnotations ? <AnnotationCard key={partIndex} value={part} /> : null;
     if (part.type === 'text') {
-      return <span key={partIndex} className="prompt-content-text">{splitFileReferences(part.text).map((piece, index) =>
-        typeof piece === 'string' ? splitSkillReferences(piece).map((reference, skillIndex) =>
-          typeof reference === 'string' ? reference : <SkillReferenceChip key={`${index}:${skillIndex}`} reference={reference} />)
+      return <span key={partIndex} className="prompt-content-text">{splitUserFileReferences(part.text).map((piece, index) =>
+        typeof piece === 'string' ? piece
           : <FileReferenceChip key={index} reference={piece} />)}</span>;
     }
     const current = imageIndex;

@@ -193,17 +193,18 @@ describe('PR04 composer queue hard cut', () => {
     const steer: QueuedPrompt = { queueItemId: 'agent-steer', sourceKind: 'agent', sourceSessionId: 'session:sender',
       sourceWorkId: 'queue:work', sequence: '2', status: 'pending', inputOrigin: 'AGENT_MESSAGE',
       deliveryMode: 'steer', targetTurnId: 'turn-one', content: textPrompt('来自代理的消息') };
-    const view = render(<WorkbenchView {...props({ queuedPrompts: [steer] })} />);
-    const pending = screen.getByRole('article', { name: '引导' });
-    expect(within(pending).getByText('代理 session:sender · 引导')).toBeTruthy();
-    expect(within(pending).getByText('等待模型接收')).toBeTruthy();
+    const view = render(<WorkbenchView {...props({ activeTurnId: 'turn-one', queuedPrompts: [steer] })} />);
+    const pending = screen.getByRole('article', { name: '代理 session:sender' });
+    expect(within(pending).getByText('代理 session:sender')).toBeTruthy();
+    expect(pending.querySelector('details')?.open).toBe(false);
+    fireEvent.click(within(pending).getByText('补充材料'));
     expect(within(pending).getByText('来自代理的消息')).toBeTruthy();
-    view.rerender(<WorkbenchView {...props({ queuedPrompts: [steer], messages: [{
+    view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', queuedPrompts: [steer], messages: [{
       id: 'accepted-steer', turnId: 'turn-one', role: 'user', userKind: 'steer', inputOrigin: 'AGENT_MESSAGE',
       body: '来自代理的消息', time: '', inputSource: {identityKind: 'queue', sourceKind: 'agent',
         sourceSessionId: 'session:sender', sourceWorkId: 'queue:work', queueItemId: 'agent-steer', deliveryMode: 'steer'},
     }] })} />);
-    expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
+    expect(screen.getAllByRole('article', { name: '代理 session:sender' })).toHaveLength(1);
     expect(screen.queryByText('等待模型接收')).toBeNull();
   });
 
@@ -402,7 +403,8 @@ describe('PR04 composer queue hard cut', () => {
     expect(within(queue).getAllByRole('button', { name: '发送' })).toHaveLength(2);
     expect(within(queue).getAllByRole('button', { name: '编辑' })).toHaveLength(2);
     expect(within(queue).getAllByRole('button', { name: '删除' })).toHaveLength(2);
-    expect(queue.querySelectorAll('button svg')).toHaveLength(6);
+    expect(queue.querySelectorAll('.composer-queue__actions button svg')).toHaveLength(6);
+    expect(within(queue).getAllByRole('button', { name: '复制排队输入' })).toHaveLength(2);
   });
 });
 
@@ -3200,4 +3202,43 @@ it('uses the existing stop button for an idle manual operation and removes it wh
   expect(onStop).toHaveBeenCalledTimes(1);
   view.rerender(<WorkbenchView {...props({isRunning: false, activeTurnId: undefined, onStop})} />);
   expect(screen.queryByRole('button', {name: '停止本轮运行'})).toBeNull();
+});
+
+it('shows mixed future inputs in one queue and cancels only the selected Cell record without expanding edit or steer', async()=>{
+ const queue:QueuedPrompt[]=[{queueItemId:'human-a',sourceKind:'command',commandId:'command:a',sequence:'1',status:'pending',deliveryMode:'new-turn',content:textPrompt('human A')},
+ {queueItemId:'cell-a',sourceKind:'cell',sourceSessionId:'session:root',sourceExecAttemptId:'attempt:a',sequence:'2',status:'pending',inputOrigin:'CELL_OUTPUT',deliveryMode:'new-turn',content:textPrompt('**Cell first**'),cellOutput:{cellId:'cell:a',sourceTurnId:'turn:source',sourceExecAttemptId:'attempt:a',recordSequence:1,kind:'log'}},
+ {queueItemId:'cell-b',sourceKind:'cell',sourceExecAttemptId:'attempt:a',sequence:'3',status:'pending',inputOrigin:'CELL_OUTPUT',deliveryMode:'new-turn',content:textPrompt('real failure'),cellOutput:{cellId:'cell:a',sourceTurnId:'turn:source',sourceExecAttemptId:'attempt:a',recordSequence:2,kind:'error'}},
+ {queueItemId:'timer-a',sourceKind:'system',sequence:'4',status:'pending',inputOrigin:'SCHEDULED_TASK',deliveryMode:'new-turn',content:textPrompt('timer input'),scheduledInput:{taskId:'scheduled:a',taskRevision:1,dueAtUtc:'2026-10-31T00:00:00Z',triggerSource:'RUN_ONCE'}}];
+ const onQueueAction=vi.fn(async()=>{});
+ const view=render(<WorkbenchView {...props({queuedPrompts:queue,queuedCount:4,onQueueAction})}/>);
+ const region=screen.getByRole('region',{name:'等待处理的输入'});
+ expect([...region.querySelectorAll('[data-queue-item-id]')].map(row=>row.getAttribute('data-queue-item-id'))).toEqual(queue.map(item=>item.queueItemId));
+ expect(screen.getByText('4 条等待处理')).toBeTruthy();
+ expect(within(region).getByText('脚本输出 · cell:a')).toBeTruthy();
+ expect(within(region).getByText('脚本错误 · cell:a')).toBeTruthy();
+ const first=region.querySelector('[data-queue-item-id="cell-a"]')!;
+ expect(within(first as HTMLElement).getByRole('button',{name:'发送'}).hasAttribute('disabled')).toBe(true);
+ expect(within(first as HTMLElement).getByRole('button',{name:'编辑'}).hasAttribute('disabled')).toBe(true);
+ fireEvent.click(within(first as HTMLElement).getByRole('button',{name:'删除'}));
+ await waitFor(()=>expect(onQueueAction).toHaveBeenCalledExactlyOnceWith(queue[1],'delete'));
+ expect(region.querySelector('[data-queue-item-id="cell-b"]')).toBeTruthy();
+ const scheduled=region.querySelector('[data-queue-item-id="timer-a"]')!;
+ expect(within(scheduled as HTMLElement).getByRole('button',{name:'编辑'}).hasAttribute('disabled')).toBe(false);
+ expect(within(scheduled as HTMLElement).getByRole('button',{name:'发送'}).hasAttribute('disabled')).toBe(true);
+ view.rerender(<WorkbenchView {...props({queuedPrompts:queue,queuedCount:4,isObserver:true,canControl:false})}/>);
+ expect(screen.getByRole('region',{name:'等待处理的输入'}).querySelectorAll('.composer-queue__actions')).toHaveLength(0);
+});
+it('keeps a Cell steer inside the same process with collapsed Markdown and a real next-turn boundary',()=>{
+ const messages:import('../../frontend/lib/pulsara-types').Message[]=[{id:'input',turnId:'turn:a',role:'user',userKind:'prompt',body:'task',time:''},
+ {id:'step',turnId:'turn:a',role:'assistant',assistantKind:'tool-request',body:'',time:'',traces:[{id:'tool',kind:'artifact',title:'工具',subtitle:'已完成',status:'completed'}]},
+ {id:'cell-steer',turnId:'turn:a',role:'user',userKind:'steer',inputOrigin:'CELL_OUTPUT',body:'## Result\n**selected output** /unknown @file',time:'',cellOutput:{cellId:'cell:a',sourceTurnId:'turn:source',sourceExecAttemptId:'attempt:a',recordSequence:1,kind:'log'},inputSource:{identityKind:'queue',queueItemId:'cell-q',sourceKind:'cell',sourceExecAttemptId:'attempt:a',deliveryMode:'steer'}},
+ {id:'answer',turnId:'turn:a',role:'assistant',assistantKind:'terminal',body:'Answer',time:''}];
+ const view=render(<ConversationMessages messages={messages} artifactOwnerKey="session:a" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}/>);
+ expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
+ const material=screen.getByRole('article',{name:'脚本输出 · cell:a'});
+ expect(material.querySelector('details')?.open).toBe(false);
+ fireEvent.click(within(material).getByText('补充材料'));
+ expect(material.querySelector('strong')?.textContent).toBe('脚本输出 · cell:a');
+ expect(within(material).getByRole('heading',{name:'Result'})).toBeTruthy();
+ expect(material.querySelector('[data-skill-reference]')).toBeNull();
 });

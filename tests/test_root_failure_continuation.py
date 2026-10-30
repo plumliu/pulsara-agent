@@ -3,7 +3,6 @@
 import asyncio
 import json
 from pathlib import Path
-from time import monotonic
 
 import pytest
 import psycopg
@@ -24,6 +23,7 @@ from pulsara_agent.ports.live_agent_event import (
     TextStartPayload,
     live_digest,
 )
+from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
@@ -44,8 +44,7 @@ async def _wait_root_idle(session):
 def _assert_root_outcomes(dsn, session_id):
     with psycopg.connect(dsn) as connection:
         rows = connection.execute(
-            "SELECT status FROM pulsara_v3.turns WHERE session_id=%s "
-            "AND conversation_scope_kind='ROOT' ORDER BY accepted_at",
+            "SELECT status FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at",
             (session_id,),
         ).fetchall()
         assert rows == [("INTERRUPTED",), ("COMPLETED",)]
@@ -55,12 +54,16 @@ def _assert_no_result(dsn, session_id, attempt_id):
     assert attempt_id is not None
     with psycopg.connect(dsn) as connection:
         assert connection.execute(
+            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s AND id=%s",
+            (session_id, attempt_id),
+        ).fetchone() == (1,)
+        assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.tool_results WHERE session_id=%s AND attempt_id=%s",
             (session_id, attempt_id),
         ).fetchone() == (0,)
 
 
-def test_queued_root_continues_after_dependent_batch_conflict(
+def test_queued_root_continues_after_dependent_work_admission_conflict(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     isolated_migrated_postgres_database,
@@ -78,29 +81,38 @@ def test_queued_root_continues_after_dependent_batch_conflict(
     recovered = asyncio.Event()
     conflict_injected = False
     failed_attempt = None
+    first_work = None
+    accepted_works = []
+    child_calls = 0
 
     async def stream(request):
+        nonlocal child_calls
         assert (
-            request.compiled_input.canonical_input_identity.scope_subagent_task_id
-            is not None
+            request.compiled_input.canonical_input_identity.conversation_scope_kind
+            is ModelInputScopeKind.SUBAGENT
         )
+        child_calls += 1
         await release_child.wait()
         text = "CHILD_DONE"
         yield TextStartPayload("text:done")
         yield TextDeltaPayload("text:done", text)
         yield TextEndPayload("text:done", text, len(text), live_digest(text))
 
-    original_accept = ConversationKernelRepository.accept_subagent_task_batch
+    original_admit = ConversationKernelRepository.admit_agent_requests
 
-    def fail_dependent_batch(self, *args, candidate, **kwargs):
-        # Keep the availability contract covered even after the independent
-        # cross-batch ID matcher defect is fixed. The attempt already exists.
-        nonlocal conflict_injected, failed_attempt
-        if any(task.dependency_task_ids for task in candidate.ordered_tasks):
+    def fail_dependent_admission(self, *args, requests, source_tool_attempt_id, **kwargs):
+        # The real tool attempt already exists; reject only its downstream
+        # dependent Work admission while retaining the first admitted Work.
+        nonlocal conflict_injected, failed_attempt, first_work
+        if any(request.depends_on for request in requests):
             conflict_injected = True
-            failed_attempt = candidate.source_tool_attempt_id
-            raise ConversationKernelConflict("injected cross-batch exact-join conflict")
-        return original_accept(self, *args, candidate=candidate, **kwargs)
+            failed_attempt = source_tool_attempt_id
+            raise ConversationKernelConflict("injected dependent Work admission conflict")
+        rows = original_admit(self, *args, requests=requests,
+                              source_tool_attempt_id=source_tool_attempt_id, **kwargs)
+        accepted_works.extend(row["work_id"] for row in rows)
+        first_work = rows[0]["work_id"]
+        return rows
 
     runtime = test_model_runtime(
         model_id="test-pro",
@@ -108,7 +120,7 @@ def test_queued_root_continues_after_dependent_batch_conflict(
         postgres_dsn=isolated_migrated_postgres_database.runtime_dsn,
     )
 
-    class NativeBatchModel(DirectKernelModelPort):
+    class NativeWorkModel(DirectKernelModelPort):
         """Exercise real ROOT wire planning, replay persistence and epoch install."""
         def __init__(self):
             super().__init__(model_runtime=runtime)
@@ -118,28 +130,22 @@ def test_queued_root_continues_after_dependent_batch_conflict(
         def preflight_execution(self, request, **kwargs):
             nonlocal root_calls
             if (
-                request.compiled_input.canonical_input_identity.scope_subagent_task_id
-                is not None
+                request.compiled_input.canonical_input_identity.conversation_scope_kind
+                is ModelInputScopeKind.SUBAGENT
             ):
                 return self.child.preflight_execution(request, **kwargs)
             self.requests.append(request)
             root_calls += 1
             if root_calls <= 2:
-                task = {
-                    "task": "wait for release",
-                    "task_key": "First",
+                arguments = {
+                    "instruction": "wait for release",
                     "context": {"mode": "none"},
                 }
                 if root_calls == 2:
-                    rows = session.repository.list_subagent_tasks(
-                        session_id=session.session_id,
-                        maximum_items=10,
-                        deadline_monotonic=monotonic() + 10,
-                    )
-                    task = {
-                        "task": "use predecessor",
-                        "task_key": "Second",
-                        "depends_on": [str(rows[0]["id"])],
+                    assert first_work is not None
+                    arguments = {
+                        "instruction": "use predecessor",
+                        "depends_on": [{"kind": "WORK", "work_id": first_work}],
                         "context": {"mode": "none"},
                     }
                 delta = {
@@ -150,8 +156,8 @@ def test_queued_root_continues_after_dependent_batch_conflict(
                             "id": f"call:batch:{root_calls}",
                             "type": "function",
                             "function": {
-                                "name": "create_agent_tasks",
-                                "arguments": json.dumps({"tasks": [task]}),
+                                "name": "run_agent",
+                                "arguments": json.dumps(arguments),
                             },
                         }
                     ],
@@ -175,13 +181,13 @@ def test_queued_root_continues_after_dependent_batch_conflict(
             ]
             return super().preflight_execution(request, **kwargs)
 
-    model = NativeBatchModel()
+    model = NativeWorkModel()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(
         kernel_host.LocalMcpManagementService, "load_configs", lambda *_a, **_kw: ()
     )
     monkeypatch.setattr(
-        ConversationKernelRepository, "accept_subagent_task_batch", fail_dependent_batch
+        ConversationKernelRepository, "admit_agent_requests", fail_dependent_admission
     )
 
     async def scenario():
@@ -195,6 +201,7 @@ def test_queued_root_continues_after_dependent_batch_conflict(
             await session.submit_prompt(
                 content=PromptContent.text("delegate then create successor"),
                 command_id=random_id("command"),
+                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
 
             async def wait_failed():
@@ -206,13 +213,14 @@ def test_queued_root_continues_after_dependent_batch_conflict(
             await asyncio.wait_for(wait_failed(), timeout=10)
             assert conflict_injected
             scope = ProviderInputContinuityScope(
-                session.session_id, ModelInputScopeKind.ROOT, None
+                session.session_id, ModelInputScopeKind.ROOT
             )
             prior_view = session._input_continuity.current_view(scope)
             assert prior_view is not None
             await session.submit_prompt(
                 command_id=random_id("command"),
                 content=PromptContent.text("continue normally"),
+                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
 
             async def wait_recovered():
@@ -234,6 +242,16 @@ def test_queued_root_continues_after_dependent_batch_conflict(
                 session.session_id,
                 failed_attempt,
             )
+            assert accepted_works == [first_work]
+            assert child_calls == 1
+            assert root_calls == 3
+            with psycopg.connect(isolated_migrated_postgres_database.runtime_dsn) as connection:
+                assert connection.execute(
+                    "SELECT count(*) FROM pulsara_v3.prompt_queue_items q "
+                    "JOIN pulsara_v3.sessions s ON s.id=q.session_id "
+                    "WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION'",
+                    (session.session_id,),
+                ).fetchone() == (1,)
             next_view = session._input_continuity.current_view(scope)
             assert next_view is not None
             assert next_view.epoch_nonce == prior_view.epoch_nonce

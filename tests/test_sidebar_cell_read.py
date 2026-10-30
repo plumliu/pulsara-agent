@@ -1,4 +1,4 @@
-"""Desktop checks Cell lifetime after asynchronous, non-consuming reads."""
+"""Canonical source reads outlive Cells; live graphs close only on retirement."""
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,8 +10,7 @@ from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from pulsara_agent.identity import random_id
 
 
-@pytest.mark.parametrize('graph', [False, True])
-def test_cell_retiring_during_read_never_delivers_cached_content(graph):
+def test_cell_retiring_during_graph_read_closes_the_live_view():
     class Tools:
         def __init__(self):
             self.live = True
@@ -25,10 +24,6 @@ def test_cell_retiring_during_read_never_delivers_cached_content(graph):
         def query_code_cells(self, **_kwargs):
             return {'cells': []}
 
-        async def read_code_cell_source_page(self, **_kwargs):
-            self.live = False
-            return {'source': {'status': 'AVAILABLE', 'text': 'frozen'}}
-
         async def read_code_cell_graph(self, **_kwargs):
             self.live = False
             return {'items': [], 'participation_coverage': 'complete'}
@@ -37,11 +32,10 @@ def test_cell_retiring_during_read_never_delivers_cached_content(graph):
         controller = object.__new__(LocalSessionController)
         tools = Tools()
         host = SimpleNamespace(_tools=tools)
-        async def root_host(*_args):
-            return host
-        controller._sidebar_root_host = root_host
-        with pytest.raises(KeyError):
-            await controller.sidebar_cell(random_id('session'), random_id('host'), random_id('cell'), {}, graph=graph)
+        controller._sidebar_root = AsyncMock()
+        controller._sidebar_root_host = AsyncMock(return_value=host)
+        result = await controller.sidebar_cell_graph(random_id('session'), random_id('host'), random_id('cell'), {})
+        assert result == {'status': 'CLOSED', 'message': '实时工作流视图已关闭'}
     asyncio.run(scenario())
 
 
@@ -57,49 +51,74 @@ def test_cell_sidecar_failure_is_not_confused_with_retirement():
         LocalSessionController._sidebar_cell_capture(SimpleNamespace(_tools=Tools()), random_id('cell'))
 
 
-def test_desktop_and_model_reads_have_distinct_retirement_boundaries():
-    from pulsara_agent.code_mode import CodeModeHost
-    from pulsara_agent.code_mode.targets import cell_target
-    from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-    from tests.test_query_cells_contract import _start, _terminal
-
+def test_canonical_source_read_does_not_borrow_a_live_host_or_cell():
     async def scenario():
-        host = CodeModeHost()
-        port = object.__new__(DirectKernelToolPort)
-        port._code_mode = host
-        started, release = asyncio.Event(), asyncio.Event()
-        calls = 0
-        async def read_source(**_kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                started.set()
-            await release.wait()
-            return 'actual frozen source'
-        port._code_mode_read_source = read_source
+        root, attempt = random_id('session'), random_id('attempt')
+        reads = []
+        def source(**kwargs):
+            reads.append(kwargs)
+            return 'const actual = "Hook后冻结源码";'
         controller = object.__new__(LocalSessionController)
-        bound_host = SimpleNamespace(_tools=port)
-        async def root_host(*_args):
-            return bound_host
-        controller._sidebar_root_host = root_host
-        try:
-            cell_id = await _start(host, "console.log('unread');")
-            await _terminal(host, cell_id)
-            output = await host.observe(cell_id, 0)
-            context = SimpleNamespace(tool_call_id=random_id('call'), session_id=random_id('session'))
-            model = asyncio.create_task(port._query_cells({'target': cell_target(cell_id)}, context))
-            desktop = asyncio.create_task(controller.sidebar_cell(context.session_id, random_id('host'), cell_id, {}, graph=False))
-            await asyncio.wait_for(started.wait(), 5)
-            await host._cells[cell_id].vm_released.wait()
-            await host.acknowledge(output)
-            assert cell_id not in host._cells
-            release.set()
-            assert (await model)['source']['text'] == 'actual frozen source'
-            with pytest.raises(KeyError):
-                await desktop
-        finally:
-            release.set()
-            await host.aclose()
+        controller._sidebar_root = AsyncMock()
+        controller._sidebar_root_host = AsyncMock(side_effect=AssertionError('source read cannot use a live Host'))
+        controller.core = SimpleNamespace(_ensure_resources=AsyncMock(return_value=SimpleNamespace(read_code_mode_source=source)),
+                                         _canonical_deadline=lambda: 100, _sessions={})
+        page = await controller.cell_source(root, attempt, {'offset_chars': 6, 'max_chars': 5})
+        assert page == {'source_exec_attempt_id': attempt, 'live_cell': None, 'source': {'status': 'AVAILABLE',
+            'text': 'actua', 'offset_chars': 6, 'returned_chars': 5,
+            'total_chars': len('const actual = "Hook后冻结源码";'), 'has_more': True, 'next_offset_chars': 11}}
+        assert reads == [{'session_id': root, 'attempt_id': attempt, 'deadline_monotonic': 100}]
+        assert controller._sidebar_root.await_count == 2
+        controller._sidebar_root_host.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+def test_missing_or_other_root_source_attempt_is_not_readable():
+    async def scenario():
+        controller = object.__new__(LocalSessionController)
+        controller._sidebar_root = AsyncMock()
+        controller.core = SimpleNamespace(_ensure_resources=AsyncMock(return_value=SimpleNamespace(read_code_mode_source=lambda **_: None)),
+                                         _canonical_deadline=lambda: 100, _sessions={})
+        with pytest.raises(KeyError):
+            await controller.cell_source(random_id('session'), random_id('attempt'), {})
+        assert controller._sidebar_root.await_count == 2
+    asyncio.run(scenario())
+
+
+def test_source_read_rechecks_root_access_before_returning_content():
+    async def scenario():
+        controller = object.__new__(LocalSessionController)
+        controller._sidebar_root = AsyncMock(side_effect=[None, KeyError('deleted ROOT')])
+        controller.core = SimpleNamespace(_ensure_resources=AsyncMock(return_value=SimpleNamespace(read_code_mode_source=lambda **_: 'frozen')),
+                                         _canonical_deadline=lambda: 100, _sessions={})
+        with pytest.raises(KeyError, match='deleted ROOT'):
+            await controller.cell_source(random_id('session'), random_id('attempt'), {})
+    asyncio.run(scenario())
+
+
+def test_source_live_graph_link_uses_only_exact_attempt_and_current_root():
+    root, other_root, attempt, other_attempt = (random_id(kind) for kind in ('session', 'session', 'attempt', 'attempt'))
+    cell, host_id = random_id('cell'), random_id('host')
+    def host(session_id, source_attempt, *, closing=False):
+        return SimpleNamespace(session_id=session_id, root_session_id=None,
+            host_session_id=host_id, _closing=closing, _closed=False,
+            _tools=SimpleNamespace(query_code_cells=lambda **_: {'cells': [{'target': {'cell_id': cell}}], 'next_cursor': None},
+                capture_code_cell=lambda _: SimpleNamespace(source_exec_attempt_id=source_attempt)))
+    controller = object.__new__(LocalSessionController)
+    controller.core = SimpleNamespace(_sessions={'other': host(other_root, attempt),
+        'retiring': host(root, attempt, closing=True), 'different': host(root, other_attempt)})
+    assert controller._live_cell_for_source(root, attempt) is None
+    controller.core._sessions['live'] = host(root, attempt)
+    assert controller._live_cell_for_source(root, attempt) == {'host_session_id': host_id, 'cell_id': cell}
+
+
+def test_graph_sidecar_failure_keeps_a_refresh_failure():
+    async def scenario():
+        controller = object.__new__(LocalSessionController)
+        controller._sidebar_root = AsyncMock()
+        controller._sidebar_root_host = AsyncMock(side_effect=CodeModeError('unavailable', 'sidecar refresh failed'))
+        with pytest.raises(CodeModeError, match='refresh failed'):
+            await controller.sidebar_cell_graph(random_id('session'), random_id('host'), random_id('cell'), {})
     asyncio.run(scenario())
 
 
@@ -193,6 +212,30 @@ def test_scoped_history_http_checks_root_before_and_after_read():
             assert response.status == 404
             surface.sessions.history_window.assert_awaited_once()
         surface.bridge.require_chat_controller.assert_not_awaited()
+    asyncio.run(scenario())
+
+
+def test_canonical_cell_source_http_does_not_require_an_active_controller():
+    from aiohttp import web
+    from aiohttp.test_utils import TestClient, TestServer
+    from pulsara_agent.desktop_app.http_server import LocalHttpServer
+
+    async def scenario():
+        root, attempt = random_id('session'), random_id('attempt')
+        surface = object.__new__(LocalHttpServer)
+        payload = {'source_exec_attempt_id': attempt,
+                   'source': {'status': 'AVAILABLE', 'text': 'frozen'}}
+        surface.sessions = SimpleNamespace(cell_source=AsyncMock(return_value=payload))
+        surface.bridge = SimpleNamespace(require_chat_controller=AsyncMock(
+            side_effect=AssertionError('source reading cannot require a controller')))
+        app = web.Application(middlewares=[surface._errors, surface._chat_write_admission])
+        app.router.add_post('/api/sessions/{session_id}/cell-sources/{source_exec_attempt_id}', surface._cell_source)
+        async with TestClient(TestServer(app)) as client:
+            response = await client.post(f'/api/sessions/{root}/cell-sources/{attempt}', json={'offset_chars': 0})
+            assert response.status == 200 and await response.json() == payload
+        surface.sessions.cell_source.assert_awaited_once_with(root, attempt, {'offset_chars': 0})
+        surface.bridge.require_chat_controller.assert_not_awaited()
+
     asyncio.run(scenario())
 
 

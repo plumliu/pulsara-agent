@@ -292,6 +292,15 @@ function canonicalInputs(messages: Message[]): CanonicalInput[] {
     ({id, userKind, inputSource, contentState, historyContextState}));
 }
 
+export interface ProviderRetryObservation {
+  session_id: string; turn_id: string; resolved_model_call_id: string; draft_id: string;
+  attempt: number; retry_number: number; max_retries: number;
+  phase: 'waiting' | 'reconnecting';
+  reason: 'connection_recovery' | 'provider_recovery' | 'tool_argument_regeneration';
+  remaining_seconds: number; has_semantic_output: boolean;
+}
+export type ProviderRetry = ProviderRetryObservation & { observedAt: number };
+
 export interface RuntimeProjection {
   /** Canonical session turn order within loaded windows; absence does not establish adjacency. */
   canonicalTurnIds?: readonly string[];
@@ -303,7 +312,10 @@ export interface RuntimeProjection {
   presentationNotices?: string[];
   contextCompaction?: ContextCompactionBoundary;
   initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
+  providerRetry?: ProviderRetry | null;
   isRunning: boolean;
+  futureQueueNextCursor?: string | null;
+  pendingSteerPage?: { targetTurnId: string; totalCount: number; nextCursor: string | null };
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
   promptTransitions: LocalPromptSubmission[];
@@ -329,6 +341,8 @@ interface QueuedPromptBase {
   status: 'pending';
   contentUnavailable?: boolean;
   inputOrigin?: string;
+  scheduledInput?: Message['scheduledInput'];
+  cellOutput?: Message['cellOutput'];
   waitingOn?: readonly string[];
   deliveryMode: 'new-turn' | 'steer';
   targetTurnId?: string;
@@ -341,9 +355,15 @@ interface QueuedPromptBase {
 export type QueuedPrompt = QueuedPromptBase & (
   | { sourceKind: 'command'; commandId: string }
   | { sourceKind: 'agent'; commandId?: never; sourceSessionId?: string; sourceWorkId?: string }
+  | { sourceKind: 'cell'; commandId?: never; sourceSessionId?: string; sourceTurnId?: string; sourceExecAttemptId?: string }
   | { sourceKind: 'system'; commandId?: never }
 );
 
+export interface QueueLane { deliveryMode: 'steer'; targetTurnId: string }
+export interface QueueItemStatus {
+  queueItemId: string; status: 'PENDING' | 'CONSUMED' | 'CANCELLED' | 'REJECTED';
+  deliveryMode: 'new-turn' | 'steer'; targetTurnId?: string; consumedEntryId?: string;
+}
 export interface QueuedPromptAction {
   sessionId: string;
   connectionGeneration: number;
@@ -448,11 +468,6 @@ export interface UserControlReceipt {
     exitCode?: number;
     physicalState: string;
     groupAlive?: boolean;
-  };
-  monitor?: {
-    monitorId: string;
-    outcome: string;
-    detail?: string;
   };
   feedback?: {
     canonicalStatus: string;
@@ -738,7 +753,8 @@ export interface AgentConversationReader {
   retainHistory(interest: HistoryResidence): RuntimeProjection | undefined;
   locateEntry(entryId: string, signal: AbortSignal): Promise<RuntimeProjection>;
   locateAnnotationSource(entryId: string, signal: AbortSignal): Promise<RuntimeProjection>;
-  readQueuePage(cursor?: string, signal?: AbortSignal): Promise<{items: QueuedPrompt[]; nextCursor: string | null}>;
+  readQueuePage(cursor?: string, signal?: AbortSignal, lane?: QueueLane): Promise<{items: QueuedPrompt[]; nextCursor: string | null}>;
+  readQueueStatus(queueItemId: string, signal?: AbortSignal): Promise<QueueItemStatus | null>;
   readQueueItem(queueItemId: string, signal?: AbortSignal): Promise<QueuedPrompt | null>;
   readToolArtifact(resultEntryId: string, offsetChars: number, maxChars?: number): Promise<ToolArtifactPage>;
   readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
@@ -762,7 +778,8 @@ export interface RuntimeConnection {
   retainHistory?: (interest: HistoryResidence) => RuntimeProjection | undefined;
   locateEntry?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   subscribe?: (listener: () => void) => () => void;
-  readQueuePage(cursor?: string, signal?: AbortSignal): Promise<{items: QueuedPrompt[]; nextCursor: string | null}>;
+  readQueuePage(cursor?: string, signal?: AbortSignal, lane?: QueueLane): Promise<{items: QueuedPrompt[]; nextCursor: string | null}>;
+  readQueueStatus(queueItemId: string, signal?: AbortSignal): Promise<QueueItemStatus | null>;
   readQueueItem(queueItemId: string, signal?: AbortSignal): Promise<QueuedPrompt | null>;
   locateAnnotationSource?: (entryId: string, signal: AbortSignal) => Promise<RuntimeProjection>;
   readonly filePreview: FilePreviewApi;
@@ -903,7 +920,7 @@ interface ProtocolEntry {
     source_coverage_reason?: string; artifact_unavailability_reason?: string;
   };
   input_origin?: string;
-  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string };
+  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string };
   scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string; trigger_source: 'TIMER' | 'RUN_ONCE' };
   visualizations?: Array<{
     ordinal: string | number; state: string; content_digest?: string;
@@ -938,10 +955,14 @@ export interface ProtocolCanonicalControl {
   prompt_queue?: Array<{
     queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
     status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string; input_origin?: string;
-    source_session_id?: string; source_work_id?: string; waiting_on?: string[];
+    source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; scheduled_input?: ProtocolEntry['scheduled_input']; waiting_on?: string[];
     content?: ProtocolContent; requested_permission_mode?: string; permission?: { requested_mode?: string; effective_mode?: string };
   }>;
   prompt_queue_total_count?: string | number;
+  prompt_queue_next_cursor?: string | number;
+  pending_steer_total_count?: string | number;
+  pending_steer_target_turn_id?: string;
+  pending_steer_next_cursor?: string | number;
   tool_attempts?: ProtocolToolAttempt[];
   active_turn_total_count?: string | number;
   tool_attempt_total_count?: string | number;
@@ -1117,6 +1138,7 @@ interface ConnectPayload {
 }
 
 interface ObservationPayload {
+  provider_retry: ProviderRetryObservation | null;
   through_event_sequence?: string | number;
   committed?: Array<{
     projection_kind: string;
@@ -1953,9 +1975,9 @@ abstract class CanonicalHistoryReader {
   protected abstract post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T>;
   protected abstract project(): RuntimeProjection;
 
-  async readQueuePage(cursor?: string, signal?: AbortSignal): Promise<{items: QueuedPrompt[]; nextCursor: string | null}> {
+  async readQueuePage(cursor?: string, signal?: AbortSignal, lane?: QueueLane): Promise<{items: QueuedPrompt[]; nextCursor: string | null}> {
     const page = await apiRequest<{items: NonNullable<ProtocolCanonicalControl['prompt_queue']>; next_cursor: string | null}>(
-      this.queuePath, {method:'POST', body:JSON.stringify(cursor ? {cursor} : {}), signal});
+      this.queuePath, {method:'POST', body:JSON.stringify({...(cursor ? {cursor} : {}), ...(lane ? {delivery_mode: 'STEER_ACTIVE_TURN', target_turn_id: lane.targetTurnId} : {})}), signal});
     const current = [] as NonNullable<ProtocolCanonicalControl['prompt_queue']>;
     const refreshed: QueuedPrompt[] = [];
     for (const item of page.items) {
@@ -1975,6 +1997,22 @@ abstract class CanonicalHistoryReader {
     return {items:[...projectQueuedPrompts({prompt_queue:current}), ...refreshed].sort((a,b) => compareSequence(a.sequence,b.sequence)), nextCursor:page.next_cursor};
   }
 
+  async readQueueStatus(queueItemId: string, signal?: AbortSignal): Promise<QueueItemStatus | null> {
+    const result = await apiRequest<{item: (NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] & {consumed_entry_id?: string}) | null}>(
+      this.queuePath, {method:'POST', body:JSON.stringify({queue_item_id:queueItemId}), signal});
+    const item = result.item;
+    if (!item) return null;
+    if (item.queue_item_id !== queueItemId || !['PENDING','CONSUMED','CANCELLED','REJECTED'].includes(item.status ?? '') || !['NEW_TURN','STEER_ACTIVE_TURN'].includes(item.delivery_mode ?? '') || (item.status === 'CONSUMED' && !item.consumed_entry_id)) throw new RuntimeApiError('PROMPT_TRANSITION_IDENTITY_INVALID', '输入状态返回了不一致的身份。', true);
+    const previous = this.control.prompt_queue?.find(row=>row.queue_item_id===queueItemId && row.status==='PENDING');
+    if (previous && item.status !== 'PENDING') {
+      previous.status = item.status;
+      const countKey = previous.delivery_mode === 'STEER_ACTIVE_TURN' ? 'pending_steer_total_count' : 'prompt_queue_total_count';
+      if (this.control[countKey] !== undefined) this.control[countKey] = Math.max(0, numeric(this.control[countKey]) - 1);
+      this.changed();
+    }
+    return { queueItemId, status: item.status as QueueItemStatus['status'], deliveryMode: deliveryMode(item.delivery_mode), targetTurnId: item.target_turn_id || undefined, consumedEntryId: item.consumed_entry_id || undefined };
+  }
+
   async readQueueItem(queueItemId: string, signal?: AbortSignal): Promise<QueuedPrompt | null> {
     const result = await apiRequest<{item: (NonNullable<ProtocolCanonicalControl['prompt_queue']>[number] & {consumed_entry_id?:string}) | null}>(
       this.queuePath, {method:'POST', body:JSON.stringify({queue_item_id:queueItemId}), signal});
@@ -1982,8 +2020,7 @@ abstract class CanonicalHistoryReader {
     if (result.item.queue_item_id !== queueItemId) throw new RuntimeApiError('PROMPT_TRANSITION_IDENTITY_INVALID', '等待处理的输入返回了不一致的身份。', true);
     if (result.item.status !== 'PENDING') {
       if (result.item.status === 'CONSUMED' && result.item.consumed_entry_id) {
-        await this.readLocatedEntry(result.item.consumed_entry_id, signal ?? new AbortController().signal);
-        this.changed();
+        void this.readLocatedEntry(result.item.consumed_entry_id, signal ?? new AbortController().signal).then(()=>this.changed()).catch(()=>{});
       } else if (result.item.status !== 'CONSUMED') this.knownQueuedContent.delete(queueItemId);
       return null;
     }
@@ -2004,8 +2041,7 @@ abstract class CanonicalHistoryReader {
     if (result.item && result.item.queue_item_id !== queueItemId) throw new RuntimeApiError('PROMPT_TRANSITION_IDENTITY_INVALID', '等待处理的输入返回了不一致的身份。', true);
     if (!result.item || (result.item.status !== 'PENDING' && result.item.status !== 'CONSUMED')) this.knownQueuedContent.delete(queueItemId);
     if (result.item?.status === 'CONSUMED' && result.item.consumed_entry_id) {
-      await this.readLocatedEntry(result.item.consumed_entry_id, signal ?? new AbortController().signal);
-      this.changed();
+      void this.readLocatedEntry(result.item.consumed_entry_id, signal ?? new AbortController().signal).then(()=>this.changed()).catch(()=>{});
     }
     return result.item?.status === 'PENDING';
   }
@@ -2971,6 +3007,8 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
     return {messages: readingMessages, canonicalInputs: canonicalInputs(messages), history: this.presentationHistory(readingMessages), interruptionNotices: this.projectInterruptionNotices(readingMessages), canonicalTurnIds,
       presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base, isRunning: this.scopeKind === 'SUBAGENT' && Boolean(this.control.active_turns?.length),
+      futureQueueNextCursor: this.control.prompt_queue_next_cursor === undefined ? null : decimal(this.control.prompt_queue_next_cursor),
+      pendingSteerPage: projectPendingSteerPage(this.control),
       queuedCount: numeric(this.control.prompt_queue_total_count), queuedPrompts: projectQueuedPrompts(this.control),
       promptTransitions: [], planMode: Boolean(this.control.active_plan_workflow),
       control: this.control, liveControl: {}, todo: undefined, eventSequence: this.eventSequence,
@@ -3014,6 +3052,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   private liveControlOwnerEpoch = 0;
   private liveControlRevision = 0;
   private presentationNotices: string[] = [];
+  private providerRetry: ProviderRetry | null = null;
   private closed = false;
   private presentationWatermark = '0';
   private presentationEpoch = new AbortController();
@@ -3156,6 +3195,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务暂时没有返回更新。', true);
     }
     const observation = frame.observation;
+    this.providerRetry = observation.provider_retry ? { ...observation.provider_retry, observedAt: performance.now() } : null;
     const liveRingGap = observation.gap?.kind === 'LIVE_GAP'
       && observation.gap.reason === 'LIVE_RING_OVERFLOW';
     if (observation.gap?.kind && !liveRingGap) {
@@ -4163,9 +4203,12 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       interruptionNotices: this.projectInterruptionNotices(readingMessages),
       canonicalTurnIds,
       presentationNotices: this.presentationNotices,
+      providerRetry: this.providerRetry,
       contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base,
       isRunning: !manualCommandId && (Boolean(this.liveControl.active_root_turn_id) || Boolean(activeTurn) || hasActiveDraft),
+      futureQueueNextCursor: this.control.prompt_queue_next_cursor === undefined ? null : decimal(this.control.prompt_queue_next_cursor),
+      pendingSteerPage: projectPendingSteerPage(this.control),
       queuedCount: numeric(this.control.prompt_queue_total_count),
       queuedPrompts: projectQueuedPrompts(this.control).filter(item => !(item.sourceKind === 'command' && ['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.commandId)?.status ?? '')) && !canonical.some(entry => entry.input_source?.queue_item_id === item.queueItemId)),
       promptTransitions: this.projectPromptTransitions(),
@@ -4704,11 +4747,12 @@ function projectEntries(
       entry.entry_kind === 'USER_MESSAGE'
       || entry.entry_kind === 'USER_STEER'
       || entry.entry_kind === 'PLAN_CONTINUATION'
+      || entry.entry_kind === 'TERMINAL_OBSERVATION'
     ) {
       const continuationBody = entry.entry_kind === 'PLAN_CONTINUATION'
         ? projectPlanContinuation(decodeContent(entry.content)) : undefined;
       if (entry.entry_kind === 'PLAN_CONTINUATION' && continuationBody === undefined) continue;
-      const userKind: NonNullable<Message['userKind']> = entry.entry_kind === 'USER_STEER'
+      const userKind: NonNullable<Message['userKind']> = entry.input_source?.delivery_mode === 'STEER_ACTIVE_TURN' || entry.entry_kind === 'USER_STEER'
         ? 'steer'
         : entry.entry_kind === 'PLAN_CONTINUATION'
           ? 'plan-continuation'
@@ -4722,7 +4766,8 @@ function projectEntries(
         entrySequence: numeric(entry.entry_sequence),
         role: 'user',
         userKind,
-        scheduledInput: entry.scheduled_input ? { taskId: entry.scheduled_input.task_id, taskRevision: numeric(entry.scheduled_input.task_revision), dueAtUtc: entry.scheduled_input.due_at_utc, triggerSource: entry.scheduled_input.trigger_source } : undefined,
+        scheduledInput: projectScheduledInput(entry.scheduled_input),
+        cellOutput: entry.entry_kind === 'TERMINAL_OBSERVATION' && entry.content?.inline_content !== undefined ? decodeCellOutput(entry.content).source : undefined,
         time: formatTime(entry.accepted_at_utc),
         body: entry.entry_kind === 'PLAN_CONTINUATION'
           ? continuationBody ?? ''
@@ -4818,29 +4863,7 @@ function projectEntries(
       });
       continue;
     }
-    if (entry.entry_kind === 'TERMINAL_OBSERVATION') {
-      const trace: ToolTrace = {
-        id: entry.entry_id,
-        kind: 'terminal',
-        title: '命令进展',
-        subtitle: '已记录',
-        status: 'completed',
-        resultText: decodeContent(entry.content),
-      };
-      {
-        messages.push({
-          id: entry.entry_id,
-          turnId: entry.turn_id,
-          entrySequence: numeric(entry.entry_sequence),
-          role: 'assistant',
-          assistantKind: 'tool-request',
-          time: formatTime(entry.accepted_at_utc),
-          body: '',
-          traces: [trace],
-          status: 'completed',
-        });
-      }
-    }
+
   }
   // Program calls retain their real entries and render inside their source
   // exec card. A page without that source never creates an orphan bubble.
@@ -4962,14 +4985,17 @@ function deliveryMode(value?: string): 'new-turn' | 'steer' {
 type InputSourceIdentity =
   | { sourceKind: 'command'; commandId: string }
   | { sourceKind: 'agent'; sourceSessionId?: string; sourceWorkId?: string }
+  | { sourceKind: 'cell'; sourceSessionId?: string; sourceTurnId?: string; sourceExecAttemptId?: string }
   | { sourceKind: 'system' };
 
 function inputSourceIdentity(
-  item: { command_id?: string; source_session_id?: string; source_work_id?: string },
+  item: { command_id?: string; source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string },
   origin?: string,
 ): InputSourceIdentity {
+  if (origin === 'CELL_OUTPUT') return { sourceKind: 'cell', sourceSessionId: item.source_session_id, sourceTurnId: item.source_turn_id, sourceExecAttemptId: item.source_tool_attempt_id };
+  if (origin === 'SCHEDULED_TASK') return { sourceKind: 'system' };
   if (item.command_id) return {sourceKind: 'command', commandId: item.command_id};
-  if (origin?.startsWith('AGENT_') || item.source_session_id || item.source_work_id) {
+  if (origin?.startsWith('AGENT_')) {
     return {sourceKind: 'agent', sourceSessionId: item.source_session_id || undefined,
       sourceWorkId: item.source_work_id || undefined};
   }
@@ -4984,8 +5010,12 @@ function projectInputSource(
   const mode = deliveryMode(item.delivery_mode);
   if (item.queue_item_id) return {identityKind:'queue', queueItemId:item.queue_item_id, deliveryMode:mode, ...identity};
   if (identity.sourceKind === 'command') return {identityKind:'revision', deliveryMode:mode, ...identity};
-  if (identity.sourceKind === 'agent') return {identityKind:'origin', deliveryMode:mode, ...identity};
+  if (identity.sourceKind === 'agent' || identity.sourceKind === 'cell') return {identityKind:'origin', deliveryMode:mode, ...identity};
   return undefined;
+}
+
+function projectPendingSteerPage(control: ProtocolCanonicalControl): RuntimeProjection['pendingSteerPage'] {
+  return control.pending_steer_target_turn_id ? { targetTurnId: control.pending_steer_target_turn_id, totalCount: numeric(control.pending_steer_total_count), nextCursor: control.pending_steer_next_cursor === undefined ? null : decimal(control.pending_steer_next_cursor) } : undefined;
 }
 
 function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[] {
@@ -5000,6 +5030,8 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
         sequence: decimal(item.queue_sequence),
         status: 'pending' as const,
         inputOrigin: item.input_origin,
+        scheduledInput: projectScheduledInput(item.scheduled_input),
+        cellOutput: item.input_origin === 'CELL_OUTPUT' && item.content?.inline_content !== undefined ? decodeCellOutput(item.content).source : undefined,
         waitingOn: item.waiting_on?.length ? item.waiting_on : undefined,
         deliveryMode: deliveryMode(item.delivery_mode),
         targetTurnId: item.target_turn_id || undefined,
@@ -5092,7 +5124,6 @@ function toolDisplayName(name: string, argumentsJson?: string): string {
   if (normalized === 'manage_cell') return '管理脚本';
   if (normalized === 'query_processes') return '查看命令';
   if (normalized === 'manage_process') return '管理命令';
-  if (normalized === 'query_monitors') return '查看进展通知';
   if (normalized === 'query_schedules') return '查看定时计划';
   if (normalized === 'manage_schedule') return '管理定时计划';
   if (normalized === 'todo') return '更新 TODO';
@@ -5112,7 +5143,6 @@ function toolDisplayName(name: string, argumentsJson?: string): string {
   if (normalized.includes('apply_patch') || normalized.includes('edit')) return '更新文件';
   if (normalized.includes('search') || normalized.includes('grep')) return '搜索内容';
   if (normalized.includes('list')) return '浏览文件';
-  if (normalized.includes('manage_monitor')) return '等待命令';
   if (normalized.includes('terminal') || normalized.includes('shell') || normalized.includes('exec')) return '运行命令';
   if (normalized.includes('browser')) return '操作浏览器';
   return '使用工具';
@@ -5281,11 +5311,9 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
   }
   const control = asRecord(value.user_control);
   const process = asRecord(control.process);
-  const monitor = asRecord(control.monitor);
   const feedback = asRecord(control.feedback);
   const hasControl = Object.keys(control).length > 0;
   const hasProcess = Object.keys(process).length > 0;
-  const hasMonitor = Object.keys(monitor).length > 0;
   const hasFeedback = Object.keys(feedback).length > 0;
   const execution = String(control.execution ?? '').replace(/^USER_CONTROL_/u, '');
   return {
@@ -5322,11 +5350,6 @@ function projectCommand(value: ProtocolCommandOutcome): CommandReceipt {
         exitCode: process.exit_code === undefined ? undefined : numeric(process.exit_code),
         physicalState: String(process.physical_state ?? ''),
         groupAlive: process.group_alive === undefined ? undefined : Boolean(process.group_alive),
-      } : undefined,
-      monitor: hasMonitor ? {
-        monitorId: String(monitor.monitor_id ?? ''),
-        outcome: String(monitor.outcome ?? ''),
-        detail: String(monitor.detail ?? '') || undefined,
       } : undefined,
       feedback: hasFeedback ? {
         canonicalStatus: String(feedback.canonical_status ?? ''),
@@ -5402,10 +5425,28 @@ function decodeToolResultContent(entry: ProtocolEntry): {
   return { text: promptContentTextProjection(content), content };
 }
 
+function projectScheduledInput(value: ProtocolEntry['scheduled_input']): Message['scheduledInput'] {
+  return value ? { taskId: value.task_id, taskRevision: numeric(value.task_revision), dueAtUtc: value.due_at_utc, triggerSource: value.trigger_source } : undefined;
+}
+
+function decodeCellOutput(content: ProtocolContent | undefined): { source: NonNullable<Message['cellOutput']>; text: string } {
+  const value = JSON.parse(decodeContent(content)) as Record<string, unknown>;
+  if (value.schema_version !== 'cell_output.v1' || typeof value.cell_id !== 'string' || typeof value.source_turn_id !== 'string'
+    || typeof value.source_exec_attempt_id !== 'string' || typeof value.record_sequence !== 'number' || !value.record || typeof value.record !== 'object') {
+    throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '脚本输出格式无效。', true);
+  }
+  const record = value.record as Record<string, unknown>;
+  const kind = String(record.kind ?? '');
+  const text = typeof record.text === 'string' ? record.text
+    : JSON.stringify(kind === 'error' ? record.error : record, null, 2);
+  return { source: { cellId: value.cell_id, sourceTurnId: value.source_turn_id, sourceExecAttemptId: value.source_exec_attempt_id, recordSequence: value.record_sequence, kind }, text };
+}
+
 function decodePromptContent(
   content: ProtocolContent | undefined,
   owner: { kind: 'entry'; entryId: string } | { kind: 'queue'; queueItemId: string },
 ): CanonicalPromptContent {
+  if (content?.media_type === 'application/vnd.pulsara.terminal-observation+json') return { parts: [{ type: 'text', text: decodeCellOutput(content).text }] };
   if (!content?.inline_content || content.media_type !== PROMPT_BODY_MEDIA_TYPE) {
     throw new RuntimeApiError('CONTENT_INTEGRITY_INVALID', '输入正文格式无效。', true);
   }

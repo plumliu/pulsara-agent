@@ -104,14 +104,6 @@ class ProcessControlResult:
 
 
 @dataclass(frozen=True, slots=True)
-class MonitorControlResult:
-    monitor_id: str
-    outcome: str
-    in_flight_observation_ids: tuple[str, ...] = ()
-    detail: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class FeedbackTransportResult:
     invocation_attempted: bool = False
     invocation_succeeded: bool | None = None
@@ -142,7 +134,6 @@ class UserControlOutcome:
     root: RootControlResult | None = None
     cell: CodeModeControlResult | None = None
     process: ProcessControlResult | None = None
-    monitor: MonitorControlResult | None = None
     feedback: UserControlFeedbackState | None = None
 
 
@@ -155,7 +146,6 @@ __all__ = [
     "FeedbackInclusionStatus",
     "FeedbackOwnerAvailability",
     "FeedbackTransportResult",
-    "MonitorControlResult",
     "ProcessControlResult",
     "RootControlResult",
     "UserControlExecution",

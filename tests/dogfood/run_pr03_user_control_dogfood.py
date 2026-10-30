@@ -300,16 +300,6 @@ def _control_fact(outcome) -> dict[str, object]:
             "physical_state": control.process.physical_state,
             "group_alive": control.process.group_alive,
         },
-        "monitor": None
-        if control.monitor is None
-        else {
-            "monitor_id": control.monitor.monitor_id,
-            "outcome": control.monitor.outcome,
-            "in_flight_observation_ids": list(
-                control.monitor.in_flight_observation_ids
-            ),
-            "detail": control.monitor.detail,
-        },
         "feedback": None
         if feedback is None
         else {
@@ -399,17 +389,17 @@ async def _run_stop_race(session) -> dict[str, object]:
 
 async def _run_background_controls(session) -> dict[str, object]:
     command_a = _shell_python(
-        "import time; print('BACKGROUND_NO_MONITOR', flush=True); time.sleep(120)"
+        "import time; print('BACKGROUND_FIRST', flush=True); time.sleep(120)"
     )
     command_b = _shell_python(
-        "import time; print('BACKGROUND_WITH_MONITOR', flush=True); time.sleep(120)"
+        "import time; print('BACKGROUND_SECOND', flush=True); time.sleep(120)"
     )
     start = await session.run_turn(
         PromptContent.text("Run this controlled sequence exactly. First call terminal with command "
         f"{command_a!r}, yield_time_ms 50, max_output_chars 2000. Then call terminal "
         f"with command {command_b!r}, yield_time_ms 50, max_output_chars 2000. "
-        "Both must return running. Register manage_monitor for only the second "
-        "process with action register and otherwise default settings. Do not poll or "
+        "Both must return running. Query current process metadata without changing either "
+        "process. Do not poll or "
         "kill either process. Finish with one short sentence."),
         command_id='command:xah3sjy3vikjqvd2l33npxbe6u',
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
@@ -418,10 +408,6 @@ async def _run_background_controls(session) -> dict[str, object]:
     by_command = {item.command: item for item in processes}
     process_a = by_command[command_a]
     process_b = by_command[command_b]
-    monitors = session._tools.terminal_monitor_coordinator.list_current()  # noqa: SLF001
-    if len(monitors) != 1 or monitors[0]["process_id"] != process_b.process_id:
-        raise RuntimeError("real provider did not register the exact second monitor")
-
     original_before_prepare = session._runner._before_provider_preparation  # noqa: SLF001
     safe_point_entered = asyncio.Event()
     release_safe_point = asyncio.Event()
@@ -456,8 +442,8 @@ async def _run_background_controls(session) -> dict[str, object]:
         requests: list[UserControlRequest] = []
         accepted_controls = []
         for label, process in (
-            ("with-monitor", process_b),
-            ("without-monitor", process_a),
+            ("second-process", process_b),
+            ("first-process", process_a),
         ):
             request = _control_request(
                 session,
@@ -529,7 +515,7 @@ async def _run_background_controls(session) -> dict[str, object]:
         "import time; print('NATURAL_SHORT', flush=True); time.sleep(1)"
     )
     idle_start = await session.run_turn(
-        PromptContent.text("Call terminal for each command exactly once and do not register monitors. "
+        PromptContent.text("Call terminal for each command exactly once and do not start additional processes. "
         f"First command {idle_long!r}, yield_time_ms 50. Second command {natural!r}, "
         "yield_time_ms 50. Use max_output_chars 2000 for both, then stop."),
         command_id='command:6ild2gmqhgnjeqkvnno7kce3de',
@@ -603,7 +589,6 @@ async def _run_background_controls(session) -> dict[str, object]:
         "active_reply": active_result.final_text,
         "idle_start_reply": idle_start.final_text,
         "initial_processes": [_process_fact(process_a), _process_fact(process_b)],
-        "monitor_before_control": list(monitors),
         "safe_point_gate": {
             "preparation_count": preparation_count,
             "canonical_at_gate": canonical_at_gate,

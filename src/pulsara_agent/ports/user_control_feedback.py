@@ -22,14 +22,6 @@ class UserControlProcessFact:
 
 
 @dataclass(frozen=True, slots=True)
-class UserControlMonitorFact:
-    monitor_id: str
-    outcome: str
-    in_flight_observation_ids: tuple[str, ...] = ()
-    detail: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class ProcessControlFeedbackContent:
     command_id: str
     session_id: str
@@ -41,7 +33,6 @@ class ProcessControlFeedbackContent:
     origin_subagent_task_id: str | None
     target_root_turn_id: str
     process: UserControlProcessFact
-    monitor: UserControlMonitorFact | None
     public_code: str
     public_detail: str
     kind: str = "process_control"
@@ -85,29 +76,7 @@ class ProcessControlFeedbackContent:
                 "group_alive": self.process.group_alive,
             }
         )
-        if self.monitor is not None:
-            _validate_monitor_mapping(
-                {
-                    "monitor_id": self.monitor.monitor_id,
-                    "outcome": self.monitor.outcome,
-                    "in_flight_observation_ids": list(
-                        self.monitor.in_flight_observation_ids
-                    ),
-                    "detail": self.monitor.detail,
-                }
-            )
-
     def canonical_mapping(self) -> dict[str, object]:
-        monitor = None
-        if self.monitor is not None:
-            monitor = {
-                "monitor_id": self.monitor.monitor_id,
-                "outcome": self.monitor.outcome,
-                "in_flight_observation_ids": list(
-                    self.monitor.in_flight_observation_ids
-                ),
-                "detail": self.monitor.detail,
-            }
         return {
             "kind": self.kind,
             "schema_version": self.schema_version,
@@ -128,7 +97,6 @@ class ProcessControlFeedbackContent:
                 "physical_state": self.process.physical_state,
                 "group_alive": self.process.group_alive,
             },
-            "monitor": monitor,
             "public_code": self.public_code,
             "public_detail": self.public_detail,
             "new_control_attempt": self.new_control_attempt,
@@ -217,7 +185,6 @@ __all__ = [
     "WorkspaceRecreatedFeedbackContent",
     "UserControlFeedbackContent",
     "UserControlFeedbackInstallationAttempt",
-    "UserControlMonitorFact",
     "UserControlProcessFact",
     "project_user_control_feedback_for_provider",
 ]
@@ -266,7 +233,6 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
         "new_control_attempt",
         "other_work_stopped",
         "origin_subagent_task_id",
-        "monitor",
     }
     if set(value) != fields or (
         value.get("kind") != "process_control"
@@ -296,22 +262,11 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
     ):
         raise ValueError("user control feedback subagent origin is invalid")
     _validate_process_mapping(value["process"])
-    monitor = value["monitor"]
-    if monitor is not None:
-        _validate_monitor_mapping(monitor)
     provider_value = {field: value[field] for field in (
         "command", "cwd", "process", "public_code", "public_detail",
     )}
     provider_value["target"] = {"kind": "PROCESS", "process_id": value["process_id"]}
     provider_value["origin"] = "ROOT" if origin_subagent_task_id is None else {"subagent_task_id": origin_subagent_task_id}
-    provider_value["monitor_result"] = (
-        None
-        if monitor is None
-        else {
-            **{key: item for key, item in monitor.items() if key != "monitor_id"},
-            "target": {"kind": "MONITOR", "monitor_id": monitor["monitor_id"]},
-        }
-    )
     return json.dumps(
         {
             "pulsara_user_control_feedback": provider_value,
@@ -348,26 +303,3 @@ def _validate_process_mapping(value: object) -> None:
         value["group_alive"], bool
     ):
         raise ValueError("user control feedback process group_alive is invalid")
-
-
-def _validate_monitor_mapping(value: object) -> None:
-    if not isinstance(value, dict) or set(value) != {
-        "monitor_id",
-        "outcome",
-        "in_flight_observation_ids",
-        "detail",
-    }:
-        raise ValueError("user control feedback monitor is invalid")
-    if not isinstance(value["monitor_id"], str) or not value["monitor_id"]:
-        raise ValueError("user control feedback monitor identity is invalid")
-    if not isinstance(value["outcome"], str) or not value["outcome"]:
-        raise ValueError("user control feedback monitor outcome is invalid")
-    in_flight = value["in_flight_observation_ids"]
-    if (
-        not isinstance(in_flight, list)
-        or any(not isinstance(item, str) or not item for item in in_flight)
-        or len(set(in_flight)) != len(in_flight)
-    ):
-        raise ValueError("user control feedback monitor observations are invalid")
-    if value["detail"] is not None and not isinstance(value["detail"], str):
-        raise ValueError("user control feedback monitor detail is invalid")

@@ -74,9 +74,6 @@ class LiveEventType(StrEnum):
     INTERACTION_REPLACED = "InteractionReplaced"
     INTERACTION_CLOSED = "InteractionClosed"
     TERMINAL_PROCESS_COMPLETED = "TerminalProcessCompleted"
-    TERMINAL_MONITOR_OPENED = "TerminalMonitorOpened"
-    TERMINAL_MONITOR_OBSERVATION = "TerminalMonitorObservation"
-    TERMINAL_MONITOR_CLOSED = "TerminalMonitorClosed"
     TODO_SNAPSHOT_UPDATED = "TodoSnapshotUpdated"
 
 
@@ -148,8 +145,8 @@ DESCRIPTOR_BY_TYPE = {item.event_type: item for item in COMMITTED_EVENT_DESCRIPT
 
 if len(COMMITTED_EVENT_DESCRIPTORS) != 25 or len(DESCRIPTOR_BY_TYPE) != 25:
     raise RuntimeError("committed event descriptor must contain exact 25 types")
-if len(LIVE_EVENT_TYPES) != 23 or len(set(LIVE_EVENT_TYPES)) != 23:
-    raise RuntimeError("live event registry must contain exact 23 types")
+if len(LIVE_EVENT_TYPES) != 20 or len(set(LIVE_EVENT_TYPES)) != 20:
+    raise RuntimeError("live event registry must contain exact 20 types")
 if len(SUBJECT_SLOTS) != 8 or len(set(SUBJECT_SLOTS)) != 8:
     raise RuntimeError("subject registry must contain exact 8 slots")
 if len(APPEND_GUARDS) != 1:

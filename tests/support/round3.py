@@ -338,6 +338,16 @@ class _CallbackPreparedExecution:
         self._install_authority = install_authority
         self._settled = False
         self._completion = None
+        self._draft_identity = None
+
+    def set_draft_identity(self, draft_identity: str) -> None:
+        self._draft_identity = draft_identity
+
+    def provider_retry_observation(self) -> dict[str, object] | None:
+        return None
+
+    def clear_retry_observation(self) -> None:
+        pass
 
     def discard(self) -> None:
         if self._settled:
@@ -388,6 +398,16 @@ class _ScriptedPreparedExecution:
         self._install_authority = install_authority
         self._opened = False
         self._completion = None
+        self._draft_identity = None
+
+    def set_draft_identity(self, draft_identity: str) -> None:
+        self._draft_identity = draft_identity
+
+    def provider_retry_observation(self) -> dict[str, object] | None:
+        return None
+
+    def clear_retry_observation(self) -> None:
+        pass
 
     def discard(self) -> None:
         if self._opened:

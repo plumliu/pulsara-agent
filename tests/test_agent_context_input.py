@@ -292,7 +292,7 @@ def test_live_cell_changes_do_not_change_environment_facts(tmp_path):
             stopped = KernelHostSession.code_mode_cells(session)
             assert stopped[0]["cell_id"] == cell_id
             assert stopped[0]["state"] == "terminated"
-            assert stopped[0]["has_unread_output"] is True
+            assert stopped[0]["has_unread_output"] is False
             assert stopped[0]["pending_calls"] == 1
             assert environment() == before
         finally:

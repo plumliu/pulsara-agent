@@ -248,7 +248,6 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
             assert child.root_session_id == root.session_id
             assert child._runner is not root._runner
             assert child._tools._terminal is root._tools._terminal
-            assert child._tools.terminal_monitor_coordinator is root._tools.terminal_monitor_coordinator
             assert child._tools.todo_owner is not root._tools.todo_owner
             assert root.active_root_turn_id() is None
             # Ordinary ROOT final does not cancel the independently admitted turn.
@@ -309,7 +308,14 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
                 assert [entry['input_origin'] for entry in child_inputs] == ['AGENT_INSTRUCTION', 'AGENT_INSTRUCTION']
                 assert child_inputs[0]['entry_sequence'] == 1
                 rows = connection.execute("SELECT input_origin,inline_content FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence", (root.session_id,)).fetchall()
-                assert any(r['input_origin'] == 'AGENT_MATERIAL' and b'CHILD_FIRST_FINAL' in bytes(r['inline_content'] or b'') for r in rows), ([(r['input_origin'], bytes(r['inline_content'] or b'')[:300]) for r in rows], root._agent_runtime._completion_notifications, connection.execute('SELECT id,input_origin,status,target_turn_id,source_work_id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s', (root.session_id,)).fetchall())
+                assert not any(r['input_origin'] == 'AGENT_MATERIAL' for r in rows)
+                assert not any(b'CHILD_FIRST_FINAL' in bytes(r['inline_content'] or b'') for r in rows)
+                queued = connection.execute("SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_MATERIAL'", (root.session_id,)).fetchall()
+                assert queued == []
+            assert works[0]['final'] == 'CHILD_FIRST_FINAL'
+            assert works[1]['final'] == 'CHILD_SECOND_FINAL'
+            assert len(model.root_turns) == 2
+
             await core.close_session(root.host_session_id)
             assert child._closed
             assert not core._sessions
@@ -502,10 +508,13 @@ def test_user_can_stop_old_cell_without_a_bypass_turn_and_reopen_waits_for_settl
         core, root = await _open_test_session(tmp_path=tmp_path, model=model,
             postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch)
         started, release = asyncio.Event(), asyncio.Event()
+        settled_results = []
         async def invoke(call):
             started.set()
             await release.wait()
-            return CodeModeToolResult(value={'physical_result':'settled'})
+            result = CodeModeToolResult(value={'physical_result':'settled'})
+            settled_results.append(result.value)
+            return result
         try:
             root._launch_permission_mode = PermissionMode.READ_ONLY
             cell_id = await _start(root._code_mode, 'await tools.read_file({});', invoke,
@@ -540,11 +549,12 @@ def test_user_can_stop_old_cell_without_a_bypass_turn_and_reopen_waits_for_settl
             assert repeated.user_control.cell.state=='terminated'
             release.set()
             async def settled():
-                return root.code_mode_cells()[0]['pending_calls']==0
+                return not root.code_mode_cells()
             await eventually(settled)
-            page = await root._code_mode.observe(cell_id,0)
-            assert any(output['kind']=='tool_result' for output in page.output)
-            await root._code_mode.acknowledge(page)
+            assert settled_results == [{'physical_result': 'settled'}]
+            assert root._code_mode.pending_output_cells() == ()
+            assert model.requests == []
+            await root.prepare_safe_runtime_reopen()
         finally:
             release.set()
             await core.shutdown()
@@ -906,7 +916,7 @@ def test_live_exec_keeps_bypass_snapshot_after_root_read_only_turn_and_prefix_st
                 code='await tools.exec_process({command:"while [ ! -f release-old-cell ]; do sleep 0.01; done",yield_time_ms:30000});'
                 code+='console.log(await tools.write_file('+json.dumps({'target':{'kind':'PATH','path':'source-write.txt'},'content':'FROM_SOURCE_BYPASS'})+'));'
                 code+='return "OLD_CELL_BYPASS_FROZEN";'
-                events=_tool_call('exec_cell',random_id('call'),{'code':code,'yield_time_ms':0})
+                events=_tool_call('exec_cell',random_id('call'),{'code':code})
             else:
                 events=_text('ROOT_TURN_FINISHED')
             for event in events:
@@ -923,7 +933,6 @@ def test_live_exec_keeps_bypass_snapshot_after_root_read_only_turn_and_prefix_st
                 cells=root.code_mode_cells()
                 return bool(cells) and cells[0]['pending_calls']==1
             await eventually(terminal_submitted)
-            cell_id=root.code_mode_cells()[0]['cell_id']
             assert not (tmp_path/'source-write.txt').exists()
             second=await root.run_turn(PromptContent.text('Read-only turn: finish while the earlier script waits'),
                 command_id=random_id('command'),requested_permission_mode=PermissionMode.READ_ONLY)
@@ -931,9 +940,17 @@ def test_live_exec_keeps_bypass_snapshot_after_root_read_only_turn_and_prefix_st
             assert root.code_mode_cells()[0]['state']=='running'
             assert not (tmp_path/'source-write.txt').exists()
             (tmp_path/'release-old-cell').write_text('release after read-only turn')
-            async def completed():
-                return root.code_mode_cells()[0]['state']=='completed'
-            await eventually(completed)
+            async def output_delivered():
+                with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                        row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+                    delivered = connection.execute("""SELECT e.inline_content FROM pulsara_v3.transcript_entries e
+                        WHERE e.session_id=%s AND e.entry_kind='TERMINAL_OBSERVATION'
+                        ORDER BY e.entry_sequence""", (root.session_id,)).fetchall()
+                return any(b'OLD_CELL_BYPASS_FROZEN' in bytes(row['inline_content'] or b'') for row in delivered)
+            await eventually(output_delivered)
+            async def output_turn_settled():
+                return not root.code_mode_cells() and root.active_root_turn_id() is None
+            await eventually(output_turn_settled)
             assert (tmp_path/'source-write.txt').read_text()=='FROM_SOURCE_BYPASS'
             original=model.requests[0].compiled_input
             latest=model.requests[-1].compiled_input
@@ -944,15 +961,18 @@ def test_live_exec_keeps_bypass_snapshot_after_root_read_only_turn_and_prefix_st
                     row_factory=dict_row,deadline_monotonic=monotonic()+10) as connection:
                 modes=connection.execute('SELECT id,effective_permission_mode FROM pulsara_v3.turns WHERE session_id=%s',
                     (root.session_id,)).fetchall()
-                assert {r['id']:r['effective_permission_mode'] for r in modes}=={first.turn_id:'bypass-permissions',second.turn_id:'read-only'}
+                by_turn = {r['id']: r['effective_permission_mode'] for r in modes}
+                assert by_turn[first.turn_id] == 'bypass-permissions'
+                assert by_turn[second.turn_id] == 'read-only'
+                assert len(by_turn) > 2
+                assert all(mode == 'bypass-permissions' for identity, mode in by_turn.items()
+                           if identity not in {first.turn_id, second.turn_id})
                 calls=connection.execute("""SELECT i.turn_id,r.result_state FROM pulsara_v3.tool_invocations i
                     JOIN pulsara_v3.tool_results r ON r.session_id=i.session_id AND r.invocation_id=i.id
                     WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='write_file'""",
                     (root.session_id,)).fetchall()
                 assert calls==[{'turn_id':first.turn_id,'result_state':'SUCCESS'}]
-            page=await root._code_mode.observe(cell_id,0)
-            assert any(output.get('text')=='OLD_CELL_BYPASS_FROZEN' for output in page.output)
-            await root._code_mode.acknowledge(page)
+            assert not root._code_mode.pending_output_cells()
         finally:
             (tmp_path/'release-old-cell').write_text('cleanup')
             await core.shutdown()

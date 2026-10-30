@@ -19,7 +19,6 @@ import json
 from time import monotonic
 from typing import Awaitable, Callable, Mapping, Protocol
 
-from psycopg import InterfaceError, OperationalError
 
 from pulsara_agent.conversation_kernel.assembler import (
     CompletedAssistantMessage,
@@ -83,6 +82,7 @@ from pulsara_agent.conversation_kernel.direct_model import (
     PreparedKernelModelCall,
     PreparedKernelModelTarget,
     PreparedKernelModelExecution,
+    KernelProviderModelExecutionFailed,
     ProviderFollowupWireResourceQuote,
     quote_provider_followup_wire_resources,
 )
@@ -99,7 +99,6 @@ from pulsara_agent.model_input.lowering import (
     image_reference_id_part,
     ordinary_tool_result_minimum_upper,
 )
-from pulsara_agent.llm.errors import ModelTargetCapabilityMismatch
 from pulsara_agent.llm.request import (
     ProviderInputUsageAnchor,
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
@@ -113,6 +112,7 @@ from pulsara_agent.ports.provider_stream import (
     ProviderModelOutputIncomplete,
     ProviderOutputIncompleteReason,
     ProviderGenerationRetry,
+    ProviderRetryReason,
 )
 from pulsara_agent.conversation_kernel.input_continuity import (
     HostProviderInputContinuityOwner,
@@ -136,7 +136,6 @@ from pulsara_agent.conversation_kernel.turn_admission import (
     TodoRunAdmissionFinalizer,
     TurnAdmissionCoordinator,
     root_cancellation_terminal_reason,
-    _await_shielded,
 )
 from pulsara_agent.conversation_kernel.workspace import SessionWorkspaceResolver
 from pulsara_agent.conversation_kernel.extensions import (
@@ -179,7 +178,6 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantToolCallBlock,
     ConversationKernelRepository,
     ConversationKernelConflict,
-    StaleHostWriter,
     build_prepared_root_turn_intent,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
@@ -221,16 +219,9 @@ from pulsara_agent.conversation_kernel.safe_point import (
     PreparedProviderInputHandle,
     ProviderSafePointCoordinator,
 )
-from pulsara_agent.ports.terminal_observation import (
-    ExistingTurnInstallation,
-    NewTurnInstallation,
-    PreparedInstallationTarget,
-    TerminalObservationInstallationAttempt,
-)
 from pulsara_agent.ports.user_control_feedback import (
     UserControlFeedbackInstallationAttempt,
 )
-from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
     tool_image_attachment_message,
@@ -910,13 +901,6 @@ class _RunnerToolCompositionPort(ToolSurfacePlanningPort, ToolInvocationPort, Pr
     ) -> tuple[FrozenVisualizationOccurrence, ...]: ...
 
 
-class TerminalObservationStartedFailure(RuntimeError):
-    """A confirmed observation start failed after its canonical publication."""
-
-    def __init__(self, error: Exception, accepted: AcceptedEntry) -> None:
-        super().__init__(str(error))
-        self.original_error = error
-        self.accepted = accepted
 
 
 class ConversationKernelRunner:
@@ -989,6 +973,7 @@ class ConversationKernelRunner:
         )
         self._writer_lease = writer_lease
         self._live_bus = live_bus
+        self._active_execution: PreparedKernelModelExecution | None = None
         self._tools = tools
         self._model_resolution_snapshot_provider = model_resolution_snapshot_provider
         resolved_input_reader = input_reader or CanonicalProviderInputReader(
@@ -2269,7 +2254,9 @@ class ConversationKernelRunner:
                 public_detail = None
                 if isinstance(error, ProviderModelExecutionFailed) and cause is None:
                     reason = "PROVIDER_REQUEST_FAILED"
-                    public_detail = f"{error.error.code.value}: {error.error.message}"
+                    public_detail = (
+                        error.public_detail if isinstance(error, KernelProviderModelExecutionFailed)
+                        else f"{error.error.code.value}: {error.error.message}")
                 if public_detail is None:
                     await self._turn_admission.interrupt_turn(turn_id, reason=reason)
                 else:
@@ -2339,160 +2326,6 @@ class ConversationKernelRunner:
             reservation.commit()
         return reservation
 
-    async def install_terminal_observation(
-        self,
-        *,
-        coordinator: TerminalMonitorCoordinator,
-        monitor_id: str,
-        target: PreparedInstallationTarget,
-        workspace_id: str,
-        actor_id: str,
-        deadline_monotonic: float,
-        admitted_writer: CompactionWriteReservation,
-        cancellation_intent: ActiveTurnCancellationIntent | None = None,
-    ) -> tuple[AcceptedEntry | None, StartedTurnInputGroup | None]:
-        prepared_attempt = await self._io.run(
-            self._safe_point.prepare_terminal_observation_installation,
-            coordinator=coordinator,
-            monitor_id=monitor_id,
-            target=target,
-            workspace_id=workspace_id,
-            actor_id=actor_id,
-            deadline_monotonic=deadline_monotonic,
-        )
-        if prepared_attempt is None:
-            return None, None
-        if isinstance(prepared_attempt, AcceptedEntry):
-            group = None
-            if isinstance(target, NewTurnInstallation):
-                load_group = asyncio.create_task(self._io.run(
-                    self._repository.read_started_turn_input_group,
-                    self._writer_lease.guard,
-                    turn_id=prepared_attempt.turn_id,
-                    deadline_monotonic=deadline_monotonic,
-                ))
-                try:
-                    group = await _await_shielded(load_group)
-                except StaleHostWriter:
-                    raise
-                except BaseException as error:
-                    await self._turn_admission.interrupt_turn(
-                        prepared_attempt.turn_id,
-                        reason=root_cancellation_terminal_reason(cancellation_intent),
-                    )
-                    if isinstance(error, Exception):
-                        raise TerminalObservationStartedFailure(error, prepared_attempt) from error
-                    raise
-            return prepared_attempt, group
-        attempt: TerminalObservationInstallationAttempt = prepared_attempt
-        if isinstance(attempt.target, ExistingTurnInstallation):
-            candidate = await self._io.run(
-                self._repository.prepare_active_terminal_observation_provider_input_candidate,
-                self._writer_lease.guard,
-                candidate=attempt,
-                deadline_monotonic=deadline_monotonic,
-            )
-            prepared_active: PreparedProspectiveActiveRootInput | None = None
-            publication_handle = None
-            try:
-                prepared_active = await self._prepare_active_root_input(
-                    candidate,
-                    deadline=deadline_monotonic,
-                    cancellation_intent=cancellation_intent,
-                    admitted_writer=admitted_writer,
-                )
-                publication_handle = prepared_active.take_handle_for_publication()
-                accepted = await self._io.run(
-                    self._safe_point.publish_terminal_observation,
-                    publication_handle,
-                    coordinator=coordinator,
-                    attempt=attempt,
-                    provider_input_admission=prepared_active.admission,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                await self._provider_dispatch.confirm_published_active_root_input(
-                    prepared_active,
-                    publication_handle=publication_handle,
-                    deadline=deadline_monotonic,
-                )
-                publication_handle = None
-                return accepted, None
-            except (StructuredModelInputCompileError, ModelTargetCapabilityMismatch):
-                coordinator.settle_installation(attempt, accepted=False)
-                raise
-            finally:
-                if publication_handle is not None:
-                    publication_handle.close()
-                if prepared_active is not None:
-                    prepared_active.close()
-        if not isinstance(attempt.target, NewTurnInstallation):
-            raise TypeError("terminal observation target is unknown")
-        async def publish_started_observation():
-            accepted = None
-            try:
-                try:
-                    accepted = await self._io.run(
-                        self._safe_point.publish_terminal_observation,
-                        None,
-                        coordinator=coordinator,
-                        attempt=attempt,
-                        provider_input_admission=None,
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                except StaleHostWriter:
-                    raise
-                except Exception:
-                    # Join the exact original write after an unknown ACK.
-                    # A NONE result is a failed unstarted installation; never
-                    # manufacture another observation or restart its write.
-                    while True:
-                        try:
-                            confirmed = await self._io.run(
-                                self._repository.confirm_terminal_observation_winner,
-                                self._writer_lease.guard,
-                                candidate=attempt,
-                                deadline_monotonic=self._canonical_deadline(),
-                            )
-                            break
-                        except (TimeoutError, ConnectionError, InterfaceError, OperationalError):
-                            await asyncio.sleep(0.05)
-                    if confirmed is None:
-                        raise
-                    coordinator.settle_installation(attempt, accepted=True)
-                    accepted = confirmed
-                group = await self._io.run(
-                    self._repository.read_started_turn_input_group,
-                    self._writer_lease.guard,
-                    turn_id=accepted.turn_id,
-                    deadline_monotonic=self._canonical_deadline(),
-                )
-                return accepted, group
-            except StaleHostWriter:
-                raise
-            except BaseException as error:
-                if accepted is not None:
-                    await self._turn_admission.interrupt_turn(
-                        accepted.turn_id,
-                        reason=root_cancellation_terminal_reason(cancellation_intent),
-                    )
-                    if isinstance(error, Exception):
-                        raise TerminalObservationStartedFailure(error, accepted) from error
-                raise
-
-        settlement = asyncio.create_task(
-            publish_started_observation(),
-            name=f"kernel-terminal-observation-start:{attempt.target.turn_id}",
-        )
-        try:
-            return await _await_shielded(settlement)
-        except asyncio.CancelledError:
-            if not settlement.cancelled() and settlement.exception() is None:
-                accepted, _group = settlement.result()
-                await self._turn_admission.interrupt_turn(
-                    accepted.turn_id,
-                    reason=root_cancellation_terminal_reason(cancellation_intent),
-                )
-            raise
 
     async def install_user_control_feedback(
         self,
@@ -2557,6 +2390,10 @@ class ConversationKernelRunner:
             deadline_monotonic=deadline_monotonic,
         )
 
+    def provider_retry_observation(self) -> dict[str, object] | None:
+        execution = self._active_execution
+        return None if execution is None else execution.provider_retry_observation()
+
     async def _collect_model(
         self,
         request: KernelModelExecutionRequest,
@@ -2592,19 +2429,25 @@ class ConversationKernelRunner:
             )
 
         assembler = new_assembler()
+        if self._active_execution is not None:
+            raise RuntimeError("another provider execution is already active")
+        self._active_execution = execution
         try:
+            execution.set_draft_identity(proposed_entry_id)
             async for item in execution.open_once(permit):
                 if isinstance(item, ProviderGenerationRetry):
                     # No assistant settlement or tool dispatch has happened.
                     # Replace only disposable output, keeping the installed
                     # provider request and its one-shot authority intact.
-                    abort_generation("TOOL_ARGUMENTS_REGENERATING")
+                    reason_code = {
+                        ProviderRetryReason.CONNECTION_RECOVERY: "PROVIDER_CONNECTION_RECOVERY",
+                        ProviderRetryReason.PROVIDER_RECOVERY: "PROVIDER_RECOVERY",
+                        ProviderRetryReason.TOOL_ARGUMENT_REGENERATION: "TOOL_ARGUMENTS_REGENERATING",
+                    }[item.reason]
+                    abort_generation(reason_code)
                     proposed_entry_id = random_id("entry")
+                    execution.set_draft_identity(proposed_entry_id)
                     assembler = new_assembler()
-                    if self._presentation_notice_sink is not None:
-                        self._presentation_notice_sink(
-                            "工具参数格式异常，正在重新生成。"
-                        )
                     continue
                 assembler.apply(item)
             provider_completion = execution.take_completed_result_once()
@@ -2662,6 +2505,12 @@ class ConversationKernelRunner:
         except BaseException as exc:
             abort_generation(f"MODEL_STREAM_{type(exc).__name__.upper()}")
             raise
+        finally:
+            try:
+                execution.clear_retry_observation()
+            finally:
+                if self._active_execution is execution:
+                    self._active_execution = None
 
     def _offer_compile_observation(
         self,
@@ -3214,7 +3063,6 @@ def _json_digest(value: FrozenJsonObjectFact) -> str:
 
 __all__ = [
     "ConversationKernelRunner",
-    "TerminalObservationStartedFailure",
     "FrozenPostResponseResourceQuote",
     "KernelRunResult",
     "OutputResourceInterruption",

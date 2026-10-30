@@ -38,9 +38,8 @@ async def query_sources(service, **arguments):
     from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
     from pulsara_agent.capability.source_query import parse_query
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
-    inspect = "target" in arguments
     return await CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT).execute(
-        parse_query(arguments, inspect=inspect), inspect=inspect)
+        parse_query(arguments))
 
 
 async def inspect_hook(service, *, scope, source_kind, plugin_id=None):

@@ -14,7 +14,7 @@ from .tool_surface import CodeModeToolDirectory
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.ports.session_content import SessionContentRange
 from .memory.contracts import FrozenModelCallMemoryContext
-from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint, encode_tool_public_json
+from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
 
 from dataclasses import dataclass, replace
 
@@ -413,7 +413,6 @@ class ToolBatchExecutor:
         bind = getattr(tools, "bind_code_mode_executor", None)
         if bind is not None:
             bind(invoke=self.invoke_code_mode, freeze_source=self.freeze_code_mode_source,
-                 archive_output=self.archive_code_mode_output,
                  read_source=self.read_code_mode_source)
 
     def freeze_code_mode_context(self, **values) -> CodeModeExecutionSnapshot:
@@ -445,20 +444,6 @@ class ToolBatchExecutor:
             deadline_monotonic=self._canonical_deadline(),
         )
 
-    async def archive_code_mode_output(self, *, context, record):
-        from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
-        text = encode_tool_public_json(dict(record)).decode("utf-8")
-        prepared = await self._io.run(self._tool_output_processor.prepare,
-            session_id=context.session_id, workspace_id=context.workspace_id,
-            result_entry_id=context.result_entry_id, public_output=text,
-            candidate=ToolOutputArtifactCandidate(role="OUTPUT", text=text,
-                source_coverage=ToolOutputSourceCoverage.COMPLETE,
-                source_format_hint=ToolOutputSourceFormatHint.TEXT),
-            artifact_inline_result=False, deadline_monotonic=self._canonical_deadline())
-        if prepared.artifact_id is None:
-            from pulsara_agent.code_mode.contracts import CodeModeError
-            raise CodeModeError("OUTPUT_ARTIFACT_UNAVAILABLE", str(prepared.artifact_unavailability_reason))
-        return prepared
 
     async def invoke_code_mode(self, invocation):
         """Run one admitted program call through the native execution leaf."""

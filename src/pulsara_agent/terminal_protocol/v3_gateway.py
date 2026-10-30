@@ -51,9 +51,6 @@ from pulsara_agent.ports.live_agent_event import (
     InteractionOpenedPayload,
     InteractionReplacedPayload,
     ReasoningPresentationKind,
-    TerminalMonitorClosedPayload,
-    TerminalMonitorObservationPayload,
-    TerminalMonitorOpenedPayload,
     TerminalProcessCompletedPayload,
     TextDeltaPayload,
     TextEndPayload,
@@ -113,7 +110,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 6
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:658765b781d1db1e53399049736b6eb28d13f292261b8f34eb7abfde8249a26c"
+    "sha256:a7e010183bcd013b868a0cfcbc976526d6badfe4cad383afbcba94fb82691b6a"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -137,6 +134,7 @@ class _Connection:
     live_control_revision: int = 0
     granted_role: int = wire.ATTACHMENT_ROLE_UNSPECIFIED
     authenticated: bool = False
+    provider_retry_key: tuple | None = None
 
 
 def protocol_identity() -> wire.ProtocolIdentity:
@@ -551,7 +549,22 @@ class TerminalKernelProtocolServer:
         if not 0 <= request.wait_ms <= MAXIMUM_OBSERVATION_WAIT_MS:
             return _error(request.request_id, "OBSERVATION_WAIT_OUT_OF_BOUNDS")
         deadline = monotonic() + request.wait_ms / 1000
+        def retry_identity(value):
+            return None if value is None else tuple(
+                (name, item) for name, item in sorted(value.items())
+                if name != "remaining_seconds")
+
+        def observation(**values):
+            current = state.host_session.provider_retry_observation()
+            state.provider_retry_key = retry_identity(current)
+            if current is not None:
+                values["provider_retry"] = wire.ProviderRetryObservation(**current)
+            return wire.ObservationResponse(**values)
+
         while True:
+            provider_retry = state.host_session.provider_retry_observation()
+            retry_key = retry_identity(provider_retry)
+            retry_changed = retry_key != state.provider_retry_key
             batch = await asyncio.to_thread(
                 state.protocol_reader.observe_committed,
                 session_id=state.host_session.session_id,
@@ -562,7 +575,7 @@ class TerminalKernelProtocolServer:
             )
             if request.live_owner_epoch not in (0, state.live_epoch):
                 return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
+                    observation=observation(
                         request_id=request.request_id,
                         through_event_sequence=batch.through_event_sequence,
                         live_owner_epoch=state.live_epoch,
@@ -581,7 +594,7 @@ class TerminalKernelProtocolServer:
             )
             if batch.gap_reason is not None:
                 return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
+                    observation=observation(
                         request_id=request.request_id,
                         through_event_sequence=batch.through_event_sequence,
                         live_owner_epoch=state.live_epoch,
@@ -601,7 +614,7 @@ class TerminalKernelProtocolServer:
                     state.live_revision,
                 ) = state.host_session.live_bus.subscribe()
                 return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
+                    observation=observation(
                         request_id=request.request_id,
                         through_event_sequence=batch.through_event_sequence,
                         committed=batch.projections,
@@ -622,7 +635,7 @@ class TerminalKernelProtocolServer:
             )
             if not state.live_control_subscriber_id:
                 return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
+                    observation=observation(
                         request_id=request.request_id,
                         through_event_sequence=batch.through_event_sequence,
                         live_owner_epoch=state.live_epoch,
@@ -646,7 +659,7 @@ class TerminalKernelProtocolServer:
                 LiveControlObservationKind.DETACHED,
             ):
                 return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
+                    observation=observation(
                         request_id=request.request_id,
                         through_event_sequence=batch.through_event_sequence,
                         live_owner_epoch=state.live_epoch,
@@ -674,10 +687,11 @@ class TerminalKernelProtocolServer:
                 or settlements
                 or control_wire
                 or presentation_notices
+                or retry_changed
                 or monotonic() >= deadline
             ):
                 return wire.ServerFrame(
-                    observation=wire.ObservationResponse(
+                    observation=observation(
                         request_id=request.request_id,
                         through_event_sequence=batch.through_event_sequence,
                         committed=batch.projections,
@@ -1762,31 +1776,6 @@ def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
         if payload.exit_code is not None:
             value.exit_code = payload.exit_code
         return wire.LiveEventPayload(terminal_process_completed=value)
-    if isinstance(payload, TerminalMonitorOpenedPayload):
-        return wire.LiveEventPayload(
-            terminal_monitor_opened=wire.LiveTerminalMonitorOpenedPayload(
-                monitor_id=payload.monitor_id, process_id=payload.process_id
-            )
-        )
-    if isinstance(payload, TerminalMonitorObservationPayload):
-        return wire.LiveEventPayload(
-            terminal_monitor_observation=wire.LiveTerminalMonitorObservationPayload(
-                monitor_id=payload.monitor_id,
-                process_id=payload.process_id,
-                observation_kind=payload.observation_kind,
-                public_preview=payload.public_preview,
-                complete_utf8_bytes=payload.complete_utf8_bytes,
-                complete_digest=payload.complete_digest,
-            )
-        )
-    if isinstance(payload, TerminalMonitorClosedPayload):
-        return wire.LiveEventPayload(
-            terminal_monitor_closed=wire.LiveTerminalMonitorClosedPayload(
-                monitor_id=payload.monitor_id,
-                process_id=payload.process_id,
-                reason=payload.reason,
-            )
-        )
     if isinstance(payload, TodoSnapshotUpdatedPayload):
         return wire.LiveEventPayload(
             todo_snapshot_updated=wire.LiveTodoSnapshotUpdatedPayload(
@@ -2099,15 +2088,6 @@ def _user_control_outcome_to_wire(value: object) -> wire.UserControlOutcome:
         if value.process.group_alive is not None:
             process.group_alive = value.process.group_alive
         result.process.CopyFrom(process)
-    if value.monitor is not None:
-        result.monitor.CopyFrom(
-            wire.MonitorControlResult(
-                monitor_id=value.monitor.monitor_id,
-                outcome=value.monitor.outcome,
-                in_flight_observation_ids=value.monitor.in_flight_observation_ids,
-                detail=value.monitor.detail or "",
-            )
-        )
     if value.feedback is not None:
         feedback = wire.UserControlFeedbackState(
             canonical_status=value.feedback.canonical_status.value,

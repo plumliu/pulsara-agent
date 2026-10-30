@@ -496,7 +496,7 @@ def test_compaction_recovery_requires_the_exact_admitted_writer_owner() -> None:
         host._closing = False
         host._closed = False
         host._queue_wake = asyncio.Event()
-        host._monitor_wake = asyncio.Event()
+        host._cell_output_wake = asyncio.Event()
         async with host._lock:
             exact = host._reserve_compaction_write_locked(
                 scope_kind=ModelInputScopeKind.ROOT,

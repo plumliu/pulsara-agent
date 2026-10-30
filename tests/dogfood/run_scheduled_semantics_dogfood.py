@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone, timedelta
-from uuid import uuid4
 import json
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
@@ -167,7 +167,7 @@ async def run(destination: Path):
                         "task_id": value["id"],
                         "session_id": session.session_id,
                         "expected_revision": value["revision"],
-                        "client_command_id": str(uuid4()),
+                        "client_command_id": random_id("command"),
                         "request_at_utc": datetime.now(timezone.utc)
                         .replace(microsecond=0)
                         .isoformat(),

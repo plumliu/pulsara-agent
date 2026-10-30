@@ -242,7 +242,7 @@ def skill_origin_label(origin: SkillDefinitionOrigin) -> str:
 class SkillProjectionResolveContext:
     """Trigger-specific input resolved against one frozen effective catalog."""
 
-    user_input: str
+    user_input: tuple[str, ...]
     active_skill_names: frozenset[str] = frozenset()
 
 

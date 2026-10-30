@@ -1,11 +1,12 @@
 import { inspectorTab, type PreparedWorkspaceTab } from '../components/desktop-workspace';
 
 export interface AgentRow { agent_id: string; title: string | null; current_work_id: string | null; queued_count: number; host_session_id?: string | null }
-export interface CellRow { target: { kind: 'CELL'; cell_id: string }; state: string; has_unread_output: boolean; pending_calls: number }
+export interface CellRow { target: { kind: 'CELL'; cell_id: string }; state: string; has_unread_output: boolean; pending_calls: number; source_exec_attempt_id: string }
 export interface WorkFact { agent_id: string; work_id: string; status: string; terminal_reason?: string | null; consumed_entry_id?: string | null; turn_id?: string | null }
 export interface WorkInput { kind: 'dependency' | 'material'; source_work_id: string; ordinal: number }
 export interface Participant { agent_id: string; work_id: string | null; kinds: string[] }
 export type SourcePage = { status: 'AVAILABLE'; text: string; offset_chars: number; returned_chars: number; total_chars: number; has_more: boolean; next_offset_chars: number | null } | { status: 'UNAVAILABLE'; reason: string };
+export type CellGraphResult = CellGraphPage | { status: 'CLOSED'; message: string };
 export interface CellGraphPage { cell: CellRow; participation_coverage: 'complete' | 'incomplete' | 'unavailable'; section: 'works' | 'participants'; items: Array<WorkFact | Participant>; next_cursor: string | null }
 export class AgentCellError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -24,15 +25,16 @@ export const agentCellApi = {
   agent: (root: string, agent: string, signal?: AbortSignal) => request<{ agent: AgentRow }>(`${rootPath(root)}/agents/${encodeURIComponent(agent)}`, undefined, signal),
   cells: (root: string, host: string, cursor?: string, signal?: AbortSignal) => request<{ cells: CellRow[]; next_cursor: string | null; has_more: boolean }>(cellsPath(root, host), { ...(cursor ? { cursor } : {}), max_items: 50 }, signal),
   cell: (root: string, host: string, cell: string, signal?: AbortSignal) => request<{ cell: CellRow }>(`${cellsPath(root, host)}/${encodeURIComponent(cell)}`, undefined, signal),
-  source: (root: string, host: string, cell: string, offset = 0, signal?: AbortSignal) => request<{ cell: CellRow; source: SourcePage }>(`${cellsPath(root, host)}/${encodeURIComponent(cell)}/source`, { offset_chars: offset }, signal),
-  graph: (root: string, host: string, cell: string, section: 'works' | 'participants', cursor?: string, signal?: AbortSignal) => request<CellGraphPage>(`${cellsPath(root, host)}/${encodeURIComponent(cell)}/graph`, { section, ...(cursor ? { cursor } : {}), max_items: 50 }, signal),
+  source: (root: string, attempt: string, offset = 0, signal?: AbortSignal) => request<{ source_exec_attempt_id: string; source: SourcePage; live_cell: { host_session_id: string; cell_id: string } | null }>(`${rootPath(root)}/cell-sources/${encodeURIComponent(attempt)}`, { offset_chars: offset }, signal),
+  graph: (root: string, host: string, cell: string, section: 'works' | 'participants', cursor?: string, signal?: AbortSignal) => request<CellGraphResult>(`${cellsPath(root, host)}/${encodeURIComponent(cell)}/graph`, { section, ...(cursor ? { cursor } : {}), max_items: 50 }, signal),
   work: (root: string, work: string, signal?: AbortSignal) => request<{ work: WorkFact; inputs: WorkInput[] }>(`${rootPath(root)}/works/${encodeURIComponent(work)}/inputs`, {}, signal),
 };
 export type SessionNavigation =
   | { kind: 'subagents'; rootSessionId: string }
   | { kind: 'cells'; rootSessionId: string; hostSessionId: string }
   | { kind: 'agent'; rootSessionId: string; agentSessionId: string }
-  | { kind: 'cell' | 'cell-graph'; rootSessionId: string; hostSessionId: string; cellId: string };
+  | { kind: 'cell'; rootSessionId: string; sourceExecAttemptId: string; hostSessionId?: string; cellId?: string }
+  | { kind: 'cell-graph'; rootSessionId: string; hostSessionId: string; cellId: string };
 /** Validate a specific target against its actual owner before publishing a tab. */
 export async function prepareSessionTarget(intent: SessionNavigation, valid: () => boolean): Promise<PreparedWorkspaceTab | undefined> {
   let tab;
@@ -40,9 +42,14 @@ export async function prepareSessionTarget(intent: SessionNavigation, valid: () 
     const result = await agentCellApi.agent(intent.rootSessionId, intent.agentSessionId);
     tab = inspectorTab(intent.rootSessionId, 'agent', result.agent.title || '子代理', intent.agentSessionId);
   } else if (intent.kind === 'cell' || intent.kind === 'cell-graph') {
-    if (intent.kind === 'cell') await agentCellApi.cell(intent.rootSessionId, intent.hostSessionId, intent.cellId);
-    else await agentCellApi.graph(intent.rootSessionId, intent.hostSessionId, intent.cellId, 'works');
-    tab = inspectorTab(intent.rootSessionId, intent.kind, intent.kind === 'cell' ? intent.cellId : '工作流图', intent.cellId, intent.hostSessionId);
+    if (intent.kind === 'cell') {
+      const source = await agentCellApi.source(intent.rootSessionId, intent.sourceExecAttemptId);
+      tab = { id: JSON.stringify([intent.rootSessionId, 'cell', intent.sourceExecAttemptId]), sessionId: intent.rootSessionId, kind: 'cell' as const, title: intent.cellId || '脚本源码', sourceExecAttemptId: intent.sourceExecAttemptId, entityId: source.live_cell?.cell_id, hostSessionId: source.live_cell?.host_session_id };
+    } else {
+      const graph = await agentCellApi.graph(intent.rootSessionId, intent.hostSessionId, intent.cellId, 'works');
+      if ('status' in graph) throw new Error(graph.message);
+      tab = inspectorTab(intent.rootSessionId, intent.kind, '工作流图', intent.cellId, intent.hostSessionId);
+    }
   } else if (intent.kind === 'cells') {
     await agentCellApi.cells(intent.rootSessionId, intent.hostSessionId);
     tab = inspectorTab(intent.rootSessionId, 'cells', 'cell', undefined, intent.hostSessionId);

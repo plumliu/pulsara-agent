@@ -282,47 +282,6 @@ class TerminalProcessCompletedPayload:
 
 
 @dataclass(frozen=True, slots=True)
-class TerminalMonitorOpenedPayload:
-    monitor_id: str
-    process_id: str
-
-    def __post_init__(self) -> None:
-        _require_identity(self.monitor_id, self.process_id)
-
-
-@dataclass(frozen=True, slots=True)
-class TerminalMonitorObservationPayload:
-    monitor_id: str
-    process_id: str
-    observation_kind: str
-    public_preview: str
-    complete_utf8_bytes: int
-    complete_digest: str
-
-    def __post_init__(self) -> None:
-        _require_identity(
-            self.monitor_id,
-            self.process_id,
-            self.observation_kind,
-            self.complete_digest,
-        )
-        if self.complete_utf8_bytes < len(self.public_preview.encode("utf-8")):
-            raise ValueError("terminal preview exceeds complete output")
-
-
-@dataclass(frozen=True, slots=True)
-class TerminalMonitorClosedPayload:
-    monitor_id: str
-    process_id: str
-    reason: str
-
-    def __post_init__(self) -> None:
-        _require_identity(self.monitor_id, self.process_id, self.reason)
-
-
-
-
-@dataclass(frozen=True, slots=True)
 class TodoLiveItemProjection:
     ordinal: int
     text: str
@@ -418,9 +377,6 @@ LivePayload: TypeAlias = (
     | InteractionReplacedPayload
     | InteractionClosedPayload
     | TerminalProcessCompletedPayload
-    | TerminalMonitorOpenedPayload
-    | TerminalMonitorObservationPayload
-    | TerminalMonitorClosedPayload
     | TodoSnapshotUpdatedPayload
 )
 
@@ -476,9 +432,6 @@ __all__ = [
     "ReasoningPresentationKind",
     "TodoLiveItemProjection",
     "TodoSnapshotUpdatedPayload",
-    "TerminalMonitorClosedPayload",
-    "TerminalMonitorObservationPayload",
-    "TerminalMonitorOpenedPayload",
     "TerminalProcessCompletedPayload",
     "TextDeltaPayload",
     "TextEndPayload",

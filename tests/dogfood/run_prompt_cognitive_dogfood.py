@@ -411,7 +411,7 @@ async def _case_terminal_nonzero_poll(
     assert isinstance(trace, list)
     row["poll_calls"] = [
         item for item in trace
-        if item["tool_name"] in {"manage_process", "manage_monitor"}
+        if item["tool_name"] in {"manage_process"}
     ]
     row["decision_passed"] = bool(
         any(item["tool_name"] == "exec_process" for item in trace)

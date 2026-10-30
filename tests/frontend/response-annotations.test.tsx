@@ -12,6 +12,9 @@ vi.mock('@floating-ui/dom', async importOriginal => ({
   computePosition: vi.fn(async () => ({ x: 100, y: 100, middlewareData: {} })),
   autoUpdate: (_reference: unknown, _floating: unknown, update: () => void) => { update(); return () => {}; },
 }));
+async function changeComment(input: HTMLElement, text: string) {
+  await act(async () => { input.textContent = text; fireEvent.input(input, { inputType: 'insertText', data: text }); await new Promise(resolve => setTimeout(resolve, 0)); });
+}
 const body = '第一段需要解释。\n\n第二段需要核对。';
 const first: PromptAnnotationPart = { type: 'annotation', quote: '第一段需要解释。', source: { entry_id: 'entry:a', start: 0, end: 8 } };
 const second: PromptAnnotationPart = { type: 'annotation', quote: '第二段需要核对。', source: { entry_id: 'entry:a', start: 10, end: 18 } };
@@ -153,7 +156,7 @@ describe('draft annotation UI', () => {
     expect(screen.getByRole('button', { name: '删除此批注' })).toBeTruthy();
     expect(inline.textContent).toBe('');
     expect((await store.capture('one')).content.parts).toEqual([first]);
-    fireEvent.change(input, { target: { value: '这句话是什么意思？' } });
+    await changeComment(input, '这句话是什么意思？');
     expect(store.annotations('one')[0].value.comment).toBe('这句话是什么意思？');
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(screen.getByRole('dialog')).toBe(inline);
@@ -164,7 +167,7 @@ describe('draft annotation UI', () => {
     const preview = await screen.findByRole('dialog');
     expect(preview.classList.contains('annotation-editor--preview')).toBe(true);
     expect(preview.querySelector('blockquote')?.textContent).toBe(first.quote);
-    expect((screen.getByRole('textbox', { name: '批注内容' }) as HTMLTextAreaElement).value).toBe('这句话是什么意思？');
+    expect(screen.getByRole('textbox', { name: '批注内容' }).textContent).toBe('这句话是什么意思？');
     expect(screen.queryByRole('button', { name: '定位批注原文' })).toBeNull();
     expect(screen.queryByRole('button', { name: '完成' })).toBeNull();
   });
@@ -174,7 +177,7 @@ describe('draft annotation UI', () => {
     render(<Harness />);
     fireEvent.click(await screen.findByRole('button', { name: '编辑批注 1' }));
     const input = await screen.findByRole('textbox', { name: '批注内容' });
-    fireEvent.change(input, { target: { value: '解释一下' } });
+    await changeComment(input, '解释一下');
     const marker = await screen.findByRole('button', { name: '正文批注 2' });
     fireEvent.mouseEnter(marker);
     expect(highlights.get('annotation-hover')?.ranges[0].toString()).toBe(second.quote);
@@ -186,8 +189,8 @@ describe('draft annotation UI', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
     fireEvent.click(await screen.findByRole('button', { name: '正文批注 1' }));
     const reopened = await screen.findByRole('textbox', { name: '批注内容' });
-    expect((reopened as HTMLTextAreaElement).value).toBe('解释一下');
-    fireEvent.change(reopened, { target: { value: '换个角度解释' } });
+    expect(reopened.textContent).toBe('解释一下');
+    await changeComment(reopened, '换个角度解释');
     fireEvent.keyDown(reopened, { key: 'z', metaKey: true });
     expect(store.annotations('one')[0].value.comment).toBe('解释一下');
     fireEvent.keyDown(reopened, { key: 'z', metaKey: true, shiftKey: true });
@@ -202,7 +205,7 @@ describe('draft annotation UI', () => {
     expect(id1).not.toBe(id2);
     render(<Harness />);
     fireEvent.click(await screen.findByRole('button', { name: '编辑批注 2' }));
-    fireEvent.change(await screen.findByRole('textbox', { name: '批注内容' }), { target: { value: '第二份引用' } });
+    await changeComment(await screen.findByRole('textbox', { name: '批注内容' }), '第二份引用');
     fireEvent.click(screen.getByRole('button', { name: '移除批注 1' }));
     await screen.findByRole('dialog', { name: '编辑批注 1' });
     expect(store.annotations('one')[0]).toMatchObject({ id: id2, number: 1, value: { comment: '第二份引用' } });
@@ -238,7 +241,7 @@ describe('draft annotation UI', () => {
     store.addAnnotation('one', first);
     const { container, rerender } = render(<Harness />);
     fireEvent.click(await screen.findByRole('button', { name: '编辑批注 1' }));
-    fireEvent.change(await screen.findByRole('textbox', { name: '批注内容' }), { target: { value: '保留的评论' } });
+    await changeComment(await screen.findByRole('textbox', { name: '批注内容' }), '保留的评论');
     const before = await store.capture('one');
     rerender(<Harness canAnnotate={false} />);
     expect(screen.queryByRole('dialog')).toBeNull();

@@ -36,52 +36,17 @@ class AgentSessionRuntime:
         self._task: asyncio.Task[None] | None = None
         self._closing = False
         self._revision = 0
-        self._completion_notifications: dict[str, dict[str, None]] = {}
-        self._completion_delivery = asyncio.Lock()
 
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._run(), name="kernel-agent-session-scheduler")
             self._wake.set()
 
-    async def completed_work(self, root_session_id: str, work_id: str) -> None:
-        # Only references wait here. The receiving canonical queue owns actual
-        # delivered text; a process crash may lose this advisory notification.
-        self._completion_notifications.setdefault(root_session_id, {})[work_id] = None
-        try:
-            await self.deliver_pending_completions(root_session_id)
-        except Exception:
-            logging.getLogger(__name__).exception("Agent completion notification remains pending")
-        await self.notify_changed()
-
-    async def deliver_pending_completions(self, root_session_id: str) -> None:
-        async with self._completion_delivery:
-            pending = self._completion_notifications.get(root_session_id)
-            if not pending:
-                return
-            for work_id in tuple(pending):
-                try:
-                    delivered = await self.core._deliver_agent_completion(root_session_id, work_id)
-                except Exception:
-                    logging.getLogger(__name__).exception("Agent completion notification remains pending")
-                    continue
-                if delivered:
-                    pending.pop(work_id, None)
-            if not pending:
-                self._completion_notifications.pop(root_session_id, None)
-
-    def forget_root(self, session_id: str) -> None:
-        self._completion_notifications.pop(session_id, None)
-
     def shared_terminal_owner(self, root_session_id: str):
         root = self.core._live_agent_session(root_session_id)
         if root is None:
             raise RuntimeError("Agent physical resources require the owning ROOT Host")
         return root._tools
-
-    def wake_monitors(self) -> None:
-        for session in tuple(self.core._sessions.values()):
-            session._monitor_wake.set()
 
     def read_deadline(self) -> float:
         return self.core._canonical_deadline()
@@ -224,8 +189,6 @@ class AgentSessionRuntime:
 
     async def _advance(self) -> None:
         repository = await self.core._ensure_resources()
-        for root_id in tuple(self._completion_notifications):
-            await self.deliver_pending_completions(root_id)
         rows = await self._io.run(repository.list_all_agent_sessions,
                                        deadline_monotonic=self.core._canonical_deadline())
         for row in rows:

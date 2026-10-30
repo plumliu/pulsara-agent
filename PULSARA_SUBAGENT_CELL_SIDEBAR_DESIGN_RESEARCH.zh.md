@@ -1,6 +1,6 @@
 # Pulsara 子代理与 Cell 侧边栏实施规格
 
-日期：2026-10-30。状态：**侧边栏已实施，定向验证及打包完成；视觉效果待用户审阅。** 运行结果和边界见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)。
+日期：2026-10-31。当前源码阅读和实时图生命周期以 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md) 为准；实现与激活验证进行中。既往证据保留其原验证范围。
 
 本文确定两个侧边栏入口、共同阅读链、Work 输入存储 hard cut、Cell 局部编排图及 `open_in_pulsara` 接入。保留原文件路径供现有链接引用。
 
@@ -40,7 +40,7 @@
 - Cell 范围与当前 Host 的 `query_cells` 清单一致；已结束但尚可查询的 Cell 可以存在，退役后移除。
 - 不扫描历史工具结果、旧 transcript 或冻结源码字段来补历史列表，不新增“最近使用”“已归档 Cell”等集合。
 - 打开列表、会话、源码或图，不保活对象，不刷新 Agent 的业务空闲时间，不推迟 Cell 输出结算和退役。
-- “源码冻结”只表示显示当次真正执行的内容，不能据此延长 Cell 寿命或建立历史浏览产品。
+- 冻结源码从历史 exec_cell canonical attempt 继续阅读，不依赖 live Cell 或 Host；不扩充存活对象列表、不延长 Cell 寿命。
 
 子代理与 cell 是会话范围内的辅助页面，绑定明确的 ROOT 身份；不扩展成用户级跨会话管理中心。
 
@@ -114,7 +114,7 @@ Cell 状态是动态观察，源码是固定值。Cell 完成或停止不代表�
 
 确认退役后立即从列表移除；刷新前不承诺实时发现。请求失败、连接暂时不可用与确认对象退役应区分，避免网络故障被显示成业务删除。
 
-对于已经打开的详情 tab，保留 tab 外壳并显示“对象已不可用”，清除该对象的内容、读取缓存与图入口；不继续提供已退役对象的历史阅读，也不自动改绑其他对象。用户自行关闭 tab。短暂网络错误保留当前内容并标为暂不可刷新，不声称已退役。
+Cell 回收后，源码 tab 保留 canonical attempt 身份、正文与阅读位置，仍可重新读取；源内容因会话删除或 retention 确实不可读时才显示准确不可用结果。实时图确认退役则清除节点、边和临时缓存，保留 tab 并显示“实时工作流视图已关闭”，移除源码页的实时图入口，不重建历史图、不宣称全部 Work 结束。短暂网络错误保留现有内容并说明刷新失败，不冒充确认退役。
 
 ## 4. Cell 的 Subagent 编排图
 
@@ -166,7 +166,7 @@ Agent A                       Agent B
 | 排队与来源 | [runtime-adapter.ts](frontend/lib/runtime-adapter.ts) 和 [canonical_v3.py](src/pulsara_agent/terminal_protocol/canonical_v3.py) 投影队列身份、来源与依赖等待；ROOT 操作和 Agent 只读阅读各自装配 |
 | Agent 与 Work | [collaboration_api.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py) 与 [_repository/subagents.py](src/pulsara_agent/conversation_kernel/_repository/subagents.py) 管理当前 ROOT 可见成员、Work 及其输入事实 |
 | 只读打开 | [session_controller.py](src/pulsara_agent/desktop_app/session_controller.py) 与 [renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 校验 ROOT／Agent，沿 canonical reader 和 live observer 读取，不 resume 或取得 writer |
-| Cell、源码与图 | [code_mode/host.py](src/pulsara_agent/code_mode/host.py) 管理当前存活 Cell 与进程内参与观察；[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 复用冻结源码和图读取，Desktop 保留自身存续复核 |
+| Cell、源码与图 | [code_mode/host.py](src/pulsara_agent/code_mode/host.py) 管理当前存活 Cell 与进程内参与观察；[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 复用冻结源码和图读取，Desktop 按 ROOT/session＋canonical attempt 校验源码读取范围，图仍使用 live Cell |
 | 源码展示 | [file-code.tsx](frontend/components/file-code.tsx) 与 [code-highlight.ts](frontend/lib/code-highlight.ts) 显示冻结源码并提供 JS 高亮，不借用文件路径身份 |
 
 ### 5.1 输入身份与共同队列阅读
@@ -265,7 +265,7 @@ ROOT 与 Agent 装配同一份 **ConversationReader／ConversationPane**（内�
 
 同屏 ROOT 与 Agent 阅读必须隔离 DOM 行为。现有 `ResponseAnnotations` 在 document 上监听选区、pointerup 和 copy；它的选区映射、来源查找、复制处理与定位要限定在自己的 thread 容器。Agent 页面不注册编辑行为仍不够，ROOT 的全局监听也不能捕获 Agent 选区。快捷键、滚动定位和异步 hydration 同样绑定各自 reader。
 
-Workspace 切换 tab 会卸载选中内容，外层 scrollTop 不能恢复内部 thread-scroll。tab 保留该阅读对象的轻量位置描述：历史阅读窗口／锚点、相对偏移和显式折叠选择；重新挂载按需重读并恢复位置。隐藏时取消活动观察、定位和读取；不要求所有 pane 常驻。关闭或退役清除该对象的视图缓存，ROOT 与不同 Agent 互不串扰。
+Workspace 切换 tab 会卸载选中内容，外层 scrollTop 不能恢复内部 thread-scroll。tab 保留该阅读对象的轻量位置描述：历史阅读窗口／锚点、相对偏移和显式折叠选择；重新挂载按需重读并恢复位置。隐藏时取消活动观察、定位和读取；不要求所有 pane 常驻。关闭清除对应阅读缓存；图退役清除实时缓存，源码按 canonical attempt 保留阅读身份，ROOT 与不同 Agent 互不串扰。
 
 ### 5.4 读取与启动／控制连接耦合：显式分离 Reader 和 Controller
 
@@ -316,9 +316,9 @@ Cell 统一列表和详情的存活／不可用判定；保留展示当前仍存
 
 文件页使用字节 cursor，Cell 使用服务端字符 offset；UI 把下一页位置视为数据源返回的 opaque 值，不用 JS UTF-16 字符数自行计算，不强行统一两种分页单位。
 
-后端以共同读取方法定位存活 Cell，沿源 attempt 读取和分页冻结源码。模型层继续负责模型结果 envelope，Desktop 层负责页面传输；不复制冻结、读 blob 或源码分页算法，也不将显示语言写进数据库。
+后端源码阅读按 ROOT/session＋canonical source attempt 直接读取冻结 CanonicalContent，核对 attempt 属于可访问 ROOT；使用既有 inline/blob 与字符分页 owner。模型 query_cells 仍为 live scope；Desktop 历史源码不依赖 live Cell/Host，不复制冻结或分页算法，不新增 Cell 历史表或代码 hash。
 
-源码读取期间 Cell 可能退役。**Desktop 交付层**完成读取后重新检查同一 ROOT Host／Cell 实例及源 attempt 是否仍可查询，再交付页面；不拿缓存的 attempt 作为永久阅读资格。侧车故障与确认对象退役分别报告，不持有锁或 lease。
+源码读取期间 Cell 可正常退役；Desktop 在读取前后校验真实 ROOT/session 和 attempt 可访问性，不能把任意 attempt ID 当作授权。live Host/Cell 已回收或应用重启不使仍保留的 canonical 源码失效；会话删除、内容 retention 与暂时服务错误按实际原因返回，不持锁保活。
 
 模型侧 `query_cells` 保持既有已捕获读取语义：capture 成功后，即使异步读取期间 Cell 退役，仍可返回已经捕获的源码页。共同 owner 负责 capture、canonical 解码与分页；Desktop 的尾部存续复核不能进入模型公共路径。已有对应合同测试必须保留。
 
@@ -338,7 +338,7 @@ Cell 统一列表和详情的存活／不可用判定；保留展示当前仍存
 
 首版不画消息边，因此不为图补写消息 provenance 字段，也不增加事件或消息表。
 
-此处新增进程内观察的唯一理由是：纯读取／等待属于 Cell 参与，却没有 Work 接纳行。图返回 `participation_coverage: complete | incomplete | unavailable`；未完成的预算申请、观察失败或丢失不能显示为完整空图。真正遗漏过观察后，incomplete 在该 Cell 寿命内保持，不能因后来一次 ACK 成功恢复 complete；只有尚无遗漏的在途操作完成才可恢复完整。canonical Work 关系仍独立可读；整个 Cell owner 不可用时按对象不可用处理。
+此处新增进程内观察的唯一理由是：纯读取／等待属于 Cell 参与，却没有 Work 接纳行。图返回 `participation_coverage: complete | incomplete | unavailable`；未完成的预算申请、观察失败或丢失不能显示为完整空图。真正遗漏过观察后，incomplete 在该 Cell 寿命内保持，不能因后来一次 ACK 成功恢复 complete；只有尚无遗漏的在途操作完成才可恢复完整。canonical Work 关系仍独立可读；整个 Cell owner 确认退役时图进入 CLOSED；临时 sidecar/网络失败保留真实错误，不冒充关闭。
 
 Python 集合不会自动计入现有 Cell／Host 预算，必须复用现有 retain／reserve 资源 owner，对每个新唯一引用的 canonical serialized UTF-8 字节计费；不宣称这是 Python 实际堆大小。参与种类使用固定宽度位集的固定长度序列化，不让后续种类合并产生未计费增长。共享预算有真实资源开销，不承诺零成本。
 
@@ -353,10 +353,11 @@ Python 集合不会自动计入现有 Cell／Host 预算，必须复用现有 re
 | Agent 列表 | ROOT session | 同一个 ROOT |
 | Agent 会话 | ROOT session | Agent session；不把临时 Host 纳入会话 tab 去重键 |
 | Cell 列表 | ROOT session | 当前明确的 ROOT Host |
-| Cell 源码／图 | ROOT session | Host＋Cell＋视图种类 |
+| Cell 源码 | ROOT session | canonical source attempt＋阅读位置 |
+| Cell 实时图 | ROOT session | 原 Host＋Cell＋图视图 |
 | 网页 | 用户级，不绑定会话 | 浏览器 tab 自身身份 |
 
-Agent 会话在其 Host 卸载／重载后仍是同一会话；Cell 则必须绑定原 Host。Work 是 Agent 会话中的定位参数，不形成额外顶层页面。对话消息使用 Agent 的内容读取 owner，不能误用承载 ROOT 的 artifact／image reader。
+Agent 会话在其 Host 卸载／重载后仍是同一会话；Cell 实时图绑定原 Host；冻结源码使用 canonical attempt，跨 Host/重启保持同一阅读身份。Work 是 Agent 会话中的定位参数，不形成额外顶层页面。对话消息使用 Agent 的内容读取 owner，不能误用承载 ROOT 的 artifact／image reader。
 
 这包括 Markdown 图片经过的嵌套 `FileLinkContext.readImageReference/imageOwnerKey`，不能只替换 `onReadPromptImage`。保留现有工作区文件链接打开行为，图片／artifact／canonical 内容 reader 绑定实际 Agent。任何衍生内容 tab 的闭包也必须绑定这个 owner，退役／切换后丢弃旧响应。
 
@@ -366,7 +367,7 @@ Agent 会话在其 Host 卸载／重载后仍是同一会话；Cell 则必须绑
 
 [subagent.py](src/pulsara_agent/conversation_kernel/subagent.py) 已区分卸载 live session 与最终删除。卸载不一定意味着 ROOT 查不到；UI 应服从查询结果，不自行以“没有 live Host”删除 Agent 行，也不为了读历史重新唤醒它。
 
-Cell 的终止与退役同样不同：`_collect` 在终态交付、待结算调用及输出等条件满足后移除对象。UI 按现有清单观察这个变化，不能把“脚本结束”提前当作退役，也不能占用输出观察 reservation 来延迟退役。
+Cell 的终止与退役同样不同：`_collect` 在物理终态、VM 释放、pending/结算完成及输出 FULL 等条件满足后移除对象；静默终态不等待模型 ACK。UI 按现有清单观察这个变化，不能把“脚本结束”提前当作退役，也不能占用输出观察 reservation 来延迟退役。
 
 所有页面刷新只读事实，不产生模型工具调用、额外会话消息或 provider 输入。列表、详情和图共享一次明确对象定位；连接／ROOT 切换后丢弃旧响应，不把旧对象 ID 绑定到新 Host。
 
@@ -403,7 +404,7 @@ Cell 的终止与退役同样不同：`_collect` 在终态交付、待结算调�
 4. 接两个清单、详情和 Cell 局部图；`open_in_pulsara` 接入相同导航与准备函数。
 5. 删除替代的 reader／投影／队列分支、两列旧输入及其读写；同步 clean-v0、接口文案、测试和 bundled Skill 中的展示例子。旧 Work 两列不双读双写。
 
-退役详情保留不可用空壳；图保留存续 Work 的完整已接纳依赖；具体解析后的读取、等待、消息和停止算参与，纯清单查询不算。这些均为确定行为，不留待实现阶段重新选择。
+冻结源码跨退役继续阅读；图确认退役温和关闭；具体解析后的读取、等待、消息和停止算参与，纯清单查询不算。这些均为确定行为，不留待实现阶段重新选择。
 
 实现过程中若发现现有 owner 无法满足本文，应先给出具体冲突及最小改法；不以“方便 UI”为理由扩大持久化、执行权限、对象生命周期或 provider 重建边界。
 
@@ -418,14 +419,14 @@ Cell 的终止与退役同样不同：`_collect` 在终态交付、待结算调�
 | 只读与 Host | 打开不 resume、不取得 writer、不刷新业务闲置时间；Core 管理的 Agent 可观察；卸载后历史可读，重载即使 epoch 相同也清除旧 draft；连接响应丢失／取消不泄漏 observer | `test_stage2_protocol_v3.py` 与 Desktop bridge 集成测试 |
 | 队列与来源 | 多份无 command_id 的 Work 和多发送者 steer 独立展示；ROOT 本地提交／revision 身份仍正确；消费与正文 hydration 竞态、分页、计数和原控制回执保持 | `tests/frontend/runtime-adapter.test.ts`、`test_stage2_canonical_reader.py`、`test_pr04_prompt_queue_actions.py` |
 | 共同阅读 | ROOT／Agent 的历史分页、推理、工具、压缩、TODO、live settlement 与阅读定位一致；ROOT 注释监听不捕获 Agent 选区；图片及衍生内容使用实际 Agent owner | `history-paging.test.ts`、`history-paging-review.test.ts`、`thread-follow-controller.test.ts` 及对应组件测试 |
-| 导航与生命周期 | 同 Agent 多 Work 仍一行一 tab；ROOT 切换和迟到响应不串数据；详情退役清内容但留空壳；暂时错误不假装删除；tab 切换恢复内部阅读位置 | `tests/frontend/desktop-workspace.test.tsx` |
-| 冻结源码 | inline／path／Hook 后实际源码；文件后来修改删除无影响；Unicode 分页不丢不重；Desktop 交付尾部核对存续，模型侧已捕获读取仍可跨退役完成；不消费输出 | `test_query_cells_contract.py`，保留 captured-source-survives-release 合同 |
+| 导航与生命周期 | 同 Agent 多 Work 仍一行一 tab；ROOT 切换和迟到响应不串数据；源码退役仍按 attempt 读取，图关闭清空节点但留 tab；暂时错误不假装删除；tab 切换恢复内部阅读位置 | `tests/frontend/desktop-workspace.test.tsx` |
+| 冻结源码 | inline／path／Hook 后实际源码；文件后来修改删除无影响；Unicode 分页不丢不重；Desktop 源码跨 Cell/Host 退役与重启读取，越权 attempt 拒绝；模型侧已捕获读取仍可跨退役完成；不消费输出 | `test_query_cells_contract.py`，保留 captured-source-survives-release 合同 |
 | 图与参与 | 纯工具／纯 Agent／混合 Cell；同 Agent 多 Work；跨 Cell 与原生来源依赖；失败、取消、退役无假边／幽灵节点；具体 query/wait/message/stop 及 batch／Hook 后身份；无 target 查询不吸纳清单 | `test_agent_code_mode_execution.py`、`test_agent_collaboration_api.py` 及只读图接口测试 |
 | 观察资源 | 不等待观察 ACK 才完成业务；资源拒绝／真实遗漏保持 incomplete，UI 不显示确定无编排；在途 ACK 与 Cell 退役交错不泄漏、不重复释放、不延迟 collect；存续终态仍可读取观察 | 现有 Code Mode 资源与执行测试 |
 | 展示工具 | 所有 target 分支、混合有效／无效元素的原数组错误索引、最后成功焦点；单目标失效不吞有效项；用户导航优先；严格结果解析与上下文绑定 | `test_open_in_pulsara.py`、`presentation-provider.test.tsx`、`presentation-result.test.tsx` |
 
 Agent／Cell／队列超过一页时仍能完整渐进浏览，缺席一页不等于退役；不新增逻辑对象总量上限。图只读取需要的 ID、关系与状态，不顺带加载全部正文。
 
-视觉验收核对五个顶层名称、两个列表的紧凑单行密度、Cell 顶栏仅有「查看工作流图」（无入口时整栏消失），以及所有页面没有附加灰色小字说明。动画验收包括 tab 切换、列表展开、源码到图、条目增减、局部展开收起、图节点直接打开的例外、快速重入／关闭时清理、减少动态效果设置及无 View Transition 降级；不产生重复共享元素名称。必要 build／typecheck 与合同测试完成后，视觉效果交用户审阅；不默认扩大为 Playwright 全站回归。
+视觉验收核对五个顶层名称、两个列表的紧凑单行密度、Cell 顶栏仅有「查看工作流图」（无入口时整栏消失），以及所有页面没有附加灰色小字说明。动画验收包括 tab 切换、列表展开、源码到图、条目增减、局部展开收起、图节点直接打开的例外、快速重入／关闭时清理、减少动态效果设置及无 View Transition 降级；不产生重复共享元素名称。本轮保留必要 build／typecheck 与合同测试；按人类决议无需视觉验收或 Playwright。
 
-定向测试、clean-v0／catalog 核对、前端构建和安装后的本地数据库重置记录见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)。两组后端联合运行各有一项环境相关失败及独立补测，按记录分别报告，不合并为一次全绿。未运行全仓测试或真实 provider；本规格不要求真实 provider。视觉效果待用户审阅。
+定向测试、clean-v0／catalog 核对、前端构建和安装后的本地数据库重置记录见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)。两组后端联合运行各有一项环境相关失败及独立补测，按记录分别报告，不合并为一次全绿。未运行全仓测试或真实 provider；本规格不要求真实 provider。本轮按人类决议无需视觉验收或 Playwright。

@@ -1,3 +1,4 @@
+import { usePendingSteerPages } from '../lib/pending-steer-pages';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { AgentCellError, agentCellApi } from '../lib/agent-cell-api';
 import type { AgentConversationReader, QueuedPrompt, RuntimeAdapter, RuntimeProjection } from '../lib/runtime-adapter';
@@ -241,6 +242,10 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
     }).finally(() => queueRequests.current.delete(controller));
   }, [reader, refreshQueue, onNotify]);
 
+  const steerReading = usePendingSteerPages(reader, projection);
+  const visibleInputs = new Map(queue.map(item=>[item.queueItemId,item]));
+  for (const item of projection?.queuedPrompts ?? []) visibleInputs.set(item.queueItemId,item);
+  for (const item of steerReading.items) visibleInputs.set(item.queueItemId,item);
   if (unavailable) return <div className="agent-pane-status" role="status">子代理已不可用。</div>;
   if (!reader || !projection) return <div className="agent-pane-status" role="status">{error ?? '正在读取子代理…'}</div>;
   return <FileLinkContext.Provider value={links}>
@@ -248,7 +253,8 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
     <section ref={pane} className="agent-conversation-pane" aria-label={`${agentName} 会话`}>
       <header><strong>{agentName}</strong>{error && <span role="status">暂时无法刷新：{error}</span>}</header>
       <AgentConversationView key={readerEpoch} sessionId={agentSessionId} agentName={agentName} reader={reader} contentReader={contentReader} projection={projection}
-        queue={queue} queueCursor={cursor} onMoreQueue={more} readingState={readingState} onNotify={onNotify}
+        queue={[...visibleInputs.values()].sort((a,b)=>compareSequence(a.sequence,b.sequence))} queueCursor={cursor}
+        steerNextCursor={steerReading.nextCursor} steerLoading={steerReading.loading} steerReadError={steerReading.error} onMoreSteers={steerReading.more} onMoreQueue={more} readingState={readingState} onNotify={onNotify}
         entryLocation={entryLocation} terminalWork={terminalWork} />
     </section>
     </VisualizationOwnerContext.Provider>

@@ -1,195 +1,116 @@
-"""Renderer-neutral process-local Terminal observation installation carriers."""
+"""Canonical content for one formal Cell output record."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-from enum import StrEnum
+from dataclasses import dataclass, field
 import json
+from typing import Mapping
+
+from pulsara_agent.llm.input import LLMTextPart
+from pulsara_agent.identity import require_id
+from pulsara_agent.ports.tool_execution import freeze_tool_json_object
 
 
-TERMINAL_OBSERVATION_CANONICAL_HARD_BYTES = 32_000
-
-
-class TerminalObservationKind(StrEnum):
-    PROGRESS = "PROGRESS"
-    HEARTBEAT = "HEARTBEAT"
-    COMPLETION = "COMPLETION"
-    EXPIRY = "EXPIRY"
-
-
-class TerminalDeliveryCoverage(StrEnum):
-    COMPLETE = "COMPLETE"
-    HEAD_TAIL = "HEAD_TAIL"
+CELL_OUTPUT_MEDIA_TYPE = "application/vnd.pulsara.terminal-observation+json"
+CELL_OUTPUT_CODEC = "utf-8"
 
 
 @dataclass(frozen=True, slots=True)
-class ExistingTurnInstallation:
-    turn_id: str
-    entry_id: str
-
-    def __post_init__(self) -> None:
-        if not self.turn_id or not self.entry_id:
-            raise ValueError("existing turn installation target is incomplete")
+class CellOutputResourceQuote:
+    canonical_expanded_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
-class NewTurnInstallation:
-    turn_id: str
-    context_binding_revision_id: str
-    initial_entry_id: str
-
-    def __post_init__(self) -> None:
-        if not all(
-            (self.turn_id, self.context_binding_revision_id, self.initial_entry_id)
-        ):
-            raise ValueError("new turn installation target is incomplete")
-
-
-PreparedInstallationTarget = ExistingTurnInstallation | NewTurnInstallation
+class CellOutputProviderContent:
+    parts: tuple[LLMTextPart, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class TerminalObservationContentV1:
-    observation_id: str
-    monitor_id: str
-    process_id: str
-    observation_ordinal: int
-    observation_kind: TerminalObservationKind
-    process_status: str
-    exit_code: int | None
-    output_disposition: str
-    gap_before_output: bool
-    delivery_coverage: TerminalDeliveryCoverage
-    available_source_utf8_bytes: int
-    included_source_utf8_bytes: int
-    omitted_by_delivery_bound_utf8_bytes: int
-    output: str
-    schema_version: str = "terminal_observation.v1"
-    host_scoped: bool = True
+class CellOutputContent:
+    """One immutable formal Cell record at the runtime/canonical boundary."""
+
+    cell_id: str
+    source_turn_id: str
+    source_exec_attempt_id: str
+    record_sequence: int
+    record: Mapping[str, object] = field(repr=False, compare=False)
+    body: bytes = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.schema_version != "terminal_observation.v1" or self.host_scoped is not True:
-            raise ValueError("terminal observation contract identity is invalid")
-        if not self.observation_id or not self.monitor_id or not self.process_id:
-            raise ValueError("terminal observation identity is incomplete")
-        if self.observation_ordinal < 1:
-            raise ValueError("terminal observation ordinal is invalid")
-        if self.process_status not in {
-            "running",
-            "success",
-            "error",
-            "timeout",
-            "blocked",
-            "killed",
-        }:
-            raise ValueError("terminal observation process status is invalid")
-        if self.output_disposition not in {
-            "CURRENT_SNAPSHOT",
-            "EXACT_DELTA",
-            "GAP",
-            "INVALID_CURSOR",
-            "UNAVAILABLE",
-        }:
-            raise ValueError("terminal observation output disposition is invalid")
-        if min(
-            self.available_source_utf8_bytes,
-            self.included_source_utf8_bytes,
-            self.omitted_by_delivery_bound_utf8_bytes,
-        ) < 0:
-            raise ValueError("terminal observation byte counts must be non-negative")
-        rendered_size = len(self.output.encode("utf-8"))
-        if rendered_size < self.included_source_utf8_bytes:
-            raise ValueError("terminal observation included byte count is invalid")
-        if (
-            self.included_source_utf8_bytes
-            + self.omitted_by_delivery_bound_utf8_bytes
-            != self.available_source_utf8_bytes
-        ):
-            raise ValueError("terminal observation coverage counts do not balance")
-        if (
-            self.delivery_coverage is TerminalDeliveryCoverage.COMPLETE
-            and self.omitted_by_delivery_bound_utf8_bytes
-        ):
-            raise ValueError("complete terminal observation cannot omit source bytes")
-        if (
-            self.delivery_coverage is TerminalDeliveryCoverage.HEAD_TAIL
-            and not self.omitted_by_delivery_bound_utf8_bytes
-        ):
-            raise ValueError("head-tail terminal observation must omit source bytes")
-        if len(self.canonical_bytes()) > TERMINAL_OBSERVATION_CANONICAL_HARD_BYTES:
-            raise ValueError("terminal observation exceeds canonical byte bound")
+        require_id(self.cell_id, "cell")
+        require_id(self.source_turn_id, "turn")
+        require_id(self.source_exec_attempt_id, "attempt")
+        if type(self.record_sequence) is not int or self.record_sequence < 1:
+            raise ValueError("Cell output record sequence is invalid")
+        if not isinstance(self.record, Mapping):
+            raise TypeError("Cell output record must be an object")
+        object.__setattr__(self, "record", freeze_tool_json_object(self.record))
+        payload = {
+            "schema_version": "cell_output.v1",
+            "cell_id": self.cell_id,
+            "source_turn_id": self.source_turn_id,
+            "source_exec_attempt_id": self.source_exec_attempt_id,
+            "record_sequence": self.record_sequence,
+            "record": dict(self.record),
+        }
+        try:
+            body = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except UnicodeEncodeError:
+            # JavaScript strings can contain lone UTF-16 surrogates. Escape
+            # the canonical JSON without replacing any formal output value.
+            body = json.dumps(
+                payload,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        object.__setattr__(self, "body", body)
 
     def canonical_mapping(self) -> dict[str, object]:
-        return {
-            "schema_version": self.schema_version,
-            "observation_id": self.observation_id,
-            "monitor_id": self.monitor_id,
-            "process_id": self.process_id,
-            "observation_ordinal": self.observation_ordinal,
-            "observation_kind": self.observation_kind.value,
-            "process_status": self.process_status,
-            "exit_code": self.exit_code,
-            "output_disposition": self.output_disposition,
-            "gap_before_output": self.gap_before_output,
-            "delivery_coverage": self.delivery_coverage.value,
-            "available_source_utf8_bytes": self.available_source_utf8_bytes,
-            "included_source_utf8_bytes": self.included_source_utf8_bytes,
-            "omitted_by_delivery_bound_utf8_bytes": (
-                self.omitted_by_delivery_bound_utf8_bytes
-            ),
-            "output": self.output,
-            "host_scoped": self.host_scoped,
-        }
+        return json.loads(self.body)
 
     def canonical_bytes(self) -> bytes:
-        return json.dumps(
-            self.canonical_mapping(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
+        return self.body
 
-
-@dataclass(frozen=True, slots=True)
-class TerminalObservationInstallationAttempt:
-    session_id: str
-    workspace_id: str
-    writer_generation: int
-    origin_turn_id: str
-    content: TerminalObservationContentV1
-    content_digest: str
-    retained_from_cursor: str
-    through_cursor: str
-    target: PreparedInstallationTarget
-    occurred_at: datetime
-    actor_id: str
-
-    def __post_init__(self) -> None:
-        if not all(
-            (
-                self.session_id,
-                self.workspace_id,
-                self.origin_turn_id,
-                self.actor_id,
-                self.retained_from_cursor,
-                self.through_cursor,
-            )
+    @classmethod
+    def from_bytes(cls, body: bytes) -> "CellOutputContent":
+        value = json.loads(body)
+        if (
+            not isinstance(value, dict)
+            or set(value)
+            != {
+                "schema_version",
+                "cell_id",
+                "source_turn_id",
+                "source_exec_attempt_id",
+                "record_sequence",
+                "record",
+            }
+            or value["schema_version"] != "cell_output.v1"
         ):
-            raise ValueError("terminal observation installation is incomplete")
-        if self.writer_generation < 1:
-            raise ValueError("terminal observation writer generation is invalid")
-        if not self.content_digest.startswith("sha256:"):
-            raise ValueError("terminal observation digest is invalid")
+            raise ValueError("Cell output canonical schema is invalid")
+        result = cls(
+            **{key: item for key, item in value.items() if key != "schema_version"}
+        )
+        if result.body != body:
+            raise ValueError("Cell output storage is not canonical")
+        return result
 
+    @property
+    def content(self) -> CellOutputProviderContent:
+        return CellOutputProviderContent((LLMTextPart(self.body.decode("utf-8")),))
 
-__all__ = [
-    "ExistingTurnInstallation",
-    "NewTurnInstallation",
-    "PreparedInstallationTarget",
-    "TERMINAL_OBSERVATION_CANONICAL_HARD_BYTES",
-    "TerminalDeliveryCoverage",
-    "TerminalObservationContentV1",
-    "TerminalObservationInstallationAttempt",
-    "TerminalObservationKind",
-]
+    @property
+    def resource_quote(self) -> CellOutputResourceQuote:
+        return CellOutputResourceQuote(len(self.body))
+
+    @property
+    def image_occurrences(self) -> tuple:
+        return ()

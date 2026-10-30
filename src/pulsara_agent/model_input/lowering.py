@@ -734,36 +734,9 @@ def _project_tool_result_closure(text: str) -> str:
 
 
 def _project_terminal_observation(text: str) -> dict[str, object]:
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError("terminal observation storage carrier is invalid") from exc
-    if not isinstance(value, dict):
-        raise ValueError("terminal observation storage carrier is not an object")
-    renames = {
-        "delivery_coverage": "delivery_coverage",
-        "exit_code": "exit_code",
-        "gap_before_output": "gap",
-        "observation_kind": "observation_kind",
-        "output": "output",
-        "output_disposition": "display_kind",
-        "process_status": "status",
-    }
-    result = {
-        projected: value[storage]
-        for storage, projected in sorted(renames.items())
-        if storage in value
-    }
-    if "monitor_id" in value:
-        result["target"] = {"kind": "MONITOR", "monitor_id": value["monitor_id"]}
-    if "process_id" in value:
-        result["process_target"] = {
-            "kind": "PROCESS",
-            "process_id": value["process_id"],
-        }
-    if result.get("status") == "running" and result.get("exit_code") is None:
-        result.pop("exit_code", None)
-    return result
+    from pulsara_agent.ports.terminal_observation import CellOutputContent
+    value = CellOutputContent.from_bytes(text.encode("utf-8"))
+    return value.canonical_mapping()
 
 
 def _project_plan_continuation(text: str) -> str:

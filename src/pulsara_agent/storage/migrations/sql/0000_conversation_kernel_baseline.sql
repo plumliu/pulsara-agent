@@ -381,8 +381,8 @@ CREATE TABLE pulsara_v3.transcript_entries (
     imported_history_group_id text,
     entry_sequence bigint NOT NULL CHECK (entry_sequence >= 1),
     scheduled_input jsonb,
-    input_origin text CHECK (input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER','SCHEDULED_TASK','AGENT_INSTRUCTION','AGENT_MATERIAL','AGENT_MESSAGE')),
-    CHECK (scheduled_input IS NULL OR (entry_kind = 'USER_MESSAGE' AND jsonb_typeof(scheduled_input) = 'object')),
+    input_origin text CHECK (input_origin IN ('HUMAN_MESSAGE','HUMAN_STEER','SCHEDULED_TASK','AGENT_INSTRUCTION','AGENT_MATERIAL','AGENT_MESSAGE','CELL_OUTPUT')),
+    CHECK (scheduled_input IS NULL OR (entry_kind IN ('USER_MESSAGE','USER_STEER') AND jsonb_typeof(scheduled_input) = 'object')),
     entry_kind text NOT NULL CHECK (entry_kind IN (
         'USER_MESSAGE', 'USER_STEER', 'ASSISTANT_MESSAGE',
         'ASSISTANT_TOOL_REQUEST', 'TOOL_RESULT', 'TERMINAL_OBSERVATION',
@@ -894,26 +894,26 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     command_id text CHECK (command_id ~ '^command:[a-z2-7]{25}[aeimquy4]$'),
     client_submission_id text CHECK (client_submission_id ~ '^command:[a-z2-7]{25}[aeimquy4]$'),
     delivery_mode text NOT NULL CHECK (delivery_mode IN ('NEW_TURN', 'STEER_ACTIVE_TURN')),
-    input_origin text NOT NULL CHECK (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'SCHEDULED_TASK', 'AGENT_INSTRUCTION', 'AGENT_MESSAGE', 'AGENT_MATERIAL')),
+    input_origin text NOT NULL CHECK (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'SCHEDULED_TASK', 'AGENT_INSTRUCTION', 'AGENT_MESSAGE', 'AGENT_MATERIAL', 'CELL_OUTPUT')),
     source_session_id text,
     source_work_id text,
     source_turn_id text,
     source_tool_attempt_id text,
     initial_context jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(initial_context)='array'),
     work_inputs jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(work_inputs)='array'),
-    CHECK ((input_origin IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL')) = (command_id IS NULL AND client_submission_id IS NULL)),
-    CHECK (input_origin NOT IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL') OR source_session_id IS NOT NULL),
+    CHECK ((input_origin IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL','CELL_OUTPUT')) = (command_id IS NULL AND client_submission_id IS NULL)),
+    CHECK (input_origin NOT IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL','CELL_OUTPUT') OR source_session_id IS NOT NULL),
     scheduled_task_id text,
     scheduled_task_revision bigint,
     scheduled_due_at timestamptz,
     scheduled_trigger_source text,
     CHECK (
-        (input_origin = 'SCHEDULED_TASK' AND delivery_mode = 'NEW_TURN'
+        (input_origin = 'SCHEDULED_TASK'
          AND scheduled_task_id IS NOT NULL AND scheduled_task_revision >= 1 AND scheduled_due_at IS NOT NULL
          AND scheduled_trigger_source IS NOT NULL AND scheduled_trigger_source IN ('TIMER', 'RUN_ONCE')) OR
-        (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'AGENT_INSTRUCTION', 'AGENT_MESSAGE', 'AGENT_MATERIAL') AND scheduled_task_id IS NULL
+        (input_origin IN ('HUMAN_MESSAGE', 'HUMAN_STEER', 'AGENT_INSTRUCTION', 'AGENT_MESSAGE', 'AGENT_MATERIAL', 'CELL_OUTPUT') AND scheduled_task_id IS NULL
          AND scheduled_task_revision IS NULL AND scheduled_due_at IS NULL AND scheduled_trigger_source IS NULL
-         AND ((input_origin = 'AGENT_INSTRUCTION' AND delivery_mode = 'NEW_TURN') OR (input_origin IN ('AGENT_MESSAGE','AGENT_MATERIAL') AND delivery_mode = 'STEER_ACTIVE_TURN') OR input_origin = CASE delivery_mode WHEN 'NEW_TURN' THEN 'HUMAN_MESSAGE' ELSE 'HUMAN_STEER' END))
+         AND ((input_origin = 'CELL_OUTPUT') OR (input_origin = 'AGENT_INSTRUCTION' AND delivery_mode = 'NEW_TURN') OR (input_origin IN ('AGENT_MESSAGE','AGENT_MATERIAL') AND delivery_mode = 'STEER_ACTIVE_TURN') OR input_origin = CASE delivery_mode WHEN 'NEW_TURN' THEN 'HUMAN_MESSAGE' ELSE 'HUMAN_STEER' END))
     ),
     model_call_binding jsonb,
     target_turn_id text,
@@ -995,7 +995,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND permission_contract_id IS NULL
             AND permission_contract_fingerprint IS NULL
             AND permission_snapshot_fingerprint IS NULL) OR
-        (input_origin = 'HUMAN_MESSAGE'
+        (input_origin IN ('HUMAN_MESSAGE','CELL_OUTPUT') AND delivery_mode='NEW_TURN'
             AND requested_permission_mode IS NOT NULL
             AND permission_snapshot_id IS NULL
             AND effective_permission_mode IS NULL
@@ -1008,7 +1008,7 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
             AND permission_contract_id IS NULL
             AND permission_contract_fingerprint IS NULL
             AND permission_snapshot_fingerprint IS NULL) OR
-        (input_origin IN ('SCHEDULED_TASK','AGENT_INSTRUCTION')
+        (input_origin IN ('SCHEDULED_TASK','AGENT_INSTRUCTION') AND delivery_mode='NEW_TURN'
             AND permission_snapshot_id IS NOT NULL
             AND requested_permission_mode IS NOT NULL
             AND effective_permission_mode IS NOT NULL

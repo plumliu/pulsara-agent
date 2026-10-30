@@ -24,16 +24,9 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     OwnerIssuedCapabilityDispatchObservation,
 )
 from pulsara_agent.model_input.contracts import PreparedProviderInputCut
-from pulsara_agent.ports.terminal_observation import (
-    ExistingTurnInstallation,
-    NewTurnInstallation,
-    PreparedInstallationTarget,
-    TerminalObservationInstallationAttempt,
-)
 from pulsara_agent.ports.user_control_feedback import (
     UserControlFeedbackInstallationAttempt,
 )
-from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
 
 
 T = TypeVar("T")
@@ -666,109 +659,7 @@ class ProviderSafePointCoordinator:
             self._active_handle = successor
             return successor
 
-    def prepare_terminal_observation_installation(
-        self,
-        *,
-        coordinator: TerminalMonitorCoordinator,
-        monitor_id: str,
-        target: PreparedInstallationTarget,
-        workspace_id: str,
-        actor_id: str,
-        deadline_monotonic: float,
-    ) -> TerminalObservationInstallationAttempt | AcceptedEntry | None:
-        """Freeze or exact-confirm one monitor draft before input admission.
 
-        A process-local in-flight candidate survives an ambiguous database
-        acknowledgement.  The next invocation exact-confirms that candidate
-        before it can issue the same canonical write again.
-        """
-
-        with self._lock:
-            if self._active_handle is not None:
-                raise ExternalSourceNotAtSafePoint(
-                    "provider input/model operation is active"
-                )
-            attempt = coordinator.current_installation_attempt(monitor_id)
-            if attempt is not None:
-                try:
-                    confirmed = self._repository.confirm_terminal_observation_winner(
-                        self._guard,
-                        candidate=attempt,
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                except ConversationKernelConflict:
-                    coordinator.settle_installation(attempt, accepted=False)
-                    raise
-                if confirmed is not None:
-                    coordinator.settle_installation(attempt, accepted=True)
-                    return confirmed
-            else:
-                attempt = coordinator.freeze(
-                    monitor_id=monitor_id,
-                    target=target,
-                    workspace_id=workspace_id,
-                    writer_generation=self._guard.writer_generation,
-                    actor_id=actor_id,
-                )
-                if attempt is None:
-                    return None
-            return attempt
-
-    def publish_terminal_observation(
-        self,
-        handle: PreparedProviderInputHandle | None,
-        *,
-        coordinator: TerminalMonitorCoordinator,
-        attempt: TerminalObservationInstallationAttempt,
-        provider_input_admission: PreparedActiveRootInputAdmission | None,
-        deadline_monotonic: float,
-    ) -> AcceptedEntry:
-        """Publish an exact observation; only an active suffix needs admission."""
-
-        with self._lock:
-            if isinstance(attempt.target, ExistingTurnInstallation):
-                if handle is None or not isinstance(
-                    provider_input_admission, PreparedActiveRootInputAdmission
-                ):
-                    raise ValueError("active terminal observation requires its input admission")
-            elif isinstance(attempt.target, NewTurnInstallation):
-                if handle is not None or provider_input_admission is not None:
-                    raise ValueError("new terminal turn starts before provider preparation")
-            else:
-                raise TypeError("terminal observation target is not closed")
-            if handle is not None:
-                self._require_current(handle)
-                if handle._model_active:
-                    raise ExternalSourceNotAtSafePoint(
-                        "provider model operation is active"
-                    )
-            elif self._active_handle is not None:
-                raise ExternalSourceNotAtSafePoint(
-                    "provider input/model operation is active"
-                )
-            try:
-                accepted = self._repository.accept_terminal_observation(
-                    self._guard,
-                    candidate=attempt,
-                    provider_input_admission=provider_input_admission,
-                    deadline_monotonic=deadline_monotonic,
-                )
-            except ConversationKernelConflict:
-                coordinator.settle_installation(attempt, accepted=False)
-                raise
-            except BaseException:
-                confirmed = self._repository.confirm_terminal_observation_winner(
-                    self._guard,
-                    candidate=attempt,
-                    deadline_monotonic=deadline_monotonic,
-                )
-                if confirmed is None:
-                    # UNKNOWN remains owned by the immutable process-local
-                    # attempt.  A later Host scheduler pass exact-confirms it.
-                    raise
-                accepted = confirmed
-            coordinator.settle_installation(attempt, accepted=True)
-            return accepted
 
     def install_user_control_feedback(
         self,

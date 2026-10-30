@@ -586,8 +586,8 @@ describe('exact prompt projection', () => {
       snapshot: { snapshot: { session_id: 'session-1', writer_generation: '1', event_sequence_cut: '8', entries: [
         entry('prompt-a', 'A', 1, 'USER_MESSAGE'),
         entry('answer-a', 'A', 2, 'ASSISTANT_MESSAGE'),
-        // B was started by a monitor, then interrupted before assistant output.
-        entry('monitor-b', 'B', 3, 'TERMINAL_OBSERVATION'),
+        // B was started by Cell output, then interrupted before assistant output.
+        { ...entry('cell-b', 'B', 3, 'TERMINAL_OBSERVATION'), input_origin: 'CELL_OUTPUT', content: { media_type: 'application/vnd.pulsara.terminal-observation+json', inline_content: btoa(JSON.stringify({schema_version:'cell_output.v1',cell_id:'cell:b',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:b',record_sequence:1,record:{kind:'log',text:'text'}})) } },
         entry('prompt-c', 'C', 4, 'USER_MESSAGE'),
         { ...entry('material', 'C', 5, 'USER_MESSAGE'), input_origin: 'AGENT_MATERIAL' },
       ], control: {} } },
@@ -3278,4 +3278,39 @@ it('refreshes mutually exclusive ordinary and manual stop targets before streami
   const next = await connection.observe();
   expect(next).toMatchObject({isRunning: true, activeTurnId: 'turn:next-preparation'});
   expect(next.manualCompactionCommandId).toBeUndefined();
+});
+
+it.each(['controller','observer'] as const)('projects the scoped current retry slot and explicit clear for %s', async role => {
+ const retry={session_id:'session-1',turn_id:'turn:retry',resolved_model_call_id:'call:retry',draft_id:'draft:retry',attempt:4,retry_number:3,max_retries:5,phase:'waiting',reason:'connection_recovery',remaining_seconds:7.4,has_semantic_output:true};
+ const frames=[{...connectPayload([],{},[],{}),role},{observation:{provider_retry:retry,through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'0',live_control_owner_epoch:'1',through_live_control_revision:'0'}},{observation:{provider_retry:{...retry,phase:'reconnecting',remaining_seconds:0},through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'0',live_control_owner_epoch:'1',through_live_control_revision:'0'}},{observation:{provider_retry:null,through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'0',live_control_owner_epoch:'1',through_live_control_revision:'0'}}];
+ stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(frames.shift()),{status:200})));
+ const connection=await new LocalHttpRuntimeAdapter().connect('session-1');
+ expect((await connection.observe()).providerRetry).toMatchObject({...retry,observedAt:expect.any(Number)});
+ expect((await connection.observe()).providerRetry?.phase).toBe('reconnecting');
+ expect((await connection.observe()).providerRetry).toBeNull();
+ expect(connection.current().messages).toEqual([]);
+});
+it('keeps each Cell record in the real queue order and projects its source rather than an Agent identity',async()=>{
+ const body=(sequence:number,text:string)=>({media_type:'application/vnd.pulsara.terminal-observation+json',inline_content:btoa(JSON.stringify({schema_version:'cell_output.v1',cell_id:'cell:one',source_turn_id:'turn:source',source_exec_attempt_id:'attempt:cell',record_sequence:sequence,record:{kind:sequence===2?'error':'log',...(sequence===2?{error:{message:text}}:{text})}}))});
+ const queue=[{queue_item_id:'queue:b',queue_sequence:'2',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',content:body(1,'**one**')},{queue_item_id:'queue:c',queue_sequence:'3',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_session_id:'session-1',source_turn_id:'turn:source',source_tool_attempt_id:'attempt:cell',content:body(2,'failure')},{queue_item_id:'queue:a',command_id:'command:a',queue_sequence:'1',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'USER_SUBMISSION',content:inlinePrompt('human')}];
+ stubRuntimeFetch(vi.fn(async()=>new Response(JSON.stringify(connectPayload([],{prompt_queue:queue,prompt_queue_total_count:'3'},[],{})),{status:200})));
+ const connection=await new LocalHttpRuntimeAdapter().connect('session-1');
+ expect(connection.current().queuedPrompts.map(item=>item.queueItemId)).toEqual(['queue:a','queue:b','queue:c']);
+ expect(connection.current().queuedPrompts[1]).toMatchObject({sourceKind:'cell',sourceExecAttemptId:'attempt:cell',content:{parts:[{type:'text',text:'**one**'}]},cellOutput:{cellId:'cell:one',kind:'log',recordSequence:1}});
+ expect(connection.current().queuedPrompts[2]).toMatchObject({sourceKind:'cell',cellOutput:{kind:'error',recordSequence:2}});
+ expect(connection.current().queuedCount).toBe(3);
+});
+
+it('confirms a consumed exact queue row without reading the consumed entry or depending on a human command',async()=>{
+ const responses=[connectPayload([],{prompt_queue_total_count:'1',prompt_queue:[{queue_item_id:'queue:cell',queue_sequence:'1',status:'PENDING',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',source_tool_attempt_id:'attempt:a'}]},[],{}),{item:{queue_item_id:'queue:cell',queue_sequence:'1',status:'CONSUMED',delivery_mode:'NEW_TURN',input_origin:'CELL_OUTPUT',consumed_entry_id:'entry:outside-window'}}];
+ const fetcher=vi.fn(async(input:RequestInfo|URL)=>{if(String(input).endsWith('/content'))throw new Error('body not resident');return new Response(JSON.stringify(responses.shift()),{status:200});});stubRuntimeFetch(fetcher);
+ const connection=await new LocalHttpRuntimeAdapter().connect('session-1');
+ expect(await connection.readQueueStatus('queue:cell')).toMatchObject({queueItemId:'queue:cell',status:'CONSUMED',consumedEntryId:'entry:outside-window',deliveryMode:'new-turn'});
+ expect(connection.current().messages).toEqual([]);expect(connection.current().queuedPrompts).toEqual([]);expect(connection.current().queuedCount).toBe(0);
+ expect(fetcher.mock.calls.filter(([input])=>String(input).includes('/history/window'))).toHaveLength(0);
+});
+it('sends the explicit exact-turn lane when paging pending steer inputs',async()=>{
+ const responses=[connectPayload([],{},[],{}),{items:[],next_cursor:null}];const fetcher=vi.fn(async()=>new Response(JSON.stringify(responses.shift()),{status:200}));stubRuntimeFetch(fetcher);
+ const connection=await new LocalHttpRuntimeAdapter().connect('session-1');await connection.readQueuePage('128',undefined,{deliveryMode:'steer',targetTurnId:'turn:a'});
+ expect(JSON.parse(String(fetcher.mock.calls.at(-1)?.[1]?.body))).toEqual({cursor:'128',delivery_mode:'STEER_ACTIVE_TURN',target_turn_id:'turn:a'});
 });

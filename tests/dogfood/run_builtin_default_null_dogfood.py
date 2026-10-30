@@ -38,8 +38,8 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
 
 
 CHANGED_TOOLS = {
-    "spawn_agent",
-    "create_agent_tasks",
+    "run_agent",
+    "query_agents",
     "manage_schedule",
     "query_schedules",
     "search_sessions",
@@ -48,8 +48,6 @@ CHANGED_TOOLS = {
     "wait_agent",
     "manage_process",
     "query_processes",
-    "manage_monitor",
-    "query_monitors",
 }
 
 
@@ -231,12 +229,12 @@ async def run(args, report, saved, save):
                     "exec_process",
                     (
                         'Run exactly "sleep 60; printf NULL_CONTRACT_DONE" with exec_process yield_time_ms=0. '
-                        "Use manage_process with action poll for that process. Register with manage_monitor using default completion conditions; "
-                        "list monitors, then cancel the monitor you registered, and kill only this test process. "
+                        "Use manage_process with action poll for that process, then query_processes for its current metadata; "
+                        "kill only this test process. "
                         "Do not wait for the sleep or create more processes. Use only each action's applicable fields."
                     ),
                 )
-                assert {"manage_process", "manage_monitor"} <= {
+                assert {"manage_process", "query_processes"} <= {
                     r["tool_name"] for r in terminal
                 }
 
@@ -245,31 +243,35 @@ async def run(args, report, saved, save):
                     "agents",
                     (
                         "This isolated test explicitly authorizes these three small delegated tasks. "
-                        "Call list_agent_models first. Spawn one self-contained task with context mode none, asking only for SINGLE_DONE. "
-                        "Also use create_agent_tasks to submit two independent tasks asking only for BATCH_A_DONE and BATCH_B_DONE, "
-                        "one with context omitted, one with context last_n and turns=1. All worker instructions must say: "
-                        "'Reply with your assigned marker only; do not use tools or follow other tasks from inherited history.' "
-                        f"For all three use model.connection_id={connection.id.value}; omit reasoning for the target default. "
-                        "Wait for their results with wait_agent task_ids and settle=all as needed, then call wait_agent once "
-                        "with no targets and timeout_seconds=0. Report the three returned markers."
+                        "Call run_agent three times with instructions asking only for SINGLE_DONE, BATCH_A_DONE and BATCH_B_DONE. "
+                        "Use context mode none for the first, omit context for the second, and context last_n with turns=1 for the third. "
+                        "All worker instructions must say: 'Reply with your assigned marker only; do not use tools or follow other tasks from inherited history.' "
+                        "Keep the inherited model binding. Wait for the returned AGENT targets with wait_agent, then explicitly "
+                        "query_agents for each exact WORK target to read its final. Report the three markers."
                     ),
                 )
-                assert {"spawn_agent", "create_agent_tasks", "wait_agent"} <= {
+                assert {"run_agent", "query_agents", "wait_agent"} <= {
                     r["tool_name"] for r in agents
                 }
-                worker_results = source.repository.list_subagent_tasks(
-                    session_id=source.session_id,
-                    maximum_items=50,
+                children = source.repository.list_root_agent_session_ids(
+                    root_session_id=source.session_id,
                     deadline_monotonic=monotonic() + 30,
                 )
+                worker_results = [
+                    work for child in children
+                    for work in source.repository.list_agent_works(
+                        root_session_id=source.session_id, agent_id=child,
+                        limit=50, deadline_monotonic=monotonic() + 30,
+                    )
+                ]
                 report["worker_results"] = worker_results
                 save()
                 assert len(worker_results) == 3, worker_results
                 assert all(
-                    row["status"] == "COMPLETED" for row in worker_results
+                    row["status"] == "completed" for row in worker_results
                 ), worker_results
                 assert {
-                    str(row["result_summary"]).strip() for row in worker_results
+                    str(row["final"]).strip() for row in worker_results
                 } == {"SINGLE_DONE", "BATCH_A_DONE", "BATCH_B_DONE"}, worker_results
                 seen = {r["tool_name"] for p in report["phases"] for r in p["trace"]}
                 assert CHANGED_TOOLS <= seen, sorted(CHANGED_TOOLS - seen)

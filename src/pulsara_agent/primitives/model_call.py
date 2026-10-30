@@ -252,6 +252,7 @@ class ProviderModelStreamErrorCode(StrEnum):
     PROVIDER_OVERLOADED = "provider_overloaded"
     MODEL_UNAVAILABLE = "model_unavailable"
     PROVIDER_TIMEOUT = "provider_timeout"
+    PROVIDER_CONNECTION_ERROR = "provider_connection_error"
     CONTENT_FILTERED = "content_filtered"
     TRANSPORT_PROTOCOL_ERROR = "transport_protocol_error"
     TRANSPORT_SOURCE_ITEM_LIMIT_EXCEEDED = "transport_source_item_limit_exceeded"

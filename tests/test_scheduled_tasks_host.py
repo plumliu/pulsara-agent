@@ -142,7 +142,7 @@ def test_quick_session_initial_model_is_ready_for_a_scheduled_task(
     asyncio.run(scenario())
 
 
-async def due(service, session, task):
+async def due(service, session, task, *, seconds_ago=1):
     repo = await service._repository()
 
     # Integral UTC is the schedule protocol. Clock seam changes only the saved due.
@@ -150,10 +150,14 @@ async def due(service, session, task):
         with repo._writer_transaction(
             session._lease.guard, deadline_monotonic=deadline_monotonic
         ) as c:
-            c.execute(
-                "UPDATE pulsara_v3.scheduled_tasks SET next_run_at=date_trunc('second',clock_timestamp())-interval '1 second' WHERE id=%s",
-                (task["id"],),
-            )
+            row = c.execute(
+                """UPDATE pulsara_v3.scheduled_tasks
+                SET next_run_at=date_trunc('second',clock_timestamp())-(%s * interval '1 second')
+                WHERE id=%s RETURNING next_run_at""",
+                (seconds_ago, task["id"]),
+            ).fetchone()
+            # This seam represents a due reached during the running kernel.
+            service._run_started_at = min(service._run_started_at, row["next_run_at"] - timedelta(seconds=1))
 
     await service._io.run(write, deadline_monotonic=monotonic() + 30)
 
@@ -174,7 +178,7 @@ async def queue(service, sid):
     return await service._io.run(read, deadline_monotonic=monotonic() + 30)
 
 
-def test_busy_fifo_coalescing_pause_and_source(
+def test_busy_timer_occurrences_stay_independent_and_pause_preserves_steer(
     tmp_path, stage2_migrated_postgres_database, monkeypatch
 ):
     async def scenario():
@@ -188,35 +192,38 @@ def test_busy_fifo_coalescing_pause_and_source(
             )
             await asyncio.wait_for(port.started.wait(), 15)
             task = await create(service, h.session)
-            await due(service, h.session, task)
-            await service.tick()
+            await due(service, h.session, task, seconds_ago=3)
+            await service._dispatch(await service._read("read_scheduled_task", task_id=task["id"]))
             await h.session.submit_prompt(
                 command_id='command:ag24n2g2ztjbupgbndkdb34zne', content=PromptContent.text("Human second")
             )
             await due(service, h.session, task)
-            await service.tick()
+            await service._dispatch(await service._read("read_scheduled_task", task_id=task["id"]))
             rows = await queue(service, h.session_id)
             assert [r["input_origin"] for r in rows] == [
                 "HUMAN_MESSAGE",
                 "SCHEDULED_TASK",
                 "HUMAN_MESSAGE",
+                "SCHEDULED_TASK",
             ]
-            assert [r["status"] for r in rows] == ["CONSUMED", "PENDING", "PENDING"]
+            assert [r["status"] for r in rows] == ["CONSUMED", "PENDING", "PENDING", "PENDING"]
+            assert rows[1]["delivery_mode"] == rows[3]["delivery_mode"] == "STEER_ACTIVE_TURN"
+            assert rows[1]["target_turn_id"] == rows[3]["target_turn_id"]
+            assert rows[1]["scheduled_due_at"] != rows[3]["scheduled_due_at"]
             assert len(port.requests) == 1
             paused = await service.mutate(
                 task_id=task["id"], expected_revision=1, action="pause"
             )
             assert paused["status"] == "PAUSED"
-            assert (await queue(service, h.session_id))[1]["status"] == "CANCELLED"
+            assert (await queue(service, h.session_id))[1]["status"] == "PENDING"
+            assert (await queue(service, h.session_id))[3]["status"] == "PENDING"
             port.release.set()
 
             async def done():
-                return (await queue(service, h.session_id))[-1][
-                    "status"
-                ] == "CONSUMED" and h.session._active_task is None
+                return all(row["status"] == "CONSUMED" for row in await queue(service, h.session_id)) and h.session._active_task is None
 
             await settled(done)
-            assert len(port.requests) == 2
+            assert len(port.requests) == 3
             # Explicit run uses the same paused task, without changing its plan.
             req = dict(
                 client_command_id=random_id("command"),
@@ -336,10 +343,10 @@ def test_restart_wakes_removed_once_pending_from_timer_or_user(
         )
         runtime = core._model_runtime
         try:
-            await h.session.submit_prompt(
-                command_id='command:uddu4kdmbvxndouvefup5xkrsy', content=PromptContent.text("Busy human")
-            )
-            await asyncio.wait_for(port.started.wait(), 15)
+            # Keep an accepted NEW_TURN durable while deliberately withholding
+            # the process-local consumer; no RUNNING turn exists to steer.
+            h.session._delivery_task.cancel()
+            await asyncio.gather(h.session._delivery_task, return_exceptions=True)
             task = await create(service, h.session, once=True)
             if manual:
                 task = await service.mutate(
@@ -389,10 +396,10 @@ def test_restart_wakes_removed_once_pending_from_timer_or_user(
 
             await settled(done)
             rows = await queue(service, h.session_id)
-            assert len(rows) == 2 and rows[-1]["input_origin"] == "SCHEDULED_TASK"
-            assert len(port.requests) == 2
+            assert len(rows) == 1 and rows[-1]["input_origin"] == "SCHEDULED_TASK"
+            assert len(port.requests) == 1
             await service.tick()
-            assert len(await queue(service, h.session_id)) == 2
+            assert len(await queue(service, h.session_id)) == 1
         finally:
             port.release.set()
             await service.aclose()
@@ -456,7 +463,7 @@ def test_manual_enqueue_unknown_commit_ack_and_exact_confirmation(
 
 
 @pytest.mark.parametrize("change", ["edit", "due_changed"])
-def test_final_admission_rechecks_cut_after_hook(
+def test_final_admission_rechecks_task_cut_before_writer(
     tmp_path, stage2_migrated_postgres_database, monkeypatch, change
 ):
     async def scenario():
@@ -469,16 +476,17 @@ def test_final_admission_rechecks_cut_after_hook(
         try:
             task = await create(service, h.session)
             await due(service, h.session, task)
-            entered, release = asyncio.Event(), asyncio.Event()
-            original = h.session._dispatch_user_prompt_hook
+            from threading import Event
+            entered, release = asyncio.Event(), Event()
+            loop = asyncio.get_running_loop()
+            original = h.session.repository.enqueue_prompt
 
-            async def held(**kwargs):
-                value = await original(**kwargs)
-                entered.set()
-                await release.wait()
-                return value
+            def held(*args, **kwargs):
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(15), "test did not release admission writer barrier"
+                return original(*args, **kwargs)
 
-            monkeypatch.setattr(h.session, "_dispatch_user_prompt_hook", held)
+            monkeypatch.setattr(h.session.repository, "enqueue_prompt", held)
             dispatch = asyncio.create_task(service.tick())
             await asyncio.wait_for(entered.wait(), 15)
             if change == "edit":
@@ -880,6 +888,176 @@ def test_saved_task_sources_do_not_trigger_automatic_memory_recall(
             with pytest.raises(KeyError):
                 await service.get(task["id"])
         finally:
+            await service.aclose()
+            await sessions.aclose()
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_scheduled_hook_gate_belongs_to_new_turn_consumption_and_keeps_route(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch, active
+):
+    async def scenario():
+        port = _SteerModelPort()
+        core, sessions, service, handle, _ = await setup(
+            tmp_path, stage2_migrated_postgres_database, monkeypatch, port
+        )
+        entered, release = asyncio.Event(), asyncio.Event()
+        try:
+            if active:
+                await handle.session.submit_prompt(
+                    command_id=random_id("command"), content=PromptContent.text("Running human request")
+                )
+                await asyncio.wait_for(port.started.wait(), 15)
+            task = await create(service, handle.session)
+
+            async def block(**kwargs):
+                if active:
+                    raise AssertionError("scheduled steer cannot run a new-turn Hook")
+                assert kwargs["input_origin"] == "SCHEDULED_TASK"
+                entered.set()
+                await release.wait()
+                return "scheduled NEW blocked by UserPromptSubmit", None
+
+            monkeypatch.setattr(handle.session, "_dispatch_user_prompt_hook", block)
+            request = dict(
+                client_command_id=random_id("command"), session_id=handle.session_id,
+                task_id=task["id"], expected_revision=task["revision"],
+                request_at_utc=datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            )
+            result = await service.run_now(request)
+            original = (await queue(service, handle.session_id))[-1]
+            assert original["status"] == "PENDING"
+            assert original["scheduled_trigger_source"] == "RUN_ONCE"
+            if active:
+                assert result["delivery_mode"] == "STEER_ACTIVE_TURN"
+                assert result["target_turn_id"] is not None and result["execution"] is None
+                assert not entered.is_set()
+            else:
+                await asyncio.wait_for(entered.wait(), 15)
+                assert result["delivery_mode"] == "NEW_TURN" and result["target_turn_id"] is None
+                assert result["execution"]["status"] == "queued"
+                release.set()
+
+                async def rejected():
+                    return (await queue(service, handle.session_id))[-1]["status"] == "REJECTED"
+
+                await settled(rejected)
+                confirmed = await service.run_now(request)
+                assert confirmed["queue_item_id"] == result["queue_item_id"]
+                assert confirmed["delivery_mode"] == "NEW_TURN" and confirmed["target_turn_id"] is None
+                assert confirmed["execution"] == {"status": "stopped", "terminal_reason": "HOOK_BLOCKED_BEFORE_DELIVERY"}
+                final = (await queue(service, handle.session_id))[-1]
+                assert final["inline_content"] == original["inline_content"]
+                assert final["consumed_entry_id"] is None
+                assert not port.requests
+        finally:
+            release.set()
+            port.release.set()
+            await service.aclose()
+            await sessions.aclose()
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+async def expire_paused_once_in_host(service, session, task):
+    from psycopg.types.json import Jsonb
+
+    schedule = {**task["schedule"], "run_at_utc": (
+        datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=1)
+    ).isoformat()}
+    repo = await service._repository()
+
+    def expire(*, deadline_monotonic):
+        with repo._writer_transaction(session._lease.guard, deadline_monotonic=deadline_monotonic) as connection:
+            connection.execute("UPDATE pulsara_v3.scheduled_tasks SET schedule=%s WHERE id=%s", (Jsonb(schedule), task["id"]))
+
+    await service._io.run(expire, deadline_monotonic=monotonic() + 30)
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_paused_once_expires_quietly_in_running_kernel_and_after_restart(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch, restart
+):
+    async def scenario():
+        port = _SteerModelPort()
+        core, sessions, service, handle, _ = await setup(tmp_path, stage2_migrated_postgres_database, monkeypatch, port)
+        try:
+            once = await create(service, handle.session, once=True)
+            paused = await service.mutate(task_id=once["id"], expected_revision=once["revision"], action="pause")
+            periodic = await create(service, handle.session)
+            periodic = await service.mutate(task_id=periodic["id"], expected_revision=periodic["revision"], action="pause")
+            if not restart:
+                await service.start()
+            await expire_paused_once_in_host(service, handle.session, paused)
+            if restart:
+                runtime = core._model_runtime
+                await service.aclose()
+                await sessions.aclose()
+                await core.shutdown()
+                core = KernelHostCore.production(model_runtime=runtime)
+                sessions = LocalSessionController(core=core, permission_policy=default_permission_policy(), active_skill_names=frozenset())
+                service = ScheduledTaskService(sessions)
+                core.scheduled_tasks = service
+                await service.start()
+            else:
+                service.wake()
+
+            async def missing():
+                return await service._read("read_scheduled_task", task_id=paused["id"]) is None
+
+            await settled(missing)
+            assert (await service.get(periodic["id"]))["status"] == "PAUSED"
+            assert not await queue(service, handle.session_id)
+            assert not port.requests
+        finally:
+            await service.aclose()
+            await sessions.aclose()
+            await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_manual_run_crossing_paused_once_deadline_is_rejected_by_final_writer(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch
+):
+    async def scenario():
+        from threading import Event
+        from pulsara_agent.scheduling.contracts import ScheduledTaskError
+
+        port = _SteerModelPort()
+        core, sessions, service, handle, _ = await setup(tmp_path, stage2_migrated_postgres_database, monkeypatch, port)
+        entered, release = asyncio.Event(), Event()
+        loop = asyncio.get_running_loop()
+        try:
+            once = await create(service, handle.session, once=True)
+            paused = await service.mutate(task_id=once["id"], expected_revision=once["revision"], action="pause")
+            original = handle.session.repository.enqueue_prompt
+
+            def held(*args, **kwargs):
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(15), "test did not release final writer"
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(handle.session.repository, "enqueue_prompt", held)
+            request = dict(client_command_id=random_id("command"), session_id=handle.session_id,
+                task_id=paused["id"], expected_revision=paused["revision"],
+                request_at_utc=datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+            pending = asyncio.create_task(service.run_now(request))
+            await asyncio.wait_for(entered.wait(), 15)
+            await expire_paused_once_in_host(service, handle.session, paused)
+            release.set()
+            with pytest.raises(ScheduledTaskError) as error:
+                await pending
+            assert error.value.code == "TASK_NOT_FOUND"
+            assert await service._read("read_scheduled_task", task_id=paused["id"]) is None
+            assert not await queue(service, handle.session_id)
+            assert not port.requests
+        finally:
+            release.set()
             await service.aclose()
             await sessions.aclose()
             await core.shutdown()

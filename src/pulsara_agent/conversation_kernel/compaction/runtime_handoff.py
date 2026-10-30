@@ -16,16 +16,16 @@ HANDOFF_CONTINUATION = (
 )
 HANDOFF_BUDGET_OMISSION = (
     "Additional active or pending objects are omitted; when available, use "
-    "query_processes, query_monitors, query_cells, or query_agents without a "
+    "query_processes, query_cells, or query_agents without a "
     "target to discover currently retained objects."
 )
 SUBAGENT_HANDOFF_BUDGET_OMISSION = (
     "Additional active or pending objects are omitted; when available, use "
-    "query_processes, query_monitors, or query_agents without a target to "
+    "query_processes or query_agents without a target to "
     "discover currently retained objects."
 )
 _PROJECTION_CONTRACT = "pulsara.compaction-runtime-handoff-projection.v4-active-pmca"
-PMCA_KEYS = ("terminal_processes", "terminal_monitors", "code_cells", "agents")
+PMCA_KEYS = ("terminal_processes", "code_cells", "agents")
 
 
 class CompactionRuntimeHandoffBoundError(ValueError):
@@ -42,20 +42,6 @@ class FrozenTerminalProcessHandoffFact:
             raise ValueError("terminal process handoff fact is invalid")
 
 
-@dataclass(frozen=True, slots=True)
-class FrozenTerminalMonitorHandoffFact:
-    monitor_id: str
-    process_id: str
-    state: str
-    pending_observation: bool
-
-    def __post_init__(self) -> None:
-        if (
-            not self.monitor_id
-            or not self.process_id
-            or self.state not in {"active", "dormant"}
-        ):
-            raise ValueError("terminal monitor handoff fact is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,31 +175,18 @@ def handoff_process_rows(
     )
 
 
-def handoff_monitor_rows(
-    facts: tuple[FrozenTerminalMonitorHandoffFact, ...],
-) -> tuple[dict[str, object], ...]:
-    return tuple(
-        {
-            "target": {"kind": "MONITOR", "monitor_id": item.monitor_id},
-            "process_target": {"kind": "PROCESS", "process_id": item.process_id},
-            "state": item.state,
-            "pending_observation": item.pending_observation,
-        }
-        for item in sorted(facts, key=lambda item: item.monitor_id)
-    )
 
 
 def freeze_compaction_runtime_handoff(
     *,
     terminal_processes: tuple[FrozenTerminalProcessHandoffFact, ...],
-    terminal_monitors: tuple[FrozenTerminalMonitorHandoffFact, ...],
     todo: FrozenTodoSnapshot | None,
     conversation_scope_kind: ModelInputScopeKind,
     agent_work_index: Iterable[dict[str, object]] = (),
     code_cells: tuple[dict[str, object], ...] = (),
     measure_pmca: Callable[[str], int] = _measure_pmca,
 ) -> FrozenCompactionRuntimeHandoff | None:
-    """Render frozen facts in deterministic P/M/C/A order without owner I/O.
+    """Render frozen facts in deterministic P/C/A order without owner I/O.
 
     Agent rows are already in canonical ID order, allowing the owner to supply
     an iterator without forcing the renderer to enumerate the entire inventory.
@@ -225,7 +198,6 @@ def freeze_compaction_runtime_handoff(
     )
     streams = {
         "terminal_processes": iter(handoff_process_rows(terminal_processes)),
-        "terminal_monitors": iter(handoff_monitor_rows(terminal_monitors)),
         "code_cells": iter(
             sorted(code_cells, key=lambda row: row["target"]["cell_id"])
         ),

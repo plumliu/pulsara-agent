@@ -135,6 +135,14 @@ class CollaborationToolPort:
             raise ValueError("WORK does not exist in this collaboration")
         return self._public_work(row)
 
+    async def _work_status(self, work_id: str) -> dict:
+        row = await self._read(self.repository.read_agent_work_graph_facts,
+            root_session_id=self.root_session_id, work_id=work_id,
+            deadline_monotonic=self.runtime.read_deadline())
+        if row is None:
+            raise ValueError("WORK does not exist in this collaboration")
+        return self._public_work(row)
+
     async def read_cell_work_page(self, *, source_exec_attempt_id, cursor, limit):
         return await self._read(self.repository.list_cell_agent_works,
             root_session_id=self.root_session_id, source_exec_attempt_id=source_exec_attempt_id,
@@ -245,7 +253,6 @@ class CollaborationToolPort:
                 "agent": agent_target(row["agent_id"]),
                 "work": work_target(row["work_id"]),
                 "status": row["status"],
-                **({"final": row["final"]} if row.get("final") is not None else {}),
             }
             for row in rows
         ), outcome
@@ -467,7 +474,7 @@ class CollaborationToolPort:
         async with self._suspend(context):
             while True:
                 revision = self.runtime.agent_change_revision()
-                works = [await self._work(identity) for identity in identities]
+                works = [await self._work_status(identity) for identity in identities]
                 self._observe_cell(context, tuple(
                     (work["agent"]["agent_id"], work["target"]["work_id"], "wait") for work in works))
                 pending = [
@@ -557,7 +564,7 @@ class CollaborationToolPort:
                     invocation_context=context,
                 )
                 works = [
-                    await self._work(binding["work"]["work_id"])
+                    await self._work_status(binding["work"]["work_id"])
                     for binding in bindings
                     if binding["work"] is not None
                 ]

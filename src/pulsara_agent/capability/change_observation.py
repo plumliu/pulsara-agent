@@ -49,23 +49,16 @@ class CapabilityUiChange:
 
 @dataclass(frozen=True, slots=True)
 class FrozenCapabilityChange:
-    change: CapabilityUiChange
+    effective_state: FrozenJsonObjectFact
     revision: int
-    changes: int
     adoption_attention: str | None = None
 
     def render(self) -> str:
         value = {
-            "source": "CAPABILITY_UI",
-            "scope": self.change.scope.value,
-            "action": str(self.change.action),
-            "target": thaw_json(self.change.target),
-            "result": self.change.result,
+            "source": "CAPABILITY_STATE",
+            "effective_state": thaw_json(self.effective_state),
+            "same_epoch_provider_prefix": "UNCHANGED",
         }
-        if self.change.enabled is not None:
-            value["enabled"] = self.change.enabled
-        if self.changes > 1:
-            value["changes"] = self.changes
         if self.adoption_attention:
             value.update(adoption="PARTIAL", diagnostic=self.adoption_attention)
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))

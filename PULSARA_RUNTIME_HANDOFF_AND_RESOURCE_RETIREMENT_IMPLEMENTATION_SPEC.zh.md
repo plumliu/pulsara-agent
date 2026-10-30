@@ -1,8 +1,8 @@
 # Pulsara：运行时摘要状态筛选与资源退役实施规格
 
-日期：2026-10-30。状态：**实施与本规格要求验收完成。** 实施基线为 `fc0d8d86`。实现、亲审修复、证据层级及验证边界见 [总交付报告](output/runtime-handoff-retirement-20261030/REPORT.zh.md)。
+日期：2026-10-31。当前合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，本轮实现与激活验证进行中。既有资源验证记录保留其原范围。
 
-本文明确 Monitor 安全删除及旧通知确认、Process 到期自动尝试回收、普通环境 Cell 索引移除，以及压缩 runtime handoff 的状态筛选。TODO 始终完整保留；3,200 个 V3 启发式 token 上限仅约束 PMCA 状态与相关说明，不约束 TODO。
+本文明确 Process 到期自动尝试回收、Cell 主动输出接纳后的回收、普通环境 Cell 索引移除，以及压缩 runtime handoff 的状态筛选。TODO 始终完整保留；3,200 个 V3 启发式 token 上限仅约束 PCA 状态与相关说明，不约束 TODO。
 
 ## 0. 权威、范围与不变量
 
@@ -15,29 +15,27 @@
 - [子代理与 Cell 侧边栏规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
 - [工具 schema 兼容性实验](output/tool-schema-compatibility-20261026/REPORT.zh.md)：本轮不修改工具参数 schema 或 provider lowering。
 - 调查证据：[摘要与查询](output/compaction-query-research-20261030/REPORT.zh.md)、[资源计费与退役](output/compaction-query-research-20261030/RESOURCE_RETIREMENT.zh.md)。调查中的候选方案只在本文明确采用后才构成实施要求。
-- 尺寸依据：[状态筛选后摘要的 V3 离线矩阵](output/compaction-query-research-20261030/token-budget/REPORT.zh.md)。本轮上限是单份观察中 PMCA 视图的输入成本边界，不是 TODO、对象数量或执行寿命限制。
+- 尺寸依据：[状态筛选后摘要的 V3 离线矩阵](output/compaction-query-research-20261030/token-budget/REPORT.zh.md)。本轮上限是单份观察中 PCA 视图的输入成本边界，不是 TODO、对象数量或执行寿命限制。
 - 补充依据：[规格复审与合法 TODO 转义反例](output/compaction-query-research-20261030/spec-review/REVIEW.zh.md)、[普通环境 Cell 索引链路与矩阵](output/runtime-environment-cell-index-20261030/REPORT.zh.md)。旧尺寸实验中的重复中文 TODO 仅为合成尺寸样本，不作为合法 TODO 上界证明。
 
 ### 0.1 已明确决议
 
 | 范围 | 实施合同 |
 |---|---|
-| Monitor | CLOSED 后继续排除摘要与 query；原有注册和通知结算完成后删除内部登记，不保留关闭历史或 tombstone |
-| Monitor 缺失 | 删除后取消返回既有 `not_found`；工具结果附通用解释，不追踪或断言每次消失原因 |
 | Process | 沿用结束后的保留策略，增加到期自动尝试回收；有使用者或物理收尾未结束时暂缓并再次尝试 |
-| Cell | 不新增数量、寿命或终态保留 cap，不按时间丢弃未交付结果；原资源计费、输出确认和回收规则保持 |
+| Cell | 不新增数量、寿命或终态保留 cap；未 FULL/UNKNOWN 输出保留原 owner，FULL 释放本地计费，静默成功不等模型 ACK |
 | Agent | 沿用同一 idle 起点的 1 小时资源卸载／3 天删除及安全门禁，不增加第二套退役机制 |
 | runtime handoff | 只主动列入符合 §6 状态条件的对象身份和必要状态；其他仍可查询的对象通过既有 query 查找 |
-| 空 handoff | PMCA 候选全空且没有 TODO 时返回空 source；不为单独发送承接句制造摘要 |
+| 空 handoff | PCA 候选全空且没有 TODO 时返回空 source；不为单独发送承接句制造摘要 |
 | 普通环境 | 删除模型输入中的 Cell 索引及专用采集／筛选／预算／省略链路；环境保留工作区、时区等事实 |
 | 用户 Cell 控制 | 保留用户 UI 查看／停止 Cell 的接口和数据来源；删除模型环境投影不删除用户控制能力 |
 | 权限 | `query_agents` 供 ROOT 与 Subagent bypass，按调用方范围查询；`query_cells` 仅供 ROOT bypass |
-| 摘要预算 | 仅 PMCA 计量视图最多 3,200 个当前 V3 启发式 tokens，含说明与封装；TODO／todo_counts 完整追加且不占用此额度；完整输入仍受现有 provider 输入预算约束 |
+| 摘要预算 | 仅 PCA 计量视图最多 3,200 个当前 V3 启发式 tokens，含说明与封装；TODO／todo_counts 完整追加且不占用此额度；完整输入仍受现有 provider 输入预算约束 |
 
 ### 0.2 不变量与非目标
 
 1. 不新增数据库表、列、持久事件／任务、subject、append guard、对象注册表、关闭历史表、指纹字段或恢复链；durable oracle 相对实施基线各类别增量为零。
-2. 不增加工具、action、参数、旧名兼容层或执行双轨。Monitor 只在既有结果正文中补充提示。
+2. 不增加工具、action、参数、旧名兼容层或执行双轨。共同输出接纳使用原 queue owner。
 3. 不限制 Process 的运行寿命，不自动停止活跃 Cell／Work，不以摘要容量拒绝逻辑工作。
 4. 不为清理制造新的交付确认协议；复用现有 token、in-flight attempt、输出确认、物理 join、锁和 owner。
 5. SYSTEM／provider tools 仅在 cold epoch 或明确采用的 compaction successor 安装新定义；已有 epoch 字节不变、messages 只追加，不新增重建边界。
@@ -50,11 +48,11 @@
 
 | 问题 | 含义 | 权威 |
 |---|---|---|
-| 还需执行或结算吗 | 物理执行、未完成调用、注册／通知交付、未确认输出 | ProcessRegistry、TerminalMonitorCoordinator、CodeModeHost、共同 Work 引擎 |
+| 还需执行或结算吗 | 物理执行、未完成调用、未 FULL 输出接纳、真实业务结算 | ProcessRegistry、CodeModeHost、共同 Work 引擎 |
 | 记录可以删除了吗 | 原有使用者与结算依赖已释放，符合该对象的保留政策 | 对应唯一 owner；摘要不参与裁决 |
 | 本次摘要主动显示吗 | 在采集时符合明确的状态和调用方范围 | owner 提供事实，纯 handoff renderer 投影 |
 
-从摘要中排除不等于删除；能 query 不等于仍在执行；从 query 中消失也不说明业务成功或失败。不得为了让摘要变小而确认输出、关闭 Monitor、缩短 Agent idle 时间或强制删除对象。
+从摘要中排除不等于删除；能 query 不等于仍在执行；从 query 中消失也不说明业务成功或失败。不得为了让摘要变小而确认输出、缩短 Agent idle 时间或强制删除对象。
 
 ## 2. Cell：保留现有资源和交付合同
 
@@ -64,7 +62,7 @@
 
 Python 对象、asyncio task、闭包、快照引用、反序列化副本、Node Worker／WASM、IPC 瞬时复制以及其他工具／artifact owner 的存储，不由这个计数器按实际内存完整覆盖。QuickJS heap／stack、VM 并发、单值／单帧及模型结果页各自沿原限制。
 
-终态未领取的 Cell 仍保留 control／catalog 和未读输出等 charge，可能令新接纳返回既有 `data_boundary`。执行期间的 reserve 失败及晚到结果继续走既有 typed 资源失败与效果结算；不能把交付失败写成外部业务没有发生。
+尚有未 FULL 输出的终态 Cell 仍保留 control／catalog 和尚未 FULL 输出等 charge，可能令新接纳返回既有 `data_boundary`。执行期间的 reserve 失败及晚到结果继续走既有 typed 资源失败与效果结算；不能把交付失败写成外部业务没有发生。
 
 本轮不新增 Cell 数量 cap、TTL、自动归档、显式清理 action、内存追踪系统或新保留账本，也不借摘要投影提前释放仍被执行或结算引用的数据。
 
@@ -73,86 +71,15 @@ Python 对象、asyncio task、闭包、快照引用、反序列化副本、Node
 只有以下条件同时满足，才沿原路径从 `_cells` 删除并发送 `forget`：
 
 - Cell 已终态；
-- 终态观察已经成功确认，`terminal_delivered` 为真；
+- 所有正式输出/必须报告的结算记录已由共同队列 FULL 接纳；无输出的正常终态无需模型 ACK；
 - 整个内部 `pending` 字典为空；
 - 输出队列为空；
-- 没有持有中的输出 observation；
+- 没有借用中的输出前缀或 immutable UNKNOWN 接纳候选；
 - VM 已释放。
 
-`pending_calls == 0` 不等价于内部 pending 为空：prepare 等请求不一定计入公开调用数。源码 query 不消费输出、不设置 terminal_delivered；stop 不代替输出交付，也不取消已接纳的独立 Work／外部调用。Host 关闭及 sidecar 失败继续使用原有清理和失败路径。
+`pending_calls == 0` 不等价于内部 pending 为空：prepare 等请求不一定计入公开调用数。源码 query 不消费输出、不确认接纳；stop 不代替输出交付，也不取消已接纳的独立 Work／外部调用。Host 关闭及 sidecar 失败继续使用原有清理和失败路径。
 
-本轮对 Cell 的生产修改限于 §6 所需的 owner 状态观察、普通环境索引删除及投影接线；用户 UI 查看／停止路径保留，不改变以上执行、收费或交付规则。
-
-## 3. Monitor：关闭后的安全删除
-
-### 3.1 关闭与删除
-
-`TerminalMonitorCoordinator` 是内部登记删除的唯一 owner。`CLOSED` 立即退出 `query_monitors` 列表／详情和 runtime handoff，这个行为保持。
-
-物理删除必须在既有 coordinator 锁内检查，且同时满足：
-
-1. 映射仍指向本次检查的同一个登记，状态为 CLOSED。
-2. 原关闭动作已经完成：mutable draft／successor 已清理，订阅已解除，原有关闭事件发送路径已执行。
-3. 现有 `_tokens` 中没有尚待结算、指向该登记的注册 token。
-4. `in_flight is None`。
-
-关闭事件沿现有 best-effort live bus 语义，不增加“模型已看见关闭通知”的确认要求。不可仅按关闭时长强行越过注册 token 或 in-flight 的结算依赖。
-
-### 3.2 触发位置与顺序
-
-复用一个 coordinator 内部删除检查，在三个现有完成点调用：
-
-- 原关闭处理完成后；
-- `settle_registration` 验证并弹出注册 token 后；
-- `settle_installation` 明确结算并清空 in-flight、完成该次状态更新后。
-
-注册先关闭后结算时，仍须先验证 token 身份并退役 token，再尝试删除；不能因登记不是 DORMANT 就跳过清理检查。通知先冻结后取消时，关闭只取消 mutable 部分，原不可变 installation 保留到既有 FULL／NONE／conflict 确认结束。UNKNOWN 保持原对象，不新增超时丢弃或伪造确认。
-
-同一内部 helper 只检查当前事实并删除，不创建待清理队列、第二份 closed 集合或按 ID 保存的历史缓存。
-
-### 3.3 Host 先确认旧通知，再判断是否允许新通知
-
-Work 已结束不代表已冻结通知的写入结果已经确定。Host 的 Monitor 投递循环必须先取得现有 immutable installation attempt；如果存在，先复用 safe-point 的原精确确认路径，再判断当前 Work 是否仍允许创建新通知。
-
-- 已确认 FULL：按原成功路径结算；已确认 NONE／conflict：按原对应路径结算。清空 in-flight 后再检查 CLOSED 登记是否可以删除。
-- 仍是 UNKNOWN：保留原 attempt 和登记，结束本次对该对象的尝试，沿既有唤醒／重驱路径等待后续确认。不得在同一轮不停选中同一 ID、重复 close／continue 或阻塞其他可处理 Monitor。
-- Work 不再活动且没有待确认 attempt：可以关闭登记并安全清理；不为旧 Work 生成、冻结或安装新草稿。
-- 已冻结 attempt 始终归原 Work／原安装目标，不转投下一份 Work，不改写通知归属，不把 UNKNOWN 伪造为 NONE。
-- 确认读取与写入沿现有 owner、权限和终态约束；本轮不增加新确认协议、持久重试队列或新的执行恢复路径。
-
-必须修改 Host 投递循环中“先检查 Work 是否活动、否则 close_work 后 continue”的原顺序，不能仅给 coordinator 增加删除 helper。该顺序要求覆盖 Work 结束／取消、注册结算、Host 关闭及 immutable attempt 已存在时的交错。
-
-### 3.4 并发与关闭
-
-- `process_completed`、`close_work` 等遍历登记并关闭对象的路径使用安全快照或收集后删除，禁止迭代字典时直接改变其大小。
-- 已复制的输出 callback／worker 可以晚到；按 ID 重新取登记，不存在或 CLOSED 就结束，不能借旧引用重新创建登记或通知。
-- Host 在按 ID 取 scope、取 installation attempt 与结算之间的竞争，仍以现有冻结 attempt 和结算 owner 为准。删除检查不得令一个已接纳且尚需结算的 attempt 失去 owner。
-- 重复／冲突结算沿现有精确身份校验处理；不将所有 stale／identity conflict 改为无条件成功。
-- Host close 和 Work close 都走同一关闭／删除条件。存在 UNKNOWN 等未决依赖时可暂留 CLOSED 记录；在依赖真正结束后再次尝试，不给这些依赖新增持久恢复机制。
-- 清理失败不得妨碍已经生效的关闭事实；错误走现有诊断路径，不吞掉真实结算异常。
-
-## 4. Monitor 工具结果：缺失解释与可见性
-
-### 4.1 既有结果分类保持
-
-| 调用及事实 | 保持的外层／正文 | 本轮调整 |
-|---|---|---|
-| `manage_monitor.cancel` 找到未关闭对象并关闭 | 外层 SUCCESS；`status:CANCELLED`；`cancellation_outcome:cancelled` | 安全条件满足后内部登记可删除 |
-| 登记已关闭但仍因结算保留 | 既有 `already_terminal` 结果 | 不为立即消除该结果而越过安全条件 |
-| cancel 不存在或当前范围不可见 | 外层 SUCCESS；`status:REJECTED`；`cancellation_outcome:not_found`；原 target | 添加通用 `message` |
-| `query_monitors` 精确 target 不存在、已关闭或不可见 | 外层 ERROR；既有 `status:REJECTED`、`reason:MONITOR_UNAVAILABLE` | 添加相同含义的通用 `message` |
-
-模型可见提示采用：
-
-> The monitor is unavailable in the current scope. It may have been cancelled, expired, or reclaimed. Use query_monitors without a target to list currently visible monitors.
-
-提示说明的是可能原因，不断言对象确实存在过，也不承诺列举能找回已删除对象。不得为了精确说明 `not_found` 的来源读取其他 Work／Host 的登记、建立 tombstone，或区分“外部对象存在但无权看见”。
-
-实际提示放在现有 tool runtime 结果构造处，复用统一正文渲染；成功关闭不冒充 Process 已停止。既有 renderer 对附加 message 正常展示，无新 UI。
-
-### 4.2 参数与 public 行为
-
-输入 schema、target、action、权限、ROOT／Subagent 范围不变。再次取消已物理删除的 ID 返回 `not_found` 是明确接受的产品行为，不要求无限期返回 `already_terminal`。原始格式不合法的 ID 仍在参数校验层拒绝，不能统一伪装成已过期。
+Cell 状态观察、普通环境索引与投影沿 §6；用户 UI 查看/停止路径保留。正式输出在队列 FULL 后释放本地计费，transcript 消费不再 ACK；物理执行和已接纳作用结算保持。
 
 ## 5. Process：结束后到期自动尝试回收
 
@@ -189,7 +116,7 @@ Work 已结束不代表已冻结通知的写入结果已经确定。Host 的 Mon
 - 取得仍属于当前 Registry／owner 的精确 state 与登记本次读取保护，应处于一致的锁／现有使用计数协调边界内。
 - 物理 join、安全计数检查、标记 PRUNABLE 和最终移除之间须再次核对对象身份，防止旧引用绕过已关闭的读取接纳。
 - 复用现有 observation lease／inflight read 及物理状态，不新增第二套租约表、generation 或恢复记录。
-- 核对 `_owned`、元数据 query／列表、poll／wait、Monitor 订阅、snapshot 与 Host release 的实际使用点；不只修一个调用入口。
+- 核对 `_owned`、元数据 query／列表、poll／wait、snapshot 与 Host release 的实际使用点；不只修一个调用入口。
 - 保持明确锁顺序，不在会阻止读取释放的锁内等待长时间 join；超时或失败沿现有实际结果处理。
 
 回收过程中不得读取并消费业务输出，不创建 artifact 副本。已经回收的 Process 不能由 query 自动重建或扫描操作系统找回。
@@ -213,22 +140,18 @@ Work 已结束不代表已冻结通知的写入结果已经确定。Host 的 Mon
 | 对象 | 主动进入条件 | 主动排除 | 保留的最小公开事实 |
 |---|---|---|---|
 | Process | 现有物理存活判断为真，包括仍存活的进程组／interop | 已结束且仅保留历史记录的对象 | PROCESS target、`status:running` |
-| Monitor | 当前调用方可见，状态 ACTIVE 或 DORMANT | CLOSED，无论内部是否尚待结算删除 | MONITOR target、PROCESS target、state、既有 pending_observation |
-| Cell | queued／running；或终态但尚未确认终态；或 output 非空；或内部 pending 字典非空 | 终态已确认、无输出、无 pending，仅剩 observation／VM 释放等内部收尾的对象 | CELL target、state、has_unread_output、既有 pending_calls |
+| Cell | queued／running；或尚有未 FULL 输出/immutable UNKNOWN 接纳；或内部 pending 字典非空 | 终态、无未 FULL 输出、无 pending，仅剩 VM 释放等内部收尾的对象 | CELL target、state、has_unread_output、既有 pending_calls |
 | Agent | 属于调用方可查询范围，`current_work_id IS NOT NULL OR queued_count > 0` | 尚保留但没有当前或排队 Work 的闲置 Agent | AGENT target、current_work 的 WORK target 或 null、queued_count |
 | TODO | 沿当前 ROOT run 的完整冻结快照 | 原 owner 判定没有当前清单时为空 | 原顺序、status、text 和原 counts |
 
-Process 的命令预览／cwd、Agent 名称预览不再作为对象候选行的必需内容，完整信息由原 query 提供。Monitor 与当前 Work／Process 的直接关联、Agent 当前 Work 以及 Cell 的未读／pending 状态仍保留，不能只输出难以区分的一串裸字符串。
+Process 的命令预览／cwd、Agent 名称预览不再作为对象候选行的必需内容，完整信息由原 query 提供。Agent 当前 Work 以及 Cell 的未读／pending 状态仍保留，不能只输出难以区分的一串裸字符串。
 
-Cell pending_calls 保持公开字段原有含义，不把 prepare 改计入它以凑摘要。进入条件由 CodeModeHost 根据完整内部 pending 与 terminal_delivered 判断；不向模型暴露 source attempt、回调、执行快照或 Promise 内容。列出的终态 Cell 仍可能需要一次既有 wait 来完成终态／输出观察，即使公开未读数量为空；此规则由现有 Cell 工具／Skill 使用指导承担，不额外增加每份摘要的固定说明。
+Cell pending_calls 保持公开字段原有含义，不把 prepare 改计入它以凑摘要。进入条件由 CodeModeHost 根据完整内部 pending 与真实队列接纳状态判断；不向模型暴露 source attempt、回调、执行快照或 Promise 内容。wait 只等状态，不领取正文或完成输出 ACK；正式输出在共同队列主动接纳。
 
-所有对象身份使用既有完整 target。当前 `code_cells` 中的裸 cell_id 改为 CELL target；不添加旧字段双读或别名。输出 key 可沿用 `terminal_processes`、`terminal_monitors`、`agents`、`code_cells`、`todos`、`todo_counts`，但每项字段与上表一致。
+所有对象身份使用既有完整 target。当前 `code_cells` 中的裸 cell_id 改为 CELL target；不添加旧字段双读或别名。输出 key 可沿用 `terminal_processes`、`agents`、`code_cells`、`todos`、`todo_counts`，但每项字段与上表一致。
 
-### 6.2 调用方范围与 Monitor 采集修复
 
 - ROOT 的 Process 使用既有 Host owner 范围；Subagent handoff 继续按真实 origin session 限定。不得为了与 Process query 的共享 owner 范围完全一致而扩大 Subagent 摘要。
-- Monitor ROOT 沿全 Host 可见范围；Subagent 必须同时传真实 `agent_id=session_id` 和本次真实 `work_turn_id` 给 coordinator 现有过滤入口。
-- 当前 Subagent handoff 无参冻结全部 Monitor 后读取不存在的 `session_id` 字段，这条错误路径在本轮替换。不得通过 `.get()` 跳过所有记录掩盖问题，也不能退化成仅 Agent、不限 Work 的过滤。
 - 当前 freezer 接口不足以携带真实 Work turn 时，从已有 compaction scope／调用上下文显式传入；不借“最近一次调用”缓存猜 turn，不新增当前 Work 映射。
 - ROOT 的 Agent 范围为其当前成员；Subagent 的 Agent 范围为自身及已知成员，不获得 ROOT 全库存或 Cell 库存。Cell 只来自当前 CodeModeHost；已知集合以 [已知对象与交接规格](PULSARA_SUBAGENT_KNOWN_AGENTS_QUERY_AND_HANDOFF_IMPLEMENTATION_SPEC.zh.md) 为准。
 - 这次观察的 scope 不授权之后的工具调用。query 继续检查执行时的权限、范围和存活性。
@@ -245,7 +168,7 @@ handoff 复用该 owner 的只读范围和活跃筛选，不为 handoff 新增�
 
 ### 6.4 Cell 由 owner 生成状态观察
 
-现有 `snapshot_cell_index()` 和 `capture_cell()` 都不足以独立判断 terminal_delivered 与全部 pending。由 CodeModeHost 在原事件循环同步观察中生成本次 handoff 事实，直接执行 §6.1 谓词；复用既有 target／公开字段构造，不在 tool runtime 用不完整公开 index 做二次猜测。
+现有 `snapshot_cell_index()` 和 `capture_cell()` 都不足以独立判断 真实输出接纳状态与全部 pending。由 CodeModeHost 在原事件循环同步观察中生成本次 handoff 事实，直接执行 §6.1 谓词；复用既有 target／公开字段构造，不在 tool runtime 用不完整公开 index 做二次猜测。
 
 候选集按 canonical Cell ID 排序；不得调用 observe／acknowledge、占用输出 reservation、阻止 forget 或以源码存在为由恢复已回收 Cell。捕获后 Cell 可正常回收，快照不保证后续 wait/query 一定成功。
 
@@ -257,7 +180,7 @@ handoff 复用该 owner 的只读范围和活跃筛选，不为 handoff 新增�
 
 ROOT bypass 是本方案主要使用场景。非 bypass／Plan 仍可能不提供 Agent／Cell query；不宣称查询始终可用，不要求模型为取库存自动改变权限或绕过 Plan 批准／退出规则。模式切换不取消对象原执行快照，也不迫使摘要把所有闲置对象补回来。
 
-查询不会找回已删除 Monitor、已回收 Cell、已 prune Process 或已删除 Agent。详情和状态是查询当时的事实，不能保证重现摘要冻结时的库存。TODO 没有只读 query，完整清单继续按原 handoff 合同保留。
+查询不会找回已回收 Cell、已 prune Process 或已删除 Agent。详情和状态是查询当时的事实，不能保证重现摘要冻结时的库存。TODO 没有只读 query，完整清单继续按原 handoff 合同保留。
 
 ### 6.6 删除普通模型环境 Cell 索引，保留用户控制
 
@@ -279,17 +202,17 @@ Agent 无 pending Work／running turn 后进入原 idle 状态；同一 idle 起
 
 本轮不新增 Agent 年龄、Work 总量、调用次数或历史长度 cap，不把物理卸载与从 handoff 排除绑定成同一个状态。Agent 是否进入 handoff 只由 §6.1 的当前／排队 Work 决定；闲置但未删除的 Agent 仍可按既有权限查询。
 
-## 8. PMCA 预算与完整 TODO 解耦
+## 8. PCA 预算与完整 TODO 解耦
 
 ### 8.1 唯一局部上限与计量口径
 
-**3,200 tokens（十进制 3.2k）仅限制 PMCA，不限制完整 handoff。** PMCA 是 Process、Monitor、Cell、Agent 的状态条目；`todos` 和 `todo_counts` 完整保留，不占用该局部额度，不因内容含引号、Unicode 或转义而被裁剪。
+**3,200 tokens（十进制 3.2k）仅限制 PCA，不限制完整 handoff。** PCA 是 Process、Cell、Agent 的状态条目；`todos` 和 `todo_counts` 完整保留，不占用该局部额度，不因内容含引号、Unicode 或转义而被裁剪。
 
-使用当前 `PulsaraHeuristicTokenEstimatorV3`，定义一个无 I/O 的 PMCA 计量视图：从最终 handoff 正文移除 `todos` 与 `todo_counts` 两个字段，保留四类对象数组及本次实际输出的承接／超限说明，然后沿原 source encoder 和 adapter 编码成 ordered input item。这个视图的 V3 估值须 ≤3,200，包含 JSON、说明、runtime observation 字符串封装和原有 message framing。不得只计算未封装正文或逐行估值相加。
+使用当前 `PulsaraHeuristicTokenEstimatorV3`，定义一个无 I/O 的 PCA 计量视图：从最终 handoff 正文移除 `todos` 与 `todo_counts` 两个字段，保留三类对象数组及本次实际输出的承接／超限说明，然后沿原 source encoder 和 adapter 编码成 ordered input item。这个视图的 V3 估值须 ≤3,200，包含 JSON、说明、runtime observation 字符串封装和原有 message framing。不得只计算未封装正文或逐行估值相加。
 
 这个视图仅用于预算计算，不单独发送、不持久化、不新增 source 或对象 owner。实际发送的仍是一份含完整 TODO 的 handoff。最终完整消息的 V3 估值另外交原输入编译链处理，可以高于 3,200；不把 TODO 的 4,024-token 已知反例当成 TODO 最大值，也不另设 6,400 或 7,224 的隐含总上限。
 
-复用现有 source encoder、adapter 的纯文本消息 lowering 与 `estimate_wire_json_component`；将计量能力通过既有 owner 传入纯投影器或复用公共无 I/O helper，不复制一套 token 公式，也不使纯 renderer 依赖具体 provider 客户端。当前两协议编码结果相同；验收仍分别经过 Chat／Responses serializer。若两协议表示成本不同，PMCA 视图使用两者较大值；完整消息分别按实际协议计入总输入预算。
+复用现有 source encoder、adapter 的纯文本消息 lowering 与 `estimate_wire_json_component`；将计量能力通过既有 owner 传入纯投影器或复用公共无 I/O helper，不复制一套 token 公式，也不使纯 renderer 依赖具体 provider 客户端。当前两协议编码结果相同；验收仍分别经过 Chat／Responses serializer。若两协议表示成本不同，PCA 视图使用两者较大值；完整消息分别按实际协议计入总输入预算。
 
 取消 runtime handoff 专属的 32,768-byte 检查、字节预算配置及其参数／调用链；不新增同义 token 配置旋钮、KiB 兜底或旧字段 fallback。其他来源、传输与模型的现有物理边界不在本轮删除范围。
 
@@ -305,34 +228,34 @@ Agent 无 pending Work／running turn 后进入原 idle 状态；同一 idle 起
 
 **仅当符合 §6 状态条件的对象因本节预算没有完整展示时，再附带以下一句：**
 
-> Additional active or pending objects are omitted; when available, use query_processes, query_monitors, query_cells, or query_agents without a target to discover currently retained objects.
+> Additional active or pending objects are omitted; when available, use query_processes, query_cells, or query_agents without a target to discover currently retained objects.
 
 Subagent 使用同一说明但不列 `query_cells`，该实际文案同样参与预算测量。
 
-PMCA 未超限时完全不输出这句，也不输出零遗漏提示、遗漏计数或额外查询说明。两段文字均计入 PMCA 的 3,200 上限。TODO 大小本身不触发超限句，也不挤占 PMCA 名额。
+PCA 未超限时完全不输出这句，也不输出零遗漏提示、遗漏计数或额外查询说明。两段文字均计入 PCA 的 3,200 上限。TODO 大小本身不触发超限句，也不挤占 PCA 名额。
 
 正文使用六个既有数组／计数字段，先渲染 canonical JSON，再以换行追加承接说明；有预算省略时再以换行追加超限说明，整体作为一个 source 的 text body。不是三个独立 source，也不新增摘要持久字段。
 
-如果状态筛选后的 PMCA 候选全空，而且 TODO 没有任何条目（包括无快照或空清单），沿原路径返回 `None`／空 source，由 coordinator 使用既有 `EXPLICIT_EMPTY`，不单独追加承接句。ROOT／Subagent 均按该条件处理。
+如果状态筛选后的 PCA 候选全空，而且 TODO 没有任何条目（包括无快照或空清单），沿原路径返回 `None`／空 source，由 coordinator 使用既有 `EXPLICIT_EMPTY`，不单独追加承接句。ROOT／Subagent 均按该条件处理。
 
-有 TODO 而 PMCA 全空时，仍生成含完整 TODO、空对象数组和承接句的 handoff；有 PMCA 而无 TODO 时同样生成。判断是否有 PMCA 以裁剪前的合格候选为准，不能因为最终裁剪为空而误报没有交接内容。承接句只随实际存在的 handoff 提供，具体状态仍由原 owner 与执行时检查负责，不借文字授予 liveness 或执行权限。
+有 TODO 而 PCA 全空时，仍生成含完整 TODO、空对象数组和承接句的 handoff；有 PCA 而无 TODO 时同样生成。判断是否有 PCA 以裁剪前的合格候选为准，不能因为最终裁剪为空而误报没有交接内容。承接句只随实际存在的 handoff 提供，具体状态仍由原 owner 与执行时检查负责，不借文字授予 liveness 或执行权限。
 
 ### 8.3 确定性装箱
 
-1. 按 §6 的真实状态和 scope 筛选，冻结完整 TODO；先按 §8.2 判定是否需要生成 handoff。PMCA 计量视图只预留四类数组、原消息封装和承接说明，不预扣 TODO 预算。
-2. 各对象类型按完整 canonical ID 稳定排序，以 Process、Monitor、Cell、Agent 为固定轮转次序，每轮从每个非空类型取一项；某类耗尽后跳过。该顺序是确定性的展示规则，不推断任务重要性，不先把全部 Cell 装满再考虑 Agent。
-3. 每次试加一个完整条目，对整份编码后的 PMCA 计量视图重新计量。全部符合条件的候选均能装入时，保留它们，只输出承接说明。
+1. 按 §6 的真实状态和 scope 筛选，冻结完整 TODO；先按 §8.2 判定是否需要生成 handoff。PCA 计量视图只预留四类数组、原消息封装和承接说明，不预扣 TODO 预算。
+2. 各对象类型按完整 canonical ID 稳定排序，以 Process、Cell、Agent 为固定轮转次序，每轮从每个非空类型取一项；某类耗尽后跳过。该顺序是确定性的展示规则，不推断任务重要性，不先把全部 Cell 装满再考虑 Agent。
+3. 每次试加一个完整条目，对整份编码后的 PCA 计量视图重新计量。全部符合条件的候选均能装入时，保留它们，只输出承接说明。
 4. 确认下一条符合条件的对象装不下时，标记本次存在预算省略，停止继续枚举，不为遗漏计数扫描后续全部 Agent 页。
-5. 加入超限说明，按装入的逆序移除末尾完整对象条目，直到**含两段说明、但不含 TODO 字段**的 PMCA 视图不超过 3,200。不得把 target、状态行或 JSON 字符串从中间截断。
-6. 将完整 `todos`／`todo_counts` 加入实际发送正文，原顺序和文字全部保留。FULL／COMPACT 使用相同完整正文；分别验证 PMCA 视图局部合规和完整实际消息的总输入成本，不再以 3,200 拒绝完整消息。
+5. 加入超限说明，按装入的逆序移除末尾完整对象条目，直到**含两段说明、但不含 TODO 字段**的 PCA 视图不超过 3,200。不得把 target、状态行或 JSON 字符串从中间截断。
+6. 将完整 `todos`／`todo_counts` 加入实际发送正文，原顺序和文字全部保留。FULL／COMPACT 使用相同完整正文；分别验证 PCA 视图局部合规和完整实际消息的总输入成本，不再以 3,200 拒绝完整消息。
 
 Agent 读取保留单页 50 的既有读取边界，按需取得下一页；第一页前的活跃筛选不能省略。一次采集开始后只操作已冻结／读取的事实，不为回退条目重新读取对象状态。采集期间对象可以按原生命周期变化，不新增库存快照或延寿机制。
 
-单纯 PMCA 对象过多触发裁剪与一句查询指引。合法 TODO 即使独立超过 3,200，也必须完整保留且不触发 PMCA 裁剪或局部失败；移除“所有合法 TODO 都能装入 3,200”的保证。没有 TODO 的 PMCA envelope 和两段说明应能装入局部预算，最终整个请求仍须满足真实输入边界。
+单纯 PCA 对象过多触发裁剪与一句查询指引。合法 TODO 即使独立超过 3,200，也必须完整保留且不触发 PCA 裁剪或局部失败；移除“所有合法 TODO 都能装入 3,200”的保证。没有 TODO 的 PCA envelope 和两段说明应能装入局部预算，最终整个请求仍须满足真实输入边界。
 
 ### 8.4 省略语义与权限
 
-- 完整删除 runtime handoff 的 `omitted` 字段，包括其中 `agents`／`code_cells` 等所有分类 count；不输出空块、零值或改名后的替代字段，也不扩展 Process／Monitor 的省略计数。同步删除专为该块维护的计数初始化、递增／递减、序列化、说明和仅冻结旧形状的断言。
+- 完整删除 runtime handoff 的 `omitted` 字段，包括其中 `agents`／`code_cells` 等所有分类 count；不输出空块、零值或改名后的替代字段，也不扩展 Process 的省略计数。同步删除专为该块维护的计数初始化、递增／递减、序列化、说明和仅冻结旧形状的断言。
 - 删除 Agent 数组中的 `{omitted_agents,next_cursor}` 特殊条目。摘要不发送遗漏数、候选总数或剩余页数；实际 query 工具自己的分页／结果合同继续独立工作。
 - 摘要只在确有预算裁剪时输出 §8.2 的一句查询提示，不为生成精确 count 扫描全部库存，不维护新遗漏统计或关闭历史。
 - 按状态主动排除的闲置对象不触发超限说明。必须有实际符合条件、但装不下的下一条对象，才能将裁剪称为预算省略。
@@ -347,7 +270,7 @@ handoff 仍是同 Host 的 untrusted runtime observation，复用现有 collecto
 
 启用 §8 的 wire 形状时，同步修改 `context_sources.py` 与 compiler 的 source metadata 镜像，以及纯 renderer 的既有 projection 标识。沿现有 provider source 兼容边界使用一版新合同；不新建 fingerprint 字段、注册表，不保留 old/new 双输出或旧 payload fallback。历史已接受内容不重写。
 
-保留 MUST_KEEP 和现有 FULL／COMPACT source 接口，两种 mode 使用同一份完整正文，其中仅 PMCA 视图受 3,200 上限约束。预算处理按 §8 联动，移除本 source 旧字节参数与检查；普通环境 Cell 索引及其专用字节装箱按 §6.6 删除，不再保留另一条自动 Cell 状态投影。编译成功、successor 被采用且实际发送后，才算新 source 对模型可见；仅 freezer 返回成功不是交付证明。
+保留 MUST_KEEP 和现有 FULL／COMPACT source 接口，两种 mode 使用同一份完整正文，其中仅 PCA 视图受 3,200 上限约束。预算处理按 §8 联动，移除本 source 旧字节参数与检查；普通环境 Cell 索引及其专用字节装箱按 §6.6 删除，不再保留另一条自动 Cell 状态投影。编译成功、successor 被采用且实际发送后，才算新 source 对模型可见；仅 freezer 返回成功不是交付证明。
 
 普通环境 source 的模型可见字段减少时，同步现有 collector／compiler 的合同元数据和说明，按现有 snapshot-on-change 后缀观察／合法 successor 路径提供新值，不回写既有历史、不修改已安装 SYSTEM／tools。移除所有专为该普通索引配置的回调和预算引用，同时保留用户控制所需索引获取方法。
 
@@ -357,15 +280,12 @@ SYSTEM 中删除关于 omitted task counts 的旧说法，改为准确的状态�
 
 | 模块 | 主要文件／owner | 必须完成的修改 | 不得越界 |
 |---|---|---|---|
-| Monitor 回收 | `terminal_process/monitor.py` | CLOSED 删除条件、三处结算触发、安全迭代／晚到回调／关闭 | 不新增历史、确认协议或计时强删 |
-| Monitor 旧通知确认 | `conversation_kernel/host.py` 的 Monitor 投递循环、既有 `safe_point.py` 确认路径 | 在活动 Work 门禁前确认已有 immutable attempt；UNKNOWN 结束本次尝试并保留，避免 close／continue 空转 | 不向新 Work 转发旧通知，不伪造 NONE，不增加确认协议 |
-| Monitor 结果提示 | `conversation_kernel/tool_runtime.py`，既有 renderer | cancel not_found／query unavailable 的通用 message | 保持原外层分类、reason/outcome、权限 |
 | Process 到期维护 | `terminal_process/manager.py` | 唯一维护线程、到期与受阻重查、release／force／shutdown | 不用执行超时杀活进程、不重写保留策略 |
 | Process 读取协调 | 同上及 `terminal_process/output.py` 必要最小接线 | 精确 state 获取、读取保护与 prune 删除原子协调 | 复用现有计数，不建并行租约系统 |
-| Cell handoff 事实 | `code_mode/host.py`，必要的现有 contracts | owner 根据完整 pending／terminal_delivered 筛选 | 不改 VM、记账、ack、stop、forget 合同 |
+| Cell handoff 事实 | `code_mode/host.py`，必要的现有 contracts | owner 根据完整 pending／输出接纳状态 筛选 | 不改 VM、记账、ack、stop、forget 合同 |
 | Agent 活跃读取 | `_repository/subagents.py`、`subagents/collaboration_api.py` | ROOT 内先筛状态再分页；移除伪 Agent 分页条目 | 不改公共 query schema、两段退役或表结构 |
-| handoff 组装 | `tool_runtime.py`、`compaction/runtime_handoff.py` | scope、目标形状、稳定轮转、PMCA 3,200-token 装箱；TODO 无损追加、空事实返回空 source | 不新增对象数量限制或遗漏计数，不以局部 cap 裁剪 TODO |
-| Subagent compaction 接线 | 既有 compaction scope／coordinator 调用链 | 真实 session+Work turn 传 Monitor owner | 不从不存在的输出字段过滤，不扩大范围 |
+| handoff 组装 | `tool_runtime.py`、`compaction/runtime_handoff.py` | scope、目标形状、稳定轮转、PCA 3,200-token 装箱；TODO 无损追加、空事实返回空 source | 不新增对象数量限制或遗漏计数，不以局部 cap 裁剪 TODO |
+| Subagent compaction 接线 | 既有 compaction scope／coordinator 调用链 | 使用真实会话及已知成员范围读取 Agent | 不扩大范围 |
 | 输入 source 与说明 | `context_sources.py`、`model_input/compiler.py`、`ports/system_prompt.py` | 合同镜像及准确使用指导 | 原前缀边界不变，不扩权限 |
 | 普通环境索引删除 | `context_sources.py`、Host collector 注入、相关说明与测试 | 删除模型环境 `cell_index`／省略字段及专用采集／筛选／预算链；保留其余环境信息 | 不删除压缩 `code_cells`，不删除用户查看／停止 Cell 的数据接口 |
 | 用户控制保留 | `CodeModeHost.snapshot_cell_index()`、Host／gateway／proto／desktop bridge 现有路径 | 查看及精确停止继续使用原对象和索引数据 | 不改 UI 外部协议，不把 UI 列表反向注入模型 |
@@ -378,25 +298,19 @@ SYSTEM 中删除关于 omitted task counts 的旧说法，改为准确的状态�
 
 | 组 | 必须证明 |
 |---|---|
-| Monitor 普通关闭 | cancel／expiry／completion／Work close 后立即退出 query 和摘要；无剩余依赖时内部记录删除 |
-| Monitor 注册竞争 | 注册结果结算前关闭，token 仍能 committed／discarded 正确退役；两种顺序最终无残留；冲突身份仍拒绝 |
-| Monitor 安装竞争 | freeze 后取消、UNKNOWN 后 FULL／NONE／conflict；未决 attempt 不丢，明确结算后删除；晚到回调无复活 |
-| Monitor Work 结束 | UNKNOWN 后 Work 结束／关闭：旧 attempt 仍可确认并最终结算删除；同一次投递尝试不反复选择同一 ID、不阻塞其他登记；不发布旧草稿到下一 Work |
-| Monitor 并发关闭 | 同时关闭多登记、不修改正在遍历的字典；Host 取 scope／attempt 与清理竞争不丢既有结算 |
-| Monitor 缺失提示 | 删除后 cancel 的 not_found 和 query unavailable 具有 message；错误 ID 仍拒绝；foreign Work/Host 不泄露存在性；不错误声称当前调用取消了进程 |
 | Process 到期 | 没有新 exec_process 时，已结束记录也能到期移除；到期前可查询，仍活进程／子进程不被误杀 |
 | Process 暂缓 | 观察 lease、inflight read、物理 join 未完成时保留；解除后无需新启动即可重试并删除；受阻期间无空转 |
 | Process 原子性 | 读取先接纳则读取可完成且回收暂缓；回收先赢则新读不可用；metadata／poll／wait／订阅／release 同样受保护 |
 | Process 线程关闭 | 普通 release、force、shutdown 都收束维护线程；共享 Subagent 关闭不误关；并发接纳与线程退出不重建多个 worker |
 | Process 保留语义 | 原 TTL／32 条压力策略及输出 coverage 保持，没有新增执行寿命或逻辑总量限制 |
-| Cell 状态筛选 | queued、running、终态未确认、未读输出、prepare-only pending 均选入；仅剩内部收尾可排除；筛选不 ack／不占 observation |
-| Cell 原合同 | 终态无人领取仍保留；资源错误不撤销已发生效果；query/source/stop/输出失败重读及原正常回收继续成立 |
+| Cell 状态筛选 | queued、running、终态未确认、尚未 FULL 输出、prepare-only pending 均选入；仅剩内部收尾可排除；筛选不 ack／不占 observation |
+| Cell 原合同 | 未 FULL 输出或未知接纳仍保留，FULL 释放本地计费；静默终态无需模型 ACK；资源错误不撤销实际效果，源码跨退役继续可读 |
 | Agent 状态筛选 | 前 50 个闲置、后续活动的 Agent 不漏；当前／排队 Work 与等待依赖均按真实派生值；闲置对象仍可 query |
 | Agent 退役 | 原 1 小时卸载／3 天删除及 idle 安全门禁不变；不按摘要选择改变 idle 起点 |
-| Scope | ROOT／Subagent Process 范围、Monitor 当前 Agent+Work 隔离；有其他 Work 的 Monitor 时 Subagent 压缩不 KeyError、不泄露 |
-| TODO／Plan／权限 | 完整 TODO 顺序和 counts 保持；合法大量引号反例由真实 parser 接受且无损发送，完整消息可 >3,200；相同 PMCA 在有／无 TODO 时选择结果一致；Plan source 与写入拒绝保持；非 bypass 不因此获得 Agent／Cell query |
-| 摘要／预算 | 两协议的无 TODO PMCA 计量视图均 ≤3,200 V3 tokens，含承接句／可选超限句和封装；实际完整正文另计总预算；边界恰为3,200、试加一项超限、因补句而回退多项、不同类型轮转均正确 |
-| 摘要说明 | 每份实际 handoff 都有承接句；PMCA 全空且无 TODO 时为 None／EXPLICIT_EMPTY、不附承接句；仅 TODO 或仅 PMCA 时正常生成；能全装时无查询提示，TODO 大小不误报 PMCA 超限；所有情况下均无 omitted 字段、分类遗漏 count、替代统计字段或伪 Agent 分页条目 |
+| Scope | ROOT／Subagent Process、Agent 已知范围及 ROOT Cell 范围保持，不扩大查询权限 |
+| TODO／Plan／权限 | 完整 TODO 顺序和 counts 保持；合法大量引号反例由真实 parser 接受且无损发送，完整消息可 >3,200；相同 PCA 在有／无 TODO 时选择结果一致；Plan source 与写入拒绝保持；非 bypass 不因此获得 Agent／Cell query |
+| 摘要／预算 | 两协议的无 TODO PCA 计量视图均 ≤3,200 V3 tokens，含承接句／可选超限句和封装；实际完整正文另计总预算；边界恰为3,200、试加一项超限、因补句而回退多项、不同类型轮转均正确 |
+| 摘要说明 | 每份实际 handoff 都有承接句；PCA 全空且无 TODO 时为 None／EXPLICIT_EMPTY、不附承接句；仅 TODO 或仅 PCA 时正常生成；能全装时无查询提示，TODO 大小不误报 PCA 超限；所有情况下均无 omitted 字段、分类遗漏 count、替代统计字段或伪 Agent 分页条目 |
 | 预算 hard cut | handoff 旧 KiB 配置、参数和重复检查全部删除，无别名／fallback；FULL／COMPACT 同文且同口径；整个请求预算检查仍生效 |
 | 普通环境删除 | 普通输入和 successor 的环境 source 均无 Cell 列表／省略字段或 provider 回调；工作区／时区事实仍可见；普通 Cell 状态变化不再单独改变环境 source；压缩 handoff 仍提供筛选后的 CELL target |
 | 用户 Cell 控制 | 用户 UI 仍能列出、查看和精确停止同一 Cell；gateway／proto／bridge 原协议不变；删除模型索引不删共享数据路径 |
@@ -409,43 +323,33 @@ SYSTEM 中删除关于 omitted task counts 的旧说法，改为准确的状态�
 
 ### 12.1 顺序
 
-1. 完成 Monitor 旧通知优先确认、安全删除与通用提示，验证 Work 结束／UNKNOWN、注册／安装竞争及范围。
 2. 完成 Process 到期维护及原子读取保护，验证无新启动时回收和全部关闭路径。
-3. 准备 Agent／Cell／Monitor 的 handoff owner 事实与状态／scope 测试；删除普通模型环境的 Cell 索引，验证用户 UI 控制及其余环境事实保留。
-4. 接入 §8 的 PMCA 3,200-token 装箱、独立完整 TODO、空 source 条件与两段说明，更新 source metadata 和 V3 计量，删除旧字节预算链路。
+3. 准备 Agent／Cell 的 handoff owner 事实与状态／scope 测试；删除普通模型环境的 Cell 索引，验证用户 UI 控制及其余环境事实保留。
+4. 接入 §8 的 PCA 3,200-token 装箱、独立完整 TODO、空 source 条件与两段说明，更新 source metadata 和 V3 计量，删除旧字节预算链路。
 5. 完成真实 Host 压缩集成、受影响回归、代码审阅及代表性真实 provider 验证，再标记实施完成。
 
 ### 12.2 真实 Host 场景
 
-至少构造同一 ROOT 下的运行／结束 Process、未关闭／待结算关闭 Monitor、活动／未领取终态／仅收尾 Cell、活动／闲置 Agent 和完整 TODO。触发 mid-turn compaction 并采用 successor，检查**实际发给模型**的 source 与 §6 状态及 §8 最终预算合同一致。
+至少构造同一 ROOT 下的运行／结束 Process、未关闭／待结算活动／未领取终态／仅收尾 Cell、活动／闲置 Agent 和完整 TODO。触发 mid-turn compaction 并采用 successor，检查**实际发给模型**的 source 与 §6 状态及 §8 最终预算合同一致。
 
-另外验证 Subagent 当前 Work 压缩，包含 ROOT 和其他 Work 的 Monitor，证明范围正确且不会因错误字段读取失败。读取源码／元数据不消费输出；既有 wait 可继续取得原结果；原对象不因压缩重新执行。Plan 权限及上下文依原专门 source 保持。
+另外验证 Subagent 当前 Work 压缩，证明 Process/已知 Agent 的范围正确。读取源码/元数据不消费输出；wait 只返回真实状态；原对象不因压缩重新执行。Plan 权限及上下文依原专门 source 保持。
 
-验证普通输入中只有环境事实、没有 Cell 索引，而压缩 handoff 仍能提供 CELL target；用户 UI 仍可查看／停止该对象。另覆盖 PMCA／TODO 全空、有 TODO 无 PMCA，以及合法 TODO 令完整 source 超过 3,200 的情况。后者不得裁剪 TODO、挤掉相同 PMCA 或触发局部 token 错误。
+验证普通输入中只有环境事实、没有 Cell 索引，而压缩 handoff 仍能提供 CELL target；用户 UI 仍可查看／停止该对象。另覆盖 PCA／TODO 全空、有 TODO 无 PCA，以及合法 TODO 令完整 source 超过 3,200 的情况。后者不得裁剪 TODO、挤掉相同 PCA 或触发局部 token 错误。
 
 ### 12.3 代表性 provider 验证
 
-沿用户既有实验偏好，用保存配置中的 DeepSeek `deepseek-flash`，主模型 reasoning effort `max`，通过两种 OpenAI API 协议各完成一个聚焦场景：读取压缩后的活动对象状态，使用既有 query 查当前仍保留的对象，并正确理解 Monitor 的 unavailable/not_found 提示。允许模型正常查询、纠错，不设零误调用门槛，也不重跑全部旧工具组合。
+沿用户既有实验偏好，用保存配置中的 DeepSeek `deepseek-flash`，本轮主模型 reasoning effort `high`，通过已选 Chat Completions 完成聚焦场景：读取压缩后的活动对象状态，使用既有 query 查当前仍保留的对象。允许模型正常查询、纠错，不设零误调用门槛，也不重跑全部旧工具组合。
 
-独立 `context_compaction_summary` 沿用所属请求的完整 binding／reasoning 与合法准备得到的目标；本场景与主模型共同使用所选 `max`，并分别记录实际调用。手动 idle 压缩使用操作接纳时的 session 选择，配置与输入安全点遵守 [压缩配置实施规格](PULSARA_COMPACTION_MODEL_CONFIGURATION_AND_MANUAL_IDLE_ONLY_IMPLEMENTATION_SPEC.zh.md)。
+独立 `context_compaction_summary` 沿用所属请求的完整 binding／reasoning 与合法准备得到的目标；本场景与主模型共同使用所选 `high`，并分别记录实际调用。手动 idle 压缩使用操作接纳时的 session 选择，配置与输入安全点遵守 [压缩配置实施规格](PULSARA_COMPACTION_MODEL_CONFIGURATION_AND_MANUAL_IDLE_ONLY_IMPLEMENTATION_SPEC.zh.md)。
 
 模型连接、凭据与 PostgreSQL 按 `LocalSettingsStore`／`require_pulsara_home()` 及现行生产注入 owner 读取；隔离时复用只读设置注入和已核实的本地可丢弃数据库，不修改保存设置，不导出秘密。真实提示、响应、参数、业务结果、原失败与修正轮保留，仅精确移除实际凭据。
 
 报告区分接口接受、模型参数、实际业务效果与 source 交付；没有采用 successor 不算验证压缩后输入。记录实际 usage 与前缀，不由摘要行数下降推断 token 改善。若必要配置或资源不足，明确未验证范围，不能标为全部通过。
 
-## 13. 完成条件与验收结果
+## 13. 完成条件与证据
 
-Monitor／Process 可按各自合同独立完成和验收。Cell 不加新 cap、Agent 两段退役保留、状态筛选谓词与权限范围均已明确。
+Process 原保留策略、Agent 两段退役、普通环境无 Cell 索引和完整 TODO 合同继续成立。Cell 正式输出只经共同队列接纳，未 FULL/UNKNOWN 必须由原 owner 收束；静默终态无需模型 ACK，源码阅读不保活运行对象。
 
-PMCA 预算为 3,200 个 V3 启发式 tokens，含 PMCA 视图的封装和说明；TODO 与 counts 始终完整保留且不受该局部 cap 限制。PMCA 全空且无 TODO 时为空 source；实际存在的 handoff 承接压缩前工作，仅 PMCA 预算省略时补一句查询提示。
+PCA 预算为 3,200 个 V3 启发式 tokens，含三类对象的封装与说明；TODO/counts 完整保留，不受局部额度限制。全空时为空 source，仅实际预算省略时补一句查询提示。保持 cold/明确 adopted successor 边界及已有 epoch 的精确前缀。
 
-Monitor 在 Work 结束后仍先确认旧 immutable attempt 再安全删除，UNKNOWN 不空转；普通模型环境 Cell 索引删除，压缩 CELL target 和用户 UI 查看／停止接口保留。上述合同连同权限、原前缀边界、Process 回收及完整输入预算均已完成要求验收，证据与范围见 [总交付报告](output/runtime-handoff-retirement-20261030/REPORT.zh.md)。
-
-验收结果：
-
-- [真实 Host 集成](output/runtime-handoff-retirement-20261030/INTEGRATION.zh.md)：ROOT 混合对象／合法大 TODO、仅 TODO、全空、Plan及 Subagent 当前真实 Work，双协议共10项通过；实际采用 successor并发送serializer source，完整输入／PMCA分别计量，原对象与前缀连续。
-- [真实 provider](output/runtime-handoff-retirement-20261030/provider/REPORT.zh.md)：两协议33次HTTP200、27对同epoch精确前缀，PMCA各283；实际查询与连续执行通过，实际模型参数及原harness和transport失败保留在报告中。
-- Monitor／Process／Agent／Cell owner、普通环境和受影响回归分别见总报告链接；ROOT亲审发现的读取／关闭竞态、callback误杀和本地新轮启动失败reservation泄漏均已在原owner边界修复并验证。没有新增schema表列或durable oracle类别。
-- 独占本地测试／实验数据库与fixture资源已清理，未知／remote PostgreSQL在创建前拒绝；统一33个修改Python文件ruff及全工作树diff检查通过。
-
-这些是本规格定义的完成证据，不扩张为全仓、所有provider或所有配置均已验证。
+本轮激活状态与逐项证据见 [验收计划](output/unified-input-retry-20261031/verification-plan.zh.md)。既往资源实验见 [总交付报告](output/runtime-handoff-retirement-20261030/REPORT.zh.md)，只证明当时实际执行范围，不充当本轮新合同的通过证据。

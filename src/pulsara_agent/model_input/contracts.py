@@ -101,6 +101,7 @@ class CanonicalInputOriginKind(StrEnum):
     AGENT_INSTRUCTION = "AGENT_INSTRUCTION"
     AGENT_MATERIAL = "AGENT_MATERIAL"
     AGENT_MESSAGE = "AGENT_MESSAGE"
+    CELL_OUTPUT = "CELL_OUTPUT"
     PLAN_CONTINUATION = "PLAN_CONTINUATION"
     USER_CONTROL_FEEDBACK = "USER_CONTROL_FEEDBACK"
 
@@ -910,7 +911,7 @@ def validate_compaction_request_shape(
         FrozenProviderInputItemKind.PLAN_CONTINUATION: {
             CanonicalInputOriginKind.PLAN_CONTINUATION
         },
-        FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {None},
+        FrozenProviderInputItemKind.TERMINAL_OBSERVATION: {CanonicalInputOriginKind.CELL_OUTPUT},
     }
     allowed = origins.get(item_kind)
     if allowed is None or input_origin not in allowed:
@@ -1115,7 +1116,11 @@ class FrozenProviderInputItem:
         has_origin = self.item_kind in {
             FrozenProviderInputItemKind.USER,
             FrozenProviderInputItemKind.PLAN_CONTINUATION,
+            FrozenProviderInputItemKind.TERMINAL_OBSERVATION,
         }
+        if (self.item_kind is FrozenProviderInputItemKind.TERMINAL_OBSERVATION
+                and self.input_origin is not CanonicalInputOriginKind.CELL_OUTPUT):
+            raise ValueError("Cell runtime input requires its real origin")
         if (self.input_origin is CanonicalInputOriginKind.SCHEDULED_TASK) != (
             self.scheduled_input is not None
         ):

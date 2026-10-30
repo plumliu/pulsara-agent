@@ -279,3 +279,10 @@ it('preserves normal Tab navigation without an available follow-up, during compo
   expect(store.summary('one').text).toBe('我的草稿');
   expect(screen.queryByText('我的问题？')).toBeNull();
 });
+
+it('keeps one body Markdown context across an inline image when deciding skill candidates',async()=>{
+ const {editor,type}=setup();
+ act(()=>editor.commands.insertContent([{type:'text',text:'```js\n'},{type:'image',attrs:{assetId:'context-only'}},{type:'text',text:'\n'}]));
+ type('/pd');await new Promise(resolve=>setTimeout(resolve,30));expect(screen.queryByRole('option')).toBeNull();
+ act(()=>editor.commands.insertContent({type:'text',text:'\n```\n'}));type('/pd');expect(await screen.findByRole('option',{name:'pdf'})).toBeTruthy();
+});

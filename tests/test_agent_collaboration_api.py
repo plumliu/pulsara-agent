@@ -136,6 +136,11 @@ class RepositoryOwner:
     def query_agent_work(self, *, root_session_id, work_id, deadline_monotonic):
         return self.rows.get(work_id)
 
+    def read_agent_work_graph_facts(self, *, root_session_id, work_id, deadline_monotonic):
+        row = self.rows.get(work_id)
+        return None if row is None else {key: row[key] for key in
+            ("work_id", "agent_id", "status", "terminal_reason") if key in row}
+
     def list_agent_works(
         self, *, root_session_id, agent_id, cursor=None, limit=20, deadline_monotonic
     ):
@@ -372,6 +377,31 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
             tool_name=name, arguments=arguments, invocation_context=self.context
         )
         return result.public_value()
+
+    async def test_both_wait_branches_read_status_without_hydrating_result_bodies(self):
+        agent, work = self.add_work(status="completed", final="full query result")
+        def forbidden(**kwargs):
+            raise AssertionError("A status wait must not hydrate a complete Work result")
+        self.repo.query_agent_work = forbidden
+        for name, target in (("wait_agent", agent_target(agent)), ("wait_agent.works", work_target(work))):
+            waited = await self.call(name, {"targets": [target]})
+            self.assertEqual(waited["works"][0]["status"], "completed")
+            for body in ("instruction", "final", "diagnostic"):
+                self.assertNotIn(body, waited["works"][0])
+
+    async def test_run_receipt_never_leaks_final_from_fast_completed_admission(self):
+        original = self.repo.admit_agent_requests
+        def completes_before_return(*args, **kwargs):
+            rows = original(*args, **kwargs)
+            for row in rows:
+                row.update(status="completed", final="available only by explicit query")
+            return rows
+        self.repo.admit_agent_requests = completes_before_return
+        accepted = await self.call("run_agent", {"instruction": "quick task"})
+        self.assertEqual(accepted["status"], "completed")
+        self.assertNotIn("final", accepted)
+        actual = await self.call("query_agents", {"target": accepted["work"]})
+        self.assertEqual(actual["final"], "available only by explicit query")
 
     async def test_batch_uses_one_admission_and_rejection_never_wakes_scheduler(self):
         peers = prepare_batch_refs({"a": {}, "b": {}})
@@ -647,7 +677,11 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.wait_for(waiter, 1)
         self.assertEqual(result["state"], "settled")
         self.assertEqual(result["bindings"][0]["work"], work_target(original))
-        self.assertEqual(result["works"][0]["final"], "original final")
+        self.assertNotIn("final", result["works"][0])
+        self.assertNotIn("instruction", result["works"][0])
+        self.assertEqual(result["works"][0]["status"], "completed")
+        queried = await self.call("query_agents", {"target": work_target(original)})
+        self.assertEqual(queried["final"], "original final")
         self.assertNotIn("profile", result["works"][0])
         self.assertEqual(self.repo.rows[next_work]["status"], "running")
 

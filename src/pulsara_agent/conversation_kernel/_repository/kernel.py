@@ -1033,7 +1033,7 @@ class _RepositoryKernel:
                     item_kind = FrozenProviderInputItemKind.PLAN_CONTINUATION
                 else:
                     _validate_terminal_observation_content(body)
-                    origin = None
+                    origin = CanonicalInputOriginKind.CELL_OUTPUT
                     item_kind = FrozenProviderInputItemKind.TERMINAL_OBSERVATION
                 items.append(FrozenProviderInputItem(
                     item_kind=item_kind, source_entry_id=str(row["id"]),

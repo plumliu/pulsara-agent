@@ -26,7 +26,7 @@ The JS subset is:
 
 JS also has `tools.run_agent.batch(...)` and `tools.wait_agent.works(...)`, described
 in [Coordination](../agent-orchestration/coordination.md). Other native tools,
-including `view_image`, `query_monitors`, `manage_monitor`, memory, Plan, capability management,
+including `view_image`, memory, Plan, capability management,
 and the `exec_cell`, `query_cells`, and `manage_cell` controls, are called outside the script.
 
 ## Sequential and parallel calls
