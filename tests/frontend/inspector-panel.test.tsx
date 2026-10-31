@@ -177,6 +177,65 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
 }
 
 describe('InspectorPanel PR03 production navigation', () => {
+  it('keeps the process card in the transition destination while its fresh metadata is pending', async () => {
+    const load = vi.fn()
+      .mockResolvedValueOnce({ processes: [backgroundProcess] })
+      .mockImplementation(() => new Promise(() => {}));
+    const readLog = vi.fn();
+    const original = document.startViewTransition;
+    let view: ReturnType<typeof render>;
+    const transition = vi.fn(({ update }: { update: () => void }) => {
+      update();
+      const detail = view.container.querySelector('.process-detail')!;
+      expect(detail).toBeTruthy();
+      expect(within(detail.querySelector('header')!).getByText(backgroundProcess.command)).toBeTruthy();
+      expect(within(detail as HTMLElement).getByText(backgroundProcess.cwd)).toBeTruthy();
+      expect(view.container.querySelector('.workspace-loading')).toBeNull();
+      expect(readLog).not.toHaveBeenCalled();
+      return { ready: Promise.resolve(), finished: Promise.resolve() };
+    });
+    Object.defineProperty(document, 'startViewTransition', { configurable: true, value: transition });
+    try {
+      const base = props({ onLoadBackgroundProcesses: load, onReadBackgroundProcessLog: readLog });
+      view = render(<Panel {...base} />);
+      fireEvent.click(screen.getByRole('button', { name: '进程' }));
+      fireEvent.click(await screen.findByRole('button', { name: /^sleep 30/ }));
+      expect(transition).toHaveBeenCalledWith(expect.objectContaining({ types: ['process-detail'] }));
+      await waitFor(() => expect(load).toHaveBeenCalledTimes(2));
+      expect(readLog).not.toHaveBeenCalled();
+      view.rerender(<Panel {...base} backgroundHostSessionId="host-replacement" />);
+      expect(screen.getByText('原运行实例已不可用。此标签不会改绑到新的实例。')).toBeTruthy();
+      expect(view.container.querySelector('.process-detail')).toBeNull();
+    } finally { Object.defineProperty(document, 'startViewTransition', { configurable: true, value: original }); }
+  });
+
+  it('creates tabs from all five category buttons immediately after the selected tab', async () => {
+    const agents = vi.spyOn(agentCellApi, 'agents').mockResolvedValue({ agents: [], next_cursor: null });
+    const cells = vi.spyOn(agentCellApi, 'cells').mockResolvedValue({ cells: [], next_cursor: null, has_more: false });
+    try {
+      render(<Panel {...props()} />);
+      const navigation = screen.getByRole('navigation', { name: '工作区入口' });
+      const tabs = () => within(screen.getByRole('tablist', { name: '打开的内容' }));
+      const titles = () => tabs().getAllByRole('tab').map(tab => tab.textContent);
+      fireEvent.click(within(navigation).getByRole('button', { name: '能力' }));
+      fireEvent.click(within(navigation).getByRole('button', { name: '进程' }));
+      fireEvent.click(tabs().getByRole('tab', { name: '能力' }));
+      fireEvent.click(within(navigation).getByRole('button', { name: '子代理' }));
+      expect(titles()).toEqual(['能力', '子代理', '进程']);
+      fireEvent.click(tabs().getByRole('tab', { name: '能力' }));
+      fireEvent.click(within(navigation).getByRole('button', { name: 'cell' }));
+      expect(titles()).toEqual(['能力', 'cell', '子代理', '进程']);
+      fireEvent.click(tabs().getByRole('tab', { name: '能力' }));
+      fireEvent.click(within(navigation).getByRole('button', { name: '网页' }));
+      expect(titles()).toEqual(['能力', '新网页', 'cell', '子代理', '进程']);
+      fireEvent.click(within(navigation).getByRole('button', { name: '进程' }));
+      expect(titles()).toEqual(['能力', '新网页', 'cell', '子代理', '进程']);
+      expect(tabs().getByRole('tab', { name: '进程' }).getAttribute('aria-selected')).toBe('true');
+      await waitFor(() => expect(agents).toHaveBeenCalled());
+      expect(cells).toHaveBeenCalled();
+    } finally { agents.mockRestore(); cells.mockRestore(); }
+  });
+
   it('keeps the empty skills panel and warning stable during background capability refreshes', () => {
     const snapshot: CapabilitySnapshot = {
       ...capabilitySnapshot,

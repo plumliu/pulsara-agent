@@ -15,6 +15,7 @@ import { ConversationMessages, WorkbenchView } from '../../frontend/components/w
 import { DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
 import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 import { WELCOME_TYPEWRITER_PHRASES } from '../../frontend/components/welcome-typewriter';
+import type { Message } from '../../frontend/lib/pulsara-types';
 
 const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
 
@@ -3268,6 +3269,65 @@ it('shows mixed future inputs in one queue and cancels only the selected Cell re
  const observerQueue=screen.getByRole('region',{name:'等待处理的输入'});
  expect([...observerQueue.querySelectorAll('.composer-queue__actions button')].map(button=>button.getAttribute('aria-label'))).toEqual(Array(4).fill('复制'));
 });
+it('stacks mixed steers when collapsed and restores their original slots through the process toggle', async () => {
+ const steers: Message[] = [
+  {id:'stack:human',turnId:'stack:turn',role:'user',userKind:'steer',time:'',body:'人类补充'},
+  {id:'stack:cell',turnId:'stack:turn',role:'user',userKind:'steer',inputOrigin:'CELL_OUTPUT',time:'',body:'脚本补充',cellOutput:{cellId:'cell:stack',sourceTurnId:'stack:turn',sourceExecAttemptId:'attempt:stack',recordSequence:1,kind:'log'}},
+  {id:'stack:timer',turnId:'stack:turn',role:'user',userKind:'steer',inputOrigin:'SCHEDULED_TASK',time:'',body:'定时补充'},
+  {id:'stack:agent',turnId:'stack:turn',role:'user',userKind:'steer',inputOrigin:'AGENT_MESSAGE',time:'',body:'代理补充',inputSource:{identityKind:'origin',sourceKind:'agent',sourceSessionId:'session:peer',deliveryMode:'steer'}},
+ ];
+ const messages: Message[] = [
+  {id:'stack:instruction',turnId:'stack:turn',role:'user',userKind:'prompt',inputOrigin:'AGENT_INSTRUCTION',time:'',body:'整理任务'},
+  {id:'stack:material',turnId:'stack:turn',role:'user',userKind:'prompt',inputOrigin:'AGENT_MATERIAL',time:'',body:'初始依赖结果'},
+  ...steers.flatMap((steer, index): Message[] => [
+   {id:`stack:progress:${index}`,turnId:'stack:turn',role:'assistant',assistantKind:'progress',time:'',body:`处理阶段 ${index}`},steer,
+  ]),
+  {id:'stack:answer',turnId:'stack:turn',role:'assistant',assistantKind:'terminal',rootFinal:true,time:'',body:'整理结果'},
+ ];
+ const view=render(<ConversationMessages messages={messages} artifactOwnerKey="stack:session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}/>);
+ const run=view.container.querySelector('.conversation-run')!;
+ expect(run.querySelectorAll('.user-steer')).toHaveLength(1);
+ expect(screen.getByText('代理补充').closest('[data-steer-stack-depth]')?.getAttribute('data-steer-stack-depth')).toBe('3');
+ expect(screen.queryByText('人类补充')).toBeNull();
+ expect(screen.getByText('初始依赖结果').closest('[data-steer-stack-depth]')).toBeNull();
+ expect(screen.getByText('整理结果').closest('.conversation-run__step')).toBeNull();
+ expect(screen.getAllByRole('button',{name:/展开处理过程/})).toHaveLength(1);
+ fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
+ expect(run.querySelectorAll('.user-steer')).toHaveLength(4);
+ const entries=[...run.querySelectorAll('[data-source-entry]')].map(node=>node.getAttribute('data-source-entry'));
+ for(let index=0;index<steers.length;index++){
+  expect(entries.indexOf(`stack:progress:${index}`)).toBeLessThan(entries.indexOf(steers[index].id));
+  if(index) expect(entries.indexOf(steers[index-1].id)).toBeLessThan(entries.indexOf(`stack:progress:${index}`));
+ }
+ fireEvent.click(screen.getByRole('button',{name:'收起处理过程'}));
+ await waitFor(()=>expect(run.querySelectorAll('.user-steer')).toHaveLength(1));
+ expect(screen.getByText('代理补充').closest('[inert]')).toBeNull();
+});
+
+it('keeps one foreground steer with at most two back cards as live steers arrive', async () => {
+ const progress: Message={id:'stack:progress',turnId:'stack:turn',role:'assistant',assistantKind:'progress',time:'',body:'处理中'};
+ const steers: Message[]=Array.from({length:51},(_,index)=>({id:`stack:steer:${index}`,turnId:'stack:turn',role:'user',userKind:'steer',time:'',body:`补充 ${index}`}));
+ const options={artifactOwnerKey:'stack:session',onReadToolArtifact:vi.fn(),onNotify:vi.fn(),activeTurnId:'stack:turn',isRunning:true};
+ const view=render(<ConversationMessages {...options} messages={[progress,steers[0]]}/>);
+ fireEvent.click(screen.getByRole('button',{name:'收起处理过程'}));
+ await waitFor(()=>expect(screen.queryByText('处理中')).toBeNull());
+ expect(screen.getByText('补充 0')).toBeTruthy();
+ expect(view.container.querySelector('[data-steer-stack-depth]')).toBeNull();
+ view.rerender(<ConversationMessages {...options} messages={[progress,...steers.slice(0,2)]}/>);
+ expect(screen.queryByText('补充 0')).toBeNull();
+ expect(screen.getByText('补充 1').closest('[data-steer-stack-depth]')?.getAttribute('data-steer-stack-depth')).toBe('2');
+ view.rerender(<ConversationMessages {...options} messages={[progress,...steers.slice(0,50)]}/>);
+ expect(view.container.querySelectorAll('.user-steer')).toHaveLength(1);
+ expect(screen.getByText('补充 49').closest('[data-steer-stack-depth]')?.getAttribute('data-steer-stack-depth')).toBe('3');
+ view.rerender(<ConversationMessages {...options} messages={[progress,...steers]}/>);
+ expect(screen.queryByText('补充 49')).toBeNull();
+ expect(screen.getByText('补充 50')).toBeTruthy();
+ expect(view.container.querySelectorAll('.user-steer')).toHaveLength(1);
+ fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
+ expect(view.container.querySelectorAll('.user-steer')).toHaveLength(51);
+ expect(screen.getByText('补充 0')).toBeTruthy();
+});
+
 it('keeps a Cell steer inside the same process as a bounded Markdown bubble',()=>{
  const messages:import('../../frontend/lib/pulsara-types').Message[]=[{id:'input',turnId:'turn:a',role:'user',userKind:'prompt',body:'task',time:''},
  {id:'step',turnId:'turn:a',role:'assistant',assistantKind:'tool-request',body:'',time:'',traces:[{id:'tool',kind:'artifact',title:'工具',subtitle:'已完成',status:'completed'}]},

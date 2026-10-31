@@ -1,7 +1,21 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { agentCellApi, AgentCellError, prepareSessionTarget, type CellGraphPage } from '../../frontend/lib/agent-cell-api';
 import { AgentList, CellGraph, CellList, CellSource, mergeParticipants } from '../../frontend/components/agent-cell-workspace';
+// Use ELK's supported in-process entry in jsdom; production uses its real Web Worker.
+vi.mock('../../frontend/components/cell-graph-layout', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../frontend/components/cell-graph-layout')>();
+  const { default: ELK } = await import('elkjs/lib/elk.bundled.js');
+  return { ...actual, createCellGraphLayoutEngine: () => {
+    const engine = new ELK({ algorithms: ['layered'] });
+    return { layout: engine.layout.bind(engine), terminateWorker: () => {} };
+  } };
+});
+beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function() { return this.classList.contains('agent-cell-graph-card') ? 240 : 0; });
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function() { return this.classList.contains('agent-cell-graph-card') ? 140 : this.hasAttribute('data-work') ? 32 : 0; });
+  vi.spyOn(HTMLElement.prototype, 'offsetTop', 'get').mockImplementation(function() { return this.hasAttribute('data-work') ? 80 : 0; });
+});
 vi.mock('../../frontend/components/file-code', () => ({ FileCode: ({ source }: { source: string }) => <pre>{source}</pre> }));
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 const cell = { target: { kind: 'CELL' as const, cell_id: 'cell:a' }, state: 'running', has_unread_output: false, pending_calls: 0, source_exec_attempt_id: 'attempt:a' };
@@ -60,33 +74,87 @@ it('continues canonical source paging after the live graph closes', async () => 
   const late = deferred<Awaited<ReturnType<typeof agentCellApi.source>>>(); let closed = false;
   vi.spyOn(agentCellApi, 'source').mockResolvedValueOnce({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'const x = 1;', offset_chars: 0, returned_chars: 12, total_chars: 18, has_more: true, next_offset_chars: 12 } }).mockReturnValueOnce(late.promise);
   const live = vi.spyOn(agentCellApi, 'cell');
-  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => closed ? { status: 'CLOSED', message: '实时工作流视图已关闭' } : page(section, []));
+  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => closed ? { status: 'CLOSED', message: '实时工作流视图已关闭' } : page(section, section === 'works' ? [{ agent_id: 'agent:a', work_id: 'work:a', status: 'running' }] : []));
   render(<CellSource attempt="attempt:a" root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
   expect(await screen.findByText('const x = 1;')).toBeTruthy();
-  expect(await screen.findByRole('button', { name: '查看工作流图' })).toBeTruthy();
+  expect(await screen.findByRole('button', { name: '查看协作图' })).toBeTruthy();
+  expect(document.querySelector('.agent-cell-source .file-preview-header')?.textContent).toBe('查看协作图');
   fireEvent.click(screen.getByRole('button', { name: '加载更多' })); closed = true;
   await new Promise(resolve => setTimeout(resolve, 3100));
-  await waitFor(() => expect(screen.queryByRole('button', { name: '查看工作流图' })).toBeNull());
+  await waitFor(() => expect(screen.queryByRole('button', { name: '查看协作图' })).toBeNull());
+  expect(document.querySelector('.agent-cell-source .file-preview-header')).toBeNull();
   expect(screen.getByText('const x = 1;')).toBeTruthy(); expect(live).not.toHaveBeenCalled();
   await act(async () => { late.resolve({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'MORE', offset_chars: 12, returned_chars: 4, total_chars: 16, has_more: false, next_offset_chars: null } }); await late.promise; });
   expect(screen.getByText('const x = 1;MORE')).toBeTruthy();
   expect(agentCellApi.source).toHaveBeenNthCalledWith(2, 'root:a', 'attempt:a', 12, expect.any(AbortSignal));
 });
-it('expands exact predecessor Work and preserves the directed dependency between agents', async () => {
-  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => page(section, section === 'works' ? [{ agent_id: 'agent:b', work_id: 'work:b', status: 'running' }] : []));
-  vi.spyOn(agentCellApi, 'work').mockImplementation(async (_r, id) => id === 'work:b'
-    ? { work: { agent_id: 'agent:b', work_id: id, status: 'running' }, inputs: [{ kind: 'dependency', source_work_id: 'work:a', ordinal: 0 }] }
+it('keeps the toolbar absent before collaboration starts and removes it when the script ends', async () => {
+  vi.useFakeTimers(); let collaborating = false, completed = false;
+  vi.spyOn(agentCellApi, 'source').mockResolvedValue({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'frozen source', offset_chars: 0, returned_chars: 13, total_chars: 13, has_more: false, next_offset_chars: null } });
+  const graph = vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => ({
+    ...page(section, section === 'works' && collaborating ? [{ agent_id: 'agent:a', work_id: 'work:a', status: 'running' }] : []),
+    cell: { ...cell, state: completed ? 'completed' : 'running', has_unread_output: completed },
+  }));
+  render(<CellSource attempt="attempt:a" root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
+  await act(async () => {});
+  expect(screen.getByText('frozen source')).toBeTruthy();
+  expect(document.querySelector('.agent-cell-source .file-preview-header')).toBeNull();
+  collaborating = true;
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(screen.getByRole('button', { name: '查看协作图' })).toBeTruthy();
+  completed = true;
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(document.querySelector('.agent-cell-source .file-preview-header')).toBeNull();
+  expect(screen.getByText('frozen source')).toBeTruthy();
+  const calls = graph.mock.calls.length;
+  await act(async () => { await vi.advanceTimersByTimeAsync(9000); });
+  expect(graph).toHaveBeenCalledTimes(calls);
+});
+it.each(['completed', 'failed', 'terminated'])('hides the toolbar for a %s Cell while its Work and pending settlement remain', async state => {
+  vi.spyOn(agentCellApi, 'source').mockResolvedValue({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'frozen source', offset_chars: 0, returned_chars: 13, total_chars: 13, has_more: false, next_offset_chars: null } });
+  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => ({
+    ...page(section, [{ agent_id: 'agent:a', work_id: 'work:a', status: 'running' }]),
+    cell: { ...cell, state, has_unread_output: true, pending_calls: 1 },
+  }));
+  render(<CellSource attempt="attempt:a" root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
+  await act(async () => {});
+  expect(screen.getByText('frozen source')).toBeTruthy();
+  expect(document.querySelector('.agent-cell-source .file-preview-header')).toBeNull();
+});
+it('shows participant-only collaboration and preserves the entry during a transient read failure', async () => {
+  vi.useFakeTimers(); let failed = false;
+  vi.spyOn(agentCellApi, 'source').mockResolvedValue({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'frozen source', offset_chars: 0, returned_chars: 13, total_chars: 13, has_more: false, next_offset_chars: null } });
+  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => {
+    if (failed) throw new AgentCellError(503, 'network');
+    return page(section, section === 'participants' ? [{ agent_id: 'agent:a', work_id: null, kinds: ['query'] }] : []);
+  });
+  render(<CellSource attempt="attempt:a" root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
+  await act(async () => {});
+  expect(screen.getByRole('button', { name: '查看协作图' })).toBeTruthy();
+  failed = true;
+  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  expect(screen.getByRole('button', { name: '查看协作图' })).toBeTruthy();
+  expect(screen.getByText('frozen source')).toBeTruthy();
+});
+it('shows Cell-scoped dependencies without fetching or expanding outside predecessor Work', async () => {
+  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => page(section, section === 'works' ? [
+    { agent_id: 'agent:a', work_id: 'work:a', status: 'completed' },
+    { agent_id: 'agent:b', work_id: 'work:b', status: 'running' },
+  ] : []));
+  const read = vi.spyOn(agentCellApi, 'work').mockImplementation(async (_r, id) => id === 'work:b'
+    ? { work: { agent_id: 'agent:b', work_id: id, status: 'running' }, inputs: [
+      { kind: 'dependency', source_work_id: 'work:a', ordinal: 0 },
+      { kind: 'dependency', source_work_id: 'work:outside', ordinal: 1 },
+    ] }
     : { work: { agent_id: 'agent:a', work_id: id, status: 'completed' }, inputs: [] });
   vi.spyOn(agentCellApi, 'agent').mockImplementation(async (_r, id) => ({ agent: { agent_id: id, title: id, current_work_id: null, queued_count: 0 } }));
   const select = vi.fn(); render(<CellGraph root="root:a" host="host:a" cell="cell:a" onAgent={() => {}} onWork={select} />);
   expect(await screen.findByText('work:b')).toBeTruthy();
-  fireEvent.click(screen.getByTitle('展开前置工作'));
-  expect(await screen.findByText('work:a')).toBeTruthy();
+  expect(screen.getByText('work:a')).toBeTruthy();
   await waitFor(() => expect(document.querySelectorAll('.agent-cell-graph-lines > path').length).toBe(1));
-  fireEvent.click(screen.getByTitle('收起前置工作'));
-  expect(screen.queryByText('work:a')).toBeNull();
-  fireEvent.click(screen.getByTitle('展开前置工作'));
-  expect(await screen.findByText('work:a')).toBeTruthy();
+  expect(new Set(read.mock.calls.map(call => call[1]))).toEqual(new Set(['work:a', 'work:b']));
+  expect(screen.queryByText('work:outside')).toBeNull();
+  expect(screen.queryByRole('button', { expanded: false })).toBeNull();
   fireEvent.click(screen.getByText('work:b')); expect(select).toHaveBeenCalledWith(expect.objectContaining({ work_id: 'work:b' }));
 });
 it('does not present incomplete observation as a complete empty graph', async () => {
@@ -108,9 +176,11 @@ it('retains a participant name on temporary failure and clears it after confirme
 }, 10000);
 it('keeps the graph entry and avoids an empty conclusion when a filtered page has a continuation', async () => {
   vi.spyOn(agentCellApi, 'source').mockResolvedValue({ source_exec_attempt_id: 'attempt:a', source: { status: 'AVAILABLE', text: 'code', offset_chars: 0, returned_chars: 4, total_chars: 4, has_more: false, next_offset_chars: null } });
-  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => ({ ...page(section, []), next_cursor: section === 'participants' ? 'more' : null }));
+  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section, cursor) => section === 'participants' && cursor === 'more'
+    ? page(section, [{ agent_id: 'agent:a', work_id: null, kinds: ['query'] }])
+    : { ...page(section, []), next_cursor: section === 'participants' ? 'more' : null });
   const source = render(<CellSource attempt="attempt:a" root="root:a" host="host:a" cell="cell:a" onGraph={() => {}} />);
-  expect(await screen.findByRole('button', { name: '查看工作流图' })).toBeTruthy(); source.unmount();
+  expect(await screen.findByRole('button', { name: '查看协作图' })).toBeTruthy(); source.unmount();
   render(<CellGraph root="root:a" host="host:a" cell="cell:a" onAgent={() => {}} onWork={() => {}} />);
   expect(await screen.findByRole('button', { name: '加载更多' })).toBeTruthy();
   expect(screen.queryByText('暂无子代理编排')).toBeNull();
@@ -147,23 +217,6 @@ it('retries a Work from a later graph page after a transient detail failure', as
   expect(await screen.findByText('部分对象暂时无法刷新。')).toBeTruthy();
   await new Promise(resolve => setTimeout(resolve, 3100));
   expect(await screen.findByText('work:b')).toBeTruthy();
-});
-it('does not resurrect a graph from a late predecessor read after Cell retirement', async () => {
-  const late = deferred<Awaited<ReturnType<typeof agentCellApi.work>>>(); let isRetired = false;
-  vi.spyOn(agentCellApi, 'graph').mockImplementation(async (_r, _h, _c, section) => {
-    if (isRetired) return { status: 'CLOSED', message: '实时工作流视图已关闭' };
-    return page(section, section === 'works' ? [{ agent_id: 'agent:b', work_id: 'work:b', status: 'running' }] : []);
-  });
-  vi.spyOn(agentCellApi, 'work').mockImplementation(async (_r, id) => id === 'work:a' ? late.promise : { work: { agent_id: 'agent:b', work_id: id, status: 'running' }, inputs: [{ kind: 'dependency', source_work_id: 'work:a', ordinal: 0 }] });
-  vi.spyOn(agentCellApi, 'agent').mockImplementation(async (_r, id) => ({ agent: { agent_id: id, title: id, current_work_id: null, queued_count: 0 } }));
-  render(<CellGraph root="root:a" host="host:a" cell="cell:a" onAgent={() => {}} onWork={() => {}} />);
-  expect(await screen.findByText('work:b')).toBeTruthy();
-  fireEvent.click(screen.getByTitle('展开前置工作'));
-  isRetired = true;
-  await new Promise(resolve => setTimeout(resolve, 3100));
-  expect(await screen.findByText('实时工作流视图已关闭')).toBeTruthy();
-  await act(async () => { late.resolve({ work: { agent_id: 'agent:a', work_id: 'work:a', status: 'completed' }, inputs: [] }); await late.promise; });
-  expect(screen.queryByText('work:a')).toBeNull(); expect(screen.queryByText('work:b')).toBeNull();
 });
 it('discards a prepared target when its ROOT navigation context has changed', async () => {
   vi.spyOn(agentCellApi, 'agent').mockResolvedValue({ agent: { agent_id: 'agent:a', title: 'A', current_work_id: null, queued_count: 0 } });

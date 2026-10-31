@@ -1381,9 +1381,12 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     events.add(marker.eventId); compactSlots.set(slot, events);
   }
   const compactAt = (slot: number) => compactSlots.has(slot) ? <ContextCompactionDivider count={compactSlots.get(slot)!.size} /> : null;
-  // One drawer per continuous foldable span, not one animation shell per
-  // record. User messages and visualizations stay visible in chronological
-  // order. Only the resident reading window survives until the exit finishes.
+  // Keep only the newest steer outside the drawers. Older steers fold with
+  // the process, preserving their exact chronological slots when expanded.
+  // Initial Work materials and visualizations remain independently visible.
+  const steers = process.filter(message => message.role === 'user' && message.userKind === 'steer');
+  const latestSteer = steers.at(-1);
+  const steerStackDepth = Math.min(steers.length, 3);
   const toggle = (edge: 'top' | 'bottom') => (<button type="button" className={`conversation-run__toggle conversation-run__toggle--${edge}`} data-process-toggle="" data-process-key={choiceKey} data-process-edge={edge} data-process-earlier={earlierProcess || undefined}
       data-history-entry={edge === 'top' ? messages[0].id : answer?.id ?? messages[0].id}
       data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
@@ -1409,11 +1412,14 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     folding = [];
   };
   process.forEach((message, index) => {
-    const persistent = message.visualizations?.length || (message.role === 'user');
+    const persistent = message.visualizations?.length
+      || (message.role === 'user' && (message.userKind !== 'steer' || message === latestSteer));
     if (persistent) {
       if (compactSlots.has(index)) folding.push(<Fragment key={`compact:${message.id}`}>{compactAt(index)}</Fragment>);
       flushDrawer();
-      processRows.push(<div key={message.id} className="conversation-run__step">
+      const stacked = message === latestSteer && steerStackDepth > 1;
+      processRows.push(<div key={message.id} className={`conversation-run__step${stacked ? ' conversation-run__steer-stack' : ''}`}
+        data-steer-stack-depth={stacked ? steerStackDepth : undefined}>
         {renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded }, false)}
       </div>);
       drawerKey = message.id;
@@ -2335,6 +2341,7 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
   return <HistoryDisclosureContext.Provider value={reading.disclosureChoices}>
     <HistoryHydrationContext.Provider value={onHydrateEntries}>
       <div className="agent-conversation-reader">
+        <div className="agent-conversation-history">
         <AnnotationReader owner={reading.threadRef} onLocate={reading.locateAnnotation} onNotify={onNotify}>
         <ConversationScroll reading={reading}>
           <div className="thread-column conversation-transcript">
@@ -2372,16 +2379,17 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
         </ConversationScroll>
         </AnnotationReader>
         {(!reading.latestVisible || !reading.atLatestHistory) && <button className="jump-to-bottom" disabled={reading.jumpingToLatest} onClick={() => void reading.jumpToLatest()}>回到最新</button>}
+        </div>
         <div className="agent-conversation-queue">
           {projection.todo && <TodoDock todo={projection.todo} interactionOpen={false} onLayoutChange={reading.restoreReadingPosition} />}
           {terminalWork && <article data-queue-item-id={terminalWork.workId} tabIndex={-1}>
-            <strong>任务已结束</strong><span>{terminalWork.status === 'stopped' ? '已停止' : terminalWork.status === 'completed' ? '已完成' : terminalWork.status}{terminalWork.reason ? `：${terminalWork.reason}` : ''}</span>
+            <strong>任务已结束</strong><small className="agent-conversation-queue__status">{terminalWork.status === 'stopped' ? '已停止' : terminalWork.status === 'completed' ? '已完成' : terminalWork.status}{terminalWork.reason ? `：${terminalWork.reason}` : ''}</small>
           </article>}
           <AnimatedPromptQueue>
             {pending.map(item => <article key={item.queueItemId} data-queue-item-id={item.queueItemId} tabIndex={-1}>
               <CornerDownRight size={13} aria-hidden="true" />
               <div className="composer-queue__body">{item.contentUnavailable ? <p>正文暂时无法读取。</p> : <PromptContentView content={item.content} variant="queue" onReadImage={contentReader.readPromptImage} />}
-                {item.waitingOn?.length ? <span>等待依赖：{item.waitingOn.join('、')}</span> : <span>排队中</span>}</div>
+                <small className="agent-conversation-queue__status">{item.waitingOn?.length ? `等待依赖：${item.waitingOn.join('、')}` : '排队中'}</small></div>
             </article>)}
             {queueCursor && <button key="queue-more" type="button" onClick={onMoreQueue}>加载更多排队任务</button>}
           </AnimatedPromptQueue>

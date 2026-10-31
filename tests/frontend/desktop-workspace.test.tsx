@@ -12,6 +12,49 @@ afterEach(() => { cleanup(); delete window.pulsaraDesktop; vi.restoreAllMocks();
 let workspace: NonNullable<ReturnType<typeof useDesktopWorkspace>>;
 function Content({ onClose = () => {} }: { onClose?: () => void }) { workspace = useDesktopWorkspace()!; return <DesktopWorkspace isOpen onClose={onClose} toolbar={null} renderTab={tab => <p>{tab.sessionId}:{tab.entityId}</p>} />; }
 function Host({ sessionId, onClose }: { sessionId: string; onClose?: () => void }) { return <DesktopWorkspaceProvider sessionId={sessionId} onShow={() => {}}><Content onClose={onClose} /></DesktopWorkspaceProvider>; }
+it('inserts each new tab after the latest selection without moving existing tabs', () => {
+  render(<Host sessionId="a" />);
+  const file = (id: string) => ({ id, sessionId: 'a', kind: 'file' as const, title: id });
+  act(() => { workspace.open(file('first')); workspace.open(file('second')); workspace.open(file('last')); });
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', 'second', 'last']);
+  act(() => { workspace.activate('first'); workspace.open(file('new')); workspace.open(file('next')); });
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', 'new', 'next', 'second', 'last']);
+  expect(workspace.activeId).toBe('next');
+  const reading = workspace.tabs.find(tab => tab.id === 'second')!.view!;
+  reading.top = 120;
+  act(() => workspace.open(file('second')));
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', 'new', 'next', 'second', 'last']);
+  expect(workspace.activeId).toBe('second');
+  expect(workspace.tabs.find(tab => tab.id === 'second')!.view).toBe(reading);
+  act(() => workspace.open(file('background'), { background: true }));
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', 'new', 'next', 'second', 'background', 'last']);
+  expect(workspace.activeId).toBe('second');
+});
+
+it('publishes new tabs beside the selection in batch order while retaining existing tabs', () => {
+  render(<Host sessionId="a" />);
+  const file = (id: string) => ({ id, sessionId: 'a', kind: 'file' as const, title: id });
+  act(() => { workspace.open(file('first')); workspace.open(file('middle')); workspace.open(file('last')); workspace.activate('middle'); });
+  act(() => workspace.publish([file('batch-a'), file('batch-b'), file('batch-a')], false));
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', 'middle', 'batch-a', 'batch-b', 'last']);
+  expect(workspace.activeId).toBe('middle');
+  const reading = workspace.tabs.find(tab => tab.id === 'batch-a')!.view!;
+  act(() => workspace.publish([file('batch-a'), file('batch-c'), file('batch-d')], true));
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', 'middle', 'batch-c', 'batch-d', 'batch-a', 'batch-b', 'last']);
+  expect(workspace.activeId).toBe('batch-d');
+  expect(workspace.tabs.find(tab => tab.id === 'batch-a')!.view).toBe(reading);
+});
+
+it('uses the close fallback selection before an immediate new tab', async () => {
+  userBrowserHost();
+  render(<Host sessionId="a" />);
+  act(() => { workspace.open({ id: 'first', sessionId: 'a', title: 'first', kind: 'file' }); workspace.open({ id: 'second', sessionId: 'a', title: 'second', kind: 'file' }); });
+  await act(async () => { workspace.browserTabs.open(); });
+  act(() => { workspace.activate('first'); workspace.close('first'); workspace.open({ id: 'new', sessionId: 'a', title: 'new', kind: 'file' }); });
+  expect(workspace.tabs.map(tab => tab.title)).toEqual(['second', 'new', '新网页']);
+  expect(workspace.activeId).toBe('new');
+});
+
 it('does not render session-owned file or visualization content while the session loads', () => {
   const renderFile = vi.fn(() => <p>file body</p>);
   const renderVisualization = vi.fn(() => <p>visualization body</p>);
@@ -57,6 +100,37 @@ it('updates overflow arrows on scroll and resize without changing the selected t
   act(() => resize());
   expect(left.disabled).toBe(true);
   expect(right.disabled).toBe(true);
+});
+it('scrolls tabs horizontally with the vertical wheel while preserving native horizontal gestures and zoom', () => {
+  render(<Host sessionId="a" />);
+  act(() => workspace.open({ id: 'file', sessionId: 'a', title: 'guide.md', kind: 'file' }));
+  const list = screen.getByRole('tablist');
+  Object.defineProperties(list, { clientWidth: { configurable: true, value: 300 }, scrollWidth: { configurable: true, value: 900 } });
+  list.scrollLeft = 100;
+  const wheel = (deltaX: number, deltaY: number, options: WheelEventInit = {}) => {
+    const event = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX, deltaY, ...options });
+    fireEvent(screen.getByRole('tab', { name: 'guide.md' }), event);
+    return event;
+  };
+  expect(wheel(0, 80).defaultPrevented).toBe(true);
+  expect(list.scrollLeft).toBe(180);
+  expect(wheel(0, -40).defaultPrevented).toBe(true);
+  expect(list.scrollLeft).toBe(140);
+  expect(wheel(50, 2).defaultPrevented).toBe(false);
+  expect(wheel(0, 80, { ctrlKey: true }).defaultPrevented).toBe(false);
+  expect(list.scrollLeft).toBe(140);
+  list.style.lineHeight = '20px';
+  wheel(0, 2, { deltaMode: WheelEvent.DOM_DELTA_LINE });
+  expect(list.scrollLeft).toBe(180);
+  wheel(0, 1, { deltaMode: WheelEvent.DOM_DELTA_PAGE });
+  expect(list.scrollLeft).toBe(480);
+  wheel(0, 500);
+  expect(list.scrollLeft).toBe(600);
+  wheel(0, -1000);
+  expect(list.scrollLeft).toBe(0);
+  expect(workspace.activeId).toBe('file');
+  Object.defineProperty(list, 'scrollWidth', { value: 300 });
+  expect(wheel(0, 80).defaultPrevented).toBe(false);
 });
 it('hides after a deliberate rightward drag and reopens the same tab at a usable width', () => {
   vi.stubGlobal('PointerEvent', MouseEvent);
@@ -269,6 +343,26 @@ function userBrowserHost() {
   window.pulsaraDesktop = { browser: {create, close, clear, activate: vi.fn(async () => {}), layout: vi.fn(async () => {}), hide: vi.fn(async () => {}), command: vi.fn(async () => {}), onEvent: () => () => {}} } as unknown as PulsaraDesktop;
   return {create, close, clear};
 }
+
+it('inserts webpages and session tabs beside each other using the current selection', async () => {
+  userBrowserHost();
+  const view = render(<Host sessionId="a" />);
+  act(() => { workspace.open({ id: 'first', sessionId: 'a', title: 'first', kind: 'file' }); workspace.open({ id: 'last', sessionId: 'a', title: 'last', kind: 'file' }); workspace.activate('first'); });
+  let browserId = '';
+  await act(async () => {
+    browserId = workspace.browserTabs.open().id;
+    workspace.open({ id: 'new-file', sessionId: 'a', title: 'new-file', kind: 'file' });
+  });
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', browserId, 'new-file', 'last']);
+  expect(workspace.activeId).toBe('new-file');
+  let backgroundId = '';
+  await act(async () => { workspace.activate(browserId); backgroundId = workspace.browserTabs.open(undefined, { newTab: true, background: true }).id; });
+  expect(workspace.tabs.map(tab => tab.id)).toEqual(['first', browserId, backgroundId, 'new-file', 'last']);
+  expect(workspace.activeId).toBe(browserId);
+  view.rerender(<Host sessionId="b" />);
+  expect(workspace.tabs.map(tab => tab.id)).toEqual([browserId, backgroundId]);
+  expect(workspace.activeId).toBe(browserId);
+});
 
 it('opens user webpages without a session and preserves their identity through session switches and deletion', async () => {
   const browser = userBrowserHost();

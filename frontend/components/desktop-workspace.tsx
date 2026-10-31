@@ -2,8 +2,9 @@ import { BrowserTabs, browserTitle, type BrowserTabRecord } from '../lib/browser
 import { desktopHost } from '../lib/desktop-host';
 import { BrowserPanel } from './browser-panel';
 import { uiPreferences } from '../lib/ui-preferences';
-import type { CommandReceipt, UserControlCommandRef } from '../lib/runtime-adapter';
+import type { BackgroundProcess, CommandReceipt, UserControlCommandRef } from '../lib/runtime-adapter';
 import type { AgentReadingState } from './agent-conversation-pane';
+import type { CellGraphReadingState } from './cell-graph-map';
 import { Blocks, Bot, ChevronLeft, ChevronRight, Globe, FileCode2, FileText, FolderKanban, ListChecks, PanelRightClose, Server, TerminalSquare, X } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
@@ -12,18 +13,19 @@ export type WorkspaceTabKind = 'browser' | 'file' | 'visualization' | 'capabilit
 export interface WorkspaceControl { forgetSession: (sessionId: string) => void; clear: () => void }
 interface WorkspaceTabBase {
   browser?: BrowserTabRecord;
-  view?: { top: number; left: number; reader?: { top: number; left: number }; graph?: { top: number; left: number; zoom?: number; expandedWorkIds?: string[]; expandedParents?: string[]; worksPages?: number; participantsPages?: number }; agentReadingState?: AgentReadingState };
+  view?: { top: number; left: number; reader?: { top: number; left: number }; graph?: CellGraphReadingState; agentReadingState?: AgentReadingState };
   id: string;
   title: string;
   workLocation?: { workId: string; requestId: number };
   render?: () => ReactNode;
   onClose?: () => void;
 }
-type StandardWorkspaceKind = 'file' | 'visualization' | 'capabilities' | 'mcp' | 'background' | 'process';
+type StandardWorkspaceKind = 'file' | 'visualization' | 'capabilities' | 'mcp' | 'background';
 type StandardWorkspaceTab = { [K in StandardWorkspaceKind]: { kind: K; entityId?: string; hostSessionId?: string } }[StandardWorkspaceKind];
 export type WorkspaceTab = WorkspaceTabBase & (
   | { kind: 'browser'; browser: BrowserTabRecord; sessionId?: never; entityId?: never; hostSessionId?: never }
   | ({ sessionId: string; browser?: never } & (StandardWorkspaceTab
+  | { kind: 'process'; entityId?: string; hostSessionId?: string; initialProcess?: BackgroundProcess }
   | { kind: 'subagents'; entityId?: never; hostSessionId?: never }
   | { kind: 'cells-unavailable'; entityId?: never; hostSessionId?: never }
   | { kind: 'cells'; entityId?: never; hostSessionId: string }
@@ -51,6 +53,13 @@ function selectedTabId(tabs: WorkspaceTab[], sessionId: string, browserId: strin
   const visible = tabs.filter(tab => tab.kind === 'browser' || tab.sessionId === sessionId);
   return visible.find(tab => tab.id === (browserId ?? sessions[sessionId]))?.id ?? visible.at(-1)?.id;
 }
+function insertNewTabs(tabs: WorkspaceTab[], batch: WorkspaceTab[], selectedId: string | undefined) {
+  const next = [...tabs];
+  const selectedIndex = next.findIndex(tab => tab.id === selectedId);
+  let index = selectedIndex < 0 ? next.length : selectedIndex + 1;
+  for (const tab of batch) if (!next.some(item => item.id === tab.id)) next.splice(index++, 0, tab);
+  return next;
+}
 const Context = createContext<WorkspaceContext | undefined>(undefined);
 export function useDesktopWorkspace() { return useContext(Context); }
 
@@ -68,10 +77,18 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   const current = useRef({ sessionId, visible, active, activeBrowserId, onBrowserShortcut }); current.current = { sessionId, visible, active, activeBrowserId, onBrowserShortcut };
   const install = useCallback((next: WorkspaceTab[]) => { tabsRef.current = next; setTabs(next); }, []);
   const select = useCallback((tab: WorkspaceTab) => {
-    if (tab.kind === 'browser') setActiveBrowserId(tab.id);
+    // Consecutive opens in one React batch must use the latest selection.
+    if (tab.kind === 'browser') {
+      current.current.activeBrowserId = tab.id;
+      setActiveBrowserId(tab.id);
+    }
     else {
-      setActive(value => ({ ...value, [tab.sessionId]: tab.id }));
-      if (tab.sessionId === current.current.sessionId) setActiveBrowserId(undefined);
+      current.current.active = { ...current.current.active, [tab.sessionId]: tab.id };
+      setActive(current.current.active);
+      if (tab.sessionId === current.current.sessionId) {
+        current.current.activeBrowserId = undefined;
+        setActiveBrowserId(undefined);
+      }
     }
   }, []);
   const activate = useCallback((id: string) => {
@@ -82,14 +99,15 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   const open = useCallback((tab: WorkspaceTab, options?: { background?: boolean }) => {
     interaction.current++;
     tab = { view: tabsRef.current.find(item => item.id === tab.id)?.view ?? { top: 0, left: 0, graph: { top: 0, left: 0 } }, ...tab };
-    install(tabsRef.current.some(item => item.id === tab.id) ? tabsRef.current.map(item => item.id === tab.id ? tab : item) : [...tabsRef.current, tab]);
+    const targetSession = tab.kind === 'browser' ? current.current.sessionId : tab.sessionId;
+    const selectedId = selectedTabId(tabsRef.current, targetSession, targetSession === current.current.sessionId ? current.current.activeBrowserId : undefined, current.current.active);
+    install(tabsRef.current.some(item => item.id === tab.id) ? tabsRef.current.map(item => item.id === tab.id ? tab : item) : insertNewTabs(tabsRef.current, [tab], selectedId));
     if (!options?.background) { select(tab); if ((tab.kind === 'browser' || current.current.sessionId === tab.sessionId) && current.current.visible) show.current(); }
   }, [install, select]);
   const publish = useCallback((batch: WorkspaceTab[], foreground: boolean) => {
     if (!batch.length || batch.some(tab => tab.kind !== 'browser' && tab.sessionId !== current.current.sessionId) || !current.current.visible) return;
-    const next = [...tabsRef.current];
-    for (const tab of batch) if (!next.some(item => item.id === tab.id)) next.push({ view: { top: 0, left: 0 }, ...tab });
-    install(next);
+    const selectedId = selectedTabId(tabsRef.current, current.current.sessionId, current.current.activeBrowserId, current.current.active);
+    install(insertNewTabs(tabsRef.current, batch.map(tab => ({ view: { top: 0, left: 0 }, ...tab })), selectedId));
     if (foreground) { select(batch.at(-1)!); show.current(); }
   }, [install, select]);
   const update = useCallback((id: string, patch: Partial<WorkspaceTabBase>) => {
@@ -113,18 +131,23 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
     install(next);
     if (tab?.kind === 'browser') {
       if (current.current.activeBrowserId === id) {
+        current.current.activeBrowserId = undefined;
         setActiveBrowserId(undefined);
         const fallback = next.filter(item => item.kind === 'browser' || item.sessionId === current.current.sessionId).at(-1);
         if (fallback) select(fallback);
       }
     } else if (tab) {
-      setActive(value => ({ ...value, [tab.sessionId]: value[tab.sessionId] === id ? next.filter(item => item.kind !== 'browser' && item.sessionId === tab.sessionId).at(-1)?.id ?? '' : value[tab.sessionId] }));
+      if (current.current.active[tab.sessionId] === id) {
+        current.current.active = { ...current.current.active, [tab.sessionId]: next.filter(item => item.kind !== 'browser' && item.sessionId === tab.sessionId).at(-1)?.id ?? '' };
+        setActive(current.current.active);
+      }
     }
   }, [install, select]);
   const forgetSession = useCallback((target: string) => {
     for (const tab of tabsRef.current.filter(tab => tab.kind !== 'browser' && tab.sessionId === target)) tab.onClose?.();
     install(tabsRef.current.filter(tab => tab.kind === 'browser' || tab.sessionId !== target));
-    setActive(value => { const next = { ...value }; delete next[target]; return next; });
+    const nextActive = { ...current.current.active }; delete nextActive[target];
+    current.current.active = nextActive; setActive(nextActive);
     for (const key of backgroundControls.keys()) if (JSON.parse(key)[0] === target) backgroundControls.delete(key);
   }, [backgroundControls, install]);
   // Database/session cleanup cannot retire the independent user browser owner.
@@ -150,7 +173,7 @@ function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: Worksp
   useEffect(() => {
     const element = list.current;
     if (!element) return;
-    // Native scrolling owns dragging and touchpad input; observe only edge visibility.
+    // Native scrolling owns dragging and horizontal touchpad input.
     measure();
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(measure);
@@ -158,6 +181,24 @@ function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: Worksp
     for (const child of element.children) observer.observe(child);
     return () => observer.disconnect();
   }, [tabs, measure]);
+  useEffect(() => {
+    const element = list.current;
+    if (!element) return;
+    const wheel = (event: WheelEvent) => {
+      if (event.ctrlKey || !event.deltaY || Math.abs(event.deltaX) >= Math.abs(event.deltaY)) return;
+      const limit = element.scrollWidth - element.clientWidth;
+      if (limit <= 0) return;
+      const style = getComputedStyle(element);
+      const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? parseFloat(style.lineHeight) || parseFloat(style.fontSize)
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? element.clientWidth : 1;
+      event.preventDefault();
+      element.scrollLeft = Math.max(0, Math.min(limit, element.scrollLeft + event.deltaY * unit));
+    };
+    // React delegates wheel events passively; this conversion must cancel vertical scrolling.
+    element.addEventListener('wheel', wheel, { passive: false });
+    return () => element.removeEventListener('wheel', wheel);
+  }, [tabs.length]);
   useEffect(() => {
     const element = list.current;
     const active = element?.querySelector<HTMLElement>('.is-active');

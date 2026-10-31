@@ -29,7 +29,7 @@ import { type PreparedWorkspaceTab, type WorkspaceTab, useDesktopWorkspace } fro
 import { FileLinkContext } from "./file-link-context";
 import { type MarkdownNotify } from "./markdown-body";
 import { FileMarkdown } from "./file-markdown";
-import { FileCode } from "./file-code";
+import { FilePreviewPanel, FileTextContent } from "./file-preview-panel";
 import { SandboxedHtmlPreview } from "./sandboxed-html-preview";
 
 const detail = (error: unknown) =>
@@ -415,11 +415,9 @@ function FileBrowserView({
     }
   };
   return (
-    <section
-      className="file-browser-panel"
-      aria-label={`文件预览：${file?.name ?? page?.path ?? ""}`}
-    >
-      <header className="file-preview-header">
+    <FilePreviewPanel
+      label={`文件预览：${file?.name ?? page?.path ?? ""}`}
+      toolbar={
         <nav aria-label="文件操作">
           <button
             aria-label="后退"
@@ -478,8 +476,8 @@ function FileBrowserView({
             </>
           )}
         </nav>
-      </header>
-      {tab.error && (
+      }
+      notice={tab.error && (
         <div className="file-preview-error" role="status">
           <p>{tab.failed?.path}</p>
           <p>{tab.error}</p>
@@ -488,7 +486,7 @@ function FileBrowserView({
           {file && <button onClick={onDismiss}>返回</button>}
         </div>
       )}
-      <div className="file-preview-body">
+    >
         {tab.loading && <WorkspaceLoading overlay/>}
         {file && api && (
           <FileLinkContext.Provider
@@ -550,8 +548,7 @@ function FileBrowserView({
             />
           </FileLinkContext.Provider>
         )}
-      </div>
-    </section>
+    </FilePreviewPanel>
   );
 }
 
@@ -810,9 +807,11 @@ function FileReader({
           onVisitChange={onVisitChange}
         />
       ) : (
-        <div
-          className={`file-preview-text ${fullMarkdown ? "is-markdown assistant-markdown" : ""}`}
-          ref={scroller}
+        <FileTextContent
+          source={page.text ?? ""}
+          filename={file.name}
+          markdown={fullMarkdown ? <FileMarkdown body={page.text ?? ""} onNotify={onNotify} /> : undefined}
+          scrollerRef={scroller}
           onScroll={(event) => {
             onVisitChange?.({
               position: {
@@ -821,15 +820,7 @@ function FileReader({
               },
             });
           }}
-        >
-          {!page.text ? (
-            <p className="file-preview-empty">空文件</p>
-          ) : fullMarkdown ? (
-            <FileMarkdown body={page.text} onNotify={onNotify} />
-          ) : (
-            <FileCode source={page.text} filename={file.name} />
-          )}
-        </div>
+        />
       )}
       {(cursor > 0 || page?.next_cursor != null) && (
         <footer

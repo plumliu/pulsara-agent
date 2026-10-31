@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   BackgroundProcess,
@@ -9,7 +9,7 @@ import type {
 import { DesktopWorkspaceProvider } from '../../frontend/components/desktop-workspace';
 import { BackgroundTerminalPanel } from '../../frontend/components/background-terminal-panel';
 
-afterEach(() => { vi.unstubAllGlobals(); cleanup(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 const process: BackgroundProcess = {
   processId: 'process-a', command: 'printf long-output', cwd: '/tmp/probe',
@@ -26,8 +26,20 @@ it('shows a standalone process with output, without list expand or open controls
   expect(view.container.querySelector('.process-detail')).toBeTruthy();
   expect(screen.queryByRole('button', { name: '打开到新标签页' })).toBeNull();
   expect(screen.queryByRole('button', { name: '查看命令详情' })).toBeNull();
-  expect(view.container.querySelector('.background-process__toggle')).toBeNull();
+  expect(screen.queryByRole('button', { expanded: true })).toBeNull();
   expect(screen.getAllByText(process.command)).toHaveLength(1);
+});
+
+it('replaces the transition preview with the process owner result when the record is gone', async () => {
+  let resolve!: (page: { processes: BackgroundProcess[] }) => void;
+  const pending = new Promise<{ processes: BackgroundProcess[] }>(done => { resolve = done; });
+  const view = render(<BackgroundTerminalPanel processId={process.processId} initialProcess={process} ownerKey="one" sessionId="one" canControl={false}
+    loadProcesses={async () => pending} readLog={vi.fn()} terminateProcess={vi.fn()} queryControl={vi.fn()} onOpenProcess={vi.fn()} />);
+  expect(view.container.querySelector('.process-detail')).toBeTruthy();
+  expect(screen.getByText(process.command)).toBeTruthy();
+  await act(async () => { resolve({ processes: [] }); });
+  expect(await screen.findByText('原进程记录已不在当前保留范围。')).toBeTruthy();
+  expect(view.container.querySelector('.process-detail')).toBeNull();
 });
 
 it('shows only the complete command on hover and opens the source card with a transition', async () => {
@@ -40,11 +52,36 @@ it('shows only the complete command on hover and opens the source card with a tr
     const command = await screen.findByText(process.command);
     fireEvent.mouseEnter(command.closest('.background-process__identity')!);
     expect(screen.getByRole('tooltip').textContent).toBe(process.command);
-    fireEvent.click(screen.getByRole('button', { name: '打开到新标签页' }));
+    fireEvent.click(screen.getByRole('button', { name: /^printf long-output/ }));
     expect(onOpen).toHaveBeenCalledWith(process);
     expect(transition).toHaveBeenCalledWith(expect.objectContaining({ types: ['process-detail'] }));
     await waitFor(() => expect(command.closest<HTMLElement>('.background-process')!.style.viewTransitionName).toBe(''));
   } finally { Object.defineProperty(document, 'startViewTransition', { configurable: true, value: original }); }
+});
+
+it('opens a list entry directly and never reads output, including while its metadata is expanded', async () => {
+  vi.useFakeTimers();
+  const readLog = vi.fn();
+  const loadProcesses = vi.fn(async () => ({ processes: [process] }));
+  const onOpenProcess = vi.fn();
+  const view = render(<BackgroundTerminalPanel ownerKey="one" sessionId="one" canControl={false}
+    loadProcesses={loadProcesses} readLog={readLog} terminateProcess={vi.fn()} queryControl={vi.fn()} onOpenProcess={onOpenProcess} />);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(loadProcesses).toHaveBeenCalledTimes(3);
+  expect(readLog).not.toHaveBeenCalled();
+  const entry = screen.getByRole('button', { name: /^printf long-output/ });
+  expect(entry.hasAttribute('aria-expanded')).toBe(false);
+  expect(screen.queryByRole('button', { name: '打开到新标签页' })).toBeNull();
+  expect(view.container.querySelector('.background-process__output')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '查看命令详情' }));
+  expect(screen.getByText(process.cwd)).toBeTruthy();
+  expect(screen.getByText(process.physicalState)).toBeTruthy();
+  expect(onOpenProcess).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(readLog).not.toHaveBeenCalled();
+  fireEvent.click(entry);
+  expect(onOpenProcess).toHaveBeenCalledExactlyOnceWith(process);
+  expect(readLog).not.toHaveBeenCalled();
 });
 
 describe('BackgroundTerminalPanel PR03 controls', () => {
@@ -65,6 +102,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
       readLog={vi.fn()}
       terminateProcess={terminate}
       queryControl={query}
+      onOpenProcess={vi.fn()}
     />);
     fireEvent.click(await screen.findByRole('button', { name: '终止 printf long-output' }));
     expect(await screen.findByText(/请求内容不正确/)).toBeTruthy();
@@ -89,6 +127,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
       readLog={vi.fn()}
       terminateProcess={vi.fn()}
       queryControl={vi.fn()}
+      onOpenProcess={vi.fn()}
     />);
     expect(await screen.findByText('已结束 · 执行失败')).toBeTruthy();
     expect(screen.queryByText(/exit -1/)).toBeNull();
@@ -108,7 +147,9 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
         },
       },
     }));
+    const onOpenProcess = vi.fn();
     render(<BackgroundTerminalPanel
+      processId={process.processId}
       ownerKey="session-a:1:host-a"
       sessionId="session-a"
       hostSessionId="host-a"
@@ -121,10 +162,9 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
       }))}
       terminateProcess={terminate}
       queryControl={vi.fn(async () => ({ status: 'RESULT_UNAVAILABLE' as const }))}
+      onOpenProcess={onOpenProcess}
     />);
-    fireEvent.click((await screen.findByText('printf long-output')).closest('button')!);
-    expect(await screen.findByText(/line-1/)).toBeTruthy();
-    expect(screen.getByRole('region', { name: '命令原文' }).textContent).toContain('$ printf long-output');
+    expect(await screen.findByText(/line-1/, {}, { timeout: 2500 })).toBeTruthy();
     expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('line-1\nline-2');
     fireEvent.click(screen.getByRole('button', { name: '终止 printf long-output' }));
     await waitFor(() => expect(terminate).toHaveBeenCalledWith(expect.objectContaining({
@@ -133,6 +173,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
     })));
     expect(screen.getByText('进程已结束，但 monitor 关闭失败。')).toBeTruthy();
     expect(screen.getByText(/已编入原轮次模型请求/)).toBeTruthy();
+    expect(onOpenProcess).not.toHaveBeenCalled();
   });
 
   it('invalidates a late log page when the owner changes', async () => {
@@ -144,15 +185,19 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
       loadProcesses: vi.fn(async () => ({ processes: [process] })),
       terminateProcess: vi.fn(),
       queryControl: vi.fn(),
+      onOpenProcess: vi.fn(),
     };
+    const readLog = vi.fn(async () => pending);
     const view = render(<BackgroundTerminalPanel
       ownerKey="session-a:1:host-a" sessionId="session-a" hostSessionId="host-a"
+      processId={process.processId}
       {...common}
-      readLog={vi.fn(async () => pending)}
+      readLog={readLog}
     />);
-    fireEvent.click((await screen.findByText('printf long-output')).closest('button')!);
+    await waitFor(() => expect(readLog).toHaveBeenCalledOnce(), { timeout: 2500 });
     view.rerender(<BackgroundTerminalPanel
       ownerKey="session-a:2:host-b" sessionId="session-a" hostSessionId="host-b"
+      processId={process.processId}
       {...common}
       readLog={vi.fn(async () => ({
         process, output: 'new-owner-output', outputCursor: '1', retainedFromCursor: '0',
@@ -165,46 +210,43 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
     });
     await Promise.resolve();
     expect(screen.queryByText(/stale-owner-output/)).toBeNull();
+    expect(await screen.findByText('new-owner-output', {}, { timeout: 2500 })).toBeTruthy();
   });
 
-  it('invalidates a late log page when the process row is collapsed', async () => {
+  it('invalidates a late log page when returning from the detail page to the list', async () => {
     let resolve!: (value: BackgroundProcessLog) => void;
     const pending = new Promise<BackgroundProcessLog>((accept) => { resolve = accept; });
-    const readLog = vi.fn()
-      .mockImplementationOnce(async () => pending)
-      .mockImplementation(async () => new Promise<BackgroundProcessLog>(() => {}));
-    render(<BackgroundTerminalPanel
-      ownerKey="session-a:1:host-a"
-      sessionId="session-a"
-      hostSessionId="host-a"
-      controlAdmissionDeadlineMs={42_000}
-      canControl={false}
-      loadProcesses={vi.fn(async () => ({ processes: [process] }))}
-      readLog={readLog}
-      terminateProcess={vi.fn()}
-      queryControl={vi.fn()}
+    const readLog = vi.fn(async () => pending);
+    const common = {
+      ownerKey: 'session-a:1:host-a', sessionId: 'session-a', hostSessionId: 'host-a',
+      canControl: false, loadProcesses: vi.fn(async () => ({ processes: [process] })),
+      readLog, terminateProcess: vi.fn(), queryControl: vi.fn(), onOpenProcess: vi.fn(),
+    };
+    const view = render(<BackgroundTerminalPanel
+      {...common}
+      processId={process.processId}
     />);
-    const toggle = (await screen.findByText('printf long-output')).closest('button')!;
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    resolve({
-      process, output: 'late-collapsed-output', outputCursor: '9', retainedFromCursor: '0',
-      gapBeforeOutput: false, truncatedByResponseBound: false, sourceCoverage: 'COMPLETE',
+    await waitFor(() => expect(readLog).toHaveBeenCalledOnce(), { timeout: 2500 });
+    view.rerender(<BackgroundTerminalPanel {...common} />);
+    expect(await screen.findByRole('button', { name: /^printf long-output/ })).toBeTruthy();
+    await act(async () => {
+      resolve({
+        process, output: 'late-detail-output', outputCursor: '9', retainedFromCursor: '0',
+        gapBeforeOutput: false, truncatedByResponseBound: false, sourceCoverage: 'COMPLETE',
+      });
     });
-    await Promise.resolve();
-    fireEvent.click(toggle);
-    await waitFor(() => expect(readLog).toHaveBeenCalledTimes(2));
-    expect(screen.queryByText(/late-collapsed-output/)).toBeNull();
+    expect(screen.queryByText(/late-detail-output/)).toBeNull();
+    expect(view.container.querySelector('.background-process__output')).toBeNull();
+    expect(readLog).toHaveBeenCalledOnce();
   });
 });
 
 it('keeps the same pending control after its view closes and reopens', async () => {
   const terminate = vi.fn(async (_reference:UserControlCommandRef):Promise<CommandReceipt> => {throw new Error('transport unknown');});
   const query = vi.fn(async (_reference:UserControlCommandRef)=>({status:'RESULT_UNAVAILABLE' as const}));
+  const onOpenProcess = vi.fn();
   const common = {ownerKey:'session-a:1:host-a',sessionId:'session-a',hostSessionId:'host-a',controlAdmissionDeadlineMs:42000,canControl:true,
-    loadProcesses:vi.fn(async()=>({processes:[process]})), readLog:vi.fn(),terminateProcess:terminate,queryControl:query};
+    loadProcesses:vi.fn(async()=>({processes:[process]})), readLog:vi.fn(),terminateProcess:terminate,queryControl:query,onOpenProcess};
   function Host({visible}:{visible:boolean}) { return <DesktopWorkspaceProvider sessionId="session-a" onShow={()=>{}}>{visible && <BackgroundTerminalPanel {...common}/>}</DesktopWorkspaceProvider>; }
   const view=render(<Host visible/>);
   fireEvent.click(await screen.findByRole('button',{name:'终止 printf long-output'}));
@@ -212,6 +254,7 @@ it('keeps the same pending control after its view closes and reopens', async () 
   const reference=terminate.mock.calls[0][0];
   view.rerender(<Host visible={false}/>);
   expect(terminate).toHaveBeenCalledOnce();
+  expect(onOpenProcess).not.toHaveBeenCalled();
   view.rerender(<Host visible/>);
   await waitFor(()=>expect(query).toHaveBeenCalledWith(reference));
   expect(await screen.findByText('当前无法取得这次操作的结果；不会自动重发。')).toBeTruthy();

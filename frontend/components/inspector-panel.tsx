@@ -569,7 +569,11 @@ export function InspectorPanel({
       return <AgentConversationPane key={`${session.id}:${tab.entityId}`} rootSessionId={session.id} agentSessionId={tab.entityId} agentName={tab.title} adapter={adapter} onNotify={onNotify} readingState={tab.view.agentReadingState} workLocation={tab.workLocation} />;
     }
     if (tab.kind === 'cell' || tab.kind === 'cell-graph') {
-      if (tab.kind === 'cell') return <CellSource root={session.id} attempt={tab.sourceExecAttemptId} host={tab.hostSessionId} cell={tab.entityId} onGraph={tab.hostSessionId && tab.entityId ? source => void openPrepared({ kind: 'cell-graph', rootSessionId: session.id, hostSessionId: tab.hostSessionId!, cellId: tab.entityId! }, source) : undefined} />;
+      if (tab.kind === 'cell') {
+        tab.view ??= { top: 0, left: 0 };
+        tab.view.reader ??= { top: 0, left: 0 };
+        return <CellSource root={session.id} attempt={tab.sourceExecAttemptId} host={tab.hostSessionId} cell={tab.entityId} viewport={tab.view.reader} onGraph={tab.hostSessionId && tab.entityId ? source => void openPrepared({ kind: 'cell-graph', rootSessionId: session.id, hostSessionId: tab.hostSessionId!, cellId: tab.entityId! }, source) : undefined} />;
+      }
       tab.view ??= { top: 0, left: 0 };
       tab.view.graph ??= { top: 0, left: 0 };
       const root = session.id; const host = tab.hostSessionId;
@@ -577,7 +581,11 @@ export function InspectorPanel({
       return <CellGraph root={root} host={host} cell={tab.entityId} viewport={tab.view.graph} onAgent={agentId => openAgent(agentId)} onWork={work => openAgent(work.agent_id, work.work_id)} />;
     }
     if ((tab.kind === 'process' || tab.kind === 'mcp') && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">原运行实例已不可用。此标签不会改绑到新的实例。</div>;
-    if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} onOpenProcess={process => open("process", process.command, process.processId, backgroundHostSessionId)}
+    if (tab.kind === 'background' || tab.kind === 'process') return <BackgroundTerminalPanel processId={tab.kind === "process" ? tab.entityId : undefined} initialProcess={tab.kind === 'process' ? tab.initialProcess : undefined} onOpenProcess={process => {
+            if (!sessionContentAvailable || !workspace) return;
+            const detail = inspectorTab(session.id, 'process', process.command, process.processId, backgroundHostSessionId);
+            if (detail.kind === 'process') workspace.open({ ...detail, initialProcess: process });
+          }}
             ownerKey={backgroundOwnerKey}
             sessionId={session.id}
             hostSessionId={backgroundHostSessionId}

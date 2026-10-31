@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronRight, GitFork, LoaderCircle } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Bot, ChevronRight, GitFork, LoaderCircle, Network } from 'lucide-react';
 import { flushSync } from 'react-dom';
 import { agentCellApi, AgentCellError, type AgentRow, type CellGraphPage, type CellRow, type Participant, type WorkFact } from '../lib/agent-cell-api';
-import { FileCode } from './file-code';
+import { FilePreviewPanel, FileTextContent } from './file-preview-panel';
+import { WorkspaceLoading } from './workspace-loading';
+import { CellGraphMap, type CellGraphReadingState } from './cell-graph-map';
 
 export function transitionWorkspace(source: HTMLElement, open: () => void) {
   if (!document.startViewTransition || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { open(); return; }
@@ -84,7 +86,7 @@ export function AgentList({ root, onOpen }: { root: string; onOpen: (agent: Agen
   const readOne = useCallback(async (id: string, signal: AbortSignal) => (await agentCellApi.agent(root, id, signal)).agent, [root]);
   const page = usePages(fetchPage, key, readOne);
   if (page.unavailable) return <div className="inspector-empty" role="status">对象已不可用</div>;
-  return <section className="agent-cell-list"><div className="agent-cell-heading"><Bot size={17}/><strong>子代理</strong></div>
+  return <section className="agent-cell-list">
     {page.loading && <div className="agent-cell-empty"><LoaderCircle size={16} className="spin" /></div>}
     {page.error && <div role="status" className="agent-cell-error">{page.error}</div>}
     {!page.loading && !page.error && !page.rows.length && <div className="agent-cell-empty">暂无子代理</div>}
@@ -100,7 +102,7 @@ export function CellList({ root, host, onOpen }: { root: string; host: string; o
   const readOne = useCallback(async (id: string, signal: AbortSignal) => (await agentCellApi.cell(root, host, id, signal)).cell, [root, host]);
   const page = usePages(fetchPage, key, readOne);
   if (page.unavailable) return <div className="inspector-empty" role="status">对象已不可用</div>;
-  return <section className="agent-cell-list"><div className="agent-cell-heading"><GitFork size={17}/><strong>cell</strong></div>
+  return <section className="agent-cell-list">
     {page.loading && <div className="agent-cell-empty"><LoaderCircle size={16} className="spin" /></div>}
     {page.error && <div role="status" className="agent-cell-error">{page.error}</div>}
     {!page.loading && !page.error && !page.rows.length && <div className="agent-cell-empty">暂无 Cell</div>}
@@ -110,10 +112,11 @@ export function CellList({ root, host, onOpen }: { root: string; host: string; o
     {page.next && <button className="agent-cell-more" type="button" onClick={page.more}>加载更多</button>}
   </section>;
 }
-export function CellSource({ root, attempt, host, cell, onGraph }: { root: string; attempt: string; host?: string; cell?: string; onGraph?: (source: HTMLElement) => void }) {
+export function CellSource({ root, attempt, host, cell, onGraph, viewport }: { root: string; attempt: string; host?: string; cell?: string; onGraph?: (source: HTMLElement) => void; viewport?: { top: number; left: number } }) {
   const [text, setText] = useState(''); const [next, setNext] = useState<number | null>(null); const [loading, setLoading] = useState(true);
   const [error, setError] = useState(''); const [graph, setGraph] = useState(false);
   const owner = useRef<AbortController | null>(null); const morePending = useRef(false);
+  const scroller = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const controller = new AbortController(); owner.current = controller;
     setText(''); setNext(null); setLoading(true); setGraph(false); setError('');
@@ -125,16 +128,39 @@ export function CellSource({ root, attempt, host, cell, onGraph }: { root: strin
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => { controller.abort(); if (owner.current === controller) owner.current = null; };
   }, [root, attempt]);
+  useLayoutEffect(() => {
+    if (loading || !scroller.current) return;
+    scroller.current.scrollTop = viewport?.top ?? 0;
+    scroller.current.scrollLeft = viewport?.left ?? 0;
+  }, [root, attempt, loading, viewport]);
   const graphEnabled = Boolean(onGraph);
   useEffect(() => {
+    setGraph(false);
     if (!host || !cell || !graphEnabled) return;
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout>;
+    const presence = async (section: 'works' | 'participants'): Promise<'present' | 'empty' | 'unknown' | 'ended'> => {
+      let cursor: string | undefined;
+      const seen = new Set<string>();
+      let complete = true;
+      while (!controller.signal.aborted) {
+        const result = await agentCellApi.graph(root, host, cell, section, cursor, controller.signal);
+        if (controller.signal.aborted) return 'unknown';
+        if ('status' in result || ['completed', 'failed', 'terminated'].includes(result.cell.state)) return 'ended';
+        if (result.items.length) return 'present';
+        if (result.participation_coverage !== 'complete') complete = false;
+        if (!result.next_cursor) return section === 'participants' && !complete ? 'unknown' : 'empty';
+        if (seen.has(result.next_cursor)) throw new Error('Cell graph cursor did not advance');
+        seen.add(result.next_cursor); cursor = result.next_cursor;
+      }
+      return 'unknown';
+    };
     const refresh = async () => {
       try {
-        const result = await agentCellApi.graph(root, host, cell, 'works', undefined, controller.signal);
+        let result = await presence('works');
+        if (result !== 'present' && result !== 'ended') result = await presence('participants');
         if (controller.signal.aborted) return;
-        if ('status' in result) { setGraph(false); return; }
-        setGraph(true);
+        if (result === 'ended') { setGraph(false); return; }
+        if (result !== 'unknown') setGraph(result === 'present');
       } catch { /* A temporary graph read failure does not invalidate canonical source. */ }
       if (!controller.signal.aborted) timer = setTimeout(() => void refresh(), 3000);
     };
@@ -152,18 +178,22 @@ export function CellSource({ root, attempt, host, cell, onGraph }: { root: strin
     } catch (failure) { if (!controller.signal.aborted) setError(errorText(failure)); }
     finally { morePending.current = false; }
   };
-  return <section className="agent-cell-source">
-    {graph && onGraph && <div className="agent-cell-source-toolbar"><button type="button" onClick={event => onGraph(event.currentTarget)}><GitFork size={14}/>查看工作流图</button></div>}
-    {error && <div className="agent-cell-error" role="status">{error}</div>}
-    {loading ? <div className="agent-cell-empty"><LoaderCircle size={16} className="spin"/></div> : <FileCode source={text} filename="cell.js"/>}
-    {next !== null && <button type="button" className="agent-cell-more" onClick={() => void more()}>加载更多</button>}
-  </section>;
+  return <FilePreviewPanel className="agent-cell-source" label="Cell 冻结源码"
+    toolbar={graph && onGraph && <button type="button" className="file-preview-action" onClick={event => onGraph(event.currentTarget)}><Network size={14}/>查看协作图</button>}
+    notice={error && <div className="file-preview-error" role="status">{error}</div>}>
+    {loading ? <WorkspaceLoading/> : <div className="file-preview-reader">
+      <FileTextContent source={text} filename="cell.js" scrollerRef={scroller} onScroll={event => {
+        if (viewport) { viewport.top = event.currentTarget.scrollTop; viewport.left = event.currentTarget.scrollLeft; }
+      }}/>
+      {next !== null && <footer className="file-preview-pagebar file-preview-pagination"><button type="button" onClick={() => void more()}>加载更多</button></footer>}
+    </div>}
+  </FilePreviewPanel>;
 }
 
 class GraphClosed extends Error {}
 
 type GraphWork = WorkFact & { dependencies: string[] };
-export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { root: string; host: string; cell: string; onAgent: (agentId: string) => void; onWork: (work: WorkFact) => void; viewport?: { top: number; left: number; zoom?: number; expandedWorkIds?: string[]; expandedParents?: string[]; worksPages?: number; participantsPages?: number } }) {
+export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { root: string; host: string; cell: string; onAgent: (agentId: string) => void; onWork: (work: WorkFact) => void; viewport?: CellGraphReadingState }) {
   const [works, setWorks] = useState<Record<string, GraphWork>>({}); const worksRef = useRef(works); worksRef.current = works;
   const [participants, setParticipants] = useState<Participant[]>([]); const participantsRef = useRef(participants); participantsRef.current = participants;
   const [names, setNames] = useState<Record<string, string>>({}); const [coverage, setCoverage] = useState('complete');
@@ -172,14 +202,8 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
   const pageCounts = useRef({ works: viewport?.worksPages ?? 1, participants: viewport?.participantsPages ?? 1 });
   const reload = useRef<(() => void) | null>(null);
   const seeds = useRef(new Set<string>());
-  const [zoom, setZoomState] = useState(viewport?.zoom ?? 1); const canvas = useRef<HTMLDivElement>(null);
-  const [expandedParents, setExpandedParents] = useState(() => new Set(viewport?.expandedParents ?? []));
-  const scroll = useRef<HTMLDivElement>(null);
-  const pan = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const owner = useRef<AbortController | null>(null); const expired = useRef(false);
-  const [lines, setLines] = useState<Array<{x1:number;y1:number;x2:number;y2:number}>>([]);
-  const setZoom = (value: number) => { const nextZoom = Math.max(.5, Math.min(2, value)); setZoomState(nextZoom); if (viewport) viewport.zoom = nextZoom; };
-  const expire = useCallback(() => { expired.current = true; owner.current?.abort(); seeds.current.clear(); if (viewport) { viewport.top = 0; viewport.left = 0; delete viewport.zoom; delete viewport.expandedWorkIds; delete viewport.expandedParents; delete viewport.worksPages; delete viewport.participantsPages; } setWorks({}); setParticipants([]); setNames({}); setExpandedParents(new Set()); setLines([]); setNext({ works: null, participants: null }); setError(''); setUnavailable(true); }, [viewport]);
+  const expire = useCallback(() => { expired.current = true; owner.current?.abort(); seeds.current.clear(); if (viewport) { viewport.top = 0; viewport.left = 0; delete viewport.zoom; delete viewport.worksPages; delete viewport.participantsPages; delete viewport.layout; } setWorks({}); setParticipants([]); setNames({}); setNext({ works: null, participants: null }); setError(''); setUnavailable(true); }, [viewport]);
   useEffect(() => {
     const controller = new AbortController(); owner.current = controller; expired.current = false; let timer: ReturnType<typeof setTimeout>; let busy = false; let requested = false;
     const scan = async (section: 'works' | 'participants') => {
@@ -200,8 +224,8 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
       if (controller.signal.aborted || expired.current || owner.current !== controller) return;
       const seed = ws.items as WorkFact[]; const extra = ps.items as Participant[];
       for (const work of seed) seeds.current.add(work.work_id);
-      // Preserve previously loaded pages and expanded predecessors until exact reads confirm retirement.
-      const ids = [...new Set([...Object.keys(worksRef.current), ...seeds.current, ...(viewport?.expandedWorkIds ?? []), ...participantsRef.current.flatMap(p => p.work_id ? [p.work_id] : []), ...extra.flatMap(p => p.work_id ? [p.work_id] : [])])];
+      // Preserve previously loaded Cell pages until exact reads confirm retirement.
+      const ids = [...new Set([...Object.keys(worksRef.current), ...seeds.current, ...participantsRef.current.flatMap(p => p.work_id ? [p.work_id] : []), ...extra.flatMap(p => p.work_id ? [p.work_id] : [])])];
       const updated: Record<string, GraphWork> = { ...worksRef.current }; const removedWorks = new Set<string>(); let partialRead = false;
       for (let i = 0; i < ids.length; i += 8) {
         const batch = await Promise.allSettled(ids.slice(i, i + 8).map(id => agentCellApi.work(root, id, controller.signal)));
@@ -217,7 +241,6 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
         if (controller.signal.aborted || expired.current || owner.current !== controller) return;
       }
       for (const [id, work] of Object.entries(updated)) if (removed.has(work.agent_id)) { delete updated[id]; removedWorks.add(id); }
-      if (viewport?.expandedWorkIds) viewport.expandedWorkIds = viewport.expandedWorkIds.filter(id => !removedWorks.has(id));
       const visibleParticipants = combined.filter(p => !removed.has(p.agent_id) && (!p.work_id || !removedWorks.has(p.work_id)));
       const visibleAgents = new Set([...Object.values(updated).map(work => work.agent_id), ...visibleParticipants.map(participant => participant.agent_id)]);
       const changed = Object.keys(updated).length !== Object.keys(worksRef.current).length || Object.keys(worksRef.current).some(id => !updated[id]) || visibleParticipants.length !== participantsRef.current.length;
@@ -234,28 +257,21 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
     };
     reload.current = () => void load(); void load(); return () => { controller.abort(); if (owner.current === controller) { owner.current = null; reload.current = null; } clearTimeout(timer); };
   }, [root, host, cell, expire, viewport]);
-  const expand = async (ids: string[]) => { const controller = owner.current; if (!controller || controller.signal.aborted || expired.current) return; for (const id of ids) { if (worksRef.current[id]) continue; try { const result = await agentCellApi.work(root, id, controller.signal); if (controller.signal.aborted || expired.current || owner.current !== controller) return; if (viewport) viewport.expandedWorkIds = [...new Set([...(viewport.expandedWorkIds ?? []), id])]; animateChange(() => { if (controller.signal.aborted || expired.current || owner.current !== controller) return; setWorks(current => ({ ...current, [id]: { ...result.work, dependencies: result.inputs.filter(i => i.kind === 'dependency').map(i => i.source_work_id) } })); }); } catch (failure) { if (controller.signal.aborted || expired.current || owner.current !== controller) return; if (!retired(failure)) setError(errorText(failure)); } } };
   const more = (section: 'works' | 'participants') => { if (!next[section] || !owner.current || expired.current) return; pageCounts.current[section]++; if (viewport) { if (section === 'works') viewport.worksPages = pageCounts.current.works; else viewport.participantsPages = pageCounts.current.participants; } reload.current?.(); };
-  const visibleWorks = useMemo(() => {
-    const ids = new Set([...seeds.current, ...participants.flatMap(p => p.work_id ? [p.work_id] : [])]);
-    const pending = [...ids];
-    for (let i = 0; i < pending.length; i++) {
-      const work = works[pending[i]];
-      if (!work || !expandedParents.has(work.work_id)) continue;
-      for (const source of work.dependencies) if (!ids.has(source) && works[source]) { ids.add(source); pending.push(source); }
-    }
-    return Object.values(works).filter(work => ids.has(work.work_id));
-  }, [works, participants, expandedParents]);
-  const groups = useMemo(() => { const ids = new Set([...visibleWorks.map(w => w.agent_id), ...participants.map(p => p.agent_id)]); return [...ids].map(id => ({ id, works: visibleWorks.filter(w => w.agent_id === id), kinds: [...new Set(participants.filter(p => p.agent_id === id).flatMap(p => p.kinds))] })); }, [visibleWorks, participants]);
-  useEffect(() => { if (scroll.current && viewport) { scroll.current.scrollTop = viewport.top; scroll.current.scrollLeft = viewport.left; } }, [viewport]);
-  useEffect(() => { const element = canvas.current; if (!element) return; const update = () => { const base = element.getBoundingClientRect(); const found: typeof lines = []; const rows = [...element.querySelectorAll<HTMLElement>('[data-work]')]; for (const work of Object.values(works)) for (const source of work.dependencies) { const start = rows.find(row => row.dataset.work === source); const end = rows.find(row => row.dataset.work === work.work_id); if (!start || !end) continue; const a = start.getBoundingClientRect(), b = end.getBoundingClientRect(); found.push({ x1:(a.right-base.left)/zoom, y1:(a.top+a.height/2-base.top)/zoom, x2:(b.left-base.left)/zoom, y2:(b.top+b.height/2-base.top)/zoom }); } setLines(found); }; update(); if (typeof ResizeObserver === 'undefined') return; const observer = new ResizeObserver(update); observer.observe(element); return () => observer.disconnect(); }, [works, groups, zoom]);
+  const groups = useMemo(() => { const visibleWorks = Object.values(works); const ids = new Set([...visibleWorks.map(w => w.agent_id), ...participants.map(p => p.agent_id)]); return [...ids].map(id => ({ id, works: visibleWorks.filter(w => w.agent_id === id) })); }, [works, participants]);
   if (unavailable) return <div className="inspector-empty" role="status">实时工作流视图已关闭</div>;
-  return <section className="agent-cell-graph"><div className="agent-cell-graph-header"><strong>工作流图</strong><div><button title="缩小" onClick={() => setZoom(zoom-.1)}>−</button><button title="适配" onClick={() => setZoom(scroll.current && canvas.current ? Math.min(1, (scroll.current.clientWidth - 24) / canvas.current.scrollWidth) : 1)}>{Math.round(zoom*100)}%</button><button title="放大" onClick={() => setZoom(zoom+.1)}>＋</button></div></div>
-    {error && <div className="agent-cell-error" role="status">{error}</div>}{coverage !== 'complete' && <div className="agent-cell-error" role="status">部分参与信息暂不可用</div>}
-    {loaded && !error && !groups.length && coverage === 'complete' && !next.works && !next.participants && <div className="agent-cell-empty">暂无子代理编排</div>}
-    <div className="agent-cell-graph-scroll" ref={scroll} onScroll={event => { if (viewport) { viewport.top = event.currentTarget.scrollTop; viewport.left = event.currentTarget.scrollLeft; } }} onPointerDown={event => { if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return; const element = event.currentTarget; pan.current = { x: event.clientX, y: event.clientY, left: element.scrollLeft, top: element.scrollTop }; element.setPointerCapture(event.pointerId); }} onPointerMove={event => { if (!pan.current) return; event.currentTarget.scrollLeft = pan.current.left + pan.current.x - event.clientX; event.currentTarget.scrollTop = pan.current.top + pan.current.y - event.clientY; }} onPointerUp={() => { pan.current = null; }} onPointerCancel={() => { pan.current = null; }}><div className="agent-cell-graph-scale" style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }} ref={canvas}>
-      <svg className="agent-cell-graph-lines" aria-hidden="true"><defs><marker id="agent-cell-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" /></marker></defs>{lines.map((line, index) => <path key={index} d={`M ${line.x1} ${line.y1} C ${line.x1+40} ${line.y1}, ${line.x2-40} ${line.y2}, ${line.x2} ${line.y2}`} markerEnd="url(#agent-cell-arrow)" />)}</svg>
-      {groups.map(group => <article className="agent-cell-graph-card" key={group.id}><button type="button" className="agent-cell-graph-agent" onClick={() => onAgent(group.id)}><span className="agent-cell-avatar"><Bot size={14}/></span><strong>{names[group.id] ?? group.id}</strong><ChevronRight size={14}/></button>{group.kinds.length > 0 && <div className="agent-cell-participation">{group.kinds.map(kind => ({ query: '查询', wait: '等待', message: '消息', stop: '停止' }[kind] ?? kind)).join(' · ')}</div>}{group.works.map(work => <div className="agent-cell-graph-work" key={work.work_id} data-work={work.work_id}><button className="agent-cell-work-link" title="定位工作" onClick={() => onWork(work)}>{work.work_id}</button><span className="agent-cell-work-status">{({ running: '运行中', queued: '排队中', completed: '已完成', stopped: '已停止' } as Record<string, string>)[work.status] ?? work.status}</span>{work.dependencies.length > 0 && <button title={expandedParents.has(work.work_id) ? '收起前置工作' : '展开前置工作'} aria-expanded={expandedParents.has(work.work_id)} onClick={() => { const opening = !expandedParents.has(work.work_id); animateChange(() => { if (expired.current || !owner.current || owner.current.signal.aborted) return; setExpandedParents(current => { const value = new Set(current); if (opening) value.add(work.work_id); else value.delete(work.work_id); if (viewport) viewport.expandedParents = [...value]; return value; }); }); if (opening) void expand(work.dependencies); }}>{expandedParents.has(work.work_id) ? '−' : '＋'}</button>}</div>)}</article>)}
-    </div></div>{(next.works || next.participants) && <button type="button" className="agent-cell-more" onClick={() => { more('works'); more('participants'); }}>加载更多</button>}
+  return <section className="agent-cell-graph" aria-label="协作图">
+    <CellGraphMap key={JSON.stringify([root, host, cell])} works={works} count={groups.length} viewport={viewport}>
+      {groups.map(group => <article className="agent-cell-graph-card" key={group.id} data-agent={group.id}>
+        <button type="button" className="agent-cell-graph-agent" onClick={() => onAgent(group.id)}><span className="agent-cell-avatar"><Bot size={14}/></span><strong>{names[group.id] ?? group.id}</strong><ChevronRight size={14}/></button>
+        {group.works.map(work => <div className="agent-cell-graph-work" key={work.work_id} data-work={work.work_id}>
+          <button className="agent-cell-work-link" title="定位工作" onClick={() => onWork(work)}>{work.work_id}</button>
+          <span className="agent-cell-work-status">{({ running: '运行中', queued: '排队中', completed: '已完成', stopped: '已停止' } as Record<string, string>)[work.status] ?? work.status}</span>
+        </div>)}
+      </article>)}
+    </CellGraphMap>
+    {(error || coverage !== 'complete') && <div className="agent-cell-graph-notices">{error && <div className="agent-cell-error" role="status">{error}</div>}{coverage !== 'complete' && <div className="agent-cell-error" role="status">部分参与信息暂不可用</div>}</div>}
+    {loaded && !error && !groups.length && coverage === 'complete' && !next.works && !next.participants && <div className="agent-cell-graph-empty">暂无子代理编排</div>}
+    {(next.works || next.participants) && <button type="button" className="agent-cell-more agent-cell-graph-more" onClick={() => { more('works'); more('participants'); }}>加载更多</button>}
   </section>;
 }

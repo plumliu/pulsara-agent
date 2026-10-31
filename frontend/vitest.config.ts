@@ -18,6 +18,7 @@ export default defineConfig({
       '@testing-library/user-event',
       '@tiptap/pm',
       '@floating-ui/dom',
+      'elkjs',
     ],
   },
   test: {
