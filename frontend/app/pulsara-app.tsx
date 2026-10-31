@@ -2854,7 +2854,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onStop={() => void stopRun()}
           onCompact={compact}
           onRenameSession={() => setRenameTarget(activeSession)}
-          onLocateScheduledTask={taskId => { setFocusScheduledTaskId(taskId); setActiveView('scheduled'); if (!window.matchMedia?.('(min-width: 1151px)').matches) setSidebarOpen(false); }}
           onOpenScheduledTask={runtimeStatus === 'online' && activeSchedule?.sessionId === activeSession.id ? () => {
             setFocusScheduledTaskId(activeSchedule.taskId);
             setActiveView('scheduled'); if (!window.matchMedia?.('(min-width: 1151px)').matches) setSidebarOpen(false);

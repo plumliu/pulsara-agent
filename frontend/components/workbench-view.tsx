@@ -1,6 +1,5 @@
 import { createPortal } from 'react-dom';
 import { usePromptHover } from '../lib/prompt-hover';
-import { LocalScheduledTasksApi } from '../lib/scheduled-tasks-api';
 import { useDesktopWorkspace } from './desktop-workspace';
 import { prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
 import { ProviderRetryStatus } from './provider-retry-status';
@@ -232,7 +231,6 @@ interface WorkbenchViewProps {
   onCompact: () => Promise<void>;
   onRenameSession: () => void;
   onOpenScheduledTask?: () => void;
-  onLocateScheduledTask?: (taskId: string) => void;
   onReopenRuntime: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
@@ -934,32 +932,11 @@ const unavailableVisualization = async (): Promise<string> => {
   throw new Error('Visualization content reader is unavailable');
 };
 
-const ScheduledSourceContext = createContext<((taskId: string) => void) | undefined>(undefined);
-const sourceScheduledApi = new LocalScheduledTasksApi();
-function ScheduledSource({ taskId, trigger, onNotify }: { taskId: string; trigger?: string; onNotify: MarkdownNotify }) {
-  const navigate = useContext(ScheduledSourceContext);
-  const [name, setName] = useState(taskId);
-  const [unavailable, setUnavailable] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    void sourceScheduledApi.get(taskId, controller.signal).then(task => { if (!controller.signal.aborted) { setName(task.name); setUnavailable(false); } })
-      .catch(() => { if (!controller.signal.aborted) setUnavailable(true); });
-    return () => controller.abort();
-  }, [taskId]);
-  return <><span>定时任务 · {name} · {trigger === 'RUN_ONCE' ? '手动触发' : '自动触发'}</span>{navigate && <button type="button" className="input-source-link" onClick={() => {
-    if (unavailable) onNotify('无法定位任务', '任务当前不可用，已接纳的输入正文仍可阅读。', 'warning');
-    else navigate(taskId);
-  }}>定位任务</button>}</>;
-}
-function cellOutputLabel(kind?: string) {
-  return kind === 'error' ? '脚本错误' : kind === 'tool_result' ? '脚本结算' : '脚本输出';
-}
 function inputLabel(item: { inputOrigin?: string; scheduledInput?: Message['scheduledInput']; cellOutput?: Message['cellOutput']; sourceKind?: string; sourceSessionId?: string; sourceExecAttemptId?: string }) {
-  if (item.inputOrigin === 'CELL_OUTPUT') return `${cellOutputLabel(item.cellOutput?.kind)} · ${item.cellOutput?.cellId ?? item.sourceExecAttemptId ?? 'Cell'}`;
-  if (item.inputOrigin === 'SCHEDULED_TASK') return `定时任务 · ${item.scheduledInput?.taskId ?? '任务'} · ${item.scheduledInput?.triggerSource === 'RUN_ONCE' ? '手动触发' : '自动触发'}`;
-  if (item.sourceKind === 'agent') return item.sourceSessionId ? `代理 ${item.sourceSessionId}` : item.inputOrigin === 'AGENT_MATERIAL' ? '任务材料' : '代理消息';
+  if (item.inputOrigin === 'CELL_OUTPUT') return item.cellOutput?.cellId ? `cell日志(${item.cellOutput.cellId})` : 'cell日志';
+  if (item.inputOrigin === 'SCHEDULED_TASK') return '定时任务';
   if (item.inputOrigin === 'AGENT_MATERIAL') return '任务材料';
-  if (item.inputOrigin === 'AGENT_MESSAGE') return '代理消息';
+  if (item.inputOrigin === 'AGENT_MESSAGE' || item.sourceKind === 'agent') return item.sourceSessionId ? `子代理消息(${item.sourceSessionId})` : '子代理消息';
   return item.sourceKind === 'command' ? '你' : '运行时';
 }
 function useInputNavigation(onNotify: MarkdownNotify) {
@@ -979,14 +956,37 @@ function useInputNavigation(onNotify: MarkdownNotify) {
     finally { prepared?.release(); }
   };
 }
-function InputSourceLink({ item, onNotify }: { item: Pick<Message, 'inputOrigin' | 'inputSource' | 'cellOutput' | 'scheduledInput'>; onNotify: MarkdownNotify }) {
-  const workspace = useDesktopWorkspace(); const navigate = useInputNavigation(onNotify);
-  const identity = item.inputSource;
-  const attempt = item.cellOutput?.sourceExecAttemptId ?? (identity?.sourceKind === 'cell' ? identity.sourceExecAttemptId : undefined);
-  if (attempt && workspace) return <button type="button" className="input-source-link" onClick={() => void navigate({ kind: 'cell', rootSessionId: workspace.sessionId, sourceExecAttemptId: attempt })}>查看源码</button>;
-  if (identity?.sourceKind === 'agent' && identity.sourceSessionId === workspace?.sessionId) return null;
-  if (identity?.sourceKind === 'agent' && identity.sourceSessionId && workspace) return <button type="button" className="input-source-link" onClick={() => void navigate({ kind: 'agent', rootSessionId: workspace.sessionId, agentSessionId: identity.sourceSessionId! }, identity.sourceWorkId)}>定位{identity.sourceWorkId ? '工作' : '代理'}</button>;
-  return null;
+function SteerMaterialBubble({ message, text, onNotify }: { message: Message; text: string; onNotify: MarkdownNotify }) {
+  const workspace = useDesktopWorkspace();
+  const navigate = useInputNavigation(onNotify);
+  const preview = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  useLayoutEffect(() => {
+    const node = preview.current;
+    if (!node) return;
+    const measure = () => setOverflowing(node.scrollHeight > node.clientHeight);
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    observer?.observe(node);
+    for (const child of node.children) observer?.observe(child);
+    let current = true;
+    void document.fonts?.ready.then(() => { if (current) measure(); });
+    return () => { current = false; observer?.disconnect(); };
+  }, [text]);
+  const identity = message.inputSource;
+  const attempt = message.cellOutput?.sourceExecAttemptId ?? (identity?.sourceKind === 'cell' ? identity.sourceExecAttemptId : undefined);
+  let destination: { intent: SessionNavigation; workId?: string; label: string } | undefined;
+  if (workspace && message.inputOrigin !== 'SCHEDULED_TASK') {
+    if (attempt) destination = { intent: { kind: 'cell', rootSessionId: workspace.sessionId, sourceExecAttemptId: attempt }, label: '查看脚本' };
+    else if (identity?.sourceKind === 'agent' && identity.sourceSessionId && identity.sourceSessionId !== workspace.sessionId) {
+      destination = { intent: { kind: 'agent', rootSessionId: workspace.sessionId, agentSessionId: identity.sourceSessionId }, workId: identity.sourceWorkId, label: '查看子代理' };
+    }
+  }
+  return <div className="user-message">
+    <div ref={preview} className="assistant-markdown user-steer__preview"><MarkdownBody body={text} onNotify={onNotify} /></div>
+    {overflowing && destination && <button type="button" role="link" className="user-steer__source-link"
+      onClick={() => { if (destination) void navigate(destination.intent, destination.workId); }}>{destination.label}</button>}
+  </div>;
 }
 
 function pendingSteerSender(item: QueuedPrompt): { label: string; senderKind: 'user' | 'agent' } {
@@ -1011,7 +1011,6 @@ function UserMessage({
   onReadPromptImage?: WorkbenchViewProps['onReadPromptImage'];
   visible?: boolean;
 }) {
-  const sourceWorkspace = useDesktopWorkspace();
   const content = pendingContent ?? message.promptContent;
   const sourceTextStyle = { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } as const;
   const copyText = content ? promptContentTextProjection(content) : message.body;
@@ -1024,14 +1023,12 @@ function UserMessage({
   const automatic = message.inputOrigin === 'CELL_OUTPUT' || message.inputOrigin === 'SCHEDULED_TASK' || message.inputOrigin === 'AGENT_MESSAGE'
     || message.inputOrigin === 'AGENT_MATERIAL';
   if (automatic) {
-    const sourceLabel = sourceWorkspace && message.inputSource?.sourceKind === 'agent' && message.inputSource.sourceSessionId === sourceWorkspace?.sessionId
-      ? 'ROOT' : inputLabel({ ...message, ...message.inputSource });
-    const title = message.inputOrigin === 'AGENT_MATERIAL' && sourceLabel !== '任务材料' ? `${sourceLabel} · 任务材料` : sourceLabel;
+    const title = inputLabel({ ...message, ...message.inputSource });
+    const startsTurn = message.userKind !== 'steer'
+      && (message.inputOrigin === 'CELL_OUTPUT' || message.inputOrigin === 'SCHEDULED_TASK');
     return <article className={`user-turn user-steer user-steer--automatic${message.cellOutput?.kind === 'error' ? ' is-error' : ''}`} aria-label={title}>
-      <header className="user-steer__heading"><strong>{message.inputOrigin === 'SCHEDULED_TASK' && message.scheduledInput ? <ScheduledSource taskId={message.scheduledInput.taskId} trigger={message.scheduledInput.triggerSource} onNotify={onNotify} /> : title}</strong>{message.userKind === 'steer' && <CornerDownLeft size={13} aria-hidden="true" />}<InputSourceLink item={message} onNotify={onNotify} />{copyButton}</header>
-      <details className="input-material-disclosure"><summary>{message.userKind === 'steer' ? '补充材料' : '查看输入正文'}</summary>
-        <div className="user-message assistant-markdown"><MarkdownBody body={copyText ?? ''} onNotify={onNotify} /></div>
-      </details>
+      <header className="user-steer__heading">{startsTurn && copyButton}<strong>{title}</strong>{message.userKind === 'steer' && <CornerDownLeft size={13} aria-hidden="true" />}{!startsTurn && copyButton}</header>
+      <SteerMaterialBubble message={message} text={copyText ?? ''} onNotify={onNotify} />
       {deliveryStatus && <span role="status">{deliveryStatus}</span>}
     </article>;
   }
@@ -1052,6 +1049,7 @@ function UserMessage({
   return (
     <article className="user-turn">
       <header className="user-heading">
+        {copyButton}
         <strong>{message.userKind === 'scheduled' ? '定时任务' : label}</strong>
         {message.userKind === 'scheduled' ? <AgentInputAvatar kind="scheduled" />
           : senderKind === 'agent' ? <AgentInputAvatar kind="agent" /> : <UserAvatar />}
@@ -1064,7 +1062,7 @@ function UserMessage({
             renderMessageBody={renderBubble}
           />
         : renderBubble(<p style={sourceTextStyle}>{message.body}</p>)}
-      <div className="message-foot">{copyButton}{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>
+      {(deliveryStatus || message.time) && <div className="message-foot">{deliveryStatus ? <span role="status">{deliveryStatus}</span> : <time>{message.time}</time>}</div>}
     </article>
   );
 }
@@ -1526,8 +1524,7 @@ export function ConversationMessages({
   const renderMessage = (message: Message, startsRun: boolean, visible = true) => {
     const pendingContent = knownPromptContent(message);
     const inputLabel = message.inputOrigin === 'AGENT_INSTRUCTION' ? 'ROOT'
-      : message.inputOrigin === 'AGENT_MATERIAL' ? '任务材料'
-        : message.inputOrigin === 'AGENT_MESSAGE' ? (message.inputSource?.sourceKind === 'agent' && message.inputSource.sourceSessionId ? `代理 ${message.inputSource.sourceSessionId}` : '代理消息') : userLabel;
+      : userLabel;
     const inputSender = message.inputOrigin?.startsWith('AGENT_') ? 'agent' : userSenderKind;
     const assistant = (value: Message, preview = false) => <AssistantMessage message={value}
       responseActionEligible={!preview && isCompleteAnswer(value)} startsAssistantRun={startsRun}
@@ -2452,7 +2449,6 @@ export function WorkbenchView({
   onCompact,
   onRenameSession,
   onOpenScheduledTask,
-  onLocateScheduledTask,
   onReopenRuntime,
   runtimeReopenBusy,
   onReadInteraction,
@@ -2957,7 +2953,6 @@ export function WorkbenchView({
   return (
     <HistoryDisclosureContext.Provider value={disclosureChoices}>
     <HistoryHydrationContext.Provider value={onHydrateEntries}>
-    <ScheduledSourceContext.Provider value={onLocateScheduledTask}>
     <ResponseAnnotations skills={skills} completePaths={onCompletePaths} sessionId={session.id} store={draftStore} onLocate={locateAnnotation} onNotify={onNotify}
       canAnnotate={canControl && !isObserver && runtimeStatus === 'online' && Boolean(session.id) && !editingQueue}>
     <section className={`workbench${welcome ? ' is-welcome' : ''}${fileDrop.dragging ? ' is-file-dragging' : ''}`} aria-label="会话工作台" ref={workbenchRef} {...fileDrop.handlers}>
@@ -2972,7 +2967,6 @@ export function WorkbenchView({
           </div><p>{workspace.kind === 'quick' ? '快速开始' : '指定目录'} · {workspace.path}</p></div>
         </div>
         <div className="topbar-actions">
-          <ProviderRetryStatus retry={providerRetry} />
           {queuedDisplayCount > 0 && <span className="queue-badge">{queuedDisplayCount} 条等待处理</span>}
           <div className="popover-anchor session-actions" ref={sessionActionsRef}>
             <button
@@ -3045,6 +3039,7 @@ export function WorkbenchView({
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             onNotify={onNotify} onFork={onFork} canFork={canControl}
             contextCompactionInProgress={atLatestHistory && contextCompactionInProgress} focusedEntry={locatedFocus?.sessionId === session.id ? locatedFocus : undefined} />
+          {atLatestHistory && <ProviderRetryStatus retry={providerRetry} />}
           {atLatestHistory && conversationSubmissions.map(item => (
             <div key={item.commandId} data-pending-message={item.commandId}
               aria-busy={item.status === 'sending' || item.status === 'synchronizing'}>
@@ -3293,7 +3288,6 @@ export function WorkbenchView({
       )}
     </section>
     </ResponseAnnotations>
-    </ScheduledSourceContext.Provider>
     </HistoryHydrationContext.Provider>
     </HistoryDisclosureContext.Provider>
   );

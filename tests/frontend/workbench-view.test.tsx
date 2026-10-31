@@ -12,6 +12,8 @@ import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../../f
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { promptContentTextProjection } from '../../frontend/lib/prompt-content';
 import { ConversationMessages, WorkbenchView } from '../../frontend/components/workbench-view';
+import { DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
+import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 import { WELCOME_TYPEWRITER_PHRASES } from '../../frontend/components/welcome-typewriter';
 
 const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
@@ -195,17 +197,17 @@ describe('PR04 composer queue hard cut', () => {
       sourceWorkId: 'queue:work', sequence: '2', status: 'pending', inputOrigin: 'AGENT_MESSAGE',
       deliveryMode: 'steer', targetTurnId: 'turn-one', content: textPrompt('来自代理的消息') };
     const view = render(<WorkbenchView {...props({ activeTurnId: 'turn-one', queuedPrompts: [steer] })} />);
-    const pending = screen.getByRole('article', { name: '代理 session:sender' });
-    expect(within(pending).getByText('代理 session:sender')).toBeTruthy();
-    expect(pending.querySelector('details')?.open).toBe(false);
-    fireEvent.click(within(pending).getByText('补充材料'));
+    const pending = screen.getByRole('article', { name: '子代理消息(session:sender)' });
+    expect(within(pending).getByText('子代理消息(session:sender)')).toBeTruthy();
+    expect(pending.querySelector('details')).toBeNull();
+    expect(pending.querySelector('.user-message')).toBeTruthy();
     expect(within(pending).getByText('来自代理的消息')).toBeTruthy();
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', queuedPrompts: [steer], messages: [{
       id: 'accepted-steer', turnId: 'turn-one', role: 'user', userKind: 'steer', inputOrigin: 'AGENT_MESSAGE',
       body: '来自代理的消息', time: '', inputSource: {identityKind: 'queue', sourceKind: 'agent',
         sourceSessionId: 'session:sender', sourceWorkId: 'queue:work', queueItemId: 'agent-steer', deliveryMode: 'steer'},
     }] })} />);
-    expect(screen.getAllByRole('article', { name: '代理 session:sender' })).toHaveLength(1);
+    expect(screen.getAllByRole('article', { name: '子代理消息(session:sender)' })).toHaveLength(1);
     expect(screen.queryByText('等待模型接收')).toBeNull();
   });
 
@@ -3266,17 +3268,51 @@ it('shows mixed future inputs in one queue and cancels only the selected Cell re
  const observerQueue=screen.getByRole('region',{name:'等待处理的输入'});
  expect([...observerQueue.querySelectorAll('.composer-queue__actions button')].map(button=>button.getAttribute('aria-label'))).toEqual(Array(4).fill('复制'));
 });
-it('keeps a Cell steer inside the same process with collapsed Markdown and a real next-turn boundary',()=>{
+it('keeps a Cell steer inside the same process as a bounded Markdown bubble',()=>{
  const messages:import('../../frontend/lib/pulsara-types').Message[]=[{id:'input',turnId:'turn:a',role:'user',userKind:'prompt',body:'task',time:''},
  {id:'step',turnId:'turn:a',role:'assistant',assistantKind:'tool-request',body:'',time:'',traces:[{id:'tool',kind:'artifact',title:'工具',subtitle:'已完成',status:'completed'}]},
  {id:'cell-steer',turnId:'turn:a',role:'user',userKind:'steer',inputOrigin:'CELL_OUTPUT',body:'## Result\n**selected output** /unknown @file',time:'',cellOutput:{cellId:'cell:a',sourceTurnId:'turn:source',sourceExecAttemptId:'attempt:a',recordSequence:1,kind:'log'},inputSource:{identityKind:'queue',queueItemId:'cell-q',sourceKind:'cell',sourceExecAttemptId:'attempt:a',deliveryMode:'steer'}},
  {id:'answer',turnId:'turn:a',role:'assistant',assistantKind:'terminal',body:'Answer',time:''}];
  const view=render(<ConversationMessages messages={messages} artifactOwnerKey="session:a" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}/>);
  expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
- const material=screen.getByRole('article',{name:'脚本输出 · cell:a'});
- expect(material.querySelector('details')?.open).toBe(false);
- fireEvent.click(within(material).getByText('补充材料'));
- expect(material.querySelector('strong')?.textContent).toBe('脚本输出 · cell:a');
+ const material=screen.getByRole('article',{name:'cell日志(cell:a)'});
+ expect(material.querySelector('details')).toBeNull();
+ expect(material.querySelector('.user-message .user-steer__preview')).toBeTruthy();
+ expect(material.querySelector('strong')?.textContent).toBe('cell日志(cell:a)');
  expect(within(material).getByRole('heading',{name:'Result'})).toBeTruthy();
  expect(material.querySelector('[data-skill-reference]')).toBeNull();
+});
+
+it.each(['agent','cell','scheduled'] as const)('opens the correct source for overflowing %s material, with no scheduled navigation',async kind=>{
+ vi.spyOn(HTMLElement.prototype,'clientHeight','get').mockImplementation(function(){return this.classList.contains('user-steer__preview')?120:0;});
+ vi.spyOn(HTMLElement.prototype,'scrollHeight','get').mockImplementation(function(){return this.classList.contains('user-steer__preview')?240:0;});
+ const readAgent=vi.spyOn(agentCellApi,'agent').mockResolvedValue({agent:{agent_id:'agent:source',title:'研究员',current_work_id:null,queued_count:0}});
+ const readSource=vi.spyOn(agentCellApi,'source').mockResolvedValue({source_exec_attempt_id:'attempt:source',source:{status:'AVAILABLE',text:'console.log(1)',offset_chars:0,returned_chars:14,total_chars:14,has_more:false,next_offset_chars:null},live_cell:null});
+ let workspace:ReturnType<typeof useDesktopWorkspace>;
+ function Probe(){workspace=useDesktopWorkspace();return null;}
+ const message:import('../../frontend/lib/pulsara-types').Message={id:'material',role:'user',userKind:'steer',time:'',body:'## 完整材料\n\n保留全文。',
+  inputOrigin:kind==='agent'?'AGENT_MESSAGE':kind==='cell'?'CELL_OUTPUT':'SCHEDULED_TASK',
+  inputSource:kind==='agent'?{identityKind:'origin',sourceKind:'agent',sourceSessionId:'agent:source',sourceWorkId:'work:source',deliveryMode:'steer'}
+   :kind==='cell'?{identityKind:'queue',queueItemId:'queue:cell',sourceKind:'cell',sourceExecAttemptId:'attempt:source',deliveryMode:'steer'}
+   :{identityKind:'queue',queueItemId:'queue:timer',sourceKind:'system',deliveryMode:'steer'}};
+ const onShow=vi.fn();
+ const view=render(<DesktopWorkspaceProvider sessionId="root:session" onShow={onShow}><Probe/><ConversationMessages messages={[message]} artifactOwnerKey="root:session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}/></DesktopWorkspaceProvider>);
+ expect(view.container.querySelector('.user-message .user-steer__preview')).toBeTruthy();
+ expect(screen.queryByText('补充材料')).toBeNull();
+ if(kind==='scheduled'){
+  expect(screen.queryByRole('link')).toBeNull();
+  expect(onShow).not.toHaveBeenCalled();
+ }else{
+  fireEvent.click(screen.getByRole('link',{name:kind==='agent'?'查看子代理':'查看脚本'}));
+  await waitFor(()=>expect(onShow).toHaveBeenCalledTimes(1));
+  const tab=workspace!.tabs.find(item=>item.id===workspace!.activeId)!;
+  expect(tab.sessionId).toBe('root:session');
+  expect(tab.kind).toBe(kind==='agent'?'agent':'cell');
+  if(tab.kind==='agent'){
+   expect(tab.entityId).toBe('agent:source');
+   expect(tab.workLocation?.workId).toBe('work:source');
+  }else if(tab.kind==='cell') expect(tab.sourceExecAttemptId).toBe('attempt:source');
+ }
+ expect(readAgent).toHaveBeenCalledTimes(kind==='agent'?1:0);
+ expect(readSource).toHaveBeenCalledTimes(kind==='cell'?1:0);
 });

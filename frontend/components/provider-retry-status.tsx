@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { LoaderCircle } from 'lucide-react';
 import type { ProviderRetry } from '../lib/runtime-adapter';
 
 export function retryStatusText(retry: ProviderRetry, now: number): string {
@@ -21,5 +22,8 @@ export function ProviderRetryStatus({ retry }: { retry?: ProviderRetry | null })
     return () => clearInterval(timer);
   }, [retry]);
   if (!retry) return null;
-  return <div className="provider-retry-status" role="status">{retryStatusText(retry, Math.max(now, performance.now()))}</div>;
+  return <div className="conversation-interruption provider-retry-status" role="status">
+    <LoaderCircle size={14} className="is-spinning" aria-hidden="true" />
+    <span>{retryStatusText(retry, Math.max(now, performance.now()))}</span>
+  </div>;
 }

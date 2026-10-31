@@ -328,19 +328,25 @@ ROOT 当前会话所有已经持久接纳的 `PENDING / NEW_TURN` 输入属于�
 
 ### 6.3 当前 turn 的 steer 与材料
 
-steer 是“补充给当前 turn”的交付语义，AGENT_MATERIAL/Cell 输出/Agent 消息是内容来源；不得把来源抹平成人类角色。当前 turn 内的这些补充输入复用现有 steer 气泡、折叠、复制和过程分组，按真实顺序显示，不再用“大段任务材料正文”打断整个处理过程。
+开启 turn 的消息（人类输入、ROOT Work instruction、定时输入和 Cell 输出）将复制图标放在消息头的发送者标签／头像左侧，不在正文底部重复显示；底部仅在存在时间或交付状态时保留对应信息。中途 steer 与初始依赖材料保留各自消息头及复制位置，不因开启 turn 的布局调整而改变交付语义。
+
+steer 是“补充给当前 turn”的交付语义，Cell 输出、Agent 消息和定时输入是内容来源；不得把来源抹平成人类角色。当前 turn 内的这些补充输入复用现有 steer 气泡、复制和过程分组，按真实顺序显示。AGENT_MATERIAL 是下述新 Work 的初始材料，不因此成为中途 steer。
+
+运行中的补充气泡标题严格使用 `cell日志(cell:hash)`、`定时任务`、`子代理消息(session:hash)`，其中括号为半角，ID使用真实完整身份；Cell 的错误/结算仍保留原 kind 和必要错误样式，不在标题增加其他来源说明。定时标题不包含任务名称、ID、手动/自动触发，也不为该标题读取任务定义。ROOT 不再自动接收 Work final/诊断为 AGENT_MATERIAL；主动 Agent 消息使用 AGENT_MESSAGE，不能用演示数据伪造 ROOT 自动材料。
+
+Subagent 新 Work 的 AGENT_MATERIAL 仍是初始输入。它与 AGENT_INSTRUCTION 一起在同一个接纳事务中进入同一个 turn：先 initial_context 各项，再 instruction，再按声明顺序排列的依赖/显式 materials。`turn.initial_entry_id` 和 Work 的 `consumed_entry_id` 指向 instruction，不一定指向该组序号最小的 entry。前端按原顺序显示 ROOT instruction 与各份“任务材料”气泡；这些材料不是中途 steer，也不会分别开启 turn。此处的“任务材料”来源标签保留，不能误改成“子代理消息”。
 
 | 来源 | 默认展示 |
 |---|---|
-| Agent 主动消息/现存补充材料 | 真实 Agent 名称、短提示、可展开正文；来源 Agent/Work 可点击定位 |
-| Cell 正式输出 | Cell 身份/脚本输出标记、可展开正文；可跳对应冻结源码 |
-| Cell 错误 | 在同一过程位置显示错误状态与可展开真实诊断 |
-| TIMER / RUN_ONCE steer | 定时任务名称及自动/手动触发标识、可展开本次完整正文、任务来源跳转；放在当前 turn 处理过程中，不冒充用户或未来队列卡片 |
+| Agent 主动消息（AGENT_MESSAGE） | 直接显示引导气泡和 Markdown 正文，预览限高120px；超高时显示“查看子代理”文字链接，打开会话侧边栏对应 Agent，并保留已有精确 Work 定位 |
+| Cell 正式输出 | 同样使用限高120px的引导气泡；超高时显示“查看脚本”文字链接，按原 source attempt 打开对应冻结源码 |
+| Cell 错误 | 在同一过程位置使用相同限高引导气泡显示真实诊断，并保留错误来源；超高时可跳对应脚本 |
+| TIMER / RUN_ONCE steer | 使用相同限高120px的引导气泡；超出直接截断，暂不提供来源跳转或正文展开入口；保留真实定时来源，放在当前 turn 处理过程中 |
 | 新 Work 的初始 context/依赖/materials | 保留新 Work 的原输入位置及各自 entry，不伪装成中途 steer |
 
-默认折叠长正文，展开可读 Markdown 和复制原文；不设置新的正文总长度 cap，不把完整内容换成摘要。复用当前组件能力，缺少的折叠/Markdown 阅读仅加在现有输入阅读组件的来源分支，不另建“材料消息系统”。模型收到完整材料与前端折叠互不影响。
+移除“补充材料/查看输入正文”的 details 折叠壳，正文直接在现有引导气泡中呈现 Markdown。以真实 DOM 自然高度判断溢出，超过120px只裁剪预览；Agent/Cell 的文字链接仅在超高且有真实可定位来源时显示，不在头部重复提供来源跳转，不伪造缺失来源。TIMER/RUN_ONCE 不提供跳转。复制始终取完整原文，不截断存储正文或模型输入，不增加正文总长度 cap，不用摘要替换材料；复用已有工作区、Agent/Work 和冻结源码导航 owner，不另建材料阅读或导航系统。
 
-Agent/Work 跳转复用已有详情与精确 Work 定位，不开启输入框或发送内容。来源 Agent 已删除时显示真实不可定位结果，接收方自己已经保存的材料仍可阅读；不通过源会话复活或补发 Work。
+Agent/Work 跳转复用已有详情与精确 Work 定位，不开启输入框或发送内容。来源 Agent 已删除时显示真实不可定位结果，接收方自己已经保存的材料仍保留完整复制能力；不通过源会话复活或补发 Work。
 
 Cell 输出使 idle ROOT 开启新 turn 时，保留真实 runtime 输入起点；不能为视觉连续谎称它属于已经结束的旧 turn。只在同一真实 turn 内合并过程展示，canonical entry、source 和实际边界不变。
 
@@ -457,7 +463,7 @@ durable oracle 的 event kind、relation、job、subject、append guard 类别�
 | 定时UI | 所有定时NEW项纳入同序头尾预览；活动定时steer在过程内保留来源；每次新RUN_ONCE反馈本次route，重传不重复显示，不用“合并/旧执行运行中”代替新输入接纳 |
 | 停机与任务管理 | 内核停机未接纳时点不补发，重启不丢已接纳队列；内核运行中ROOT忙不抑制触发；暂停/删除/切换先后与steer接纳线性化，已接纳steer不撤回，未来NEW取消范围不扩至steer；PAUSED一次性任务按DB时钟到期静默删除，清理延迟不允许resume复活，不补发/不通知，周期PAUSED规则保持 |
 | 辅助/引用保留 | Hook被省略正文不冒充canonical已接纳消息；能力通知只表达实际生效终态不逐操作计数；同Work依赖/material重复引用仍一份，不同Work同文仍两份；last_n范围保持 |
-| 材料UI | 同turn过程不被材料切开；来源不冒充用户；长材料默认折叠、展开Markdown/复制；跳Agent/Work/源码准确 |
+| 材料UI | 同turn过程不被材料切开；来源不冒充用户；材料直接使用限高120px的引导气泡与Markdown；完整复制；超高Agent/Cell分别跳对应Agent/Work与源码，定时输入截断且无跳转 |
 | 引用 | 主正文/comment均有相同候选、光标、IME、撤销、选择和发送表现；排队转steer内容不丢；quote/code/URL/材料不误识别 |
 | 引用边界 | 未知/失效技能不冒充已执行；@不自动全文注入或越权读取；既有epoch不因新引用rebase |
 | 源码 | Hook后实际源码、code/path、原文件删改、Cell回收、Host置换、重启后均能按已有attempt读取；历史读取越权被拒 |

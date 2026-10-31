@@ -301,7 +301,7 @@ describe('Agent conversation reader', () => {
       readingState={{choices:new Map()}} onNotify={() => {}} />);
     expect(screen.getByText('ROOT')).toBeTruthy();
     expect(screen.getByRole('article', {name:'任务材料'}).textContent).toContain('Prior context.');
-    expect(screen.getByText('代理 session:other')).toBeTruthy();
+    expect(screen.getByText('子代理消息(session:other)')).toBeTruthy();
     const cards = container.querySelectorAll('.agent-conversation-queue article');
     expect(cards).toHaveLength(2);
     expect(within(cards[0] as HTMLElement).getByText('等待依赖：queue:dependency')).toBeTruthy();

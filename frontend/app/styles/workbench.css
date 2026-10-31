@@ -112,6 +112,7 @@
 .hairline { width: 28px; height: 1px; background: var(--paper-darker); }
 .user-turn { width: min(520px, 88%); margin: 0 0 24px auto; }
 .user-heading { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 3px 8px 0; }
+.user-heading .user-message-copy, .user-steer__heading .user-message-copy { flex: none; }
 .user-heading strong { font-family: var(--serif); font-size: var(--type-title-small); }
 .user-message { width: fit-content; max-width: 100%; margin-left: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: 15px 4px 15px 15px; background: color-mix(in srgb, var(--paper-solid) 90%, transparent); box-shadow: var(--shadow-sm); --type-body: 16px; }
 .user-message p { margin: 0; font-size: var(--type-body); line-height: 1.72; }
@@ -741,6 +742,7 @@
 .composer-queue__item.is-exiting { pointer-events: none; }
 @media (prefers-reduced-motion: reduce) {
   .composer-queue__action-busy .is-spinning { animation: none; }
+  .provider-retry-status > .is-spinning { animation: none; }
   .queued-prompt-content__meta button { transition: none; }
   .composer-queue__actions button, .composer-queue__actions button:hover, .composer-queue__actions button:focus-visible, .composer-queue__actions button:active,
   .queue-action-tooltip, .queue-action-tooltip[data-open='true'] { transform: none; transition: none; }
@@ -1018,6 +1020,8 @@
   --type-heading: 20px;
 }
 .conversation-transcript > .conversation-run:nth-last-child(1 of :not([data-thread-tail-end])) { margin-bottom: 0; }
+/* Status notes belong to the preceding reply, not the next conversation. */
+.conversation-transcript > .conversation-run:has(+ .conversation-interruption, + div > .conversation-interruption) { margin-bottom: 0; }
 .conversation-transcript .assistant-markdown { line-height: 1.52; }
 .conversation-transcript .assistant-markdown p { margin-bottom: 5px; }
 .conversation-transcript .assistant-markdown hr { margin: 18px 0; border: 0; border-top: 1px solid var(--line-strong); }
@@ -1072,11 +1076,14 @@
 
 .prompt-composer .tiptap, .prompt-composer__placeholder { letter-spacing: 0; }
 
-.provider-retry-status { color: var(--text-secondary); font-size: 12px; padding: 8px 12px; }
+.provider-retry-status > svg { flex: none; }
 .input-source-link { border: 0; background: none; color: var(--text-secondary); font-size: 11px; cursor: pointer; padding: 3px 6px; }
 .input-source-link:hover { color: var(--text-primary); text-decoration: underline; }
-.input-material-disclosure > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; padding: 7px 0; }
 .user-steer--automatic .user-message { max-width: 100%; white-space: normal; }
+.user-steer__preview { max-height: 120px; overflow: hidden; }
+.user-steer__source-link { display: block; margin-top: 8px; padding: 0; background: transparent; color: var(--blue); font: inherit; font-size: var(--type-small); line-height: 1.6; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.user-steer__source-link:hover { color: var(--ink); }
+.user-steer__source-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 3px; }
 .user-steer--automatic.is-error .user-steer__heading { color: #b3574d; }
 .annotation-comment-editor { min-height: 24px; max-height: 160px; overflow: auto; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 .annotation-comment-editor p { margin: 0; }
