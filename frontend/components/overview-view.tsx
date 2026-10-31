@@ -114,7 +114,7 @@ export function OverviewView({
 
         <div className="overview-columns">
           <section className="overview-card recent-card">
-            <header className="overview-card__header"><div><span className="page-kicker">最近记录</span><h2>最近会话</h2></div><button onClick={() => onNavigate('workbench')}>查看全部</button></header>
+            <header className="overview-card__header"><h2>最近会话</h2></header>
             <div className="recent-table">
               {sessions.slice(0, 4).map((session) => {
                 const presence = session.live ? 'loaded' : 'resumable';
@@ -129,7 +129,7 @@ export function OverviewView({
           </section>
 
           <section className="overview-card system-card">
-            <header className="overview-card__header"><div><span className="page-kicker">本机设置</span><h2>当前配置</h2></div></header>
+            <header className="overview-card__header"><h2>当前配置</h2></header>
             <div className="system-map">
               <div className="system-node"><Bot size={14} /><span><strong>模型配置</strong><small>{modelCatalogLoading ? '模型目录正在载入' : <>{readyModelConfigurations} 组可用{unavailableModelConfigurations > 0 ? ` · ${unavailableModelConfigurations} 组不可用` : ''}</>}</small></span><b className={modelConfigurations.length === 0 ? 'is-inactive' : undefined}>{modelConfigurations.length} 组</b></div>
               <div className="system-line" />

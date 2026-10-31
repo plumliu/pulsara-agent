@@ -31,7 +31,7 @@ it('shows the original hero, brand bar, metrics, and empty recent sessions', () 
   expect(screen.getByText('会话列表为空')).toBeTruthy();
 });
 
-it('opens task creation, workbench, and all sessions from the original actions', () => {
+it('opens task creation and workbench from the hero actions', () => {
   const onNavigate = vi.fn();
   const onNewSession = vi.fn();
   renderOverview({ onNavigate, onNewSession });
@@ -39,8 +39,7 @@ it('opens task creation, workbench, and all sessions from the original actions',
   fireEvent.click(screen.getByRole('button', { name: '开始新任务' }));
   expect(onNewSession).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole('button', { name: '打开工作台' }));
-  fireEvent.click(screen.getByRole('button', { name: '查看全部' }));
-  expect(onNavigate.mock.calls).toEqual([['workbench'], ['workbench']]);
+  expect(onNavigate.mock.calls).toEqual([['workbench']]);
 });
 
 it('shows four recent sessions with shared presence and opens the selected session', () => {

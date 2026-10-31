@@ -543,7 +543,7 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
       <aside className="settings-nav">
         <div className="settings-profile"><UserAvatar /><div><strong>用户</strong><small>偏好与设置</small></div></div>
         {navItems.map(({ id, label, icon: Icon }) => <button className={section === id ? 'is-active' : ''} key={id} onClick={() => setSection(id)}><Icon size={14} /><span>{label}</span><ChevronRight size={12} /></button>)}
-        <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span><a className="settings-font-notice" href="/assets/font-licenses/MiSans-license.pdf" target="_blank" rel="noreferrer">本软件使用 MiSans 字体 · 许可</a></div>
+        <div className="settings-version"><strong>Pulsara</strong><span>{bootstrap?.application.version ?? '本地版本'}</span></div>
       </aside>
       <div className="settings-content">
         {section === 'archived' && <ArchivedSessions adapter={adapter} revision={sessionRevision} onRestored={onSessionsChanged} onDelete={onDeleteSession} onDeleteAll={onDeleteArchivedSessions} deletionBusy={sessionDeletionBusy} />}

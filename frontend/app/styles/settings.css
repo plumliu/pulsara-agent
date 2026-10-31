@@ -300,5 +300,3 @@
 .model-id-options [role="option"]:hover, .model-id-options .is-active { color: var(--blue); background: var(--blue-soft); }
 .model-id-empty, .model-id-field > small { color: var(--muted); font-size: var(--type-caption); line-height: 1.5; }
 .model-id-empty { padding: 10px; }
-
-.settings-font-notice { display: block; margin-top: 9px; color: var(--muted); font-size: var(--type-micro); line-height: 1.6; text-underline-offset: 2px; }
