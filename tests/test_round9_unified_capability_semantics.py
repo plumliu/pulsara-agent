@@ -743,7 +743,7 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
     owner = ProcessLocalNewMcpToolRefOwner()
     prepared = owner.prepare(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
+        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         capability_identity_fingerprint="sha256:identity",
         tool_semantic_fingerprint="sha256:semantic",
@@ -759,19 +759,19 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
         owner.resolve_callable(
             prepared.ref.opaque_token,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
             continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         )
     assert owner.install_full_result(
         result_entry_id='entry:okwolwkgl3d2koiqkyi5mc5zj4',
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
+        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
     )
     resolved = owner.resolve_callable(
         prepared.ref.opaque_token,
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
+        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
     )
     assert resolved is prepared.ref
@@ -779,7 +779,7 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
         owner.resolve_callable(
             prepared.ref.opaque_token,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
             continuity_epoch_nonce='epoch:heb6jusirvxkuhyvcwlhgyqtbq',
         )
 
@@ -795,7 +795,7 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
     owner = ProcessLocalNewMcpToolRefOwner()
     first = owner.prepare(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
+        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         capability_identity_fingerprint="sha256:identity-one",
         tool_semantic_fingerprint="sha256:semantic-one",
@@ -806,7 +806,7 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
     with pytest.raises(McpToolRefCapacityExceeded):
         owner.prepare(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
             continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
             capability_identity_fingerprint="sha256:identity-two",
             tool_semantic_fingerprint="sha256:semantic-two",
@@ -821,14 +821,14 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
     assert owner.install_full_result(
         result_entry_id='entry:ja6ihq637wrsnc35ze6r5r3ezq',
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
+        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
     )
     assert (
         owner.resolve_callable(
             first.ref.opaque_token,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
+            session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
             continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
         )
         == first.ref

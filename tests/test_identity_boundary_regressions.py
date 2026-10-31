@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+
 import asyncio
 import json
 from threading import Lock
@@ -376,21 +377,13 @@ def test_scheduled_run_now_rejects_invalid_id_before_confirmation(field, bad):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize(
-    "identity",
-    [
-        "terminal-monitor:" + "0" * 32,
-        "process:" + "a" * 26,
-        "monitor:" + "a" * 25 + "b",
-    ],
-)
-def test_monitor_cancel_invalid_id_rejected_by_parser_and_owner(identity):
-    from pulsara_agent.ports.terminal import parse_manage_monitor_input
-    from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator
+@pytest.mark.parametrize("kind", ["monitor", "monitor-settlement"])
+def test_removed_subscription_id_kinds_cannot_be_allocated_or_accepted(kind):
+    from pulsara_agent.identity import derive_id, random_id, require_id
 
+    with pytest.raises(ValueError, match="unknown identity kind"):
+        random_id(kind)
+    with pytest.raises(ValueError, match="unknown identity kind"):
+        derive_id(kind, "removed-subscription")
     with pytest.raises(ValueError, match="INVALID_ID"):
-        parse_manage_monitor_input({"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": identity}})
-    # Validation must precede even looking up the live collection.
-    owner = object.__new__(TerminalMonitorCoordinator)
-    with pytest.raises(ValueError, match="INVALID_ID"):
-        owner.cancel(identity)
+        require_id(f"{kind}:" + "a" * 26, "process", "cell")

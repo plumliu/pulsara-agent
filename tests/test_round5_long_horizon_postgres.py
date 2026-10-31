@@ -294,7 +294,7 @@ class _SettlementTokenTool(_KnownReadOnlyTool):
             state="SUCCESS",
             content=b"known exact result",
             process_local_settlement=ProcessLocalEffectSettlementToken(
-                token_id="terminal-monitor-token:test",
+                token_id="tool-effect-token:test",
                 prepared=self,
             ),
         )

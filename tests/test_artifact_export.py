@@ -663,7 +663,7 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
         if not terminal_available:
             # Model the unavailable capability before the first epoch installs
             # its surface; availability never mutates an installed prefix.
-            for name in ("exec_process", "manage_process", "manage_monitor"):
+            for name in ("exec_process", "manage_process"):
                 port._tools.pop(name, None)
         seal_test_direct_tool_port(port)
         runner = ConversationKernelRunner(

@@ -46,7 +46,6 @@ def test_full_inspect_delivery_is_consumer_and_session_specific_and_cell_survive
         owner.resolve_callable(cell.ref.opaque_token, **cell_scope)
 
 
-
 def test_repeated_code_inspect_reuses_current_ref_and_prunes_obsolete_facts():
     owner = ProcessLocalNewMcpToolRefOwner()
     scope = dict(conversation_scope_kind=ModelInputScopeKind.ROOT, session_id="session:root",
@@ -256,69 +255,6 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
                 await supervisor.aclose()
 
     asyncio.run(scenario())
-
-
-def test_monitor_current_work_delivery_filter_compaction_and_terminal_cleanup_share_manager(tmp_path):
-    import os
-    import sys
-    from time import monotonic
-    from pulsara_agent.identity import random_id
-    from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
-    from pulsara_agent.ports.terminal_observation import ExistingTurnInstallation, NewTurnInstallation
-    from pulsara_agent.terminal_process.manager import ProcessRegistry
-    from pulsara_agent.terminal_process.monitor import TerminalMonitorCoordinator, TerminalMonitorPolicy
-
-    owner = random_id("host")
-    root, agent = random_id("session"), random_id("session")
-    turn = random_id("turn")
-    registry = ProcessRegistry()
-    registry.activate_owner(owner)
-    state, yielded = registry.exec_with_yield(command="background", cwd=tmp_path, yield_time_ms=0,
-        tty=False, max_lifetime_seconds=None, owner_host_session_id=owner,
-        shell_argv=(sys.executable, "-c", "import time;time.sleep(30)"),
-        decision_deadline_monotonic=monotonic()+5, env=dict(os.environ))
-    assert yielded
-    root_bus, child_bus = LiveAgentEventBus(), LiveAgentEventBus()
-    root_observer, _, root_revision = root_bus.subscribe()
-    child_observer, _, child_revision = child_bus.subscribe()
-    coordinator = TerminalMonitorCoordinator(session_id=root, owner_epoch=owner, registry=registry,
-        live_bus=root_bus, wake_scheduler=lambda: None)
-    coordinator.bind_live_bus(agent, child_bus)
-    try:
-        registration = coordinator.prepare_registration(process_id=state.process_id, origin_turn_id=turn,
-            origin_attempt_id=random_id("attempt"), origin_result_entry_id=random_id("entry"),
-            writer_generation=1, authorization_reference="policy:actual", recipient_session_id=agent,
-            registering_agent_id=agent, work_turn_id=turn,
-            policy=TerminalMonitorPolicy(min_new_output_chars=1, quiet_period_ms=0))
-        coordinator.settle_registration(registration, committed=True)
-        assert coordinator.registration_scope(registration.monitor_id) == (agent, agent, turn)
-        assert len(coordinator.list_current()) == 1  # ROOT management is Host-wide.
-        assert len(coordinator.list_current(agent_id=agent, work_turn_id=turn)) == 1
-        assert coordinator.list_current(agent_id=agent, work_turn_id=random_id("turn")) == ()
-        assert coordinator.cancel(registration.monitor_id, agent_id=root, work_turn_id=turn) == "not_found"
-        assert len(coordinator.freeze_compaction_handoff(agent_id=agent, work_turn_id=turn)) == 1
-        state.output.append_raw(b"work observation")
-        coordinator._evaluate(registration.monitor_id, monotonic()+6)
-        fields = dict(monitor_id=registration.monitor_id, workspace_id=random_id("workspace"),
-                      writer_generation=1, actor_id=owner)
-        assert coordinator.freeze(**fields, target=NewTurnInstallation(random_id("turn"), "revision:wrong", random_id("entry"))) is None
-        assert coordinator.freeze(**fields, target=ExistingTurnInstallation(random_id("turn"), random_id("entry"))) is None
-        attempt = coordinator.freeze(**fields, target=ExistingTurnInstallation(turn, random_id("entry")))
-        assert attempt is not None and attempt.session_id == agent and attempt.origin_turn_id == turn
-        # A true terminal Work closes its subscription while a frozen result still settles exactly.
-        coordinator.close_work(turn)
-        assert coordinator.list_current() == ()
-        child_events = child_bus.observe(child_observer, after_revision=child_revision, maximum_events=32).events
-        assert {item.event_type.value for item in child_events} >= {"TerminalMonitorOpened", "TerminalMonitorObservation", "TerminalMonitorClosed"}
-        assert all(item.session_id == agent for item in child_events)
-        assert not root_bus.observe(root_observer, after_revision=root_revision, maximum_events=32).events
-        assert coordinator.current_installation_attempt(registration.monitor_id) is attempt
-        coordinator.settle_installation(attempt, accepted=True)
-        assert coordinator.current_installation_attempt(registration.monitor_id) is None
-        assert registry.output_owner(state.process_id, owner_host_session_id=owner).snapshot(maximum_chars=1).process_status == "running"
-    finally:
-        coordinator.stop_admission_and_close(timeout_seconds=2)
-        registry.release_owner(owner, timeout_seconds=5)
 
 
 def test_pretool_hook_complete_argument_replacement_is_validated_and_deny_wins(tmp_path):

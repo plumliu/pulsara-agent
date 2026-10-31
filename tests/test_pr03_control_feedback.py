@@ -84,7 +84,6 @@ def _content(*, session_id: str = 'session:5dyf7lfzp7z22pphjtostkgsjm') -> Proce
         process=UserControlProcessFact(
             "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
         ),
-        monitor=None,
         public_code="BACKGROUND_CONTROL_COMPLETED",
         public_detail="The exact process control completed.",
     )
@@ -530,7 +529,6 @@ def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
                     physical_state="PHYSICALLY_JOINED",
                     group_alive=False,
                 ),
-                monitor=None,
                 public_code="BACKGROUND_CONTROL_COMPLETED",
                 public_detail="done",
             )
@@ -626,7 +624,6 @@ def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit() -> None:
                     physical_state="PHYSICALLY_JOINED",
                     group_alive=False,
                 ),
-                monitor=None,
                 public_code="BACKGROUND_CONTROL_COMPLETED",
                 public_detail="done",
             )

@@ -32,7 +32,6 @@ from pulsara_agent.model_input.contracts import (
     model_tool_surface_fingerprint,
 )
 from pulsara_agent.primitives.context import freeze_json
-from pulsara_agent.terminal_process.monitor import TerminalMonitorPolicy
 from tests.support.round3 import prepare_test_direct_tool_surface
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.terminal import (
@@ -291,17 +290,6 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
                 ).output
             )
             pid = result["target"]["process_id"]
-            coordinator = port.terminal_monitor_coordinator
-            registration = coordinator.prepare_registration(
-                process_id=pid,
-                origin_turn_id='turn:gc7de6qlnst5d77yis7utsj2xu',
-                origin_attempt_id='attempt:rywnac27lbxzzu5jos2emnc4l4',
-                origin_result_entry_id='entry:7q3f3aefu65zldthqrf5igswka',
-                writer_generation=1,
-                authorization_reference="policy:cognitive",
-                policy=TerminalMonitorPolicy(),
-            )
-            coordinator.settle_registration(registration, committed=True)
             plan = captured["plan"]
             # Reproduce the removed, semantically different descriptor, including
             # calls whose arguments happen to be valid under both contracts.
@@ -351,9 +339,6 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
             payload = json.loads(handoff.full_text.split("\n", 1)[0])
             assert payload["terminal_processes"][0]["target"]["process_id"] == pid
             assert "terminal_session_id" not in handoff.full_text
-            assert (
-                payload["terminal_monitors"][0]["target"]["monitor_id"] == registration.monitor_id
-            )
             successor = prepare_test_direct_tool_surface(port)
             borrow = port.borrow_tool_surface(successor)
             try:
@@ -361,10 +346,6 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
                     port._terminal, "poll", pid, since_cursor=result["output_cursor"]
                 )
                 assert json.loads(observed.output)["status"] == "running"
-                assert (
-                    coordinator.list_current()[0]["monitor_id"]
-                    == registration.monitor_id
-                )
             finally:
                 borrow.close()
             (tmp_path / "child").mkdir()

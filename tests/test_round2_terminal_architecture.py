@@ -29,12 +29,11 @@ from pulsara_agent.conversation_kernel.vocabulary import (
 from pulsara_agent.ports.terminal import (
     _inline_schema_references,
     parse_exec_process_input,
-    parse_manage_monitor_input,
     parse_manage_process_input,
     exec_process_input_schema,
 )
 from pulsara_agent.ports.terminal_observation import (
-    TerminalObservationInstallationAttempt,
+    CellOutputContent,
 )
 from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.terminal_process.output import (
@@ -79,13 +78,6 @@ def test_terminal_schema_titles_are_removed_only_at_schema_nodes():
     assert schema["title"] == "Container"
 
 
-def _repository_aggregate_source() -> str:
-    kernel = SRC / "conversation_kernel"
-    paths = [kernel / "repository.py"]
-    paths.extend(sorted((kernel / "_repository").glob("*.py")))
-    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
-
-
 def _fixed_live_producers() -> dict[str, set[Path]]:
     result: dict[str, set[Path]] = {}
     for path in SRC.rglob("*.py"):
@@ -116,14 +108,14 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority(
     tmp_path: Path,
 ) -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
     assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     terminal_names = {
         "exec_process",
         "manage_process",
-        "manage_monitor",
+        "query_processes",
     }
     tool_owner = DirectKernelToolPort(
         workspace_root=tmp_path,
@@ -168,23 +160,7 @@ def test_round2_terminal_observation_descriptor_and_payload_surface_are_narrow()
     )
     assert descriptor.subject_slot is SubjectSlot.ENTRY
     assert descriptor.append_guards == (AppendGuardKind.HOST_WRITER,)
-    source = _repository_aggregate_source()
-    event_method = source[
-        source.index("def _terminal_observation_event(") : source.index(
-            "def _insert_entry(", source.index("def _terminal_observation_event(")
-        )
-    ]
-    for forbidden in (
-        '"output"',
-        '"cursor"',
-        '"policy"',
-        '"callback"',
-        '"lease"',
-        '"pid"',
-        '"raw"',
-    ):
-        assert forbidden not in event_method
-    assert TerminalObservationInstallationAttempt.__dataclass_params__.frozen is True
+    assert CellOutputContent.__dataclass_params__.frozen is True
     assert [item.name for item in fields(ProcessLocalEffectSettlementToken)] == [
         "token_id",
         "prepared",
@@ -199,22 +175,20 @@ def test_round2_live_terminal_events_have_only_real_process_local_producers() ->
     assert producers["TERMINAL_PROCESS_COMPLETED"] == {
         Path("src/pulsara_agent/conversation_kernel/tool_runtime.py")
     }
-    expected_monitor = {Path("src/pulsara_agent/terminal_process/monitor.py")}
     for name in (
         "TERMINAL_MONITOR_OPENED",
         "TERMINAL_MONITOR_OBSERVATION",
         "TERMINAL_MONITOR_CLOSED",
     ):
-        assert producers[name] == expected_monitor
+        assert name not in producers
     assert "_offer_terminal_live" not in "\n".join(
         path.read_text(encoding="utf-8") for path in SRC.rglob("*.py")
     )
 
 
-def test_round2_physical_and_monitor_owners_do_not_import_semantic_authority() -> None:
+def test_round2_physical_owners_do_not_import_semantic_authority() -> None:
     output = (SRC / "terminal_process" / "output.py").read_text(encoding="utf-8")
     manager = (SRC / "terminal_process" / "manager.py").read_text(encoding="utf-8")
-    monitor = (SRC / "terminal_process" / "monitor.py").read_text(encoding="utf-8")
     for source in (output, manager):
         for forbidden in (
             "conversation_kernel.repository",
@@ -224,17 +198,6 @@ def test_round2_physical_and_monitor_owners_do_not_import_semantic_authority() -
             "EventLog",
         ):
             assert forbidden not in source
-    for forbidden in (
-        "conversation_kernel.repository",
-        "conversation_kernel.runner",
-        "storage.migrations",
-        "conversation_kernel.jobs",
-        "EventLog",
-    ):
-        assert forbidden not in monitor
-    assert "pickle" not in monitor
-    assert "sqlite" not in monitor
-    assert "open(" not in monitor
 
 
 def test_round2_cursor_and_initial_entry_contract_are_not_dual_sources() -> None:
@@ -258,10 +221,6 @@ def test_round2_strict_three_tool_input_contracts_fail_closed() -> None:
     with pytest.raises(ValidationError):
         parse_manage_process_input(
             {"action": "wait", "target": {"kind": "PROCESS", "process_id": "p"}, "timeout_seconds": "1"}
-        )
-    with pytest.raises(ValidationError):
-        parse_manage_monitor_input(
-            {"action": "cancel", "target": {"kind": "MONITOR", "monitor_id": "m"}, "extra": "open"}
         )
 
 

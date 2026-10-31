@@ -26,9 +26,6 @@ from pulsara_agent.llm.model_target import (
     default_reasoning_selection,
     validate_reasoning_selection,
 )
-from pulsara_agent.ports.terminal import (
-    parse_manage_monitor_input,
-)
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
@@ -261,19 +258,6 @@ def test_existing_empty_values_remain_operations():
         "run_agent", {"instruction": "Inspect", "materials": [], "depends_on": []}, True
     )
     assert_shape("wait_agent", {"targets": []}, False)
-    base = {"action": "register", "target": {"kind": "PROCESS", "process_id": "p"}}
-    assert (
-        parse_manage_monitor_input(
-            {**base, "conditions": {"output": None}}
-        ).conditions.output
-        is None
-    )
-    assert (
-        parse_manage_monitor_input(
-            {**base, "conditions": {"output": {}}}
-        ).conditions.output
-        is not None
-    )
 
 
 def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():

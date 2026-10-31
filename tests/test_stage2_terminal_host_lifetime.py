@@ -1,4 +1,4 @@
-"""Host-lifetime replacement coverage for the removed durable monitor owner."""
+"""Host lifetime, physical process ownership and shutdown coverage."""
 
 from __future__ import annotations
 

@@ -166,6 +166,8 @@ Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Sche
 
 继续区分安装配置 MCP_CONNECTION、运行实例 MCP_SERVER 和远端叶子；不因为 query 合并而统一其 ID。`MCP_TOOL_REF` 是 META 调用返回的调用引用，沿现有 `use_new_mcp_tool` 使用，不冒充可枚举能力配置 target。
 
+`MCP_TOOL_REF.tool_ref` 直接由共享 `random_id("mcpref")` 生成，格式严格为 `mcpref:<26 位小写 Base32>`。现有进程内 owner 在锁内精确比较 scope／session／epoch／consumer／runtime generation 及 capability、tool semantic、execution policy、route 绑定；相同且仍保留的绑定复用原记录和 ID，记录退役后再次查看则生成新 ID。不使用 HMAC、进程私钥或绑定值派生 ID，不增加第二张映射表，不保留旧格式兼容。生成、schema、投影和接收校验使用同一 canonical 规则。原 Host／session／epoch／Cell consumer、完整结果交付后激活、当前工具／策略及退役校验保持。provider tools/schema 只在既定 cold epoch 或 adopted compaction successor 边界安装，不原地改写已有前缀。
+
 ### 3.3 公共参数规则
 
 所有新入口采用封闭参数分支；不接受额外键。`target:null` 不等于列表分支，必须拒绝；缺少 target 才进入集合分支。沿旧接口明确允许的其他 null 语义保持，例如 Process 的 since_cursor、定时计划列表／创建的 session，以及创建时的 status；定时计划列表的 status:null 仍须拒绝。

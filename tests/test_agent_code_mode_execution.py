@@ -87,7 +87,6 @@ def test_child_close_does_not_release_shared_terminal_owner(tmp_path):
         root = DirectKernelToolPort(**common, host_owner_id='root-host', session_id='session:root')
         child = DirectKernelToolPort(**common, host_owner_id='child-host', session_id='session:child', shared_terminal_owner=root)
         assert child._terminal is root._terminal
-        assert child._terminal_monitor is root._terminal_monitor
         assert child._terminal_owner_id == root._terminal_owner_id
         await child.aclose()
         assert not root._terminal_physically_closed
@@ -195,7 +194,7 @@ def test_real_host_code_calls_parallel_then_continue_after_source_turn_final(tmp
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_runtime, test_model_binding
     from tests.support.round3 import CallbackScriptedKernelModel
-    from tests.test_round2_terminal_host import _tool_call, _text
+    from tests.support.model_stream import _tool_call, _text
     import pulsara_agent.conversation_kernel.host as kernel_host
     (tmp_path / 'source.txt').write_text('before\nsecond\n')
     bodies = []
@@ -293,7 +292,7 @@ def test_real_host_stop_settles_effect_and_large_output_pages_keep_artifact(mode
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_runtime, test_model_binding
     from tests.support.round3 import CallbackScriptedKernelModel
-    from tests.test_round2_terminal_host import _tool_call, _text
+    from tests.support.model_stream import _tool_call, _text
     import pulsara_agent.conversation_kernel.host as kernel_host
     bodies = []
     cell_id = None
@@ -450,7 +449,7 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_runtime, test_model_binding
     from tests.support.round3 import CallbackScriptedKernelModel
-    from tests.test_round2_terminal_host import _tool_call, _text
+    from tests.support.model_stream import _tool_call, _text
     import pulsara_agent.conversation_kernel.host as kernel_host
     (tmp_path/'source.txt').write_text('native-value\n')
     cells, observations = [], []
@@ -521,7 +520,7 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_runtime, test_model_binding
     from tests.support.round3 import CallbackScriptedKernelModel
-    from tests.test_round2_terminal_host import _tool_call, _text
+    from tests.support.model_stream import _tool_call, _text
     from time import monotonic
     import pulsara_agent.conversation_kernel.host as kernel_host
     root_session_id, cell_id = None, None

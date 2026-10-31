@@ -1697,14 +1697,14 @@ describe('PulsaraApp', () => {
           resultText: JSON.stringify({
             target: { kind: 'MCP_TOOL', server_id: 'firecrawl', tool_name: 'mcp__firecrawl__firecrawl_search' },
             effect_kind: 'READ_ONLY',
-            description: '搜索公开网页。', invocation: {mode: 'META', target: {kind: 'MCP_TOOL_REF', tool_ref: 'mcpref_firecrawl_search'}},
+            description: '搜索公开网页。', invocation: {mode: 'META', target: {kind: 'MCP_TOOL_REF', tool_ref: 'mcpref:aaaaaaaaaaaaaaaaaaaaaaaaaa'}},
             input_schema: { type: 'object', properties: { query: { type: 'string' } } },
           }),
         }, {
           id: 'trace-use', kind: 'mcp', toolName: 'use_new_mcp_tool', title: '调用 MCP 工具',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
           argumentsJson: JSON.stringify({
-            target: {kind: 'MCP_TOOL_REF', tool_ref: 'mcpref_firecrawl_search'}, arguments: { query: 'Pulsara' },
+            target: {kind: 'MCP_TOOL_REF', tool_ref: 'mcpref:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, arguments: { query: 'Pulsara' },
           }),
           resultText: JSON.stringify({ content: '搜索完成' }),
         }],

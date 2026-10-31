@@ -1861,7 +1861,6 @@ def test_k3_user_control_feedback_is_measured_before_atomic_publication(
             process=UserControlProcessFact(
                 "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
             ),
-            monitor=None,
             public_code="BACKGROUND_CONTROL_COMPLETED",
             public_detail="The process was stopped.",
         )
@@ -1987,7 +1986,6 @@ def test_k3_user_control_feedback_resource_failure_precedes_publication(
                             "TERMINAL",
                             False,
                         ),
-                        monitor=None,
                         public_code="BACKGROUND_CONTROL_COMPLETED",
                         public_detail="\\" * 28_000,
                     ),
@@ -2107,7 +2105,6 @@ def test_k3_active_feedback_compacts_before_atomic_publication(
             process=UserControlProcessFact(
                 "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
             ),
-            monitor=None,
             public_code="BACKGROUND_CONTROL_COMPLETED",
             public_detail="\\" * 18_000,
         ),

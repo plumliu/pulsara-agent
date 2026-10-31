@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
-from pulsara_agent.identity import random_id
+from pulsara_agent.identity import is_valid_id, random_id, require_id
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-import base64
-import hashlib
-import hmac
-import secrets
 from threading import RLock
 
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH = 1_024
@@ -50,13 +45,13 @@ class NewMcpToolRef:
     runtime_generation: int | None = None
 
     def __post_init__(self) -> None:
+        require_id(self.opaque_token, "mcpref")
         if (self.consumer_kind is McpToolRefConsumerKind.CODE_CELL) != (self.consumer_id is not None):
             raise ValueError("MCP ref consumer identity is invalid")
         if not self.session_id:
             raise ValueError("new MCP ref session identity is missing")
         if (
-            not self.opaque_token.startswith("mcpref_")
-            or not self.continuity_epoch_nonce
+            not self.continuity_epoch_nonce
             or not all(
                 (
                     self.capability_identity_fingerprint,
@@ -85,12 +80,11 @@ class _RefRecord:
 
 
 class ProcessLocalNewMcpToolRefOwner:
-    """Sealed HMAC references; no slot, durable row, replay, or LRU owner."""
+    """Random canonical references retained by their exact process-local binding."""
 
     def __init__(self) -> None:
         self._lock = RLock()
         self._authority = object()
-        self._secret = secrets.token_bytes(32)
         self._refs: dict[str, _RefRecord] = {}
         self._prepared: dict[str, PreparedNewMcpToolRefSettlement] = {}
         self._closed = False
@@ -110,45 +104,28 @@ class ProcessLocalNewMcpToolRefOwner:
         consumer_id: str | None = None,
         runtime_generation: int | None = None,
     ) -> PreparedNewMcpToolRefSettlement:
-        semantic = {
-            "scope": conversation_scope_kind.value,
-            "consumer_kind": consumer_kind.value,
-            "consumer_id": consumer_id,
-            "runtime_generation": runtime_generation,
-            "session_id": session_id,
-            "epoch_nonce": continuity_epoch_nonce,
-            "capability_identity": capability_identity_fingerprint,
-            "tool_semantic": tool_semantic_fingerprint,
-            "execution_policy": mcp_execution_policy_fingerprint,
-            "tool_route": tool_route_fingerprint,
-        }
-        digest = hmac.new(
-            self._secret,
-            canonical_json_bytes(semantic),
-            hashlib.sha256,
-        ).digest()
-        token = "mcpref_" + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
-        ref = NewMcpToolRef(
-            opaque_token=token,
-            conversation_scope_kind=conversation_scope_kind,
-            session_id=session_id,
-            continuity_epoch_nonce=continuity_epoch_nonce,
-            capability_identity_fingerprint=capability_identity_fingerprint,
-            tool_semantic_fingerprint=tool_semantic_fingerprint,
-            mcp_execution_policy_fingerprint=mcp_execution_policy_fingerprint,
-            tool_route_fingerprint=tool_route_fingerprint,
-            issued_by_host_authority=self._authority,
-            consumer_kind=consumer_kind,
-            consumer_id=consumer_id,
-            runtime_generation=runtime_generation,
-        )
         with self._lock:
             if self._closed:
                 raise RuntimeError("new MCP ref owner is closed")
             settlement_id = random_id("settlement")
             while settlement_id in self._prepared:
                 settlement_id = random_id("settlement")
-            record = self._refs.get(token)
+            record = next(
+                (
+                    item for item in self._refs.values()
+                    if item.ref.conversation_scope_kind is conversation_scope_kind
+                    and item.ref.session_id == session_id
+                    and item.ref.continuity_epoch_nonce == continuity_epoch_nonce
+                    and item.ref.consumer_kind is consumer_kind
+                    and item.ref.consumer_id == consumer_id
+                    and item.ref.runtime_generation == runtime_generation
+                    and item.ref.capability_identity_fingerprint == capability_identity_fingerprint
+                    and item.ref.tool_semantic_fingerprint == tool_semantic_fingerprint
+                    and item.ref.mcp_execution_policy_fingerprint == mcp_execution_policy_fingerprint
+                    and item.ref.tool_route_fingerprint == tool_route_fingerprint
+                ),
+                None,
+            )
             if record is None:
                 epoch_count = sum(
                     item.ref.conversation_scope_kind is conversation_scope_kind
@@ -163,13 +140,28 @@ class ProcessLocalNewMcpToolRefOwner:
                     raise McpToolRefCapacityExceeded(
                         "MCP_REF_CAPACITY_EXCEEDED"
                     )
+                token = random_id("mcpref")
+                while token in self._refs:
+                    token = random_id("mcpref")
+                ref = NewMcpToolRef(
+                    opaque_token=token,
+                    conversation_scope_kind=conversation_scope_kind,
+                    session_id=session_id,
+                    continuity_epoch_nonce=continuity_epoch_nonce,
+                    capability_identity_fingerprint=capability_identity_fingerprint,
+                    tool_semantic_fingerprint=tool_semantic_fingerprint,
+                    mcp_execution_policy_fingerprint=mcp_execution_policy_fingerprint,
+                    tool_route_fingerprint=tool_route_fingerprint,
+                    issued_by_host_authority=self._authority,
+                    consumer_kind=consumer_kind,
+                    consumer_id=consumer_id,
+                    runtime_generation=runtime_generation,
+                )
                 record = self._refs[token] = _RefRecord(
                     ref=ref,
                     state=NewMcpToolRefState.PREPARED,
                     committed_result_entry_ids=set(),
                 )
-            elif record.ref != ref:
-                raise RuntimeError("new MCP ref token collision")
             prepared = PreparedNewMcpToolRefSettlement(
                 settlement_token_id=settlement_id, result_entry_id=result_entry_id,
                 ref=record.ref, record=record,
@@ -187,7 +179,7 @@ class ProcessLocalNewMcpToolRefOwner:
             retained = self._prepared.pop(prepared.settlement_token_id, None)
             if retained is None:
                 if self._refs.get(prepared.ref.opaque_token) is not prepared.record:
-                    return  # Retired occurrence, including a delayed ABA settlement.
+                    return  # Delayed settlement for a retired occurrence.
                 if committed:
                     raise RuntimeError("committed MCP ref settlement is absent")
                 return
@@ -195,7 +187,7 @@ class ProcessLocalNewMcpToolRefOwner:
                 raise RuntimeError("MCP ref settlement token conflicts")
             record = self._refs.get(prepared.ref.opaque_token)
             if record is not prepared.record:
-                return  # A newer inspect with the same deterministic token owns its own result IDs.
+                return  # The retained record no longer belongs to this inspect.
             if committed:
                 if record.state is not NewMcpToolRefState.CALLABLE:
                     record.committed_result_entry_ids.add(prepared.result_entry_id)
@@ -248,6 +240,8 @@ class ProcessLocalNewMcpToolRefOwner:
         consumer_kind: McpToolRefConsumerKind = McpToolRefConsumerKind.MODEL_EPOCH,
         consumer_id: str | None = None,
     ) -> NewMcpToolRef:
+        if not is_valid_id(token, "mcpref"):
+            raise LookupError("MCP_TOOL_REF_NOT_FOUND")
         with self._lock:
             record = self._refs.get(token)
             if record is None:

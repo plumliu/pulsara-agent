@@ -47,7 +47,6 @@ def target(kind, field, prefix):
 AGENT = target("AGENT", "agent_id", "session")
 WORK = target("WORK", "work_id", "queue")
 PROCESS = target("PROCESS", "process_id", "process")
-MONITOR = target("MONITOR", "monitor_id", "monitor")
 CELL = target("CELL", "cell_id", "cell")
 SCHEDULE = target("SCHEDULE", "task_id", "schedule")
 MCP = {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": "read"}
@@ -78,10 +77,6 @@ LEGAL = [
     ("manage_process", {"action": "submit", "target": PROCESS, "data": "x"}),
     ("manage_process", {"action": "close_stdin", "target": PROCESS}),
     ("manage_process", {"action": "kill", "target": PROCESS}),
-    ("query_monitors", {}),
-    ("query_monitors", {"target": MONITOR}),
-    ("manage_monitor", {"action": "register", "target": PROCESS}),
-    ("manage_monitor", {"action": "cancel", "target": MONITOR}),
     ("exec_cell", {"code": ""}),
     ("exec_cell", {"path": "script.js"}),
     ("query_cells", {"max_items": 10000}),
@@ -126,8 +121,6 @@ def test_canonical_calls_survive_both_actual_wire_serializers(name, arguments):
     ("query_agents", {"target": WORK, "max_items": 1}),
     ("query_agents", {"target": WORK, "cursor": "x"}),
     ("query_processes", {"target": PROCESS, "include_running": True}),
-    ("query_monitors", {"cursor": "x"}),
-    ("query_monitors", {"target": PROCESS}),
     ("query_cells", {"target": CELL, "cursor": CELL["cell_id"]}),
     ("query_cells", {"offset_chars": 0}),
     ("query_cells", {"max_items": True}),
@@ -140,10 +133,9 @@ def test_canonical_calls_survive_both_actual_wire_serializers(name, arguments):
     ("manage_cell", {"action": "wait", "cell_id": CELL["cell_id"]}),
     ("manage_process", {"action": "poll", "target": PROCESS, "timeout_seconds": 2}),
     ("manage_process", {"action": "list"}),
-    ("manage_monitor", {"action": "list"}),
     ("manage_schedule", {"action": "list"}),
 ] + [(name, {"target": None}) for name in (
-    "query_capabilities", "query_agents", "query_processes", "query_monitors", "query_cells", "query_schedules",
+    "query_capabilities", "query_agents", "query_processes", "query_cells", "query_schedules",
 )])
 def test_merged_branches_reject_cross_branch_fields(name, arguments):
     schema = thaw_tool_json_object(builtin_tool_catalog_entry(name).descriptor.input_schema)
@@ -152,14 +144,12 @@ def test_merged_branches_reject_cross_branch_fields(name, arguments):
 
 @pytest.mark.parametrize("name,arguments,read_only", [
     ("query_capabilities", {}, True), ("query_agents", {}, True),
-    ("query_processes", {}, True), ("query_monitors", {}, True),
+    ("query_processes", {}, True),
     ("query_cells", {}, True), ("query_schedules", {}, True),
     ("manage_process", {"action": "poll"}, True),
     ("manage_process", {"action": "wait"}, True),
     ("manage_process", {"action": "write"}, False),
     ("manage_process", {"action": "kill"}, False),
-    ("manage_monitor", {"action": "register"}, False),
-    ("manage_monitor", {"action": "cancel"}, False),
     ("manage_cell", {"action": "wait"}, True),
     ("manage_cell", {"action": "stop"}, False),
     ("manage_schedule", {"action": "pause"}, False),
@@ -195,7 +185,7 @@ def test_shared_query_retains_bypass_permission_requirement(mode, tmp_path):
 def test_terminal_queries_keep_terminal_access_requirement(tmp_path):
     policy = replace(preset_to_policy(PermissionMode.BYPASS_PERMISSIONS), terminal=TerminalAccess.OFF)
     gate = PolicyPermissionGate(policy, AllowAllPermissionGate(), workspace_root=tmp_path)
-    for name in ("query_processes", "query_monitors"):
+    for name in ("query_processes",):
         entry = builtin_tool_catalog_entry(name)
         assert entry.permission_contract.terminal_rule.kind is BuiltinTerminalPermissionRuleKind.ALL_ACTIONS
         decision = asyncio.run(gate.evaluate([ToolCall("test", name, {})]))
@@ -232,11 +222,11 @@ def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners():
     assert set(query.availability_requirement.allowed_invocation_owners) == {
         ToolInvocationOwnerKind.HOST_MAIN_RUN, ToolInvocationOwnerKind.SUBAGENT,
     }
-    for name in ("exec_process", "query_processes", "manage_process", "query_monitors", "manage_monitor"):
+    for name in ("exec_process", "query_processes", "manage_process"):
         assert tool_observation_origin_for_binding(prepared.binding(name)) is ToolObservationOrigin.TERMINAL_PROCESS
 
 
-@pytest.mark.parametrize("name", ["list_capabilities", "inspect_capability", "list_agents", "inspect_agent", "terminal", "terminal_process", "terminal_monitor", "scheduled_tasks", "exec", "wait_exec", "stop_exec", "artifact_read", "artifact_export", "memory_get", "memory_search"])
+@pytest.mark.parametrize("name", ["list_capabilities", "inspect_capability", "list_agents", "inspect_agent", "terminal", "terminal_process", "terminal_monitor", "manage_monitor", "query_monitors", "scheduled_tasks", "exec", "wait_exec", "stop_exec", "artifact_read", "artifact_export", "memory_get", "memory_search"])
 def test_old_public_names_have_no_catalog_or_classifier_path(name):
     with pytest.raises(KeyError):
         builtin_tool_catalog_entry(name)

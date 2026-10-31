@@ -537,7 +537,6 @@ def _install_handoff_source_fixture(session) -> dict[str, object]:
 
     handoff = freeze_compaction_runtime_handoff(
         terminal_processes=(),
-        terminal_monitors=(),
         todo=None,
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         agent_work_index=({

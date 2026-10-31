@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.code_mode import CodeModeError, CodeModeHost
-from pulsara_agent.code_mode.contracts import CodeModeObservation
 from pulsara_agent.code_mode.host import _Cell, _Output, _Pending
 from pulsara_agent.code_mode.targets import cell_target
 from pulsara_agent.identity import random_id
@@ -18,32 +17,32 @@ def test_cell_handoff_filters_complete_pending_without_consuming_or_retaining():
     async def scenario():
         host = CodeModeHost()
 
-        def cell(state, *, delivered=False):
+        def cell(state):
             value = _Cell(
                 cell_id=random_id("cell"), turn_id="turn", source_exec_attempt_id="attempt",
                 snapshot=object(), tool_catalog={}, invoke=None, prepare_batch=None,
                 admitted=asyncio.get_running_loop().create_future(),
-                state=state, terminal_delivered=delivered,
+                state=state,
             )
             host._cells[value.cell_id] = value
             return value
 
-        queued = cell("queued", delivered=True)
-        running = cell("running", delivered=True)
+        queued = cell("queued")
+        running = cell("running")
         unacknowledged = cell("completed")
-        unread = cell("failed", delivered=True)
+        unacknowledged.output.append(_Output({"kind": "log", "text": "pending"}, charge=12))
+        unread = cell("failed")
         unread.output.append(_Output({"kind": "log", "text": "unread"}, charge=12))
-        preparation = cell("terminated", delivered=True)
+        preparation = cell("terminated")
         preparation.pending["prepare"] = _Pending("prepare", None, None, 4)
-        call = cell("terminated", delivered=True)
+        call = cell("terminated")
         call.pending["invoke"] = _Pending("invoke", 1, "read_file", 4)
-        cleanup = cell("completed", delivered=True)
-        cleanup.observation = CodeModeObservation(cleanup.cell_id, "completed", (), False, 0, None)
+        cleanup = cell("completed")
         cleanup.vm_released.set()
-        vm_cleanup = cell("terminated", delivered=True)
+        vm_cleanup = cell("terminated")
         before = {
-            value.cell_id: (value.terminal_delivered, tuple(value.output), dict(value.pending),
-                            value.observation, dict(value.reservations), value.observed_count)
+            value.cell_id: (tuple(value.output), dict(value.pending),
+                            value.output_lease, dict(value.reservations), value.next_output_sequence)
             for value in host._cells.values()
         }
 
@@ -57,8 +56,8 @@ def test_cell_handoff_filters_complete_pending_without_consuming_or_retaining():
         )
         assert next(row for row in facts if row["target"] == cell_target(preparation.cell_id))["pending_calls"] == 0
         assert {
-            value.cell_id: (value.terminal_delivered, tuple(value.output), dict(value.pending),
-                            value.observation, dict(value.reservations), value.observed_count)
+            value.cell_id: (tuple(value.output), dict(value.pending),
+                            value.output_lease, dict(value.reservations), value.next_output_sequence)
             for value in host._cells.values()
         } == before
         # User controls retain all current cells, including internal cleanup.
@@ -75,7 +74,7 @@ def test_cell_handoff_filters_complete_pending_without_consuming_or_retaining():
             forgotten.append(message)
 
         host._safe_send = send
-        unacknowledged.terminal_delivered = True
+        unacknowledged.output.clear()
         unacknowledged.vm_released.set()
         await host._collect(unacknowledged)
         assert unacknowledged.cell_id not in host._cells

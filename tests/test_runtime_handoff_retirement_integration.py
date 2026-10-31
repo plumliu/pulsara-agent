@@ -22,14 +22,14 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition, CompactionTrigger, ResolvedCompactionPolicy,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
-    HANDOFF_BUDGET_OMISSION, HANDOFF_CONTINUATION, PMCA_KEYS,
+    HANDOFF_BUDGET_OMISSION, HANDOFF_CONTINUATION, PCA_KEYS,
 )
 from pulsara_agent.conversation_kernel.direct_model import DirectKernelModelPort
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent, text_part_values
 from pulsara_agent.llm.provider_replay import ProviderAssistantReplayCodecKind
-from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pmca_tokens
+from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pca_tokens
 from pulsara_agent.model_input.continuity import decode_runtime_observation
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json, thaw_json
@@ -41,13 +41,12 @@ from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.desktop_runtime import validate_managed_postgres
 from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
 from pulsara_agent.terminal_process.models import TerminalProcessOrigin, TerminalRequest
-from pulsara_agent.terminal_process.monitor import TerminalMonitorPolicy
 from pulsara_agent.tools.builtins.todo import parse_todo_replacement
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.dogfood.run_model_switch_handover_dogfood import _require_disposable_local_root
 from tests.support.model_config import test_model_binding, test_model_limits, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
-from tests.test_round2_terminal_host import _text, _tool_call
+from tests.support.model_stream import _text, _tool_call
 from tests.test_stage2_conversation_runner import _CompactionSummaryTransport, _context_snapshot_payload
 
 
@@ -264,17 +263,6 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
             TerminalRequest("printf HANDOFF_ENDED_PROCESS", yield_time_ms=1000),
             owner_host_session_id=owner, origin=origin, decision_deadline_monotonic=monotonic()+30)
         assert ended.process_id and ended.exit_code == 0
-        coordinator = session._tools.terminal_monitor_coordinator
-        tokens = []
-        for process_id in running:
-            tokens.append(coordinator.prepare_registration(process_id=process_id,
-                origin_turn_id=request.turn_id, origin_attempt_id=random_id("attempt"),
-                origin_result_entry_id=random_id("entry"), writer_generation=session._lease.guard.writer_generation,
-                authorization_reference="integration-owner-setup", policy=TerminalMonitorPolicy()))
-        coordinator.settle_registration(tokens[0], committed=True)
-        coordinator.cancel(tokens[1].monitor_id)
-        assert tokens[1].monitor_id in coordinator._registrations
-        assert coordinator._registrations[tokens[1].monitor_id].state.value == "CLOSED"
         cell_started = asyncio.Event()
         cell_release = asyncio.Event()
         async def invoke(_):
@@ -282,42 +270,14 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
             await cell_release.wait()
             return CodeModeToolResult(value={})
         cells = session._code_mode
-        active = await cells.start(source="await tools.read_file({}); console.log('ACTIVE_CELL_ONCE');",
+        active = await cells.start(source="await tools.read_file({});",
             source_exec_attempt_id=random_id("attempt"), turn_id=request.turn_id,
             snapshot=object(), tool_catalog={"read_file": {}}, invoke=invoke)
         await asyncio.wait_for(cell_started.wait(), 10)
-        terminal_cell = await cells.start(source="console.log('UNCLAIMED_CELL_ONCE');",
-            source_exec_attempt_id=random_id("attempt"), turn_id=request.turn_id,
-            snapshot=object(), tool_catalog={}, invoke=invoke)
-        await _eventually(lambda: cells.capture_cell(terminal_cell).state == "completed")
-        # Freeze real owner facts without acquiring an output observation.
-        before = cells.capture_cell(terminal_cell)
-        assert before.has_unread_output
-        cleanup_gate, cleanup_blocked = asyncio.Event(), asyncio.Event()
-        collect = cells._collect
-        cleanup_id = None
-        async def held_collect(cell):
-            if cell.cell_id == cleanup_id:
-                if cell.terminal_delivered:
-                    cleanup_blocked.set()
-                await cleanup_gate.wait()
-            await collect(cell)
-        cells._collect = held_collect
-        cleanup_id = await cells.start(source="void 0;", source_exec_attempt_id=random_id("attempt"),
-            turn_id=request.turn_id, snapshot=object(), tool_catalog={}, invoke=invoke)
-        await _eventually(lambda: cells.capture_cell(cleanup_id).state == "completed")
-        cleanup_observation = await cells.observe(cleanup_id, 0)
-        cleanup_ack = asyncio.create_task(cells.acknowledge(cleanup_observation))
-        await asyncio.wait_for(cleanup_blocked.wait(), 10)
-        assert cells._cells[cleanup_id].terminal_delivered
-        assert not cells._cells[cleanup_id].output and not cells._cells[cleanup_id].pending
-        self.resources.update(running=running, ended=ended.process_id, tokens=tokens,
-            active=active, terminal_cell=terminal_cell, cell_release=cell_release,
-            terminal_before=before, release_path=release_path, cleanup_id=cleanup_id,
-            cleanup_gate=cleanup_gate, cleanup_ack=cleanup_ack,
+        self.resources.update(running=running, ended=ended.process_id,
+            active=active, cell_release=cell_release, release_path=release_path,
             process_states={key: terminal.process_registry._states[key] for key in running},
-            active_cell_owner=cells._cells[active],
-            monitor_owner=coordinator._registrations[tokens[0].monitor_id])
+            active_cell_owner=cells._cells[active])
         if self.variant == "large_todo":
             self._seed_todo(request)
 
@@ -363,11 +323,6 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
                 events = _tool_call("query_cells", "call:query-original-cells", {})
             else:
                 events = _tool_call("read_file", "call:post-successor-read", {"target": {"kind": "PATH", "path": "input.txt"}})
-        elif self.variant == "large_todo" and index == 4:
-            # Metadata/source projection has not consumed the original output.
-            assert self.session._code_mode.capture_cell(self.resources["terminal_cell"]) == self.resources["terminal_before"]
-            events = _tool_call("manage_cell", "call:wait-original-cell", {"action": "wait",
-                "target": {"kind": "CELL", "cell_id": self.resources["terminal_cell"]}, "yield_time_ms": 0})
         else:
             events = _text("text:finished", "HOST_HANDOFF_FINISHED")
         for event in events:
@@ -454,34 +409,27 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                 assert HANDOFF_CONTINUATION in handoff.body
                 assert HANDOFF_BUDGET_OMISSION not in handoff.body
                 assert "omitted" not in payload
-                pmca = canonical_json_bytes({key: payload[key] for key in PMCA_KEYS}).decode() + "\n" + HANDOFF_CONTINUATION
-                assert estimate_runtime_handoff_pmca_tokens(pmca) <= 3200
-                assert estimate_runtime_handoff_pmca_tokens(handoff.body) > 3200
+                pca = canonical_json_bytes({key: payload[key] for key in PCA_KEYS}).decode() + "\n" + HANDOFF_CONTINUATION
+                assert estimate_runtime_handoff_pca_tokens(pca) <= 3200
+                assert estimate_runtime_handoff_pca_tokens(handoff.body) > 3200
                 assert wire_observations["COMPACTION_RUNTIME_HANDOFF"] == handoff.body
-                record_property("pmca_tokens", estimate_runtime_handoff_pmca_tokens(pmca))
-                record_property("full_handoff_tokens", estimate_runtime_handoff_pmca_tokens(handoff.body))
+                record_property("pca_tokens", estimate_runtime_handoff_pca_tokens(pca))
+                record_property("full_handoff_tokens", estimate_runtime_handoff_pca_tokens(handoff.body))
                 record_property("actual_wire_handoff_body", wire_observations["COMPACTION_RUNTIME_HANDOFF"])
             if variant == "large_todo":
                 for process_id, process_owner in model.resources["process_states"].items():
                     assert session._tools._terminal.process_registry._states[process_id] is process_owner
                     assert process_owner.process.poll() is None
                 assert session._code_mode._cells[model.resources["active"]] is model.resources["active_cell_owner"]
-                assert session._tools.terminal_monitor_coordinator._registrations[
-                    model.resources["tokens"][0].monitor_id] is model.resources["monitor_owner"]
                 assert model.child_calls == 1 and not model.child_release.is_set()
                 record_property("background_owners_unchanged", True)
                 record_property("todo_owner_and_snapshot_unchanged", True)
                 assert {row["target"]["process_id"] for row in payload["terminal_processes"]} == set(model.resources["running"])
                 assert model.resources["ended"] not in handoff.body
-                assert [row["target"]["monitor_id"] for row in payload["terminal_monitors"]] == [model.resources["tokens"][0].monitor_id]
-                assert model.resources["tokens"][1].monitor_id not in handoff.body
-                assert {row["target"]["cell_id"] for row in payload["code_cells"]} == {model.resources["active"], model.resources["terminal_cell"]}
-                assert model.resources["cleanup_id"] not in handoff.body
+                assert "terminal_monitors" not in payload
+                assert {row["target"]["cell_id"] for row in payload["code_cells"]} == {model.resources["active"]}
                 assert model.idle_agent_id not in handoff.body
                 assert len(payload["agents"]) == 1 and payload["agents"][0]["current_work"]["kind"] == "WORK"
-                rendered = "\n".join(text for request in model.root_calls[successor_index + 1:]
-                    for message in request.compiled_input.messages for text in text_part_values(message.content))
-                assert "UNCLAIMED_CELL_ONCE" in rendered
                 # UI reads and precise stop retain the existing object identity.
                 assert any(row["cell_id"] == model.resources["active"] for row in session.code_mode_cells())
                 command = random_id("command")
@@ -500,7 +448,7 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                 assert stopped.status == "SUCCEEDED" and stopped.user_control.cell.cell_id == model.resources["active"]
                 assert session._code_mode.capture_cell(model.resources["active"]).state == "terminated"
             elif variant == "todo_only":
-                assert all(payload[key] == [] for key in PMCA_KEYS)
+                assert all(payload[key] == [] for key in PCA_KEYS)
             else:
                 assert handoff is None
                 assert "COMPACTION_RUNTIME_HANDOFF" not in wire_observations
@@ -529,13 +477,8 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                 _assert_wire_prefix(before, after)
         finally:
             if model.resources:
-                for token in model.resources["tokens"]:
-                    session._tools.terminal_monitor_coordinator.cancel(token.monitor_id)
-                model.resources["cleanup_gate"].set()
                 model.resources["cell_release"].set()
                 model.resources["release_path"].touch()
-                await model.resources["cleanup_ack"]
-                session._tools.terminal_monitor_coordinator.settle_registration(model.resources["tokens"][1], committed=False)
             model.child_release.set()
             try:
                 await _finish_agent_work_before_normal_close(core, session)
@@ -557,7 +500,7 @@ class _SubagentCompactionModel(_HostCompactionModel):
         self.scoped_resources = {}
         self.compactions = []
 
-    async def _monitor_for(self, session, request):
+    async def _process_for(self, session, request):
         path = self.session.workspace.workspace_root / "release-scoped-processes"
         script = f"from pathlib import Path; import time\np=Path({str(path)!r})\nwhile not p.exists(): time.sleep(.01)"
         command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
@@ -567,15 +510,7 @@ class _SubagentCompactionModel(_HostCompactionModel):
             origin=TerminalProcessOrigin(request.turn_id, "ROOT" if is_root else "SUBAGENT", session.session_id),
             decision_deadline_monotonic=monotonic()+30)
         assert process.process_id
-        coordinator = session._tools.terminal_monitor_coordinator
-        token = coordinator.prepare_registration(process_id=process.process_id, origin_turn_id=request.turn_id,
-            origin_attempt_id=random_id("attempt"), origin_result_entry_id=random_id("entry"),
-            writer_generation=session._lease.guard.writer_generation, authorization_reference="integration-scoped-setup",
-            policy=TerminalMonitorPolicy(), recipient_session_id=session.session_id,
-            registering_agent_id=None if is_root else session.session_id,
-            work_turn_id=None if is_root else request.turn_id)
-        coordinator.settle_registration(token, committed=True)
-        self.scoped_resources[session.session_id] = (process.process_id, token.monitor_id, request.turn_id)
+        self.scoped_resources[session.session_id] = (process.process_id, request.turn_id)
 
     async def _stream(self, request):
         index = self.calls_by_session.get(request.session_id, 0) + 1
@@ -586,7 +521,7 @@ class _SubagentCompactionModel(_HostCompactionModel):
                 events = _tool_call("run_agent", "call:sibling", {"instruction": "OTHER_WORK: remain active until released."})
             elif index == 2:
                 await asyncio.wait_for(self.sibling_ready.wait(), 20)
-                await self._monitor_for(self.session, request)
+                await self._process_for(self.session, request)
                 events = _tool_call("run_agent", "call:compact-child", {"instruction": "CURRENT_WORK: inspect with mid-turn compaction."})
             else:
                 await asyncio.wait_for(self.target_finished.wait(), 60)
@@ -594,7 +529,7 @@ class _SubagentCompactionModel(_HostCompactionModel):
         elif self.sibling_id is None or request.session_id == self.sibling_id:
             self.sibling_id = request.session_id
             sibling = self.core._live_agent_session(request.session_id)
-            await self._monitor_for(sibling, request)
+            await self._process_for(sibling, request)
             self.sibling_ready.set()
             await self.child_release.wait()
             events = _text("text:sibling-finished", "SIBLING_FINISHED")
@@ -603,7 +538,7 @@ class _SubagentCompactionModel(_HostCompactionModel):
             self.target_requests.append(request)
             if index == 1:
                 target = self.core._live_agent_session(request.session_id)
-                await self._monitor_for(target, request)
+                await self._process_for(target, request)
                 target._compaction.policy = ResolvedCompactionPolicy(auto_trigger_ratio=.75,
                     post_compaction_target_ratio=.60, minimum_reclaim_tokens=1, maximum_retained_tail_utf8_bytes=1)
                 execute = target._runner.compaction.execute_active
@@ -615,7 +550,7 @@ class _SubagentCompactionModel(_HostCompactionModel):
                 events = _text("text:child-large", "accepted child context " + "a" * 1_080_000)
                 events += _tool_call("read_file", "call:child-trigger", {"target": {"kind": "PATH", "path": "input.txt"}})
             elif index == 2:
-                events = _tool_call("query_monitors", "call:child-query", {})
+                events = _tool_call("query_processes", "call:child-query", {})
             else:
                 self.target_finished.set()
                 events = _text("text:target-finished", "CURRENT_WORK_FINISHED")
@@ -624,7 +559,7 @@ class _SubagentCompactionModel(_HostCompactionModel):
 
 
 @pytest.mark.parametrize("wire", ["openai_chat_completions", "openai_responses"])
-def test_real_subagent_work_compaction_excludes_root_and_other_work_monitors(tmp_path, monkeypatch, handoff_database, wire, record_property):
+def test_real_subagent_work_compaction_excludes_foreign_session_processes(tmp_path, monkeypatch, handoff_database, wire, record_property):
     import pulsara_agent.conversation_kernel.host as host_module
     runtime_dsn, _ = handoff_database
     monkeypatch.setenv("PULSARA_HOME", os.fspath(tmp_path / "home"))
@@ -659,26 +594,29 @@ def test_real_subagent_work_compaction_excludes_root_and_other_work_monitors(tmp
             assert _wire_observations(successor)["COMPACTION_RUNTIME_HANDOFF"] == handoff.body
             record_property("wire", wire)
             record_property("actual_wire_handoff_body", handoff.body)
-            process_id, monitor_id, work_turn_id = model.scoped_resources[model.target_id]
+            process_id, work_turn_id = model.scoped_resources[model.target_id]
             assert work_turn_id == successor.turn_id
             assert payload["terminal_processes"] == [{"target": {"kind": "PROCESS", "process_id": process_id}, "status": "running"}]
-            assert [row["target"]["monitor_id"] for row in payload["terminal_monitors"]] == [monitor_id]
-            assert payload["agents"] == [] and payload["code_cells"] == []
+            assert "terminal_monitors" not in payload
+            assert payload["code_cells"] == []
+            assert [row["agent"] for row in payload["agents"]] == [
+                {"kind": "AGENT", "agent_id": model.target_id},
+            ]
+            assert payload["agents"][0]["current_work"]["kind"] == "WORK"
+            assert payload["agents"][0]["queued_count"] == 0
             assert len(model.scoped_resources) == 3
-            for session_id, (foreign_process, foreign_monitor, _) in model.scoped_resources.items():
+            for session_id, (foreign_process, _) in model.scoped_resources.items():
                 if session_id != model.target_id:
-                    assert foreign_process not in handoff.body and foreign_monitor not in handoff.body
-            assert not {"query_agents", "query_cells", "exec_cell", "manage_cell"} & {tool.name for tool in successor.compiled_input.tools}
+                    assert foreign_process not in handoff.body
+            assert not {"query_cells", "exec_cell", "manage_cell"} & {tool.name for tool in successor.compiled_input.tools}
             assert following.compiled_input.system_prompt == successor.compiled_input.system_prompt
             assert following.compiled_input.tools == successor.compiled_input.tools
             assert following.compiled_input.messages[:len(successor.compiled_input.messages)] == successor.compiled_input.messages
             _assert_wire_prefix(successor, following)
             rendered = "\n".join(text for message in following.compiled_input.messages for text in text_part_values(message.content))
-            assert monitor_id in rendered
+            assert process_id in rendered
             assert len([call for call in model.target_requests if call.model_call_index == 1]) == 1
         finally:
-            for _process, monitor, _turn in model.scoped_resources.values():
-                root._tools.terminal_monitor_coordinator.cancel(monitor)
             model.child_release.set()
             (tmp_path / "release-scoped-processes").touch()
             try:

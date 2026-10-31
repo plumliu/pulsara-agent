@@ -39,7 +39,6 @@ from pulsara_agent.terminal_process.output import (
     TERMINAL_HOST_RETAINED_HARD_BYTES,
     TERMINAL_RETAINED_OUTPUT_HARD_BYTES,
     TerminalOutputOwner,
-    TerminalOutputObservationSlice,
     TerminalOutputSnapshot,
 )
 
@@ -771,7 +770,7 @@ class ProcessRegistry:
         state.reader.join()
         # The shell leader is not the physical process boundary.  A detached
         # descendant can remain in the same group after closing or redirecting
-        # stdout.  Completion, capacity release and monitor wake all wait for
+        # stdout. Completion and capacity release wait for
         # the exact group to disappear.
         while _process_group_exists(state.process.pid):
             if state.interop_scope is not None and state.interop_scope.failed.is_set():
@@ -847,31 +846,6 @@ class ProcessRegistry:
         with self._owned(process_id, owner_host_session_id) as state:
             return state.output
 
-    def snapshot_and_subscribe(
-        self,
-        process_id: str,
-        *,
-        owner_host_session_id: str,
-        callback: OutputSubscriber,
-        maximum_chars: int = 32_000,
-    ) -> tuple[TerminalOutputSnapshot, str]:
-        with self._owned(process_id, owner_host_session_id) as state:
-            # OutputOwner serializes both operations with the same lock.  Subscribe
-            # first, then snapshot: callbacks may overlap the snapshot but their
-            # exact offsets make the overlap mechanically deduplicable.
-            token, _cursor = state.output.subscribe(callback)
-            try:
-                snapshot = state.output.snapshot(maximum_chars=maximum_chars)
-            except BaseException:
-                state.output.unsubscribe(token)
-                raise
-            return snapshot, token
-
-    def unsubscribe_output(
-        self, process_id: str, token: str, *, owner_host_session_id: str
-    ) -> bool:
-        with self._owned(process_id, owner_host_session_id, cleanup=True) as state:
-            return state.output.unsubscribe(token)
 
     def poll(
         self,
@@ -1109,21 +1083,6 @@ class ProcessRegistry:
                 source_coverage=snapshot.source_coverage,
             )
 
-    def observation_slice(
-        self,
-        process_id: str,
-        *,
-        maximum_chars: int,
-        maximum_bytes: int,
-        owner_host_session_id: str,
-        since_cursor: str | None,
-    ) -> TerminalOutputObservationSlice:
-        with self._owned(process_id, owner_host_session_id) as state:
-            return state.output.observation_slice(
-                maximum_chars=maximum_chars,
-                maximum_bytes=maximum_bytes,
-                since_cursor=since_cursor,
-            )
 
     def live_count(self, *, owner_host_session_id: str) -> int:
         with self._lock:

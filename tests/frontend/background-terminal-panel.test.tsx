@@ -138,7 +138,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
     const terminate = vi.fn(async (reference: UserControlCommandRef): Promise<CommandReceipt> => ({
       commandId: reference.commandId,
       status: 'failed',
-      publicMessage: '进程已结束，但 monitor 关闭失败。',
+      publicMessage: '进程已结束，但资源清理失败。',
       userControl: {
         accepted: true, execution: 'FINISHED',
         feedback: {
@@ -171,7 +171,7 @@ describe('BackgroundTerminalPanel PR03 controls', () => {
       commandId: 'command:aaaaaaaaaaaaaaaaaaaaaaaaaa', admissionDeadlineMs: 42000,
       sessionId: 'session-a', hostSessionId: 'host-a', targetId: 'process-a',
     })));
-    expect(screen.getByText('进程已结束，但 monitor 关闭失败。')).toBeTruthy();
+    expect(screen.getByText('进程已结束，但资源清理失败。')).toBeTruthy();
     expect(screen.getByText(/已编入原轮次模型请求/)).toBeTruthy();
     expect(onOpenProcess).not.toHaveBeenCalled();
   });

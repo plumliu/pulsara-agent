@@ -182,15 +182,11 @@ def test_cold_archive_checks_domain_live_lease_and_exact_writer(
     assert repo.archive_session(memory_domain_id="u_local", **params) == "ARCHIVED"
 
 
-@pytest.mark.parametrize("kind", ["process", "monitor", "pending", "idle"])
+@pytest.mark.parametrize("kind", ["process", "idle"])
 def test_archive_terminal_admission(kind):
     tools = SimpleNamespace(
         list_background_terminal_processes=lambda: (
             [SimpleNamespace(physical_state="RUNNING")] if kind == "process" else []
-        ),
-        terminal_monitor_coordinator=SimpleNamespace(
-            list_current=lambda: ["monitor"] if kind == "monitor" else [],
-            pending_monitor_ids=lambda: ["pending"] if kind == "pending" else [],
         ),
     )
     assert KernelHostSession.archive_has_terminal_work(
@@ -273,7 +269,6 @@ def test_unarchive_uncertain_retry_confirms_without_second_write(tmp_path):
         assert session.session_id not in c._operations
 
     asyncio.run(run())
-
 
 
 def test_writer_conflict_is_not_reported_as_unfinished_work_or_detached(tmp_path):

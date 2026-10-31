@@ -336,7 +336,7 @@ def test_unlaunched_tool_rejected_and_workspace_feedback_appends_at_ordinary_bar
 ):
     from pulsara_agent.conversation_kernel import host as host_module
     from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
-    from tests.test_round2_terminal_host import _tool_call, _text
+    from tests.support.model_stream import _tool_call, _text
     from pulsara_agent.llm.input import MessageRole
 
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
@@ -443,7 +443,7 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
 ):
     from pulsara_agent.conversation_kernel import host as host_module
     from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
-    from tests.test_round2_terminal_host import _tool_call
+    from tests.support.model_stream import _tool_call
 
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(

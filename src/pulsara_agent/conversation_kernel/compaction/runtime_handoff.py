@@ -9,7 +9,7 @@ from pulsara_agent.conversation_kernel.todo_runtime import FrozenTodoSnapshot
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 
-MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS = 3_200
+MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS = 3_200
 HANDOFF_CONTINUATION = (
     "This snapshot carries forward the work in progress before compaction. "
     "Continue that work using the existing targets."
@@ -24,12 +24,12 @@ SUBAGENT_HANDOFF_BUDGET_OMISSION = (
     "query_processes or query_agents without a target to "
     "discover currently retained objects."
 )
-_PROJECTION_CONTRACT = "pulsara.compaction-runtime-handoff-projection.v4-active-pmca"
-PMCA_KEYS = ("terminal_processes", "code_cells", "agents")
+_PROJECTION_CONTRACT = "pulsara.compaction-runtime-handoff-projection.v4-active-pca"
+PCA_KEYS = ("terminal_processes", "code_cells", "agents")
 
 
 class CompactionRuntimeHandoffBoundError(ValueError):
-    """The PMCA envelope cannot fit its specified local input boundary."""
+    """The PCA envelope cannot fit its specified local input boundary."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +40,6 @@ class FrozenTerminalProcessHandoffFact:
     def __post_init__(self) -> None:
         if not self.process_id or self.status != "running":
             raise ValueError("terminal process handoff fact is invalid")
-
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,17 +66,17 @@ def _body(payload: dict[str, object], *, omitted: bool, omission_text: str) -> s
     return text + "\n" + omission_text if omitted else text
 
 
-def _measure_pmca(body: str) -> int:
+def _measure_pca(body: str) -> int:
     # The compiler owns source encoding and the actual adapter/V3 wire quote.
-    from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pmca_tokens
+    from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pca_tokens
 
-    return estimate_runtime_handoff_pmca_tokens(body)
+    return estimate_runtime_handoff_pca_tokens(body)
 
 
 class CompactionRuntimeHandoffBuilder:
     """Whole-entry admission; callers can stop lazy inventory reads on overflow.
 
-    `measure_pmca` receives the complete no-TODO body, including the actual
+    `measure_pca` receives the complete no-TODO body, including the actual
     explanation(s). It must quote its encoded runtime observation and framing.
     """
 
@@ -87,7 +85,7 @@ class CompactionRuntimeHandoffBuilder:
         *,
         todo: FrozenTodoSnapshot | None,
         conversation_scope_kind: ModelInputScopeKind,
-        measure_pmca: Callable[[str], int] = _measure_pmca,
+        measure_pca: Callable[[str], int] = _measure_pca,
     ) -> None:
         if not isinstance(conversation_scope_kind, ModelInputScopeKind):
             raise TypeError("runtime handoff requires an explicit conversation scope")
@@ -97,9 +95,9 @@ class CompactionRuntimeHandoffBuilder:
             else SUBAGENT_HANDOFF_BUDGET_OMISSION
         )
         self._todo = todo
-        self._measure = measure_pmca
+        self._measure = measure_pca
         self._payload: dict[str, list[dict[str, object]]] = {
-            key: [] for key in PMCA_KEYS
+            key: [] for key in PCA_KEYS
         }
         self._admitted: list[str] = []
         self._has_candidates = False
@@ -108,10 +106,10 @@ class CompactionRuntimeHandoffBuilder:
             self._measure(
                 _body(self._payload, omitted=True, omission_text=self._omission_text)
             )
-            > MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
+            > MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS
         ):
             raise CompactionRuntimeHandoffBoundError(
-                "runtime handoff PMCA envelope exceeds its token budget"
+                "runtime handoff PCA envelope exceeds its token budget"
             )
 
     def add(self, key: str, item: dict[str, object]) -> bool:
@@ -125,7 +123,7 @@ class CompactionRuntimeHandoffBuilder:
             self._measure(
                 _body(self._payload, omitted=False, omission_text=self._omission_text)
             )
-            <= MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
+            <= MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS
         ):
             self._admitted.append(key)
             return True
@@ -135,7 +133,7 @@ class CompactionRuntimeHandoffBuilder:
             self._measure(
                 _body(self._payload, omitted=True, omission_text=self._omission_text)
             )
-            > MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
+            > MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS
         ):
             self._payload[self._admitted.pop()].pop()
         return False
@@ -175,8 +173,6 @@ def handoff_process_rows(
     )
 
 
-
-
 def freeze_compaction_runtime_handoff(
     *,
     terminal_processes: tuple[FrozenTerminalProcessHandoffFact, ...],
@@ -184,7 +180,7 @@ def freeze_compaction_runtime_handoff(
     conversation_scope_kind: ModelInputScopeKind,
     agent_work_index: Iterable[dict[str, object]] = (),
     code_cells: tuple[dict[str, object], ...] = (),
-    measure_pmca: Callable[[str], int] = _measure_pmca,
+    measure_pca: Callable[[str], int] = _measure_pca,
 ) -> FrozenCompactionRuntimeHandoff | None:
     """Render frozen facts in deterministic P/C/A order without owner I/O.
 
@@ -194,7 +190,7 @@ def freeze_compaction_runtime_handoff(
     builder = CompactionRuntimeHandoffBuilder(
         todo=todo,
         conversation_scope_kind=conversation_scope_kind,
-        measure_pmca=measure_pmca,
+        measure_pca=measure_pca,
     )
     streams = {
         "terminal_processes": iter(handoff_process_rows(terminal_processes)),

@@ -245,7 +245,8 @@ block_kind 固定为 assembler 的 `text`、`thinking`、`data`、`tool`；provi
 | postgres-borrower | `R(borrow)`，33字符 | 原连接 provider 的 release/引用计数；不转成数据库授权令牌 |
 | mcp-candidate | `D(mcp-candidate, installation, [full_candidate_compatibility_digest])`，40字符 | 原 SDK discovery/config/slot lease/policy 完整比较保持；短 ID 不代替候选事实或 owner |
 | Pulsara MCP connection slot / dispatch permit | `R(slot)` / `R(permit)`，31/33字符 | 原 supervisor epoch、server、connection generation、slot lease、retained permit 与 authority object 全部保留；这不是 SDK 自有 ID |
-| Pulsara MCP ref settlement | `R(settlement)`，37字符 | 原新 tool_ref 的冻结 result entry、scope/epoch 与单次结算；tool_ref 本身仍是完整 HMAC |
+| Pulsara MCP tool_ref | `R(mcpref)`，33字符，即 `mcpref:`＋26位小写 Base32 | 现有进程内 owner 精确比较 scope/session/epoch、consumer/runtime generation、capability/tool semantic/policy/route 绑定并复用仍保留的记录；退役后重新生成 ID。不使用 HMAC、进程私钥或绑定值派生路径；完整交付激活及原调用校验保持 |
+| Pulsara MCP ref settlement | `R(settlement)`，37字符 | 原新 tool_ref 的冻结 result entry、scope/epoch 与单次结算；tool_ref 使用统一 `mcpref:` ID |
 | no-continuation fence | `R(fence)`，32字符 | 原 installed predecessor、candidate/cut/destination、scope 与 seal；不新增阻止续轮的产品分支 |
 | model-context / final-steer / prospective-root / compaction-variant / hook-sibling，以及 compaction summary / destination summary / repair 的实际 context | 每个新的 compile/summary candidate `R(context)`，34字符；持有该 candidate 的各阶段复用 | 覆盖 provider_dispatch 和 compaction/model_call 的创建路径。完整 source/prefix/compiled compatibility 检查另行保持；不以 context ID 判断内容相等或保留旧 DTO 前像来求同号 |
 | 非执行 structural projection 的 wire-plan context | `D(context, structural, [canonical_identity_fingerprint, placements_fingerprint, compile_binding_fingerprint])`，34字符 | 三项沿用原 `_wire_plan_semantic_identity` 已有完整边界值。只适用于现有 `FrozenModelInputSemanticProjection` 闭合类型的不可执行测量；不新增字段/实体或赋予执行权 |
@@ -280,7 +281,6 @@ revision:4oymiquy7qobjgx36tejs35zeqt24qpemsnzgtfeswmrw6csxbkq
 
 | 值 | 格式/强度与决定 | 生命周期/owner |
 | --- | --- | --- |
-| late MCP tool_ref | 原 `mcpref_` +43字符 Base64url，完整 HMAC-SHA256，不截短 | 原 scope/epoch/capability/policy/route 绑定，不能跨 owner 猜测重建 |
 | MCP secret-generation commitment | 原 `hmac-sha256:` +64 hex，不改为对象 ID | 原进程密钥和 secret-generation owner |
 | terminal launch capability | 原32随机字节及现有 wire 编码 | 常量时间比较；launch 结束失效；不是 `launch:` ID |
 | UI file preview read_token | 原32随机字节 Base64url43字符 | 原权限和预览 owner；关闭/失效规则保持 |

@@ -114,56 +114,6 @@ class TerminalOutputSnapshot:
             raise ValueError("terminal output delta exceeds its authority range")
 
 
-@dataclass(frozen=True, slots=True)
-class TerminalOutputObservationSlice:
-    """One bounded read of an exact sanitized cursor range.
-
-    ``available_source_utf8_bytes`` always describes the full range selected
-    by the cursor cut.  ``text`` may be a deterministic head/tail projection
-    of that range, but response shaping never changes the authority cursor or
-    masquerades as a retention gap.
-    """
-
-    process_id: str
-    stream_id: str
-    output_revision: int
-    text: str
-    process_status: str
-    exit_code: int | None
-    source_coverage: TerminalOutputSourceCoverage
-    disposition: TerminalOutputReadDisposition
-    output_cursor: str
-    retained_from_cursor: str
-    gap_before_output: bool
-    available_source_utf8_bytes: int
-    included_source_utf8_bytes: int
-    omitted_by_delivery_bound_utf8_bytes: int
-    source_digest: str
-
-    def __post_init__(self) -> None:
-        if (
-            min(
-                self.available_source_utf8_bytes,
-                self.included_source_utf8_bytes,
-                self.omitted_by_delivery_bound_utf8_bytes,
-            )
-            < 0
-        ):
-            raise ValueError("terminal observation byte counts are negative")
-        if (
-            self.included_source_utf8_bytes + self.omitted_by_delivery_bound_utf8_bytes
-            != self.available_source_utf8_bytes
-        ):
-            raise ValueError("terminal observation byte counts do not balance")
-        if len(self.text.encode("utf-8")) < self.included_source_utf8_bytes:
-            raise ValueError("terminal observation rendered text is incomplete")
-        if (
-            not self.source_digest.startswith("sha256:")
-            or len(self.source_digest) != 71
-        ):
-            raise ValueError("terminal observation source digest is invalid")
-
-
 class IncrementalTerminalSanitizer:
     """One streaming automaton for decoding, ANSI/OSC suppression and redaction."""
 
@@ -633,63 +583,6 @@ class TerminalOutputOwner:
                 self._inflight_reads -= 1
                 self._condition.notify_all()
 
-    def observation_slice(
-        self,
-        *,
-        maximum_chars: int,
-        maximum_bytes: int,
-        since_cursor: str | None,
-    ) -> TerminalOutputObservationSlice:
-        """Read one exact range and shape it once for canonical observation.
-
-        This is intentionally separate from the public tail-oriented
-        ``snapshot`` API.  Monitor delivery needs a head/tail projection and
-        exact source-byte accounting, while ``terminal_process poll`` retains
-        its established tail response semantics.
-        """
-
-        if maximum_chars <= 0 or maximum_bytes <= 0:
-            raise ValueError("terminal observation bounds must be positive")
-        with self._lock:
-            if self._reads_closed:
-                raise KeyError(self.process_id)
-            self._inflight_reads += 1
-            try:
-                disposition, gap, raw = self._range_locked(since_cursor)
-                source = raw.decode("utf-8")
-                text, included, omitted = _head_tail_by_limits(
-                    source,
-                    maximum_chars=maximum_chars,
-                    maximum_bytes=maximum_bytes,
-                )
-                return TerminalOutputObservationSlice(
-                    process_id=self.process_id,
-                    stream_id=self.stream_id,
-                    output_revision=self._revision,
-                    text=text,
-                    process_status=self._status,
-                    exit_code=self._exit_code,
-                    source_coverage=self._source_coverage_locked(),
-                    disposition=(
-                        TerminalOutputReadDisposition.UNAVAILABLE
-                        if self._unavailable
-                        else disposition
-                    ),
-                    output_cursor=encode_terminal_output_cursor(
-                        self._cursor(self._through)
-                    ),
-                    retained_from_cursor=encode_terminal_output_cursor(
-                        self._cursor(self._retained_from)
-                    ),
-                    gap_before_output=gap,
-                    available_source_utf8_bytes=len(raw),
-                    included_source_utf8_bytes=included,
-                    omitted_by_delivery_bound_utf8_bytes=omitted,
-                    source_digest=f"sha256:{sha256(raw).hexdigest()}",
-                )
-            finally:
-                self._inflight_reads -= 1
-                self._condition.notify_all()
 
     def _snapshot_locked(
         self, *, maximum_chars: int, since_cursor: str | None
@@ -870,75 +763,6 @@ def _tail_by_chars(value: str, maximum_chars: int) -> tuple[str, bool]:
     return value[-maximum_chars:], True
 
 
-_OBSERVATION_OMISSION_MARKER = (
-    "\n… [TERMINAL OUTPUT: {omitted} UTF-8 bytes omitted by delivery bound] …\n"
-)
-
-
-def _head_tail_by_limits(
-    value: str, *, maximum_chars: int, maximum_bytes: int
-) -> tuple[str, int, int]:
-    encoded = value.encode("utf-8")
-    if len(value) <= maximum_chars and len(encoded) <= maximum_bytes:
-        return value, len(encoded), 0
-
-    omitted_guess = len(encoded)
-    for _attempt in range(8):
-        marker = _OBSERVATION_OMISSION_MARKER.format(omitted=omitted_guess)
-        source_char_budget = max(0, maximum_chars - len(marker))
-        source_byte_budget = max(0, maximum_bytes - len(marker.encode("utf-8")))
-        head_char_budget = source_char_budget // 2
-        tail_char_budget = source_char_budget - head_char_budget
-        head_byte_budget = source_byte_budget // 2
-        tail_byte_budget = source_byte_budget - head_byte_budget
-        head = _prefix_within(
-            value,
-            maximum_chars=head_char_budget,
-            maximum_bytes=head_byte_budget,
-        )
-        remainder = value[len(head) :]
-        tail = _suffix_within(
-            remainder,
-            maximum_chars=tail_char_budget,
-            maximum_bytes=tail_byte_budget,
-        )
-        included = len(head.encode("utf-8")) + len(tail.encode("utf-8"))
-        omitted = len(encoded) - included
-        marker = _OBSERVATION_OMISSION_MARKER.format(omitted=omitted)
-        rendered = head + marker + tail
-        if (
-            len(rendered) <= maximum_chars
-            and len(rendered.encode("utf-8")) <= maximum_bytes
-        ):
-            return rendered, included, omitted
-        omitted_guess = omitted
-    raise RuntimeError("terminal observation projection could not satisfy bounds")
-
-
-def _prefix_within(value: str, *, maximum_chars: int, maximum_bytes: int) -> str:
-    high = min(len(value), maximum_chars)
-    low = 0
-    while low < high:
-        middle = (low + high + 1) // 2
-        if len(value[:middle].encode("utf-8")) <= maximum_bytes:
-            low = middle
-        else:
-            high = middle - 1
-    return value[:low]
-
-
-def _suffix_within(value: str, *, maximum_chars: int, maximum_bytes: int) -> str:
-    high = min(len(value), maximum_chars)
-    low = 0
-    while low < high:
-        middle = (low + high + 1) // 2
-        if len(value[len(value) - middle :].encode("utf-8")) <= maximum_bytes:
-            low = middle
-        else:
-            high = middle - 1
-    return value[len(value) - low :] if low else ""
-
-
 __all__ = [
     "IncrementalTerminalSanitizer",
     "InvalidTerminalOutputCursor",
@@ -946,7 +770,6 @@ __all__ = [
     "TERMINAL_RETAINED_OUTPUT_HARD_BYTES",
     "TERMINAL_SANITIZER_CARRY_HARD_BYTES",
     "TerminalOutputCursor",
-    "TerminalOutputObservationSlice",
     "TerminalOutputOwner",
     "TerminalOutputReadDisposition",
     "TerminalOutputSnapshot",

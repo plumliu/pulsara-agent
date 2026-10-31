@@ -9,6 +9,7 @@ from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES, sessio
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import Any, Literal
+from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 
 from pulsara_agent.capability.management_intent import capability_management_input_schema
 
@@ -505,12 +506,11 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema={'type': 'object',
  'properties': {'target': {'type': 'object',
                            'properties': {'kind': {'const': 'MCP_TOOL_REF'},
-                                          'tool_ref': {'description': 'Exact reference from '
+                                          'tool_ref': {'description': 'Canonical mcpref ID copied from '
                                                                       'invocation.target, scoped '
                                                                       'to this agent and '
                                                                       'conversation.',
-                                                       'maxLength': 160,
-                                                       'pattern': '^mcpref_[A-Za-z0-9_-]+$',
+                                                       'pattern': '^mcpref:' + ID_PAYLOAD_PATTERN + '$',
                                                        'type': 'string'}},
                            'required': ['kind', 'tool_ref'],
                            'additionalProperties': False},

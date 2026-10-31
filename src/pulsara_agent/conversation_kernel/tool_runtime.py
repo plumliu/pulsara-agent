@@ -1388,7 +1388,7 @@ class DirectKernelToolPort:
         session_id: str,
         work_turn_id: str,
     ) -> FrozenCompactionRuntimeHandoff | None:
-        """Freeze scoped owner facts; admit complete PMCA entries lazily."""
+        """Freeze scoped owner facts; admit complete PCA entries lazily."""
         if session_id != self._session_id or not work_turn_id:
             raise ValueError("runtime handoff scope differs from its tool owner")
         is_root = conversation_scope_kind is ModelInputScopeKind.ROOT

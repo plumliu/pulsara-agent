@@ -2076,7 +2076,7 @@ def test_round5b_runtime_handoff_is_ordered_bounded_and_body_free() -> None:
     assert "result" not in handoff.full_text
 
 
-def test_round5b_runtime_handoff_reports_a_bounded_pmca_projection() -> None:
+def test_round5b_runtime_handoff_reports_a_bounded_pca_projection() -> None:
     from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
         HANDOFF_BUDGET_OMISSION,
     )

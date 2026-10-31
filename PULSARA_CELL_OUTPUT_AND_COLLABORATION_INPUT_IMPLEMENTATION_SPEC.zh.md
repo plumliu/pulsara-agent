@@ -286,6 +286,8 @@ Stop 当前 ROOT turn 仍按原范围停止所属 Cell，不扩大到独立 Cell
 
 删除 manage_monitor/query_monitors 工具、schema、注册/取消/查询、monitor coordinator、策略/预算/生命周期、进程回调、独立自主投递循环及其 UI/环境索引/提示词/Skill/活动文档说明。共享进程日志、poll/wait、真实工具结算和仍有独立用途的资源 owner 保留；不隐藏入口后保留后台实现，不换名保存订阅或给 Cell 建假 Process/Monitor。
 
+ROOT 原生、JS 目录及 Subagent 均不提供 monitor 工具；删除其专属 ID 类型、输出投影 DTO 与无生产消费者的订阅读取分支。压缩交接仅含 Process、Cell、Agent 三类状态，代码、预算 helper 与 source contract 统一使用 PCA 命名，TODO/counts 仍独立完整保留。不提供旧协议兼容分支；已有 epoch 的前缀不因此改写，继续只在既定 cold／adopted successor 边界安装来源合同。Windows interop 的底层进程生命周期辅助角色独立保留，不作为模型订阅工具。
+
 只复用原自主输出中确有用途的 model/permission 继承、compaction reservation 和精确提交确认职责，统一到 §5.1 的队列接纳与消费 owner。移除绕过队列的 ExistingTurn/NewTurn 直接安装及“存在人类队首便让路”的分叉，不维护两种输出消费/ACK。保留既有 TERMINAL_OBSERVATION entry/occurrence 家族，但将 monitor/process 强制字段的正文 codec 硬切为真实 Cell 来源和完整记录；provider planning/lowering、reader、预算、Plan drain、协议和 UI 同步更新，不添加兼容双读或新的 durable 分类。
 
 ## 6. 统一排队卡片、来源与当前 turn 展示

@@ -11,7 +11,7 @@
 须区分两种内容：
 
 - **模型摘要**：通过模型调用归纳对话、任务进展、结论与后续需要的信息。本次模型与推理配置沿用规则作用于这次调用及其合法修复调用。
-- **运行时交接**：PMCA 状态与完整 TODO 由现有运行时收集和装配，继续遵守各自合同，不把它们当成已经执行过模型摘要的证明。
+- **运行时交接**：PCA 状态与完整 TODO 由现有运行时收集和装配，继续遵守各自合同，不把它们当成已经执行过模型摘要的证明。
 
 三类操作的共同语义如下：
 
@@ -33,7 +33,7 @@ ROOT 与 Subagent 共享后两种语义。Subagent 的配置来自该 Work 接�
 - 不改前端布局、文案和交互流程，不新增“直接发送 steer”入口或压缩专属页面。必要的协议接线与既有状态投影适配不构成新增产品表面；idle 门禁必须在后端成立。
 - 所有行为变更一次 hard cut；删除被替代的执行分支，不保留兼容执行双轨。
 
-继续复用 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)、[Code Mode 合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)、[runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 和 [工具查询与身份规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md)。PMCA 的 3,200 V3 token 局部预算、完整 TODO、后台资源生命周期、权限与查询范围不因本次变更扩大或缩减。
+继续复用 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)、[Code Mode 合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)、[runtime handoff 与资源退役规格](PULSARA_RUNTIME_HANDOFF_AND_RESOURCE_RETIREMENT_IMPLEMENTATION_SPEC.zh.md) 和 [工具查询与身份规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md)。PCA 的 3,200 V3 token 局部预算、完整 TODO、后台资源生命周期、权限与查询范围不因本次变更扩大或缩减。
 
 ## 2. 模型与推理配置
 
@@ -113,11 +113,11 @@ ROOT 没有当前请求准备、执行或结算，没有待启动的普通新请
 
 ### 4.2 共同启动事务：turn 与首次输入准备解耦
 
-turn 表达请求已经开始执行，不表达首次 provider 输入已经准备成功。ROOT direct、ROOT queued 与 Subagent Work 共用以下边界。Plan 自动 successor、外部 review continuation 和 NewTurn terminal observation 在各自原事务内完成真实启动，再由原 owner 承接同一首次准备与终态边界；原子事务职责见 §4.3：
+turn 表达请求已经开始执行，不表达首次 provider 输入已经准备成功。ROOT direct、ROOT queued 与 Subagent Work 共用以下边界。Cell 的 NEW_TURN 由统一队列按队首消费并启动；Plan 自动 successor 和外部 review continuation 在各自原事务内完成真实启动，再由原 owner 承接同一首次准备与终态边界；原子事务职责见 §4.3：
 
 1. 启动前检查真实执行资格：有效 writer／workspace、同 session 串行、队首及未取消事实、依赖就绪、可用物理容量、冻结模型选择合法、权限与 Plan 前置条件、适用的 UserPromptSubmit Hook 未阻止。等待依赖、前一 Work 或容量时仍是未开始请求，不创建 turn；无可信配置观察时沿原等待修复规则处理。
 2. 在原 Host 取得执行资格，由同一个 owned task 与 `ActiveTurnCancellationIntent` 承接启动写入及其确认、首次准备、普通执行和终态。此时内部 owner 已存在，但未成立的 turn 不作为可接收消息的公开目标。取消／关闭可以作用于该 owner，并由其确认实际启动结果。
-3. 原 writer 事务重验可变接纳条件，一次性创建真实 RUNNING turn、冻结 binding／permission、完整独立初始 entries、初始 context binding revision；有 queue 的请求同时改为 CONSUMED，并将 `consumed_entry_id` 指向 instruction。直接请求沿原命令身份接纳，不为统一形式制造队列项。复用现有 committed occurrences。
+3. 原 writer 事务重验可变接纳条件，一次性创建真实 RUNNING turn、冻结 binding／permission、完整独立初始 entries、初始 context binding revision；有 queue 的请求同时改为 CONSUMED，并将 `consumed_entry_id` 指向真实开启 entry，Subagent Work 为 instruction，Cell 输入为其独立输出 entry。直接请求沿原命令身份接纳，不为统一形式制造队列项。复用现有 committed occurrences。
 4. 同一 owner 确认启动结果并完成 TODO 等既有启动 finalization，再执行首次 provider 输入准备。长时间摘要只能发生在真实开始之后；接纳成功后的 finalization／准备异常必须进入原 turn 的终态结算范围。
 5. 只有成功开始的真实目标才能公开为活动 turn、接收 steer／Agent 消息并用于 Work wait／stop。DB 成立到活动投影更新之间仍由上述 owner 负责；不得留下可用 Host 内无执行或结算 owner 的 RUNNING turn。
 
@@ -137,7 +137,8 @@ turn 表达请求已经开始执行，不表达首次 provider 输入已经准�
 - TODO activation 跟随真实启动且 exact-join 原始 instruction，失败／终态沿原 finalization 收束；不等到 provider open 再激活。
 - SessionStart、PreCompact、PostCompact 各自按既有合法 epoch／压缩采用边界运行一次；创建 RUNNING 本身不额外触发它们。启动后 Hook 阻断结算同一 turn。
 - memory policy、recall 与 hint 由真实输入及来源触发，不能仅因创建 turn 重跑；原 HUMAN_MESSAGE 与后续 steer 的处理顺序保持。
-- Plan continuation 的 workflow 更新、权限、origin 结算及 successor 创建在原事务内原子成立，不要求预编译 provider admission；确认后读取实际初始组，由原 Host task／handoff 与 cancellation owner 进入共同首次准备，不能拆成两次独立提交。NewTurn terminal observation 同样先在原发布事务建立真实 turn 与 observation，再确认并进入共同准备；ExistingTurn terminal observation 与 Plan question 的 active suffix 保留发布前精确准备。
+- Plan continuation 的 workflow 更新、权限、origin 结算及 successor 创建在原事务内原子成立，不要求预编译 provider admission；确认后读取实际初始组，由原 Host task／handoff 与 cancellation owner 进入共同首次准备，不能拆成两次独立提交。Plan question 的 active suffix 保留其发布前精确准备。
+- Cell 输出由统一队列接纳事务固定为 NEW_TURN 或精确 STEER_ACTIVE_TURN；完整接纳确认后才释放本地输出。NEW_TURN 只在队首消费事务中建立真实 turn 和输出开启 entry；steer 由共同安全点按顺序消费，不存在独立发布、预编译安装或第二份输出 ACK。压缩期间新接纳的输出保持原 route，不改写当前摘要或已安装 provider 输入。
 
 ### 4.4 首次输入组边界与新 turn 采用
 
@@ -283,7 +284,7 @@ query_command、Work 状态、Agent wait、stop 和既有 UI active target 从�
 
 | 共同边界 | 输入与输出 | 现有落点 |
 |---|---|---|
-| 请求开始 | 输入确定请求身份、初始输入组、binding／permission 和真实启动条件；输出 accepted turn／entries／初始基底及实际组边界，不携带预编译 wire；Plan／terminal 的新 turn 保持各自原子事务 | `turn_admission.py`、Host、`_repository/conversation.py`／`prompts.py`／`plans.py`、原 terminal publication |
+| 请求开始 | 输入确定请求身份、初始输入组、binding／permission 和真实启动条件；输出 accepted turn／entries／初始基底及实际组边界，不携带预编译 wire；Cell 沿共同队列消费，Plan 保持 workflow／successor 原子事务 | `turn_admission.py`、Host、`_repository/conversation.py`／`prompts.py`／`plans.py` |
 | 首次输入准备 | 输入已开始的 turn、初始组保护边界及同一 cancellation intent；输出合法普通输入，必要时由该 turn 采用摘要 | `runner.py`、`provider_dispatch.py`、`compaction/coordinator.py` |
 | 压缩采用与 continuation | 输出一个持有与 Installed／Empty 前驱匹配的真实 continuation 权限和未最终绑定资源的 owner，由共同 safe point 接手 | 原 coordinator、candidate family、continuity |
 | 共同输入 safe point | 输入 ordinary／adopted base 和一次待输入截面；输出精确消费并最终测量、绑定、安装的调用 | ProviderDispatch、`steer_consumption.py`、原 writer |
@@ -295,14 +296,14 @@ query_command、Work 状态、Agent wait、stop 和既有 UI active target 从�
 
 以下被替代路径必须删除，不能保留恒定分支、参数别名或 wrapper：
 
-- 新 turn 创建对 `PreparedRootProviderInputAdmission` 的依赖，包括 Plan continuation 和 NewTurn terminal observation；删除只为预编译输入存在的 prospective head/base 预期与重试。
+- 新 turn 创建对 `PreparedRootProviderInputAdmission` 的依赖，包括 Plan continuation 和 Cell 队首启动；删除只为预编译输入存在的 prospective head/base 预期与重试。
 - 普通新请求尚未发布时借旧 terminal turn 压缩的 `recover_pending_root_input`／`execute_pending_root_model_handover` 及专用重接纳流程。
 - `pending_root_turn_id` fence 特例、terminal retarget、prospective-root 临时输入／重接纳及其 candidate／admission／dispatch／activation；所有新 turn 入口接入真实启动后的共同准备，删除 runner `pending_prospective_root_dispatch` 接力。
 - 压缩后先绑定安装、绕过共同输入 safe point 发送首个普通调用的路径。
 - 运行中手动压缩及结束后转交 idle 的分支、无用途的手动 active-target／force 协议接线。
 - 摘要重选默认 reasoning、A 先摘要再转 B 的中间路线及专属 numeric tier fallback。
 
-Plan review continuation、自动 Plan successor 和 NewTurn terminal observation 均由原事务先建立真实 turn；确认后沿现有 `read_started_turn_input_group` 读取开启 entry 与初始 revision 的事实，再进入 §5 的共同准备与 safe point，不保留 root prospective carrier。Plan 的 workflow／权限／origin／successor 原子性、已有 pending handoff 的取消收束及 terminal observation 的精确 ACK 确认保持。Plan question、ExistingTurn terminal observation 等未发布 active suffix，及 Empty adoption settlement／bootstrap 重封、普通 source 重借用、摘要 repair、权限校验与采用确认具有独立用途，保留其实际 caller 所需职责，不因名称包含 pending／prospective／frozen 而机械删除。
+Plan review continuation、自动 Plan successor 由原事务建立真实 turn；Cell NEW_TURN 在共同队首消费事务中建立真实 turn。确认后均沿现有 `read_started_turn_input_group` 读取开启 entry 与初始 revision，再进入 §5 的共同准备与 safe point，不保留 root prospective carrier。Plan 的 workflow／权限／origin／successor 原子性和已有 pending handoff 的取消收束保持；Cell 使用统一队列的精确接纳与消费确认。Plan question 的未发布 active suffix、Empty adoption settlement／bootstrap 重封、普通 source 重借用、摘要 repair、权限校验与采用确认保留各自实际 caller 所需职责。
 
 纯 queue 接纳和转换不登记成会修改当前 transcript 的 compaction write reservation；它们仍受原 writer、目标与权限检查。实际 transcript 修改、final 裁决、输入安装和采用继续保留各自保护。手动 idle 的接纳判断需同时覆盖已有队列和正在进行的接纳，不能因开放入队而失去互斥。
 
@@ -335,7 +336,7 @@ Plan review continuation、自动 Plan successor 和 NewTurn terminal observatio
 | 采用后追加带 memory 指令的人类 steer | 保留所属分型的真实 continuation 权限；原 trigger／recall／hint／预算规则生效；最终 suffix 选定前未消费普通调用 transition 权限 |
 | safe point 截面之后继续来消息 | 后来消息保留到下一边界，不倒序、不丢失，不无限追逐新输入 |
 | 新 suffix 超预算或含不支持内容 | 真实最终 wire 检查生效；沿共同恢复／失败语义处理，不发送超预算请求 |
-| 三种补充来源混排与正常 final 竞争 | 人类转换 steer、Agent message／completion 按实际接纳序号交付、归因不变；消息先提交则当前 turn 继续，final 先提交则不接纳消息、不投向后继 |
+| 当前补充来源混排与正常 final 竞争 | 人类转换 steer、显式 Agent message、Cell 输出及定时 steer 按实际接纳序号交付、归因不变；steer 先接纳则当前 turn 继续，final 先成立则原目标的人类／Agent steer 不接纳，后来新接纳的 Cell／定时输入按 idle 事实排 NEW_TURN；不改投已接纳项或自动广播 Work 终态 |
 | 请求停止与消息接纳／准备完成竞争 | 原目标有单一结算；未消费 steer 不转投；原请求不重新回队首启动 |
 | 启动前拒绝与启动后准备失败 | 前者无 turn；后者保留原始 entries、CONSUMED 和同一 INTERRUPTED turn；不能沿用“首次编译失败必为零 turn”的旧断言 |
 | 启动 commit ACK 丢失，随后停止或 binding 推进 | 确认仍识别原 FULL 接纳；当前资格另判，不重消费、不重复 TODO activation |
@@ -348,7 +349,7 @@ Plan review continuation、自动 Plan successor 和 NewTurn terminal observatio
 | 摘要失败、采用失败、采用 ACK 未知 | 采用前旧上下文有效；未知走原确认；采用成立后不伪造回滚 |
 | 命令重试、关闭、Host 替换与结果查询 | 不重复摘要、不冒充成功、不自动恢复；资源与等待者正确结算 |
 | 后台 Cell、Process、Work 及 PCA／TODO | 不重启或连带停止对象；交接预算、完整 TODO、权限及查询范围保持 |
-| Hook／Plan／TODO／memory 及 terminal observation 穿过首次准备与采用 | 启动 gate、force-exit、原子 continuation、一次性 Hook context、TODO 开始／结束及来源相关 memory 语义均保持；Plan／NewTurn terminal 均先真实启动再进入共同准备，不绕过普通调用前 safe point |
+| Hook／Plan／TODO／memory 及 Cell 输入穿过首次准备与采用 | 启动 gate、force-exit、原子 continuation、一次性 Hook context、TODO 开始／结束及来源相关 memory 语义均保持；Plan successor 与 Cell NEW_TURN 队首消费均先真实启动再进入共同准备，不绕过普通调用前 safe point |
 | 前缀与调用所有权 | SYSTEM/tools 不变、messages 只追加；新 suffix 对应新测量；无重复采用、过期 permit 或资源泄漏 |
 
 优先扩展现有真实 Host／PostgreSQL 的 request execution、Agent session、队列转换、Hook、Plan、TODO 和 interruption 测试；将屏障放在真实启动写入／ACK、摘要、采用与首次 provider open，而非仅挂起已经开始的普通流式回复。现有 direct 和 queued 的“最终输入预算失败必须发生在 turn／消费之前”断言应改为上述启动前／后分界，不能以 skip 或弱化检查保留冲突合同。

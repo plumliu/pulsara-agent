@@ -1792,7 +1792,7 @@ class ToolBatchExecutor:
                 # Once a physical call has returned an exact outcome, this
                 # process-local task owns every remaining settlement step.
                 # Cancelling the turn detaches only its waiter; it cannot
-                # erase the result or race a Terminal monitor token discard.
+                # erase the result or bypass its canonical settlement.
                 if _physical_complete is not None:
                     _physical_complete()
                 if _settlement_gate is not None:

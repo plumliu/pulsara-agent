@@ -434,14 +434,14 @@ _BINDINGS = (
     ),
     _SourceBinding(
         ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
-        "pulsara.compaction-runtime-handoff.v3-active-pmca",
+        "pulsara.compaction-runtime-handoff.v3-active-pca",
         ContextChannel.RUNTIME_OBSERVATION,
         ContextTrustClass.UNTRUSTED_OBSERVATION,
         ContextBudgetClass.MUST_KEEP,
         75,
         15,
         (ContextRenderMode.FULL, ContextRenderMode.COMPACT),
-        "pulsara.compaction-runtime-handoff-collector.v3-active-pmca",
+        "pulsara.compaction-runtime-handoff-collector.v3-active-pca",
         ContextSourceLifecycle.SNAPSHOT_ON_CHANGE,
     ),
     _SourceBinding(

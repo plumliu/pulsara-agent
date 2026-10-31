@@ -24,10 +24,6 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTargetKind,
 )
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
-from pulsara_agent.terminal_process.monitor import (
-    TerminalMonitorCancelOutcome,
-    TerminalMonitorCancelResult,
-)
 
 
 class _Clock:
@@ -61,7 +57,8 @@ def _host(clock: _Clock) -> KernelHostSession:
     host._control_monotonic = clock
     host.root_session_id = None
     host._session_scope_kind = ModelInputScopeKind.ROOT
-    host._code_mode = SimpleNamespace(stop_turn=lambda _turn: asyncio.sleep(0), index=lambda: ())
+    host._code_mode = SimpleNamespace(mark_turn_stopped=lambda _turn: None,
+                                     stop_turn=lambda _turn: asyncio.sleep(0), index=lambda: ())
     host._user_control_attempts = {}
     host._lock = asyncio.Lock()
     host._active_task = None
@@ -88,15 +85,63 @@ def _command(host: KernelHostSession, suffix: str) -> str:
     return derive_id("command", "test-fixture", str(host.control_admission_deadline_ms()), suffix)
 
 
+def test_starting_turn_stop_confirmation_failure_finishes_without_claiming_success():
+    async def scenario():
+        host = _host(_Clock())
+        target = 'turn:74y74rvr2pht5lydgxvy57nxgq'
+        host._external_new_turn_accepting = True
+        host._external_new_turn_cancellation_intent = ActiveTurnCancellationIntent(
+            target, ModelInputScopeKind.ROOT,
+        )
+        host._external_new_turn_settled = asyncio.Event()
+        interrupted = []
+        reads = []
+
+        async def interrupt(*, turn_id, reason):
+            interrupted.append((turn_id, reason))
+            host.repository.turns[turn_id] = {
+                'status': 'INTERRUPTED', 'terminal_reason': reason,
+            }
+
+        def uncertain_terminal(*, session_id, turn_id):
+            reads.append((session_id, turn_id))
+            raise OSError('terminal commit succeeded; confirmation is unavailable')
+
+        host._interrupt_queued_admission_until_safe = interrupt
+        host.repository.read_turn_terminal_outcome = uncertain_terminal
+        accepted = await host.request_stop_turn(
+            command_id=_command(host, 'stop-starting'), target_turn_id=target,
+            admission_deadline_ms=host.control_admission_deadline_ms(),
+            expected_session_id=host.session_id,
+            expected_host_session_id=host.host_session_id,
+        )
+        assert accepted.status == 'PENDING'
+        attempt = host._user_control_attempts[accepted.command_id]
+        assert not attempt.task.done()
+        host._external_new_turn_settled.set()
+        await asyncio.wait_for(attempt.task, 1)
+        outcome = (await host.query_control_command(attempt.request)).outcome
+        assert interrupted == [(target, 'USER_STOPPED')]
+        assert reads == [(host.session_id, target)]
+        assert host.repository.turns[target]['status'] == 'INTERRUPTED'
+        assert outcome.status == 'FAILED' and outcome.public_code == 'CONTROL_FAILED'
+        assert outcome.user_control.execution.value == 'FINISHED'
+        assert outcome.user_control.root is None
+
+    asyncio.run(scenario())
+
+
 def test_pr03_exact_stop_never_cancels_a_successor_that_takes_the_root_slot() -> None:
     async def scenario() -> None:
         clock = _Clock()
         host = _host(clock)
         successor_release = asyncio.Event()
         successor = asyncio.create_task(successor_release.wait())
+        root_started = asyncio.Event()
 
         async def root_a() -> None:
             try:
+                root_started.set()
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 host.repository.turns['turn:74y74rvr2pht5lydgxvy57nxgq'] = {
@@ -116,6 +161,7 @@ def test_pr03_exact_stop_never_cancels_a_successor_that_takes_the_root_slot() ->
         host._active_cancellation_intent = ActiveTurnCancellationIntent(
             'turn:74y74rvr2pht5lydgxvy57nxgq', ModelInputScopeKind.ROOT
         )
+        await root_started.wait()
 
         async def settle_exact(_task) -> None:
             return None
@@ -144,27 +190,14 @@ def test_pr03_exact_stop_never_cancels_a_successor_that_takes_the_root_slot() ->
     asyncio.run(scenario())
 
 
-
-
-
-
-def test_pr03_background_control_closes_monitor_before_physical_termination() -> None:
+def test_pr03_background_control_terminates_the_exact_process() -> None:
     async def scenario() -> None:
         clock = _Clock()
         host = _host(clock)
         order: list[str] = []
 
-        class _Monitor:
-            def cancel_for_process(self, process_id: str):
-                order.append(f"monitor:{process_id}")
-                return TerminalMonitorCancelResult(
-                    'monitor:4jgfcphmbriq5w4bko5mhb2qri',
-                    TerminalMonitorCancelOutcome.CANCELLED,
-                    ('entry:sl7dldallpsjyohxno62xsfnoy',),
-                )
 
         class _Tools:
-            terminal_monitor_coordinator = _Monitor()
 
             def list_background_terminal_processes(self):
                 return [SimpleNamespace(process_id='process:34npgaljkboupr4n456vrmou6a')]
@@ -195,13 +228,10 @@ def test_pr03_background_control_closes_monitor_before_physical_termination() ->
         attempt = host._user_control_attempts[command_id]
         assert attempt.task is not None
         await attempt.task
-        assert order == ['monitor:process:34npgaljkboupr4n456vrmou6a', 'process:process:34npgaljkboupr4n456vrmou6a']
+        assert order == ['process:process:34npgaljkboupr4n456vrmou6a']
         assert attempt.outcome.status == "SUCCEEDED"
         assert attempt.outcome.user_control is not None
-        assert attempt.outcome.user_control.monitor is not None
-        assert attempt.outcome.user_control.monitor.in_flight_observation_ids == (
-            'entry:sl7dldallpsjyohxno62xsfnoy',
-        )
+
 
     asyncio.run(scenario())
 
@@ -214,12 +244,8 @@ def test_pr03_root_completion_seal_prevents_late_feedback_binding() -> None:
         host._active_task = active
         host._active_turn_id = 'turn:74y74rvr2pht5lydgxvy57nxgq'
 
-        class _Monitor:
-            def cancel_for_process(self, _process_id: str):
-                return None
 
         class _Tools:
-            terminal_monitor_coordinator = _Monitor()
 
             def list_background_terminal_processes(self):
                 return [SimpleNamespace(process_id='process:34npgaljkboupr4n456vrmou6a')]
@@ -273,12 +299,8 @@ def test_pr03_already_terminal_background_control_is_a_queryable_no_op() -> None
     async def scenario() -> None:
         host = _host(_Clock())
 
-        class _Monitor:
-            def cancel_for_process(self, _process_id: str):
-                return None
 
         class _Tools:
-            terminal_monitor_coordinator = _Monitor()
 
             def list_background_terminal_processes(self):
                 return [SimpleNamespace(process_id='process:qmi3ybigp4h4iv3tmaqmlm64am')]
@@ -361,10 +383,6 @@ def test_pr03_attempt_retention_waits_for_feedback_owner_and_restarts_at_termina
         ).status is ControlQueryStatus.FOUND
 
     asyncio.run(scenario())
-
-
-
-
 
 
 def test_pr03_query_requires_the_exact_control_value() -> None:

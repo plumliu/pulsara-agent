@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from hashlib import sha256
 import sys
 from threading import Event, Thread
 from time import monotonic, sleep
@@ -91,7 +90,7 @@ def test_round2_sanitizer_bounds_undecided_secret_and_escape_payloads() -> None:
     assert b"TERMINAL_ESCAPE_SEQUENCE_SUPPRESSED" in escaped
 
 
-def test_round2_output_cursor_exact_delta_invalid_and_delivery_head_tail() -> None:
+def test_round2_output_cursor_exact_delta_and_invalid_owner() -> None:
     owner = TerminalOutputOwner(owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i')
     owner.append_raw("one 🙂 ".encode())
     first = owner.snapshot(maximum_chars=512)
@@ -107,26 +106,6 @@ def test_round2_output_cursor_exact_delta_invalid_and_delivery_head_tail() -> No
         owner.snapshot(maximum_chars=512, since_cursor=foreign)
     with pytest.raises(InvalidTerminalOutputCursor, match="INVALID_CURSOR"):
         owner.snapshot(maximum_chars=512, since_cursor="not-a-cursor")
-
-    start = owner.snapshot(maximum_chars=512).output_cursor
-    body = "HEAD-" + "🙂" * 1_000 + "-TAIL "
-    owner.append_raw(body.encode())
-    bounded = owner.observation_slice(
-        maximum_chars=512,
-        maximum_bytes=1_500,
-        since_cursor=start,
-    )
-    assert bounded.disposition is TerminalOutputReadDisposition.EXACT_DELTA
-    assert bounded.text.startswith("HEAD-")
-    assert bounded.text.endswith("-TAIL ")
-    assert bounded.omitted_by_delivery_bound_utf8_bytes > 0
-    assert (
-        bounded.included_source_utf8_bytes
-        + bounded.omitted_by_delivery_bound_utf8_bytes
-        == bounded.available_source_utf8_bytes
-        == len(body.encode())
-    )
-    assert bounded.source_digest == f"sha256:{sha256(body.encode()).hexdigest()}"
 
 
 def test_round2_cursor_snapshot_and_artifact_share_the_exact_selected_range() -> None:
@@ -201,7 +180,7 @@ def test_round2_sanitizer_failure_cannot_claim_complete_artifact(
     assert candidate.original_utf8_bytes is None
 
 
-def test_round2_retention_gap_is_orthogonal_to_response_and_delivery_bounds() -> None:
+def test_round2_retention_gap_is_orthogonal_to_response_bound() -> None:
     owner = TerminalOutputOwner(
         owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei', process_id='process:72qov6ocdngiw5hv6gjo4g2o7i', maximum_bytes=100
     )
@@ -216,16 +195,6 @@ def test_round2_retention_gap_is_orthogonal_to_response_and_delivery_bounds() ->
     assert owner.snapshot(maximum_chars=8, since_cursor=public.output_cursor).text == ""
     assert owner.artifact_candidate().text.endswith(public.text)
     assert len(owner.artifact_candidate().text) > len(public.text)
-
-    observed = owner.observation_slice(
-        maximum_chars=80,
-        maximum_bytes=128,
-        since_cursor=before,
-    )
-    assert observed.disposition is TerminalOutputReadDisposition.GAP
-    assert observed.gap_before_output is True
-    assert observed.omitted_by_delivery_bound_utf8_bytes > 0
-    assert observed.available_source_utf8_bytes == owner.retained_utf8_bytes
 
 
 def test_round2_output_metadata_stays_bounded_after_many_tiny_segments() -> None:

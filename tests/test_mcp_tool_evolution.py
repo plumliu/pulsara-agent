@@ -408,7 +408,7 @@ def test_catalog_budget_prioritizes_native_exceptions_across_all_servers():
 
 
 @pytest.mark.parametrize("commit_old", [False, True])
-def test_meta_ref_churn_reclaims_capacity_and_aba_full_delivery_is_isolated(
+def test_meta_ref_churn_reclaims_capacity_and_late_full_delivery_is_isolated(
     monkeypatch,
     commit_old,
 ):
@@ -419,7 +419,7 @@ def test_meta_ref_churn_reclaims_capacity_and_aba_full_delivery_is_isolated(
     owner = ProcessLocalNewMcpToolRefOwner()
     scope = dict(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
+        session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce="epoch:evolution",
     )
 
@@ -444,7 +444,9 @@ def test_meta_ref_churn_reclaims_capacity_and_aba_full_delivery_is_isolated(
         assert owner.resolve_callable(item.ref.opaque_token, **scope) is item.ref
     owner.retire_unroutable(**scope, allowed=set())
     current = prepare("A", "new-result")
-    assert current.ref.opaque_token == old.ref.opaque_token
+    assert current.ref.opaque_token != old.ref.opaque_token
+    with pytest.raises(LookupError, match="NOT_FOUND"):
+        owner.resolve_callable(old.ref.opaque_token, **scope)
     owner.settle(
         prepared=old, committed=True
     )  # Delayed settlement cannot touch the new record.

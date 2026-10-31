@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pulsara_agent.identity import derive_id, require_id
 
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -16,11 +17,9 @@ from pulsara_agent.primitives.tool_result_projection import (
 
 MCP_INSPECT_PERMISSION_NOTICE = "availability does not grant permission"
 MCP_INSPECT_INVOCATION_NOTICE = "invoke only with use_new_mcp_tool"
-MAXIMUM_NEW_MCP_TOOL_REF_CHARACTERS = 160
+_CONSERVATIVE_INSPECT_TOOL_REF = derive_id("mcpref", "inspection-output-budget")
+MAXIMUM_NEW_MCP_TOOL_REF_CHARACTERS = len(_CONSERVATIVE_INSPECT_TOOL_REF)
 _CONSERVATIVE_INSPECT_TOOL_CALL_ID = "call_" + ("x" * 123)
-_CONSERVATIVE_INSPECT_TOOL_REF = "mcpref_" + (
-    "x" * (MAXIMUM_NEW_MCP_TOOL_REF_CHARACTERS - len("mcpref_"))
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +69,7 @@ def render_inspected_new_mcp_tool_provider_result(
     *,
     tool_ref: str,
 ) -> str:
-    if (
-        not tool_ref.startswith("mcpref_")
-        or len(tool_ref) > MAXIMUM_NEW_MCP_TOOL_REF_CHARACTERS
-        or not tool_ref.isascii()
-    ):
-        raise ValueError("MCP tool reference is invalid")
+    require_id(tool_ref, "mcpref")
     return canonical_json_bytes(
         {
             "target": {

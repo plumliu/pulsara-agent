@@ -101,7 +101,7 @@ repository 提供一个连接内的集合并入 helper，接收已验证的观�
 
 1. `admit_agent_requests`：原有请求全部校验通过，在接纳事务内处理 instruction 和 `req.initial_context`。普通调用与 batch 复用同一路径；batch 先建立全部成员身份，再统一处理介绍，避免依赖循环顺序。
 2. 显式 `materials`／`depends_on`：已接纳关系足以介绍来源 Agent，不要求等待对方 final；复用当前 Work→Agent 解析。已冻结正文在其接纳时扫描；尚未物化的依赖正文在成功写入 work_inputs 时扫描。
-3. `enqueue_agent_steer`：确认活动目标 turn，接纳消息的同一事务内并入双方关系和接收者正文候选。ROOT 完成材料通知仍按其真实输入类型处理，不误当成双方直接通信。
+3. `enqueue_agent_steer`：确认活动目标 turn，接纳消息的同一事务内并入双方关系和接收者正文候选。Work 的初始依赖／materials 按真实材料来源处理，不误当成双方直接通信。
 
 现有 `context:last_n` 已通过 `_prepare_agent_invocation_snapshot` 生成 USER／ASSISTANT 公共文本投影，排除工具结果。扫描实际选定并冻结为 `req.initial_context` 的文本即可，不回读 ROOT 历史、不扫描未选入的单元，也不扩充该投影的内容。显式选择某个 Work 作为材料同样属于新的材料输入。扫描边界由这次接纳的输入来源决定，不因为材料曾经是 assistant final 或曾被工具返回就拒绝扫描；直接的 tool result 仍不扫描。
 
@@ -172,9 +172,9 @@ ROOT 是通信目标别名，不是 Subagent，也没有委派 Work。为了单�
 - ROOT 的 Agent 候选保持现有成员范围；Subagent 的 Agent 候选使用其查询范围。快照不允许重新从 ROOT 全量名单取数。
 - 在共同范围上继续筛选 `current_work_id IS NOT NULL OR queued_count > 0`，沿用现有身份、当前 Work、排队数投影。不是把 query 的完整 instruction／final 塞入快照。
 - 已知但 idle 的对象不必列入快照，仍可 query 找回。集合不是快照反序列化得到的，也不被快照内容覆盖。
-- ROOT 别名不伪造活跃 Work。无 target query 总能给出它；当前 runtime 身份说明／工具说明应明确可使用 ROOT，不为单独列出别名强行生成一份非空 PMCA。
+- ROOT 别名不伪造活跃 Work。无 target query 总能给出它；当前 runtime 身份说明／工具说明应明确可使用 ROOT，不为单独列出别名强行生成一份非空 PCA。
 - Subagent 仍没有 Cell 快照，其 Process、TODO 作用域保持现有语义；只打开按范围读取 Agent 的路径。
-- 复用 3,200 V3 启发式 tokens 的 PMCA 预算、惰性分页和整项省略机制；TODO 完整追加、不占 PMCA 预算的规则保持。
+- 复用 3,200 V3 启发式 tokens 的 PCA 预算、惰性分页和整项省略机制；TODO 完整追加、不占 PCA 预算的规则保持。
 - 省略提示应匹配当前作用域的实际工具：Subagent 可被引导使用 query_agents，不提示它使用不可用的 query_cells。同一实际提示须参与 builder 的初始预留、逐项测量、溢出回退和最终正文，不能只在输出后替换文案。无需另造摘要机制或专用恢复工具。
 - 保留 coordinator 的实际时序：模型摘要完成后采集 runtime handoff；采用后在既有 safe point 还会重采集当前 runtime source，并做后续调用的实际预算测量。不要把采集提前到摘要前，也不要以“已冻结”为由删除合法的采用后重采集。
 - 每次采集仍是分页的弱一致观察，不是全目录的单事务快照。已选入的完整项属于那一次冻结结果；联系人若在采集期间加入且 ID 排在已过 cursor 之前，可以不出现在该次结果中。集合中的身份仍可在后续 query 从第一页找回。
@@ -216,11 +216,11 @@ ROOT 是通信目标别名，不是 Subagent，也没有委派 Work。为了单�
 
 ### 8.3 压缩与真实 provider
 
-- Subagent PMCA 的 Agent 项只来自自身 A 与 K(A) 的共同查询范围，并仅保留活跃项；ROOT 结果保持原成员范围，Subagent 无 Cell 项。
+- Subagent PCA 的 Agent 项只来自自身 A 与 K(A) 的共同查询范围，并仅保留活跃项；ROOT 结果保持原成员范围，Subagent 无 Cell 项。
 - 超预算省略恢复用确定性测试构造足够候选并触发真实 builder 预算；Subagent 可用 query_agents 分页重新找到，idle 联系人也能找回。ROOT／Subagent 两种省略文案都参与 3,200-token 边界、整项回退和 TODO 独立计量验证。
 - 覆盖摘要执行期间及分页 cursor 之前新增联系，验证其最终可 query、不会重启摘要；冻结前缀、首次调用前压缩、turn 内压缩及采用后重采集保持既有语义。
-- 复用 `test_agent_requests_persistence.py`、`test_agent_collaboration_api.py`、`test_agent_collaboration_postgres.py`、`test_agent_session_host.py`、`test_runtime_handoff_agent_postgres.py`、`test_runtime_handoff_pmca.py`、owner／retirement 集成测试，以及现有 catalog 测试；更新旧 scope 断言而不削弱预算和归属断言。clean-v0 使用 `test_stage5_clean_migration.py` 和 `test_stage2_conversation_kernel_postgres.py` 的精确 oracle。
-- 实施阶段执行真实 provider 最小闭环：ROOT 创建 A/B/C；只向 A 介绍 B；A 实际采用 compaction successor 后，通过原生 query 找回 B、查询 B 的 Work，并给确实处于活动 turn 的 B 发消息；确认 C 未进入 A 的目录。正文只使用真实创建的 ID，保留 COMPACTED／采用记录及实际工具参数与返回。此闭环与确定性超预算场景分开，不假设三个 Agent 就会触发 PMCA 省略。
+- 复用 `test_agent_requests_persistence.py`、`test_agent_collaboration_api.py`、`test_agent_collaboration_postgres.py`、`test_agent_session_host.py`、`test_runtime_handoff_agent_postgres.py`、`test_runtime_handoff_pca.py`、owner／retirement 集成测试，以及现有 catalog 测试；更新旧 scope 断言而不削弱预算和归属断言。clean-v0 使用 `test_stage5_clean_migration.py` 和 `test_stage2_conversation_kernel_postgres.py` 的精确 oracle。
+- 实施阶段执行真实 provider 最小闭环：ROOT 创建 A/B/C；只向 A 介绍 B；A 实际采用 compaction successor 后，通过原生 query 找回 B、查询 B 的 Work，并给确实处于活动 turn 的 B 发消息；确认 C 未进入 A 的目录。正文只使用真实创建的 ID，保留 COMPACTED／采用记录及实际工具参数与返回。此闭环与确定性超预算场景分开，不假设三个 Agent 就会触发 PCA 省略。
 - 当前 `tests/dogfood/run_compaction_request_start_dogfood.py` 可复用配置和证据收集，但只覆盖 ROOT，不能当作 Subagent 已通过的证据。子代理触发与采用链路参考 `test_compaction_request_start_integration.py::test_subagent_first_summary_uses_full_initial_group_and_current_work` 和 `test_agent_session_host.py::test_child_first_preparation_adopts_real_common_snapshot_for_next_work`，使用现有 owner 与压缩策略，不添加生产捷径或复活旧任务工具。
 - provider 验证复用有效 Pulsara home 的只读生产配置，通过 LocalSettingsStore 加载；保留具体工具参数、返回和 provider 证据，排除实际凭据值。不以模型未实际调用工具的自然语言陈述代替验证。
 

@@ -104,21 +104,20 @@ def test_expiry_uses_ended_at_exact_deadline_without_another_exec(tmp_path, monk
 def test_lease_blocks_expiry_then_automatic_one_second_retry(tmp_path, monkeypatch):
     with owned_registry(finished_ttl_seconds=3600) as registry:
         state = launch(registry, tmp_path)
-        _snapshot, token = registry.snapshot_and_subscribe(
-            state.process_id, owner_host_session_id=OWNER, callback=lambda *_: None,
-        )
+        output = registry.output_owner(state.process_id, owner_host_session_id=OWNER)
+        token, _cursor = output.subscribe(lambda *_: None)
         waits = observe_waits(monkeypatch, registry)
         set_clock(monkeypatch, registry, state.ended_at + 3600)
         wake(registry)
         next_wait(waits, 1.0)
         assert state.process_id in registry._states
-        assert registry.unsubscribe_output(state.process_id, token, owner_host_session_id=OWNER)
+        assert output.unsubscribe(token)
         # No Registry notification and no new command: the bounded retry itself
         # must notice the output owner releasing its existing lease.
         await_removed(registry, state)
 
 
-@pytest.mark.parametrize("operation", ["metadata", "list", "poll", "wait", "log", "observation", "subscribe", "handoff"])
+@pytest.mark.parametrize("operation", ["metadata", "list", "poll", "wait", "log", "handoff"])
 def test_admitted_reader_blocks_prune_until_whole_operation_finishes(tmp_path, monkeypatch, operation):
     with owned_registry(finished_ttl_seconds=3600) as registry:
         state = launch(registry, tmp_path)
@@ -137,7 +136,6 @@ def test_admitted_reader_blocks_prune_until_whole_operation_finishes(tmp_path, m
 
         monkeypatch.setattr(state.output, "reading", reading)
         values, failures = [], []
-        subscription = []
 
         def read():
             try:
@@ -152,11 +150,6 @@ def test_admitted_reader_blocks_prune_until_whole_operation_finishes(tmp_path, m
                     value = registry.wait(state.process_id, timeout_seconds=0, max_output_chars=512, **args)
                 elif operation == "log":
                     value = registry.log(state.process_id, max_output_chars=512, **args)
-                elif operation == "observation":
-                    value = registry.observation_slice(state.process_id, maximum_chars=512, maximum_bytes=2048, since_cursor=None, **args)
-                elif operation == "subscribe":
-                    value, token = registry.snapshot_and_subscribe(state.process_id, callback=lambda *_: None, **args)
-                    subscription.append(token)
                 else:
                     value = registry.freeze_compaction_handoff(**args)
                 values.append(value)
@@ -179,8 +172,6 @@ def test_admitted_reader_blocks_prune_until_whole_operation_finishes(tmp_path, m
         assert not reader.is_alive()
         assert failures == []
         assert len(values) == 1
-        for token in subscription:
-            registry.unsubscribe_output(state.process_id, token, owner_host_session_id=OWNER)
         wake(registry)
         await_removed(registry, state)
 

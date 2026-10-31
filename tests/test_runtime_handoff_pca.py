@@ -1,4 +1,4 @@
-"""The handoff is a bounded PMCA observation with independent complete TODO."""
+"""The handoff is a bounded PCA observation with independent complete TODO."""
 
 import asyncio
 import json
@@ -9,12 +9,11 @@ import pytest
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     CompactionRuntimeHandoffBoundError,
     CompactionRuntimeHandoffBuilder,
-    FrozenTerminalMonitorHandoffFact,
     FrozenTerminalProcessHandoffFact,
     HANDOFF_BUDGET_OMISSION,
     SUBAGENT_HANDOFF_BUDGET_OMISSION,
     HANDOFF_CONTINUATION,
-    MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS,
+    MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS,
     freeze_compaction_runtime_handoff,
 )
 from pulsara_agent.conversation_kernel.todo_runtime import (
@@ -25,7 +24,7 @@ from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
 from pulsara_agent.llm.adapters.openai.responses import responses_semantic_wire_group
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
-from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pmca_tokens
+from pulsara_agent.model_input.compiler import estimate_runtime_handoff_pca_tokens
 from pulsara_agent.model_input.continuity import (
     SourceObservationLifecycle,
     SourceObservationPresence,
@@ -44,10 +43,6 @@ def process(index):
     return FrozenTerminalProcessHandoffFact(f"process:{index:026d}", "running")
 
 
-def monitor(index):
-    return FrozenTerminalMonitorHandoffFact(
-        f"monitor:{index:026d}", f"process:{index:026d}", "active", bool(index % 2)
-    )
 
 
 def cell(index):
@@ -71,7 +66,7 @@ def payload(handoff):
     return json.loads(handoff.full_text.split("\n", 1)[0])
 
 
-def pmca_body(handoff):
+def pca_body(handoff):
     data = payload(handoff)
     del data["todos"]
     del data["todo_counts"]
@@ -93,12 +88,11 @@ def todo_snapshot(items):
 
 
 @pytest.mark.parametrize("todo", [None, todo_snapshot([])])
-def test_no_pmca_and_no_todo_is_explicit_empty(todo):
+def test_no_pca_and_no_todo_is_explicit_empty(todo):
     assert (
         freeze_compaction_runtime_handoff(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             terminal_processes=(),
-            terminal_monitors=(),
             todo=todo,
         )
         is None
@@ -114,7 +108,6 @@ def test_todo_only_preserves_status_text_order_counts_and_continuation():
     handoff = freeze_compaction_runtime_handoff(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         terminal_processes=(),
-        terminal_monitors=(),
         todo=todo_snapshot(items),
     )
     assert payload(handoff)["todos"] == items
@@ -135,14 +128,13 @@ def test_todo_only_preserves_status_text_order_counts_and_continuation():
 @pytest.mark.parametrize(
     "serializer", [chat_semantic_wire_group, responses_semantic_wire_group]
 )
-def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
+def test_actual_source_encoder_and_both_serializers_stay_within_pca_boundary(
     serializer,
     scope,
 ):
     handoff = freeze_compaction_runtime_handoff(
         conversation_scope_kind=scope,
         terminal_processes=tuple(process(i) for i in range(200, 0, -1)),
-        terminal_monitors=tuple(monitor(i) for i in range(200, 0, -1)),
         code_cells=(
             tuple(cell(i) for i in range(200, 0, -1))
             if scope is ModelInputScopeKind.ROOT
@@ -151,21 +143,21 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
         agent_work_index=(agent(i) for i in range(200)),
         todo=None,
     )
-    body = pmca_body(handoff)
+    body = pca_body(handoff)
     message = encode_runtime_observation(
         source_kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF,
         trust_class=ContextTrustClass.UNTRUSTED_OBSERVATION,
         lifecycle=SourceObservationLifecycle.SNAPSHOT,
         presence=SourceObservationPresence.VALUE,
-        contract_version="pulsara.compaction-runtime-handoff.v3-active-pmca",
+        contract_version="pulsara.compaction-runtime-handoff.v3-active-pca",
         body=body,
     )
     primitive = PulsaraHeuristicTokenEstimatorV3()
     cost = sum(
         primitive.estimate_wire_json_component(item) for item in serializer(message)
     )
-    assert cost <= MAXIMUM_RUNTIME_HANDOFF_PMCA_TOKENS
-    assert estimate_runtime_handoff_pmca_tokens(body) >= cost
+    assert cost <= MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS
+    assert estimate_runtime_handoff_pca_tokens(body) >= cost
     omission = (
         HANDOFF_BUDGET_OMISSION
         if scope is ModelInputScopeKind.ROOT
@@ -174,7 +166,7 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
     assert handoff.full_text.endswith(omission)
     assert ("query_cells" in handoff.full_text) is (scope is ModelInputScopeKind.ROOT)
     data = payload(handoff)
-    keys = ("terminal_processes", "terminal_monitors", "agents")
+    keys = ("terminal_processes", "agents")
     if scope is ModelInputScopeKind.ROOT:
         keys = (*keys, "code_cells")
     counts = [len(data[key]) for key in keys]
@@ -189,7 +181,6 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
     assert data["agents"][0] == agent(0)
     assert set(data) == {
         "terminal_processes",
-        "terminal_monitors",
         "code_cells",
         "agents",
         "todos",
@@ -200,7 +191,7 @@ def test_actual_source_encoder_and_both_serializers_stay_within_pmca_boundary(
 @pytest.mark.parametrize(
     "scope", [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT]
 )
-def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pmca_selection(
+def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pca_selection(
     scope,
 ):
     # This passes the real NFC/unique/192-byte/4-KiB parser. Source JSON nesting
@@ -210,7 +201,6 @@ def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pmca_selecti
     facts = dict(
         conversation_scope_kind=scope,
         terminal_processes=tuple(process(i) for i in range(150)),
-        terminal_monitors=tuple(monitor(i) for i in range(150)),
         code_cells=tuple(cell(i) for i in range(150))
         if scope is ModelInputScopeKind.ROOT
         else (),
@@ -218,17 +208,16 @@ def test_legal_quoted_todo_can_exceed_local_budget_without_changing_pmca_selecti
     )
     without = freeze_compaction_runtime_handoff(**facts, todo=None)
     with_todo = freeze_compaction_runtime_handoff(**facts, todo=todo)
-    assert pmca_body(with_todo) == pmca_body(without)
+    assert pca_body(with_todo) == pca_body(without)
     assert payload(with_todo)["todos"] == items
     assert payload(with_todo)["todo_counts"]["total"] == 16
-    assert estimate_runtime_handoff_pmca_tokens(with_todo.full_text) > 3_200
+    assert estimate_runtime_handoff_pca_tokens(with_todo.full_text) > 3_200
     only_todo = freeze_compaction_runtime_handoff(
         conversation_scope_kind=scope,
         terminal_processes=(),
-        terminal_monitors=(),
         todo=todo,
     )
-    assert estimate_runtime_handoff_pmca_tokens(only_todo.full_text) > 3_200
+    assert estimate_runtime_handoff_pca_tokens(only_todo.full_text) > 3_200
     assert HANDOFF_BUDGET_OMISSION not in only_todo.full_text
     assert SUBAGENT_HANDOFF_BUDGET_OMISSION not in only_todo.full_text
 
@@ -252,7 +241,6 @@ def test_exact_boundary_and_omission_note_remove_multiple_whole_rows_in_reverse_
             len(data[key])
             for key in (
                 "terminal_processes",
-                "terminal_monitors",
                 "code_cells",
                 "agents",
             )
@@ -265,18 +253,17 @@ def test_exact_boundary_and_omission_note_remove_multiple_whole_rows_in_reverse_
 
     handoff = freeze_compaction_runtime_handoff(
         conversation_scope_kind=scope,
-        terminal_processes=(process(1),),
-        terminal_monitors=(monitor(1),),
+        terminal_processes=(process(1), process(2)),
         code_cells=(cell(1),) if scope is ModelInputScopeKind.ROOT else (),
         agent_work_index=(agent(1),)
         if scope is ModelInputScopeKind.ROOT
         else (agent(1), agent(2)),
         todo=None,
-        measure_pmca=measure,
+        measure_pca=measure,
     )
     data = payload(handoff)
     assert len(data["terminal_processes"]) == 1
-    assert data["terminal_monitors"] == data["code_cells"] == data["agents"] == []
+    assert data["code_cells"] == data["agents"] == []
     assert (3, False) in seen and (4, False) in seen
     assert seen[-3:] == [(3, True), (2, True), (1, True)]
 
@@ -292,10 +279,9 @@ def test_first_candidate_too_large_still_produces_handoff_and_stops_enumeration(
     handoff = freeze_compaction_runtime_handoff(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         terminal_processes=(),
-        terminal_monitors=(),
         agent_work_index=candidates(),
         todo=None,
-        measure_pmca=measure,
+        measure_pca=measure,
     )
     assert handoff is not None
     assert payload(handoff)["agents"] == []
@@ -307,7 +293,7 @@ def test_invalid_envelope_and_reader_errors_are_not_reported_as_empty_or_omissio
         CompactionRuntimeHandoffBuilder(
             todo=None,
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            measure_pmca=lambda _: 3_201,
+            measure_pca=lambda _: 3_201,
         )
 
     def candidates():
@@ -318,20 +304,16 @@ def test_invalid_envelope_and_reader_errors_are_not_reported_as_empty_or_omissio
         freeze_compaction_runtime_handoff(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             terminal_processes=(),
-            terminal_monitors=(),
             agent_work_index=candidates(),
             todo=None,
         )
 
 
-def port_fixture(*, subagent=None, code_mode=None, monitor_freezer=None, processes=()):
+def port_fixture(*, subagent=None, code_mode=None, processes=()):
     port = DirectKernelToolPort.__new__(DirectKernelToolPort)
     port._session_id = "session:current"
     port._terminal_owner_id = "host:current"
     port._terminal = SimpleNamespace(freeze_compaction_handoff=lambda **_: processes)
-    port._terminal_monitor = SimpleNamespace(
-        freeze_compaction_handoff=monitor_freezer or (lambda **_: ())
-    )
     port._todo_owner = SimpleNamespace(freeze_compaction_handoff=lambda **_: None)
     port._subagent = subagent
     port._code_mode = code_mode
@@ -348,20 +330,7 @@ def freeze(port, scope=ModelInputScopeKind.ROOT):
     )
 
 
-def test_subagent_reads_scoped_agents_and_real_work_monitors_without_cells():
-    scopes = []
-
-    def monitors(**scope):
-        scopes.append(scope)
-        return (
-            {
-                "monitor_id": "monitor:own",
-                "process_id": "process:own",
-                "state": "dormant",
-                "pending_observation": True,
-            },
-        )
-
+def test_subagent_reads_only_own_processes_and_scoped_agents_without_cells():
     class CellInventory:
         def freeze_compaction_handoff(self, **kwargs):
             raise AssertionError("Subagent must not read Cell inventory")
@@ -378,13 +347,11 @@ def test_subagent_reads_scoped_agents_and_real_work_monitors_without_cells():
         process_id="process:foreign", origin=SimpleNamespace(session_id="session:other")
     )
     port = port_fixture(
-        monitor_freezer=monitors,
         subagent=AgentInventory(),
         code_mode=CellInventory(),
         processes=(foreign, own),
     )
     data = payload(freeze(port, ModelInputScopeKind.SUBAGENT))
-    assert scopes == [{"agent_id": "session:current", "work_turn_id": "turn:actual"}]
     assert data["terminal_processes"] == [
         {
             "target": {"kind": "PROCESS", "process_id": "process:own"},
@@ -393,7 +360,6 @@ def test_subagent_reads_scoped_agents_and_real_work_monitors_without_cells():
     ]
     assert data["agents"] == [agent(1), agent(2)]
     assert data["code_cells"] == []
-    assert data["terminal_monitors"][0]["state"] == "dormant"
 
 
 @pytest.mark.parametrize(

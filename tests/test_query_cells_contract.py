@@ -354,7 +354,7 @@ def test_real_host_hook_path_source_and_full_projection_failure_keep_original_ou
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_binding, test_model_runtime
     from tests.support.round3 import CallbackScriptedKernelModel
-    from tests.test_round2_terminal_host import _text, _tool_call
+    from tests.support.model_stream import _text, _tool_call
     from tests.test_round9_2_hook_integration_postgres import _install_trusted_sources
 
     home, workspace = tmp_path / "home", tmp_path / "workspace"

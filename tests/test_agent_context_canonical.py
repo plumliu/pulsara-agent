@@ -299,7 +299,7 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
     from pulsara_agent.identity import random_id
     from tests.support.model_config import test_model_runtime, test_model_binding
     from tests.support.round3 import CallbackScriptedKernelModel
-    from tests.test_round2_terminal_host import _tool_call, _text
+    from tests.support.model_stream import _tool_call, _text
     import pulsara_agent.conversation_kernel.host as kernel_host
 
     operations = {
