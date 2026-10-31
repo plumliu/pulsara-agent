@@ -68,10 +68,10 @@ it('saves a real stdio candidate from the inline editor without converting it to
   expect(adapter.lastConnection!.resolveInteraction.mock.calls[0][1]).toEqual(expect.objectContaining({submission: expect.objectContaining({config: expect.objectContaining({transport: {type: 'stdio', command: 'uv', args: ['run', 'server.py'], cwd: '/tmp/mcp', env: {}, secret_env: {}}})})}));
 });
 
-it('keeps plugin overrides and private connection inputs in the inline plugin path', async () => {
+it.each([{visibility:'VISIBLE',value:'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, {visibility:'WITHHELD'}])('keeps plugin overrides and private connection inputs with %s identity', async packageId => {
   const pluginOwner = {...owner, kind: 'plugin', plugin_id: 'research'};
   const adapter = await open(capability('CONFIGURE_PLUGIN_MCP_CONNECTION', {server_id: 'docs', config}, {
-    plugin: {name: '资料工具包', enabled: true, package_install_id: 'package:research'},
+    plugin: {name: '资料工具包', enabled: true, package_install_id: packageId},
     connection: {server_id: 'docs', defaults: config, config, overlay: null, credential_owner: pluginOwner,
       connection_inputs: [{name: 'API_KEY', title: '服务密钥', private: true, required: true}]},
   }));
@@ -85,6 +85,8 @@ it('keeps plugin overrides and private connection inputs in the inline plugin pa
   const result = adapter.lastConnection!.resolveInteraction.mock.calls[0][1];
   expect(result).toEqual(expect.objectContaining({submission: expect.objectContaining({overlay: expect.objectContaining({local_server_id: 'docs', endpoint: 'https://override.example/mcp'}), secret_changes: [{binding: {owner: pluginOwner, name: 'input:API_KEY'}, value: 'plugin-private'}]})}));
   expect(JSON.stringify(result.kind === 'capability' && result.submission?.overlay)).not.toContain('plugin-private');
+  expect(JSON.stringify(result)).not.toContain('WITHHELD');
+  expect(JSON.stringify(result)).not.toContain('package:aaaaaaaaaaaaaaaaaaaaaaaaaa');
 });
 
 it('keeps plugin review acceptance and OAuth cancellation on their original capability resolutions', async () => {
@@ -164,7 +166,7 @@ it.each(['approve', 'revise', 'cancel'] as const)('preserves the Markdown plan a
 
 it('restores an inline plugin connection only after reviewing the default and confirming', async () => {
   const adapter = await open(capability('CONFIGURE_PLUGIN_MCP_CONNECTION', {server_id: 'docs'}, {
-    plugin: {name: '资料工具包', enabled: true, package_install_id: 'package:research'},
+    plugin: {name: '资料工具包', enabled: true, package_install_id: {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}},
     connection: {server_id: 'docs', defaults: config, config: {...config, transport: {...config.transport, endpoint: 'https://override.example/mcp'}}, overlay: {endpoint: 'https://override.example/mcp'}, credential_owner: {...owner, kind: 'plugin', plugin_id: 'research'}},
   }));
   await screen.findByRole('region', {name: '配置 文档服务 连接'});

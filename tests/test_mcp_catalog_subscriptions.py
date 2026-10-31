@@ -52,7 +52,7 @@ def _supervisor(tmp_path, endpoint, *, required=True):
         },
     })
     return McpHostSupervisor(
-        session_id="session:subscription-test", workspace_root=tmp_path,
+        workspace_root=tmp_path,
         configs=(config,), credential_boundary=ProcessCredentialBoundary(),
     )
 

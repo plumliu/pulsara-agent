@@ -973,8 +973,8 @@ class StructuredModelInputCompiler:
             tools=tool_states,
             deadline=deadline,
         )
-        degraded_source_ids = {
-            state.candidate.source_instance_id
+        degraded_source_kinds = {
+            state.candidate.source_kind
             for state in source_states
             if state.omitted or state.mode() is not state.candidate.initial_mode
         }
@@ -1029,7 +1029,7 @@ class StructuredModelInputCompiler:
             state.mode() is ToolResultProviderRenderMode.OMITTED_BODY
             for state in tool_states
         )
-        if degraded_source_ids:
+        if degraded_source_kinds:
             self._add_diagnostic(
                 diagnostics, ContextPublicDiagnosticCode.SOURCE_DEGRADED
             )
@@ -1111,7 +1111,7 @@ class StructuredModelInputCompiler:
             protected_prefix_message_count=0,
             protected_prefix_logical_bytes=0,
             protected_prefix_fingerprint=None,
-            degraded_source_count=len(degraded_source_ids),
+            degraded_source_count=len(degraded_source_kinds),
             omitted_source_count=omitted_sources,
             degraded_tool_result_count=len(degraded_tool_ids),
             omitted_tool_result_body_count=omitted_tools,
@@ -1978,8 +1978,8 @@ class StructuredModelInputCompiler:
             tools=tool_states,
             deadline=deadline,
         )
-        degraded_source_ids = {
-            item.state.candidate.source_instance_id
+        degraded_source_kinds = {
+            item.state.candidate.source_kind
             for item in emissions
             if item.state is not None
             and (
@@ -2057,7 +2057,7 @@ class StructuredModelInputCompiler:
             state.mode() is ToolResultProviderRenderMode.OMITTED_BODY
             for state in tool_states
         )
-        if degraded_source_ids:
+        if degraded_source_kinds:
             self._add_diagnostic(
                 diagnostics, ContextPublicDiagnosticCode.SOURCE_DEGRADED
             )
@@ -2131,7 +2131,7 @@ class StructuredModelInputCompiler:
             protected_prefix_message_count=len(previous_messages),
             protected_prefix_logical_bytes=predecessor.logical_bytes,
             protected_prefix_fingerprint=prefix_fingerprint,
-            degraded_source_count=len(degraded_source_ids),
+            degraded_source_count=len(degraded_source_kinds),
             omitted_source_count=omitted_sources,
             degraded_tool_result_count=len(degraded_tool_ids),
             omitted_tool_result_body_count=omitted_tools,
@@ -2778,7 +2778,6 @@ class StructuredModelInputCompiler:
             candidate.channel.value,
             candidate.placement_ordinal,
             candidate.source_kind.value,
-            candidate.source_instance_id,
         )
 
     @staticmethod
@@ -2792,7 +2791,6 @@ class StructuredModelInputCompiler:
             1,
             "SOURCE",
             candidate.source_kind.value,
-            candidate.source_instance_id,
         )
 
     @staticmethod

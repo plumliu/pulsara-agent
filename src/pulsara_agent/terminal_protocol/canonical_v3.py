@@ -13,6 +13,8 @@ from pulsara_agent.conversation_kernel.interruption import (
     TurnInterruptionNotice,
 )
 from dataclasses import asdict
+from pulsara_agent.identity import derive_id, is_valid_id
+from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 
 import codecs
 import json
@@ -1066,13 +1068,15 @@ class CanonicalProtocolReader:
             check_budget()
             return value
 
+        segment_facts: dict[str, tuple[str, ...]] = {}
         for row in rows:
             kind = str(row["entry_owner_kind"])
             owner_id = str(row["turn_id"] if kind == "EXECUTED_TURN" else row["imported_history_group_id"])
+            segment_fact = ("history-initial", kind, owner_id)
             owner = group(kind, owner_id)
             context: dict[str, object] = {
                 "entry_id": str(row["id"]), "owner_kind": kind, "owner_id": owner_id,
-                "segment_id": f"{kind}:{owner_id}:initial",
+                "segment_id": derive_id("segment", "history-initial", kind, owner_id),
                 "segment_start_entry_id": owner["initial_entry_id"],
             }
             if row["previous_id"]:
@@ -1081,7 +1085,8 @@ class CanonicalProtocolReader:
                 context["next_entry_id"] = str(row["next_id"])
             if kind == "EXECUTED_TURN":
                 if row["segment_event_id"]:
-                    context["segment_id"] = f"{kind}:{owner_id}:{row['segment_event_id']}"
+                    segment_fact = ("history-boundary", kind, owner_id, str(row["segment_event_id"]))
+                    context["segment_id"] = derive_id("segment", *segment_fact)
                     context["segment_start_entry_id"] = str(row["segment_start_id"])
             elif owner_id in imported_interruptions and int(row["entry_sequence"]) > imported_interruptions[owner_id]:
                 if owner_id not in imported_segment_starts:
@@ -1091,8 +1096,13 @@ class CanonicalProtocolReader:
                         (session_id, owner_id, imported_interruptions[owner_id], cut),
                     ).fetchone()
                     imported_segment_starts[owner_id] = str(first["id"])
-                context["segment_id"] = f"{kind}:{owner_id}:interruption"
+                segment_fact = ("history-interruption", kind, owner_id)
+                context["segment_id"] = derive_id("segment", *segment_fact)
                 context["segment_start_entry_id"] = imported_segment_starts[owner_id]
+            segment_id = str(context["segment_id"])
+            prior_fact = segment_facts.setdefault(segment_id, segment_fact)
+            if prior_fact != segment_fact:
+                raise ConversationKernelConflict("history segment identity collision")
             response["entry_contexts"].append(context)
             check_budget()
 
@@ -1301,6 +1311,7 @@ class CanonicalProtocolReader:
         block_id: str | None = None,
         image_ref_ordinal: int | None = None,
         visualization_ordinal: int | None = None,
+        reasoning_ordinal: int | None = None,
         image_ref: str | None = None,
     ) -> Mapping[str, object]:
         """Re-authorize an exact entry/block content edge before blob hydration."""
@@ -1324,8 +1335,24 @@ class CanonicalProtocolReader:
             or image_ref_ordinal is not None
         ):
             raise ValueError("visualization content target is invalid")
+        if reasoning_ordinal is not None and (
+            isinstance(reasoning_ordinal, bool) or not isinstance(reasoning_ordinal, int)
+            or reasoning_ordinal < 0 or entry_id is None
+            or not is_valid_id(block_id, "reasoning-block")
+            or image_ref_ordinal is not None or visualization_ordinal is not None
+        ):
+            raise ValueError("reasoning content target is invalid")
+        if is_valid_id(block_id, "reasoning-block") and reasoning_ordinal is None:
+            raise ValueError("reasoning ordinal is required")
         with self._connection(deadline_monotonic) as connection:
             session = self._session(connection, session_id)
+            if reasoning_ordinal is not None:
+                derived = self._resolve_reasoning_content(
+                    connection, session_id=session_id, entry_id=entry_id,
+                    block_id=block_id, ordinal=reasoning_ordinal)
+                if derived is None:
+                    raise KeyError(block_id)
+                return derived
             if image_ref is not None:
                 from pulsara_agent.conversation_kernel.prompt_storage import read_image_reference_in_connection
                 from pulsara_agent.conversation_kernel.prompt_content import MAXIMUM_PROMPT_MULTIPART_BYTES
@@ -1397,15 +1424,6 @@ class CanonicalProtocolReader:
                     (session_id, entry_id),
                 ).fetchone()
             if row is None:
-                if block_id:
-                    derived = self._resolve_reasoning_content(
-                        connection,
-                        session_id=session_id,
-                        entry_id=entry_id,
-                        block_id=block_id,
-                    )
-                    if derived is not None:
-                        return derived
                 raise KeyError(entry_id if not block_id else block_id)
             if image_ref_ordinal is not None:
                 if (
@@ -1460,13 +1478,8 @@ class CanonicalProtocolReader:
         session_id: str,
         entry_id: str,
         block_id: str,
+        ordinal: int,
     ) -> Mapping[str, object] | None:
-        prefix = f"{entry_id}:provider-reasoning:"
-        if not block_id.startswith(prefix):
-            return None
-        raw_ordinal = block_id.removeprefix(prefix)
-        if not raw_ordinal.isdigit() or str(int(raw_ordinal)) != raw_ordinal:
-            return None
         entry = connection.execute(
             """
             SELECT * FROM pulsara_v3.transcript_entries
@@ -1476,8 +1489,10 @@ class CanonicalProtocolReader:
         ).fetchone()
         if entry is None:
             return None
+        if block_id != derive_id("reasoning-block", "provider-reasoning", entry_id, str(ordinal)):
+            return None
         reasoning = self._reasoning_blocks(connection, entry)
-        ordinal = int(raw_ordinal)
+        _reasoning_ids(entry_id, reasoning)
         if ordinal >= len(reasoning):
             return None
         content = reasoning[ordinal].text.encode("utf-8")
@@ -1927,10 +1942,11 @@ class CanonicalProtocolReader:
             reasoning = ()
         else:
             reasoning = self._reasoning_blocks(connection, stored_row)
+        reasoning_ids = _reasoning_ids(entry_id, reasoning)
         for ordinal, reasoning in enumerate(reasoning):
             content = reasoning.text.encode("utf-8")
             target = result.reasoning_blocks.add(
-                block_id=f"{entry_id}:provider-reasoning:{ordinal}",
+                block_id=reasoning_ids[ordinal],
                 ordinal=ordinal,
                 presentation_kind=(
                     wire.REASONING_PRESENTATION_SUMMARY
@@ -2543,3 +2559,11 @@ def _session_scope(connection, session_id: str) -> str:
     if row is None:
         raise KeyError(session_id)
     return "ROOT" if row["root_session_id"] is None else "SUBAGENT"
+
+
+def _reasoning_ids(entry_id: str, reasoning: object) -> tuple[str, ...]:
+    ids = tuple(derive_id("reasoning-block", "provider-reasoning", entry_id, str(i))
+                for i, _ in enumerate(reasoning))
+    if len(set(ids)) != len(ids):
+        raise ConversationKernelConflict("reasoning block identity collision")
+    return ids

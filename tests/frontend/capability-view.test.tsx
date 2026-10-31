@@ -138,7 +138,7 @@ it('saves an adjusted MCP scope from enable review before enabling with the same
     public_headers: {}, environment: {}, secret_environment: {}, auth: {type: 'none'}};
   const connection = {serverId: 'search', credentialOwner: {kind: 'plugin' as const, scope_key: 'user', plugin_id: 'docs', server_id: 'search'},
     defaults: {}, config: {scope_policy: 'ROOT_ONLY', transport: {type: 'streamable_http', endpoint: 'https://example.org'}, auth: {type: 'none'}}, overlay};
-  const plugin = {id: 'docs', name: 'Docs', description: '', enabled: false, packageInstallId: 'pkg', packageRoot: '/package',
+  const plugin = {id: 'docs', name: 'Docs', description: '', enabled: false, packageInstallId: {visibility: 'VISIBLE' as const, value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, packageRoot: '/package',
     skillCount: 0, mcpCount: 1, hookCount: 0, effectiveSkillNames: [], effectiveMcpServerIds: [], details: [],
     mcpConnections: [connection], connectionReview: [{overlay, credentials: []}]};
   const edit = vi.fn(async () => true), enable = vi.fn(async () => true);

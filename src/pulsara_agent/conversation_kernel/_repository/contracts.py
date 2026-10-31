@@ -86,6 +86,7 @@ from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, Sub
 from pulsara_agent.conversation_kernel.steer import PromptIngressWriteRejection, StartedTurnInputGroup
 from pulsara_agent.conversation_kernel.tool_contracts import (
     AcceptedCanonicalToolResultSettlement,
+    valid_tool_remote_identity,
 )
 
 
@@ -334,6 +335,7 @@ class PreparedToolRemoteIdentityPublication:
     session_id: str
     attempt_id: str
     remote_identity: str
+    remote_identity_verification: str | None
     occurred_at: datetime
     actor_id: str
     event: CommittedEventDraft
@@ -344,6 +346,7 @@ class PreparedToolRemoteIdentityPublication:
             session_id=self.session_id,
             attempt_id=self.attempt_id,
             remote_identity=self.remote_identity,
+            remote_identity_verification=self.remote_identity_verification,
             occurred_at=self.occurred_at,
             actor_id=self.actor_id,
         )
@@ -356,6 +359,7 @@ class PreparedToolRemoteIdentityPublication:
             or not self.attempt_id
             or not self.remote_identity
             or len(identity_bytes) > 4096
+            or not valid_tool_remote_identity(self.remote_identity, self.remote_identity_verification)
             or not self.actor_id
             or self.candidate_fingerprint != expected
             or self.event.event_id
@@ -374,6 +378,8 @@ class PreparedToolRemoteIdentityPublication:
                 "remote_identity_utf8_bytes": len(identity_bytes),
                 "remote_identity_digest": "sha256:"
                 + sha256(identity_bytes).hexdigest(),
+                **({"remote_identity_verification": self.remote_identity_verification}
+                   if self.remote_identity_verification is not None else {}),
             }
         ):
             raise ValueError("prepared tool remote identity publication is invalid")
@@ -1163,6 +1169,7 @@ def _tool_remote_identity_publication_payload(
     session_id: str,
     attempt_id: str,
     remote_identity: str,
+    remote_identity_verification: str | None,
     occurred_at: datetime,
     actor_id: str,
 ) -> Mapping[str, object]:
@@ -1170,6 +1177,8 @@ def _tool_remote_identity_publication_payload(
         "session_id": session_id,
         "attempt_id": attempt_id,
         "remote_identity": remote_identity,
+        **({"remote_identity_verification": remote_identity_verification}
+           if remote_identity_verification is not None else {}),
         "occurred_at": occurred_at.isoformat(),
         "actor_id": actor_id,
     }
@@ -1180,6 +1189,7 @@ def build_prepared_tool_remote_identity_publication(
     session_id: str,
     attempt_id: str,
     remote_identity: str,
+    remote_identity_verification: str | None = None,
     occurred_at: datetime,
     actor_id: str,
 ) -> PreparedToolRemoteIdentityPublication:
@@ -1187,6 +1197,7 @@ def build_prepared_tool_remote_identity_publication(
         session_id=session_id,
         attempt_id=attempt_id,
         remote_identity=remote_identity,
+        remote_identity_verification=remote_identity_verification,
         occurred_at=occurred_at,
         actor_id=actor_id,
     )
@@ -1208,6 +1219,8 @@ def build_prepared_tool_remote_identity_publication(
                 "remote_identity_utf8_bytes": len(identity_bytes),
                 "remote_identity_digest": "sha256:"
                 + sha256(identity_bytes).hexdigest(),
+                **({"remote_identity_verification": remote_identity_verification}
+                   if remote_identity_verification is not None else {}),
             }
         ),
     )
@@ -1215,6 +1228,7 @@ def build_prepared_tool_remote_identity_publication(
         session_id=session_id,
         attempt_id=attempt_id,
         remote_identity=remote_identity,
+        remote_identity_verification=remote_identity_verification,
         occurred_at=occurred_at,
         actor_id=actor_id,
         event=event,

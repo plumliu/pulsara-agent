@@ -1,5 +1,5 @@
 import { requestExecutionFromWire, type RequestExecution } from './request-execution';
-import { parseMcpAuthorizationResult, type McpAuthorizationRequest, type McpAuthorizationResult } from './mcp-authorization-result';
+import { parseMcpAuthorizationResult, parsePublicPackageId, type McpAuthorizationRequest, type McpAuthorizationResult } from './mcp-authorization-result';
 import { parsePresentationResult, type PresentationRequest } from './presentation-targets';
 import { desktopHost } from './desktop-host';
 import { randomIdentity, isCanonicalIdentity } from './identity';
@@ -288,7 +288,7 @@ interface ProtocolTurnInterruptionNotice {
 export type CanonicalInput = Pick<Message, 'id' | 'userKind' | 'inputSource' | 'contentState' | 'historyContextState'>;
 
 function canonicalInputs(messages: Message[]): CanonicalInput[] {
-  return messages.filter(message => message.role === 'user' && message.inputSource).map(({id, userKind, inputSource, contentState, historyContextState}) =>
+  return messages.filter(message => !message.viewSource && message.role === 'user' && message.inputSource).map(({id, userKind, inputSource, contentState, historyContextState}) =>
     ({id, userKind, inputSource, contentState, historyContextState}));
 }
 
@@ -1168,12 +1168,15 @@ interface ObservationPayload {
 
 interface LiveDraft {
   id: string;
+  source: NonNullable<Message['viewSource']> & {kind: 'draft'};
   committedEntryId?: string;
   turnId: string;
   scopeKind: string;
   body: string;
   reasoning: ReasoningBlock[];
+  reasoningSources: (string | undefined)[];
   traces: ToolTrace[];
+  traceBlocks: (string | undefined)[];
 }
 
 interface LiveToolResult {
@@ -1734,9 +1737,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async pluginMcpAuthorization(plugin: UserPluginCapability, connection: PluginMcpConnection, action: 'login' | 'status' | 'cancel' | 'logout') {
+    if (plugin.packageInstallId.visibility !== 'VISIBLE') throw new Error('插件安装身份不可用。');
     return apiRequest<{state: string; error: string | null}>(
       `/api/capabilities/plugins/${encodeURIComponent(plugin.id)}/mcp/${encodeURIComponent(connection.serverId)}/authorization`,
-      {method: 'POST', body: JSON.stringify({package_install_id: plugin.packageInstallId, action})},
+      {method: 'POST', body: JSON.stringify({package_install_id: plugin.packageInstallId.value, action})},
     );
   }
 
@@ -1751,9 +1755,10 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async updatePluginConnection(plugin: UserPluginCapability, connection: PluginMcpConnection, input: PluginMcpEditInput) {
+    if (plugin.packageInstallId.visibility !== 'VISIBLE') throw new Error('插件安装身份不可用。');
     return projectUserCapabilityOperation(await apiRequest<Record<string, unknown>>(
       `/api/capabilities/plugins/${encodeURIComponent(plugin.id)}/mcp/${encodeURIComponent(connection.serverId)}`,
-      { method: 'PUT', body: JSON.stringify({ package_install_id: plugin.packageInstallId,
+      { method: 'PUT', body: JSON.stringify({ package_install_id: plugin.packageInstallId.value,
         expected_overlay: connection.overlay, overlay: input.overlay, secret_changes: input.secretChanges,
         retain_credentials_confirmed: input.retainCredentialsConfirmed ?? false }) },
     ));
@@ -1961,7 +1966,7 @@ abstract class CanonicalHistoryReader {
       if (![...this.entries.values()].some(entry => numeric(entry.entry_sequence) === sequence)) continue;
       const source = [...this.entries.values()].find(entry => numeric(entry.entry_sequence) === sequence);
       if (!source || !readingIds.has(source.entry_id)) continue;
-      const message = source && messages.find(message => message.id === source.entry_id || message.sourceEntryIds?.includes(source.entry_id));
+      const message = source && messages.find(message => !message.viewSource && (message.id === source.entry_id || message.sourceEntryIds?.includes(source.entry_id)));
       mounted.push({ownerKind: notice.owner_kind, ownerId: notice.owner_id, reason: notice.reason,
         publicDetail: notice.public_detail, terminalAtUtc: notice.terminal_at_utc,
         displayAfterEntrySequence: sequence, displayAfterEntryId: source?.entry_id, displayAfterMessageId: message?.id});
@@ -2055,7 +2060,6 @@ abstract class CanonicalHistoryReader {
   private supplementalBodies = new WeakSet<ProtocolContent>();
   protected readerClosed = false;
   protected controlReadSequence = '0';
-  private pageCounter = 0;
   private initialContextReady = false;
   private knownQueuedContent = new Map<string, CanonicalPromptContent>();
   private tailPage?: BrowserHistoryPage;
@@ -2079,7 +2083,7 @@ abstract class CanonicalHistoryReader {
   private readingAtLatest(): boolean { return !this.tailPage || this.readingIds().has(this.tailPage.entryIds.at(-1)!); }
   protected readingMessages(messages: Message[]): Message[] {
     const ids = this.readingIds(), atLatest = this.readingAtLatest();
-    return messages.filter(message => this.entries.has(message.id) ? ids.has(message.id) : atLatest);
+    return messages.filter(message => message.viewSource ? atLatest : ids.has(message.id));
   }
 
   async readLatestHistory(signal?: AbortSignal): Promise<RuntimeProjection> {
@@ -2336,7 +2340,9 @@ abstract class CanonicalHistoryReader {
       if (tail) { this.tailPage = same; if (same.cut) this.pairedTailPage = same; }
       return same;
     }
-    const page: BrowserHistoryPage = {id: `history:${++this.pageCounter}`, entryIds: ids,
+    let pageId = randomIdentity('page');
+    while (this.pages.some(page => page.id === pageId)) pageId = randomIdentity('page');
+    const page: BrowserHistoryPage = {id: pageId, entryIds: ids,
       cut: cut && cut.event_sequence_cut !== undefined ? {cut_sequence: decimal(cut.cut_sequence), event_sequence_cut: decimal(cut.event_sequence_cut)} : undefined,
       older, newer, loading: false, contextState: 'loading'};
     this.pages.push(page);
@@ -2616,7 +2622,11 @@ abstract class CanonicalHistoryReader {
       const operation = (async () => {
         try {
           await this.hydrateContentReference(entry.content, {entry_id: entryId}, '这条会话内容暂时无法完整读取。');
-          for (const block of [...entry.blocks ?? [], ...(includeReasoning ? entry.reasoning_blocks ?? [] : [])]) await this.hydrateContentReference(block.content, {entry_id: entryId, block_id: block.block_id}, '这段正文暂时无法完整读取。');
+          for (const block of entry.blocks ?? []) await this.hydrateContentReference(block.content, {entry_id: entryId, block_id: block.block_id}, '这段正文暂时无法完整读取。');
+          if (includeReasoning) for (const block of entry.reasoning_blocks ?? []) {
+            if (block.ordinal === undefined || !Number.isSafeInteger(Number(block.ordinal)) || Number(block.ordinal) < 0) throw new RuntimeApiError('HISTORY_REASONING_ORDINAL_INVALID', '推理正文定位无效。', false);
+            await this.hydrateContentReference(block.content, {entry_id: entryId, block_id: block.block_id, reasoning_ordinal: Number(block.ordinal)}, '这段正文暂时无法完整读取。');
+          }
           this.contentErrors.delete(entryId);
         } catch (error) { if (!this.readerClosed && this.entries.has(entryId)) this.contentErrors.set(key, error instanceof Error ? error.message : '正文暂时无法读取。'); }
       })();
@@ -2628,7 +2638,7 @@ abstract class CanonicalHistoryReader {
   }
   protected presentationHistory(messages: Message[]): BrowserHistoryState {
     const state = this.historyState();
-    const host = (id?: string) => messages.find(message => message.id === id || message.sourceEntryIds?.includes(id ?? ''))?.id;
+    const host = (id?: string) => messages.find(message => !message.viewSource && (message.id === id || message.sourceEntryIds?.includes(id ?? '')))?.id;
     for (const window of state.windows) {
       window.firstEntryId = host(window.firstEntryId) ?? window.entryIds.map(id => host(id)).find(Boolean);
       window.lastEntryId = host(window.lastEntryId) ?? window.entryIds.map(id => host(id)).filter(Boolean).at(-1);
@@ -2656,6 +2666,7 @@ abstract class CanonicalHistoryReader {
     }
     const windows = this.historyState().windows;
     for (const message of messages) {
+      if (message.viewSource) continue;
       const sourceIds = message.sourceEntryIds ?? [message.id];
       message.sourceEntryIds = sourceIds;
       const context = contexts.get(message.id);
@@ -2803,7 +2814,7 @@ abstract class CanonicalHistoryReader {
 
   protected async hydrateContentReference(
     reference: ProtocolContent | undefined,
-    target: { entry_id: string; block_id?: string } | { queue_item_id: string },
+    target: { entry_id: string; block_id?: string; reasoning_ordinal?: number } | { queue_item_id: string },
     publicMessage: string,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -2847,7 +2858,7 @@ abstract class CanonicalHistoryReader {
 
   protected async readExactContentBytes(
     target: (
-      | { entry_id: string; block_id?: string }
+      | { entry_id: string; block_id?: string; reasoning_ordinal?: number }
       | { queue_item_id: string }
       | { image_ref: string }
     ) & { image_ref_ordinal?: number; visualization_ordinal?: number },
@@ -3023,6 +3034,11 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   private readonly connectionId: string;
   private drafts = new Map<string, LiveDraft>();
   private liveResults = new Map<string, LiveToolResult>();
+  private newViewId(): string {
+    let id = randomIdentity('view');
+    while ([...this.drafts.values(), ...this.liveResults.values()].some(value => value.id === id)) id = randomIdentity('view');
+    return id;
+  }
   protected releaseSettledHistory(visible: ReadonlySet<string>): boolean {
     let changed = false;
     // Accepted, context-confirmed offscreen content can be reread canonically.
@@ -3930,22 +3946,34 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         this.applyLiveToolResult(event, payload);
         continue;
       }
-      const identity = event.draft_identity || event.generation_id || event.turn_id || `revision:${event.live_revision}`;
+      const draftIdentity: NonNullable<Message['viewSource']> & {kind: 'draft'} = { kind: 'draft', identity: event.draft_identity ? {kind: 'draft', value: event.draft_identity} : event.generation_id ? {kind: 'generation', value: event.generation_id} : event.turn_id ? {kind: 'turn', value: event.turn_id} : {kind: 'revision', value: event.live_revision} };
+      const identity = JSON.stringify([draftIdentity.identity.kind, draftIdentity.identity.value]);
       const current = this.drafts.get(identity) ?? {
-        id: identity,
+        id: this.newViewId(),
+        source: draftIdentity,
         turnId: event.turn_id ?? '',
         scopeKind: event.scope_kind ?? '',
         body: '',
         reasoning: [],
+        reasoningSources: [],
         traces: [],
+        traceBlocks: [],
+      };
+      const newBlockId = () => {
+        let id = randomIdentity('block');
+        while (current.reasoning.some(block => block.id === id) || current.traces.some(trace => trace.id === id)) id = randomIdentity('block');
+        return id;
       };
       if (event.scope_kind) current.scopeKind = event.scope_kind;
       if (event.event_type === 'TEXT_DELTA') current.body += stringField(payload.text_delta, 'delta');
       if (event.event_type === 'TEXT_END') current.body = stringField(payload.text_end, 'final_text') || current.body;
       if (event.event_type === 'THINKING_START') {
         const item = payload.thinking_start ?? {};
-        const blockId = String(item.block_identity ?? event.block_id ?? `reasoning:${current.reasoning.length}`);
-        if (!current.reasoning.some((block) => block.id === blockId)) {
+        const rawBlockId = item.block_identity ?? event.block_id;
+        const source = rawBlockId == null ? undefined : String(rawBlockId);
+        if (source === undefined || !current.reasoningSources.includes(source)) {
+          const blockId = source || newBlockId();
+          current.reasoningSources.push(source);
           current.reasoning.push({
             id: blockId,
             kind: reasoningKind(String(item.presentation_kind ?? '')),
@@ -3957,9 +3985,10 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       if (event.event_type === 'THINKING_DELTA') {
         const item = payload.thinking_delta ?? {};
         const blockId = String(item.block_identity ?? event.block_id ?? '');
-        let block = current.reasoning.find((candidate) => candidate.id === blockId);
+        let block = current.reasoning[current.reasoningSources.indexOf(blockId)];
         if (!block) {
-          block = { id: blockId || `reasoning:${current.reasoning.length}`, kind: 'full', body: '', active: true };
+          block = { id: blockId || newBlockId(), kind: 'full', body: '', active: true };
+          current.reasoningSources.push(blockId || undefined);
           current.reasoning.push(block);
         }
         block.active = true;
@@ -3968,9 +3997,10 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       if (event.event_type === 'THINKING_END') {
         const item = payload.thinking_end ?? {};
         const blockId = String(item.block_identity ?? event.block_id ?? '');
-        let block = current.reasoning.find((candidate) => candidate.id === blockId);
+        let block = current.reasoning[current.reasoningSources.indexOf(blockId)];
         if (!block) {
-          block = { id: blockId || `reasoning:${current.reasoning.length}`, kind: 'full', body: '' };
+          block = { id: blockId || newBlockId(), kind: 'full', body: '' };
+          current.reasoningSources.push(blockId || undefined);
           current.reasoning.push(block);
         }
         block.body = String(item.final_text ?? '') || block.body;
@@ -3979,8 +4009,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       if (event.event_type === 'TOOL_CALL_START') {
         const item = payload.tool_call_start ?? {};
         const toolName = String(item.tool_name ?? 'tool');
+        current.traceBlocks.push(String(item.block_identity ?? event.block_id ?? '') || undefined);
         current.traces.push({
-          id: String(item.tool_call_id ?? event.block_id ?? crypto.randomUUID()),
+          id: String(item.tool_call_id ?? event.block_id ?? newBlockId()),
           kind: toolKind(toolName),
           toolName,
           title: toolDisplayName(toolName),
@@ -3988,11 +4019,30 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
           status: 'running',
         });
       }
+      if (event.event_type === 'TOOL_CALL_DELTA') {
+        const item = payload.tool_call_delta ?? {};
+        const callId = String(item.tool_call_id ?? event.block_id ?? '');
+        const blockId = String(item.block_identity ?? event.block_id ?? '');
+        let trace = (callId && current.traces.find(candidate => candidate.id === callId)) || (blockId && current.traces[current.traceBlocks.indexOf(blockId)]) || undefined;
+        if (!trace) {
+          current.traceBlocks.push(blockId || undefined);
+          trace = { id: callId || newBlockId(), kind: 'artifact', title: '操作', subtitle: '等待参数与执行结果', status: 'running' };
+          current.traces.push(trace);
+        }
+        trace.argumentsJson = (trace.argumentsJson ?? '') + String(item.delta ?? '');
+      }
       if (event.event_type === 'TOOL_CALL_END') {
         const item = payload.tool_call_end ?? {};
         const toolCallId = String(item.tool_call_id ?? '');
-        const trace = current.traces.find((candidate) => candidate.id === toolCallId);
+        const blockId = String(item.block_identity ?? event.block_id ?? '');
+        let trace = (toolCallId && current.traces.find((candidate) => candidate.id === toolCallId)) || (blockId && current.traces[current.traceBlocks.indexOf(blockId)]) || undefined;
+        if (!trace && (toolCallId || blockId)) {
+          current.traceBlocks.push(blockId || undefined);
+          trace = {id: toolCallId || blockId, kind: 'artifact', title: '操作', subtitle: '等待参数与执行结果', status: 'running'};
+          current.traces.push(trace);
+        }
         if (trace) {
+          if (toolCallId) trace.id = toolCallId;
           const toolName = String(item.tool_name ?? trace.toolName ?? 'tool');
           const argumentsJson = String(item.arguments_json ?? '');
           trace.toolName = toolName;
@@ -4013,7 +4063,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     }
     this.reconcileLiveToolResults();
     for (const settlement of settlements) {
-      const identity = settlement.draft_identity || settlement.generation_id;
+      const identity = settlement.draft_identity ? JSON.stringify(['draft', settlement.draft_identity]) : settlement.generation_id ? JSON.stringify(['generation', settlement.generation_id]) : undefined;
       if (settlement.channel_kind?.includes('TOOL_RESULT')) {
         for (const [key, result] of this.liveResults) {
           if (!this.liveResultMatches(result, settlement)) continue;
@@ -4038,8 +4088,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         event.draft_identity ?? event.generation_id ?? '', event.block_id ?? '',
         event.channel_tool_call_id ?? '',
     ];
-    const channelIdentity = exactChannel || (fallbackParts.some(Boolean) ? fallbackParts.join(':') : '');
-    return channelIdentity ? `live-result:${channelIdentity}` : undefined;
+    return exactChannel ? JSON.stringify(['channel', exactChannel]) : fallbackParts.some(Boolean) ? JSON.stringify(['fallback', ...fallbackParts]) : undefined;
   }
 
   private reconcileLiveToolResults(): void {
@@ -4099,9 +4148,13 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       || (augmented.proposed_entry_id && candidate.proposedEntryId === augmented.proposed_entry_id)
       || (augmented.draft_identity && candidate.draftIdentity === augmented.draft_identity)
       || (augmented.generation_id && candidate.generationId === augmented.generation_id)
+      || (augmented.block_id && augmented.channel_tool_call_id && candidate.blockId === augmented.block_id && candidate.toolCallId === augmented.channel_tool_call_id)
+      || ((String(item.assistant_entry_id ?? '') || attempt?.assistant_entry_id || proposed?.tool_result?.assistant_entry_id) && augmented.channel_tool_call_id
+        && candidate.assistantEntryId === (String(item.assistant_entry_id ?? '') || attempt?.assistant_entry_id || proposed?.tool_result?.assistant_entry_id)
+        && candidate.toolCallId === augmented.channel_tool_call_id)
     ));
     const current = matched?.[1] ?? this.liveResults.get(key) ?? {
-      id: key,
+      id: this.newViewId(),
       sourceExecAttemptId: String(item.source_exec_attempt_id ?? '') || undefined,
       turnId: augmented.turn_id ?? '',
       scopeKind: augmented.scope_kind ?? '',
@@ -4157,7 +4210,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const canonicalTurnIds = orderedTurnIdsFromEntries(canonical, this.scopeKind);
     for (const draft of visibleDrafts) {
       messages.push({
-        id: `live:${draft.id}`,
+        id: draft.id, viewSource: draft.source,
         turnId: draft.turnId,
         role: 'assistant',
         assistantKind: 'live',
@@ -4173,7 +4226,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.decorateHistory(messages);
     for (const [identity, draft] of this.drafts) {
       if (!draft.committedEntryId) continue;
-      const message = messages.find(item => item.id === draft.committedEntryId || item.sourceEntryIds?.includes(draft.committedEntryId!));
+      const message = messages.find(item => !item.viewSource && (item.id === draft.committedEntryId || item.sourceEntryIds?.includes(draft.committedEntryId!)));
       if (!message) continue;
       if (message.turnId !== draft.turnId) { this.drafts.delete(identity); continue; }
       if (message.historyContextState === 'ready' && message.contentState === 'ready'
@@ -4249,7 +4302,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   private applyProjectedLiveResults(messages: Message[], activeTurnIds: Set<string>) {
     const traceTargets = new Map<string, ToolTrace>();
     for (const message of messages) {
-      for (const trace of message.traces ?? []) traceTargets.set(`${message.id}:${trace.id}`, trace);
+      if (!message.viewSource) for (const trace of message.traces ?? []) traceTargets.set(JSON.stringify([message.id, trace.id]), trace);
     }
     for (const [key, result] of this.liveResults) {
       if (result.sourceExecAttemptId || (result.committedEntryId && this.entries.get(result.committedEntryId)?.tool_result?.source_kind === 'CODE_MODE_CALL')) {
@@ -4257,13 +4310,13 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         continue;
       }
       const trace = result.assistantEntryId && result.toolCallId
-        ? traceTargets.get(`${result.assistantEntryId}:${result.toolCallId}`)
+        ? traceTargets.get(JSON.stringify([result.assistantEntryId, result.toolCallId]))
         : undefined;
       if (result.committedEntryId) {
         if (this.entryContentState(result.committedEntryId) === 'ready' && this.entries.has(result.committedEntryId)) {
           this.liveResults.delete(key);
         } else if (result.hasText && trace?.resultEntryId === result.committedEntryId) {
-          const owner = messages.find(message => message.id === result.assistantEntryId && message.turnId === result.turnId);
+          const owner = messages.find(message => !message.viewSource && message.id === result.assistantEntryId && message.turnId === result.turnId);
           if (owner) owner.pendingAssistant = {
             body: owner.pendingAssistant?.body ?? owner.body,
             reasoning: owner.pendingAssistant?.reasoning ?? owner.reasoning,
@@ -4296,7 +4349,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       };
       {
         messages.push({
-          id: `live-result:${result.id}`, turnId: result.turnId, role: 'assistant',
+          id: result.id, viewSource: {kind: 'detached-result', id: result.id}, turnId: result.turnId, role: 'assistant',
           assistantKind: 'tool-request', time: '现在', body: '', status: 'running', traces: [detachedTrace],
         });
       }
@@ -4610,7 +4663,7 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
         version: typeof item.version === 'string' ? item.version : undefined,
         author: typeof item.author === 'string' ? item.author : undefined,
         enabled: Boolean(item.enabled),
-        packageInstallId: String(item.package_install_id ?? ''),
+        packageInstallId: parsePublicPackageId(item.package_install_id) ?? (() => { throw new RuntimeApiError('INVALID_PACKAGE_ID', '插件安装身份格式无效。', false); })(),
         packageRoot: String(item.package_root ?? ''),
         skillCount: numeric(item.skill_count),
         mcpCount: numeric(item.mcp_count),
@@ -4643,6 +4696,39 @@ function projectSkillRemovalIdentity(value: unknown): UserSkillCapability['remov
   return Object.fromEntries(names.map((name) => [name, raw[name]])) as NonNullable<UserSkillCapability['removalIdentity']>;
 }
 
+function projectPublicPluginOperationFacts(operation: Record<string, unknown>): Partial<CapabilityOperation> {
+  const result: Partial<CapabilityOperation> = {};
+  const fields = [
+    ['package_install_id', 'packageInstallId'], ['attempted_package_install_id', 'attemptedPackageInstallId'],
+    ['expected_package_install_id', 'expectedPackageInstallId'], ['observed_package_install_id', 'observedPackageInstallId'],
+    ['prior_package_install_id', 'priorPackageInstallId'],
+  ] as const;
+  for (const [wire, field] of fields) {
+    if (!Object.hasOwn(operation, wire)) continue;
+    const value = operation[wire];
+    if (value === null) { result[field] = null; continue; }
+    const parsed = parsePublicPackageId(value);
+    if (!parsed) throw new RuntimeApiError('INVALID_PACKAGE_ID', '插件安装身份格式无效。', false);
+    result[field] = parsed;
+  }
+  if (Object.hasOwn(operation, 'prior_operation_status')) {
+    if (typeof operation.prior_operation_status !== 'string') throw new RuntimeApiError('INVALID_PLUGIN_RESULT', '插件操作结果格式无效。', false);
+    result.priorOperationStatus = operation.prior_operation_status;
+  }
+  for (const [wire, field] of [['last_known_cut', 'lastKnownCut'], ['intended_enabled', 'intendedEnabled'], ['desired_enabled', 'desiredEnabled']] as const) {
+    if (!Object.hasOwn(operation, wire)) continue;
+    const value = operation[wire];
+    if (wire === 'last_known_cut') {
+      if (value !== null && typeof value !== 'string') throw new RuntimeApiError('INVALID_PLUGIN_RESULT', '插件操作结果格式无效。', false);
+      result.lastKnownCut = value;
+    } else {
+      if (value !== null && typeof value !== 'boolean') throw new RuntimeApiError('INVALID_PLUGIN_RESULT', '插件操作结果格式无效。', false);
+      result[field] = value;
+    }
+  }
+  return result;
+}
+
 function projectUserCapabilityOperation(value: Record<string, unknown>): {
   operation: CapabilityOperation;
   capabilities: UserCapabilitySnapshot;
@@ -4655,6 +4741,7 @@ function projectUserCapabilityOperation(value: Record<string, unknown>): {
       message: String(operation.message ?? '能力已经更新。'),
       details: stringArray(operation.details),
       pluginId: typeof operation.plugin_id === 'string' ? operation.plugin_id : undefined,
+      ...projectPublicPluginOperationFacts(operation),
     },
     capabilities: projectUserCapabilitySnapshot({
       ...asRecord(value.capabilities),
@@ -5212,7 +5299,7 @@ function projectTodo(control: ProtocolLiveControlSnapshot, scopeKind: 'ROOT' | '
     items: run.ordered_items.map((item, index) => {
       const status = item.status.toUpperCase();
       return {
-        id: `${run.todo_run_id}:${item.ordinal ?? index}`,
+        ordinal: item.ordinal ?? index,
         label: item.text,
         status: status === 'COMPLETED'
           ? 'completed'

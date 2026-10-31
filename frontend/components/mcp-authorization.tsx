@@ -93,11 +93,15 @@ export function useModelMcpAuthorization(
         if (!result || lifetime.signal.aborted || request.signal.aborted) return;
         const target = result.authorization;
         const owner = target.owner;
-        const key = owner.kind === 'plugin'
-          ? mcpAuthorizationKey('plugin', target.package_install_id!, owner.server_id)
-          : result.scope === 'WORKSPACE'
+        let key: string;
+        if (owner.kind === 'plugin') {
+          if (target.package_install_id?.visibility !== 'VISIBLE') return;
+          key = mcpAuthorizationKey('plugin', target.package_install_id.value, owner.server_id);
+        } else {
+          key = result.scope === 'WORKSPACE'
             ? mcpAuthorizationKey('project', connection.sessionId, owner.server_id, target.display_identity)
             : mcpAuthorizationKey('device', owner.server_id, target.display_identity);
+        }
         // The connection owns reading the fresh model result. After acceptance,
         // a USER authorization belongs to the user hook, including Plugin owners.
         // Every status read still checks the saved target's current identity.

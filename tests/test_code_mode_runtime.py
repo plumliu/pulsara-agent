@@ -354,6 +354,179 @@ def test_batch_preallocates_frozen_refs_then_one_real_descriptor():
     asyncio.run(run())
 
 
+def test_worker_request_ids_preserve_batch_preparation_resume_and_concurrent_results():
+    from pulsara_agent.identity import is_valid_id
+
+    async def run():
+        host = CodeModeHost()
+        requests, replies, calls = [], [], []
+        prepared_reply, resume_preparation = asyncio.Event(), asyncio.Event()
+        original_accept, original_send = host._accept_request, host._send
+
+        def accept(cell, message):
+            requests.append(dict(message))
+            original_accept(cell, message)
+
+        async def send(message):
+            if message['type'] == 'result':
+                replies.append(dict(message))
+            elif message['type'] == 'resume' and message.get('keep_preparation'):
+                prepared_reply.set()
+                await resume_preparation.wait()
+            await original_send(message)
+
+        async def invoke(call):
+            calls.append(call)
+            if call.tool_name == 'read_file':
+                if call.arguments['value'] == 'slow':
+                    await asyncio.sleep(.02)
+                return CodeModeToolResult(value=call.arguments['value'])
+            return CodeModeToolResult(value={'accepted': True})
+
+        host._accept_request, host._send = accept, send
+        try:
+            cell_id = await _start(host, '''
+              await Promise.all([
+                tools.run_agent.batch({a:{instruction:'first batch'}}),
+                tools.run_agent.batch({b:{instruction:'second batch'}})
+              ]);
+              console.log(await Promise.all([
+                tools.read_file({value:'slow'}), tools.read_file({value:'fast'})
+              ]));
+            ''', invoke, {'run_agent': {}, 'read_file': {}})
+            await asyncio.wait_for(prepared_reply.wait(), 5)
+            assert not calls, 'Batch execution must wait for the original prepare resume'
+            owned = host._test_cells[cell_id]
+            assert owned.preparations
+            prepare_ids = {m['request_id'] for m in requests if m['type'] == 'prepare'}
+            first_reply = json.loads(replies[0]['json'])
+            assert first_reply['request_id'] == replies[0]['request_id']
+            assert first_reply['request_id'] in prepare_ids
+            assert set(first_reply) == {'request_id', 'peers'}
+            resume_preparation.set()
+            page, output = await _finish(host, cell_id)
+            assert page.state == 'completed', page.error
+            assert output == [{'kind': 'log', 'text': '["slow","fast"]'}]
+            assert len(requests) == 6  # two preparations and four actual tool calls
+            ids = [m['request_id'] for m in requests]
+            assert len(set(ids)) == len(ids)
+            assert all(is_valid_id(value, 'request') for value in ids)
+            prepares = {m['request_id']: m for m in requests if m['type'] == 'prepare'}
+            actual = [m for m in requests if m['type'] == 'call']
+            assert all('sequence' not in m for m in prepares.values())
+            assert [m['sequence'] for m in actual] == ['1', '2', '3', '4']
+            assert [call.sequence for call in calls] == [1, 2, 3, 4]
+            batches = [m for m in actual if m['tool_name'] == 'run_agent.batch']
+            assert {m['preparation'] for m in batches} == set(prepares)
+            assert all(m['request_id'] != m['preparation'] for m in batches)
+            by_request = {m['request_id']: json.loads(m['json']) for m in replies}
+            for preparation in prepares:
+                assert set(by_request[preparation]) == {'request_id', 'peers'}
+                assert by_request[preparation]['request_id'] == preparation
+            assert not owned.pending and not owned.preparations
+            await asyncio.wait_for(owned.vm_released.wait(), 5)
+            assert owned.vm_released.is_set()
+        finally:
+            resume_preparation.set()
+            await host.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('kind', ['call', 'prepare'])
+@pytest.mark.parametrize('invalid', ['1', 'request:' + 'a' * 25 + 'b', 'cell:' + 'a' * 26])
+def test_worker_request_boundary_rejects_legacy_and_wrong_kind_ids(kind, invalid):
+    from pulsara_agent.code_mode.host import _Cell
+
+    async def run():
+        host = CodeModeHost()
+        reader = asyncio.StreamReader()
+        terminated, invoked = [], []
+        host._process = SimpleNamespace(stdout=reader, returncode=None, terminate=lambda: terminated.append(True))
+        admitted = asyncio.get_running_loop().create_future()
+        admitted.set_result(None)
+        cell = _Cell('cell', 'turn', 'attempt', object(), {},
+                     lambda _: invoked.append('call'), lambda _: invoked.append('prepare'), admitted)
+        cell.state = 'running'
+        host._cells[cell.cell_id] = cell
+        task = asyncio.create_task(host._read_messages())
+        reader.feed_data((json.dumps({'type': kind, 'cell_id': cell.cell_id, 'request_id': invalid,
+                                     'sequence': '1', 'tool_name': 'read_file',
+                                     'arguments_json': '{}', 'charge': 128}) + '\n').encode())
+        await asyncio.wait_for(task, 1)
+        assert not invoked and not cell.pending and not cell.preparations
+        assert cell.state == 'failed' and cell.terminal_event.is_set()
+        assert 'INVALID_ID' in host._sidecar_failure
+        assert terminated == [True]
+
+    asyncio.run(run())
+
+
+def test_worker_rejects_legacy_result_request_id_before_guest_continuation():
+    async def run():
+        host = CodeModeHost()
+        original_send = host._send
+        calls = []
+
+        async def send(message):
+            if message['type'] == 'result':
+                message = {**message, 'request_id': '1'}
+            await original_send(message)
+
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={'accepted': True})
+
+        host._send = send
+        try:
+            page, output = await _finish(host, await _start(
+                host, 'await tools.read_file({});console.log("must not continue");', invoke))
+            assert page.state == 'failed'
+            assert 'Invalid Code Mode request identity' in page.error['message']
+            assert len(calls) == 1
+            # The malformed transport must not lose the tool's accepted effect.
+            assert [item['kind'] for item in output] == ['tool_result']
+            assert output[0]['result'] == {'accepted': True}
+        finally:
+            await host.aclose()
+
+    asyncio.run(run())
+
+
+def test_batch_does_not_accept_legacy_preparation_result_id_field():
+    async def run():
+        host = CodeModeHost()
+        original_send = host._send
+        calls = []
+
+        async def send(message):
+            if message['type'] == 'result':
+                value = json.loads(message['json'])
+                if 'peers' in value:
+                    value['id'] = value.pop('request_id')
+                    message = {**message, 'json': json.dumps(value)}
+            await original_send(message)
+
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+
+        host._send = send
+        try:
+            cell_id = await _start(host, '''
+              await tools.run_agent.batch({a:{instruction:'must not dispatch'}});
+              console.log('must not continue');
+            ''', invoke, {'run_agent': {}})
+            page, output = await _finish(host, cell_id)
+            assert page.state == 'failed'
+            assert not calls and not output
+            assert not host._test_cells[cell_id].preparations
+        finally:
+            await host.aclose()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('instruction', [
     'async peers=>"async is illegal"',
     'peers=>{tools.read_file({});return "side effect"}',
@@ -1001,3 +1174,90 @@ def test_stop_during_late_result_retention_cannot_resurrect_output():
             release.set()
             await host.aclose()
     asyncio.run(run())
+
+
+def test_retain_reservation_collision_redraws_and_concurrent_replies_match(monkeypatch):
+    from pulsara_agent.code_mode import host as host_module
+    from pulsara_agent.identity import derive_id
+
+    async def run():
+        host = CodeModeHost()
+        host._process = SimpleNamespace(returncode=None)
+        first = derive_id("request", "retain-test", "first")
+        second = derive_id("request", "retain-test", "second")
+        ids = iter((first, first, second))
+        monkeypatch.setattr(host_module, "random_id", lambda kind: next(ids))
+        sent = []
+        async def send(message):
+            sent.append(message)
+        host._send = send
+        cell = SimpleNamespace(cell_id="cell", reservations={})
+        one = asyncio.create_task(host._retain_data(cell, 17))
+        await asyncio.sleep(0)
+        original_future = cell.reservations[first]
+        two = asyncio.create_task(host._retain_data(cell, 31))
+        await asyncio.sleep(0)
+        assert cell.reservations[first] is original_future
+        assert [(m["reservation"], m["bytes"]) for m in sent] == [(first, 17), (second, 31)]
+        host._complete_retention(cell, {"reservation": second, "accepted": False})
+        host._complete_retention(cell, {"reservation": first, "accepted": True})
+        assert await one is True
+        assert await two is False
+        assert cell.reservations == {}
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("invalid", ["0123456789abcdef0123456789abcdef", "cell:aaaaaaaaaaaaaaaaaaaaaaaaaa"])
+def test_retain_response_rejects_invalid_ids_and_settles_pending_on_protocol_failure(invalid):
+    from pulsara_agent.code_mode.host import _Cell
+    from pulsara_agent.identity import derive_id
+
+    async def run():
+        host = CodeModeHost()
+        reader = asyncio.StreamReader()
+        terminated = []
+        host._process = SimpleNamespace(stdout=reader, returncode=None, terminate=lambda: terminated.append(True))
+        admitted = asyncio.get_running_loop().create_future()
+        admitted.set_result(None)
+        cell = _Cell("cell", "turn", "attempt", object(), {}, lambda _: None, lambda _: None, admitted)
+        cell.state = "running"
+        host._cells[cell.cell_id] = cell
+        known = derive_id("request", "retain-test", "known")
+        unknown = derive_id("request", "retain-test", "unknown")
+        waiting = asyncio.get_running_loop().create_future()
+        cell.reservations[known] = waiting
+        task = asyncio.create_task(host._read_messages())
+        reader.feed_data((json.dumps({"type": "retained", "cell_id": cell.cell_id,
+                                     "reservation": unknown, "accepted": True}) + "\n").encode())
+        await asyncio.wait_for(cell.changed.wait(), 1)
+        assert not waiting.done()
+        assert cell.reservations == {known: waiting}
+        reader.feed_data((json.dumps({"type": "retained", "cell_id": cell.cell_id,
+                                     "reservation": invalid, "accepted": True}) + "\n").encode())
+        await asyncio.wait_for(task, 1)
+        assert waiting.result() is False
+        assert cell.reservations == {}
+        assert cell.state == "failed" and cell.terminal_event.is_set()
+        assert "sidecar protocol failed" in host._sidecar_failure
+        assert terminated == [True]
+
+    asyncio.run(run())
+
+
+def test_orchestration_skill_example_uses_shared_canonical_identity_vectors():
+    from pathlib import Path
+    from pulsara_agent.identity import derive_id, is_valid_id
+
+    example = (Path(__file__).resolve().parents[1] / "src/pulsara_agent/bundled_skills"
+               / "pulsara-code-mode/references/agent-orchestration/workflows.md").read_text()
+    vectors = (
+        ("session", "design", "session:df2uoz5psbdmr7n5evanmsp2n4"),
+        ("session", "critic", "session:bwmbtnixb46w4alboxd7vwdpki"),
+        ("queue", "critic-work", "queue:sliof53naqlyggmralreyz2h4y"),
+    )
+    for kind, part, expected in vectors:
+        assert derive_id(kind, "skill-example", part) == expected
+        assert is_valid_id(expected, kind)
+        assert expected in example
+    assert "Copy these values directly from the tool output" in example

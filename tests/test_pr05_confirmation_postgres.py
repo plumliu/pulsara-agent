@@ -263,7 +263,9 @@ class ProtocolHost:
     def __init__(self, owner, live, repository):
         from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
         import tempfile
-        self.workspace_gate = WorkspaceExecutionGate(Path(tempfile.gettempdir()).resolve())
+        workspace_root = Path(tempfile.gettempdir()).resolve()
+        self.workspace_gate = WorkspaceExecutionGate(workspace_root)
+        self.session = SimpleNamespace(workspace=SimpleNamespace(workspace_root=workspace_root))
         self._interactions = owner
         self._presentation_notices = {}
         self.session_id = owner._guard.session_id
@@ -289,6 +291,9 @@ class ProtocolHost:
 
     def control_admission_deadline_ms(self):
         return 10000
+
+    def active_manual_compaction_command_id(self):
+        return None
 
 
 @pytest.mark.parametrize("decision", ["ALLOW", "DENY"])
@@ -323,9 +328,9 @@ def test_r15_real_rollback_returns_explicit_non_acceptance_and_allows_new_click(
         server = TerminalKernelProtocolServer(socket_path=Path(socket_dir) / "s", session_provider=lambda _: host)
 
         async def resume(_):
-            return SimpleNamespace(session_id=host.session_id, host_session_id=host.host_session_id)
+            return SimpleNamespace(session_id=host.session_id, host_session_id=host.host_session_id, session=host.session)
 
-        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume), protocol_server=server)
+        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, host_writer_unavailable=lambda _id: False), protocol_server=server)
         await server.start()
         waiter = None
         try:
@@ -398,11 +403,11 @@ def test_r12_real_unix_bridge_takeover_while_original_decision_settles(
         async def resume(session_id):
             assert session_id == host.session_id
             return SimpleNamespace(
-                session_id=host.session_id, host_session_id=host.host_session_id
+                session_id=host.session_id, host_session_id=host.host_session_id, session=host.session
             )
 
         bridge = RendererBridge(
-            sessions=SimpleNamespace(resume_session=resume), protocol_server=server
+            sessions=SimpleNamespace(resume_session=resume, host_writer_unavailable=lambda _id: False), protocol_server=server
         )
         await server.start()
         waiter = None

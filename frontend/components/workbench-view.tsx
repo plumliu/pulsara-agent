@@ -102,7 +102,7 @@ import type {
   EditablePromptContent,
 } from '../lib/runtime-adapter';
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
-import { permissionLabels, permissionModeOrder } from '../lib/pulsara-types';
+import { permissionLabels, permissionModeOrder, messageSourceEntryId, messageViewKey } from '../lib/pulsara-types';
 import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-body';
 import { AnnotationBody, AnnotationReader, ResponseAnnotations } from './response-annotations';
 import { PromptComposer } from './prompt-composer';
@@ -840,7 +840,7 @@ function TodoDock({
           </div>
           <ol>
             {items.map((item) => (
-              <li className={`todo-dock__item todo-dock__item--${item.status}`} key={item.id}>
+              <li className={`todo-dock__item todo-dock__item--${item.status}`} key={item.ordinal}>
                 <span className="todo-dock__marker" aria-hidden="true">
                   {item.status === 'completed' ? <Check size={10} /> : null}
                 </span>
@@ -1122,10 +1122,11 @@ function AssistantMessage({
 }) {
   const [forking, setForking] = useState(false);
   const forkInFlight = useRef(false);
-  const visualization = useMemo(() => message.visualizations ? {
-    entryId: message.id, items: message.visualizations,
+  const sourceEntryId = messageSourceEntryId(message);
+  const visualization = useMemo(() => message.visualizations && sourceEntryId ? {
+    entryId: sourceEntryId, items: message.visualizations,
     onRead: onReadVisualization, onReadThumbnail: onReadVisualizationThumbnail,
-  } : undefined, [message.id, message.visualizations, onReadVisualization, onReadVisualizationThumbnail]);
+  } : undefined, [sourceEntryId, message.visualizations, onReadVisualization, onReadVisualizationThumbnail]);
   const hasNaturalLanguage = Boolean(message.body.trim());
   const isStreaming = message.status === 'running';
   const canCopyResponse = hasNaturalLanguage && responseActionEligible;
@@ -1147,14 +1148,14 @@ function AssistantMessage({
       {startsAssistantRun && <AssistantHeading message={message} response={hasNaturalLanguage} label={assistantLabel} />}
 
       {message.reasoning?.length ? (
-        <ReasoningDisclosure blocks={message.reasoning} ownerId={message.sourceEntryIds?.[0] ?? message.id} onNotify={onNotify} />
+        <ReasoningDisclosure blocks={message.reasoning} ownerId={message.sourceEntryIds?.[0] ?? messageViewKey(message)} onNotify={onNotify} />
       ) : null}
 
       {hasNaturalLanguage && (
         <>
           <div className="assistant-copy">
             <div className="assistant-markdown">
-              <AnnotationBody entryId={message.assistantKind !== 'live' && !isStreaming ? message.id : undefined} body={message.body}>
+              <AnnotationBody entryId={!isStreaming && message.assistantKind !== 'live' ? sourceEntryId : undefined} body={message.body}>
                 <MarkdownBody assistantChat visualization={visualization} annotationSource={!isStreaming && message.assistantKind !== 'live'} body={message.body} onNotify={onNotify} streaming={isStreaming} />
               </AnnotationBody>
             </div>
@@ -1169,13 +1170,13 @@ function AssistantMessage({
                   }}
                   aria-label="复制回复"
                 ><Copy size={13} /></button>
-                {canFork && message.forkEligible && (
+                {canFork && message.forkEligible && sourceEntryId && (
                   <button aria-label="从此处分叉" title="从此处分叉" disabled={forking} aria-busy={forking}
                     onClick={() => {
                       if (!canFork || forkInFlight.current) return;
                       forkInFlight.current = true;
                       setForking(true);
-                      void onFork(message.id).finally(() => { forkInFlight.current = false; setForking(false); });
+                      void onFork(sourceEntryId).finally(() => { forkInFlight.current = false; setForking(false); });
                     }}
                   >{forking ? <LoaderCircle size={13} /> : <GitFork size={13} />}</button>
                 )}
@@ -1190,7 +1191,7 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} disclosureOwnerId={message.sourceEntryIds?.[0] ?? message.id} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} disclosureOwnerId={message.sourceEntryIds?.[0] ?? messageViewKey(message)} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
 
     </article>
   );
@@ -1233,12 +1234,12 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   const contentState = contentStates.includes('error') ? 'error' : contentStates.includes('loading') ? 'loading'
     : contentStates.includes('unloaded') ? 'unloaded' : 'ready';
   const pending = contentState !== 'ready';
-  const sourceIds = message.sourceEntryIds?.length ? message.sourceEntryIds : [message.id];
+  const sourceIds = message.sourceEntryIds?.length ? message.sourceEntryIds : messageSourceEntryId(message) ? [messageSourceEntryId(message)!] : [];
   const read = () => hydrate?.(sourceIds, includeReasoning).catch(() => {});
   useEffect(() => {
     const host = ref.current;
-    if (!host || host.closest('[inert]') || !hydrate || contextPending || contentState !== 'unloaded') return;
-    const read = () => { void hydrate(message.sourceEntryIds?.length ? message.sourceEntryIds : [message.id], includeReasoning).catch(() => {}); };
+    if (!host || host.closest('[inert]') || !hydrate || !sourceIds.length || contextPending || contentState !== 'unloaded') return;
+    const read = () => { void hydrate(sourceIds, includeReasoning).catch(() => {}); };
     if (typeof IntersectionObserver === 'undefined') {
       const viewport = host.closest('.thread-scroll')?.getBoundingClientRect();
       const rect = host.getBoundingClientRect();
@@ -1253,7 +1254,7 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   }, [contextPending, hydrate, message.id, contentState, message.sourceEntryIds, includeReasoning]);
   const summarized = contextLoadingSummarized && message.historyContextState === 'loading';
   if (summarized && !knownContent) return null;
-  return <div ref={ref} data-source-entry={message.id} data-content-state={contextPending ? 'loading' : contentState} data-source-entries={message.sourceEntryIds?.join(' ')}>
+  return <div ref={ref} data-source-entry={messageSourceEntryId(message)} data-content-state={contextPending ? 'loading' : contentState} data-source-entries={message.sourceEntryIds?.join(' ')}>
     {/* Exact known input/output keeps its layout while canonical reads catch up.
         Errors still expose their status and retry action below. */}
     {knownContent && (contextPending || pending || message.pendingAssistant)
@@ -1278,7 +1279,7 @@ function processIdentity(message: Message): string {
   // Imported interrupted groups retain their canonical segments. Executed
   // turns keep one disclosure through every provider compaction epoch.
   return message.entryOwnerKind !== 'IMPORTED_HISTORY' && message.turnId
-    ? `turn:${message.turnId}` : message.historyGroupId ?? message.id;
+    ? JSON.stringify(['turn', message.turnId]) : message.historyGroupId ?? messageViewKey(message);
 }
 
 function ConversationRun({ messages, renderMessage, focusRequest, completed, active, assistantLabel,
@@ -1332,7 +1333,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     request.current = undefined;
     requestedExpansion.current = undefined;
     if (cancelling) { setBusy(false); onProcessLayout?.(); return; }
-    const finalId = answer?.id ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
+    const finalId = (answer && messageSourceEntryId(answer)) ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
     const commit = () => {
       choices?.set(choiceKey, expanded);
       // Reverse an unfinished exit from its current clip edge. A fresh open
@@ -1359,17 +1360,17 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const process = messages.flatMap((message) => {
     if (message !== answer) return [message];
     return message.reasoning?.length || (message.reasoningContentState && message.reasoningContentState !== 'ready') || message.traces?.length
-      ? [{ ...message, id: `${message.id}:process`, sourceEntryIds: message.sourceEntryIds ?? [message.id], body: '', forkEligible: false, visualizations: undefined,
+      ? [{ ...message, viewRole: 'process' as const, body: '', forkEligible: false, visualizations: undefined,
           pendingAssistant: message.pendingAssistant ? { ...message.pendingAssistant, body: '' } : undefined }] : [];
   });
   const afterFinalEvents = new Set(compactions.filter(marker => answer && !marker.displayBeforeEntryId && marker.displayAfterEntryId === answer.id).map(marker => marker.eventId));
   const hasProcess = earlierProcess || compactions.some(marker => !afterFinalEvents.has(marker.eventId)) || compactionInProgress
     || process.some((message) => message.role === 'assistant');
-  if (!hasProcess) return <>{renderMessage(answer!, true)}{afterFinalEvents.size > 0 && <ContextCompactionDivider count={afterFinalEvents.size} />}</>;
+  if (!hasProcess) return <>{renderMessage({ ...answer!, viewRole: 'final' }, true)}{afterFinalEvents.size > 0 && <ContextCompactionDivider count={afterFinalEvents.size} />}</>;
   // Different accepted compactions can share a canonical edge, or map from
   // separate tool results to one visible host. Group the *visual insertion
   // slot*, retaining event identity/count rather than erasing real events.
-  const orderedHosts = [...process.map(message => message.id === `${answer?.id}:process` ? answer!.id : message.id), ...(answer ? [answer.id] : [])];
+  const orderedHosts = [...process.map(message => messageSourceEntryId(message)), ...(answer ? [messageSourceEntryId(answer)] : [])];
   const compactSlots = new Map<number, Set<string>>();
   for (const marker of compactions) {
     const host = marker.displayBeforeEntryId ?? marker.displayAfterEntryId;
@@ -1388,8 +1389,8 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const latestSteer = steers.at(-1);
   const steerStackDepth = Math.min(steers.length, 3);
   const toggle = (edge: 'top' | 'bottom') => (<button type="button" className={`conversation-run__toggle conversation-run__toggle--${edge}`} data-process-toggle="" data-process-key={choiceKey} data-process-edge={edge} data-process-earlier={earlierProcess || undefined}
-      data-history-entry={edge === 'top' ? messages[0].id : answer?.id ?? messages[0].id}
-      data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? [message.id]).join(' ')}
+      data-history-entry={edge === 'top' ? messageSourceEntryId(messages[0]) : (answer && messageSourceEntryId(answer)) ?? messageSourceEntryId(messages[0])}
+      data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? (messageSourceEntryId(message) ? [messageSourceEntryId(message)!] : [])).join(' ')}
       data-thread-disclosure="" data-disclosure-key={choiceKey} aria-expanded={disclosure.expanded} aria-busy={busy}
       aria-label={edge === 'top' ? '从顶部收起处理过程' : disclosure.expanded ? '收起处理过程' : '展开处理过程'}
       onClick={event => {
@@ -1418,13 +1419,13 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
       if (compactSlots.has(index)) folding.push(<Fragment key={`compact:${message.id}`}>{compactAt(index)}</Fragment>);
       flushDrawer();
       const stacked = message === latestSteer && steerStackDepth > 1;
-      processRows.push(<div key={message.id} className={`conversation-run__step${stacked ? ' conversation-run__steer-stack' : ''}`}
+      processRows.push(<div key={messageViewKey(message)} className={`conversation-run__step${stacked ? ' conversation-run__steer-stack' : ''}`}
         data-steer-stack-depth={stacked ? steerStackDepth : undefined}>
         {renderMessage({ ...message, historyIncludeReasoning: disclosure.expanded }, false)}
       </div>);
-      drawerKey = message.id;
+      drawerKey = messageViewKey(message);
     } else {
-      folding.push(<div key={message.id} className="conversation-run__step">
+      folding.push(<div key={messageViewKey(message)} className="conversation-run__step">
         {compactAt(index)}
         {renderMessage({ ...message, historyIncludeReasoning: true }, false)}
       </div>);
@@ -1437,7 +1438,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     <AssistantHeading message={messages[0]} response={false} running={active && !complete} label={assistantLabel} />
     {processRows}
     {toggle('bottom')}
-    {answer && renderMessage({ ...answer, historyIncludeReasoning: false, reasoning: undefined, traces: undefined,
+    {answer && renderMessage({ ...answer, viewRole: 'final', historyIncludeReasoning: false, reasoning: undefined, traces: undefined,
       pendingAssistant: answer.pendingAssistant ? { body: answer.pendingAssistant.body } : undefined }, false)}
     {answer && compactAt(process.length + 1)}
   </section>;
@@ -1545,7 +1546,7 @@ export function ConversationMessages({
       assistantKind: 'live', status: 'completed', forkEligible: false, visualizations: undefined,
       reasoning: message.historyIncludeReasoning === false ? undefined : fallback.reasoning,
     }, true);
-    return <HistoryMessageHost key={message.id} message={message}
+    return <HistoryMessageHost key={messageViewKey(message)} message={message}
       contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
       ? <UserMessage message={message} label={inputLabel} senderKind={inputSender} onNotify={onNotify} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
       {message.role === 'user'
@@ -1569,21 +1570,21 @@ export function ConversationMessages({
     const sourceInProcess = focusedEntry && run.some(message => {
       // The accepted answer's body is always mounted outside the disclosure.
       // Its tool-result aliases still belong to the process.
-      if (message.id === focusedEntry.entryId) return !isCompleteAnswer(message);
+      if (messageSourceEntryId(message) === focusedEntry.entryId) return !isCompleteAnswer(message);
       return message.sourceEntryIds?.includes(focusedEntry.entryId)
         || message.traces?.some(trace => trace.resultEntryId === focusedEntry.entryId);
     });
     const focused = sourceInProcess
       ? focusedEntry
       : undefined;
-    const runIds = new Set(run.map(message => message.id));
+    const runIds = new Set(run.map(messageSourceEntryId).filter((id): id is string => Boolean(id)));
     content.push(<ConversationRun key={`${artifactOwnerKey}:${processIdentity(run[0])}:${interruptionBoundaries.get(run[0].turnId ?? '') ?? 'start'}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel}
       tail={Boolean(latestMessage && run.includes(latestMessage))}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
       revealEarlierProcess={revealEarlierProcess} canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd} onProcessLayout={onProcessLayout} onNotify={onNotify}
       earlierProcess={Boolean(run.some(message => isCompleteAnswer(message)
-        && message.historyInitialEntryId && !messages.some(candidate => candidate.id === message.historyInitialEntryId)))}
+        && message.historyInitialEntryId && !messages.some(candidate => messageSourceEntryId(candidate) === message.historyInitialEntryId)))}
       compactions={history?.compactions?.filter(marker => runIds.has(marker.displayBeforeEntryId ?? marker.displayAfterEntryId ?? ''))}
       compactionInProgress={contextCompactionInProgress && isRunning && run[0].turnId === activeTurnId}
       active={isRunning && run[0].turnId === activeTurnId} />);
@@ -1591,7 +1592,7 @@ export function ConversationMessages({
   };
   type TimelineItem = { message: Message; windowId?: string } | { notice: TurnInterruptionNotice; windowId: string };
   const timeline: TimelineItem[] = messages.filter(message => !isEmptyLiveAssistant(message)).map(message => ({ message, windowId: message.historyWindowId
-    ?? history?.windows.find(window => window.entryIds?.includes(message.id) || window.firstEntryId === message.id || window.lastEntryId === message.id)?.id }));
+    ?? history?.windows.find(window => { const source = messageSourceEntryId(message); return Boolean(source && (window.entryIds?.includes(source) || window.firstEntryId === source || window.lastEntryId === source)); })?.id }));
   for (const notice of interruptionNotices.filter(item => !item.displayAfterMessageId)) {
     // USER_CONTROL_FEEDBACK has no chat bubble. Its exact retained canonical
     // entry still provides a timeline location inside its own loaded window.
@@ -1637,7 +1638,7 @@ export function ConversationMessages({
     if ('notice' in item) emitNotice(item.notice, true);
     else {
       const message = item.message;
-      const beforeMarkers = (history?.compactions ?? []).filter(marker => marker.displayBeforeEntryId === message.id);
+      const beforeMarkers = (history?.compactions ?? []).filter(marker => marker.displayBeforeEntryId === messageSourceEntryId(message));
       if (beforeMarkers.length && !run.length && message.role === 'user') {
         content.push(<ContextCompactionDivider key={`before:${message.id}`} count={new Set(beforeMarkers.map(marker => marker.eventId)).size} />);
       }
@@ -1666,11 +1667,11 @@ export function ConversationMessages({
         else run.push(message);
         if (isCompleteAnswer(message)) flush();
       }
-      const afterMarkers = (history?.compactions ?? []).filter(marker => !marker.displayBeforeEntryId && marker.displayAfterEntryId === message.id);
+      const afterMarkers = (history?.compactions ?? []).filter(marker => !marker.displayBeforeEntryId && marker.displayAfterEntryId === messageSourceEntryId(message));
       if (afterMarkers.length && !run.length && message.role === 'user') {
         content.push(<ContextCompactionDivider key={`after:${message.id}`} count={new Set(afterMarkers.map(marker => marker.eventId)).size} />);
       }
-      for (const notice of interruptionNotices.filter(n => n.displayAfterMessageId === message.id)) emitNotice(notice);
+      for (const notice of interruptionNotices.filter(n => n.displayAfterMessageId === messageSourceEntryId(message))) emitNotice(notice);
     }
   });
   flush();
@@ -2090,7 +2091,7 @@ function useConversationReading({ sessionId, history, onLoadHistory, onReadLates
     if (automatic && !canAutoCollapse()) throw new DOMException('阅读位置已改变', 'AbortError');
     locateRequest.current?.abort();
     const request = new AbortController(); locateRequest.current = request;
-    if (automatic) automaticProcessRead.current = { request, turnId: messages.find(message => message.id === entryId)?.turnId };
+    if (automatic) automaticProcessRead.current = { request, turnId: messages.find(message => messageSourceEntryId(message) === entryId)?.turnId };
     const abort = () => request.abort();
     signal.addEventListener('abort', abort, { once: true });
     const thread = threadRef.current;

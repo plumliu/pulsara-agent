@@ -1,5 +1,6 @@
 import { InteractionCardHeader } from './interaction-card-header';
 import { McpAuthorizationStatus } from './mcp-authorization';
+import { hasWithheldMcpFields } from '../lib/mcp-public-projection';
 import { useEffect, useState } from 'react';
 import { ChevronDown, LoaderCircle, Plus, Save, Trash2, X, PlugZap, Globe2, KeyRound, Eye, EyeOff, Link2, ArrowRight } from 'lucide-react';
 import type { McpEditInput, McpCredentialOwner, McpConnectionTestResult, UserMcpServerCapability, PluginMcpConnection } from '../lib/pulsara-types';
@@ -25,7 +26,7 @@ type ConnectionTestProps = {
 } | { onTest?: never; onNotify?: never };
 
 export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthorization, authorizationKey, onRestoreDefaults, credentialOwner, credentialScopeKey, packageDefinition, connectionInputs = [], presentation = 'dialog', title, sourceName, scopeLabel }: {
-  server?: UserMcpServerCapability;
+  server?: Omit<UserMcpServerCapability, 'currentIdentity'> & Partial<Pick<UserMcpServerCapability, 'currentIdentity'>>;
   presentation?: 'dialog' | 'inline';
   title?: string;
   sourceName?: string;
@@ -45,6 +46,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
   const [inputValues, setInputValues] = useState<Record<string, string>>({});
   const [clearInputs, setClearInputs] = useState<Record<string, boolean>>({});
   const original = server?.config ?? {};
+  const withheld = hasWithheldMcpFields(original) || hasWithheldMcpFields(packageDefinition);
   const [confirmRestore, setConfirmRestore] = useState(false);
   const previousTransport = object(original.transport);
   const previousAuth = object(original.auth);
@@ -106,7 +108,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
   const retainsCredential = kind === 'stdio' ? envSecrets.some((row) => row.reference && !row.value && !row.clear) : auth === 'bearer' ? bearerRetained : auth === 'static_headers' ? headerSecrets.some((row) => row.reference && !row.value && !row.clear) : auth === 'oauth' && clientSecretRetained;
 
   const submit = async (testing = false) => {
-    if (busy) return;
+    if (busy || withheld) return;
     setError('');
     setBusy(true);
     try {
@@ -186,6 +188,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
     {!inline && <div className="capability-add-panel__backdrop" onClick={busy ? undefined : onClose} />}
     <section>{inline ? <InteractionCardHeader icon={packageDefinition ? Link2 : PlugZap} title={title ?? (server ? `编辑 ${server.name} 连接` : '添加 MCP 连接')} subtitle={sourceName} scope={scopeLabel} /> : <header><div><span>本机连接</span><h2>{server ? '编辑 MCP 服务' : '添加 MCP 服务'}</h2></div><button disabled={busy} onClick={onClose} aria-label="关闭"><X size={16} /></button></header>}
       <div className="capability-form-grid capability-dialog-body">
+        {withheld && <p className="capability-field--wide">部分配置因凭据保护无法显示，当前不能保存或测试此配置。</p>}
         {inline && <div className="interaction-form-section capability-field--wide"><Globe2 size={14} />连接信息</div>}
         {!inline && <label className="capability-field"><span>服务 ID</span><input autoFocus disabled={Boolean(server)} value={id} onChange={(event) => setId(event.target.value)} /></label>}
         <label className="capability-field"><span>显示名称</span><input disabled={Boolean(packageDefinition)} value={name} onChange={(event) => setName(event.target.value)} /></label>
@@ -261,7 +264,7 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
           })()}>{({login: '登录授权', status: '查看授权状态', cancel: '取消登录', logout: '清除本机授权'})[action]}</button>)}
         </div></div>}
       </div>
-      <footer className={inline ? 'interaction-editor-footer' : undefined}><button className="secondary-action" disabled={busy} onClick={onClose}>取消</button>{onTest && <button className="secondary-action" disabled={busy || !id.trim() || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit(true)}><PlugZap size={14} />测试连接</button>}<button className="capability-primary" disabled={busy || !id.trim() || !(kind === 'stdio' ? command : endpoint) || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit()}>{busy ? <LoaderCircle size={14} /> : !inline && <Save size={14} />}{inline ? '保存并继续' : '保存连接'}{inline && !busy && <ArrowRight size={14} />}</button></footer>
+      <footer className={inline ? 'interaction-editor-footer' : undefined}><button className="secondary-action" disabled={busy} onClick={onClose}>取消</button>{onTest && <button className="secondary-action" disabled={busy || withheld || !id.trim() || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit(true)}><PlugZap size={14} />测试连接</button>}<button className="capability-primary" disabled={busy || withheld || !id.trim() || !(kind === 'stdio' ? command : endpoint) || (destinationChanged && retainsCredential && !retainConfirmed)} onClick={() => void submit()}>{busy ? <LoaderCircle size={14} /> : !inline && <Save size={14} />}{inline ? '保存并继续' : '保存连接'}{inline && !busy && <ArrowRight size={14} />}</button></footer>
     </section>
   </div>;
 }

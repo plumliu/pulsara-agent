@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Mapping
 
 from pulsara_agent.capability.contracts import McpProviderNameCollisionFact
+from pulsara_agent.identity import require_id
 from pulsara_agent.mcp_config import McpRuntimeSourceIdentity
 from pulsara_agent.model_input.contracts import FrozenToolSpec, ModelInputScopeKind
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, context_fingerprint
@@ -266,12 +267,15 @@ class McpServerCatalogEntry:
 
 @dataclass(frozen=True, slots=True)
 class McpCatalogSnapshot:
-    owner_epoch: int
+    owner_epoch: str
     catalog_revision: int
     servers: tuple[McpServerCatalogEntry, ...]
     semantic_fingerprint: str
     presentation_fingerprint: str
     provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = ()
+
+    def __post_init__(self) -> None:
+        require_id(self.owner_epoch, "epoch")
 
     def for_scope(
         self,
@@ -338,7 +342,7 @@ class McpDiscoveryCatalogInspection:
 class McpInstallationCandidate:
     candidate_id: str
     server_id: str
-    expected_supervisor_epoch: int
+    expected_supervisor_epoch: str
     expected_semantic_config_fingerprint: str
     expected_runtime_config_fingerprint: str
     expected_resolved_config_identity: str
@@ -350,13 +354,14 @@ class McpInstallationCandidate:
     normalized_physical_bytes: int
 
     def __post_init__(self) -> None:
+        require_id(self.expected_supervisor_epoch, "epoch")
         if not 1_000 <= self.standard_read_timeout_ms <= 600_000:
             raise ValueError("MCP standard read timeout is out of range")
 
 
 def build_catalog_snapshot(
     *,
-    owner_epoch: int,
+    owner_epoch: str,
     catalog_revision: int,
     entries: tuple[McpServerCatalogEntry, ...],
     provider_name_collision_facts: tuple[McpProviderNameCollisionFact, ...] = (),

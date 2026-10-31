@@ -114,7 +114,7 @@ def _config(tmp_path, options):
 async def _runtime(tmp_path, **options):
     config = _config(tmp_path, options)
     supervisor = McpHostSupervisor(
-        session_id="session:rpc-review", workspace_root=tmp_path,
+        workspace_root=tmp_path,
         configs=(config,), credential_boundary=ProcessCredentialBoundary(),
     )
     runtime = None

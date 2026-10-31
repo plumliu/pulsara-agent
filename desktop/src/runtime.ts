@@ -1,3 +1,4 @@
+import { isCanonicalIdentity, randomIdentity } from './identity';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { HostOperations } from './host-operations';
 import type { DesktopResourcePaths } from './resource-paths';
@@ -15,7 +16,6 @@ export class PythonRuntime {
   private preparing = false;
   private preparation?: Promise<void>;
   private exit?: Promise<{code: number | null; signal: NodeJS.Signals | null; startSent: boolean; stopped: boolean; settlementFailure: boolean; cleanStartupSettlement: boolean; failure?: string}>;
-  private request = 0;
   private inspections = new Map<string, (value: RuntimeEvent) => void>();
   private certificate?: string;
   constructor(readonly resources: DesktopResourcePaths, readonly home: string, readonly onEvent: (event: RuntimeEvent) => void, private readonly host: HostOperations, private readonly wsl?: WslRuntimeOptions) {}
@@ -81,6 +81,7 @@ export class PythonRuntime {
           try {
             event = JSON.parse(line);
             if (!event || typeof event !== 'object' || typeof event.type !== 'string' || !['starting','ready','failed','stopping','stopped','quit-state','open-oauth-browser'].includes(event.type)) throw new Error('Invalid frame');
+            if ((event.type === 'quit-state' || event.type === 'open-oauth-browser' || event.requestId !== undefined) && !isCanonicalIdentity(event.requestId, 'request')) throw new Error('Invalid request identity');
           } catch {
             invalidFrame();
             return;
@@ -90,7 +91,7 @@ export class PythonRuntime {
               let opened = false;
               try {
                 if (!this.wsl || this.child !== child || child.stdin.writableEnded || child.stdin.destroyed
-                  || typeof event.requestId !== 'string' || !event.requestId || typeof event.url !== 'string') throw new Error('Invalid OAuth request');
+                  || !isCanonicalIdentity(event.requestId, 'request') || typeof event.url !== 'string') throw new Error('Invalid OAuth request');
                 const url = new URL(event.url);
                 if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Invalid OAuth URL');
                 await this.wsl.openOAuthBrowser(url.href);
@@ -183,7 +184,8 @@ export class PythonRuntime {
     // Before the start frame there can be no accepted work. Do not put an
     // inspection ahead of that frame while PostgreSQL is still preparing.
     if (this.preparing || !this.child) return {type: 'inspect-quit', activeTasks: 0, scheduledTasks: 0};
-    const requestId = String(++this.request);
+    let requestId: string;
+    do { requestId = randomIdentity('request'); } while (this.inspections.has(requestId));
     return new Promise(resolve => {
       // This bounds only a UI status query. Unknown status asks the user; it never kills work.
       const timer = setTimeout(() => { this.inspections.delete(requestId); resolve({type:'failed', error:'暂时无法确认后台工作状态。'}); }, 2000);

@@ -66,30 +66,23 @@ class LocalSkillRootKind(StrEnum):
 class CapabilitySourceRef:
     kind: CapabilitySourceKind
     stable_source_id: str
-    source_identity_fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, CapabilitySourceKind):
             raise TypeError("capability source kind is not closed")
         if not self.stable_source_id:
             raise ValueError("capability source id is empty")
-        expected = context_fingerprint(
-            "capability-source-identity:v1",
-            (self.kind.value, self.stable_source_id),
-        )
-        if self.source_identity_fingerprint != expected:
-            raise ValueError("capability source identity fingerprint mismatch")
 
 
 def capability_source_ref(
     kind: CapabilitySourceKind, stable_source_id: str
 ) -> CapabilitySourceRef:
-    return CapabilitySourceRef(
-        kind=kind,
-        stable_source_id=stable_source_id,
-        source_identity_fingerprint=context_fingerprint(
-            "capability-source-identity:v1", (kind.value, stable_source_id)
-        ),
+    return CapabilitySourceRef(kind=kind, stable_source_id=stable_source_id)
+
+
+def capability_source_identity_digest(source: CapabilitySourceRef) -> str:
+    return context_fingerprint(
+        "capability-source-identity:v1", (source.kind.value, source.stable_source_id)
     )
 
 
@@ -98,7 +91,6 @@ class CapabilityIdentity:
     kind: CapabilityKind
     source: CapabilitySourceRef
     stable_name: str
-    identity_fingerprint: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.kind, CapabilityKind):
@@ -107,35 +99,23 @@ class CapabilityIdentity:
             raise TypeError("capability source is not frozen")
         if not self.stable_name:
             raise ValueError("capability stable name is empty")
-        expected = context_fingerprint(
-            "capability-identity:v1",
-            {
-                "kind": self.kind.value,
-                "source_kind": self.source.kind.value,
-                "stable_source_id": self.source.stable_source_id,
-                "stable_name": self.stable_name,
-            },
-        )
-        if self.identity_fingerprint != expected:
-            raise ValueError("capability identity fingerprint mismatch")
 
 
 def capability_identity(
     *, kind: CapabilityKind, source: CapabilitySourceRef, stable_name: str
 ) -> CapabilityIdentity:
-    return CapabilityIdentity(
-        kind=kind,
-        source=source,
-        stable_name=stable_name,
-        identity_fingerprint=context_fingerprint(
-            "capability-identity:v1",
-            {
-                "kind": kind.value,
-                "source_kind": source.kind.value,
-                "stable_source_id": source.stable_source_id,
-                "stable_name": stable_name,
-            },
-        ),
+    return CapabilityIdentity(kind=kind, source=source, stable_name=stable_name)
+
+
+def capability_identity_digest(identity: CapabilityIdentity) -> str:
+    return context_fingerprint(
+        "capability-identity:v1",
+        {
+            "kind": identity.kind.value,
+            "source_kind": identity.source.kind.value,
+            "stable_source_id": identity.source.stable_source_id,
+            "stable_name": identity.stable_name,
+        },
     )
 
 
@@ -194,7 +174,7 @@ def capability_source_registration_identity_digest(
         "capability-source-registration:v1",
         {
             "source_identity_fingerprint": (
-                registration.source.source_identity_fingerprint
+                capability_source_identity_digest(registration.source)
             ),
             "refresh_mode": registration.refresh_mode.value,
             "source_contract_fingerprint": registration.source_contract_fingerprint,
@@ -291,7 +271,7 @@ def tool_capability_semantic_fingerprint(
     return context_fingerprint(
         "tool-capability-fact:v1",
         {
-            "identity_fingerprint": identity.identity_fingerprint,
+            "identity_fingerprint": capability_identity_digest(identity),
             "origin": origin.value,
             "name": canonical_tool_spec.name,
             "description": canonical_tool_spec.description,
@@ -321,13 +301,17 @@ def freeze_tool_capability_fact(
 
 @dataclass(frozen=True, slots=True)
 class ToolCapabilityVersionRef:
-    identity_fingerprint: str
+    identity: CapabilityIdentity
     semantic_fingerprint: str
     provider_name: str
 
     def __post_init__(self) -> None:
         if not all(
-            (self.identity_fingerprint, self.semantic_fingerprint, self.provider_name)
+            (
+                isinstance(self.identity, CapabilityIdentity),
+                self.semantic_fingerprint,
+                self.provider_name,
+            )
         ):
             raise ValueError("tool capability version is incomplete")
 
@@ -340,7 +324,7 @@ def tool_capability_version_identity_digest(
     return context_fingerprint(
         "tool-capability-version:v1",
         {
-            "identity_fingerprint": version.identity_fingerprint,
+            "identity_fingerprint": capability_identity_digest(version.identity),
             "semantic_fingerprint": version.semantic_fingerprint,
             "provider_name": version.provider_name,
         },
@@ -351,7 +335,7 @@ def tool_capability_version_ref(
     fact: FrozenToolCapabilityFact,
 ) -> ToolCapabilityVersionRef:
     return ToolCapabilityVersionRef(
-        identity_fingerprint=fact.identity.identity_fingerprint,
+        identity=fact.identity,
         semantic_fingerprint=fact.fact_semantic_fingerprint,
         provider_name=fact.canonical_tool_spec.name,
     )
@@ -427,7 +411,11 @@ class FrozenNativeToolWireEligibilitySet:
         _validate_scope(self.conversation_scope_kind)
         versions = tuple(item.version for item in self.entries)
         keys = tuple(
-            (item.provider_name, item.identity_fingerprint, item.semantic_fingerprint)
+            (
+                item.provider_name,
+                capability_identity_digest(item.identity),
+                item.semantic_fingerprint,
+            )
             for item in versions
         )
         if keys != tuple(sorted(keys)) or len(versions) != len(set(versions)):
@@ -554,7 +542,7 @@ class FrozenSkillCapabilityFact:
         ):
             raise ValueError("bundled Skill fact origin/name join conflicts")
         expected = skill_capability_fact_fingerprint(
-            identity_fingerprint=self.identity.identity_fingerprint,
+            identity=self.identity,
             catalog_semantic_fingerprint=self.catalog_semantic_fingerprint,
             activation_semantic_fingerprint=self.activation_semantic_fingerprint,
             origin=self.origin,
@@ -565,7 +553,7 @@ class FrozenSkillCapabilityFact:
 
 def skill_capability_fact_fingerprint(
     *,
-    identity_fingerprint: str,
+    identity: CapabilityIdentity,
     catalog_semantic_fingerprint: str,
     activation_semantic_fingerprint: str,
     origin: "SkillDefinitionOrigin",
@@ -574,7 +562,7 @@ def skill_capability_fact_fingerprint(
     return context_fingerprint(
         "skill-capability-fact:v1",
         {
-            "identity_fingerprint": identity_fingerprint,
+            "identity_fingerprint": capability_identity_digest(identity),
             "catalog_semantic_fingerprint": catalog_semantic_fingerprint,
             "activation_semantic_fingerprint": activation_semantic_fingerprint,
             "winning_root_provenance_fingerprint": (
@@ -661,14 +649,14 @@ class FrozenCapabilitySourceSnapshot:
         fact_keys = tuple(
             (
                 fact.identity.kind.value,
-                fact.identity.identity_fingerprint,
+                capability_identity_digest(fact.identity),
                 fact.fact_semantic_fingerprint,
             )
             for fact in self.facts
         )
         if fact_keys != tuple(sorted(fact_keys)):
             raise ValueError("capability source facts are not deterministically sorted")
-        if len({item.identity.identity_fingerprint for item in self.facts}) != len(
+        if len({item.identity for item in self.facts}) != len(
             self.facts
         ):
             raise ValueError("capability source identities are duplicated")
@@ -727,7 +715,7 @@ def freeze_capability_source_snapshot(
             facts,
             key=lambda fact: (
                 fact.identity.kind.value,
-                fact.identity.identity_fingerprint,
+                capability_identity_digest(fact.identity),
                 fact.fact_semantic_fingerprint,
             ),
         )
@@ -747,16 +735,16 @@ class FrozenCapabilityRegistrySnapshot:
 
     def __post_init__(self) -> None:
         expected_sources = tuple(
-            item.source.source_identity_fingerprint
+            item.source
             for item in self.registration_set.registrations
         )
         actual_sources = tuple(
-            item.registration.source.source_identity_fingerprint
+            item.registration.source
             for item in self.source_snapshots
         )
         if actual_sources != expected_sources:
             raise ValueError("registry source coverage is not exact")
-        identities: set[str] = set()
+        identities: set[CapabilityIdentity] = set()
         provider_names: set[str] = set()
         for snapshot in self.source_snapshots:
             if (
@@ -765,9 +753,9 @@ class FrozenCapabilityRegistrySnapshot:
             ):
                 raise ValueError("registry source snapshot scope conflicts")
             for fact in snapshot.facts:
-                if fact.identity.identity_fingerprint in identities:
+                if fact.identity in identities:
                     raise ValueError("registry capability identity is duplicated")
-                identities.add(fact.identity.identity_fingerprint)
+                identities.add(fact.identity)
                 if isinstance(fact, FrozenToolCapabilityFact):
                     if fact.canonical_tool_spec.name in provider_names:
                         raise ValueError("registry provider tool name is duplicated")
@@ -860,7 +848,7 @@ class FrozenMcpRouteProjection:
     projection_fingerprint: str
     # Epoch-local choice, retained even while a tool/server is absent. This is
     # not another public catalog/version identity or a durable change log.
-    native_meta_identities: frozenset[str] = frozenset()
+    native_meta_identities: frozenset[CapabilityIdentity] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.native_meta_identities, frozenset):
@@ -1155,7 +1143,7 @@ class FrozenToolCapabilityDispatchView:
 
     def __post_init__(self) -> None:
         keys = tuple(
-            (item.identity.identity_fingerprint, item.fact_semantic_fingerprint)
+            (item.identity, item.fact_semantic_fingerprint)
             for item in self.registry_tool_facts
         )
         if len(keys) != len(set(keys)):
@@ -1175,7 +1163,7 @@ class FrozenSkillCapabilityDispatchView:
 
     def __post_init__(self) -> None:
         keys = tuple(
-            (item.identity.identity_fingerprint, item.fact_semantic_fingerprint)
+            (item.identity, item.fact_semantic_fingerprint)
             for item in self.registry_skill_facts
         )
         if len(keys) != len(set(keys)):
@@ -1203,7 +1191,7 @@ class FrozenToolCapabilityExposureSelection:
     def __post_init__(self) -> None:
         native = self.dispatch_view.planning_input.native_wire
         if not self.mcp_catalog_route_projection.native_meta_identities <= {
-            item.identity_fingerprint for item in self.direct_tool_versions
+            item.identity for item in self.direct_tool_versions
         }:
             raise ValueError("native meta choices escaped the installed cohort")
         _validate_scope(native.conversation_scope_kind)
@@ -1279,7 +1267,7 @@ class FrozenToolCapabilityExposurePlan:
 
 @dataclass(frozen=True, slots=True)
 class PreparedUnavailableDirectMcpGate:
-    capability_identity_fingerprint: str
+    capability_identity: CapabilityIdentity
     tool_semantic_fingerprint: str
     provider_tool_name: str
     unavailable_reason_code: str
@@ -1299,7 +1287,7 @@ class PreparedUnavailableDirectMcpGate:
         return context_fingerprint(
             "unavailable-direct-mcp-gate:v1",
             {
-                "identity": self.capability_identity_fingerprint,
+                "identity": capability_identity_digest(self.capability_identity),
                 "semantic": self.tool_semantic_fingerprint,
                 "provider_name": self.provider_tool_name,
                 "reason": self.unavailable_reason_code,

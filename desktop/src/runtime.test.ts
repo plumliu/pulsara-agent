@@ -7,6 +7,7 @@ import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import { PythonRuntime, type RuntimeEvent, type WslRuntimeOptions } from './runtime';
+import { isCanonicalIdentity } from './identity';
 import type { HostOperations } from './host-operations';
 import { posixHostOperations } from './host-posix';
 import { desktopResourcePaths } from './resource-paths';
@@ -60,11 +61,22 @@ lines.on('line', line => {
     }
     if (mode === 'ready-on-shutdown-failure') return;
     output({type:'ready', origin:'http://127.0.0.1:12345', database_state:'ready', ...(mode.startsWith('wsl') && mode !== 'wsl-certificate-then-failure' ? {certificatePem:'-----BEGIN CERTIFICATE-----\\nfixture\\n-----END CERTIFICATE-----'} : {})});
-    if (mode === 'wsl-oauth') output({type:'open-oauth-browser', requestId:'oauth-1', url:'https://example.com/authorize'});
-    if (mode === 'wsl-bad-oauth') output({type:'open-oauth-browser', requestId:'oauth-1', url:'file:///etc/passwd'});
+    if (mode === 'wsl-oauth') output({type:'open-oauth-browser', requestId:'request:aaaaaaaaaaaaaaaaaaaaaaaaaa', url:'https://example.com/authorize'});
+    if (mode === 'wsl-interleaved') {
+      output({type:'open-oauth-browser', requestId:'request:aaaaaaaaaaaaaaaaaaaaaaaaaa', url:'https://example.com/one'});
+      output({type:'open-oauth-browser', requestId:'request:aaaaaaaaaaaaaaaaaaaaaaaaae', url:'https://example.com/two'});
+    }
+    if (mode === 'wsl-bad-oauth') output({type:'open-oauth-browser', requestId:'request:aaaaaaaaaaaaaaaaaaaaaaaaaa', url:'file:///etc/passwd'});
   } else if (message.type === 'open-oauth-browser-result') {
     fs.writeFileSync(path.join(home, 'oauth-result'), JSON.stringify(message));
   } else if (message.type === 'inspect-quit') {
+    if (mode === 'inspect-timeout') return;
+    if (mode === 'inspect-exit') { process.exit(0); return; }
+    if (mode === 'wsl-interleaved') {
+      global.inspects = global.inspects || []; global.inspects.push(message.requestId);
+      if (global.inspects.length === 2) { output({type:'quit-state',requestId:global.inspects[1],activeTasks:2}); output({type:'quit-state',requestId:global.inspects[0],activeTasks:1}); }
+      return;
+    }
     if (typeof message.requestId !== 'string') throw new Error('requestId must be a string');
     output({type:'quit-state', requestId:message.requestId, activeTasks:1, scheduledTasks:2});
   } else if (message.type === 'shutdown') {
@@ -257,9 +269,49 @@ for (const mode of ['wsl-oauth', 'wsl-bad-oauth']) {
       await value.runtime.start(async () => settings, () => true);
       await waitForFile(path.join(value.home, 'oauth-result'), t.signal);
       const result = JSON.parse(await readFile(path.join(value.home, 'oauth-result'), 'utf8'));
-      assert.deepEqual(result, {type:'open-oauth-browser-result', requestId:'oauth-1', opened:mode === 'wsl-oauth'});
+      assert.deepEqual(result, {type:'open-oauth-browser-result', requestId:'request:aaaaaaaaaaaaaaaaaaaaaaaaaa', opened:mode === 'wsl-oauth'});
       assert.deepEqual(opened, mode === 'wsl-oauth' ? ['https://example.com/authorize'] : []);
       await value.runtime.stop();
+    } finally { await value.close(); }
+  });
+}
+
+test('interleaved OAuth and reverse-order inspections retain independent request owners', {timeout:10000}, async t => {
+  const resolvers: Array<() => void> = [];
+  const options = {...wslOptions, openOAuthBrowser: async (_url: string) => new Promise<void>(resolve => resolvers.push(resolve))};
+  const value = await fixture('wsl-interleaved', posixHostOperations, options);
+  try {
+    await value.runtime.start(async () => settings, () => true);
+    const originalRandom = crypto.getRandomValues.bind(crypto);
+    let entropy = 0;
+    crypto.getRandomValues = ((bytes: Uint8Array) => { bytes.fill(entropy++ < 2 ? 0 : 1); return bytes; }) as typeof crypto.getRandomValues;
+    let first: Promise<RuntimeEvent>, second: Promise<RuntimeEvent>;
+    try { first = value.runtime.inspectQuit(); second = value.runtime.inspectQuit(); }
+    finally { crypto.getRandomValues = originalRandom; }
+    assert.equal(entropy, 3);
+    assert.equal((await first).activeTasks, 1); assert.equal((await second).activeTasks, 2);
+    assert.equal(resolvers.length, 2); resolvers[1](); resolvers[0]();
+    await waitForFile(path.join(value.home, 'oauth-result'), t.signal);
+    await value.runtime.stop();
+    const calls = await value.calls();
+    const inspections = calls.filter(call => call.type === 'inspect-quit');
+    assert.equal(inspections.length, 2);
+    assert.ok(inspections.every(call => isCanonicalIdentity(call.requestId, 'request')));
+    assert.notEqual(inspections[0].requestId, inspections[1].requestId);
+    const results = calls.filter(call => call.type === 'open-oauth-browser-result');
+    assert.deepEqual(results.map(call => call.requestId), ['request:aaaaaaaaaaaaaaaaaaaaaaaaae', 'request:aaaaaaaaaaaaaaaaaaaaaaaaaa']);
+    assert.ok(results.every(call => call.opened));
+  } finally { await value.close(); }
+});
+
+for (const mode of ['inspect-timeout', 'inspect-exit']) {
+  test(`pending inspection settles on ${mode}`, {timeout:10000}, async () => {
+    const value = await fixture(mode);
+    try {
+      await value.runtime.start(async () => settings, () => true);
+      const result = await value.runtime.inspectQuit();
+      assert.equal(result.type, 'failed');
+      assert.match(result.error!, mode === 'inspect-timeout' ? /暂时无法确认/ : /内核进程已退出/);
     } finally { await value.close(); }
   });
 }
@@ -280,7 +332,7 @@ test('host uses one child, private startup frame and correlated quit inspection'
     const calls = await value.calls();
     assert.deepEqual(calls[0], {type:'start', postgres:settings, initialize:true});
     assert.equal(calls.filter(value => value.type === 'start').length, 1);
-    assert.equal(typeof calls[1].requestId, 'string');
+    assert.ok(isCanonicalIdentity(calls[1].requestId, 'request'));
     assert.deepEqual(calls.at(-1), {type:'shutdown'});
   } finally { await value.close(); }
 });

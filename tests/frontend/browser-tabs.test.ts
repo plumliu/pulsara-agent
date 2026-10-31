@@ -1,10 +1,11 @@
+import { isCanonicalIdentity, randomIdentity } from '../../frontend/lib/identity';
 import { describe, expect, it, vi } from 'vitest';
 import { BrowserTabs, browserUrl, browserAddressUrl, type BrowserTabRecord, type BrowserTabSink } from '../../frontend/lib/browser-tabs';
 import type { BrowserEvent, BrowserState, DesktopBrowser } from '../../frontend/lib/desktop-host';
-const state = (tab: BrowserTabRecord, instanceId = crypto.randomUUID()): BrowserState => ({ instanceId, tabId: tab.id, title: '', url: '', pendingUrl: null, loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false });
+const state = (tab: BrowserTabRecord, instanceId = randomIdentity('browser-instance')): BrowserState => ({ instanceId, tabId: tab.id, title: '', url: '', pendingUrl: null, loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false });
 function setup() {
   let event!: (event: BrowserEvent) => void;
-  const sink: BrowserTabSink = { visible: () => true, activeId: () => undefined, insert: vi.fn(), changed: vi.fn(), activate: vi.fn(), shortcut: vi.fn() };
+  const sink: BrowserTabSink = { visible: () => true, activeId: () => undefined, hasId: () => false, insert: vi.fn(), changed: vi.fn(), activate: vi.fn(), shortcut: vi.fn() };
   const host: DesktopBrowser = { create: vi.fn(), command: vi.fn(async () => {}), close: vi.fn(async () => {}), clear: vi.fn(async () => {}), activate: vi.fn(async () => {}), layout: vi.fn(async () => {}), hide: vi.fn(async () => {}), onEvent: listener => { event = listener; return () => {}; } };
   vi.mocked(host.create).mockImplementation(async ({tabId}) => state({id: tabId}));
   const tabs = new BrowserTabs(host, sink); tabs.connect();
@@ -70,6 +71,30 @@ describe('browser resource ownership', () => {
     expect(sink.insert).toHaveBeenLastCalledWith(expect.objectContaining({id:expect.any(String)}),false);
     tabs.close(record.id); event({kind:'popup',instanceId:record.state!.instanceId,url:'https://stale.test/',disposition:'foreground-tab'});
     expect(host.create).toHaveBeenCalledTimes(2);
+  });
+  it('retries a collision before publishing a new tab without changing the original', () => {
+    const {tabs} = setup();
+    const get = vi.spyOn(crypto, 'getRandomValues');
+    get.mockImplementationOnce(array => { (array as Uint8Array).fill(0); return array; });
+    const first = tabs.open()!;
+    get.mockImplementationOnce(array => { (array as Uint8Array).fill(0); return array; });
+    get.mockImplementationOnce(array => { (array as Uint8Array).fill(1); return array; });
+    const second = tabs.open()!;
+    expect(isCanonicalIdentity(first.id, 'tab')).toBe(true);
+    expect(second.id).not.toBe(first.id); expect(tabs.records.get(first.id)).toBe(first);
+    get.mockRestore();
+  });
+  it('retries an identity already held in the workspace by another tab', () => {
+    const {tabs, sink} = setup();
+    const occupied = 'tab:' + 'a'.repeat(26);
+    sink.hasId = id => id === occupied;
+    const get = vi.spyOn(crypto, 'getRandomValues');
+    get.mockImplementationOnce(array => { (array as Uint8Array).fill(0); return array; });
+    get.mockImplementationOnce(array => { (array as Uint8Array).fill(1); return array; });
+    const tab = tabs.open()!;
+    expect(tab.id).not.toBe(occupied);
+    expect(isCanonicalIdentity(tab.id, 'tab')).toBe(true);
+    get.mockRestore();
   });
   it('clears the user browser even after every visible tab was already closed', async () => {
     const {tabs,host}=setup(); const record=tabs.open()!; await settle(); tabs.close(record.id);

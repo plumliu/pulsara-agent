@@ -231,3 +231,17 @@ it('published tool webpages are user tabs that survive the calling ROOT being re
   f.view.rerender(<f.Harness session="" />);
   expect(f.tabs()).toHaveLength(1); expect(f.tabs()[0].id).toBe(id); expect(f.create).toHaveBeenCalledOnce();
 });
+
+it('reuses an MCP tab for the same runtime source without confusing canonical-looking natural names', async () => {
+  const { inspectorTab } = await import('../../frontend/components/desktop-workspace');
+  const { deriveIdentity } = await import('../../frontend/lib/identity');
+  const natural = 'mcp-server:' + 'a'.repeat(26);
+  const canonical = deriveIdentity('mcp-server', 'runtime-target', natural);
+  const configuration = inspectorTab('one', 'mcp', 'config', natural, 'host:one');
+  const presentation = inspectorTab('one', 'mcp', 'live', canonical, 'host:one', 'runtime');
+  const other = inspectorTab('one', 'mcp', 'other', natural, 'host:one', 'runtime');
+  expect(configuration.id).toBe(presentation.id);
+  expect(configuration.id).not.toBe(other.id);
+  expect(configuration.kind === 'mcp' && configuration.mcpTargetRole).toBe('configuration');
+  expect(presentation.kind === 'mcp' && presentation.mcpTargetRole).toBe('runtime');
+});

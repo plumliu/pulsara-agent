@@ -1,3 +1,4 @@
+import { isCanonicalIdentity } from '../../frontend/lib/identity';
 import { Slice } from '@tiptap/pm/model';
 import { closeHistory } from '@tiptap/pm/history';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -60,7 +61,11 @@ describe('PromptDraftStore', () => {
     store.insertText('session', '\\nafter [Figure 1]  ');
     store.insertFiles('session', [imageFile('a-again.png', 'image/png', [1, 2, 3])]);
 
+    const assetIds = store.getEditor('session').getJSON().content![0].content!.filter(node => node.type === 'image').map(node => node.attrs!.assetId);
+    expect(assetIds.every(id => isCanonicalIdentity(id, 'draft-asset'))).toBe(true);
+    expect(new Set(assetIds).size).toBe(2);
     const snapshot = await store.capture('session');
+    expect(JSON.stringify(snapshot.content)).not.toContain('draft-asset:');
 
     expect(snapshot.content.parts).toEqual([
       { type: 'text', text: '  before' },
@@ -70,6 +75,21 @@ describe('PromptDraftStore', () => {
     ]);
     expect(snapshot.content.parts.filter((part) => part.type === 'text')
       .map((part) => part.text).join('')).not.toContain('[Figure 2]');
+    store.destroy();
+  });
+
+  it('keeps annotation identities through undo without serializing them', async () => {
+    const store = new PromptDraftStore();
+    const annotation = {type:'annotation' as const, quote:'same', source:null};
+    const first = store.addAnnotation('session', annotation);
+    const second = store.addAnnotation('session', annotation);
+    expect(isCanonicalIdentity(first, 'draft-node')).toBe(true);
+    expect(isCanonicalIdentity(second, 'draft-node')).toBe(true);
+    expect(first).not.toBe(second);
+    store.removeAnnotation('session', first);
+    expect(store.getEditor('session').commands.undo()).toBe(true);
+    expect(store.annotations('session').map(item => item.id)).toEqual([first, second]);
+    expect(JSON.stringify((await store.capture('session')).content)).not.toContain('draft-node:');
     store.destroy();
   });
 

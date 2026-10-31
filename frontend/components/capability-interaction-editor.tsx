@@ -1,3 +1,4 @@
+import { parsePublicPackageId } from '../lib/mcp-authorization-result';
 import { Box, Check, FileText, Globe2, PlugZap, ShieldCheck, Trash2, Workflow, ArrowRight } from 'lucide-react';
 import { InteractionCardHeader, type InteractionTone } from './interaction-card-header';
 import { useRef, useState } from 'react';
@@ -64,8 +65,9 @@ export function CapabilityInteractionEditor({form, onResolve}: {
   }
   if (action === 'CONFIGURE_PLUGIN_MCP_CONNECTION') {
     const connection = record(form.connection);
-    const view = {name: String(plugin.name), enabled: Boolean(plugin.enabled),
-      packageInstallId: String(plugin.package_install_id)};
+    const packageInstallId = parsePublicPackageId(plugin.package_install_id);
+    if (!packageInstallId) return null;
+    const view = {name: String(plugin.name), enabled: Boolean(plugin.enabled), packageInstallId};
     return <PluginConnectionEditor presentation="inline" scopeLabel={scope} plugin={view} connection={{serverId: String(connection.server_id),
       defaults: record(connection.defaults), config: record(connection.config),
       overlay: connection.overlay == null ? null : record(connection.overlay),

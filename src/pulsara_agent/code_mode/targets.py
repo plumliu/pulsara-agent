@@ -21,7 +21,7 @@ def cell_target_schema(description: str | None = None) -> dict[str, object]:
         "type": "object",
         "properties": {
             "kind": {"type": "string", "const": "CELL"},
-            "cell_id": {"type": "string", "pattern": "^cell:" + ID_PAYLOAD_PATTERN + "$"},
+            "cell_id": {"type": "string", "pattern": "^cell:" + ID_PAYLOAD_PATTERN + "$", "maxLength": 31},
         },
         "required": ["kind", "cell_id"],
         "additionalProperties": False,

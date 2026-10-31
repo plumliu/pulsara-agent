@@ -8,6 +8,7 @@ introduced. Each operation has its existing physical database deadline.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pulsara_agent.identity import derive_id
 import logging
 
 from psycopg import IsolationLevel
@@ -164,7 +165,7 @@ class HistoryProjectionRepository:
                         covered_entry_sequence,expected_variants)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
-                        f"{build.session_id}/{build.q1_entry_id}/{variant}/{int(tools)}",
+                        derive_id("search-document", "history-projection", build.session_id, build.q1_entry_id, variant, str(int(tools))),
                         build.session_id,
                         build.q1_entry_id,
                         document["q2_entry_id"],

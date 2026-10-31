@@ -337,3 +337,148 @@ def test_round9_3_cli_and_dependency_direction_are_single_path() -> None:
         for name in ("PULSARA_PLUGIN_PROFILE", "PULSARA_PLUGIN_LAYOUT")
     )
     assert "credential_boundary" in signature(KernelHostCore.production).parameters
+
+
+def test_validation_parses_hook_declarations_without_plugin_provenance(tmp_path, monkeypatch):
+    from pulsara_agent.plugins import package_core
+
+    source = _package(tmp_path / "source")
+    boundary, service, _ = _owners(tmp_path)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("prevalidation must not construct Hook provenance")
+    with monkeypatch.context() as patch:
+        patch.setattr(package_core, "PluginHookSourceIdentity", forbidden)
+        result = service.validate_local_plugin_source(
+            ValidateLocalPluginSourceRequest(source, monotonic() + 30)
+        )
+    assert result.disposition is PluginValidationDisposition.VALID
+    assert len(result.summary.hooks.hook_definitions) == 2
+    installed = _install(service, InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30))
+    inspected = service.inspect_local_plugins(InspectLocalPluginsRequest(monotonic() + 30))
+    try:
+        bound = inspected.instances[0].hook_config
+        assert bound is not None
+        assert bound.provenance.identity.package_install_id == installed.package_install_id
+        assert all(item.provenance is bound.provenance for item in bound.definitions)
+    finally:
+        inspected.close()
+
+
+def test_secret_package_id_stays_raw_for_cas_and_is_withheld_in_public_output(tmp_path, monkeypatch):
+    from pulsara_agent.cli import _plugin_install_payload, _plugin_inspection_payload, _plugin_enablement_payload
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.plugins import package_store
+    from pulsara_agent.plugins.contracts import SetLocalPluginEnabledRequest
+    from pulsara_agent.cli import _public_plugin_cli_payload
+
+    source = _package(tmp_path / "source")
+    package = random_id("package")
+    monkeypatch.setattr(package_store, "random_id", lambda kind: package if kind == "package" else random_id(kind))
+    boundary, service, _ = _owners(tmp_path, credential=package)
+    deadline = monotonic() + 30
+    installed = _install(service, InstallLocalPluginRequest(source, PluginScopeKind.USER, deadline))
+    assert installed.disposition is PluginInstallDisposition.INSTALLED
+    assert installed.package_install_id == package
+    public = _public_plugin_cli_payload(_plugin_install_payload(installed), installed.scrub_set)
+    assert public["package_install_id"] == {"visibility": "WITHHELD"}
+    assert package not in json.dumps(public)
+
+    inspection = service.inspect_local_plugins(InspectLocalPluginsRequest(deadline))
+    try:
+        assert inspection.instances[0].package_install_id == package
+        assert inspection.instances[0].package_root.name == package
+        assert inspection.instances[0].hook_config.provenance.identity.package_install_id == package
+        public = _public_plugin_cli_payload(_plugin_inspection_payload(inspection, doctor=True, projection="doctor"), inspection.scrub_set)
+        assert public["instances"][0]["package_install_id"] == {"visibility": "WITHHELD"}
+        assert package not in json.dumps(public)
+    finally:
+        inspection.close()
+    changed = service.set_local_plugin_enabled(SetLocalPluginEnabledRequest(
+        PluginScopeKind.USER, "fixture-plugin", False, package, deadline, connection_review=(),
+    ))
+    assert changed.disposition is PluginEnablementDisposition.ALREADY_DISABLED
+    assert changed.package_install_id == package
+    public = _public_plugin_cli_payload(_plugin_enablement_payload(changed, reviewed={}), changed.scrub_set)
+    assert public["package_install_id"] == {"visibility": "WITHHELD"}
+    assert package not in json.dumps(public)
+    stale_id = random_id("package")
+    stale = service.set_local_plugin_enabled(SetLocalPluginEnabledRequest(
+        PluginScopeKind.USER, "fixture-plugin", False, stale_id, deadline, connection_review=(),
+    ))
+    assert stale.disposition is PluginEnablementDisposition.STALE
+    public = _public_plugin_cli_payload(
+        _plugin_enablement_payload(stale, reviewed={}), stale.scrub_set)
+    assert public["expected_package_install_id"] == {"visibility": "VISIBLE", "value": stale_id}
+    assert public["observed_package_install_id"] == {"visibility": "WITHHELD"}
+    from pulsara_agent.cli import _plugin_removal_payload
+    removed = asyncio.run(service.remove_local_plugin(RemoveLocalPluginRequest(
+        PluginScopeKind.USER, "fixture-plugin", deadline, package,
+    )))
+    assert removed.disposition is PluginRemovalDisposition.REMOVED
+    public = _public_plugin_cli_payload(
+        _plugin_removal_payload(removed), removed.scrub_set)
+    assert public["prior_package_install_id"] == {"visibility": "WITHHELD"}
+    assert package not in json.dumps(public)
+
+
+def test_model_omitted_guard_freezes_raw_id_while_form_withholds_it(tmp_path):
+    from pulsara_agent.capability.management_form import AcceptedCapabilityFormSubmission
+    from pulsara_agent.capability.mcp_management import McpManagementConflict
+    from pulsara_agent.conversation_kernel.capability_management_execution import CapabilityManagementCall
+    from pulsara_agent.primitives.context import thaw_json
+    from tests.test_capability_management_preparation import preparation
+    import pytest
+
+    async def run():
+        service = preparation(tmp_path)
+        source = _package(tmp_path / "source")
+        installed = await service.plugins.install_local_plugin(
+            InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 20),
+            connections=service.mcp,
+        )
+        package = installed.package_install_id
+        service.plugins._credential_boundary.rotate_sync(package[10:20])
+        intent = {"action": "SET_PLUGIN_ENABLED", "enabled": False,
+                  "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "fixture-plugin"}}
+        prepared = await service.prepare(intent)
+        assert thaw_json(prepared.expected_current)["expected_package_install_id"] == package
+        form_call = CapabilityManagementCall(service, prepared)
+        form = form_call.form("review")
+        public = thaw_json(form.public_projection)
+        assert public["plugin"]["package_install_id"] == {"visibility": "WITHHELD"}
+        assert public["expected_current"]["expected_package_install_id"] == {"visibility": "WITHHELD"}
+        assert package[10:20] not in json.dumps(public)
+        form_call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
+        assert (await form_call.execute())["status"] == "APPLIED"
+        explicit = await service.prepare({**intent, "expected_package_install_id": package})
+        assert thaw_json(explicit.expected_current)["expected_package_install_id"] == package
+        with pytest.raises(McpManagementConflict):
+            await service.prepare({**intent, "expected_package_install_id": "package:aaaaaaaaaaaaaaaaaaaaaaaaaa"})
+        await service.mcp.aclose()
+    asyncio.run(run())
+
+
+def test_install_ack_unknown_keeps_real_id_and_public_cut_when_secret_matches(tmp_path, monkeypatch):
+    from pulsara_agent.cli import _plugin_install_payload
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.plugins import package_store
+    from pulsara_agent.cli import _public_plugin_cli_payload
+
+    source = _package(tmp_path / "source")
+    package = random_id("package")
+    monkeypatch.setattr(package_store, "random_id", lambda kind: package if kind == "package" else random_id(kind))
+    original_read = ManagedPluginStore.read_state
+    def read_until_committed(store, layout):
+        if layout.state_path.exists():
+            raise OSError("confirmation unavailable")
+        return original_read(store, layout)
+    monkeypatch.setattr(ManagedPluginStore, "read_state", read_until_committed)
+    _, service, _ = _owners(tmp_path, credential=package)
+    result = _install(service, InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30))
+    assert result.disposition is PluginInstallDisposition.ACK_UNKNOWN
+    assert result.attempted_package_install_id == package
+    assert result.last_known_cut == "STATE_RENAME_FULL_CONFIRMATION_UNAVAILABLE"
+    public = _public_plugin_cli_payload(_plugin_install_payload(result), result.scrub_set)
+    assert public["attempted_package_install_id"] == {"visibility": "WITHHELD"}
+    assert public["last_known_cut"] == result.last_known_cut
+    assert package not in json.dumps(public)

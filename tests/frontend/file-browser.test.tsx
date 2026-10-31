@@ -614,6 +614,22 @@ it("keeps new-navigation failures off history and retries historical failures in
   );
 });
 
+it("retries a file tab identity already in the workspace before preview IO", async () => {
+  const reader = api();
+  const get = vi.spyOn(crypto, 'getRandomValues');
+  get.mockImplementationOnce(array => { (array as Uint8Array).fill(0); return array; });
+  render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}><MarkdownBody body="[甲](a.txt) [乙](b.txt)" onNotify={notify} /></FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('link', {name:'甲'}));
+  await screen.findByText('hello');
+  get.mockImplementationOnce(array => { (array as Uint8Array).fill(0); return array; });
+  get.mockImplementationOnce(array => { (array as Uint8Array).fill(1); return array; });
+  fireEvent.click(screen.getByRole('link', {name:'乙'}));
+  await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(2));
+  expect(reader.open).toHaveBeenCalledTimes(2);
+  expect(get).toHaveBeenCalledTimes(3);
+  get.mockRestore();
+});
+
 it("deduplicates only current pages and allows explicit independent copies", async () => {
   const reader = api();
   render(

@@ -1,3 +1,4 @@
+import { deriveIdentity } from '../lib/identity';
 import { WorkspaceLoading } from './workspace-loading';
 import { McpAuthorizationStatus } from './mcp-authorization';
 import {
@@ -250,6 +251,7 @@ function ProjectCapabilityPanel({
   onNotify,
   onOpenMcp,
   selectedMcpId,
+  mcpTargetRole,
   canControl,
   kind,
   setKind,
@@ -276,6 +278,7 @@ function ProjectCapabilityPanel({
   onNotify: MarkdownNotify;
   onOpenMcp: (server: McpServerCapability) => void;
   selectedMcpId?: string;
+  mcpTargetRole?: 'configuration' | 'runtime';
   canControl: boolean;
   mcpForms: ProjectMcpForms;
   kind: ProjectCapabilityKind;
@@ -315,7 +318,8 @@ function ProjectCapabilityPanel({
     }
   }
   const skills = snapshot?.skills.items ?? [];
-  const servers = (snapshot?.mcp.servers ?? []).filter(server => !selectedMcpId || server.id === selectedMcpId);
+  const servers = (snapshot?.mcp.servers ?? []).filter(server => !selectedMcpId || (mcpTargetRole === 'runtime' ? server.effective && deriveIdentity('mcp-server', 'runtime-target', server.id) === selectedMcpId : server.id === selectedMcpId));
+  if (mcpTargetRole === 'runtime' && new Set(servers.map(server => server.id)).size > 1) throw new Error('MCP runtime target identity collision');
   const projectSkills = skills.filter((item) => item.source === 'workspace');
   const inheritedSkills = skills.filter((item) => item.source !== 'workspace');
   const projectMcp = servers.filter((item) => item.source === 'workspace');
@@ -598,7 +602,7 @@ export function InspectorPanel({
           />;
     if (tab.kind === 'file' || tab.kind === 'visualization' || tab.kind === 'browser') return <div className="inspector-empty" role="status">对象已不可用</div>;
     if (tab.kind !== 'capabilities' && tab.kind !== 'mcp') { const unhandled: never = tab; return unhandled; }
-    return <ProjectCapabilityPanel selectedMcpId={tab.kind === "mcp" ? tab.entityId : undefined} onOpenMcp={server => open("mcp", server.name, server.id, backgroundHostSessionId)}
+    return <ProjectCapabilityPanel selectedMcpId={tab.kind === "mcp" ? tab.entityId : undefined} mcpTargetRole={tab.kind === "mcp" ? tab.mcpTargetRole : undefined} onOpenMcp={server => open("mcp", server.name, server.id, backgroundHostSessionId)}
             canControl={canControl}
             onNotify={onNotify}
             key={session.id}

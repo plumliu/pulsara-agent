@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pulsara_agent.identity import derive_id
+
 from pulsara_agent.identity import random_id
 
 from tests.support.model_config import frozen_test_prompt
@@ -313,12 +315,17 @@ class _SettlementTokenTool(_KnownReadOnlyTool):
 
 
 class _RemoteIdentityTool(_KnownReadOnlyTool):
+    def __init__(self, remote_kind="process"):
+        super().__init__()
+        self.remote_kind = remote_kind
+
     async def invoke(self, **_kwargs: object) -> KernelToolResult:
         self.invocations += 1
         return KernelToolResult(
             state="SUCCESS",
             content=b"known exact result",
-            remote_identity="terminal-process:test-exact",
+            remote_identity=derive_id(self.remote_kind, "test-exact"),
+            remote_identity_verification=("sha256:" + "a" * 64 if self.remote_kind == "mcp-tool" else None),
         )
 
 
@@ -651,13 +658,14 @@ def test_root_unknown_start_cancellation_during_confirmation_never_readmits(
 
 
 
+@pytest.mark.parametrize("remote_kind", ["process", "mcp-tool"])
 def test_round5_remote_identity_lost_ack_cannot_discard_exact_tool_result(
-    stage2_migrated_postgres_database,
+    stage2_migrated_postgres_database, remote_kind,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = _LostRemoteIdentityAckRepository(provider)
     session_id, _workspace_id, lease = _lease(repository)
-    tool = _RemoteIdentityTool()
+    tool = _RemoteIdentityTool(remote_kind)
     model = ScriptedKernelModel(
         [
             _tool_stream(1),

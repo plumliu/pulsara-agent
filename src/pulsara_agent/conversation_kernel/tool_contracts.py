@@ -91,12 +91,26 @@ from pulsara_agent.primitives.tool_observation import (
 from pulsara_agent.tools.builtins.filesystem import ViewImageSource
 
 
+def valid_tool_remote_identity(identity: str | None, verification: str | None) -> bool:
+    """Validate the closed process, MCP and absent identity branches."""
+    import re
+    from pulsara_agent.identity import is_valid_id
+
+    if identity is None:
+        return verification is None
+    return (is_valid_id(identity, "process") and verification is None) or (
+        is_valid_id(identity, "mcp-tool") and isinstance(verification, str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", verification) is not None
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class KernelToolResult:
     state: str
     content: bytes | FrozenPromptContent
     memory_mutation: PreparedMemoryMutation | None = None
     remote_identity: str | None = None
+    remote_identity_verification: str | None = None
     output_artifact_candidate: ToolOutputArtifactCandidate | None = None
     artifact_inline_result: bool = False
     process_local_settlement: ProcessLocalEffectSettlementToken | None = None
@@ -126,6 +140,8 @@ class KernelToolResult:
         )
 
     def __post_init__(self) -> None:
+        if not valid_tool_remote_identity(self.remote_identity, self.remote_identity_verification):
+            raise ValueError("invalid remote identity and verification")
         if not isinstance(self.public_format, ToolOutputSourceFormatHint):
             raise TypeError("public tool result format must be explicit TEXT or JSON")
         if isinstance(self.content, bytes):

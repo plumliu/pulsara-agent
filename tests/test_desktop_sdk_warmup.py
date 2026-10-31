@@ -27,7 +27,7 @@ from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from pulsara_agent.settings import LocalSettingsStore
 service=LocalMcpManagementService(LocalSettingsStore(Path(sys.argv[1])/'settings.yaml'),user_config_path=Path(sys.argv[1])/'mcp.yaml')
-owner=McpHostSupervisor(session_id='unused',workspace_root=Path(sys.argv[1]),configs=(),credential_boundary=ProcessCredentialBoundary())
+owner=McpHostSupervisor(workspace_root=Path(sys.argv[1]),configs=(),credential_boundary=ProcessCredentialBoundary())
 async def run():
     await owner.start()
     await owner.aclose()

@@ -31,7 +31,7 @@ function settlement(scope: McpAuthorizationResult['scope'], kind: 'local' | 'plu
     authorization: {
       owner: { kind, scope_key: 'saved-owner', server_id: 'docs', plugin_id: kind === 'plugin' ? 'example' : null },
       config_identity: 'saved-config', display_identity: 'display-config',
-      package_install_id: kind === 'plugin' ? 'installed-package' : null,
+      package_install_id: kind === 'plugin' ? {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'} : null,
     },
   };
 }
@@ -57,7 +57,7 @@ it.each(['local', 'plugin'] as const)('keeps an accepted USER %s authorization p
   const { result, rerender } = observe(first.value, readStatus);
   await act(async () => first.emit({ signal: source.signal, read: async () => target }));
   const key = kind === 'plugin'
-    ? mcpAuthorizationKey('plugin', 'installed-package', 'docs')
+    ? mcpAuthorizationKey('plugin', 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa', 'docs')
     : mcpAuthorizationKey('device', 'docs', 'display-config');
   expect(result.current.statuses[key]).toEqual(waiting);
 
@@ -105,7 +105,7 @@ it('invalidates the saved owner status and ignores an in-flight response after a
   const request = vi.fn().mockResolvedValueOnce(waiting)
     .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
   const { result } = renderHook(() => useMcpAuthorization(vi.fn()));
-  const owner = mcpAuthorizationKey('plugin', 'installed-package', 'docs');
+  const owner = mcpAuthorizationKey('plugin', 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa', 'docs');
   await act(async () => result.current.run(owner, 'login', request));
   await act(async () => vi.advanceTimersByTimeAsync(1000));
   act(() => result.current.invalidate(owner));

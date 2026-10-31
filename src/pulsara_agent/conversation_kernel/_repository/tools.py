@@ -519,7 +519,7 @@ class _ToolOperations:
         ) as connection:
             row = connection.execute(
                 """
-                SELECT remote_identity
+                SELECT remote_identity, remote_identity_verification
                 FROM pulsara_v3.tool_execution_attempts
                 WHERE session_id = %s AND id = %s
                 FOR UPDATE
@@ -538,6 +538,7 @@ class _ToolOperations:
                 if (
                     current is not None
                     and str(current) == candidate.remote_identity
+                    and row["remote_identity_verification"] == candidate.remote_identity_verification
                     and event is not None
                     and _event_row_matches_draft(event, candidate.event)
                 ):
@@ -549,11 +550,13 @@ class _ToolOperations:
                 """
                 UPDATE pulsara_v3.tool_execution_attempts
                 SET remote_identity = %s,
+                    remote_identity_verification = %s,
                     remote_identity_published_at = clock_timestamp()
                 WHERE session_id = %s AND id = %s
                 """,
                 (
                     candidate.remote_identity,
+                    candidate.remote_identity_verification,
                     guard.session_id,
                     candidate.attempt_id,
                 ),
@@ -585,7 +588,7 @@ class _ToolOperations:
         ) as connection:
             self._require_writer(connection, guard, lock=False)
             row = connection.execute(
-                """SELECT remote_identity
+                """SELECT remote_identity, remote_identity_verification
                    FROM pulsara_v3.tool_execution_attempts
                    WHERE session_id = %s AND id = %s""",
                 (guard.session_id, candidate.attempt_id),
@@ -598,11 +601,12 @@ class _ToolOperations:
                 (guard.session_id, candidate.event.event_id),
             ).fetchone()
             current = row["remote_identity"]
-            if current is None and event is None:
+            if current is None and row["remote_identity_verification"] is None and event is None:
                 return ToolRemoteIdentityConfirmationKind.NONE
             if (
                 current is not None
                 and str(current) == candidate.remote_identity
+                and row["remote_identity_verification"] == candidate.remote_identity_verification
                 and event is not None
                 and _event_row_matches_draft(event, candidate.event)
             ):
@@ -1242,7 +1246,7 @@ class _ToolOperations:
                         invocation_source.invocation_id,
                         assistant_entry_id,
                         tool_call_id,
-                        f"interaction-decision:{decision_id}",
+                        decision_id,
                         permission_snapshot_fingerprint,
                     ),
                 )
@@ -1463,7 +1467,7 @@ class _ToolOperations:
                 or attempt["assistant_entry_id"] != assistant_entry_id
                 or attempt["tool_call_id"] != tool_call_id
                 or attempt["authorization_kind"] != "human"
-                or attempt["authorization_reference"] != f"interaction-decision:{decision_id}"
+                or attempt["authorization_reference"] != decision_id
                 or attempt["permission_snapshot_fingerprint"] != permission_snapshot_fingerprint
                 or result_id is not None or result_entry_id is not None or denial_content is not None):
                 raise ConversationKernelConflict("interaction ALLOW attempt is incomplete or conflicting")

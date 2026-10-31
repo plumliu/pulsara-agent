@@ -36,6 +36,8 @@ class OpenInPulsaraTool(WorkspaceTool):
         value = target[field]
         if not isinstance(value, str) or not value.strip() or '\x00' in value:
             raise ValueError(f"{field} 必须是非空文本")
+        if kind in {"terminal", "mcp", "agent", "cell"}:
+            require_id(value, {"terminal": "process", "mcp": "mcp-server", "agent": "session", "cell": "cell"}[kind])
         value = value.strip()
         result = {"type": kind, field: value}
         if kind == "file":
@@ -58,21 +60,19 @@ class OpenInPulsaraTool(WorkspaceTool):
         elif kind == "panel":
             if value not in {"capabilities", "background", "subagents", "cells", "browser"}:
                 raise ValueError("入口名称只支持 capabilities、background、subagents、cells、browser")
-        elif kind in {"agent", "cell"}:
-            require_id(value, "session" if kind == "agent" else "cell")
-        else:
-            result["host_session_id"] = self.host_session_id
+        elif kind in {"terminal", "mcp"}:
+            result["host_session_id"] = require_id(self.host_session_id, "host")
         public = {"target": {"kind": target["kind"], field: result[field]}}
         if "host_session_id" in result:
             public["host_session_id"] = result["host_session_id"]
         if kind in {"agent", "cell"} or (kind == "panel" and value in {"subagents", "cells"}):
             if not self.root_session_id:
                 raise ValueError("ROOT context is unavailable")
-            public["root_session_id"] = self.root_session_id
+            public["root_session_id"] = require_id(self.root_session_id, "session")
         if kind == "cell" or (kind == "panel" and value == "cells"):
             if not self.host_session_id:
                 raise ValueError("Host context is unavailable")
-            public["host_session_id"] = self.host_session_id
+            public["host_session_id"] = require_id(self.host_session_id, "host")
         return public
 
     async def execute_async(self, call: ToolCall, *, resolve_object: Callable[[str, str], Awaitable[ResolvedPresentationObject]]) -> ToolExecutionResult:

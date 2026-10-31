@@ -137,7 +137,6 @@ def test_discovery_and_public_authorization_never_retrieve_schema(
 
     async def exercise():
         supervisor = fixture.McpHostSupervisor(
-            session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
             workspace_root=tmp_path, configs=(config,),
         )
         port = _port(tmp_path, supervisor)
@@ -208,7 +207,6 @@ def test_document_local_refs_reach_public_authorization(tmp_path):
 
     async def exercise():
         supervisor = fixture.McpHostSupervisor(
-            session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
             workspace_root=tmp_path, configs=(config,),
         )
         port = _port(tmp_path, supervisor)
@@ -281,7 +279,6 @@ def test_real_sdk_distinguishes_explicit_null_from_unset(
 
     async def exercise():
         supervisor = fixture.McpHostSupervisor(
-            session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
             workspace_root=tmp_path, configs=(config,),
         )
         runtime = None
@@ -303,7 +300,6 @@ def test_real_sdk_distinguishes_explicit_null_from_unset(
             permit = executor.admit(
                 session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
                 scope_kind=fixture.ModelInputScopeKind.ROOT,
-                scope_subagent_task_id=None,
                 turn_id="turn:fugd2z4wkqsu77svw4oie5ktvy", tool_call_id="call:null",
             )
             permit.mark_attempt_accepted()
@@ -357,7 +353,6 @@ def test_recursive_evaluation_stays_local_in_public_prepare_and_authorize(tmp_pa
 
     async def exercise():
         supervisor = fixture.McpHostSupervisor(
-            session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
             workspace_root=tmp_path, configs=(config,),
         )
         port = _port(tmp_path, supervisor)
@@ -423,7 +418,6 @@ def test_real_sdk_output_boundary_preserves_response_and_connection(tmp_path, re
 
     async def exercise():
         supervisor = fixture.McpHostSupervisor(
-            session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
             workspace_root=tmp_path, configs=(config,),
         )
         await supervisor.start()
@@ -434,7 +428,7 @@ def test_real_sdk_output_boundary_preserves_response_and_connection(tmp_path, re
             for index in range(2):
                 permit = executor.admit(
                     session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
-                    scope_kind=fixture.ModelInputScopeKind.ROOT, scope_subagent_task_id=None,
+                    scope_kind=fixture.ModelInputScopeKind.ROOT,
                     turn_id="turn:fugd2z4wkqsu77svw4oie5ktvy", tool_call_id=f"call:schema:{index}",
                 )
                 permit.mark_attempt_accepted()

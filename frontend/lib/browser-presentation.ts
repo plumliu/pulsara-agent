@@ -1,3 +1,4 @@
+import { randomIdentity } from './identity';
 import type { DesktopBrowser } from './desktop-host';
 
 const overlaySelector = '[role="dialog"], dialog, .menu-popover, .mobile-scrim, .yarl__root';
@@ -6,7 +7,7 @@ const intersects = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.l
 
 /** Native children cannot be clipped or covered by DOM. Track this one display slot. */
 export function presentBrowser(host: DesktopBrowser, instanceId: string, slot: HTMLElement, onError: (message: string) => void) {
-  const presentationId = crypto.randomUUID();
+  const presentationId = randomIdentity('presentation');
   let alive = true, activated = false, frame = 0, hidden = false, hideConfirmed = false, hidePending = false;
   let last = '';
   const transitions = new Set<string>();

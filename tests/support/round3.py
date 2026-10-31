@@ -1002,7 +1002,7 @@ class StructuredToolPort:
             conversation_scope_kind=conversation_scope_kind,
             source_snapshots=(),
             catalog_snapshot=build_catalog_snapshot(
-                owner_epoch=1, catalog_revision=1, entries=()
+                owner_epoch=derive_id("epoch", "test-mcp-owner"), catalog_revision=1, entries=()
             ).for_scope(conversation_scope_kind),
             inspection_inputs=(),
             owner_authenticity=self._mcp_owner,
@@ -1219,7 +1219,7 @@ class _EmptyTestMcpCapabilityOwner:
     def __init__(self) -> None:
         self._authority = object()
         self._catalog = build_catalog_snapshot(
-            owner_epoch=1, catalog_revision=1, entries=()
+            owner_epoch=derive_id("epoch", "test-mcp-owner"), catalog_revision=1, entries=()
         )
 
     def freeze_capability_source_snapshot_set(
@@ -1663,7 +1663,6 @@ def _candidate(
     )
     return ContextSourceCandidate(
         kind,
-        instance,
         version,
         contract,
         semantic,

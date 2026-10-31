@@ -6,7 +6,7 @@ import type {PluginMcpConnection, UserPluginCapability} from '../../frontend/lib
 afterEach(cleanup);
 const plugin: UserPluginCapability = {
   id: 'docs', name: 'Docs', description: 'A fixture', enabled: false,
-  packageInstallId: 'pkg-fixture', packageRoot: '/tmp/package', skillCount: 0, mcpCount: 1, hookCount: 3,
+  packageInstallId: {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, packageRoot: '/tmp/package', skillCount: 0, mcpCount: 1, hookCount: 3,
   effectiveSkillNames: [], effectiveMcpServerIds: [], details: [],
 };
 const connection: PluginMcpConnection = {
@@ -17,6 +17,20 @@ const connection: PluginMcpConnection = {
 };
 
 describe('Plugin connection editor', () => {
+  it('keeps a withheld external block distinct from empty editable configuration', () => {
+    const save = vi.fn(async () => true);
+    const close = vi.fn();
+    const config = {...connection.config, public_headers: undefined, withheld_fields: ['public_headers']};
+    render(<PluginConnectionEditor plugin={plugin} connection={{...connection, config}} onSave={save} onClose={close} />);
+    expect(screen.getByText('部分配置因凭据保护无法显示，当前不能保存或测试此配置。')).toBeTruthy();
+    const button = screen.getByRole('button', {name: '保存连接'}) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', {name: '取消'}));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('restores the immutable default only after a second explicit confirmation', async () => {
     const save = vi.fn(async () => true);
     const close = vi.fn();

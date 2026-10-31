@@ -106,8 +106,9 @@ def test_code_tool_pre_and_post_owners_send_actual_program_source(tmp_path):
         request = CodeModeToolRequest("session:root", "model:test", None, None)
         canonical = SimpleNamespace(run_permission_snapshot=SimpleNamespace(effective_mode=PermissionMode.BYPASS_PERMISSIONS, plan_workflow_id=None))
         prepared = PreparedResolvedToolInvocation("read_file", "read_file", freeze_json({"path": "actual.txt"}))
-        source = ToolInvocationSource("call:program", ToolInvocationSourceKind.CODE_MODE_CALL, "turn:source",
-            source_exec_attempt_id="attempt:source", call_sequence=1, tool_name="read_file", original_arguments=prepared.resolved_arguments)
+        from pulsara_agent.identity import random_id
+        source = ToolInvocationSource(random_id("call"), ToolInvocationSourceKind.CODE_MODE_CALL, random_id("turn"),
+            source_exec_attempt_id=random_id("attempt"), call_sequence=1, tool_name="read_file", original_arguments=prepared.resolved_arguments)
         source_token = current_tool_invocation.set(source)
         snapshot_token = _code_snapshot.set(SimpleNamespace(hook_epoch_nonce=object()))
         try:

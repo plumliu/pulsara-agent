@@ -11,15 +11,10 @@ import os
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 
-from pulsara_agent.hooks.config_parser import parse_hook_config
+from pulsara_agent.hooks.config_parser import parse_hook_declarations
 from pulsara_agent.hooks.contracts import (
-    FrozenHookSourceProvenance,
     HookDiagnostic,
     HookDiagnosticSeverity,
-    HookSourceKind,
-    HookVisibilityScope,
-    LocalFileHookSourceIdentity,
-    LocalFileHookTrustSubject,
 )
 from .contracts import PluginDiagnostic, PluginDiagnosticCode
 from pulsara_agent.capability.mcp_import import (
@@ -180,6 +175,7 @@ def observe_plugin_import(observer, request, *, scrub_set):
             deadline_monotonic=request.deadline_monotonic,
             cancellation=request.cancellation,
             scrub_set=scrub_set,
+            secret_scan_source_path=request.source_path,
         )
         # Unsupported host behavior is reported, never activated. Invalid
         # supported components and source safety still fail native admission.
@@ -380,19 +376,7 @@ class PluginSourceImport:
         )
 
     def parse_import_hooks(self, hooks):
-        # Reuse the production parser for preview and validation; this temporary
-        # provenance describes the held declaration, never grants execution.
-        provenance = FrozenHookSourceProvenance(
-            LocalFileHookSourceIdentity(
-                HookSourceKind.USER_FILE,
-                self.source / SOURCE_MANIFESTS[self.format],
-                HookVisibilityScope.USER,
-            ),
-            LocalFileHookTrustSubject(HookSourceKind.USER_FILE),
-            None,
-            "Plugin import",
-        )
-        parsed = parse_hook_config(json.dumps(hooks).encode(), provenance=provenance)
+        parsed = parse_hook_declarations(json.dumps(hooks).encode())
         if any(not _unsupported_hook_diagnostic(item) for item in parsed.diagnostics):
             raise PluginImportError(
                 "Hook 支持项配置无效："

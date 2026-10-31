@@ -1,9 +1,7 @@
 """Host-scoped MCP physical owner, discovery, fencing, and exact execution."""
 
 from __future__ import annotations
-from pulsara_agent.identity import derive_id
-
-from pulsara_agent.identity import random_id
+from pulsara_agent.identity import derive_id, random_id, require_id
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
@@ -15,7 +13,6 @@ import random
 import re
 from threading import RLock
 from typing import TYPE_CHECKING, Callable, Mapping
-from uuid import uuid4
 
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
@@ -327,7 +324,7 @@ class McpConnectionSlot:
         self,
         *,
         server_id: str,
-        supervisor_epoch: int,
+        supervisor_epoch: str,
         connection_generation: int,
         runtime_config_fingerprint: str,
         client: BoundedMcpSdkClient,
@@ -339,7 +336,7 @@ class McpConnectionSlot:
     ) -> None:
         self.slot_id = random_id("slot")
         self.server_id = server_id
-        self.supervisor_epoch = supervisor_epoch
+        self.supervisor_epoch = require_id(supervisor_epoch, "epoch")
         self.connection_generation = connection_generation
         self.runtime_config_fingerprint = runtime_config_fingerprint
         self.client = client
@@ -638,6 +635,12 @@ class McpKnownToolResult:
     state: str
     content: bytes
     remote_identity: str
+    remote_identity_verification: str
+
+    def __post_init__(self) -> None:
+        require_id(self.remote_identity, "mcp-tool")
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", self.remote_identity_verification) is None:
+            raise ValueError("MCP remote identity verification is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,18 +678,24 @@ class McpBoundToolExecutor:
         from .sdk_facade import MCPError, types
 
         if (
-            permit.runtime_generation_id != self.runtime_generation_id
+            permit.lease is not self.lease
+            or permit.runtime_generation_id != self.runtime_generation_id
             or permit.descriptor_fingerprint != self.semantic.descriptor_fingerprint
             or permit.policy_fingerprint != execution_policy_fingerprint(self.policy)
             or permit.tool_call_id == ""
         ):
             raise RuntimeError("MCP dispatch permit does not exact-join executor")
+        remote_identity, remote_identity_verification = _mcp_remote_identity(
+            semantic=self.semantic, connection_generation=permit.lease.connection_generation
+        )
         try:
             operation = await permit.acquire_operation(cell_cancel_event=cell_cancel_event)
         except _McpDispatchCancelledBeforeStart:
             permit.release()
-            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
-                _mcp_remote_identity(semantic=self.semantic, connection_generation=self.lease.connection_generation))
+            return McpKnownToolResult(
+                "CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
+                remote_identity, remote_identity_verification,
+            )
         except BaseException:
             if permit.state is McpDispatchPermitState.ATTEMPT_ACCEPTED:
                 permit.release()
@@ -694,10 +703,6 @@ class McpBoundToolExecutor:
         async with operation:
             input_owner = McpInputRequiredRoundOwner(
                 operation_identity=permit.permit_id,
-                connection_generation=self.lease.connection_generation,
-            )
-            remote_identity = _mcp_remote_identity(
-                semantic=self.semantic,
                 connection_generation=self.lease.connection_generation,
             )
             try:
@@ -731,12 +736,14 @@ class McpBoundToolExecutor:
                                 return _known_mcp_system_failure(
                                     error_code="MCP_INPUT_REQUIRED_UNSUPPORTED",
                                     remote_identity=remote_identity,
+                                    remote_identity_verification=remote_identity_verification,
                                     message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                                 )
                             return _mcp_invocation_failure(
                                 error=exc,
                                 client=self.lease._slot.client,  # noqa: SLF001
                                 remote_identity=remote_identity,
+                                remote_identity_verification=remote_identity_verification,
                                 effect_kind=self.policy.effect_kind,
                             )
                         result = await self.lease._slot.client.session.call_tool(  # noqa: SLF001
@@ -758,6 +765,7 @@ class McpBoundToolExecutor:
                     return _known_mcp_system_failure(
                         error_code="MCP_OUTPUT_SCHEMA_MISMATCH",
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                     )
                 except McpProtocolConformanceError as exc:
@@ -767,6 +775,7 @@ class McpBoundToolExecutor:
                     return _known_mcp_system_failure(
                         error_code="MCP_RESULT_TYPE_CONFORMANCE_FAILED",
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                     )
                 except McpTransportOperationError as exc:
@@ -777,11 +786,13 @@ class McpBoundToolExecutor:
                         return _known_mcp_system_failure(
                             error_code="MCP_TRANSPORT_UNWRITTEN",
                             remote_identity=remote_identity,
+                            remote_identity_verification=remote_identity_verification,
                         )
                     return _mcp_invocation_failure(
                         error=exc,
                         client=self.lease._slot.client,  # noqa: SLF001
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         effect_kind=self.policy.effect_kind,
                     )
                 except MCPError as exc:
@@ -790,6 +801,7 @@ class McpBoundToolExecutor:
                             error=exc,
                             client=self.lease._slot.client,  # noqa: SLF001
                             remote_identity=remote_identity,
+                            remote_identity_verification=remote_identity_verification,
                         )
                     self.lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_TRANSPORT_FAILED", retryable=True
@@ -798,6 +810,7 @@ class McpBoundToolExecutor:
                         error=exc,
                         client=self.lease._slot.client,  # noqa: SLF001
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         effect_kind=self.policy.effect_kind,
                     )
                 except (asyncio.CancelledError, MemoryError):
@@ -810,6 +823,7 @@ class McpBoundToolExecutor:
                         error=exc,
                         client=self.lease._slot.client,  # noqa: SLF001
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         effect_kind=self.policy.effect_kind,
                     )
 
@@ -829,12 +843,14 @@ class McpBoundToolExecutor:
                     return _known_mcp_system_failure(
                         error_code="MCP_RESULT_LOWERING_FAILED",
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         message=self.lease._slot.client.diagnostic_message(exc),  # noqa: SLF001
                     )
                 return McpKnownToolResult(
                     state="APPLICATION_ERROR" if result.is_error else "SUCCESS",
                     content=body,
                     remote_identity=remote_identity,
+                    remote_identity_verification=remote_identity_verification,
                 )
             except asyncio.CancelledError:
                 raise
@@ -1075,16 +1091,27 @@ class McpInstalledRuntimeGeneration:
             arguments,
             scope_kind=scope_kind,
         )
-        if candidate is None or permit.runtime_generation_id != self.runtime_generation_id:
+        if (
+            candidate is None
+            or permit.runtime_generation_id != self.runtime_generation_id
+            or self.slot_lease_by_server.get(candidate.server_id) is not permit.lease
+        ):
             permit.release()
             raise McpSnapshotStale("MCP standard operation generation is stale")
+        remote_identity, remote_identity_verification = _mcp_standard_operation_identity(
+            server_id=candidate.server_id,
+            connection_generation=permit.lease.connection_generation,
+            tool_name=tool_name,
+        )
         permit.mark_attempt_accepted()
         try:
             operation = await permit.acquire_operation(cell_cancel_event=cell_cancel_event)
         except _McpDispatchCancelledBeforeStart:
             permit.release()
-            return McpKnownToolResult("CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
-                f"mcp:{candidate.server_id}:{permit.lease.connection_generation}:{tool_name}")
+            return McpKnownToolResult(
+                "CANCELLED_BEFORE_DISPATCH", "Cell 已停止".encode("utf-8"),
+                remote_identity, remote_identity_verification,
+            )
         except BaseException:
             if permit.state is McpDispatchPermitState.ATTEMPT_ACCEPTED:
                 permit.release()
@@ -1094,10 +1121,6 @@ class McpInstalledRuntimeGeneration:
             if runtime_lease is None:
                 raise McpSnapshotStale("MCP runtime lease is unavailable")
             client = runtime_lease._slot.client  # noqa: SLF001
-            remote_identity = (
-                f"mcp:{candidate.server_id}:"
-                f"{runtime_lease.connection_generation}:{tool_name}"
-            )
             input_owner = McpInputRequiredRoundOwner(
                 operation_identity=permit.permit_id,
                 connection_generation=runtime_lease.connection_generation,
@@ -1121,6 +1144,7 @@ class McpInstalledRuntimeGeneration:
                     return _known_mcp_system_failure(
                         error_code="MCP_RESULT_TYPE_CONFORMANCE_FAILED",
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         message=client.diagnostic_message(exc),
                     )
                 except McpTransportOperationError as exc:
@@ -1131,11 +1155,13 @@ class McpInstalledRuntimeGeneration:
                         return _known_mcp_system_failure(
                             error_code="MCP_TRANSPORT_UNWRITTEN",
                             remote_identity=remote_identity,
+                            remote_identity_verification=remote_identity_verification,
                         )
                     return _mcp_invocation_failure(
                         error=exc,
                         client=client,
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         effect_kind=McpEffectKind.READ_ONLY,
                     )
                 except MCPError as exc:
@@ -1144,6 +1170,7 @@ class McpInstalledRuntimeGeneration:
                             error=exc,
                             client=client,
                             remote_identity=remote_identity,
+                            remote_identity_verification=remote_identity_verification,
                         )
                     runtime_lease._slot.report_transport_failure(  # noqa: SLF001
                         "MCP_TRANSPORT_FAILED", retryable=True
@@ -1152,12 +1179,14 @@ class McpInstalledRuntimeGeneration:
                         error=exc,
                         client=client,
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         effect_kind=McpEffectKind.READ_ONLY,
                     )
                 except McpInputRequiredUnsupported as exc:
                     return _known_mcp_system_failure(
                         error_code="MCP_INPUT_REQUIRED_UNSUPPORTED",
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         message=client.diagnostic_message(exc),
                     )
                 except TimeoutError:
@@ -1167,6 +1196,7 @@ class McpInstalledRuntimeGeneration:
                     return _known_mcp_system_failure(
                         error_code="MCP_STANDARD_READ_TIMEOUT",
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                     )
                 except (asyncio.CancelledError, MemoryError):
                     raise
@@ -1178,6 +1208,7 @@ class McpInstalledRuntimeGeneration:
                         error=exc,
                         client=client,
                         remote_identity=remote_identity,
+                        remote_identity_verification=remote_identity_verification,
                         effect_kind=McpEffectKind.READ_ONLY,
                     )
             finally:
@@ -1201,12 +1232,14 @@ class McpInstalledRuntimeGeneration:
                 return _known_mcp_system_failure(
                     error_code="MCP_RESULT_LOWERING_FAILED",
                     remote_identity=remote_identity,
+                    remote_identity_verification=remote_identity_verification,
                     message=client.diagnostic_message(exc),
                 )
             return McpKnownToolResult(
                 state="SUCCESS",
                 content=body,
                 remote_identity=remote_identity,
+                remote_identity_verification=remote_identity_verification,
             )
 
 
@@ -1315,7 +1348,7 @@ def _candidate_exact_joins_config(
     candidate: McpInstallationCandidate,
     config: McpServerConfig,
     *,
-    supervisor_epoch: int,
+    supervisor_epoch: str,
 ) -> bool:
     return (
         candidate.server_id == config.server_id
@@ -1338,7 +1371,6 @@ class McpHostSupervisor:
     def __init__(
         self,
         *,
-        session_id: str,
         workspace_root: Path,
         configs: tuple[McpServerConfig, ...],
         credential_boundary: ProcessCredentialBoundary,
@@ -1348,7 +1380,6 @@ class McpHostSupervisor:
     ) -> None:
         if len(configs) > MAXIMUM_CONFIGURED_MCP_SERVERS:
             raise ValueError("too many configured MCP servers")
-        self.session_id = session_id
         self.workspace_root = workspace_root.resolve()
         self.configs = tuple(sorted(configs, key=lambda item: item.server_id))
         self._config_by_id = {item.server_id: item for item in self.configs}
@@ -1361,7 +1392,7 @@ class McpHostSupervisor:
             raise ValueError("MCP startup watchdogs must be positive")
         self._required_startup_timeout_seconds = required_startup_timeout_seconds
         self._connect_attempt_timeout_seconds = connect_attempt_timeout_seconds
-        self._epoch = int.from_bytes(uuid4().bytes[:8], "big")
+        self._epoch = random_id("epoch")
         self._lock = RLock()
         self._state = {
             item.server_id: (
@@ -1402,7 +1433,7 @@ class McpHostSupervisor:
         self._capability_owner_authenticity = object()
 
     @property
-    def owner_epoch(self) -> int:
+    def owner_epoch(self) -> str:
         return self._epoch
 
     async def start(self) -> None:
@@ -3198,7 +3229,7 @@ async def _list_optional_resource_templates(
 def _candidate(
     *,
     config: McpServerConfig,
-    epoch: int,
+    epoch: str,
     attempt_generation: int,
     lease: McpSlotLease,
     snapshot: McpDiscoverySnapshot,
@@ -3702,19 +3733,40 @@ def _render_typed_result(result: types.CallToolResult) -> bytes:
 
 def _mcp_remote_identity(
     *, semantic: McpToolSemanticFact, connection_generation: int
-) -> str:
-    # Remote tool names are server-controlled and the MCP SDK intentionally
-    # does not impose Pulsara's 4 KiB canonical identity bound.  Freeze the
-    # complete exact identity into a domain-separated digest before physical
-    # dispatch, so every exposed tool can settle a known result regardless of
-    # the display-name length.
-    return "mcp-tool:" + context_fingerprint(
-        "pulsara:mcp-remote-tool-identity:v1",
-        {
-            "server_id": semantic.server_id,
-            "connection_generation": connection_generation,
-            "remote_tool_name": semantic.remote_tool_name,
-        },
+) -> tuple[str, str]:
+    """Freeze the short identity and full cross-restart verification fact."""
+    return (
+        derive_id(
+            "mcp-tool", "remote-tool", semantic.server_id,
+            str(connection_generation), semantic.remote_tool_name,
+        ),
+        context_fingerprint(
+            "pulsara:mcp-remote-tool-identity:v1",
+            {
+                "server_id": semantic.server_id,
+                "connection_generation": connection_generation,
+                "remote_tool_name": semantic.remote_tool_name,
+            },
+        ),
+    )
+
+
+def _mcp_standard_operation_identity(
+    *, server_id: str, connection_generation: int, tool_name: str
+) -> tuple[str, str]:
+    return (
+        derive_id(
+            "mcp-tool", "standard-operation", server_id,
+            str(connection_generation), tool_name,
+        ),
+        context_fingerprint(
+            "pulsara:mcp-standard-operation-identity:v1",
+            {
+                "server_id": server_id,
+                "connection_generation": connection_generation,
+                "tool_name": tool_name,
+            },
+        ),
     )
 
 
@@ -3723,6 +3775,7 @@ def _mcp_invocation_failure(
     error: Exception,
     client: BoundedMcpSdkClient,
     remote_identity: str,
+    remote_identity_verification: str,
     effect_kind: McpEffectKind,
 ) -> McpKnownToolResult:
     # The failed observation is known; the remote operation's outcome is not.
@@ -3750,6 +3803,7 @@ def _mcp_invocation_failure(
             }
         ),
         remote_identity=remote_identity,
+        remote_identity_verification=remote_identity_verification,
     )
 
 
@@ -3763,7 +3817,8 @@ def _mcp_error_is_transport_failure(error: MCPError) -> bool:
 
 
 def _known_mcp_remote_error(
-    *, error: MCPError, client: BoundedMcpSdkClient, remote_identity: str
+    *, error: MCPError, client: BoundedMcpSdkClient, remote_identity: str,
+    remote_identity_verification: str,
 ) -> McpKnownToolResult:
     # The response and its data already crossed the transport's exact-secret
     # scrub boundary. Keep its diagnostic payload, without replaying the call
@@ -3782,11 +3837,13 @@ def _known_mcp_remote_error(
             }
         ),
         remote_identity=remote_identity,
+        remote_identity_verification=remote_identity_verification,
     )
 
 
 def _known_mcp_system_failure(
-    *, error_code: str, remote_identity: str, message: str | None = None
+    *, error_code: str, remote_identity: str, remote_identity_verification: str,
+    message: str | None = None,
 ) -> McpKnownToolResult:
     return McpKnownToolResult(
         state="SYSTEM_ERROR",
@@ -3800,6 +3857,7 @@ def _known_mcp_system_failure(
             }
         ),
         remote_identity=remote_identity,
+        remote_identity_verification=remote_identity_verification,
     )
 
 

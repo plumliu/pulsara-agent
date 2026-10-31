@@ -5,7 +5,7 @@ import { BrowserTabs, type BrowserTabRecord } from '../../frontend/lib/browser-t
 import type { BrowserState } from '../../frontend/lib/desktop-host';
 afterEach(cleanup);
 const state=(record:BrowserTabRecord,url:string):BrowserState=>({tabId:record.id,instanceId:'native',url,pendingUrl:null,title:'Page',loading:false,canGoBack:false,canGoForward:false,error:null,crashed:false});
-const tabs=()=>new BrowserTabs(undefined,{visible:()=>false,activeId:()=>undefined,insert:vi.fn(),changed:vi.fn(),activate:vi.fn(),shortcut:vi.fn()});
+const tabs=()=>new BrowserTabs(undefined,{visible:()=>false,activeId:()=>undefined,hasId:()=>false,insert:vi.fn(),changed:vi.fn(),activate:vi.fn(),shortcut:vi.fn()});
 it('does not focus a temporary blank field for a popup or supplied URL; shows the committed URL',()=>{
  const record:BrowserTabRecord={id:'popup',pendingNavigation:'https://example.com/'};
  const manager=tabs(); const view=render(<BrowserPanel record={record} tabs={manager} isOpen/>);

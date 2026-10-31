@@ -295,7 +295,6 @@ def test_supervisor_host_close_retains_failed_slot_and_repeats_error(tmp_path):
             "unit", {"transport": {"type": "stdio", "command": "/bin/false"}}
         )
         supervisor = McpHostSupervisor(
-            session_id="session:unit",
             workspace_root=tmp_path,
             configs=(config,),
             credential_boundary=ProcessCredentialBoundary(),
@@ -353,7 +352,6 @@ def test_supervisor_owns_failed_cleanup_before_slot_publication(tmp_path):
             },
         )
         supervisor = McpHostSupervisor(
-            session_id="session:unit",
             workspace_root=tmp_path,
             configs=(config,),
             credential_boundary=ProcessCredentialBoundary(),

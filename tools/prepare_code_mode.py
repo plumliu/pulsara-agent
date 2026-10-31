@@ -1,7 +1,7 @@
 """Prepare existing mise Node and locked QuickJS assets for offline wheels.
 
 mise owns the pinned Node distribution and npm owns SDK integrity. Pulsara only
-copies their release assets; an installed Host never downloads dependencies.
+copies their release assets and the shared dependency-free identity core; an installed Host never downloads dependencies.
 """
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ def prepare(repository: Path) -> None:
     for filename in ("package.json", "LICENSE", "quickjs.wasm"):
         shutil.copy2(sdk / filename, destination / filename)
     shutil.copytree(sdk / "dist", destination / "dist")
+    shutil.copy2(repository / "desktop/src/identity-core.mjs", target / "identity-core.mjs")
     shutil.copy2(node, target / "node")
     shutil.copy2(license_file, target / "NODE-LICENSE.txt")
     (target / "node").chmod(0o755)

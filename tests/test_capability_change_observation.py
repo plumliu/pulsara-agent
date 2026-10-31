@@ -632,6 +632,26 @@ def test_hook_model_projections_share_unknown_enablement(tmp_path, damage):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("secret", ["status", "RELOADED", "USER_FILE"])
+def test_reload_status_protocol_is_fixed_and_source_paths_are_dynamic(tmp_path, monkeypatch, secret):
+    import pulsara_agent.conversation_kernel.host as host_module
+    from pulsara_agent.hooks.executor import HookSecretScrubSet
+
+    async def run():
+        service = preparation(tmp_path)
+        scrub = HookSecretScrubSet()
+        scrub.observe(secret)
+        monkeypatch.setattr(host_module.HookSecretScrubSet, "capture", lambda: scrub)
+        host = SimpleNamespace(_hooks=SimpleNamespace(reload=AsyncMock(return_value=service.hooks.discover())),
+                               _lock=asyncio.Lock(), _closing=False, _closed=False)
+        result = await KernelHostSession.reload_hooks(host, deadline_monotonic=None)
+        assert result["status"] == "RELOADED"
+        assert next(source for source in result["sources"] if source["source"] == "USER_FILE")
+        assert all(secret not in source["path"] for source in result["sources"])
+        await service.mcp.aclose()
+    asyncio.run(run())
+
+
 def test_notice_scrub_uses_typed_saved_credentials_without_redacting_public_context():
     from dataclasses import replace
     from pulsara_agent.mcp_credentials import LocalMcpOAuthRecord, McpCredentialOwner

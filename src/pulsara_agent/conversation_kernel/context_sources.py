@@ -1195,10 +1195,9 @@ class KernelContextSourceCollector:
             _variant(mode, text)
             for mode, text in zip(binding.modes, texts, strict=True)
         )
-        instance_id = f"context-source:{kind.value.lower()}"
         semantic_payload: dict[str, object] = {
             "source_kind": kind.value,
-            "source_instance_id": instance_id,
+            "source_instance_id": f"context-source:{kind.value.lower()}",
             "source_contract_fingerprint": binding.contract_fingerprint,
             "variants": tuple(item.semantic_fingerprint for item in variants),
         }
@@ -1220,7 +1219,6 @@ class KernelContextSourceCollector:
         )
         return ContextSourceCandidate(
             source_kind=kind,
-            source_instance_id=instance_id,
             source_contract_version=binding.contract_version,
             source_contract_fingerprint=binding.contract_fingerprint,
             source_semantic_fingerprint=semantic,
@@ -1373,12 +1371,11 @@ def build_memory_context_source(
     variants = tuple(
         _variant(mode, text) for mode, text in zip(binding.modes, texts, strict=True)
     )
-    instance_id = f"context-source:{kind.value.lower()}"
     semantic = context_fingerprint(
         "context-source-candidate:v1",
         {
             "source_kind": kind.value,
-            "source_instance_id": instance_id,
+            "source_instance_id": f"context-source:{kind.value.lower()}",
             "source_contract_fingerprint": binding.contract_fingerprint,
             "variants": tuple(item.semantic_fingerprint for item in variants),
         },
@@ -1398,7 +1395,6 @@ def build_memory_context_source(
     )
     return ContextSourceCandidate(
         source_kind=kind,
-        source_instance_id=instance_id,
         source_contract_version=binding.contract_version,
         source_contract_fingerprint=binding.contract_fingerprint,
         source_semantic_fingerprint=semantic,
@@ -1478,12 +1474,11 @@ def build_compaction_context_source(
     variants = tuple(
         _variant(mode, text) for mode, text in zip(binding.modes, texts, strict=True)
     )
-    instance_id = f"context-source:{kind.value.lower()}"
     semantic = context_fingerprint(
         "context-source-candidate:v1",
         {
             "source_kind": kind.value,
-            "source_instance_id": instance_id,
+            "source_instance_id": f"context-source:{kind.value.lower()}",
             "source_contract_fingerprint": binding.contract_fingerprint,
             "variants": tuple(item.semantic_fingerprint for item in variants),
         },
@@ -1503,7 +1498,6 @@ def build_compaction_context_source(
     )
     return ContextSourceCandidate(
         source_kind=kind,
-        source_instance_id=instance_id,
         source_contract_version=binding.contract_version,
         source_contract_fingerprint=binding.contract_fingerprint,
         source_semantic_fingerprint=semantic,

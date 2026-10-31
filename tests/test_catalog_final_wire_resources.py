@@ -58,7 +58,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ModelInputCompileFailureKind,
-    ModelInputScopeKind,
     ProviderToolCall,
     StructuredModelInputCompileError,
 )
@@ -163,7 +162,7 @@ def _mcp_source():
         )
         for index in range(100)
     )
-    catalog = build_catalog_snapshot(owner_epoch=1, catalog_revision=1, entries=servers)
+    catalog = build_catalog_snapshot(owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=servers)
     return _candidate(
         ContextSourceKind.MCP_CATALOG,
         _render_mcp_catalog(catalog, SimpleNamespace(routes=()), ()),
@@ -515,44 +514,154 @@ def test_mcp_remeasures_each_legal_variant_and_rejects_if_reference_cannot_fit(
         _assert_typed_budget_rejection(coordinator, decision)
 
 
-def test_pending_root_hook_binds_the_measured_catalog_winner():
-    original = object()
-    winner = object()
-    expected = object()
-    sibling = SimpleNamespace(candidate=original, owns_reservation=False)
-    prepared = SimpleNamespace(
-        admission=SimpleNamespace(candidate=SimpleNamespace(exact_turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')),
-        owns_resources=False,
+class _RecordedHookReservation:
+    def __init__(self):
+        self.retire_calls = 0
+
+    def retire(self):
+        self.retire_calls += 1
+        assert self.retire_calls == 1
+
+
+class _RecordedDispatchAuthority:
+    def __init__(self):
+        self.close_calls = 0
+
+    def close(self):
+        self.close_calls += 1
+        assert self.close_calls == 1
+
+
+def _prepared_hook_case(api, *, catalog_count=230):
+    from pulsara_agent.conversation_kernel.provider_dispatch import PreparedProviderDispatch
+
+    coordinator, initial, _, _ = _prepare_case(
+        api, _skill_source(catalog_count), cold=True, budget=64_000
     )
+    authority = _RecordedDispatchAuthority()
+    reservation = _RecordedHookReservation()
+    retired_plans = []
+    continuity = coordinator._continuity
 
-    async def prepare_hook(base, **_kwargs):
-        assert base is prepared
-        return sibling
+    class RecordingContinuity:
+        def __getattr__(self, name):
+            return getattr(continuity, name)
 
-    async def measure(candidate, **_kwargs):
-        assert candidate is original
-        return SimpleNamespace(candidate=winner, wire_input_plan=object())
+        def abort_planning(self, planning):
+            retired_plans.append(planning)
+            return continuity.abort_planning(planning)
 
-    def bind(*, base, sibling, decision):
-        assert base is prepared
-        assert sibling.candidate is decision.candidate
-        return expected
-
-    runner = object.__new__(ConversationKernelRunner)
-    runner._session_scope_kind = ModelInputScopeKind.ROOT
-    runner._session_start_boundary = SimpleNamespace(has_pending=False)
-    runner._provider_dispatch = SimpleNamespace(
-        prepare_hook_context_sibling=prepare_hook,
-        measure_prepared_wire_candidate=measure,
-        bind_selected_prospective_root_dispatch=bind,
+    coordinator._continuity = RecordingContinuity()
+    coordinator._cold_epoch_assembler = KernelColdEpochInputAssembler(coordinator._compiler)
+    hook = _candidate(ContextSourceKind.HOOK_CONTEXT, ("Hook context", "Hook context"))
+    coordinator._context_source_collector = SimpleNamespace(
+        freeze_hook_context_source=lambda **_: (hook, reservation)
     )
-    runner._planning_deadline = lambda: monotonic() + 30
-    intent = SimpleNamespace(require_exact=lambda **_kwargs: None)
-
-    assert (
-        asyncio.run(runner._attach_pending_root_hook_context(prepared, intent))
-        is expected
+    base = PreparedProviderDispatch(
+        _execution_authority=authority,
+        _continuity_owner=coordinator._continuity,
+        canonical_read=initial.canonical_read,
+        canonical_facts=initial.canonical_read.compile_snapshot,
+        planning=initial.planning,
+        prepared_call=initial.prepared_call,
+        capability_dispatch_cut=initial.cold_semantic.capability_dispatch_cut,
+        tool_exposure_plan=initial.tool_exposure_plan,
+        sources=initial.sources,
+        compile_request=initial.compile_request,
+        append_result=initial.append_result,
+        memory_context=initial.memory_context,
+        cold_semantic=initial.cold_semantic,
+        non_trigger_sources=initial.cold_semantic.non_trigger_sources,
     )
+    sibling = asyncio.run(coordinator.prepare_hook_context_sibling(
+        base, model_call_index=1, deadline=monotonic() + 30
+    ))
+    assert sibling is not None
+    assert _mode(sibling.candidate, ContextSourceKind.HOOK_CONTEXT) is ContextRenderMode.FULL
+    return coordinator, base, sibling, authority, reservation, retired_plans
+
+
+@pytest.mark.parametrize("api", _WIRE_APIS)
+def test_hook_sibling_binds_measured_catalog_winner_and_transfers_authority(api):
+    coordinator, base, sibling, authority, reservation, retired = _prepared_hook_case(api)
+    original = sibling.candidate
+    decision = _measure(coordinator, original)
+    assert decision.wire_input_plan is not None
+    assert decision.candidate is not original
+    assert _mode(original, ContextSourceKind.SKILL_CATALOG) is ContextRenderMode.FULL
+    assert _mode(decision.candidate, ContextSourceKind.SKILL_CATALOG) is ContextRenderMode.UNAVAILABLE_MINIMAL
+    # Existing degradation order omits this optional Hook before the catalog.
+    assert _mode(decision.candidate, ContextSourceKind.HOOK_CONTEXT) is None
+    assert decision.quote.raw_final_wire_estimated_input_tokens <= 64_000
+
+    # Compaction's owner selects the measured sibling before the production
+    # dispatch owner transfers the unique physical authority and reservation.
+    sibling.candidate = decision.candidate
+    selected = coordinator.bind_selected_provider_dispatch(base=base, sibling=sibling)
+    assert selected.append_result is decision.candidate.append_result
+    assert selected.cold_semantic is decision.candidate.cold_semantic
+    assert selected.sources is decision.candidate.sources
+    assert selected.append_result.compiled_input is decision.candidate.semantic_input
+    assert not base.owns_execution_authority and selected.owns_execution_authority
+    assert not sibling.owns_reservation and selected.has_hook_context_reservation
+    assert authority.close_calls == reservation.retire_calls == 0
+    with pytest.raises(RuntimeError, match="already consumed"):
+        sibling.take_reservation()
+    selected.close()
+    assert authority.close_calls == reservation.retire_calls == 1
+    assert retired == [selected.planning]
+    with pytest.raises(RuntimeError, match="authority is consumed"):
+        selected.close()
+
+
+
+@pytest.mark.parametrize("api", _WIRE_APIS)
+def test_hook_sibling_that_fits_remains_in_the_bound_wire_input(api):
+    coordinator, base, sibling, authority, reservation, retired = _prepared_hook_case(
+        api, catalog_count=1
+    )
+    original = sibling.candidate
+    decision = _measure(coordinator, original)
+    assert decision.wire_input_plan is not None and decision.candidate is original
+    assert _mode(decision.candidate, ContextSourceKind.HOOK_CONTEXT) is ContextRenderMode.FULL
+    assert "Hook context" in repr(decision.wire_input_plan.materialization.ordered_input_items)
+    sibling.candidate = decision.candidate
+    selected = coordinator.bind_selected_provider_dispatch(base=base, sibling=sibling)
+    assert selected.append_result.compiled_input is decision.candidate.semantic_input
+    assert not base.owns_execution_authority and selected.has_hook_context_reservation
+    selected.close()
+    assert authority.close_calls == reservation.retire_calls == 1
+    assert retired == [selected.planning]
+
+def test_hook_sibling_binding_rejects_mismatched_cut_and_retires_reservation():
+    coordinator, base, sibling, authority, reservation, retired = _prepared_hook_case(
+        "openai_chat_completions"
+    )
+    base.tool_exposure_plan = object()
+    with pytest.raises(StructuredModelInputCompileError) as raised:
+        coordinator.bind_selected_provider_dispatch(base=base, sibling=sibling)
+    assert raised.value.kind is ModelInputCompileFailureKind.CANONICAL_PREFIX_CONFLICT
+    assert not sibling.owns_reservation and reservation.retire_calls == 1
+    assert base.owns_execution_authority and authority.close_calls == 0
+    base.close()
+    assert authority.close_calls == 1 and retired == [base.planning]
+
+
+def test_hook_sibling_binding_failure_closes_transferred_authority_and_reservation(monkeypatch):
+    import pulsara_agent.conversation_kernel.provider_dispatch as dispatch_module
+
+    coordinator, base, sibling, authority, reservation, retired = _prepared_hook_case(
+        "openai_chat_completions"
+    )
+    def fail_final(**_kwargs):
+        raise RuntimeError("injected final dispatch construction failure")
+
+    monkeypatch.setattr(dispatch_module, "PreparedProviderDispatch", fail_final)
+    with pytest.raises(RuntimeError, match="injected final dispatch construction failure"):
+        coordinator.bind_selected_provider_dispatch(base=base, sibling=sibling)
+    assert not base.owns_execution_authority and not sibling.owns_reservation
+    assert authority.close_calls == reservation.retire_calls == 1
+    assert not retired  # No dispatch was constructed to own continuity cleanup.
 
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
@@ -665,3 +774,104 @@ def test_catalog_selection_failure_consumes_real_measurement_exactly_once(
     assert discard_counts == [1]
     with pytest.raises(RuntimeError, match="already consumed"):
         measurements[0].prepare_executable_plan()
+
+
+@pytest.mark.postgres
+def test_compaction_installs_the_actual_measured_hook_sibling_winner(
+    stage2_migrated_postgres_database,
+):
+    """The real compaction owner must adopt the candidate returned by measurement."""
+    from pulsara_agent.conversation_kernel.compaction.contracts import (
+        CompactionDisposition, ResolvedCompactionPolicy,
+    )
+    from pulsara_agent.conversation_kernel.compaction.runtime import HostCompactionRuntimeOwner
+    from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
+    from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
+    from pulsara_agent.identity import random_id
+    from tests.support.model_config import frozen_test_prompt, test_model_resolution_snapshot
+    from tests.support.postgres import verified_postgres_provider
+    from tests.support.round3 import StructuredToolPort
+    from tests.test_stage2_conversation_runner import (
+        _AssertingTool, _LimitedCompactionScriptedModel,
+        _PostCompactionHookContextCollector, _acquire_bound_host_writer,
+        _record_automatic_compaction, _text_stream,
+    )
+
+    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
+    repository = ConversationKernelRepository(provider)
+    session_id, workspace_id = random_id("session"), random_id("workspace")
+    lease = _acquire_bound_host_writer(
+        repository, session_id=session_id, workspace_id=workspace_id,
+        writer_owner_id=random_id("host"), lease_seconds=30,
+        deadline_monotonic=monotonic() + 30,
+    )
+    collector = _PostCompactionHookContextCollector("Hook payload\n" + "\n" * 110_000)
+    model = _LimitedCompactionScriptedModel(
+        [_text_stream("history " + "x" * 80_000), _text_stream("final answer")],
+        "A concise handoff after compaction.",
+    )
+    owner = HostCompactionRuntimeOwner(policy=ResolvedCompactionPolicy(
+        automatic_enabled=False, auto_trigger_ratio=0.05,
+        post_compaction_target_ratio=0.04, minimum_reclaim_tokens=1,
+    ))
+    runner = ConversationKernelRunner(
+        model_resolution_snapshot_provider=test_model_resolution_snapshot,
+        repository=repository, writer_lease=lease, model=model,
+        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
+        live_bus=LiveAgentEventBus(), context_source_collector=collector,
+        compaction_owner=owner, workspace_id=workspace_id,
+    )
+    dispatch = runner._provider_dispatch
+    prepare, measure, bind = (dispatch.prepare_hook_context_sibling,
+                              dispatch.measure_prepared_wire_candidate,
+                              dispatch.bind_selected_provider_dispatch)
+    observed = {}
+
+    async def record_prepare(*args, **kwargs):
+        sibling = await prepare(*args, **kwargs)
+        if sibling is not None:
+            observed["sibling"] = sibling
+            observed["original"] = sibling.candidate
+        return sibling
+
+    async def record_measure(candidate, **kwargs):
+        decision = await measure(candidate, **kwargs)
+        if candidate is observed.get("original"):
+            observed["decision"] = decision
+        return decision
+
+    def record_bind(*, base, sibling):
+        decision = observed["decision"]
+        assert sibling is observed["sibling"]
+        assert decision.candidate is not observed["original"]
+        assert sibling.candidate is decision.candidate
+        selected = bind(base=base, sibling=sibling)
+        assert selected.append_result is decision.candidate.append_result
+        observed["selected"] = selected
+        return selected
+
+    async def exercise():
+        try:
+            await runner.run_turn(frozen_test_prompt("first question"))
+            dispatch.prepare_hook_context_sibling = record_prepare
+            dispatch.measure_prepared_wire_candidate = record_measure
+            dispatch.bind_selected_provider_dispatch = record_bind
+            outcomes = _record_automatic_compaction(runner)
+            result = await runner.run_turn(frozen_test_prompt("second question"))
+            return result, outcomes[-1]
+        finally:
+            await owner.aclose()
+
+    result, outcome = asyncio.run(exercise())
+    assert result.final_text == "final answer"
+    assert outcome.disposition is CompactionDisposition.COMPACTED
+    assert observed["decision"].wire_input_plan is not None
+    assert _mode(observed["original"], ContextSourceKind.HOOK_CONTEXT) is ContextRenderMode.FULL
+    assert _mode(observed["decision"].candidate, ContextSourceKind.HOOK_CONTEXT) is not ContextRenderMode.FULL
+    actual = model.requests[-1].wire_input_plan.materialization
+    measured = observed["decision"].wire_input_plan.materialization
+    assert actual.root_policy_value == measured.root_policy_value
+    assert actual.tool_items == measured.tool_items
+    assert actual.ordered_input_items == measured.ordered_input_items
+    assert model.requests[-1].compiled_input.messages == observed["decision"].candidate.semantic_input.messages
+    assert tuple(item.retire_calls for item in collector.reservations) == (1,)

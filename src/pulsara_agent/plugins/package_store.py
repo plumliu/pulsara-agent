@@ -569,6 +569,13 @@ class ManagedPluginStore:
                 deadline_monotonic=deadline_monotonic,
                 cancellation=cancellation,
                 scrub_set=scrub_set,
+                # The stage path is store-generated and embeds the package ID.
+                # Admission checks the original source path and the staged bytes.
+                secret_scan_source_path=(
+                    observation.source_import.source
+                    if observation.source_import is not None
+                    else observation.source_path
+                ),
                 hook_package_install_id=state.current_package_install_id,
                 hook_visibility=(
                     HookVisibilityScope.USER
@@ -620,7 +627,11 @@ class ManagedPluginStore:
                     raise PluginPackageTimedOut from exc
                 encoded_expected = os.fsencode(expected)
                 contains = bool(expected) and (
-                    encoded_expected in os.fsencode(package_root)
+                    encoded_expected in os.fsencode(package_root.parent)
+                    or (
+                        encoded_expected in os.fsencode(package_root)
+                        and encoded_expected not in os.fsencode(state.current_package_install_id)
+                    )
                     or tree_contains_secret(
                         stage_fd,
                         normalized_entries,

@@ -184,7 +184,7 @@ it('hydrates the actual result host before committing a navigation, without read
     if (url.endsWith('/connections')) return payload([entry('tail', 1000)]);
     if (url.endsWith('/context')) return context(body);
     if (url.endsWith('/window')) return {session_id:'session:test',cut_sequence:'1000',event_sequence_cut:'2000',entries:[
-      entry('creator', 1, {entry_kind:'ASSISTANT_TOOL_REQUEST',root_final:false,content:ref,blocks:[{block_id:'call',block_kind:'TOOL_CALL',tool_call_id:'call',tool_name:'read_file'}],reasoning_blocks:[{block_id:'reason',content:reasonRef}]}),
+      entry('creator', 1, {entry_kind:'ASSISTANT_TOOL_REQUEST',root_final:false,content:ref,blocks:[{block_id:'call',block_kind:'TOOL_CALL',tool_call_id:'call',tool_name:'read_file'}],reasoning_blocks:[{block_id:'reason',ordinal:0,content:reasonRef}]}),
       entry('result', 2, {entry_kind:'TOOL_RESULT',blocks:[],content:inline('结果'),tool_result:{assistant_entry_id:'creator',tool_call_id:'call',result_state:'SUCCESS'}}),
       entry('unrelated', 3, {blocks:[],content:blob('无关正文')}),
     ]};
@@ -204,7 +204,10 @@ it('hydrates the actual result host before committing a navigation, without read
   fail = false;
   const p = await reader.locateEntry!('result', new AbortController().signal);
   expect(p.messages.find(m => m.id === 'creator')).toMatchObject({contentState:'ready',reasoningContentState:'ready',sourceEntryIds:['creator','result']});
-  expect(calls.filter(c => c.url.endsWith('/read-content')).every(c => c.body.entry_id === 'creator')).toBe(true);
+  const reads = calls.filter(c => c.url.endsWith('/read-content'));
+  expect(reads.every(c => c.body.entry_id === 'creator')).toBe(true);
+  expect(reads.find(c => c.body.block_id === 'reason')?.body.reasoning_ordinal).toBe(0);
+  expect(reads.find(c => !c.body.block_id)?.body).not.toHaveProperty('reasoning_ordinal');
 });
 
 it('uses the documented byte buffer before the entry-count buffer for large admitted entries', async () => {
@@ -450,4 +453,27 @@ it.each(['current band','selected aperture'] as const)('keeps delayed older pagi
   expect(reader.current().messages.map(message=>message.id)).toEqual(range(1,8).map(item=>item.entry_id));
   expect(reader.current().history!.hasOlder).toBe(false);
   expect(calls.filter(call=>call.body.cursor).map(call=>call.body.cursor.entry_sequence)).toEqual(['5','3']);
+});
+
+it('reuses a page identity and redraws a collision for a newly admitted page', async () => {
+  fixture((url, body) => {
+    if (url.endsWith('/connections')) return payload([entry('first',1)]);
+    if (url.endsWith('/context')) return context(body);
+    if (url.endsWith('/history-snapshot')) return {snapshot:{snapshot:snapshot([entry('first',1)])}};
+    if (url.endsWith('/observe')) return {observation:{through_event_sequence:'31',committed:[{projection_kind:'IMMUTABLE_ENTRY',entry:entry('second',2)}]}};
+    throw Error(url);
+  });
+  let draws = 0;
+  vi.stubGlobal('crypto', {getRandomValues: (bytes: Uint8Array) => { bytes.fill(draws++ < 3 ? 0 : 1); return bytes; }});
+  const reader = await connect(); await flush();
+  const owner = reader as unknown as {pages: {id:string}[]};
+  const first = owner.pages[0].id;
+  expect(first).toMatch(/^page:[a-z2-7]{25}[aeimquy4]$/);
+  await reader.snapshot(); await flush();
+  expect(owner.pages[0].id).toBe(first);
+  expect(draws).toBe(2);
+  await reader.observe(); await flush();
+  expect(owner.pages).toHaveLength(2);
+  expect(owner.pages[1].id).not.toBe(first);
+  expect(draws).toBe(4);
 });

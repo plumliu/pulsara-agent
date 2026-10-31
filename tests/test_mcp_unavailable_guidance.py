@@ -1,3 +1,4 @@
+from pulsara_agent.identity import derive_id
 """Unavailable-tool guidance after real SDK catalog refreshes."""
 
 import asyncio
@@ -134,7 +135,7 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                 assert inspection["diagnostics"][0]["code"] == gate.unavailable_reason_code
                 diagnostic = inspection["diagnostics"][0]["message"]
                 server_target = json.JSONDecoder().raw_decode(diagnostic.split("target=", 1)[1])[0]
-                assert server_target == {"kind": "MCP_SERVER", "runtime_server_id": "catalog"}
+                assert server_target == {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "catalog")}
                 assert "not dispatched" not in diagnostic
                 assert "MCP_TOOL" not in diagnostic
                 if change == "schema":
@@ -162,4 +163,37 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
                 await port.aclose(timeout_seconds=5)
                 await close
 
+    asyncio.run(scenario())
+
+
+def test_real_mcp_tool_query_preserves_package_named_schema_fields(tmp_path):
+    async def scenario():
+        schema = {"type": "object", "properties": {
+            "package_install_id": {"type": "string", "default": "ordinary"},
+            "options": {"const": {"package_install_id": "literal-value"}},
+        }}
+        async def tools(_ctx, _params):
+            return types.ListToolsResult(tools=[types.Tool(name="inspect", input_schema=schema)])
+        server = Server("schema-catalog", on_list_tools=tools)
+        async with _sdk_http(server) as endpoint:
+            supervisor = _supervisor(tmp_path, endpoint)
+            port = fixture._port(tmp_path, supervisor)
+            borrow = None
+            try:
+                await supervisor.start()
+                port.prepare_tool_surface_safe_point()
+                surface = production.prepare_test_direct_tool_surface(port)
+                borrow = port.borrow_tool_surface(surface)
+                name = next(spec.name for spec in surface.model_surface.tool_specs if spec.name.endswith("inspect"))
+                target = {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name}
+                result = await port._query_capabilities_result(tool_name="query_capabilities", arguments={"target": target}, invocation_context=SimpleNamespace(surface_borrow=borrow))
+                assert result.state == "SUCCESS"
+                assert json.loads(result.content)["input_schema"] == schema
+            finally:
+                if borrow is not None:
+                    borrow.close()
+                supervisor.stop_admission()
+                close = asyncio.create_task(supervisor.aclose())
+                await port.aclose(timeout_seconds=5)
+                await close
     asyncio.run(scenario())

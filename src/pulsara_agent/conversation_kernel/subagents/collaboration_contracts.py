@@ -57,7 +57,7 @@ def target_schema(kind: str, *, allow_root: bool = False) -> dict:
     key = "agent_id" if kind == "AGENT" else "work_id"
     prefix = "session" if kind == "AGENT" else "queue"
     pattern = f"^{prefix}:{ID_PAYLOAD_PATTERN}$"
-    identity = {"type": "string", "pattern": pattern}
+    identity = {"type": "string", "pattern": pattern, "maxLength": len(prefix) + 27}
     if allow_root:
         identity = {"anyOf": [identity, {"const": "ROOT"}]}
     return {

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from pulsara_agent.capability.management_effects import (
@@ -79,6 +79,7 @@ from pulsara_agent.plugins.mcp_connection import (
     overlay_from_dict,
     overlay_to_dict,
 )
+from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     freeze_json,
@@ -102,6 +103,7 @@ class PreparedCapabilityManagementInvocation:
     skill_validation: LocalSkillValidationOutcome | None = None
     skill_removal: LocalSkillRemovalIdentity | None = None
     hook: FrozenHookSourceSnapshot | None = None
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False)
 
 
 class CapabilityManagementPreparation:
@@ -257,6 +259,7 @@ class CapabilityManagementPreparation:
                 plugin=current,
             )
         if intent.action is Action.REMOVE_PLUGIN:
+            scrub = self.plugins._credential_boundary.capture_scrub_set()
             scope = PluginScopeKind(resolved_scope.value)
             identity = _request_identity(scope, fields["plugin_id"], root)
             observed = await asyncio.to_thread(
@@ -264,6 +267,8 @@ class CapabilityManagementPreparation:
                 InspectLocalPluginsRequest(self.deadline(), workspace_root=root),
                 identity=identity,
             )
+            for secret in self.plugins._credential_boundary.capture_scrub_set().values:
+                scrub.observe(secret)
             current = observed.current
             if current is None:
                 raise McpManagementConflict(
@@ -304,6 +309,7 @@ class CapabilityManagementPreparation:
                     {"expected_package_install_id": current.current_package_install_id}
                 ),
                 plugin_instance=observed,
+                scrub_set=scrub,
             )
         plugin = await self._plugin(root, fields["plugin_id"])
         assert plugin is not None
@@ -603,9 +609,12 @@ class CapabilityManagementPreparation:
             or not snapshot.definitions
         ):
             raise ValueError("complete current Hook definitions are required for trust")
+        scrub = await asyncio.to_thread(
+            self.plugins._capture_scrub_set, InspectLocalPluginsRequest(self.deadline())
+        )
         prefill = {
             **intent.to_dict(),
-            "hook_source": await self.public_hook_snapshot(snapshot),
+            "hook_source": self.hook_review_snapshot(snapshot),
         }
         return PreparedCapabilityManagementInvocation(
             intent,
@@ -620,6 +629,7 @@ class CapabilityManagementPreparation:
             freeze_json({}),
             plugin=plugin,
             hook=snapshot,
+            scrub_set=scrub,
         )
 
     def inspect_plugin_skill_definitions(
@@ -649,10 +659,7 @@ class CapabilityManagementPreparation:
         finally:
             view.close()
 
-    async def public_hook_snapshot(self, snapshot):
-        scrub = await asyncio.to_thread(
-            self.plugins._capture_scrub_set, InspectLocalPluginsRequest(self.deadline())
-        )
+    def hook_review_snapshot(self, snapshot):
         subjects, complete = (
             self.hook_review_tools()
             if self.hook_review_tools is not None
@@ -668,7 +675,7 @@ class CapabilityManagementPreparation:
             complete=complete,
             workspace_root=self.workspace_root,
         )
-        return scrub.scrub_json(value)
+        return value
 
     async def _local(self, intent, fields, root):
         target = LocalMcpTarget(fields["server_id"], root)

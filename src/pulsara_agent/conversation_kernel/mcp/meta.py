@@ -9,6 +9,7 @@ from enum import StrEnum
 from threading import RLock
 
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.capability.contracts import CapabilityIdentity
 
 
 MAXIMUM_LIVE_NEW_MCP_TOOL_REFS_PER_EPOCH = 1_024
@@ -35,7 +36,7 @@ class NewMcpToolRef:
     conversation_scope_kind: ModelInputScopeKind
     session_id: str
     continuity_epoch_nonce: str
-    capability_identity_fingerprint: str
+    capability_identity: CapabilityIdentity
     tool_semantic_fingerprint: str
     mcp_execution_policy_fingerprint: str
     tool_route_fingerprint: str
@@ -46,6 +47,8 @@ class NewMcpToolRef:
 
     def __post_init__(self) -> None:
         require_id(self.opaque_token, "mcpref")
+        if not isinstance(self.capability_identity, CapabilityIdentity):
+            raise TypeError("MCP ref capability identity is not frozen")
         if (self.consumer_kind is McpToolRefConsumerKind.CODE_CELL) != (self.consumer_id is not None):
             raise ValueError("MCP ref consumer identity is invalid")
         if not self.session_id:
@@ -54,7 +57,7 @@ class NewMcpToolRef:
             not self.continuity_epoch_nonce
             or not all(
                 (
-                    self.capability_identity_fingerprint,
+                    self.capability_identity,
                     self.tool_semantic_fingerprint,
                     self.mcp_execution_policy_fingerprint,
                     self.tool_route_fingerprint,
@@ -95,7 +98,7 @@ class ProcessLocalNewMcpToolRefOwner:
         conversation_scope_kind: ModelInputScopeKind,
         session_id: str,
         continuity_epoch_nonce: str,
-        capability_identity_fingerprint: str,
+        capability_identity: CapabilityIdentity,
         tool_semantic_fingerprint: str,
         mcp_execution_policy_fingerprint: str,
         tool_route_fingerprint: str,
@@ -119,7 +122,7 @@ class ProcessLocalNewMcpToolRefOwner:
                     and item.ref.consumer_kind is consumer_kind
                     and item.ref.consumer_id == consumer_id
                     and item.ref.runtime_generation == runtime_generation
-                    and item.ref.capability_identity_fingerprint == capability_identity_fingerprint
+                    and item.ref.capability_identity == capability_identity
                     and item.ref.tool_semantic_fingerprint == tool_semantic_fingerprint
                     and item.ref.mcp_execution_policy_fingerprint == mcp_execution_policy_fingerprint
                     and item.ref.tool_route_fingerprint == tool_route_fingerprint
@@ -148,7 +151,7 @@ class ProcessLocalNewMcpToolRefOwner:
                     conversation_scope_kind=conversation_scope_kind,
                     session_id=session_id,
                     continuity_epoch_nonce=continuity_epoch_nonce,
-                    capability_identity_fingerprint=capability_identity_fingerprint,
+                    capability_identity=capability_identity,
                     tool_semantic_fingerprint=tool_semantic_fingerprint,
                     mcp_execution_policy_fingerprint=mcp_execution_policy_fingerprint,
                     tool_route_fingerprint=tool_route_fingerprint,
@@ -274,7 +277,7 @@ class ProcessLocalNewMcpToolRefOwner:
             stale = set()
             for token, record in self._refs.items():
                 ref = record.ref
-                key = (ref.capability_identity_fingerprint, ref.tool_semantic_fingerprint,
+                key = (ref.capability_identity, ref.tool_semantic_fingerprint,
                        ref.mcp_execution_policy_fingerprint, ref.tool_route_fingerprint, ref.runtime_generation)
                 if (ref.conversation_scope_kind is conversation_scope_kind
                         and ref.session_id == session_id

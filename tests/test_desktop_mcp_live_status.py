@@ -19,6 +19,7 @@ from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.desktop_app import session_controller as controller_module
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from pulsara_agent.settings import LocalSettingsStore
+from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from tests.test_mcp_catalog_subscriptions import _sdk_http
 from tests.test_mcp_scheduling_isolation import _invoke, _until
 
@@ -31,6 +32,7 @@ def _session(supervisor):
     session = object.__new__(KernelHostSession)
     session._writer_renewal_failure = None
     session._closing = False
+    session._session_scope_kind = ModelInputScopeKind.ROOT
     session._tools = port
     session._capabilities = SimpleNamespace(
         configured_active_skill_names=frozenset(),
@@ -90,7 +92,7 @@ def test_failed_reconnect_is_not_ready_and_other_working_owner_still_wins(tmp_pa
                               "allow_http_localhost": True},
             })
             supervisors = [McpHostSupervisor(
-                session_id="session:scheduling", workspace_root=tmp_path,
+                workspace_root=tmp_path,
                 configs=service.load_configs(), credential_boundary=service.credential_boundary,
                 connect_attempt_timeout_seconds=0.25,
             ) for _ in range(2)]
@@ -183,7 +185,7 @@ def test_subscription_relist_fences_management_tools_without_changing_provider_c
                               "allow_http_localhost": True},
             })
             supervisor = McpHostSupervisor(
-                session_id="session:scheduling", workspace_root=tmp_path,
+                workspace_root=tmp_path,
                 configs=service.load_configs(), credential_boundary=service.credential_boundary,
             )
             controller = _controller(service, monkeypatch)
@@ -240,7 +242,7 @@ def test_replaced_connect_task_cannot_supply_status_for_new_config(tmp_path, mon
                               "allow_http_localhost": True},
             })
             supervisor = McpHostSupervisor(
-                session_id="session:scheduling", workspace_root=tmp_path,
+                workspace_root=tmp_path,
                 configs=service.load_configs(), credential_boundary=service.credential_boundary,
                 connect_attempt_timeout_seconds=5,
             )

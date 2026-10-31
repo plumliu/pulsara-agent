@@ -7,6 +7,7 @@ import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptors
 from pulsara_agent.capability.contracts import (
+    capability_identity_digest,
     CapabilitySourceKind,
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
@@ -124,7 +125,6 @@ Review body
 def _skill_view(composer: KernelSkillProjectionComposer):
     owner = composer.freeze_owner_snapshot(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     projection = composer.freeze_projection_input(owner)
     builtin_source = capability_source_ref(
@@ -140,13 +140,11 @@ def _skill_view(composer: KernelSkillProjectionComposer):
     builtin_snapshot = freeze_capability_source_snapshot(
         registration=builtin_registration,
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         disposition=CapabilitySourceSnapshotDisposition.COMPLETE,
         facts=(),
     )
     registration_set = freeze_capability_registration_set(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         builtin_registration=builtin_registration,
         mcp_registrations=(),
         local_skill_catalog_registration=owner.source_snapshot.registration,
@@ -158,13 +156,11 @@ def _skill_view(composer: KernelSkillProjectionComposer):
     native_contract = context_fingerprint("test:native-contract:v1", "empty")
     native = FrozenNativeToolWireEligibilitySet(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         native_function_tool_wire_contract_fingerprint=native_contract,
         entries=(),
     )
     mcp = FrozenMcpCapabilityProjectionInput(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         source_snapshots=(),
         catalog_semantic_fingerprint=context_fingerprint("test:mcp-catalog:v1", ()),
         inspectability_facts=(),
@@ -176,7 +172,6 @@ def _skill_view(composer: KernelSkillProjectionComposer):
     )
     _parent, _tool_view, view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         registry=registry,
         tools=tools,
         skills=projection,
@@ -184,14 +179,52 @@ def _skill_view(composer: KernelSkillProjectionComposer):
     return owner, view
 
 
-def test_every_model_callable_builtin_has_provider_object_schema() -> None:
-    invalid = {
-        descriptor.name: descriptor.input_schema.get("type")
-        for descriptor in builtin_tool_descriptors()
-        if descriptor.is_model_callable
-        and descriptor.input_schema.get("type") != "object"
-    }
-    assert invalid == {}
+@pytest.mark.parametrize("wire_api", ("openai_chat_completions", "openai_responses"))
+def test_every_model_callable_builtin_has_provider_object_schema(wire_api: str) -> None:
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.capability.contracts import (
+        CapabilityKind, FrozenNativeToolWireEligibilityQuote, ToolCapabilityOrigin,
+        capability_identity, freeze_tool_capability_fact,
+    )
+    from pulsara_agent.llm.adapters.openai.function_tools import (
+        freeze_openai_native_tool_eligibility,
+        materialize_openai_native_tool_projection_set,
+    )
+    from pulsara_agent.model_input.contracts import FrozenToolSpec
+    from pulsara_agent.primitives.context import freeze_json, thaw_json
+
+    # Descriptors may use a root union; the provider schema is the lowered value.
+    source = capability_source_ref(CapabilitySourceKind.BUILTIN_REGISTRY, "test-builtin")
+    descriptors = tuple(d for d in builtin_tool_descriptors() if d.is_model_callable)
+    facts = tuple(
+        freeze_tool_capability_fact(
+            identity=capability_identity(kind=CapabilityKind.TOOL, source=source, stable_name=d.name),
+            origin=ToolCapabilityOrigin.BUILTIN,
+            canonical_tool_spec=FrozenToolSpec(
+                name=d.name, description=d.description,
+                parameters=freeze_json(d.input_schema), descriptor_fingerprint="test-descriptor",
+            ),
+        )
+        for d in descriptors
+    )
+    eligibility = freeze_openai_native_tool_eligibility(
+        conversation_scope_kind=ModelInputScopeKind.ROOT, wire_api=wire_api, tool_facts=facts,
+    )
+    assert len(eligibility.entries) == len(descriptors)
+    assert all(isinstance(entry, FrozenNativeToolWireEligibilityQuote) for entry in eligibility.entries)
+    versions = tuple(entry.version for entry in eligibility.entries)
+    specs = {fact.canonical_tool_spec.name: fact.canonical_tool_spec for fact in facts}
+    projection = materialize_openai_native_tool_projection_set(
+        conversation_scope_kind=ModelInputScopeKind.ROOT, wire_api=wire_api,
+        tool_versions=versions, tool_specs=tuple(specs[version.provider_name] for version in versions),
+        eligibility=eligibility,
+    )
+    assert {version.provider_name for version in versions} == {descriptor.name for descriptor in descriptors}
+    for item in projection.projections:
+        wire = thaw_json(item.wire_tool)
+        function = wire["function"] if wire_api == "openai_chat_completions" else wire
+        assert function["parameters"]["type"] == "object"
+        Draft202012Validator.check_schema(function["parameters"])
 
 
 def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
@@ -239,7 +272,7 @@ def test_kernel_composition_preserves_root_catalog_and_active_skill_prompt(
         assert bundled_fact.fact_semantic_fingerprint == context_fingerprint(
             "skill-capability-fact:v1",
             {
-                "identity_fingerprint": bundled_fact.identity.identity_fingerprint,
+                "identity_fingerprint": capability_identity_digest(bundled_fact.identity),
                 "catalog_semantic_fingerprint": (
                     bundled_fact.catalog_semantic_fingerprint
                 ),
@@ -355,6 +388,10 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
             return FrozenHookDefinitionView(())
 
     class FakeRepository:
+        @staticmethod
+        def read_session_root_id(*, session_id, deadline_monotonic):
+            return session_id
+
         @staticmethod
         def acquire_host_writer(**kwargs: object):
             from datetime import datetime, timedelta, timezone

@@ -912,7 +912,7 @@ class RendererBridge:
         targets = [key for key in ("entry_id", "queue_item_id", "image_ref") if key in body]
         if len(targets) != 1 or not isinstance(body[targets[0]], str) or not body[targets[0]]:
             raise ValueError("exactly one content target is required")
-        if targets[0] == "image_ref" and any(key in body for key in ("block_id", "image_ref_ordinal", "visualization_ordinal")):
+        if targets[0] == "image_ref" and any(key in body for key in ("block_id", "image_ref_ordinal", "visualization_ordinal", "reasoning_ordinal")):
             raise ValueError("image reference content target is invalid")
         request = wire.ReadContentRequest(
             block_id=str(body.get("block_id", "")),
@@ -932,6 +932,8 @@ class RendererBridge:
             request.visualization_ordinal = _uint(
                 body["visualization_ordinal"], "visualization_ordinal"
             )
+        if "reasoning_ordinal" in body:
+            request.reasoning_ordinal = _uint(body["reasoning_ordinal"], "reasoning_ordinal")
         setattr(request, targets[0], body[targets[0]])
         return await self._reader_reply(connection_id, connection,
             await connection.controller.request("read_content", request))

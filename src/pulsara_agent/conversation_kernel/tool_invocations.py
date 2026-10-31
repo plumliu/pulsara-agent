@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pulsara_agent.identity import derive_id
+from pulsara_agent.identity import derive_id, require_id
 from pulsara_agent.primitives.context import FrozenJsonObjectFact
 
 
@@ -30,8 +30,12 @@ class ToolInvocationSource:
         if not isinstance(self.kind, ToolInvocationSourceKind):
             raise TypeError("tool invocation source kind must be closed")
         model = self.kind is ToolInvocationSourceKind.MODEL_TOOL_CALL
-        if not self.invocation_id or not self.turn_id:
-            raise ValueError("tool invocation identity is required")
+        require_id(self.invocation_id, "call")
+        require_id(self.turn_id, "turn")
+        if self.assistant_entry_id is not None:
+            require_id(self.assistant_entry_id, "entry")
+        if self.source_exec_attempt_id is not None:
+            require_id(self.source_exec_attempt_id, "attempt")
         if model:
             if not self.assistant_entry_id or not self.tool_call_id or any(
                 value is not None for value in (self.source_exec_attempt_id,

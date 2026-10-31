@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from pulsara_agent.identity import require_id
+from pulsara_agent.identity import ID_PAYLOAD_PATTERN, require_id
 
 
 def memory_target(memory_id: str) -> dict[str, str]:
@@ -24,7 +24,7 @@ def memory_target_schema(description: str | None = None) -> dict[str, object]:
         "type": "object",
         "properties": {
             "kind": {"type": "string", "const": "MEMORY"},
-            "memory_id": {"type": "string", "minLength": 1},
+            "memory_id": {"type": "string", "pattern": f"^memory:{ID_PAYLOAD_PATTERN}$", "maxLength": 33},
         },
         "required": ["kind", "memory_id"],
         "additionalProperties": False,

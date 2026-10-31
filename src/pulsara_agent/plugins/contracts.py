@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, TypeAlias
+from typing import Literal, Protocol, TypeAlias, TypedDict
+
+from pulsara_agent.identity import require_id
+from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
 
 from pulsara_agent.mcp_config import McpScopePolicy
 from pulsara_agent.hooks.contracts import HookTrustDisposition
@@ -19,6 +22,28 @@ PLUGIN_MANIFEST_SCHEMA_ID = (
 )
 PLUGIN_MCP_SCHEMA_ID = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 PLUGIN_INSTANCE_STATE_CONTRACT_ID = "pulsara.plugin-instance-state.v1"
+
+
+class VisiblePackageId(TypedDict):
+    visibility: Literal["VISIBLE"]
+    value: str
+
+
+class WithheldPackageId(TypedDict):
+    visibility: Literal["WITHHELD"]
+
+
+PublicPackageId: TypeAlias = VisiblePackageId | WithheldPackageId
+
+
+def public_package_id(value: str | None, scrub_set: ProcessCredentialScrubSet | None) -> PublicPackageId | None:
+    if value is None:
+        return None
+    require_id(value, "package")
+    if scrub_set is not None and scrub_set.contains(value):
+        return {"visibility": "WITHHELD"}
+    return {"visibility": "VISIBLE", "value": value}
+
 
 
 class PluginCancellationPort(Protocol):
@@ -498,9 +523,10 @@ class GcLocalPluginPackagesRequest:
 
 @dataclass(frozen=True, slots=True)
 class ValidPluginValidationOutcome:
-    source_path: Path
-    summary: PluginValidationSummary
-    diagnostics: tuple[object, ...] = ()
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
+    source_path: Path = field(repr=False)
+    summary: PluginValidationSummary = field(repr=False)
+    diagnostics: tuple[object, ...] = field(default=(), repr=False)
     disposition: PluginValidationDisposition = field(
         default=PluginValidationDisposition.VALID, init=False
     )
@@ -508,8 +534,9 @@ class ValidPluginValidationOutcome:
 
 @dataclass(frozen=True, slots=True)
 class InvalidPluginValidationOutcome:
-    source_path: Path
-    diagnostics: tuple[object, ...]
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
+    source_path: Path = field(repr=False)
+    diagnostics: tuple[object, ...] = field(repr=False)
     disposition: PluginValidationDisposition = field(
         default=PluginValidationDisposition.INVALID, init=False
     )
@@ -521,8 +548,9 @@ class InvalidPluginValidationOutcome:
 
 @dataclass(frozen=True, slots=True)
 class UnavailablePluginValidationOutcome:
-    source_path: Path
-    diagnostics: tuple[PluginDiagnostic, ...]
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
+    source_path: Path = field(repr=False)
+    diagnostics: tuple[PluginDiagnostic, ...] = field(repr=False)
     disposition: PluginValidationDisposition = field(
         default=PluginValidationDisposition.UNAVAILABLE, init=False
     )
@@ -534,7 +562,8 @@ class UnavailablePluginValidationOutcome:
 
 @dataclass(frozen=True, slots=True)
 class AbortedPluginValidationOutcome:
-    source_path: Path
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
+    source_path: Path = field(repr=False)
     disposition: PluginValidationDisposition
 
     def __post_init__(self) -> None:
@@ -625,6 +654,7 @@ class PreparedPluginInstanceObservation:
 
 @dataclass(frozen=True, slots=True)
 class SuccessfulPluginInstallOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     disposition: PluginInstallDisposition
     identity: PluginInstanceIdentity
     package_install_id: str
@@ -646,6 +676,7 @@ class SuccessfulPluginInstallOutcome:
 
 @dataclass(frozen=True, slots=True)
 class AlreadyPresentPluginInstallOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     identity: PluginInstanceIdentity
     package_install_id: str
     enabled: bool
@@ -657,11 +688,12 @@ class AlreadyPresentPluginInstallOutcome:
 
 @dataclass(frozen=True, slots=True)
 class FailedPluginInstallOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     disposition: PluginInstallDisposition
-    source_path: Path
+    source_path: Path = field(repr=False)
     identity: PluginInstanceIdentity | None = None
     attempted_package_install_id: str | None = None
-    diagnostics: tuple[object, ...] = ()
+    diagnostics: tuple[object, ...] = field(default=(), repr=False)
     intended_enabled: bool | None = None
     last_known_cut: str | None = None
 
@@ -686,6 +718,7 @@ class FailedPluginInstallOutcome:
 
 @dataclass(frozen=True, slots=True)
 class CleanupUnavailablePluginInstallOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     prior: "NonCleanupPluginInstallOutcome"
     attempted_path: Path
     location_status: PluginCleanupLocationStatus
@@ -707,6 +740,7 @@ PluginInstallOutcome: TypeAlias = (
 
 @dataclass(frozen=True, slots=True)
 class SettledPluginEnablementOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     disposition: PluginEnablementDisposition
     identity: PluginInstanceIdentity
     package_install_id: str
@@ -724,6 +758,7 @@ class SettledPluginEnablementOutcome:
 
 @dataclass(frozen=True, slots=True)
 class FailedPluginEnablementOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     disposition: PluginEnablementDisposition
     identity: PluginInstanceIdentity
     desired_enabled: bool
@@ -766,6 +801,7 @@ PluginEnablementOutcome: TypeAlias = (
 
 @dataclass(frozen=True, slots=True)
 class RemovedPluginOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     identity: PluginInstanceIdentity
     prior_package_install_id: str
     cleanup_attention: bool = False
@@ -776,6 +812,7 @@ class RemovedPluginOutcome:
 
 @dataclass(frozen=True, slots=True)
 class FailedPluginRemovalOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     disposition: PluginRemovalDisposition
     identity: PluginInstanceIdentity
     prior_package_install_id: str | None = None
@@ -807,6 +844,7 @@ PluginRemovalOutcome: TypeAlias = RemovedPluginOutcome | FailedPluginRemovalOutc
 
 @dataclass(frozen=True, slots=True)
 class PluginInstanceInspection:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     identity: PluginInstanceIdentity
     package_install_id: str
     enabled: bool
@@ -844,6 +882,7 @@ class PluginInstanceInspection:
 
 @dataclass(frozen=True, slots=True)
 class PluginVersionInspection:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     identity: PluginInstanceIdentity
     package_install_id: str
     package_root: Path
@@ -853,6 +892,7 @@ class PluginVersionInspection:
 
 @dataclass(frozen=True, slots=True)
 class PluginInspectionOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     disposition: PluginInspectionDisposition
     instances: tuple[PluginInstanceInspection, ...]
     versions: tuple[PluginVersionInspection, ...]
@@ -932,6 +972,7 @@ class PluginGcProgress:
 
 @dataclass(frozen=True, slots=True)
 class PluginGcOutcome:
+    scrub_set: ProcessCredentialScrubSet | None = field(default=None, repr=False, compare=False, kw_only=True)
     disposition: PluginGcDisposition
     progress: PluginGcProgress
     diagnostics: tuple[PluginDiagnostic, ...] = ()

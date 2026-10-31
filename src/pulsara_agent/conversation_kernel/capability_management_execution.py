@@ -24,6 +24,7 @@ from pulsara_agent.hooks.trust import normalized_definition_digest
 from pulsara_agent.plugins.contracts import (
     InspectLocalPluginsRequest,
     PluginInspectionDisposition,
+    public_package_id,
 )
 from pulsara_agent.capability.management_form import (
     AcceptedCapabilityFormSubmission,
@@ -66,6 +67,12 @@ from pulsara_agent.plugins.mcp_connection import (
     connection_editor_definition,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
+from pulsara_agent.public_projection import public_record
+from pulsara_agent.capability.public_projection import (
+    public_connection_editor, public_diagnostic, public_mcp_config,
+    public_overlay, public_owner, public_target,
+)
+from pulsara_agent.plugins.public_projection import project_hook_public
 
 from .capability_management import (
     CapabilityManagementPreparation,
@@ -136,10 +143,19 @@ class CapabilityManagementCall:
             connections = []
             for server in plugin.summary.mcp.mcp_servers:
                 config = self.service._connection(plugin, server)
+                if server.kind.value == "stdio":
+                    overlay = next((item for item in plugin.mcp_connection_overlays
+                                    if item.local_server_id == server.local_server_id), None)
+                    _, public_config = connection_editor_definition(
+                        server, overlay,
+                        owner=plugin_connection_owner(plugin.identity, server.local_server_id),
+                    )
+                else:
+                    public_config = config_to_entry(config)
                 connections.append(
                     {
                         "server_id": server.local_server_id,
-                        "config": config_to_entry(config),
+                        "config": public_config,
                         "credentials": credential_presence(config),
                     }
                 )
@@ -180,27 +196,48 @@ class CapabilityManagementCall:
                         plugin_connection_owner(plugin.identity, fields["server_id"])
                     ),
                 }
+        public = {
+            "action": prepared.intent.action.value,
+            "scope": prepared.resolved_scope.value,
+            "prefill": thaw_json(prepared.public_prefill),
+            "expected_current": thaw_json(prepared.expected_current),
+            "user_inputs": list(prepared.user_inputs),
+            "reason": reason,
+            "effects": {
+                "workspace_write": prepared.effects.workspace_write,
+                "outside_workspace_write": prepared.effects.outside_workspace_write,
+                "process_control": prepared.effects.process_control,
+                "destructive": prepared.effects.destructive,
+            },
+            **editor,
+        }
+        scrub = self._public_scrub(prepared)
+        children = {
+            "prefill": _public_management_fields(public["prefill"], scrub),
+            "expected_current": _public_management_fields(public["expected_current"], scrub),
+            "effects": public["effects"],
+        }
+        if "plugin" in public:
+            children["plugin"] = _public_form_plugin(public["plugin"], scrub)
+        if "connection" in public:
+            children["connection"] = public_connection_editor(public["connection"], scrub)
+        if "credential_owner" in public:
+            children["credential_owner"] = public_owner(public["credential_owner"], scrub)
+        public = public_record(public, scrub, fixed=("action", "scope"), children=children)
         return PendingCapabilityForm(
-            freeze_json(
-                {
-                    "action": prepared.intent.action.value,
-                    "scope": prepared.resolved_scope.value,
-                    "prefill": thaw_json(prepared.public_prefill),
-                    "expected_current": thaw_json(prepared.expected_current),
-                    "user_inputs": list(prepared.user_inputs),
-                    "reason": reason,
-                    "effects": {
-                        "workspace_write": prepared.effects.workspace_write,
-                        "outside_workspace_write": prepared.effects.outside_workspace_write,
-                        "process_control": prepared.effects.process_control,
-                        "destructive": prepared.effects.destructive,
-                    },
-                    **editor,
-                }
-            ),
+            freeze_json(public),
             "请检查并确认这次能力配置；密钥只交给本机配置服务，不会发送给模型。",
             self._prepare_submission,
         )
+
+    def _public_scrub(self, prepared):
+        scrub = self.service.plugins._credential_boundary.capture_scrub_set()
+        for candidate in (prepared, self.prepared):
+            for observed in (candidate.scrub_set, getattr(candidate.plugin, "scrub_set", None)):
+                if observed is not None:
+                    for secret in observed.values:
+                        scrub.observe(secret)
+        return scrub
 
     async def _prepare_submission(self, body):
         if self._state != "form":
@@ -420,7 +457,7 @@ class CapabilityManagementCall:
             Action.SET_LOOSE_SKILL_ENABLED,
             Action.REMOVE_LOOSE_SKILL,
         }:
-            return await self._skill(prepared, fields, root)
+            return _public_management_result(await self._skill(prepared, fields, root), self._public_scrub(prepared))
         if action in {
             Action.TRUST_HOOK_SOURCE,
             Action.REVOKE_HOOK_TRUST,
@@ -445,14 +482,14 @@ class CapabilityManagementCall:
                 )
             else:
                 outcome = await service.mcp.execute_prepared_mutation(mutation)
-            return self._result(
+            return _public_management_result(self._result(
                 prepared,
                 "APPLIED",
                 {
                     "config_path": str(service.mcp.path(mutation.target)),
                     "cleanup_attention": outcome.cleanup_attention,
                 },
-            )
+            ), self._public_scrub(prepared))
         if action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}:
             return await self._authorization(prepared, cell_cancel_event=cell_cancel_event)
         observed = _plugin_observation(prepared, root)
@@ -532,13 +569,15 @@ class CapabilityManagementCall:
                 ),
                 connections=service.mcp,
             )
-            return self._result(
-                prepared,
-                "APPLIED",
-                {
-                    "overlay": fields["overlay"],
-                    "cleanup_attention": outcome.cleanup_attention,
-                },
+            return self._public_plugin_result(
+                prepared, outcome, self._result(
+                    prepared,
+                    "APPLIED",
+                    {
+                        "overlay": fields["overlay"],
+                        "cleanup_attention": outcome.cleanup_attention,
+                    },
+                ),
             )
         else:
             raise ValueError("unsupported capability operation")
@@ -564,10 +603,31 @@ class CapabilityManagementCall:
                 "plugin_id": outcome.identity.plugin_id,
             }
             result["current"]["package_root"] = str(outcome.package_root)
-            result["diagnostics"] = [
-                diagnostic_payload(item) for item in outcome.diagnostics
-            ]
-        return result
+        source = getattr(outcome, "prior", outcome)
+        diagnostics = list(getattr(source, "diagnostics", ()))
+        if source is not outcome:
+            result["current"]["prior_operation_status"] = source.disposition.value
+            diagnostics.append(outcome.diagnostic)
+        if diagnostics:
+            result["diagnostics"] = [diagnostic_payload(item) for item in diagnostics]
+        for name in (
+            "package_install_id", "attempted_package_install_id",
+            "expected_package_install_id", "observed_package_install_id",
+            "prior_package_install_id", "last_known_cut", "intended_enabled",
+            "desired_enabled",
+        ):
+            if hasattr(source, name):
+                result["current"][name] = getattr(source, name)
+        return self._public_plugin_result(prepared, outcome, result)
+
+    def _public_plugin_result(self, prepared, outcome, result):
+        scrub = self._public_scrub(prepared)
+        for value in (outcome, getattr(outcome, "prior", None)):
+            observed = getattr(value, "scrub_set", None)
+            if observed is not None:
+                for secret in observed.values:
+                    scrub.observe(secret)
+        return _public_management_result(result, scrub)
 
     async def _skill(self, prepared, fields, root):
         service = self.service
@@ -739,7 +799,7 @@ class CapabilityManagementCall:
                 enabled=fields["enabled"],
                 require_current=current,
             )
-        return self._result(
+        result = self._result(
             prepared,
             "APPLIED",
             {
@@ -756,6 +816,7 @@ class CapabilityManagementCall:
                 ),
             },
         )
+        return _public_management_result(result, self._public_scrub(prepared))
 
     async def _authorization(self, prepared, *, cell_cancel_event=None):
         service = self.service
@@ -840,7 +901,8 @@ class CapabilityManagementCall:
                 if prepared.plugin
                 else None,
             }
-        return result
+        scrub = self._public_scrub(prepared)
+        return _public_management_result(result, scrub)
 
     @staticmethod
     def _result(prepared, status, current):
@@ -855,6 +917,52 @@ class CapabilityManagementCall:
             "current": current,
             "adoption": "NOT_APPLICABLE",
         }
+
+
+def _public_management_fields(value, scrub):
+    children = {}
+    for name in ("expected_package_install_id", "package_install_id", "attempted_package_install_id",
+                 "observed_package_install_id", "prior_package_install_id"):
+        if name in value:
+            children[name] = public_package_id(value[name], scrub)
+    for name in ("overlay", "expected_overlay"):
+        if name in value:
+            children[name] = public_overlay(value[name], scrub)
+    if "config" in value:
+        children["config"] = public_mcp_config(value["config"], scrub)
+    if "target" in value:
+        children["target"] = public_target(value["target"], scrub)
+    if "hook_source" in value:
+        children["hook_source"] = project_hook_public(value["hook_source"], scrub)
+    return public_record(value, scrub,
+        fixed=("action", "scope", "source_kind", "source_format", "operation_status", "prior_operation_status", "last_known_cut", "cleanup_location_status"),
+        children=children)
+
+
+def _public_form_plugin(value, scrub):
+    return public_record(value, scrub, children={
+        "package_install_id": public_package_id(value["package_install_id"], scrub),
+        "skills": [public_record(item, scrub) for item in value["skills"]],
+        "hooks": [public_record(item, scrub, fixed=("event",)) for item in value["hooks"]],
+        "mcp": [public_connection_editor(item, scrub) for item in value["mcp"]],
+    })
+
+
+def _public_management_result(value, scrub):
+    children = {}
+    if "target" in value:
+        children["target"] = public_target(value["target"], scrub)
+    if "current" in value:
+        children["current"] = _public_management_fields(value["current"], scrub)
+    if "diagnostics" in value:
+        children["diagnostics"] = [public_diagnostic(item, scrub) for item in value["diagnostics"]]
+    if "authorization" in value:
+        authorization = value["authorization"]
+        children["authorization"] = public_record(authorization, scrub, children={
+            "owner": public_owner(authorization["owner"], scrub),
+            "package_install_id": public_package_id(authorization["package_install_id"], scrub),
+        })
+    return public_record(value, scrub, fixed=("status", "action", "adoption"), children=children)
 
 
 async def _settled_call(function, *args, _cancellation=None, **kwargs):

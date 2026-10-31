@@ -552,7 +552,7 @@ class KernelInteractionCoordinator:
             pending.resolving = False
             resolution = ToolInteractionResolution(
                 decision,
-                f"interaction-decision:{accepted.decision_id}",
+                accepted.decision_id,
                 "tool execution was allowed"
                 if decision == "ALLOW"
                 else "tool execution was denied",

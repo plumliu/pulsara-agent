@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pulsara_agent.hooks.presentation import hook_snapshot_public
+from pulsara_agent.plugins.public_projection import project_hook_public
 from pulsara_agent.capability.inspection_presentation import diagnostic_payload
+from pulsara_agent.capability.public_projection import public_connection_review
+from pulsara_agent.public_projection import public_record
 
 import argparse
 import asyncio
 from contextlib import contextmanager
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
@@ -71,7 +75,6 @@ from pulsara_agent.hooks.contracts import (
     HookSourceKind,
     PluginHookSourceIdentity,
 )
-from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.plugins.contracts import (
     CleanupUnavailablePluginInstallOutcome,
@@ -276,12 +279,23 @@ def main() -> None:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return
     if args.command == "hooks":
+        from pulsara_agent.settings import LocalSettingsStore
         try:
+            settings = LocalSettingsStore()
+            scrub = settings.read().credential_scrub_set()
             result = _hooks_command(args)
+            for secret in settings.read().credential_scrub_set().values:
+                scrub.observe(secret)
         except (ValueError, KeyError, RuntimeError) as exc:
             parser.error(_public_error(exc))
-        scrub = HookSecretScrubSet.capture()
-        safe = scrub.scrub_json(result)
+        children = {}
+        if "sources" in result:
+            children["sources"] = [project_hook_public(source, scrub) for source in result["sources"]]
+        if "source" in result:
+            children["source"] = project_hook_public(result["source"], scrub)
+        if "compatibility_profile" in result:
+            children["compatibility_profile"] = result["compatibility_profile"]
+        safe = public_record(result, scrub, fixed=("status",), children=children)
         print(json.dumps(safe, indent=2, ensure_ascii=False))
         return
     if args.command == "config-check":
@@ -737,11 +751,18 @@ class _PluginCliUsageError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class _PluginCliOutput:
+    payload: dict[str, object]
+    json_output: bool
+    scrub: ProcessCredentialScrubSet
+
+
 def _plugins_command(
     args: argparse.Namespace,
     *,
     credential_boundary: ProcessCredentialBoundary | None = None,
-) -> tuple[str, int]:
+) -> tuple[_PluginCliOutput, int]:
     command = args.plugins_command
     if command is None:
         raise _PluginCliUsageError("plugins requires a subcommand")
@@ -749,6 +770,15 @@ def _plugins_command(
     service = PluginManagementService(credential_boundary=boundary)
     cancellation = EventPluginCancellationPort()
     deadline = float("inf")
+
+    def render(payload, json_output, *sources):
+        scrub = boundary.capture_scrub_set()
+        for source in sources:
+            captured = getattr(source, "scrub_set", None)
+            if captured is not None:
+                for secret in captured.values:
+                    scrub.observe(secret)
+        return _PluginCliOutput(payload, json_output, scrub)
 
     if command == "validate":
         with _bridge_skill_sigint(cancellation):
@@ -758,7 +788,7 @@ def _plugins_command(
                 )
             )
         payload = _plugin_validation_payload(result)
-        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+        return render(payload, args.json, result), _plugin_exit_status(
             result.disposition
         )
 
@@ -780,7 +810,7 @@ def _plugins_command(
                 connections=LocalMcpManagementService(LocalSettingsStore(), credential_boundary=boundary),
             ))
         payload = _plugin_install_payload(result)
-        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+        return render(payload, args.json, result), _plugin_exit_status(
             result.disposition
         )
 
@@ -796,7 +826,7 @@ def _plugins_command(
             payload = _plugin_inspection_payload(
                 inspection, doctor=True, projection="enable-preflight"
             )
-            return _render_plugin_payload(payload, args.json), 2
+            return render(payload, args.json, inspection), 2
         try:
             target = next(
                 (
@@ -814,7 +844,7 @@ def _plugins_command(
                     "scope": scope.value,
                     "plugin_id": args.plugin_id,
                 }
-                return _render_plugin_payload(payload, args.json), 1
+                return render(payload, args.json, inspection), 1
             review = _plugin_instance_payload(target, include_diagnostics=True)
             from pulsara_agent.plugins.mcp_connection import connection_review, review_to_dict
             from pulsara_agent.settings import LocalSettingsStore, LOCAL_SETTINGS_FILE_NAME
@@ -826,10 +856,10 @@ def _plugins_command(
             )
             review["connection_review"] = review_to_dict(reviewed_connections)
             if command == "enable" and not args.yes:
-                _plugin_cli_stderr(_plugin_enable_review_text(review), boundary)
+                _plugin_cli_stderr(lambda scrub: _plugin_enable_review_text(_public_plugin_cli_review(review, scrub)), boundary,
+                                   observed=inspection.scrub_set)
                 _plugin_cli_stderr(
-                    "Enable this exact package and accept future local process/HTTP "
-                    "startup? [y/N] ",
+                    lambda scrub: "Enable this exact package and accept future local process/HTTP startup? [y/N] ",
                     boundary,
                     end="",
                 )
@@ -843,7 +873,7 @@ def _plugins_command(
                         "disposition": "DECLINED",
                         "reviewed_package": review,
                     }
-                    return _render_plugin_payload(payload, args.json), 1
+                    return render(payload, args.json, inspection), 1
             with _bridge_skill_sigint(cancellation):
                 result = service.set_local_plugin_enabled(
                     SetLocalPluginEnabledRequest(
@@ -863,7 +893,7 @@ def _plugins_command(
                     )
                 )
             payload = _plugin_enablement_payload(result, reviewed=review)
-            return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+            return render(payload, args.json, result, inspection), _plugin_exit_status(
                 result.disposition
             )
         finally:
@@ -876,10 +906,10 @@ def _plugins_command(
         )
         try:
             if not isinstance(inspection, PluginInspectionOutcome) or inspection.disposition is not PluginInspectionDisposition.COMPLETE:
-                return _render_plugin_payload(_plugin_inspection_payload(inspection, doctor=True, projection="remove-preflight"), args.json), 2
+                return render(_plugin_inspection_payload(inspection, doctor=True, projection="remove-preflight"), args.json, inspection), 2
             target = next((item for item in inspection.instances if item.identity.scope is scope and item.identity.plugin_id == args.plugin_id), None)
             if target is None:
-                return _render_plugin_payload({"operation": "remove_local_plugin", "disposition": "NOT_FOUND", "plugin_id": args.plugin_id}, args.json), 1
+                return render({"operation": "remove_local_plugin", "disposition": "NOT_FOUND", "plugin_id": args.plugin_id}, args.json, inspection), 1
             with _bridge_skill_sigint(cancellation):
                 result = asyncio.run(service.remove_local_plugin(
                     RemoveLocalPluginRequest(
@@ -889,7 +919,7 @@ def _plugins_command(
         finally:
             _close_inspection_anchors(inspection)
         payload = _plugin_removal_payload(result)
-        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+        return render(payload, args.json, result), _plugin_exit_status(
             result.disposition
         )
 
@@ -909,7 +939,7 @@ def _plugins_command(
                 and inspection.disposition is PluginInspectionDisposition.COMPLETE
                 else 2
             )
-            return _render_plugin_payload(payload, args.json), status
+            return render(payload, args.json, inspection), status
         finally:
             if isinstance(inspection, PluginInspectionOutcome):
                 _close_inspection_anchors(inspection)
@@ -920,7 +950,7 @@ def _plugins_command(
                 GcLocalPluginPackagesRequest(deadline, workspace, cancellation)
             )
         payload = _plugin_gc_payload(result)
-        return _render_plugin_payload(payload, args.json), _plugin_exit_status(
+        return render(payload, args.json, result), _plugin_exit_status(
             result.disposition
         )
     raise _PluginCliUsageError("unknown plugins command")
@@ -937,6 +967,88 @@ def _plugin_scope_and_workspace(
     if args.workspace is None:
         raise _PluginCliUsageError("--scope workspace requires --workspace")
     return scope, _resolved_skill_workspace(args.workspace)
+
+
+
+def _public_plugin_cli_review(review, scrub):
+    from pulsara_agent.plugins.contracts import public_package_id
+
+    children = {}
+    if "package_install_id" in review:
+        children["package_install_id"] = public_package_id(review["package_install_id"], scrub)
+    if "identity" in review:
+        children["identity"] = public_record(review["identity"], scrub, fixed=("scope",))
+    if "summary" in review:
+        children["summary"] = _public_plugin_summary(review["summary"], scrub)
+    if "diagnostics" in review:
+        children["diagnostics"] = [_public_plugin_diagnostic(item, scrub) for item in review["diagnostics"]]
+    if "connection_review" in review:
+        children["connection_review"] = public_connection_review(review["connection_review"], scrub)
+    return public_record(review, scrub, fixed=("kind", "effective_hook_trust_disposition"), children=children)
+
+
+def _public_plugin_diagnostic(value, scrub):
+    children = {}
+    if "diagnostics" in value:
+        children["diagnostics"] = [_public_plugin_diagnostic(item, scrub) for item in value["diagnostics"]]
+    if "candidates" in value:
+        children["candidates"] = [public_record(item, scrub) for item in value["candidates"]]
+    return public_record(value, scrub,
+        fixed=("code", "component", "severity", "kind", "producer_kind", "reason", "tier", "diagnostic_codes"), children=children)
+
+
+def _public_plugin_summary(value, scrub):
+    manifest = value["manifest"]
+    manifest_children = {"author": public_record(manifest["author"], scrub) if manifest["author"] else None}
+    children = {"manifest": public_record(manifest, scrub, children=manifest_children)}
+    for component in ("skills", "mcp", "hooks"):
+        part = value[component]
+        definitions = "servers" if component == "mcp" else "definitions"
+        part_children = {
+            "diagnostics": [_public_plugin_diagnostic(item, scrub) for item in part["diagnostics"]],
+            definitions: [public_record(item, scrub,
+                fixed=("event", "transport"), external=("env", "public_headers")) for item in part[definitions]],
+        }
+        children[component] = public_record(part, scrub, fixed=("disposition",), children=part_children)
+    return public_record(value, scrub, children=children)
+
+
+def _public_plugin_cli_payload(payload, scrub):
+    """Assemble the closed CLI protocol from projected dynamic data."""
+    from pulsara_agent.plugins.contracts import public_package_id
+
+    children = {}
+    for name in ("package_install_id", "attempted_package_install_id",
+                 "expected_package_install_id", "observed_package_install_id",
+                 "prior_package_install_id"):
+        if name in payload:
+            children[name] = public_package_id(payload[name], scrub)
+    for name in ("identity", "effective_composition"):
+        if name in payload:
+            children[name] = public_record(payload[name], scrub, fixed=("scope",) if name == "identity" else ("skills", "mcp", "hooks"))
+    if "summary" in payload:
+        children["summary"] = _public_plugin_summary(payload["summary"], scrub)
+    if "diagnostics" in payload:
+        children["diagnostics"] = [_public_plugin_diagnostic(item, scrub) for item in payload["diagnostics"]]
+    if "diagnostic" in payload:
+        children["diagnostic"] = _public_plugin_diagnostic(payload["diagnostic"], scrub)
+    if "prior" in payload:
+        children["prior"] = _public_plugin_cli_payload(payload["prior"], scrub)
+    if "reviewed_package" in payload:
+        children["reviewed_package"] = _public_plugin_cli_review(payload["reviewed_package"], scrub)
+    for name in ("instances", "versions"):
+        if name in payload:
+            children[name] = [_public_plugin_cli_review(item, scrub) for item in payload[name]]
+    if "progress" in payload:
+        progress = payload["progress"]
+        progress_children = {}
+        for name in ("ordered_removed", "ordered_in_use"):
+            progress_children[name] = [_public_plugin_cli_review(item, scrub) for item in progress[name]]
+        if progress["current_attempted_ref"] is not None:
+            progress_children["current_attempted_ref"] = _public_plugin_cli_review(progress["current_attempted_ref"], scrub)
+        children["progress"] = public_record(progress, scrub, fixed=("current_location_status",), children=progress_children)
+    return public_record(payload, scrub,
+        fixed=("operation", "disposition", "projection", "last_known_cut", "location_status"), children=children)
 
 
 def _plugin_validation_payload(result) -> dict[str, object]:
@@ -1263,6 +1375,12 @@ def _plugin_enable_review_text(review: dict[str, object]) -> str:
     )
 
 
+def _display_public_package_id(value: object) -> str:
+    if isinstance(value, dict) and value.get("visibility") == "VISIBLE":
+        return str(value["value"])
+    return "[WITHHELD]"
+
+
 def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str:
     if json_output:
         return json.dumps(payload, indent=2, ensure_ascii=False)
@@ -1274,7 +1392,8 @@ def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str
     if isinstance(identity, dict):
         lines.append(f"Instance: {identity.get('scope')}:{identity.get('plugin_id')}")
     if "package_install_id" in payload:
-        lines.append(f"Package install id: {payload['package_install_id']}")
+        package = payload["package_install_id"]
+        lines.append(f"Package install id: {_display_public_package_id(package)}")
     instances = payload.get("instances")
     if isinstance(instances, list):
         if not instances:
@@ -1284,7 +1403,7 @@ def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str
                 item_identity = item["identity"]
                 lines.append(
                     f"- {item_identity['scope']}:{item_identity['plugin_id']} "
-                    f"{item['package_install_id']} enabled={item['enabled']}"
+                    f"{_display_public_package_id(item['package_install_id'])} enabled={item['enabled']}"
                 )
                 skills = ", ".join(item.get("effective_skill_names", [])) or "none"
                 servers = ", ".join(item.get("effective_mcp_server_ids", [])) or "none"
@@ -1307,28 +1426,28 @@ def _render_plugin_payload(payload: dict[str, object], json_output: bool) -> str
 
 
 def _plugin_cli_print(
-    output: str, credential_boundary: ProcessCredentialBoundary
+    output: _PluginCliOutput, credential_boundary: ProcessCredentialBoundary
 ) -> None:
-    """Scrub and emit while supported rotation is excluded from stdout."""
+    """Project dynamic data and emit fixed protocol inside the same sink gate."""
 
     with credential_boundary.sync_guard() as guard:
-        scrub_set = ProcessCredentialScrubSet()
-        scrub_set.observe(guard.value)
-        print(scrub_set.scrub_text(output))
+        output.scrub.observe(guard.value)
+        print(_render_plugin_payload(_public_plugin_cli_payload(output.payload, output.scrub), output.json_output))
 
 
 def _plugin_cli_stderr(
-    output: str,
+    output,
     credential_boundary: ProcessCredentialBoundary,
     *,
     end: str = "\n",
+    observed=None,
 ) -> None:
     """Keep preflight review/prompt off JSON stdout and inside the sink gate."""
 
     with credential_boundary.sync_guard() as guard:
-        scrub_set = ProcessCredentialScrubSet()
+        scrub_set = observed or ProcessCredentialScrubSet()
         scrub_set.observe(guard.value)
-        print(scrub_set.scrub_text(output), end=end, file=sys.stderr, flush=True)
+        print(output(scrub_set), end=end, file=sys.stderr, flush=True)
 
 
 def _plugin_cli_parser_error(
@@ -1472,7 +1591,6 @@ async def _mcp_command(
                 results.append({"server_id": config.server_id, "status": "disabled"})
                 continue
             supervisor = McpHostSupervisor(
-                session_id=f"mcp-doctor:{config.server_id}",
                 workspace_root=workspace_root or require_pulsara_home(),
                 configs=(config,),
                 credential_boundary=boundary,

@@ -2266,12 +2266,12 @@ class LocalHttpServer:
         else:
             if sum(field in body for field in ("entry_id", "queue_item_id", "image_ref")) != 1:
                 raise ValueError("exactly one canonical content owner is required")
-            if "image_ref" in body and any(key in body for key in ("block_id", "image_ref_ordinal", "visualization_ordinal")):
+            if "image_ref" in body and any(key in body for key in ("block_id", "image_ref_ordinal", "visualization_ordinal", "reasoning_ordinal")):
                 raise ValueError("image reference content target is invalid")
             content_request = wire.ReadContentRequest(
                 block_id=body.get("block_id", ""), offset_bytes=int(body.get("offset_bytes", 0)),
                 limit_bytes=int(body.get("limit_bytes", 256 << 10)))
-            for field in ("entry_id", "queue_item_id", "image_ref", "image_ref_ordinal", "visualization_ordinal"):
+            for field in ("entry_id", "queue_item_id", "image_ref", "image_ref_ordinal", "visualization_ordinal", "reasoning_ordinal"):
                 if field in body:
                     setattr(content_request, field, body[field])
         return protobuf_json(await self.sessions.history_content(session_id, content_request, artifact=artifact))

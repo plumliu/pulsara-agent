@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useMemo, useState, type ComponentProps } from 'react';
 import { createRoot } from 'react-dom/client';
 import { WorkbenchView } from '../components/workbench-view';
+import { randomIdentity } from '../lib/identity';
 import { PromptDraftStore } from '../lib/prompt-draft';
 import { promptContentTextProjection } from '../lib/prompt-content';
 import { initializeUiPreferences } from '../lib/ui-preferences';
@@ -51,7 +52,8 @@ function Demo() {
     const interval=setInterval(()=>setBody(previous=>`${previous}\n\n${paragraph(previous.split('\n\n').length+1)}`),250);
     return()=>clearInterval(interval);
   },[streaming,running]);
-  const current:Message={id:'current-process',role:'assistant',assistantKind:'live',turnId:'current',time:'',status:running?'running':'completed',body:'',
+  const currentId=useMemo(()=>randomIdentity('view'),[version]);
+  const current:Message={id:currentId,viewSource:{kind:'draft',identity:{kind:'turn',value:'current'}},role:'assistant',assistantKind:'live',turnId:'current',time:'',status:running?'running':'completed',body:'',
     reasoning:[{id:'current-thought',kind:'full',active:running,body}],
     traces:[{id:'current-tool',kind:'mcp',toolName:'mcp__demo__read',title:'读取演示文本',subtitle:'已完成',status:'completed',resultText:longThought}]};
   const [sent,setSent]=useState<Message[]>([]);
@@ -69,8 +71,8 @@ function Demo() {
     canControl:true,isObserver:false,permission:'read-only',skills:[],
     onFork:async()=>{},onReconnect:noop,onTakeControl:noop,onNewSession:reset,onToggleInspector:noop,onOpenModelSettings:noop,
     onModelCallBindingChange:async()=>{},onSend:async(content)=>{
-      if(running)setQueue(previous=>[...previous,{sourceKind:'command',queueItemId:crypto.randomUUID(),commandId:crypto.randomUUID(),sequence:String(previous.length+1),status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:promptContentTextProjection(content)}]},permission:'read-only'}]);
-      else setSent(previous=>[...previous,{id:crypto.randomUUID(),role:'user',time:'',body:promptContentTextProjection(content)}]);
+      if(running)setQueue(previous=>[...previous,{sourceKind:'command',queueItemId:randomIdentity('queue'),commandId:randomIdentity('command'),sequence:String(previous.length+1),status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:promptContentTextProjection(content)}]},permission:'read-only'}]);
+      else setSent(previous=>[...previous,{id:randomIdentity('entry'),role:'user',time:'',body:promptContentTextProjection(content)}]);
       return true;
     },onStop:()=>{setRunning(false);setStreaming(false);},onCompact:async()=>{},onRenameSession:noop,onReopenRuntime:reset,runtimeReopenBusy:false,
     onReadInteraction:async()=>{throw Error('此演示没有交互卡片');},onResolveInteraction:async()=>false,
@@ -80,7 +82,7 @@ function Demo() {
     onReadProcessEnd:async(_entry,signal)=>{await read(signal);},
     onLoadHistory:async()=>setOldBand(false),
     onRetainHistory:interest=>setReaderStatus(interest.followLatest?'允许跟随':'保护阅读'),
-    todo:{id:'demo-todo',items:[{id:'one',label:'展开长思考',status:'completed'},{id:'two',label:'向上阅读并选择文字',status:'in-progress'},{id:'three',label:'回到最新并完成执行',status:'pending'}]},
+    todo:{id:'demo-todo',items:[{ordinal:0,label:'展开长思考',status:'completed'},{ordinal:1,label:'向上阅读并选择文字',status:'in-progress'},{ordinal:2,label:'回到最新并完成执行',status:'pending'}]},
   };
   return <><aside className="follow-demo-controls">
     <strong>本地体验 · {readerStatus}</strong>

@@ -83,7 +83,7 @@ bytes unavailable at verifier
 durable row / ACK unknown / cross restart
   -> semantic digest or stable canonical identity
 
-untrusted opaque reference
+authenticated cursor or token requiring a MAC
   -> HMAC/MAC token
 
 same-process exact frozen object already present
@@ -203,7 +203,7 @@ consumer recomputes H(FrozenThing.fields)
 | `semantic_digest` | 不携带完整payload时的canonical语义摘要 | durable confirmation、source lineage、prefix | 有独立verifier时保留 |
 | `compatibility_digest` | adapter/codec/config中真正改变重放或lowering的closed语义 | provider replay、MCP config/policy | 保留 |
 | `stable_identity_digest` | 已进入canonical/opaque ID算法的稳定输入 | event/result/entry派生 | 输出保持不变；可即时计算 |
-| `MAC` | 带密钥的不可伪造token | cursor、MCP ref、list_agents cursor | 保留 |
+| `MAC` | 带密钥的不可伪造token | cursor、list_agents cursor | 保留 |
 | `process-local nonce` | owner签发的一次性opaque identity | permit、reservation | 保留nonce，不hash完整DTO |
 | `decorative fingerprint` | 只做self-check或重复child/parent语义 | frozen DTO链 | 删除 |
 
@@ -274,7 +274,7 @@ process-local authority统一采用：
 - permission mode、permission snapshot与local authorize不变；
 - Builtin/MCP/Skill registry completeness不变；
 - MCP cold DIRECT、late/incompatible META、disconnect gate与same-schema reconnect语义不变；
-- inspect/use opaque ref与cursor的HMAC安全不变；
+- MCP inspect/use ref 使用 `R(mcpref)` 和现有 owner 的完整绑定、scope 及交付激活校验；cursor 的 HMAC 安全不变；
 - Skill四root、precedence、complete-or-unavailable、普通`read_file`激活路径不变；
 - provider tools顺序、schema、name与description不变。
 
@@ -444,7 +444,6 @@ writer在写入时计算，reader在取得bytes后独立重算。这里不能改
 
 以下不是普通fingerprint，必须保留：
 
-- MCP inspect/use opaque ref；
 - MCP directory cursor；
 - subagent list cursor；
 - 任何permission/config secret-generation commitment；
@@ -883,7 +882,8 @@ owner必须验证：
 | continuity candidate在install前被新candidate替换 | epoch/slot/object identity冲突；provider open为0 |
 | ACK unknown后canonical row已提交 | 通过stable ID与逐字段confirmation返回FULL，不依赖外层self fingerprint |
 | blob/replay/artifact body被篡改 | content digest校验失败；hard fail |
-| MCP ref/cursor被修改 | HMAC失败；不得降级为普通hash比较 |
+| MCP ref被修改 | 原 owner 精确绑定查找／scope 校验失败；不得凭引用授予权限 |
+| cursor被修改 | HMAC失败；不得降级为普通hash比较 |
 | capability owner snapshot遗漏source | owner completeness/factory失败；不得靠registry hash自证 |
 | stable event ID原先依赖candidate fingerprint | 按原semantic payload即时计算，ID保持byte-identical |
 | historical activation JSON含旧hash | 正常保留；不作为current gate |

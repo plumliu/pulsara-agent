@@ -6,7 +6,7 @@ requests are translated into attached Protocol-v3 frames after authentication.
 
 from __future__ import annotations
 
-from pulsara_agent.identity import random_id
+from pulsara_agent.identity import derive_id, random_id
 
 import asyncio
 from contextlib import suppress
@@ -309,7 +309,7 @@ class BrowserRuntimeConnection:
             host_session_id=host_session_id,
             session_id=session_id,
             role=control_role,
-            client_instance_id=f"{connection_id}:controller",
+            client_instance_id=derive_id("transport", "client-instance", connection_id, "controller"),
         )
         observer: TerminalProtocolClient | None = None
         try:
@@ -318,7 +318,7 @@ class BrowserRuntimeConnection:
                 host_session_id=host_session_id,
                 session_id=session_id,
                 role=wire.ATTACHMENT_ROLE_OBSERVER,
-                client_instance_id=f"{connection_id}:observer",
+                client_instance_id=derive_id("transport", "client-instance", connection_id, "observer"),
             )
             # Live-control subscriptions are attachment-local.  The same
             # observer that owns long-poll observation must establish this

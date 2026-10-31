@@ -1,3 +1,4 @@
+import { randomIdentity } from './identity';
 import type { BrowserState, DesktopBrowser } from './desktop-host';
 
 export interface BrowserTabRecord {
@@ -15,6 +16,7 @@ export interface BrowserTabRecord {
 export interface BrowserTabSink {
   visible(): boolean;
   activeId(): string | undefined;
+  hasId(id: string): boolean;
   insert(record: BrowserTabRecord, foreground: boolean): void;
   changed(record: BrowserTabRecord): void;
   activate(id: string): void;
@@ -63,6 +65,11 @@ export class BrowserTabs {
     const candidates = [...this.records.values()].filter(item => item.state?.url === url && !item.opening && !item.pendingNavigation && !item.state.loading && !item.state.pendingUrl && !item.state.crashed);
     return candidates.find(item => item.id === this.sink.activeId()) ?? candidates[0];
   }
+  private newId(): string {
+    let id: string;
+    do { id = randomIdentity('tab'); } while (this.records.has(id) || this.sink.hasId(id));
+    return id;
+  }
   /** Adopt only at batch publication; native resources are started afterwards. */
   prepare(input: string | undefined, batch: Map<string, BrowserTabRecord>) {
     let url: string | undefined, error: string | undefined;
@@ -72,7 +79,7 @@ export class BrowserTabs {
       adopt: () => {
         const match = input === undefined ? batch.get('') : url ? batch.get(url) ?? this.find(url) : undefined;
         if (match) return match;
-        created = { id: crypto.randomUUID(), focusAddressOnOpen: input === undefined, requestedUrl: input, error };
+        created = { id: this.newId(), focusAddressOnOpen: input === undefined, requestedUrl: input, error };
         this.records.set(created.id, created); if (!error) batch.set(url ?? '', created);
         return created;
       },
@@ -85,7 +92,7 @@ export class BrowserTabs {
       const match = this.find(url);
       if (match) { if (!options.background) this.sink.activate(match.id); return match; }
     }
-    const record: BrowserTabRecord = { id: crypto.randomUUID(), focusAddressOnOpen: !url };
+    const record: BrowserTabRecord = { id: this.newId(), focusAddressOnOpen: !url };
     this.records.set(record.id, record);
     this.sink.insert(record, !options.background);
     void this.create(record, url);

@@ -4,6 +4,9 @@ from dataclasses import replace
 import pytest
 
 from pulsara_agent.capability.source_query import parse_query
+from pulsara_agent.capability.contracts import CapabilityKind, CapabilitySourceKind, capability_identity, capability_source_ref
+
+IDENTITY = capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="tool")
 from pulsara_agent.conversation_kernel.mcp.meta import (
     McpToolRefConsumerKind,
     ProcessLocalNewMcpToolRefOwner,
@@ -20,7 +23,7 @@ def test_full_inspect_delivery_is_consumer_and_session_specific_and_cell_survive
     owner = ProcessLocalNewMcpToolRefOwner()
     common = dict(conversation_scope_kind=ModelInputScopeKind.ROOT,
                   session_id="session:root", continuity_epoch_nonce="epoch:one")
-    facts = dict(capability_identity_fingerprint="identity", tool_semantic_fingerprint="schema",
+    facts = dict(capability_identity=IDENTITY, tool_semantic_fingerprint="schema",
                  mcp_execution_policy_fingerprint="policy", tool_route_fingerprint="route",
                  runtime_generation=3)
     model = owner.prepare(**common, **facts, result_entry_id="entry:model")
@@ -51,7 +54,7 @@ def test_repeated_code_inspect_reuses_current_ref_and_prunes_obsolete_facts():
     scope = dict(conversation_scope_kind=ModelInputScopeKind.ROOT, session_id="session:root",
                  continuity_epoch_nonce="cell:long", consumer_kind=McpToolRefConsumerKind.CODE_CELL,
                  consumer_id="cell:long")
-    facts = dict(capability_identity_fingerprint="identity", tool_semantic_fingerprint="schema",
+    facts = dict(capability_identity=IDENTITY, tool_semantic_fingerprint="schema",
                  mcp_execution_policy_fingerprint="policy", tool_route_fingerprint="CODE_CELL", runtime_generation=1)
     tokens = set()
     for i in range(1100):  # More than the existing MODEL bound is not a cell lifetime cap.
@@ -62,7 +65,7 @@ def test_repeated_code_inspect_reuses_current_ref_and_prunes_obsolete_facts():
     assert len(tokens) == 1
     ref = owner.resolve_callable(item.ref.opaque_token, **scope)
     assert not item.record.committed_result_entry_ids
-    owner.retire_unroutable(**scope, allowed={("identity", "new-schema", "policy", "CODE_CELL", 2)})
+    owner.retire_unroutable(**scope, allowed={(IDENTITY, "new-schema", "policy", "CODE_CELL", 2)})
     with pytest.raises(LookupError):
         owner.resolve_callable(ref.opaque_token, **scope)
     current = owner.prepare(**scope, **{**facts, "tool_semantic_fingerprint": "new-schema", "runtime_generation": 2},
@@ -162,7 +165,7 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
         server = Server("code-consumer", on_list_tools=tools, on_call_tool=call,
                         on_subscriptions_listen=ListenHandler(bus))
         async with _sdk_http(server) as endpoint:
-            supervisor = McpHostSupervisor(session_id="session:root", workspace_root=tmp_path,
+            supervisor = McpHostSupervisor(workspace_root=tmp_path,
                 configs=(_parse_server("catalog", {"required": True, "catalog_refresh_interval_ms": "DISABLED",
                     "effect_policy": {"default_effect": "READ_ONLY"}, "transport": {"type": "streamable_http",
                     "endpoint": endpoint, "allow_http_localhost": True}}),),
@@ -313,3 +316,21 @@ def test_shared_hook_dispatch_exposes_real_subagent_session_and_instruction_orig
             await dispatcher.aclose(deadline_monotonic=monotonic()+5)
 
     asyncio.run(scenario())
+
+
+def test_kernel_tool_result_remote_identity_closed_branches():
+    from pulsara_agent.conversation_kernel.tool_contracts import KernelToolResult
+    from pulsara_agent.identity import derive_id
+
+    process = derive_id('process', 'result-test', 'one')
+    remote = derive_id('mcp-tool', 'remote-tool', 'fixture', '1', 'tool')
+    verification = 'sha256:' + 'a' * 64
+    KernelToolResult(state='SUCCESS', content=b'', remote_identity=process)
+    KernelToolResult(state='SUCCESS', content=b'', remote_identity=remote,
+                     remote_identity_verification=verification)
+    KernelToolResult(state='SUCCESS', content=b'')
+    for identity, verifier in ((None, verification), (process, verification),
+                               (remote, None), (remote, 'sha256:short')):
+        with pytest.raises(ValueError, match='remote identity'):
+            KernelToolResult(state='SUCCESS', content=b'', remote_identity=identity,
+                             remote_identity_verification=verifier)

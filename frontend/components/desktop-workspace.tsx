@@ -1,3 +1,4 @@
+import { deriveIdentity } from '../lib/identity';
 import { BrowserTabs, browserTitle, type BrowserTabRecord } from '../lib/browser-tabs';
 import { desktopHost } from '../lib/desktop-host';
 import { BrowserPanel } from './browser-panel';
@@ -20,11 +21,12 @@ interface WorkspaceTabBase {
   render?: () => ReactNode;
   onClose?: () => void;
 }
-type StandardWorkspaceKind = 'file' | 'visualization' | 'capabilities' | 'mcp' | 'background';
+type StandardWorkspaceKind = 'file' | 'visualization' | 'capabilities' | 'background';
 type StandardWorkspaceTab = { [K in StandardWorkspaceKind]: { kind: K; entityId?: string; hostSessionId?: string } }[StandardWorkspaceKind];
 export type WorkspaceTab = WorkspaceTabBase & (
   | { kind: 'browser'; browser: BrowserTabRecord; sessionId?: never; entityId?: never; hostSessionId?: never }
   | ({ sessionId: string; browser?: never } & (StandardWorkspaceTab
+  | { kind: 'mcp'; entityId?: string; hostSessionId?: string; mcpTargetRole: 'configuration' | 'runtime' }
   | { kind: 'process'; entityId?: string; hostSessionId?: string; initialProcess?: BackgroundProcess }
   | { kind: 'subagents'; entityId?: never; hostSessionId?: never }
   | { kind: 'cells-unavailable'; entityId?: never; hostSessionId?: never }
@@ -107,13 +109,19 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   const publish = useCallback((batch: WorkspaceTab[], foreground: boolean) => {
     if (!batch.length || batch.some(tab => tab.kind !== 'browser' && tab.sessionId !== current.current.sessionId) || !current.current.visible) return;
     const selectedId = selectedTabId(tabsRef.current, current.current.sessionId, current.current.activeBrowserId, current.current.active);
-    install(insertNewTabs(tabsRef.current, batch.map(tab => ({ view: { top: 0, left: 0 }, ...tab })), selectedId));
+    const added = batch.map(tab => ({ view: { top: 0, left: 0 }, ...tab }));
+    const next = insertNewTabs(tabsRef.current, added, selectedId).map(existing => {
+      const runtime = added.find(tab => tab.id === existing.id && tab.kind === 'mcp' && tab.mcpTargetRole === 'runtime');
+      return runtime ? { ...runtime, view: existing.view } : existing;
+    });
+    install(next);
     if (foreground) { select(batch.at(-1)!); show.current(); }
   }, [install, select]);
   const update = useCallback((id: string, patch: Partial<WorkspaceTabBase>) => {
     install(tabsRef.current.map(item => item.id === id ? { ...item, ...patch } as WorkspaceTab : item));
   }, [install]);
   const [browserTabs] = useState(() => new BrowserTabs(desktopHost()?.browser, {
+    hasId: id => tabsRef.current.some(tab => tab.id === id),
     visible: () => current.current.visible,
     activeId: () => selectedTabId(tabsRef.current, current.current.sessionId, current.current.activeBrowserId, current.current.active),
     insert: (record, foreground) => open({ id: record.id, kind: 'browser', title: browserTitle(record), browser: record, onClose: () => browserTabs.close(record.id) }, { background: !foreground }),
@@ -304,8 +312,10 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvai
   </aside>;
 }
 
-export function inspectorTab(sessionId: string, kind: Exclude<WorkspaceTabKind, 'browser'>, title: string, entityId?: string, hostSessionId?: string): WorkspaceTab {
-  const id = JSON.stringify([sessionId, kind, entityId ?? '', hostSessionId ?? '']);
+export function inspectorTab(sessionId: string, kind: Exclude<WorkspaceTabKind, 'browser'>, title: string, entityId?: string, hostSessionId?: string, mcpTargetRole: 'configuration' | 'runtime' = 'configuration'): WorkspaceTab {
+  const key = kind === 'mcp' && entityId && mcpTargetRole === 'configuration' ? deriveIdentity('mcp-server', 'runtime-target', entityId) : entityId;
+  const id = JSON.stringify([sessionId, kind, key ?? '', hostSessionId ?? '']);
+  if (kind === 'mcp') return { id, sessionId, kind, title, entityId, hostSessionId, mcpTargetRole };
   if (kind === 'agent') {
     if (!entityId || hostSessionId) throw new Error('Agent tab requires its session identity');
     return { id, sessionId, kind, title, entityId };

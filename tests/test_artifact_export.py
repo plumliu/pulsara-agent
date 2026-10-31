@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import errno
 from hashlib import sha256
+from pathlib import Path
 import json
 from time import monotonic
 
@@ -410,28 +411,27 @@ def test_parent_rebinding_never_writes_substitute_or_claims_success(
     assert not list(relocated.glob(".pulsara-*.tmp"))
 
 
-def test_large_serialized_metadata_fails_before_writing(tmp_path):
-    port = BodyPort()
-    artifact_id = '"' * 40000
-    port.record = replace(port.record, artifact_id=artifact_id)
-    result = ArtifactExportTool(tmp_path, artifact_read_port=port).execute(
-        call(artifact_id=artifact_id)
-    )
+def test_large_serialized_metadata_fails_before_writing(tmp_path, monkeypatch):
+    from pulsara_agent.tools.builtins import artifact as owner
+    path = tmp_path / ("a" * 40000)
+    monkeypatch.setattr(ArtifactExportTool, "_resolve_path", lambda *args, **kwargs: path)
+    monkeypatch.setattr(owner, "_requested_leaf_path", lambda *args: path)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    result = ArtifactExportTool(tmp_path, artifact_read_port=BodyPort()).execute(call(path))
     assert json.loads(result.output)["status"] == "resource_boundary"
     assert not list(tmp_path.iterdir())
-    # Unknown overlong IDs also produce a bounded failure without echoing them.
-    result = ArtifactExportTool(tmp_path, artifact_read_port=BodyPort()).execute(
-        call(artifact_id=artifact_id)
-    )
-    assert len(result.output) < 1000
 
 
-def test_inline_metadata_above_archive_threshold_does_not_create_an_artifact(tmp_path):
-    port = BodyPort()
-    port.record = replace(port.record, artifact_id="a" * 9000)
-    result = ArtifactExportTool(tmp_path, artifact_read_port=port).execute(
-        call(artifact_id=port.record.artifact_id)
-    )
+def test_inline_metadata_above_archive_threshold_does_not_create_an_artifact(tmp_path, monkeypatch):
+    from pulsara_agent.tools.builtins import artifact as owner
+    path = tmp_path / ("a" * 9000)
+    monkeypatch.setattr(ArtifactExportTool, "_resolve_path", lambda *args, **kwargs: path)
+    monkeypatch.setattr(owner, "_requested_leaf_path", lambda *args: path)
+    monkeypatch.setattr(Path, "is_symlink", lambda self: False)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    monkeypatch.setattr(owner, "_atomic_create_bytes", lambda *args: None)
+    result = ArtifactExportTool(tmp_path, artifact_read_port=BodyPort()).execute(call(path))
     assert result.status is ToolResultState.SUCCESS
     assert len(result.output.encode()) > 8000
     publisher = _RecordingPublisher()
@@ -704,3 +704,19 @@ def test_export_runtime_dispatch_delivery_and_prefix_continuity(
             after.compiled_input.messages[: len(before.compiled_input.messages)]
             == before.compiled_input.messages
         )
+
+
+@pytest.mark.parametrize("artifact_id", ["artifact:old", "memory:" + "a" * 26, "artifact:" + "b" * 26])
+def test_invalid_artifact_targets_fail_before_lookup(tmp_path, artifact_id):
+    class NoRead:
+        def read_body(self, *_args):
+            pytest.fail("invalid ID reached export owner")
+        def read_text(self, *_args, **_kwargs):
+            pytest.fail("invalid ID reached read owner")
+    export = ArtifactExportTool(tmp_path, artifact_read_port=NoRead()).execute(call(artifact_id=artifact_id))
+    assert export.status is ToolResultState.ERROR
+    assert json.loads(export.output)["error"] == "INVALID_ARGUMENTS"
+    from pulsara_agent.tools.builtins.artifact import ArtifactReadTool
+    result = ArtifactReadTool(NoRead()).execute(ToolCall(id="call:external", name="read_artifact", arguments={"target": {"kind": "ARTIFACT", "artifact_id": artifact_id}}))
+    assert result.status is ToolResultState.ERROR
+    assert json.loads(result.output)["status"] == "error"

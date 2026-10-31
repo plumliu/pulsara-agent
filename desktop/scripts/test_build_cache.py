@@ -73,6 +73,7 @@ if name == 'desktop:python-dependencies' and (root / 'fail-python').exists():
         "desktop/scripts/prepare_resources.py": "native recipe 1",
         "tools/prepare_ripgrep.py": "ripgrep recipe 1",
         "tools/prepare_code_mode.py": "Code Mode recipe 1",
+        "desktop/src/identity-core.mjs": "shared identity 1",
         "tools/code_mode_node/package.json": "{}", "tools/code_mode_node/package-lock.json": "{}",
         "frontend/package.json": "{}", "frontend/package-lock.json": "{}",
         "desktop/package.json": "{}", "desktop/package-lock.json": "{}",
@@ -322,6 +323,18 @@ def test_code_mode_sdk_lock_change_reprepares_only_its_dependency_layer(graph):
     (root / "tools/code_mode_node/package-lock.json").write_text('{"locked-sdk":"changed"}')
     run()
     assert counts()["desktop:code-mode"] == 2
+    assert counts()["desktop:postgres"] == 1
+    assert counts()["desktop:python-dependencies"] == 1
+    assert counts()["desktop:ripgrep"] == 1
+
+
+def test_shared_identity_change_reprepares_code_mode_without_rebuilding_native_dependencies(graph):
+    root, run, counts = graph
+    run()
+    (root / "desktop/src/identity-core.mjs").write_text("shared identity 2")
+    run()
+    assert counts()["desktop:code-mode"] == 2
+    assert (root / "src/pulsara_agent/_vendor/code_mode/identity-core.mjs").is_file()
     assert counts()["desktop:postgres"] == 1
     assert counts()["desktop:python-dependencies"] == 1
     assert counts()["desktop:ripgrep"] == 1

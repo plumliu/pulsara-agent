@@ -58,16 +58,16 @@ to assess findings and decide how to continue.
 
 Each `exec_cell` has fresh variables. Copy the actual design agent and critic targets printed above
 into the next script; the example IDs below are illustrative and must be replaced
-with the tool-provided targets.
+with the tool-provided targets. Copy these values directly from the tool output; do not infer or modify them.
 
 ```js
 const phase1 = {
   design: {
-    agent: { kind: "AGENT", agent_id: "session:aaaaaaaaaaaaaaaaaaaaaaaaaa" }
+    agent: { kind: "AGENT", agent_id: "session:df2uoz5psbdmr7n5evanmsp2n4" }
   },
   critic: {
-    agent: { kind: "AGENT", agent_id: "session:bbbbbbbbbbbbbbbbbbbbbbbbbb" },
-    work: { kind: "WORK", work_id: "queue:cccccccccccccccccccccccccc" }
+    agent: { kind: "AGENT", agent_id: "session:bwmbtnixb46w4alboxd7vwdpki" },
+    work: { kind: "WORK", work_id: "queue:sliof53naqlyggmralreyz2h4y" }
   }
 };
 const phase2 = await tools.run_agent.batch({

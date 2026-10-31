@@ -68,6 +68,7 @@ def test_public_form_applies_new_secrets_but_requires_confirmation_for_retained_
                     "environment": {},
                     "secret_environment": {},
                     "auth": auth,
+                    "scope_policy": "ROOT_ONLY",
                 }
                 await service.plugins.replace_plugin_mcp_connection_overlay(
                     ReplacePluginMcpConnectionRequest(
@@ -83,9 +84,8 @@ def test_public_form_applies_new_secrets_but_requires_confirmation_for_retained_
                 )
                 arguments = {
                     "action": "CONFIGURE_PLUGIN_MCP_CONNECTION",
-                    "scope": "USER",
-                    "plugin_id": installed.identity.plugin_id,
-                    "server_id": "docs",
+                    "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "PLUGIN",
+                               "plugin_id": installed.identity.plugin_id, "server_id": "docs"},
                 }
                 replacement = {**original, "endpoint": "https://new.example/mcp"}
                 body = {"overlay": replacement}
@@ -100,8 +100,7 @@ def test_public_form_applies_new_secrets_but_requires_confirmation_for_retained_
                 await service.mcp.create(target, original, old_secrets)
                 arguments = {
                     "action": "UPDATE_LOCAL_MCP",
-                    "scope": "USER",
-                    "server_id": "docs",
+                    "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": "docs"},
                 }
                 body = {
                     "config": {
@@ -174,8 +173,7 @@ def test_public_form_rejects_foreign_secret_before_destination_review(tmp_path):
                 await service.prepare(
                     {
                         "action": "UPDATE_LOCAL_MCP",
-                        "scope": "USER",
-                        "server_id": "docs",
+                        "target": {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "LOCAL", "server_id": "docs"},
                     }
                 ),
             )

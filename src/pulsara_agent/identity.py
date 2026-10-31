@@ -81,6 +81,18 @@ IdentityKind = Literal[
     "context",
     "segment",
     "page",
+    "tab",
+    "browser-instance",
+    "presentation",
+    "mcp-tool",
+    "reasoning-block",
+    "search-document",
+    "draft-node",
+    "draft-import",
+    "draft-asset",
+    "skill",
+    "mcp-server",
+    "view",
 ]
 
 # A closed format vocabulary, not a registry of objects or allocation state.

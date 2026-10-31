@@ -332,7 +332,6 @@ def test_round3_1_forbidden_durable_provider_input_graph_is_absent() -> None:
         "ProviderInputAppendCommitted",
         "provider_input_recovery",
         "runtime.provider_input",
-        "previous_response_id",
     )
     occurrences: dict[str, list[str]] = {token: [] for token in forbidden}
     for path in production.rglob("*.py"):
@@ -341,3 +340,37 @@ def test_round3_1_forbidden_durable_provider_input_graph_is_absent() -> None:
             if token in source:
                 occurrences[token].append(str(path.relative_to(_REPOSITORY_ROOT)))
     assert occurrences == {token: [] for token in forbidden}
+
+
+def test_remote_response_identity_is_only_checked_to_refuse_replay() -> None:
+    from pulsara_agent.llm.adapters.openai.retrying import replay_is_safe
+
+    # Keep the architecture guard while allowing the retry safety owner to
+    # mention this protocol field in its explicit rejection checks.
+    production = _REPOSITORY_ROOT / "src/pulsara_agent"
+    occurrences = [
+        str(path.relative_to(_REPOSITORY_ROOT))
+        for path in production.rglob("*.py")
+        if "previous_response_id" in path.read_text(encoding="utf-8")
+    ]
+    assert occurrences == ["src/pulsara_agent/llm/adapters/openai/retrying.py"]
+    tree = ast.parse((production / "llm/adapters/openai/retrying.py").read_text(encoding="utf-8"))
+    mentions = [node for node in ast.walk(tree) if isinstance(node, ast.Constant)
+                and node.value == "previous_response_id"]
+    assert len(mentions) == 2
+    safety = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name == "replay_is_safe")
+    assert all(node in set(ast.walk(safety)) for node in mentions)
+    reads = [node for node in ast.walk(safety) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute) and node.func.attr == "get"
+             and node.args and isinstance(node.args[0], ast.Constant)
+             and node.args[0].value == "previous_response_id"]
+    assert len(reads) == 1 and ast.unparse(reads[0].func.value) == "effective"
+    base = {"model": "fixture", "input": [], "store": False}
+    assert replay_is_safe(api="openai_responses", payload=base)
+    for extension in (
+        {"previous_response_id": "resp:external"},
+        {"extra_body": {"previous_response_id": "resp:external"}},
+        {"conversation": "conversation:external"},
+    ):
+        assert not replay_is_safe(api="openai_responses", payload={**base, **extension})

@@ -21,14 +21,14 @@ from tests.support.round3 import direct_tool_invocation_context, prepare_test_di
 @pytest.mark.parametrize('arguments,rejected', [
     ({'targets': []}, True), ({'targets': 'file'}, True), ({}, True),
     ({'targets': [{'kind': 'PANEL', 'name': 'tasks'}], 'session_id': 'other'}, True),
-    ({'targets': [None, {'kind': 'PATH', 'path': 'missing #?.md'}, {'kind': 'URL', 'url': 'file:///tmp/a'}, {'kind': 'PROCESS', 'process_id': 'p1'}, {'kind': 'PANEL', 'name': 'tasks'}]}, False),
+    ({'targets': [None, {'kind': 'PATH', 'path': 'missing #?.md'}, {'kind': 'URL', 'url': 'file:///tmp/a'}, {'kind': 'PROCESS', 'process_id': 'process:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, {'kind': 'PANEL', 'name': 'tasks'}]}, False),
     ({'targets': [None, {'kind': 'PATH', 'path': ''}]}, False),
     ({'targets': [{'kind': 'PANEL', 'name': 'browser'}]}, False),
     ({'targets': [None], 'session_id': 'other'}, True),
 ])
 def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:test', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         ids = dict(session_id='session:test', tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
         borrow, context = direct_tool_invocation_context(port, **ids)
         try:
@@ -60,7 +60,7 @@ def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
                 assert [e['index'] for e in value['errors']] == [0, 2, 4]
                 assert value['targets'] == [
                     {'target': {'kind': 'PATH', 'path': str(tmp_path / 'missing #?.md')}},
-                    {'target': {'kind': 'PROCESS', 'process_id': 'p1'}, 'host_session_id': 'host:test'},
+                    {'target': {'kind': 'PROCESS', 'process_id': 'process:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, 'host_session_id': 'host:aaaaaaaaaaaaaaaaaaaaaaaaaa'},
                 ]
         finally:
             borrow.close()
@@ -70,7 +70,7 @@ def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
 
 def test_root_surface_and_recovery(tmp_path):
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:test', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         try:
             prepared = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
             borrow = port.borrow_tool_surface(prepared)
@@ -86,7 +86,7 @@ def test_root_surface_and_recovery(tmp_path):
 
 
 def test_normalization_does_not_read_or_resolve_links(tmp_path):
-    tool = OpenInPulsaraTool(tmp_path, host_session_id='host:test')
+    tool = OpenInPulsaraTool(tmp_path, host_session_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa')
     (tmp_path / 'link').symlink_to(tmp_path / 'absent')
     assert tool.normalize_target({'kind': 'PATH', 'path': 'link/a.md'})['target']['path'] == str(tmp_path / 'link/a.md')
     with pytest.raises(ValueError) as failure:
@@ -106,7 +106,7 @@ def test_clean_import_order():
 def test_real_tool_rejects_removed_wrappers_without_aliases(tmp_path):
     async def run():
         task_id = 'task:6d7i5mg4ymfcckogzrqiser5km'
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:test', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         ids = dict(session_id='session:test', tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
         borrow, context = direct_tool_invocation_context(port, **ids)
         arguments = {'targets': [
@@ -150,13 +150,13 @@ def test_object_requests_use_resolved_calling_context_and_keep_original_indexes(
     agent_id = "session:" + "a" * 26
     retired_id = "session:" + "b" * 25 + "a"
     cell_id = "cell:" + "a" * 26
-    tool = OpenInPulsaraTool(tmp_path, root_session_id="session:root", host_session_id="host:original")
+    tool = OpenInPulsaraTool(tmp_path, root_session_id="session:ddddddddddddddddddddddddda", host_session_id="host:aaaaaaaaaaaaaaaaaaaaaaaaaa")
     resolved = []
     async def resolve(kind, identity):
         resolved.append((kind, identity))
         if identity == retired_id:
             raise LookupError("Agent retired")
-        return ResolvedPresentationObject(kind, identity, "session:root", "host:original" if kind == "CELL" else None)
+        return ResolvedPresentationObject(kind, identity, "session:ddddddddddddddddddddddddda", "host:aaaaaaaaaaaaaaaaaaaaaaaaaa" if kind == "CELL" else None)
     arguments = {"targets": [
         {"kind": "AGENT", "agent_id": agent_id},
         {"kind": "AGENT", "agent_id": retired_id},
@@ -173,10 +173,10 @@ def test_object_requests_use_resolved_calling_context_and_keep_original_indexes(
     assert [error["index"] for error in value["errors"]] == [1, 2, 6, 7]
     assert resolved == [("AGENT", agent_id), ("AGENT", retired_id), ("CELL", cell_id)]
     assert value["targets"] == [
-        {"target": arguments["targets"][0], "root_session_id": "session:root"},
-        {"target": arguments["targets"][3], "root_session_id": "session:root", "host_session_id": "host:original"},
-        {"target": arguments["targets"][4], "root_session_id": "session:root"},
-        {"target": arguments["targets"][5], "root_session_id": "session:root", "host_session_id": "host:original"},
+        {"target": arguments["targets"][0], "root_session_id": "session:ddddddddddddddddddddddddda"},
+        {"target": arguments["targets"][3], "root_session_id": "session:ddddddddddddddddddddddddda", "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
+        {"target": arguments["targets"][4], "root_session_id": "session:ddddddddddddddddddddddddda"},
+        {"target": arguments["targets"][5], "root_session_id": "session:ddddddddddddddddddddddddda", "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
         {"target": arguments["targets"][8]},
     ]
 
@@ -186,8 +186,8 @@ def test_shared_object_reader_rejects_root_and_other_root_without_touching_lifec
     from unittest.mock import Mock
     from pulsara_agent.conversation_kernel.presentation_targets import resolve_visible_agent, resolve_visible_cell
     agent = "session:" + "a" * 26
-    repository = SimpleNamespace(read_agent_runtime_state=Mock(return_value={"root_session_id": "session:root"}))
-    assert resolve_visible_agent(repository, root_session_id="session:root", agent_session_id=agent, deadline_monotonic=123) == {"root_session_id": "session:root"}
+    repository = SimpleNamespace(read_agent_runtime_state=Mock(return_value={"root_session_id": "session:ddddddddddddddddddddddddda"}))
+    assert resolve_visible_agent(repository, root_session_id="session:ddddddddddddddddddddddddda", agent_session_id=agent, deadline_monotonic=123) == {"root_session_id": "session:ddddddddddddddddddddddddda"}
     repository.read_agent_runtime_state.assert_called_once_with(session_id=agent, deadline_monotonic=123)
     for root in (agent, "session:other"):
         with pytest.raises(LookupError):
@@ -229,7 +229,7 @@ def test_real_dispatch_resolves_objects_through_common_read_owners(tmp_path):
             return {"root_session_id": root if kwargs["session_id"] == agent else other}
         async def read(method, **kwargs):
             return method(**kwargs)
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="host:original", session_id=root, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="host:aaaaaaaaaaaaaaaaaaaaaaaaaa", session_id=root, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         collaboration = CollaborationToolPort(repository=SimpleNamespace(read_agent_runtime_state=read_agent), root_session_id=root, session_id=root, runtime=SimpleNamespace(read_deadline=lambda: 123), admission_facts=lambda *_: {}, io=SimpleNamespace(run=read))
         port.bind_subagent_port(collaboration)
         def capture(identity):
@@ -250,8 +250,8 @@ def test_real_dispatch_resolves_objects_through_common_read_owners(tmp_path):
             assert [error["index"] for error in value["errors"]] == [1, 2, 3]
             assert value["targets"] == [
                 {"target": {"kind": "AGENT", "agent_id": agent}, "root_session_id": root},
-                {"target": {"kind": "CELL", "cell_id": cell}, "root_session_id": root, "host_session_id": "host:original"},
-                {"target": {"kind": "PANEL", "name": "cells"}, "root_session_id": root, "host_session_id": "host:original"},
+                {"target": {"kind": "CELL", "cell_id": cell}, "root_session_id": root, "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                {"target": {"kind": "PANEL", "name": "cells"}, "root_session_id": root, "host_session_id": "host:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
             ]
             assert [item["session_id"] for item in reads] == [agent, other]
             assert [call.args for call in port.capture_code_cell.call_args_list] == [(retired,), (cell,)]
@@ -270,7 +270,7 @@ def test_known_reader_outage_fails_one_target_and_programming_error_still_raises
     agent = "session:" + "a" * 26
     reader = Mock(side_effect=OperationalError("connection closed"))
     repository = SimpleNamespace(read_agent_runtime_state=reader)
-    tool = OpenInPulsaraTool(tmp_path, root_session_id="session:root", host_session_id="host:test")
+    tool = OpenInPulsaraTool(tmp_path, root_session_id="session:ddddddddddddddddddddddddda", host_session_id="host:aaaaaaaaaaaaaaaaaaaaaaaaaa")
     async def resolve(kind, identity):
         return resolve_visible_agent(repository, root_session_id=tool.root_session_id, agent_session_id=identity, deadline_monotonic=123)
     call = ToolCall(id="call:test", name=tool.name, arguments={"targets": [
@@ -284,3 +284,44 @@ def test_known_reader_outage_fails_one_target_and_programming_error_still_raises
     reader.side_effect = TypeError("invalid repository row")
     with pytest.raises(TypeError, match="invalid repository row"):
         asyncio.run(tool.execute_async(call, resolve_object=resolve))
+
+
+def test_shared_identity_schemas_reject_wrong_kinds_and_trailing_newlines():
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.identity import derive_id
+    from pulsara_agent.memory.targets import memory_target_schema, parse_memory_target
+    from pulsara_agent.capability.source_query import capability_target_schema
+
+    for tool, kind, field, identity_kind in [
+        ("read_artifact", "ARTIFACT", "artifact_id", "artifact"),
+        ("export_artifact", "ARTIFACT", "artifact_id", "artifact"),
+    ]:
+        target_schema = builtin_tool_catalog_entry(tool).descriptor.input_schema["properties"]["target"]
+        valid = derive_id(identity_kind, "test-schema", "object")
+        validator = Draft202012Validator(target_schema)
+        assert validator.is_valid({"kind": kind, field: valid})
+        assert not validator.is_valid({"kind": kind, field: valid + "\n"})
+        assert not validator.is_valid({"kind": kind, field: derive_id("memory", "test-schema", "object")})
+    memory = derive_id("memory", "test-schema", "object")
+    validator = Draft202012Validator(memory_target_schema())
+    assert validator.is_valid({"kind": "MEMORY", "memory_id": memory})
+    assert not validator.is_valid({"kind": "MEMORY", "memory_id": memory + "\n"})
+    with pytest.raises(ValueError):
+        parse_memory_target({"kind": "MEMORY", "memory_id": memory + "\n"})
+    server = derive_id("mcp-server", "runtime-target", "docs")
+    assert not Draft202012Validator(capability_target_schema("MCP_SERVER")).is_valid(
+        {"kind": "MCP_SERVER", "runtime_server_id": server + "\n"})
+
+
+def test_agent_and_cell_schemas_reject_trailing_newline_and_wrong_kind():
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.code_mode.targets import cell_target_schema
+    from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import target_schema
+    for schema, kind, field, identity in [
+        (cell_target_schema(), "CELL", "cell_id", "cell:" + "a" * 26),
+        (target_schema("AGENT"), "AGENT", "agent_id", "session:" + "a" * 26),
+    ]:
+        validator = Draft202012Validator(schema)
+        assert validator.is_valid({"kind": kind, field: identity})
+        assert not validator.is_valid({"kind": kind, field: identity + "\n"})
+        assert not validator.is_valid({"kind": kind, field: "process:" + "a" * 26})

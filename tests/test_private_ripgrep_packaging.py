@@ -36,6 +36,9 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         artifact = source / name
         artifact.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / name, artifact)
+    identity_source = source / 'desktop/src/identity-core.mjs'
+    identity_source.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / 'desktop/src/identity-core.mjs', identity_source)
     # Each real backend entry point fails offline before explicit preparation.
     for expression in ["build_wheel('dist')", "build_editable('dist')", "build_sdist('dist')"]:
         command = [sys.executable, '-c', f"from hatchling.build import *; {expression}"]
@@ -87,10 +90,62 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         assert archive.read('pulsara_agent/_vendor/ripgrep/LICENSE-MIT')
         assert archive.read('pulsara_agent/_vendor/ripgrep/COPYING')
         assert archive.read('pulsara_agent/_vendor/ripgrep/LICENSE-PCRE2')
+        assert archive.read('pulsara_agent/_vendor/code_mode/identity-core.mjs') == identity_source.read_bytes()
         prefix = 'pulsara_agent/desktop_app/static/'
         assert {name.removeprefix(prefix) for name in archive.namelist() if name.startswith(prefix)} == set(renderer_files)
         for name, content in renderer_files.items():
             assert archive.read(prefix + name) == content
+    installed = tmp_path / 'isolated installed wheel'
+    installation = subprocess.run(
+        ['uv', 'pip', 'install', '--offline', '--no-deps', '--python', sys.executable,
+         '--target', str(installed), str(wheel)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=60,
+    )
+    assert installation.returncode == 0, installation.stdout + installation.stderr
+    # The packaged worker must use the shipped shared module without reaching
+    # into desktop/dist or any repository node_modules directory.
+    worker = subprocess.run([sys.executable, '-I', '-c', '''
+import asyncio
+from pathlib import Path
+import sys
+sys.path.insert(0, sys.argv[1])
+import pulsara_agent.code_mode.host as module
+from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
+from pulsara_agent.identity import is_valid_id, random_id
+assert Path(module.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve())
+
+async def main():
+    host = CodeModeHost()
+    requests, output = [], []
+    original = host._accept_request
+    def accept(cell, message):
+        requests.append(message['request_id'])
+        original(cell, message)
+    host._accept_request = accept
+    async def invoke(call):
+        return CodeModeToolResult(value=call.sequence)
+    try:
+        cell_id = await host.start(source='return await tools.read_file({});',
+            source_exec_attempt_id=random_id('attempt'), turn_id=random_id('turn'),
+            snapshot=object(), tool_catalog={'read_file': {}}, invoke=invoke)
+        cell = host._cells[cell_id]
+        async with asyncio.timeout(15):
+            while True:
+                lease = await host.lease_output(cell_id) if cell_id in host._cells else None
+                if lease is not None:
+                    output.append(dict(lease.record))
+                    await host.acknowledge_output(lease)
+                if cell.terminal_event.is_set() and not cell.pending and not cell.output:
+                    break
+                await asyncio.sleep(.001)
+        assert cell.state == 'completed', cell.error
+        assert output == [{'kind': 'return', 'text': '1'}], output
+        assert len(requests) == 1 and is_valid_id(requests[0], 'request'), requests
+    finally:
+        await host.aclose()
+asyncio.run(main())
+''', str(installed)], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert worker.returncode == 0, worker.stdout + worker.stderr
     with zipfile.ZipFile(next((source / 'editable').glob('*.whl'))) as archive:
         assert not any('/desktop_app/static/' in name for name in archive.namelist())
     with tarfile.open(next((source / 'dist').glob('*.tar.gz'))) as archive:
@@ -103,6 +158,7 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         assert any(name.endswith('frontend/package-lock.json') for name in names)
         assert any(name.endswith('desktop/package-lock.json') for name in names)
         assert any(name.endswith('tools/prepare_ripgrep.py') for name in names)
+        assert any(name.endswith('desktop/src/identity-core.mjs') for name in names)
 
 
 def test_prepare_checksum_failure_writes_no_resources(tmp_path, monkeypatch):

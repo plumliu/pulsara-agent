@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
@@ -15,16 +14,6 @@ from pulsara_agent.capability.pulsara_home import (
     resolve_pulsara_home,
 )
 from pulsara_agent.memory.scope import workspace_context_key
-from pulsara_agent.capability.types import (
-    ConflictingSkillCandidateIssue,
-    InvalidSkillCandidateIssue,
-    ProducerUnavailableCause,
-    ResolutionUnavailableCause,
-    ShadowedSkillCandidateIssue,
-    SkillDiagnostic,
-    skill_origin_label,
-)
-from pulsara_agent.hooks.contracts import HookDiagnostic
 from pulsara_agent.plugins.contracts import (
     AbortedPluginValidationOutcome,
     AlreadyPresentPluginInstallOutcome,
@@ -42,27 +31,15 @@ from pulsara_agent.plugins.contracts import (
     PluginGcDisposition,
     PluginGcOutcome,
     PluginGcProgress,
-    PluginGcRef,
     PluginInspectionAbort,
     PluginInspectionAbortReason,
     PluginInspectionDisposition,
     PluginInspectionOutcome,
     PluginInstallDisposition,
-    PluginAuthor,
-    PluginComponentSummary,
-    PluginHookDefinitionSummary,
     PluginInstanceIdentity,
-    PluginInstanceInspection,
     PreparedPluginInstanceObservation,
-    PluginManifest,
-    PluginMcpHttpSummary,
-    PluginMcpSseSummary,
-    PluginMcpStdioSummary,
     PluginRemovalDisposition,
     PluginScopeKind,
-    PluginSkillSummary,
-    PluginValidationSummary,
-    PluginVersionInspection,
     PluginValidationDisposition,
     RemoveLocalPluginRequest,
     RemovedPluginOutcome,
@@ -221,35 +198,35 @@ class PluginManagementService:
 
             observation = observe_plugin_import(observer, request, scrub_set=scrub_set)
         except PluginPackageInvalid as exc:
-            return InvalidPluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
-                _safe_diagnostics(exc.diagnostics, scrub_set),
-            )
+            return replace(InvalidPluginValidationOutcome(
+                request.source_path,
+                exc.diagnostics,
+            ), scrub_set=scrub_set)
         except PluginPackageUnavailable as exc:
-            return UnavailablePluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(UnavailablePluginValidationOutcome(
+                request.source_path,
                 (_diagnostic(exc.code),),
-            )
+            ), scrub_set=scrub_set)
         except PluginPackageRaced:
-            return UnavailablePluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(UnavailablePluginValidationOutcome(
+                request.source_path,
                 (_diagnostic(PluginDiagnosticCode.SOURCE_RACED),),
-            )
+            ), scrub_set=scrub_set)
         except PluginPackageCancelled:
-            return AbortedPluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(AbortedPluginValidationOutcome(
+                request.source_path,
                 PluginValidationDisposition.CANCELLED,
-            )
+            ), scrub_set=scrub_set)
         except PluginPackageTimedOut:
-            return AbortedPluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(AbortedPluginValidationOutcome(
+                request.source_path,
                 PluginValidationDisposition.TIMED_OUT,
-            )
+            ), scrub_set=scrub_set)
         except (MemoryError, OSError, ValueError):
-            return UnavailablePluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(UnavailablePluginValidationOutcome(
+                request.source_path,
                 (_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),),
-            )
+            ), scrub_set=scrub_set)
         try:
             summary = observation.summary
             if observation.source_import is not None:
@@ -270,31 +247,31 @@ class PluginManagementService:
                         ),
                     ),
                 )
-            return ValidPluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
-                _safe_summary(summary, scrub_set),
-                _safe_diagnostics(observation.diagnostics, scrub_set),
-            )
+            return replace(ValidPluginValidationOutcome(
+                request.source_path,
+                summary,
+                observation.diagnostics,
+            ), scrub_set=scrub_set)
         except PluginPackageCancelled:
-            return AbortedPluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(AbortedPluginValidationOutcome(
+                request.source_path,
                 PluginValidationDisposition.CANCELLED,
-            )
+            ), scrub_set=scrub_set)
         except PluginPackageTimedOut:
-            return AbortedPluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(AbortedPluginValidationOutcome(
+                request.source_path,
                 PluginValidationDisposition.TIMED_OUT,
-            )
+            ), scrub_set=scrub_set)
         except PluginPackageRaced:
-            return UnavailablePluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(UnavailablePluginValidationOutcome(
+                request.source_path,
                 (_diagnostic(PluginDiagnosticCode.SOURCE_RACED),),
-            )
+            ), scrub_set=scrub_set)
         except (KeyError, MemoryError, OSError, ValueError):
-            return UnavailablePluginValidationOutcome(
-                _safe_path(request.source_path, scrub_set),
+            return replace(UnavailablePluginValidationOutcome(
+                request.source_path,
                 (_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),),
-            )
+            ), scrub_set=scrub_set)
         finally:
             observation.close()
 
@@ -331,25 +308,26 @@ class PluginManagementService:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.TIMED_OUT, _withheld_source_path()
             )
-        safe_source_path = _safe_path(request.source_path, scrub_set)
+        source_path = request.source_path
         store = self._store()
         if store is None:
             return FailedPluginInstallOutcome(
                 PluginInstallDisposition.UNAVAILABLE,
-                safe_source_path,
+                source_path,
                 diagnostics=(
                     _diagnostic(PluginDiagnosticCode.HOME_CONFIGURATION_INVALID),
                 ),
+                scrub_set=scrub_set,
             )
         workspace_diagnostic = _workspace_diagnostic(
             request.scope, request.workspace_root
         )
         if workspace_diagnostic is not None:
-            return FailedPluginInstallOutcome(
+            return replace(FailedPluginInstallOutcome(
                 PluginInstallDisposition.UNAVAILABLE,
-                safe_source_path,
+                source_path,
                 diagnostics=(workspace_diagnostic,),
-            )
+            ), scrub_set=scrub_set)
         observer = PluginSourceObserver(self._credential_boundary)
         try:
             from .source_import import observe_plugin_import
@@ -358,37 +336,37 @@ class PluginManagementService:
                 observe_plugin_import, observer, request, scrub_set=scrub_set
             )
         except PluginPackageInvalid as exc:
-            return FailedPluginInstallOutcome(
+            return replace(FailedPluginInstallOutcome(
                 PluginInstallDisposition.INVALID,
-                safe_source_path,
-                diagnostics=_safe_diagnostics(exc.diagnostics, scrub_set),
-            )
+                source_path,
+                diagnostics=exc.diagnostics,
+            ), scrub_set=scrub_set)
         except PluginPackageUnavailable as exc:
-            return FailedPluginInstallOutcome(
+            return replace(FailedPluginInstallOutcome(
                 PluginInstallDisposition.UNAVAILABLE,
-                safe_source_path,
+                source_path,
                 diagnostics=(_diagnostic(exc.code),),
-            )
+            ), scrub_set=scrub_set)
         except PluginPackageRaced:
-            return FailedPluginInstallOutcome(
+            return replace(FailedPluginInstallOutcome(
                 PluginInstallDisposition.UNAVAILABLE,
-                safe_source_path,
+                source_path,
                 diagnostics=(_diagnostic(PluginDiagnosticCode.SOURCE_RACED),),
-            )
+            ), scrub_set=scrub_set)
         except PluginPackageCancelled:
-            return FailedPluginInstallOutcome(
-                PluginInstallDisposition.CANCELLED, safe_source_path
-            )
+            return replace(FailedPluginInstallOutcome(
+                PluginInstallDisposition.CANCELLED, source_path
+            ), scrub_set=scrub_set)
         except PluginPackageTimedOut:
-            return FailedPluginInstallOutcome(
-                PluginInstallDisposition.TIMED_OUT, safe_source_path
-            )
+            return replace(FailedPluginInstallOutcome(
+                PluginInstallDisposition.TIMED_OUT, source_path
+            ), scrub_set=scrub_set)
         except (MemoryError, OSError, ValueError):
-            return FailedPluginInstallOutcome(
+            return replace(FailedPluginInstallOutcome(
                 PluginInstallDisposition.UNAVAILABLE,
-                safe_source_path,
+                source_path,
                 diagnostics=(_diagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE),),
-            )
+            ), scrub_set=scrub_set)
         try:
             identity = store.identity(
                 scope=request.scope,
@@ -413,14 +391,14 @@ class PluginManagementService:
                 result = StoreMutationFailure(
                     _diagnostic(PluginDiagnosticCode.STATE_UNAVAILABLE)
                 )
-            return _install_outcome(
+            return replace(_install_outcome(
                 result,
-                source_path=safe_source_path,
+                source_path=source_path,
                 package_parent=store.layout(identity).plugin_package_parent,
-                identity=_safe_identity(identity, scrub_set),
-                diagnostics=_safe_diagnostics(observation.diagnostics, scrub_set),
+                identity=identity,
+                diagnostics=observation.diagnostics,
                 scrub_set=scrub_set,
-            )
+            ), scrub_set=scrub_set)
         finally:
             observation.close()
 
@@ -444,7 +422,7 @@ class PluginManagementService:
             )
 
         def settle(value):
-            return _safe_enablement_outcome(value, scrub_set)
+            return replace(value, scrub_set=scrub_set)
 
         store = self._store()
         if store is None:
@@ -601,7 +579,7 @@ class PluginManagementService:
             )
 
         def settle(value):
-            return _safe_removal_outcome(value, scrub_set)
+            return replace(value, scrub_set=scrub_set)
 
         store = self._store()
         if store is None:
@@ -786,7 +764,7 @@ class PluginManagementService:
                         "exact Plugin identity does not join observation scope"
                     )
                 outcome = inspection.inspect_exact(identity=identity, **arguments)
-            return _safe_inspection_outcome(outcome, scrub_set)
+            return _attach_inspection_scrub(outcome, scrub_set)
         except PluginPackageCancelled:
             return PluginInspectionAbort(PluginInspectionAbortReason.CANCELLED)
         except PluginPackageTimedOut:
@@ -875,29 +853,25 @@ def _install_outcome(
                 else PluginInstallDisposition.INSTALLED
             ),
             identity,
-            _safe_package_install_id(value.state.current_package_install_id, scrub_set),
-            _safe_summary(value.summary, scrub_set),
-            diagnostics + _safe_diagnostics(value.connection_diagnostics, scrub_set),
-            package_root=_safe_path(
-                package_parent / value.state.current_package_install_id, scrub_set
-            ),
+            value.state.current_package_install_id,
+            value.summary,
+            diagnostics + value.connection_diagnostics,
+            package_root=package_parent / value.state.current_package_install_id,
             cleanup_attention=value.cleanup_attention,
         )
     if isinstance(value, StoreAlreadyPresent):
         return AlreadyPresentPluginInstallOutcome(
             identity,
-            _safe_package_install_id(value.state.current_package_install_id, scrub_set),
+            value.state.current_package_install_id,
             value.state.enabled,
-            _safe_summary(value.summary, scrub_set),
+            value.summary,
         )
     if isinstance(value, StoreStateCutUnknown):
         return FailedPluginInstallOutcome(
             PluginInstallDisposition.ACK_UNKNOWN,
             source_path,
             identity,
-            _safe_package_install_id(
-                value.intended_state.current_package_install_id, scrub_set
-            ),
+            value.intended_state.current_package_install_id,
             (),
             value.intended_state.enabled,
             value.last_known_cut,
@@ -907,7 +881,7 @@ def _install_outcome(
             PluginInstallDisposition.INVALID,
             source_path,
             identity,
-            diagnostics=_safe_diagnostics(value.diagnostics, scrub_set),
+            diagnostics=value.diagnostics,
         )
     if isinstance(value, StoreOperationCancelled):
         return FailedPluginInstallOutcome(
@@ -922,10 +896,8 @@ def _install_outcome(
             PluginInstallDisposition.UNAVAILABLE,
             source_path,
             identity,
-            _safe_optional_package_install_id(
-                value.published_package_install_id, scrub_set
-            ),
-            _safe_diagnostics((value.diagnostic,), scrub_set),
+            value.published_package_install_id,
+            (value.diagnostic,),
         )
     if isinstance(value, StoreCleanupFailure):
         prior = _install_outcome(
@@ -940,9 +912,9 @@ def _install_outcome(
             raise TypeError("Plugin cleanup wrapper cannot recurse")
         return CleanupUnavailablePluginInstallOutcome(
             prior,
-            _safe_path(value.attempted_path, scrub_set),
+            value.attempted_path,
             value.location_status,
-            _safe_diagnostics((value.diagnostic,), scrub_set)[0],
+            value.diagnostic,
         )
     raise TypeError("Plugin store install result union is open")
 
@@ -992,412 +964,21 @@ def _enablement_failure(
     )
 
 
-def _safe_summary(
-    summary: PluginValidationSummary, scrub_set: ProcessCredentialScrubSet
-) -> PluginValidationSummary:
-    manifest = summary.manifest
-    author = manifest.author
-    safe_manifest = PluginManifest(
-        manifest.schema,
-        _safe_text(manifest.name, scrub_set),
-        _safe_optional_text(manifest.version, scrub_set),
-        _safe_optional_text(manifest.description, scrub_set),
-        (
-            None
-            if author is None
-            else PluginAuthor(
-                _safe_optional_text(author.name, scrub_set),
-                _safe_optional_text(author.email, scrub_set),
-                _safe_optional_text(author.url, scrub_set),
-            )
-        ),
-        _safe_optional_text(manifest.homepage, scrub_set),
-        _safe_optional_text(manifest.repository, scrub_set),
-        _safe_optional_text(manifest.license, scrub_set),
-        tuple(sorted(_safe_text(item, scrub_set) for item in manifest.keywords)),
-        tuple(sorted(_safe_text(item, scrub_set) for item in manifest.extension_names)),
-    )
-
-    skills = tuple(
-        sorted(
-            (
-                PluginSkillSummary(
-                    _safe_text(item.name, scrub_set),
-                    _safe_text(item.description, scrub_set),
-                    _safe_text(item.skill_path, scrub_set),
-                )
-                for item in summary.skills.skills
-            ),
-            key=lambda item: item.name,
-        )
-    )
-    mcp_servers = tuple(
-        sorted(
-            (_safe_mcp_summary(item, scrub_set) for item in summary.mcp.mcp_servers),
-            key=lambda item: item.local_server_id,
-        )
-    )
-    hooks = tuple(
-        PluginHookDefinitionSummary(
-            _safe_text(item.event, scrub_set),
-            _safe_text(item.matcher, scrub_set),
-            _safe_text(item.command, scrub_set),
-            _safe_optional_text(item.command_windows, scrub_set),
-            item.timeout_seconds,
-            item.asynchronous,
-            _safe_optional_text(item.status_message, scrub_set),
-        )
-        for item in summary.hooks.hook_definitions
-    )
-    return PluginValidationSummary(
-        safe_manifest,
-        PluginComponentSummary(
-            summary.skills.disposition,
-            skills=skills,
-            diagnostics=_safe_diagnostics(summary.skills.diagnostics, scrub_set),
-        ),
-        PluginComponentSummary(
-            summary.mcp.disposition,
-            mcp_servers=mcp_servers,
-            diagnostics=_safe_diagnostics(summary.mcp.diagnostics, scrub_set),
-        ),
-        PluginComponentSummary(
-            summary.hooks.disposition,
-            hook_definitions=hooks,
-            diagnostics=_safe_diagnostics(summary.hooks.diagnostics, scrub_set),
-        ),
-    )
-
-
-def _safe_enablement_outcome(value, scrub_set: ProcessCredentialScrubSet):
-    if isinstance(value, SettledPluginEnablementOutcome):
-        return SettledPluginEnablementOutcome(
-            value.disposition,
-            _safe_identity(value.identity, scrub_set),
-            _safe_package_install_id(value.package_install_id, scrub_set),
-            value.enabled,
-        )
-    if isinstance(value, FailedPluginEnablementOutcome):
-        return FailedPluginEnablementOutcome(
-            disposition=value.disposition,
-            identity=_safe_identity(value.identity, scrub_set),
-            desired_enabled=value.desired_enabled,
-            expected_package_install_id=_safe_optional_package_install_id(
-                value.expected_package_install_id, scrub_set
-            ),
-            observed_package_install_id=_safe_optional_package_install_id(
-                value.observed_package_install_id, scrub_set
-            ),
-            last_known_cut=_safe_optional_text(value.last_known_cut, scrub_set),
-            diagnostics=_safe_diagnostics(value.diagnostics, scrub_set),
-        )
-    raise TypeError("Plugin enablement outcome union is open")
-
-
-def _safe_removal_outcome(value, scrub_set: ProcessCredentialScrubSet):
-    if isinstance(value, RemovedPluginOutcome):
-        return RemovedPluginOutcome(
-            _safe_identity(value.identity, scrub_set),
-            _safe_package_install_id(value.prior_package_install_id, scrub_set),
-            value.cleanup_attention,
-        )
-    if isinstance(value, FailedPluginRemovalOutcome):
-        return FailedPluginRemovalOutcome(
-            disposition=value.disposition,
-            identity=_safe_identity(value.identity, scrub_set),
-            prior_package_install_id=_safe_optional_package_install_id(
-                value.prior_package_install_id, scrub_set
-            ),
-            last_known_cut=_safe_optional_text(value.last_known_cut, scrub_set),
-            diagnostics=_safe_diagnostics(value.diagnostics, scrub_set),
-        )
-    raise TypeError("Plugin removal outcome union is open")
-
-
-def _safe_inspection_outcome(
+def _attach_inspection_scrub(
     value: PluginInspectionOutcome, scrub_set: ProcessCredentialScrubSet
 ) -> PluginInspectionOutcome:
-    instances = tuple(
-        PluginInstanceInspection(
-            identity=_safe_identity(item.identity, scrub_set),
-            mcp_connection_overlays=item.mcp_connection_overlays,
-            hook_config=item.hook_config,
-            package_install_id=_safe_package_install_id(
-                item.package_install_id, scrub_set
-            ),
-            enabled=item.enabled,
-            package_root=_safe_path(item.package_root, scrub_set),
-            data_root=_safe_path(item.data_root, scrub_set),
-            summary=_safe_summary(item.summary, scrub_set),
-            diagnostics=_safe_diagnostics(item.diagnostics, scrub_set),
-            package_in_use=item.package_in_use,
-            effective_skill_names=tuple(
-                sorted(
-                    {_safe_text(name, scrub_set) for name in item.effective_skill_names}
-                )
-            ),
-            effective_mcp_server_ids=tuple(
-                sorted(
-                    {
-                        _safe_text(server_id, scrub_set)
-                        for server_id in item.effective_mcp_server_ids
-                    }
-                )
-            ),
-            effective_hook=item.effective_hook,
-            effective_hook_definition_count=item.effective_hook_definition_count,
-            effective_hook_trust_disposition=(item.effective_hook_trust_disposition),
-        )
-        for item in value.instances
-    )
-    versions = tuple(
-        PluginVersionInspection(
-            identity=_safe_identity(item.identity, scrub_set),
-            package_install_id=_safe_package_install_id(
-                item.package_install_id, scrub_set
-            ),
-            package_root=_safe_path(item.package_root, scrub_set),
-            referenced=item.referenced,
-            in_use=item.in_use,
-        )
-        for item in value.versions
-    )
-    return PluginInspectionOutcome(
-        disposition=value.disposition,
-        instances=instances,
-        versions=versions,
-        diagnostics=_safe_diagnostics(value.diagnostics, scrub_set),
-        physical_lifetime_anchors=value.physical_lifetime_anchors,
-        skill_composition_disposition=value.skill_composition_disposition,
-        mcp_composition_disposition=value.mcp_composition_disposition,
-        hook_composition_disposition=value.hook_composition_disposition,
+    return replace(
+        value,
+        instances=tuple(replace(item, scrub_set=scrub_set) for item in value.instances),
+        versions=tuple(replace(item, scrub_set=scrub_set) for item in value.versions),
+        scrub_set=scrub_set,
     )
 
 
 def _safe_gc_outcome(
     value: PluginGcOutcome, scrub_set: ProcessCredentialScrubSet
 ) -> PluginGcOutcome:
-    progress = value.progress
-    return PluginGcOutcome(
-        value.disposition,
-        PluginGcProgress(
-            ordered_removed=tuple(
-                _safe_gc_ref(item, scrub_set) for item in progress.ordered_removed
-            ),
-            ordered_in_use=tuple(
-                _safe_gc_ref(item, scrub_set) for item in progress.ordered_in_use
-            ),
-            current_attempted_ref=(
-                None
-                if progress.current_attempted_ref is None
-                else _safe_gc_ref(progress.current_attempted_ref, scrub_set)
-            ),
-            current_location_status=progress.current_location_status,
-            unvisited_suffix=progress.unvisited_suffix,
-        ),
-        _safe_diagnostics(value.diagnostics, scrub_set),
-    )
-
-
-def _safe_gc_ref(
-    value: PluginGcRef, scrub_set: ProcessCredentialScrubSet
-) -> PluginGcRef:
-    return PluginGcRef(
-        value.kind,
-        _safe_path(value.path, scrub_set),
-        _safe_optional_package_install_id(value.package_install_id, scrub_set),
-    )
-
-
-def _safe_mcp_summary(value, scrub_set: ProcessCredentialScrubSet):
-    if isinstance(value, PluginMcpStdioSummary):
-        return PluginMcpStdioSummary(
-            _safe_text(value.local_server_id, scrub_set),
-            _safe_text(value.command, scrub_set),
-            tuple(_safe_text(item, scrub_set) for item in value.args),
-            _safe_optional_text(value.cwd, scrub_set),
-            tuple(
-                sorted(
-                    (
-                        _safe_text(key, scrub_set),
-                        _safe_text(item, scrub_set),
-                    )
-                    for key, item in value.environment
-                )
-            ),
-            connection_inputs=value.connection_inputs,
-        )
-    if isinstance(value, PluginMcpHttpSummary):
-        return PluginMcpHttpSummary(
-            _safe_text(value.local_server_id, scrub_set),
-            _safe_text(value.endpoint, scrub_set),
-            tuple(
-                sorted(
-                    (
-                        _safe_text(key, scrub_set),
-                        _safe_text(item, scrub_set),
-                    )
-                    for key, item in value.public_headers
-                )
-            ),
-            connection_inputs=value.connection_inputs,
-        )
-    if isinstance(value, PluginMcpSseSummary):
-        return PluginMcpSseSummary(
-            _safe_text(value.local_server_id, scrub_set),
-            _safe_text(value.endpoint, scrub_set),
-            tuple(
-                sorted(
-                    (
-                        _safe_text(key, scrub_set),
-                        _safe_text(item, scrub_set),
-                    )
-                    for key, item in value.public_headers
-                )
-            ),
-            connection_inputs=value.connection_inputs,
-        )
-    raise TypeError("Plugin MCP summary union is open")
-
-
-def _safe_diagnostics(
-    diagnostics: tuple[object, ...], scrub_set: ProcessCredentialScrubSet
-) -> tuple[object, ...]:
-    safe: list[object] = []
-    for diagnostic in diagnostics:
-        if isinstance(diagnostic, PluginDiagnostic):
-            safe.append(
-                PluginDiagnostic(
-                    diagnostic.code,
-                    scrub_set.scrub_text(diagnostic.message),
-                    (
-                        None
-                        if diagnostic.path is None
-                        else scrub_set.scrub_text(diagnostic.path)
-                    ),
-                    _safe_optional_text(diagnostic.component, scrub_set),
-                )
-            )
-        elif isinstance(diagnostic, SkillDiagnostic):
-            safe.append(
-                SkillDiagnostic(
-                    diagnostic.severity,
-                    diagnostic.code,
-                    scrub_set.scrub_text(diagnostic.message),
-                    (
-                        None
-                        if diagnostic.path is None
-                        else _safe_path(diagnostic.path, scrub_set)
-                    ),
-                )
-            )
-        elif isinstance(diagnostic, HookDiagnostic):
-            safe.append(
-                HookDiagnostic(
-                    scrub_set.scrub_text(diagnostic.code),
-                    scrub_set.scrub_text(diagnostic.message),
-                    diagnostic.severity,
-                    diagnostic.event_type,
-                    _safe_optional_text(diagnostic.source_label, scrub_set),
-                    diagnostic.event_dispatch_ordinal,
-                    diagnostic.source_ordinal,
-                    diagnostic.definition_ordinal,
-                    diagnostic.diagnostic_ordinal,
-                )
-            )
-        elif isinstance(diagnostic, ProducerUnavailableCause):
-            safe.append(
-                ProducerUnavailableCause(
-                    diagnostic.producer_kind,
-                    diagnostic.reason,
-                    _safe_diagnostics(diagnostic.diagnostics, scrub_set),
-                )
-            )
-        elif isinstance(diagnostic, ResolutionUnavailableCause):
-            safe_diagnostic = _safe_diagnostics((diagnostic.diagnostic,), scrub_set)[0]
-            if not isinstance(safe_diagnostic, SkillDiagnostic):
-                raise TypeError("Skill resolution diagnostic union is open")
-            safe.append(ResolutionUnavailableCause(diagnostic.reason, safe_diagnostic))
-        elif isinstance(diagnostic, InvalidSkillCandidateIssue):
-            if _skill_issue_identity_contains_secret(diagnostic, scrub_set):
-                safe.append(_withheld_skill_inspection_diagnostic())
-                continue
-            safe_diagnostics = _safe_diagnostics(diagnostic.diagnostics, scrub_set)
-            if not all(isinstance(item, SkillDiagnostic) for item in safe_diagnostics):
-                raise TypeError("invalid Skill issue diagnostic union is open")
-            safe.append(
-                InvalidSkillCandidateIssue(
-                    diagnostic.path,
-                    diagnostic.origin,
-                    safe_diagnostics,
-                    _safe_optional_text(diagnostic.declared_name, scrub_set),
-                )
-            )
-        elif isinstance(
-            diagnostic,
-            (ShadowedSkillCandidateIssue, ConflictingSkillCandidateIssue),
-        ):
-            if _skill_issue_identity_contains_secret(diagnostic, scrub_set):
-                safe.append(_withheld_skill_inspection_diagnostic())
-            else:
-                safe.append(diagnostic)
-        else:
-            # Other producer diagnostics carry closed enum/numeric facts only.
-            safe.append(diagnostic)
-    return tuple(safe)
-
-
-def _skill_issue_identity_contains_secret(
-    issue: object, scrub_set: ProcessCredentialScrubSet
-) -> bool:
-    values: list[str] = []
-    if isinstance(issue, InvalidSkillCandidateIssue):
-        values.extend(
-            (
-                str(issue.path),
-                skill_origin_label(issue.origin),
-                issue.declared_name or "",
-            )
-        )
-    elif isinstance(issue, ShadowedSkillCandidateIssue):
-        values.extend(
-            (
-                str(issue.path),
-                skill_origin_label(issue.origin),
-                issue.name,
-                str(issue.winner_path),
-                skill_origin_label(issue.winner_origin),
-            )
-        )
-    elif isinstance(issue, ConflictingSkillCandidateIssue):
-        values.append(issue.name)
-        for candidate in issue.candidates:
-            values.extend((str(candidate.path), skill_origin_label(candidate.origin)))
-    else:
-        raise TypeError("Skill issue union is open")
-    return any(scrub_set.contains(value) for value in values)
-
-
-def _withheld_skill_inspection_diagnostic() -> PluginDiagnostic:
-    return PluginDiagnostic(
-        PluginDiagnosticCode.VIEW_UNAVAILABLE,
-        "Skill inspection fact withheld because it contained the active API key",
-        component="SKILL_INSPECTION",
-    )
-
-
-def _safe_path(path: Path, scrub_set: ProcessCredentialScrubSet) -> Path:
-    return Path(scrub_set.scrub_text(os.fspath(path)))
-
-
-def _safe_identity(
-    identity: PluginInstanceIdentity, scrub_set: ProcessCredentialScrubSet
-) -> PluginInstanceIdentity:
-    return PluginInstanceIdentity(
-        identity.scope,
-        _safe_text(identity.plugin_id, scrub_set),
-        _safe_optional_text(identity.workspace_state_key, scrub_set),
-    )
+    return replace(value, scrub_set=scrub_set)
 
 
 def _withheld_identity(scope: PluginScopeKind) -> PluginInstanceIdentity:
@@ -1406,28 +987,6 @@ def _withheld_identity(scope: PluginScopeKind) -> PluginInstanceIdentity:
         "redacted-plugin",
         "redacted-workspace" if scope is PluginScopeKind.WORKSPACE else None,
     )
-
-
-def _safe_package_install_id(value: str, scrub_set: ProcessCredentialScrubSet) -> str:
-    if scrub_set.contains(value):
-        return "package:aaaaaaaaaaaaaaaaaaaaaaaaaa"
-    return value
-
-
-def _safe_optional_package_install_id(
-    value: str | None, scrub_set: ProcessCredentialScrubSet
-) -> str | None:
-    return None if value is None else _safe_package_install_id(value, scrub_set)
-
-
-def _safe_optional_text(
-    value: str | None, scrub_set: ProcessCredentialScrubSet
-) -> str | None:
-    return None if value is None else _safe_text(value, scrub_set)
-
-
-def _safe_text(value: str, scrub_set: ProcessCredentialScrubSet) -> str:
-    return scrub_set.scrub_text(value)
 
 
 def _withheld_source_path() -> Path:

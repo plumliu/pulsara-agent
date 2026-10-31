@@ -349,3 +349,63 @@ def test_bootstrap_reuses_migration_owner_and_never_resets(desktop_home, monkeyp
         assert len(creates) == 2
         assert "NOSUPERUSER NOCREATEDB NOCREATEROLE" in creates[0]
         assert creates[1] == "CREATE DATABASE pulsara OWNER pulsara_admin"
+
+
+def test_control_requests_keep_correlation_and_reject_old_encoding(desktop_home, monkeypatch):
+    from pulsara_agent.identity import is_valid_id
+    import pulsara_agent.desktop_app.tls_identity as tls
+    import pulsara_agent.windows_interop as interop
+
+    async def exercise():
+        start = frame(desktop_home)
+        start['host'] = {'platform': 'win32', 'executionDomain': 'wsl', 'distribution': 'Ubuntu',
+                         'user': 'test', 'interopHelper': '/tmp/interop'}
+        reader = asyncio.StreamReader()
+        reader.feed_data((json.dumps(start) + '\n').encode())
+        ready = asyncio.Event()
+        outgoing = asyncio.Queue()
+        callbacks = {}
+        class App:
+            database_state = DatabaseDataPlaneState.READY
+            origin = 'https://127.0.0.1:12345'
+            def __init__(self, **kwargs): callbacks['open'] = kwargs['open_browser']
+            async def start(self): pass
+            async def aclose(self): pass
+        def emit(value):
+            if value['type'] == 'ready':
+                ready.set()
+            if value['type'] in {'open-oauth-browser', 'quit-state'}:
+                outgoing.put_nowait(value)
+        async def inspection(_application): return {'activeTasks': 7, 'scheduledTasks': 0}
+        monkeypatch.setattr(module, 'inspect_quit', inspection)
+        monkeypatch.setattr(interop, 'configure_interop', lambda **kwargs: None)
+        monkeypatch.setattr(tls, 'create_desktop_tls_identity', lambda _path: SimpleNamespace(certificate_pem='certificate'))
+        allocated = iter(('request:' + 'a' * 26, 'request:' + 'a' * 26,
+                          'request:' + 'a' * 25 + 'e', 'request:' + 'a' * 25 + 'i'))
+        monkeypatch.setattr(module, 'random_id', lambda kind: next(allocated))
+        task = asyncio.create_task(module.run_desktop_child(reader, emit, application_factory=App,
+                                                           database_preparer=lambda *a, **k: None))
+        await ready.wait()
+        one = asyncio.create_task(callbacks['open']('https://example.test/one'))
+        two = asyncio.create_task(callbacks['open']('https://example.test/two'))
+        first, second = await outgoing.get(), await outgoing.get()
+        assert all(is_valid_id(item['requestId'], 'request') for item in (first, second))
+        assert first['requestId'] != second['requestId']
+        inspect = 'request:' + 'a' * 26
+        for request in (
+            {'type': 'open-oauth-browser-result', 'requestId': second['requestId'], 'opened': False},
+            {'type': 'inspect-quit', 'requestId': inspect},
+            {'type': 'open-oauth-browser-result', 'requestId': first['requestId'], 'opened': True},
+        ):
+            reader.feed_data((json.dumps(request) + '\n').encode())
+        assert (await outgoing.get())['requestId'] == inspect
+        await one
+        with pytest.raises(RuntimeError, match='could not open'):
+            await two
+        pending = asyncio.create_task(callbacks['open']('https://example.test/pending'))
+        await outgoing.get()
+        reader.feed_data(b'{"type":"inspect-quit","requestId":"oauth-1"}\n')
+        assert await task == 1
+        with pytest.raises(ConnectionError, match='channel closed'):
+            await pending
+    asyncio.run(exercise())

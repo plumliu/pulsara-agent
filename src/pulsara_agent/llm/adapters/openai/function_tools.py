@@ -24,6 +24,7 @@ from pulsara_agent.capability.contracts import (
     ToolCapabilityVersionRef,
     NativeToolWireIncompatibilityReason,
     canonical_tool_spec_fingerprint,
+    capability_identity_digest,
     frozen_tool_spec_fingerprint,
     native_tool_projection_set_fingerprint,
     tool_capability_version_ref,
@@ -477,7 +478,7 @@ def freeze_openai_native_tool_eligibility(
             entries,
             key=lambda item: (
                 item.version.provider_name,
-                item.version.identity_fingerprint,
+                capability_identity_digest(item.version.identity),
                 item.version.semantic_fingerprint,
             ),
         )

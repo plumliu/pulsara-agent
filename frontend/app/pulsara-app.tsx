@@ -650,13 +650,15 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     // Retain the last complete values so recovery can still detect replacements.
     if (next.plugins.status === 'ready') {
       for (const plugin of completeUserPlugins.current?.items ?? []) {
-        const current = next.plugins.items.find(item => item.id === plugin.id && item.packageInstallId === plugin.packageInstallId);
+        if (plugin.packageInstallId.visibility !== 'VISIBLE') continue;
+        const packageId = plugin.packageInstallId.value;
+        const current = next.plugins.items.find(item => item.id === plugin.id && item.packageInstallId.visibility === 'VISIBLE' && item.packageInstallId.value === packageId);
         for (const connection of plugin.mcpConnections ?? []) {
           const replacement = current?.mcpConnections?.find(item => item.serverId === connection.serverId);
           // Compare complete existing values, not a new identity/fingerprint. An
           // external overlay change or package removal also retires old UI auth.
           if (!replacement || JSON.stringify([connection.config, connection.overlay]) !== JSON.stringify([replacement.config, replacement.overlay])) {
-            invalidateMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId, connection.serverId));
+            invalidateMcpAuthorization(mcpAuthorizationKey('plugin', packageId, connection.serverId));
           }
         }
       }
@@ -1328,6 +1330,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         readConsumedInput(connection, receipt);
       } catch (error) {
         if (connectionRef.current !== connection) return;
+        if (error instanceof RuntimeApiError && error.code === 'PROMPT_RECEIPT_MISMATCH') {
+          notify('无法核对输入状态', error.message, 'warning');
+        }
         setLocalSubmissions((current) => current.map((item) => (
           item.sessionId === candidate.sessionId
           && item.connectionGeneration === candidate.connectionGeneration
@@ -1352,6 +1357,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     activeSessionId,
     connection,
     localSubmissions,
+    notify,
     notifyPromptReceipt,
     projection.eventSequence,
     readConsumedInput,
@@ -2365,9 +2371,13 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [adapter, adoptUserCapabilityMutation, loadCapabilities, notify, notifyUserCapabilityResult]);
 
   const pluginMcpAuthorization = useCallback(async (plugin: UserPluginCapability, connection: PluginMcpConnection, action: 'login' | 'status' | 'cancel' | 'logout') => {
-    await runMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId, connection.serverId), action,
+    if (plugin.packageInstallId.visibility !== 'VISIBLE') {
+      notify('授权状态未更新', '插件安装身份不可用，请刷新后重试。', 'warning');
+      return;
+    }
+    await runMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId.value, connection.serverId), action,
       next => adapter.pluginMcpAuthorization(plugin, connection, next));
-  }, [adapter, runMcpAuthorization]);
+  }, [adapter, notify, runMcpAuthorization]);
 
   const toggleDeviceSkill = useCallback(async (
     skill: UserSkillCapability,
@@ -2393,9 +2403,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     enabled: boolean,
   ): Promise<boolean> => {
     try {
+      if (plugin.packageInstallId.visibility !== 'VISIBLE') throw new Error('插件安装身份不可用，请刷新后重试。');
       const result = await adapter.setUserPluginEnabled(
         plugin.id,
-        plugin.packageInstallId,
+        plugin.packageInstallId.value,
         enabled,
         plugin.connectionReview ?? [],
       );
@@ -2411,10 +2422,11 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
 
   const removeDevicePlugin = useCallback(async (plugin: UserPluginCapability): Promise<boolean> => {
     try {
-      const result = await adapter.removeUserPlugin(plugin.id, plugin.packageInstallId);
+      if (plugin.packageInstallId.visibility !== 'VISIBLE') throw new Error('插件安装身份不可用，请刷新后重试。');
+      const result = await adapter.removeUserPlugin(plugin.id, plugin.packageInstallId.value);
       if (result.operation.success) {
         for (const connection of plugin.mcpConnections ?? []) {
-          invalidateMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId, connection.serverId));
+          invalidateMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId.value, connection.serverId));
         }
       }
       adoptUserCapabilityMutation(result.capabilities);
@@ -2433,9 +2445,10 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     input: import('../lib/pulsara-types').PluginMcpEditInput,
   ): Promise<boolean> => {
     try {
+      if (plugin.packageInstallId.visibility !== 'VISIBLE') throw new Error('插件安装身份不可用，请刷新后重试。');
       const result = await adapter.updatePluginConnection(plugin, connection, input);
       if (result.operation.success) {
-        invalidateMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId, connection.serverId));
+        invalidateMcpAuthorization(mcpAuthorizationKey('plugin', plugin.packageInstallId.value, connection.serverId));
       }
       adoptUserCapabilityMutation(result.capabilities);
       notifyUserCapabilityResult('插件连接', result);

@@ -20,7 +20,7 @@ def config(tmp_path, monkeypatch):
         "      type: streamable_http\n      endpoint: https://docs.example/mcp\n"
     )
     monkeypatch.setenv("PULSARA_HOME", str(tmp_path))
-    monkeypatch.setattr(controller_module, "_user_plugins_payload", lambda *_: {})
+    monkeypatch.setattr(controller_module, "_user_plugins_payload", lambda *_: {"status": "ready", "items": [], "details": []})
     return mcp_config.load_mcp_server_configs(user_config_path=path)[0]
 
 
@@ -103,7 +103,7 @@ def test_disabled_current_config_wins_over_loaded_observation(config, tmp_path):
 
 def test_inventory_reads_all_loaded_owners_and_drops_retired_owner(config, monkeypatch):
     async def exercise():
-        monkeypatch.setattr(controller_module, "_inspect_user_skills", lambda: {})
+        monkeypatch.setattr(controller_module, "_inspect_user_skills", lambda: {"status": "ready", "items": [], "issues": [], "roots": [], "details": []})
         controller = object.__new__(LocalSessionController)
         controller._lock = asyncio.Lock()
         controller._operations = {}
@@ -140,3 +140,85 @@ def test_inventory_reads_all_loaded_owners_and_drops_retired_owner(config, monke
         assert result["tools"] == []
 
     asyncio.run(exercise())
+
+
+def test_workspace_skill_target_is_exact_and_collisions_fail(tmp_path, monkeypatch):
+    from pulsara_agent.identity import derive_id
+    from pulsara_agent.capability.local_skill_publisher import LocalSkillInstallScope
+    items = [{"root": "agents", "name": "one", "path": str(tmp_path / "one")},
+             {"root": "pulsara", "name": "two", "path": str(tmp_path / "two")}]
+    class Inventory:
+        def inspect_loose_skills(self, **_kwargs):
+            return {"status": "COMPLETE", "config_available": True, "items": [dict(item) for item in items]}, None, None
+    monkeypatch.setattr(controller_module, "LocalSkillManagementService", Inventory)
+    monkeypatch.setattr(controller_module, "_skill_removal_identity", lambda *_: None)
+    observed = controller_module._inspect_loose_skill_management(LocalSkillInstallScope.WORKSPACE, tmp_path)
+    assert observed["items"][0]["id"] == derive_id("skill", "ui-target", "agents", "one")
+    assert controller_module._workspace_skill_path(observed, observed["items"][0]["id"]) == (tmp_path / "one").resolve()
+    with pytest.raises(ValueError):
+        controller_module._workspace_skill_path(observed, "agents:one")
+    monkeypatch.setattr(controller_module, "derive_id", lambda *_: "skill:" + "a" * 26)
+    with pytest.raises(ValueError, match="identity collision"):
+        controller_module._inspect_loose_skill_management(LocalSkillInstallScope.WORKSPACE, tmp_path)
+
+
+def test_readonly_skill_winners_use_source_name_and_reject_collisions(tmp_path, monkeypatch):
+    from pulsara_agent.identity import derive_id
+    class Catalog:
+        def __init__(self):
+            self.candidate_issues = ()
+            self.root_policy = SimpleNamespace(roots=())
+            self.winners = tuple(SimpleNamespace(
+                path=tmp_path / name / "SKILL.md", source=SimpleNamespace(value=source),
+                name=name, description="", skill_path=str(tmp_path / name / "SKILL.md"),
+                authoring_diagnostic_codes=(),
+            ) for source, name in (("user", "one"), ("plugin", "two")))
+    monkeypatch.setattr(controller_module, "CompleteEffectiveSkillCatalogInspection", Catalog)
+    inspection = SimpleNamespace(mcp_tools=(), mcp_catalog=SimpleNamespace(servers=(), provider_name_collision_facts=()),
+        mcp_configured_servers=(), skill_catalog=Catalog(), configured_active_skill_names=frozenset())
+    kwargs = dict(session_id="session:" + "a" * 26, workspace_root=tmp_path, workspace_kind="project",
+        workspace_skills={"items": []}, workspace_mcp_configs=(), trust_all_workspace_mcp=False,
+        workspace_mcp_approvals={}, refresh_pending=False, refresh_attention=None, inspection=inspection)
+    result = controller_module._capability_payload(**kwargs)
+    assert [item["id"] for item in result["skills"]["items"]] == [
+        derive_id("skill", "ui-target", "user", "one"), derive_id("skill", "ui-target", "plugin", "two")]
+    monkeypatch.setattr(controller_module, "derive_id", lambda *_: "skill:" + "a" * 26)
+    with pytest.raises(ValueError, match="identity collision"):
+        controller_module._capability_payload(**kwargs)
+
+
+def test_plugin_operation_preserves_cut_facts_and_withholds_secret_id(tmp_path):
+    from pulsara_agent.plugins.contracts import (
+        CleanupUnavailablePluginInstallOutcome, FailedPluginEnablementOutcome, FailedPluginInstallOutcome, FailedPluginRemovalOutcome,
+        PluginCleanupLocationStatus, PluginDiagnostic, PluginDiagnosticCode,
+        PluginEnablementDisposition, PluginInstallDisposition, PluginRemovalDisposition,
+        PluginInstanceIdentity, PluginScopeKind,
+    )
+    from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+    secret_id = "package:" + "a" * 26
+    visible_id = "package:" + "b" * 25 + "a"
+    scrub = ProcessCredentialScrubSet()
+    scrub.observe(secret_id)
+    identity = PluginInstanceIdentity(PluginScopeKind.USER, "demo")
+    install = FailedPluginInstallOutcome(PluginInstallDisposition.ACK_UNKNOWN, tmp_path,
+        attempted_package_install_id=secret_id, intended_enabled=False, last_known_cut="written", scrub_set=scrub)
+    enabled = FailedPluginEnablementOutcome(PluginEnablementDisposition.STALE, identity, True,
+        expected_package_install_id=secret_id, observed_package_install_id=visible_id, scrub_set=scrub)
+    removed = FailedPluginRemovalOutcome(PluginRemovalDisposition.ACK_UNKNOWN, identity,
+        prior_package_install_id=secret_id, last_known_cut="removed", scrub_set=scrub)
+    for outcome, builder, field in ((install, controller_module._plugin_install_operation, "attempted_package_install_id"),
+                                    (enabled, controller_module._plugin_enablement_operation, "expected_package_install_id"),
+                                    (removed, controller_module._plugin_removal_operation, "prior_package_install_id")):
+        public = controller_module._public_plugin_operation(outcome, builder(outcome))
+        assert public[field] == {"visibility": "WITHHELD"}
+        assert public["status"] == outcome.disposition.value
+        assert secret_id not in str(public)
+    public = controller_module._public_plugin_operation(enabled, controller_module._plugin_enablement_operation(enabled))
+    assert public["observed_package_install_id"] == {"visibility": "VISIBLE", "value": visible_id}
+    assert controller_module._public_plugin_operation(install, controller_module._plugin_install_operation(install))["last_known_cut"] == "written"
+    wrapped = CleanupUnavailablePluginInstallOutcome(install, tmp_path, PluginCleanupLocationStatus.UNKNOWN,
+        PluginDiagnostic(PluginDiagnosticCode.SOURCE_UNAVAILABLE, "cleanup"), scrub_set=scrub)
+    public = controller_module._public_plugin_operation(wrapped, controller_module._plugin_install_operation(wrapped))
+    assert public["status"] == "CLEANUP_UNAVAILABLE"
+    assert public["prior_operation_status"] == "ACK_UNKNOWN"
+    assert public["attempted_package_install_id"] == {"visibility": "WITHHELD"}

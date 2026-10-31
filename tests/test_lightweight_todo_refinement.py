@@ -265,6 +265,27 @@ def test_todo_external_continuation_tolerates_state_lost_with_host() -> None:
 
 
 
+def test_todo_live_snapshot_identity_is_stable_per_revision() -> None:
+    bus = LiveAgentEventBus()
+    observer, generation, baseline = bus.subscribe()
+    owner = SimpleNamespace(_live_bus=bus, _session_id="session:test")
+    run_id = derive_id("todo-run", "test", "run")
+    for revision in (1, 1, 2):
+        DirectKernelToolPort._offer_todo_snapshot(
+            owner, todo_run_id=run_id, todo_revision=revision, disposition="CLEARED",
+            ordered_items=(), pending_count=0, in_progress_count=0, completed_count=0,
+            turn_id="turn:test", scope_kind=ModelInputScopeKind.ROOT,
+        )
+    events = bus.observe(observer, after_revision=baseline, maximum_events=4).events
+    assert len(events) == 3
+    assert events[0].draft_identity == events[0].block_id == events[1].draft_identity == events[1].block_id
+    assert events[0].block_id == derive_id("block", "todo-snapshot", run_id, "1")
+    assert events[2].draft_identity == events[2].block_id == derive_id("block", "todo-snapshot", run_id, "2")
+    assert events[2].block_id != events[0].block_id
+    assert {event.generation_id for event in events} == {derive_id("generation", "channel", "todo", run_id)}
+    assert all(_live_to_wire(generation, event).draft_identity == event.draft_identity for event in events)
+
+
 def test_todo_tool_installs_only_after_explicit_canonical_settlement(
     tmp_path,
 ) -> None:
@@ -341,6 +362,9 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert event.event_type is LiveEventType.TODO_SNAPSHOT_UPDATED
         assert isinstance(event.payload, TodoSnapshotUpdatedPayload)
         assert event.payload.todo_revision == 1
+        expected = derive_id("block", "todo-snapshot", after.run_identity.todo_run_id, "1")
+        assert event.draft_identity == event.block_id == expected
+        assert event.generation_id == derive_id("generation", "channel", "todo", after.run_identity.todo_run_id)
         projected = _live_to_wire(generation, event)
         assert projected.event_type > 0
         assert projected.payload.WhichOneof("payload") == "todo_snapshot_updated"
@@ -374,6 +398,11 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert after.ordered_items[1].status.value == 'pending'
         events = live_bus.observe(observer, after_revision=baseline, maximum_events=4).events
         assert len(events) == 2
+        assert events[-1].draft_identity == events[-1].block_id == derive_id(
+            "block", "todo-snapshot", after.run_identity.todo_run_id, "2"
+        )
+        assert events[-1].draft_identity != event.draft_identity
+        assert events[-1].generation_id == event.generation_id
         wire = _live_to_wire(generation, events[-1])
         assert wire.payload.todo_snapshot_updated.disposition == 'CLEARED'
         assert not wire.payload.todo_snapshot_updated.ordered_items

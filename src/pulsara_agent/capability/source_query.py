@@ -11,6 +11,7 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
+from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.tool_observation import (
     MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
@@ -60,7 +61,7 @@ def capability_target_schema(kind, *, source_kind=None):
             fields["server_id"] = TEXT
         return _target(kind, fields)
     if kind == "MCP_SERVER":
-        return _target(kind, {"runtime_server_id": TEXT})
+        return _target(kind, {"runtime_server_id": {"type": "string", "pattern": f"^mcp-server:{ID_PAYLOAD_PATTERN}$", "maxLength": 37}})
     if kind == "SKILL":
         return _target(kind, {"skill_path": TEXT})
     names = {

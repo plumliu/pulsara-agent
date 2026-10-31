@@ -19,6 +19,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
+from pulsara_agent.identity import is_valid_id, random_id
 
 if TYPE_CHECKING:
     from pulsara_agent.settings import LocalPostgresConfig
@@ -211,7 +212,6 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
     loop = asyncio.get_running_loop()
     installed = []
     oauth_pending: dict[str, asyncio.Future] = {}
-    oauth_request = 0
 
     def close_oauth_requests():
         for future in tuple(oauth_pending.values()):
@@ -219,11 +219,11 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
                 future.set_exception(ConnectionError("desktop host control channel closed"))
 
     async def open_oauth_browser(url: str) -> None:
-        nonlocal oauth_request
         if stop.is_set() or channel_closed:
             raise ConnectionError("desktop host is closing")
-        oauth_request += 1
-        identifier = f"oauth-{oauth_request}"
+        identifier = random_id("request")
+        while identifier in oauth_pending:
+            identifier = random_id("request")
         future = loop.create_future()
         oauth_pending[identifier] = future
         try:
@@ -266,7 +266,7 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
             if request == {"type": "shutdown"}:
                 request_stop()
             elif (set(request) == {"type", "requestId"}
-                  and request["type"] == "inspect-quit" and isinstance(request["requestId"], str)):
+                  and request["type"] == "inspect-quit" and is_valid_id(request["requestId"], "request")):
                 try:
                     reply = await inspect_quit(application)
                     emit({"type": "quit-state", "requestId": request["requestId"], **reply})
@@ -274,7 +274,7 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
                     emit({"type": "quit-state", "requestId": request["requestId"], "error": error_text(exc)})
             elif (isinstance(request, dict) and set(request) == {"type", "requestId", "opened"}
                   and request["type"] == "open-oauth-browser-result"
-                  and isinstance(request["requestId"], str) and type(request["opened"]) is bool):
+                  and is_valid_id(request["requestId"], "request") and type(request["opened"]) is bool):
                 pending = oauth_pending.get(request["requestId"])
                 if pending is not None and not pending.done():
                     pending.set_result(request["opened"])

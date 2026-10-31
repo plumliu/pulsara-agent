@@ -1,3 +1,4 @@
+import { isCanonicalIdentity } from '../../frontend/lib/identity';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { closeHistory } from '@tiptap/pm/history';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -41,6 +42,9 @@ describe('file reference path contract', () => {
     Object.defineProperty(image, 'arrayBuffer', { value: async () => new Uint8Array([1, 2]).buffer });
     value.insertFiles('s', [new File(['pdf'], 'a.pdf'), image, new File(['docx'], 'b.docx')], 'end');
     value.insertText('s', 'after');
+    const ids = editor.getJSON().content![0].content!.filter(node => node.type === 'fileReference').map(node => node.attrs!.id);
+    expect(ids.every(id => isCanonicalIdentity(id, 'draft-import'))).toBe(true);
+    expect(new Set(ids).size).toBe(2);
     await expect(value.capture('s')).rejects.toThrow('导入');
     b.resolve(imported('b.docx')); await new Promise(resolve => setTimeout(resolve, 0));
     expect(value.summary('s').pendingFiles).toBe(1);
@@ -51,6 +55,7 @@ describe('file reference path contract', () => {
       { type: 'image', source: 'local', bytes: new Uint8Array([1, 2]), declaredMediaType: 'image/png' },
       { type: 'text', text: raw('b.docx') + 'after' },
     ]);
+    expect(JSON.stringify(snapshot.content)).not.toContain('draft-import:');
     expect(value.restoreIfEmpty('fork', snapshot.content)).toBe(true);
     expect((await value.capture('fork')).content).toEqual(snapshot.content);
     expect(value.getEditor('fork').getText()).toContain('/tmp/imports/id/a.pdf');

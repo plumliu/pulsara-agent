@@ -2174,3 +2174,78 @@ def test_input_suggestions_setting_is_user_level_and_validated(tmp_path):
             await server.aclose()
 
     asyncio.run(exercise())
+
+
+def test_user_capability_http_preserves_dynamic_mcp_package_named_fields(tmp_path, monkeypatch):
+    import yaml
+    from time import monotonic
+    from pulsara_agent.plugins.contracts import InstallLocalPluginRequest, InspectLocalPluginsRequest, PluginScopeKind
+    from tests.test_capability_management_preparation import preparation
+
+    async def exercise():
+        (tmp_path / "index.html").write_text("Pulsara", encoding="utf-8")
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path))
+        path = tmp_path / "mcp.yaml"
+        path.write_text(yaml.safe_dump({"servers": {
+            "stdio": {"transport": {"type": "stdio", "command": "echo", "env": {"package_install_id": "plain-env"}}},
+            "http": {"transport": {"type": "streamable_http", "endpoint": "https://example.test/mcp"}, "public_headers": {"package_install_id": "plain-header"}},
+            "secret": {"transport": {"type": "stdio", "command": "echo", "secret_env": {"package_install_id": {"source": "environment", "name": "MCP_TEST_REFERENCE"}}}},
+        }}))
+        configs = mcp_config.load_mcp_server_configs(user_config_path=path)
+        owner = preparation(tmp_path)
+        source = tmp_path / "plugin-source"
+        source.mkdir()
+        (source / "plugin.json").write_text(json.dumps({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "example"}))
+        (source / "mcp.json").write_text(json.dumps({"$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json", "mcpServers": {
+            "stdio": {"type": "stdio", "command": "node", "env": {"package_install_id": "plugin-env"}},
+            "http": {"type": "streamable-http", "url": "https://example.test/mcp", "headers": {"package_install_id": "plugin-header"}},
+        }}))
+        installed = await owner.plugins.install_local_plugin(InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 10), connections=owner.mcp)
+        assert installed.disposition.value == "INSTALLED"
+        package_id = installed.package_install_id
+        monkeypatch.setattr(session_controller_module, "_inspect_user_skills", lambda: {})
+        controller = object.__new__(LocalSessionController)
+        controller._lock = asyncio.Lock()
+        controller._operations = {}
+        controller._by_session = {}
+        async def inspect_plugins():
+            return await asyncio.to_thread(owner.plugins.inspect_local_plugins, InspectLocalPluginsRequest(monotonic() + 10))
+        controller.core = SimpleNamespace(mcp_management=SimpleNamespace(
+            load_configs=lambda: configs,
+            settings=owner.mcp.settings,
+        ), inspect_user_plugins=inspect_plugins)
+        sessions = _Sessions()
+        sessions.inspect_user_capabilities = controller.inspect_user_capabilities
+        server = LocalHttpServer(sessions=cast(LocalSessionController, sessions),
+            bridge=cast(RendererBridge, _Bridge()), static_root=tmp_path,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies())
+        await server.start()
+        try:
+            async with ClientSession(headers={"X-Pulsara-Connection-Id": "connection-1", "X-Pulsara-Connection-Generation": "1"}) as client:
+                async with client.get(f"{server.origin}/api/capabilities") as response:
+                    assert response.status == 200
+                    payload = await response.json()
+            configs_by_id = {item["id"]: item["config"] for item in payload["mcp"]["servers"]}
+            assert configs_by_id["stdio"]["transport"]["env"]["package_install_id"] == "plain-env"
+            assert configs_by_id["http"]["public_headers"]["package_install_id"] == "plain-header"
+            assert configs_by_id["secret"]["transport"]["secret_env"]["package_install_id"] == {"source": "environment", "name": "MCP_TEST_REFERENCE"}
+            plugin = payload["plugins"]["items"][0]
+            assert plugin["package_install_id"] == {"visibility": "VISIBLE", "value": package_id}
+            connections = {item["server_id"]: item["config"] for item in plugin["mcp_connections"]}
+            assert connections["stdio"]["transport"]["env"]["package_install_id"] == "plugin-env"
+            assert connections["http"]["public_headers"]["package_install_id"] == "plugin-header"
+            owner.plugins._credential_boundary.rotate_sync(package_id)
+            async with ClientSession(headers={"X-Pulsara-Connection-Id": "connection-1", "X-Pulsara-Connection-Generation": "1"}) as client:
+                async with client.get(f"{server.origin}/api/capabilities") as response:
+                    assert response.status == 200
+                    withheld = await response.json()
+            assert withheld["plugins"]["items"][0]["package_install_id"] == {"visibility": "WITHHELD"}
+            assert package_id not in json.dumps(withheld)
+            connections = {item["server_id"]: item["config"] for item in withheld["plugins"]["items"][0]["mcp_connections"]}
+            assert connections["stdio"]["transport"]["env"]["package_install_id"] == "plugin-env"
+            assert connections["http"]["public_headers"]["package_install_id"] == "plugin-header"
+        finally:
+            await server.aclose()
+            await owner.mcp.aclose()
+    asyncio.run(exercise())

@@ -1,4 +1,14 @@
-import type { McpCredentialOwner } from './pulsara-types';
+import type { McpCredentialOwner, PublicPackageId } from './pulsara-types';
+import { isCanonicalIdentity } from './identity';
+
+export function parsePublicPackageId(value: unknown): PublicPackageId | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const object = value as Record<string, unknown>;
+  const keys = Object.keys(object);
+  if (object.visibility === 'WITHHELD' && keys.length === 1) return {visibility: 'WITHHELD'};
+  if (object.visibility === 'VISIBLE' && keys.length === 2 && isCanonicalIdentity(object.value, 'package')) return {visibility: 'VISIBLE', value: object.value};
+  return;
+}
 
 export interface McpAuthorizationResult {
   scope: 'USER' | 'WORKSPACE';
@@ -6,7 +16,7 @@ export interface McpAuthorizationResult {
     owner: McpCredentialOwner;
     config_identity: string;
     display_identity: string;
-    package_install_id: string | null;
+    package_install_id: PublicPackageId | null;
   };
 }
 export interface McpAuthorizationRequest {
@@ -33,7 +43,7 @@ export function parseMcpAuthorizationResult(text: string): McpAuthorizationResul
       || (owner.kind === 'plugin' ? typeof owner.plugin_id !== 'string' || !owner.plugin_id : owner.plugin_id !== null)
       || typeof target.config_identity !== 'string' || !target.config_identity
       || typeof target.display_identity !== 'string' || !target.display_identity
-      || (owner.kind === 'plugin' ? typeof target.package_install_id !== 'string' || !target.package_install_id : target.package_install_id !== null)) return;
+      || (owner.kind === 'plugin' ? !parsePublicPackageId(target.package_install_id) : target.package_install_id !== null)) return;
     return { scope: connection.scope, authorization: target };
   } catch { return; }
 }

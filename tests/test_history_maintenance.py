@@ -13,7 +13,7 @@ from pulsara_agent.conversation_kernel.history_publication import (
     HistoryQuestionKey,
 )
 from pulsara_agent.conversation_kernel.host import KernelHostCore
-from pulsara_agent.conversation_kernel.vocabulary import SubjectSlot
+from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from tests.support.model_config import test_model_runtime
 
 
@@ -213,7 +213,8 @@ def test_core_offers_entry_hints_without_a_live_host_route():
         offer_entries=lambda sid, ids: offered.append((sid, ids))
     )
     event = SimpleNamespace(
-        session_id="s", subject=SimpleNamespace(slot=SubjectSlot.ENTRY, subject_id="e")
+        session_id="s", event_type=CommittedEventType.USER_MESSAGE_ACCEPTED,
+        subject=SimpleNamespace(slot=SubjectSlot.ENTRY, subject_id="e")
     )
     core._deliver_committed_events((event,))
     assert offered == [("s", ("e",))]

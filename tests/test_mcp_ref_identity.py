@@ -9,6 +9,10 @@ from jsonschema import Draft202012Validator
 import pytest
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.capability.contracts import CapabilityKind, CapabilitySourceKind, capability_identity, capability_source_ref
+
+def _identity(name):
+    return capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name=name)
 from pulsara_agent.capability.mcp_projection import (
     MAXIMUM_NEW_MCP_TOOL_REF_CHARACTERS,
     McpInspectionDescriptorValues,
@@ -33,7 +37,7 @@ def inspection_values():
 
 def prepare(owner, scope, **overrides):
     parameters = dict(
-        scope, capability_identity_fingerprint='identity', tool_semantic_fingerprint='schema',
+        scope, capability_identity=_identity('identity'), tool_semantic_fingerprint='schema',
         mcp_execution_policy_fingerprint='policy', tool_route_fingerprint='route',
         result_entry_id=random_id('entry'),
     )
@@ -84,7 +88,7 @@ def test_canonical_ref_is_copied_from_inspection_and_keeps_installation_and_scop
     {'consumer_kind': McpToolRefConsumerKind.MODEL_EPOCH, 'consumer_id': None},
     {'consumer_id': 'cell:bbbbbbbbbbbbbbbbbbbbbbbbba'},
     {'runtime_generation': 2},
-    {'capability_identity_fingerprint': 'other-identity'},
+    {'capability_identity': _identity('other-identity')},
     {'tool_semantic_fingerprint': 'other-schema'},
     {'mcp_execution_policy_fingerprint': 'other-policy'},
     {'tool_route_fingerprint': 'other-route'},
@@ -166,3 +170,25 @@ def test_noncanonical_refs_are_rejected_by_schema_projection_and_owner(invalid):
         render_inspected_new_mcp_tool_provider_result(inspection_values(), tool_ref=invalid)
     with pytest.raises(LookupError, match='NOT_FOUND'):
         owner.resolve_callable(invalid, **scope)
+
+
+def test_refs_compare_complete_identity_even_if_boundary_digests_collide(monkeypatch):
+    monkeypatch.setattr(
+        'pulsara_agent.capability.contracts.capability_identity_digest',
+        lambda identity: 'sha256:' + '0' * 64,
+    )
+    owner = ProcessLocalNewMcpToolRefOwner()
+    scope = dict(conversation_scope_kind=ModelInputScopeKind.ROOT,
+                 session_id=random_id('session'), continuity_epoch_nonce=random_id('epoch'))
+    first = prepare(owner, scope, capability_identity=_identity('one'))
+    second = prepare(owner, scope, capability_identity=_identity('two'))
+    assert first.ref.capability_identity != second.ref.capability_identity
+    assert first.ref.opaque_token != second.ref.opaque_token
+    owner.settle(prepared=first, committed=True)
+    assert owner.install_full_result(result_entry_id=first.result_entry_id, **scope)
+    owner.retire_unroutable(**scope, allowed={
+        (second.ref.capability_identity, 'schema', 'policy', 'route', None),
+    })
+    with pytest.raises(LookupError, match='NOT_FOUND'):
+        owner.resolve_callable(first.ref.opaque_token, **scope)
+    assert prepare(owner, scope, capability_identity=_identity('two')).ref is second.ref

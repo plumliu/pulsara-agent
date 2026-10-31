@@ -134,8 +134,8 @@
             members[members.length] = {key, agent_id: peers[key].agent.agent_id,
               work_id: peers[key].work.work_id, parameters};
           });
-          return await call('run_agent.batch', {members}, prepared.id);
-        } finally { discardHost(prepared.id); }
+          return await call('run_agent.batch', {members}, prepared.request_id);
+        } finally { discardHost(prepared.request_id); }
       })();
     };
   }

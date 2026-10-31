@@ -12,6 +12,7 @@ from pulsara_agent.conversation_kernel.tool_artifacts import (
     ARTIFACT_READ_HARD_CHARS,
     CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
 )
+from pulsara_agent.identity import is_valid_id
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.artifact import ArtifactContentError, ToolArtifactReadPort
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult, ToolOutputSourceFormatHint
@@ -295,8 +296,7 @@ def _export_error(
 def _artifact_target_id(arguments: dict) -> str | None:
     target = arguments.get("target")
     if (not isinstance(target, dict) or set(target) != {"kind", "artifact_id"}
-        or target.get("kind") != "ARTIFACT" or not isinstance(target.get("artifact_id"), str)
-        or not target["artifact_id"].strip()):
+        or target.get("kind") != "ARTIFACT" or not is_valid_id(target.get("artifact_id"), "artifact")):
         return None
     return target["artifact_id"]
 

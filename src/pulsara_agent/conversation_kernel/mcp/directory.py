@@ -1,5 +1,6 @@
 """Local scoped MCP query projections. Pagination belongs to the unified query."""
 
+from pulsara_agent.identity import derive_id
 from pulsara_agent.capability.contracts import (
     CapabilitySourceKind,
     CapabilitySourceSnapshotDisposition,
@@ -42,6 +43,12 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
                 }
             ],
         )
+    target_facts = sorted(
+        (derive_id("mcp-server", "runtime-target", server.server_id), server.server_id)
+        for server in catalog.servers
+    )
+    if any(a[0] == b[0] and a[1] != b[1] for a, b in zip(target_facts, target_facts[1:])):
+        raise ValueError("MCP runtime target identity collision")
     rows, details = [], {}
     complete_sources = set(runtime.candidates) if code_direct_specs is not None else {
         snapshot.registration.source.stable_source_id
@@ -50,7 +57,7 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
         and snapshot.disposition is CapabilitySourceSnapshotDisposition.COMPLETE
     }
     for server in catalog.servers:
-        target = {"kind": "MCP_SERVER", "runtime_server_id": server.server_id}
+        target = {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", server.server_id)}
         status = f"连接状态：{server.status.value}。"
         if server.stable_failure_category:
             status += f" {server.stable_failure_category}。"

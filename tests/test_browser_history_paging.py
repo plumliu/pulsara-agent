@@ -246,3 +246,20 @@ def test_browser_uint64_rejects_lossy_or_invalid_inputs(value):
 def test_browser_uint64_retains_wire_precision_and_explicit_zero():
     assert browser_history_uint64(str(2**53 + 3), "cut") == 2**53 + 3
     assert browser_history_uint64("0", "cut") == 0
+
+
+def test_context_rejects_colliding_segment_facts(repo, monkeypatch):
+    import pulsara_agent.terminal_protocol.canonical_v3 as canonical
+    from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
+    from pulsara_agent.identity import derive_id
+
+    lease = new_session(repo)
+    first = turn(repo, lease.guard, 'first')
+    second = turn(repo, lease.guard, 'second')
+    reader = CanonicalProtocolReader(repo.connection_provider)
+    collision = derive_id('segment', 'collision-test', 'one')
+    original = canonical.derive_id
+    monkeypatch.setattr(canonical, 'derive_id', lambda kind, *parts:
+                        collision if kind == 'segment' else original(kind, *parts))
+    with pytest.raises(ConversationKernelConflict, match='segment identity collision'):
+        context(reader, lease.guard.session_id, [first[2], second[2]])

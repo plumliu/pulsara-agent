@@ -145,6 +145,8 @@ class CustomBuildHook(BuildHookInterface):
             observed = subprocess.check_output([str(code_mode / "node"), "--version"], timeout=60).strip()
             if observed != f"v{node_version}".encode():
                 raise ValueError("Code Mode Node differs from the mise pin")
+            if not (code_mode / "identity-core.mjs").is_file():
+                raise ValueError("Missing Code Mode shared identity core")
             sdk = code_mode / "quickjs-wasi"
             if json.loads((sdk / "package.json").read_text())["version"] != "3.6.2":
                 raise ValueError("Code Mode SDK differs from the fixed release")

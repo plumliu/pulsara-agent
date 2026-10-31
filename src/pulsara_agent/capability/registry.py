@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pulsara_agent.capability.contracts import (
     CapabilitySourceKind,
+    CapabilitySourceRef,
+    capability_source_identity_digest,
     EmptyCapabilityEpochPredecessor,
     FrozenCapabilityDispatchCut,
     FrozenCapabilityRegistrySnapshot,
@@ -54,10 +56,10 @@ def _require_bounded_planner_framing(
             raise ValueError("capability planner framing bound exceeded")
 
     for registration in registry.registration_set.registrations:
-        add(registration.source.source_identity_fingerprint)
+        add(capability_source_identity_digest(registration.source))
         add(registration.source_contract_fingerprint)
     for snapshot in registry.source_snapshots:
-        add(snapshot.registration.source.source_identity_fingerprint)
+        add(capability_source_identity_digest(snapshot.registration.source))
         add(snapshot.registration.source_contract_fingerprint)
         add(snapshot.disposition.value)
         for fact in snapshot.facts:
@@ -95,9 +97,9 @@ def freeze_capability_registration_set(
     mcp_registrations: tuple[FrozenCapabilitySourceRegistration, ...],
     local_skill_catalog_registration: FrozenCapabilitySourceRegistration,
 ) -> FrozenCapabilitySourceRegistrationSet:
-    by_source: dict[str, FrozenCapabilitySourceRegistration] = {}
+    by_source: dict[CapabilitySourceRef, FrozenCapabilitySourceRegistration] = {}
     for registration in mcp_registrations:
-        source_id = registration.source.source_identity_fingerprint
+        source_id = registration.source
         existing = by_source.get(source_id)
         if existing is None:
             by_source[source_id] = registration
@@ -121,9 +123,9 @@ def freeze_capability_registry_snapshot(
 ) -> FrozenCapabilityRegistrySnapshot:
     """Admit one complete, deterministic registry value."""
 
-    by_source: dict[str, FrozenCapabilitySourceSnapshot] = {}
+    by_source: dict[CapabilitySourceRef, FrozenCapabilitySourceSnapshot] = {}
     for snapshot in source_snapshots:
-        source_id = snapshot.registration.source.source_identity_fingerprint
+        source_id = snapshot.registration.source
         existing = by_source.get(source_id)
         if existing is not None:
             if existing == snapshot:
@@ -133,7 +135,7 @@ def freeze_capability_registry_snapshot(
 
     ordered: list[FrozenCapabilitySourceSnapshot] = []
     for registration in registration_set.registrations:
-        snapshot = by_source.pop(registration.source.source_identity_fingerprint, None)
+        snapshot = by_source.pop(registration.source, None)
         if snapshot is None:
             raise ValueError("capability registry source snapshot is missing")
         if snapshot.registration != registration:

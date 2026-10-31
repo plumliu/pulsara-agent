@@ -632,7 +632,7 @@ def _candidate(
             "lifecycle": lifecycle.value,
         },
     )
-    instance = f"source:{kind.value.lower()}"
+    instance = f"context-source:{kind.value.lower()}"
     semantic_payload: dict[str, object] = {
         "source_kind": kind.value,
         "source_instance_id": instance,
@@ -644,7 +644,6 @@ def _candidate(
     semantic = context_fingerprint("context-source-candidate:v1", semantic_payload)
     return ContextSourceCandidate(
         source_kind=kind,
-        source_instance_id=instance,
         source_contract_version=version,
         source_contract_fingerprint=contract,
         source_semantic_fingerprint=semantic,
@@ -1844,6 +1843,28 @@ def test_round3_1_compiler_rejects_self_certified_absent_policy() -> None:
             _prepared_request(_snapshot(), malformed)
         )
     assert failure.value.kind is ModelInputCompileFailureKind.SOURCE_CONTRACT_INVALID
+
+
+def test_source_kind_slots_preserve_semantic_fingerprint_vectors() -> None:
+    from pulsara_agent.conversation_kernel.context_sources import (
+        ContextSourceRegistry, build_memory_context_source, build_compaction_context_source,
+    )
+
+    collector = object.__new__(KernelContextSourceCollector)
+    collector._registry = ContextSourceRegistry()
+    candidates = (
+        collector._candidate(ContextSourceKind.BASE_SYSTEM, ("base",)),
+        build_memory_context_source(kind=ContextSourceKind.MEMORY_WRITE_HINT, texts=("memory",)),
+        build_compaction_context_source(
+            kind=ContextSourceKind.COMPACTION_RUNTIME_HANDOFF, texts=("handoff", "compact")
+        ),
+    )
+    assert [candidate.source_semantic_fingerprint for candidate in candidates] == [
+        "sha256:b9e3ec989658174fb3b3b44feaa753b3a1a430c3270e2ed1bdbc605609e60558",
+        "sha256:8d6ca0c13a68ecf7d65a641a8eb7ddfe2c48a29b22ce82b43d323b16890734b0",
+        "sha256:96c7ed082c45721932bc21b81fcb2d888d01b9e4cd6a107ff0641cdd79e4b18f",
+    ]
+    assert all(not hasattr(candidate, "source_instance_id") for candidate in candidates)
 
 
 def test_round3_source_identity_duplicate_and_variant_order_fail_closed() -> None:
@@ -3810,6 +3831,7 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
     first_request = _prepared_request(
         _snapshot(initial),
         _sources(_candidate(ContextSourceKind.RUNTIME_CLOCK, ("clock=A", "A"))),
+        tool_names=("read_file",),
     )
     _first, installed = _compile_and_install_append(
         compiler=compiler, owner=owner, request=first_request
@@ -3826,6 +3848,7 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
         _prepared_request(
             _snapshot(initial, assistant),
             _sources(_candidate(ContextSourceKind.RUNTIME_CLOCK, ("clock=B", "B"))),
+            tool_names=("read_file",),
         ),
         context_id="context:227vr3lxxerzucei2odo5zvd24",
         model_call_index=2,
@@ -3837,6 +3860,20 @@ def test_round3_1_compatible_epoch_appends_clock_without_rewriting_prefix() -> N
     assert successor.system_prompt == installed.system_prompt
     assert successor.tools == installed.tools
     assert successor.messages[: len(installed.messages)] == installed.messages
+    assert successor.system_prompt.encode("utf-8") == installed.system_prompt.encode("utf-8")
+    first_wire = installed.wire_input_plan.materialization
+    second_wire = successor.wire_input_plan.materialization
+    assert first_wire.tool_items
+    assert canonical_json_bytes(thaw_json(first_wire.root_policy_value)) == canonical_json_bytes(
+        thaw_json(second_wire.root_policy_value)
+    )
+    assert canonical_json_bytes([thaw_json(item) for item in first_wire.tool_items]) == canonical_json_bytes(
+        [thaw_json(item) for item in second_wire.tool_items]
+    )
+    assert [canonical_json_bytes(thaw_json(item)) for item in first_wire.ordered_input_items] == [
+        canonical_json_bytes(thaw_json(item))
+        for item in second_wire.ordered_input_items[:len(first_wire.ordered_input_items)]
+    ]
     assert second.appended_message_count == len(successor.messages) - len(
         installed.messages
     )

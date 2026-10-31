@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Callable, Mapping
 from types import MappingProxyType
 
-from uuid import uuid4
 from pulsara_agent.identity import random_id, require_id
 
 from .contracts import (
@@ -292,9 +291,9 @@ class CodeModeHost:
                 elif kind == "retained":
                     self._complete_retention(cell, message)
                 elif kind == "discard_preparation":
-                    cell.preparations.pop(message["preparation"], None)
+                    cell.preparations.pop(require_id(message["preparation"], "request"), None)
                 elif kind == "delivered":
-                    pending = cell.pending.get(str(message["request_id"]))
+                    pending = cell.pending.get(require_id(message["request_id"], "request"))
                     if pending is not None:
                         pending.delivered = True
                         pending.charge = 0  # Worker released the original parameters.
@@ -393,7 +392,7 @@ class CodeModeHost:
             asyncio.create_task(self._safe_send({"type": "release", "cell_id": cell.cell_id,
                                                  "bytes": int(message["charge"])}))
             return
-        request_id = str(message["request_id"])
+        request_id = require_id(message["request_id"], "request")
         pending = _Pending(request_id,
                            int(message["sequence"]) if message["type"] == "call" else None,
                            str(message["tool_name"]) if message["type"] == "call" else None,
@@ -416,7 +415,7 @@ class CodeModeHost:
                 peers = cell.prepare_batch(arguments)
                 # Keep only temporary identities, not an admitted batch or Work state.
                 cell.preparations[pending.request_id] = peers
-                result = CodeModeToolResult(value={"id": pending.request_id, "peers": peers})
+                result = CodeModeToolResult(value={"request_id": pending.request_id, "peers": peers})
             else:
                 name = pending.tool_name
                 assert name is not None
@@ -424,7 +423,7 @@ class CodeModeHost:
                     raise CodeModeError("tool_unavailable", "Tool is not in this cell's frozen catalog")
                 if name == "run_agent.batch":
                     from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import validate_batch_identities
-                    prepared = cell.preparations.pop(str(message.get("preparation")), None)
+                    prepared = cell.preparations.pop(require_id(message.get("preparation"), "request"), None)
                     if prepared is None:
                         raise CodeModeError("invalid_batch", "Batch does not own prepared identities")
                     validate_batch_identities(arguments, prepared)
@@ -497,7 +496,8 @@ class CodeModeHost:
 
     @staticmethod
     def _complete_retention(cell: _Cell, message: Mapping[str, object]) -> None:
-        reservation = cell.reservations.pop(message["reservation"], None)
+        key = require_id(message["reservation"], "request")
+        reservation = cell.reservations.pop(key, None)
         if reservation is not None and not reservation.done():
             reservation.set_result(message["accepted"])
 
@@ -506,7 +506,9 @@ class CodeModeHost:
             return True
         if self._process is None or self._process.returncode is not None or self._sidecar_failure is not None:
             return False
-        key = uuid4().hex
+        key = random_id("request")
+        while key in cell.reservations:
+            key = random_id("request")
         future = asyncio.get_running_loop().create_future()
         cell.reservations[key] = future
         try:

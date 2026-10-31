@@ -140,7 +140,7 @@ def test_concrete_utf8_documents_and_variant_mutation_are_independent(repo):
 def test_annotation_image_visualization_and_final_labels_match_single_entry_reads(repo):
     lease, runtime, _ = _bound_session(repo)
     workspace = _workspace(repo, lease)
-    source, _, _ = _direct_intent(repo, lease, runtime, FrozenPromptContent.text("quote source"))
+    source, _ = _direct_intent(repo, lease, runtime, FrozenPromptContent.text("quote source"))
     quote = "引用 Ω😀"
     source_answer = final(repo, lease.guard, source.turn_id, quote)
     image = _image(workspace_id=workspace)
@@ -151,7 +151,7 @@ def test_annotation_image_visualization_and_final_labels_match_single_entry_read
             source=PromptAnnotationSource(source_answer, 0, len(quote.encode("utf-16-le")) // 2), comment=comment),
         image,
     ))
-    intent, _, _ = _direct_intent(repo, lease, runtime, prompt)
+    intent, _ = _direct_intent(repo, lease, runtime, prompt)
     progress, _ = append(repo, lease.guard, intent.turn_id, "进展 Ω")
     cut = repo.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic() + 30)
     final_id = identity("entry")
@@ -169,7 +169,7 @@ def test_annotation_image_visualization_and_final_labels_match_single_entry_read
         complete_turn=True, occurred_at=datetime.now(timezone.utc), actor_id="model:test",
         deadline_monotonic=monotonic() + 30,
     )
-    q2, _, _ = _direct_intent(repo, lease, runtime, FrozenPromptContent.text("successor"))
+    q2, _ = _direct_intent(repo, lease, runtime, FrozenPromptContent.text("successor"))
     boundary = head(repo, lease.guard.session_id)
     with snapshot(repo) as connection:
         built = build_history_group(connection, lease.guard.session_id, intent.entry_id,
@@ -270,7 +270,7 @@ def test_tool_and_text_failures_do_not_cross_mode_qualification(
     assert isinstance(valid, HistoryBuildSuccess)
     assert artifact in valid.documents[("QA", True)]["body"]
     assert artifact not in valid.documents[("QA", False)]["body"]
-    assert "terminal\n" in valid.documents[("QA", True)]["body"]
+    assert "exec_process\n" in valid.documents[("QA", True)]["body"]
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
         if corrupt == "preview":
             changed = connection.execute("UPDATE pulsara_v3.transcript_entries SET inline_content=%s || substring(inline_content FROM 2) WHERE id=%s", (b"x", result_entry))

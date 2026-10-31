@@ -1,5 +1,6 @@
 import { session, WebContentsView, type BrowserWindow, type Session, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { isCanonicalIdentity, randomIdentity, type IdentityKind } from './identity';
 import type { BrowserCommand, BrowserEvent, BrowserHide, BrowserLayout, BrowserPresentation, BrowserState } from './browser-contract';
 import { allowBrowserRequest, browserBounds, browserURL, networkPort } from './browser-policy';
 
@@ -14,8 +15,8 @@ interface Page {
   navigation: Navigation | null;
   firstCommit: boolean;
 }
-function identity(value: unknown): asserts value is string {
-  if (typeof value !== 'string' || !value.trim()) throw new Error('缺少网页实例身份。');
+function identity(value: unknown, kind: IdentityKind): asserts value is string {
+  if (!isCanonicalIdentity(value, kind)) throw new Error('无效的网页身份。');
 }
 
 /** Owns only native browser resources belonging to this trusted workbench. */
@@ -64,15 +65,17 @@ export class BrowserOwner {
   }
 
   create(input: { tabId: string }): BrowserState {
-    identity(input?.tabId);
+    identity(input?.tabId, 'tab');
     if (!this.accepting || !this.origin()) throw new Error('工作台正在切换，不能创建网页。');
     if ([...this.pages.values()].some(page => page.state.tabId === input.tabId)) throw new Error('网页标签已有原生实例。');
     const part = this.partition();
     const view = new WebContentsView({ webPreferences: { session: part.session, sandbox: true, contextIsolation: true,
       nodeIntegration: false, nodeIntegrationInWorker: false, nodeIntegrationInSubFrames: false, webSecurity: true,
       webviewTag: false, plugins: false, allowRunningInsecureContent: false, navigateOnDragDrop: false, disableDialogs: true } });
+    let instanceId: string;
+    do { instanceId = randomIdentity('browser-instance'); } while (this.pages.has(instanceId));
     const page: Page = { partition: part, view, live: true, visible: false, navigation: null, firstCommit: true,
-      state: { instanceId: randomUUID(), tabId: input.tabId, url: '', pendingUrl: null,
+      state: { instanceId, tabId: input.tabId, url: '', pendingUrl: null,
         title: '', loading: false, canGoBack: false, canGoForward: false, error: null, crashed: false } };
     this.pages.set(page.state.instanceId, page);
     const wc = view.webContents;
@@ -181,7 +184,7 @@ export class BrowserOwner {
   private validURL(page: Page, url: string): boolean { try { browserURL(url, page.partition.port); return !page.partition.retired; } catch { return false; } }
 
   command(input: BrowserCommand): void {
-    identity(input?.instanceId);
+    identity(input?.instanceId, 'browser-instance');
     const page = this.pages.get(input.instanceId);
     if (!page || !this.active(page)) return;
     const wc = page.view.webContents;
@@ -210,12 +213,14 @@ export class BrowserOwner {
   }
 
   activate(input: BrowserPresentation): void {
-    identity(input?.presentationId);
-    if (input.instanceId !== null) identity(input.instanceId);
+    identity(input?.presentationId, 'presentation');
+    if (input.instanceId !== null) identity(input.instanceId, 'browser-instance');
     for (const page of this.pages.values()) this.hidePage(page);
     this.presentation = { ...input };
   }
   private matches(input: { instanceId: string; presentationId: string }): Page | undefined {
+    identity(input?.instanceId, 'browser-instance');
+    identity(input?.presentationId, 'presentation');
     if (this.presentation?.instanceId !== input.instanceId || this.presentation.presentationId !== input.presentationId) return;
     const page = this.pages.get(input.instanceId);
     return page && this.active(page) ? page : undefined;
@@ -241,7 +246,7 @@ export class BrowserOwner {
     }
   }
   close(instanceId: string): void {
-    identity(instanceId);
+    identity(instanceId, 'browser-instance');
     const page = this.pages.get(instanceId);
     if (!page) return;
     page.live = false; page.navigation = null; this.hidePage(page);

@@ -35,7 +35,7 @@ def test_required_discovery_reserves_before_cold_sdk_preparation(tmp_path, monke
             "transport": {"type": "stdio", "command": sys.executable},
         }) for server_id, required in (("a_optional", False), ("z_required", True)))
         owner = module.McpHostSupervisor(
-            session_id="session:cold-priority", workspace_root=tmp_path,
+            workspace_root=tmp_path,
             configs=configs, credential_boundary=ProcessCredentialBoundary(),
         )
         start = asyncio.create_task(owner.start())
@@ -77,7 +77,7 @@ def test_optional_only_start_does_not_wait_for_cold_sdk_preparation(tmp_path, mo
 
         monkeypatch.setattr(module, "_prepare_sdk_client_factory", prepare)
         owner = module.McpHostSupervisor(
-            session_id="session:optional-cold", workspace_root=tmp_path,
+            workspace_root=tmp_path,
             configs=(_parse_server("optional", {
                 "transport": {"type": "stdio", "command": sys.executable},
             }),), credential_boundary=ProcessCredentialBoundary(),

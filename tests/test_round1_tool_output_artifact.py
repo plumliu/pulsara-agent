@@ -159,7 +159,13 @@ def test_round1_static_authority_and_count_oracles_remain_closed() -> None:
     assert len(CONVERSATION_KERNEL_RELATIONS) == 30
     assert "tool_result_artifacts" not in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert LIVE_EVENT_TYPES == (
+        "TextStart", "TextDelta", "TextEnd", "ThinkingStart", "ThinkingDelta",
+        "ThinkingEnd", "DataStart", "DataDelta", "DataEnd", "ToolCallStart",
+        "ToolCallDelta", "ToolCallEnd", "ToolResultStart", "ToolResultDelta",
+        "ToolResultEnd", "InteractionOpened", "InteractionReplaced",
+        "InteractionClosed", "TerminalProcessCompleted", "TodoSnapshotUpdated",
+    )
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
 

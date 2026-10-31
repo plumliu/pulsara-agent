@@ -235,12 +235,12 @@ class KernelToolCapabilityPlanner:
                             "installed direct cohort cannot be fully reprojected"
                         )
             current_by_identity = {
-                fact.identity.identity_fingerprint: fact
+                fact.identity: fact
                 for fact in facts
                 if fact.origin is ToolCapabilityOrigin.MCP
             }
             previous_by_identity = {
-                route.version.identity_fingerprint: route
+                route.version.identity: route
                 for route in predecessor.mcp_route_projection.routes
             }
             native_meta_identities.update(
@@ -254,11 +254,11 @@ class KernelToolCapabilityPlanner:
                 for item in view.planning_input.mcp.source_snapshots
             }
             for version in direct_tool_versions:
-                previous = previous_by_identity.get(version.identity_fingerprint)
+                previous = previous_by_identity.get(version.identity)
                 if previous is None:
                     continue  # Builtins have no MCP route.
                 baseline = frozen_by_name[version.provider_name]
-                current = current_by_identity.get(version.identity_fingerprint)
+                current = current_by_identity.get(version.identity)
                 if current is None:
                     source = sources.get(previous.target.server_id)
                     reason = (
@@ -284,7 +284,7 @@ class KernelToolCapabilityPlanner:
                     FrozenNativeToolWireEligibilityQuote,
                 )
                 if (
-                    version.identity_fingerprint not in native_meta_identities
+                    version.identity not in native_meta_identities
                     and compatibility is NativeMcpCompatibility.COMPATIBLE
                     and wire_compatible
                 ):
@@ -297,7 +297,7 @@ class KernelToolCapabilityPlanner:
                         )
                     )
                 else:
-                    native_meta_identities.add(version.identity_fingerprint)
+                    native_meta_identities.add(version.identity)
                     reason = {
                         NativeMcpCompatibility.INPUT_CHANGED: CapabilityRouteReasonCode.NATIVE_INPUT_CHANGED,
                         NativeMcpCompatibility.OUTPUT_CHANGED: CapabilityRouteReasonCode.NATIVE_OUTPUT_CHANGED,
@@ -326,12 +326,12 @@ class KernelToolCapabilityPlanner:
                     )
                     routes.append(replace(routed, native_spec=baseline))
             direct_identities = {
-                item.identity_fingerprint for item in direct_tool_versions
+                item.identity for item in direct_tool_versions
             }
             for fact in mcp_eligible:
-                if fact.identity.identity_fingerprint in direct_identities:
+                if fact.identity in direct_identities:
                     continue
-                previous = previous_by_identity.get(fact.identity.identity_fingerprint)
+                previous = previous_by_identity.get(fact.identity)
                 if (
                     previous is not None
                     and previous.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
@@ -355,12 +355,12 @@ class KernelToolCapabilityPlanner:
             raise TypeError("capability epoch predecessor union is open")
 
         installed_direct_identities = (
-            {item.identity_fingerprint for item in direct_tool_versions}
+            {item.identity for item in direct_tool_versions}
             if isinstance(predecessor, InstalledCapabilityEpochPredecessor)
             else set()
         )
         for fact in mcp_incompatible:
-            if fact.identity.identity_fingerprint in installed_direct_identities:
+            if fact.identity in installed_direct_identities:
                 # Installed native identities were classified against their frozen baseline above.
                 continue
             key = (
@@ -368,7 +368,7 @@ class KernelToolCapabilityPlanner:
                 fact.identity.stable_name,
             )
             previous = (
-                previous_by_identity.get(fact.identity.identity_fingerprint)
+                previous_by_identity.get(fact.identity)
                 if isinstance(predecessor, InstalledCapabilityEpochPredecessor)
                 else None
             )

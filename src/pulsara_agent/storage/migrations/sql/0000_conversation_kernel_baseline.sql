@@ -630,7 +630,7 @@ CREATE TABLE pulsara_v3.provider_assistant_replay_fragments (
 );
 
 CREATE TABLE pulsara_v3.tool_invocations (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^call:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
     turn_id text NOT NULL,
     source_kind text NOT NULL CHECK (source_kind IN ('MODEL_TOOL_CALL','CODE_MODE_CALL')),
@@ -670,6 +670,7 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
     actor_id text NOT NULL,
     remote_idempotency_key text,
     remote_identity text,
+    remote_identity_verification text,
     retry_of_attempt_id text,
     code_source_inline_content bytea,
     code_source_blob_id text REFERENCES pulsara_v3.blobs(id) ON DELETE RESTRICT,
@@ -695,7 +696,10 @@ CREATE TABLE pulsara_v3.tool_execution_attempts (
         REFERENCES pulsara_v3.assistant_message_blocks (session_id, assistant_entry_id, tool_call_id) ON DELETE CASCADE,
     FOREIGN KEY (session_id, retry_of_attempt_id)
         REFERENCES pulsara_v3.tool_execution_attempts (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    CHECK ((remote_identity IS NULL) = (remote_identity_published_at IS NULL))
+    CHECK ((remote_identity IS NULL) = (remote_identity_published_at IS NULL)),
+    CHECK ((remote_identity IS NULL AND remote_identity_verification IS NULL)
+        OR (remote_identity IS NOT NULL AND remote_identity ~ '^process:[a-z2-7]{25}[aeimquy4]$' AND remote_identity_verification IS NULL)
+        OR (remote_identity IS NOT NULL AND remote_identity_verification IS NOT NULL AND remote_identity ~ '^mcp-tool:[a-z2-7]{25}[aeimquy4]$' AND remote_identity_verification ~ '^sha256:[0-9a-f]{64}$'))
 );
 
 ALTER TABLE pulsara_v3.tool_invocations ADD CONSTRAINT invocation_source_exec_fk
@@ -736,7 +740,7 @@ CREATE TABLE pulsara_v3.tool_results (
         CHECK (output_artifact_disposition IN (
             'NOT_REQUIRED', 'AVAILABLE', 'INCOMPLETE', 'UNAVAILABLE'
         )),
-    output_artifact_id text,
+    output_artifact_id text CHECK (output_artifact_id ~ '^artifact:[a-z2-7]{25}[aeimquy4]$'),
     output_artifact_blob_id text,
     output_source_coverage text NOT NULL DEFAULT 'COMPLETE'
         CHECK (output_source_coverage IN ('COMPLETE', 'RETAINED_SNAPSHOT')),
@@ -2422,7 +2426,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA pulsara_v3 FROM PUBLIC;
 -- Disposable search projection. Canonical entry/block rows alone own content.
 -- QA and QAQ share one body layout and one index, selected mutually exclusively.
 CREATE TABLE pulsara_v3.history_search_documents (
-    id text PRIMARY KEY,
+    id text CHECK (id ~ '^search-document:[a-z2-7]{25}[aeimquy4]$') PRIMARY KEY,
     session_id text NOT NULL REFERENCES pulsara_v3.sessions(id) ON DELETE CASCADE,
     q1_entry_id text NOT NULL,
     q2_entry_id text,

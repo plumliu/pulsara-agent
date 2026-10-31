@@ -1,3 +1,4 @@
+import { randomIdentity } from './identity';
 import { desktopHost } from './desktop-host';
 import { isNativeDirectory } from './file-drop';
 import { closeHistory } from '@tiptap/pm/history';
@@ -156,7 +157,8 @@ export class PromptDraftStore {
     editor.state.doc.forEach(node => { if (node.type.name === 'annotation') position += node.nodeSize; });
     // Only identifies a draft node across edits, undo and duplicate quotes.
     // Canonical serialization carries value alone, never this UI identity.
-    const id = crypto.randomUUID();
+    let id: string;
+    do { id = randomIdentity('draft-node'); } while (this.annotations(sessionId).some(item => item.id === id));
     editor.view.dispatch(closeHistory(editor.state.tr));
     editor.commands.insertContentAt(position, { type: 'annotation', attrs: { value: copyAnnotation(annotation), draftId: id } });
     return id;
@@ -193,7 +195,7 @@ export class PromptDraftStore {
         nodes.push(this.createImport(sessionId, session, [file]));
         continue;
       }
-      const asset = this.createAsset(file, file.type);
+      const asset = this.createAsset(file, file.type, session.assets);
       session.assets.set(asset.id, asset);
       nodes.push({
         type: 'image',
@@ -221,7 +223,9 @@ export class PromptDraftStore {
   }
 
   private createImport(sessionId: string, session: DraftSession, files: readonly File[]): JSONContent {
-    const item: DraftImport = { id: crypto.randomUUID(), files, controller: new AbortController(), raw: '' };
+    let id: string;
+    do { id = randomIdentity('draft-import'); } while (session.imports.has(id));
+    const item: DraftImport = { id, files, controller: new AbortController(), raw: '' };
     session.imports.set(item.id, item);
     // Reserve all editor positions synchronously before starting asynchronous IO.
     queueMicrotask(() => { void this.runImport(sessionId, session, item); });
@@ -417,13 +421,15 @@ export class PromptDraftStore {
         continue;
       }
       if (part.type === 'annotation') {
-        annotations.push({ type: 'annotation', attrs: { value: copyAnnotation(part), draftId: crypto.randomUUID() } });
+        let draftId: string;
+        do { draftId = randomIdentity('draft-node'); } while (annotations.some(node => node.attrs?.draftId === draftId));
+        annotations.push({ type: 'annotation', attrs: { value: copyAnnotation(part), draftId } });
         continue;
       }
       const blob = new Blob([new Uint8Array(part.bytes)], {
         type: part.declaredMediaType,
       });
-      const asset = this.createReadyAsset(blob, part.declaredMediaType, part.bytes);
+      const asset = this.createReadyAsset(blob, part.declaredMediaType, part.bytes, assets);
       assets.set(asset.id, asset);
       nodes.push({
         type: 'image',
@@ -508,8 +514,9 @@ export class PromptDraftStore {
     });
   }
 
-  private createAsset(blob: Blob, declaredMediaType: string): DraftAsset {
-    const id = crypto.randomUUID();
+  private createAsset(blob: Blob, declaredMediaType: string, assets: ReadonlyMap<string, DraftAsset>): DraftAsset {
+    let id: string;
+    do { id = randomIdentity('draft-asset'); } while (assets.has(id));
     const asset: DraftAsset = {
       id,
       blob,
@@ -529,9 +536,12 @@ export class PromptDraftStore {
     blob: Blob,
     declaredMediaType: string,
     value: Uint8Array,
+    assets: ReadonlyMap<string, DraftAsset>,
   ): DraftAsset {
+    let id: string;
+    do { id = randomIdentity('draft-asset'); } while (assets.has(id));
     return {
-      id: crypto.randomUUID(),
+      id,
       blob,
       declaredMediaType,
       objectUrl: URL.createObjectURL(blob),

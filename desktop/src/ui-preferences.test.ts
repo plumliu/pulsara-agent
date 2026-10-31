@@ -32,6 +32,10 @@ test('desktop UI preferences survive a new owner independently of renderer ports
     assert.throws(() => second.write({key:'postgres', value:'anything'}));
     assert.throws(() => second.write({key:'__proto__', value:null}));
     assert.throws(() => second.write({key:b, value:1}));
+    const noncanonical = 'session:' + 'a'.repeat(25) + 'b';
+    assert.throws(() => second.write({key:'pulsara-active-session', value:noncanonical}));
+    assert.throws(() => second.write({key:'pulsara-workspace-open:' + noncanonical, value:'true'}));
+    assert.throws(() => second.write({key:'pulsara-workspace-width:' + noncanonical, value:null}));
     assert.deepEqual(new UiPreferences(file).read(), second.read());
   } finally { rmSync(root, {recursive:true,force:true}); }
 });

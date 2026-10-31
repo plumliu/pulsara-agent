@@ -821,7 +821,13 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
     assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 30
     assert "agent_known_sessions" in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert LIVE_EVENT_TYPES == (
+        "TextStart", "TextDelta", "TextEnd", "ThinkingStart", "ThinkingDelta",
+        "ThinkingEnd", "DataStart", "DataDelta", "DataEnd", "ToolCallStart",
+        "ToolCallDelta", "ToolCallEnd", "ToolResultStart", "ToolResultDelta",
+        "ToolResultEnd", "InteractionOpened", "InteractionReplaced",
+        "InteractionClosed", "TerminalProcessCompleted", "TodoSnapshotUpdated",
+    )
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
 
@@ -1116,8 +1122,9 @@ def test_stage2_host_takeover_rejects_pending_exact_turn_steer(
         ]
 
 
+@pytest.mark.parametrize("remote_kind", ["process", "mcp-tool"])
 def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
-    stage2_migrated_postgres_database,
+    stage2_migrated_postgres_database, remote_kind,
 ) -> None:
     repository = _repository(stage2_migrated_postgres_database)
     deadline = monotonic() + 30
@@ -1181,14 +1188,29 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
         deadline_monotonic=deadline,
     )
     assert attempt.tool_call_id == call_id
-    remote_identity = _name("process")
+    remote_identity = _name(remote_kind)
+    verification = "sha256:" + "a" * 64 if remote_kind == "mcp-tool" else None
     remote_identity_candidate = build_prepared_tool_remote_identity_publication(
         session_id=session_id,
         attempt_id=attempt.attempt_id,
         remote_identity=remote_identity,
+        remote_identity_verification=verification,
         occurred_at=datetime.now(timezone.utc),
         actor_id="tool-executor",
     )
+    if remote_kind == "process":
+        from pulsara_agent.conversation_kernel.contracts import canonical_digest
+        from pulsara_agent.identity import derive_id
+        legacy_payload = {"session_id": session_id, "attempt_id": attempt.attempt_id,
+                          "remote_identity": remote_identity,
+                          "occurred_at": remote_identity_candidate.occurred_at.isoformat(),
+                          "actor_id": "tool-executor"}
+        assert remote_identity_candidate.candidate_fingerprint == canonical_digest(
+            "pulsara:prepared-tool-remote-identity-publication:v1", legacy_payload)
+        assert remote_identity_candidate.event.event_id == derive_id(
+            "event", "accepted", session_id, "TOOL_REMOTE_IDENTITY_PUBLISHED",
+            "TOOL_ATTEMPT", attempt.attempt_id, "")
+    assert repository.confirm_tool_remote_identity(lease.guard, candidate=remote_identity_candidate, deadline_monotonic=deadline) is ToolRemoteIdentityConfirmationKind.NONE
     repository.publish_tool_remote_identity(
         lease.guard,
         candidate=remote_identity_candidate,
@@ -1209,17 +1231,25 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
         )
         is ToolRemoteIdentityConfirmationKind.FULL
     )
+    if verification is not None:
+        conflicting = build_prepared_tool_remote_identity_publication(
+            session_id=session_id, attempt_id=attempt.attempt_id, remote_identity=remote_identity,
+            remote_identity_verification="sha256:" + "b" * 64,
+            occurred_at=remote_identity_candidate.occurred_at, actor_id="tool-executor")
+        assert repository.confirm_tool_remote_identity(lease.guard, candidate=conflicting, deadline_monotonic=deadline) is ToolRemoteIdentityConfirmationKind.CONFLICT
+        with pytest.raises(ConversationKernelConflict):
+            repository.publish_tool_remote_identity(lease.guard, candidate=conflicting, deadline_monotonic=deadline)
     with repository.connection_provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=deadline,
     ) as connection:
         assert connection.execute(
             """
-            SELECT remote_identity FROM pulsara_v3.tool_execution_attempts
+            SELECT remote_identity, remote_identity_verification FROM pulsara_v3.tool_execution_attempts
             WHERE session_id = %s AND id = %s
             """,
             (session_id, attempt.attempt_id),
-        ).fetchone() == (remote_identity,)
+        ).fetchone() == (remote_identity, verification)
         assert connection.execute(
             """
             SELECT count(*) FROM pulsara_v3.agent_events
@@ -1243,6 +1273,7 @@ def test_stage2_tool_message_precedes_attempt_and_remote_identity_is_set_once(
             "remote_identity_utf8_bytes": len(remote_identity.encode("utf-8")),
             "remote_identity_digest": "sha256:"
             + sha256(remote_identity.encode("utf-8")).hexdigest(),
+            **({"remote_identity_verification": verification} if verification else {}),
         }
 
 
@@ -1380,6 +1411,11 @@ def test_stage2_human_tool_decision_atomically_installs_exact_effect_boundary(
             ),
         ).fetchone()
         assert counts == ((1, 1, 1, 0) if decision == "ALLOW" else (1, 1, 0, 1))
+        if decision == "ALLOW":
+            assert connection.execute(
+                "SELECT authorization_kind, authorization_reference FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s AND id=%s",
+                (session_id, attempt_id),
+            ).fetchone() == ("human", decision_id)
         event_types = tuple(
             row[0]
             for row in connection.execute(

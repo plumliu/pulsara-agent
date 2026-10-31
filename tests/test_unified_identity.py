@@ -84,6 +84,7 @@ def test_derivation_preserves_unicode_delimiters_and_empty_positions():
             separators=(",", ":"),
         ).encode()
     ).digest()[:16]
+    assert derive_id("entry", "fixture", *parts) == "entry:hbumehpzj53h3gbt572hhjtpbq"
     assert (
         derive_id("entry", "fixture", *parts)
         == "entry:" + base64.b32encode(expected).decode().rstrip("=").lower()

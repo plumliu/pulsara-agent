@@ -28,6 +28,7 @@ from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
 )
 from pulsara_agent.process_credential_boundary import (
+    CredentialObjectKeyConflict,
     ProcessCredentialBoundary,
     ProcessCredentialBoundaryTimedOut,
 )
@@ -97,7 +98,7 @@ class HookSecretScrubSet:
             for key, item in root.items():
                 safe_key = self.scrub_text(key)
                 if safe_key != key or safe_key in scrubbed:
-                    raise ValueError("API key scrub changed a JSON object key")
+                    raise CredentialObjectKeyConflict("API key scrub changed a JSON object key")
                 scrubbed[safe_key] = self.scrub_json(item)
             return scrubbed
         return root

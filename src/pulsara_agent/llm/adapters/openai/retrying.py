@@ -26,6 +26,7 @@ from pulsara_agent.process_credential_boundary import (
     ProcessCredentialScrubSet,
     PROCESS_CREDENTIAL_REPLACEMENT,
 )
+from pulsara_agent.public_projection import public_record
 from pulsara_agent.primitives.model_call import (
     ModelCallPurpose,
     ProviderRetryAttemptSummaryFact,
@@ -725,40 +726,40 @@ def log_provider_decision(
         "delay_seconds": delay,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
-    # Bound diagnostics at their existing public-message size per value; mark
-    # truncation explicitly and perform final-text exact credential scrub.
-    for item in payload["exception_chain"]:
+    # Project dynamic diagnostics, then retain the existing per-value bound.
+    chain = [public_record(item, scrub, external=("body",)) for item in payload["exception_chain"]]
+    for item in chain:
         for key in ("message", "body"):
-            value = scrub.scrub_text(str(item[key])) if item[key] is not None else None
+            if key not in item:
+                continue
+            value = str(item[key]) if item[key] is not None else None
             item[key] = value
             limit = DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars
             if value is not None and len(value) > limit:
                 item[key] = value[:limit]
                 item[key + "_truncated"] = True
-    LOGGER.warning(
-        "%s",
-        scrub.scrub_text(
-            "Provider request " + json.dumps(payload, ensure_ascii=False, default=str)
-        ),
-    )
+    payload = public_record(payload, scrub,
+        fixed=("api", "phase", "classification", "decision", "skipped_reason", "close_scope", "original_classification"),
+        children={"exception_chain": chain})
+    LOGGER.warning("%s", "Provider request " + json.dumps(payload, ensure_ascii=False, default=str))
 
 
 def log_invalid_tool_arguments(*, scrub, attempt, arguments, terminal_chunk, exc):
     try:
-        diagnostic = scrub.scrub_json(
+        diagnostic = public_record(
             {
                 "arguments": arguments,
                 "terminal_chunk": terminal_chunk,
                 "parse_error": str(exc.__cause__ or exc),
-            }
+            }, scrub, external=("arguments", "terminal_chunk"),
         )
         limit = DEFAULT_PROVIDER_ERROR_SANITIZATION_CONTRACT.max_message_chars
-        for key, value in diagnostic["arguments"].items():
+        for key, value in diagnostic.get("arguments", {}).items():
             if len(value) > limit:
                 diagnostic["arguments"][key] = value[:limit]
                 diagnostic["arguments_truncated"] = True
-        terminal_text = json.dumps(diagnostic["terminal_chunk"], ensure_ascii=False)
-        if len(terminal_text) > limit:
+        terminal_text = json.dumps(diagnostic.get("terminal_chunk"), ensure_ascii=False)
+        if "terminal_chunk" in diagnostic and len(terminal_text) > limit:
             diagnostic["terminal_chunk"] = {
                 "prefix": terminal_text[:limit],
                 "truncated": True,
@@ -769,8 +770,8 @@ def log_invalid_tool_arguments(*, scrub, attempt, arguments, terminal_chunk, exc
         )
     except Exception as diagnostic_error:
         # Diagnostics have no authority to alter a recovery decision.
-        text = f"Invalid tool arguments attempt={attempt} diagnostic_unavailable={type(diagnostic_error).__name__}: {diagnostic_error}"
-    LOGGER.warning("%s", scrub.scrub_text(text))
+        text = f"Invalid tool arguments attempt={attempt} diagnostic_unavailable={type(diagnostic_error).__name__}: {scrub.scrub_text(str(diagnostic_error))}"
+    LOGGER.warning("%s", text)
 
 
 def retry_reason(decision):

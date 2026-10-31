@@ -37,6 +37,7 @@ from pulsara_agent.hooks.config_parser import (
     MAXIMUM_HOOK_CONFIG_BYTES,
     ParsedHookConfig,
     parse_hook_config,
+    parse_hook_declarations,
 )
 from pulsara_agent.hooks.contracts import (
     FrozenHookSourceProvenance,
@@ -87,7 +88,6 @@ MAXIMUM_PLUGIN_JSON_NODES = 16_384
 MAXIMUM_PLUGIN_JSON_DEPTH = 64
 MAXIMUM_PLUGIN_JSON_SCALAR_BYTES = 64 * 1024
 COPY_CHUNK_BYTES = 64 * 1024
-_VALIDATION_INSTALL_ID = "package:aaaaaaaaaaaaaaaaaaaaaaaaaa"
 _TCHAR = frozenset(
     b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
@@ -218,12 +218,13 @@ class PluginSourceObserver:
         deadline_monotonic: float,
         cancellation: PluginCancellationPort | None = None,
         scrub_set: ProcessCredentialScrubSet | None = None,
-        hook_package_install_id: str = _VALIDATION_INSTALL_ID,
+        hook_package_install_id: str | None = None,
         hook_visibility: HookVisibilityScope = HookVisibilityScope.USER,
         hook_workspace_state_key: str | None = None,
         hook_lifetime_anchor: object | None = None,
         hook_declaration_environment: tuple[tuple[str, str], ...] = (),
         scan_active_api_key: bool = True,
+        secret_scan_source_path: Path | None = None,
         enforce_managed_admission: bool = True,
     ) -> HeldPluginPackageObservation:
         source = prepare_local_source_path(source_path)
@@ -332,7 +333,7 @@ class PluginSourceObserver:
                     self._credential_boundary,
                     descriptor,
                     entries,
-                    source_path=os.fsencode(source),
+                    source_path=os.fsencode(secret_scan_source_path or source),
                     deadline_monotonic=deadline_monotonic,
                     cancellation=probe,
                     scrub_set=scrub,
@@ -1117,7 +1118,7 @@ def _parse_hooks(
     *,
     source: Path,
     manifest: PluginManifest,
-    package_install_id: str,
+    package_install_id: str | None,
     visibility: HookVisibilityScope,
     workspace_state_key: str | None,
     lifetime_anchor: object | None,
@@ -1151,25 +1152,22 @@ def _parse_hooks(
             deadline_monotonic=deadline_monotonic,
             cancellation=cancellation,
         )
-        identity = PluginHookSourceIdentity(
-            visibility,
-            manifest.name,
-            package_install_id,
-            relative.as_posix(),
-            source.joinpath(*relative.parts),
-            workspace_state_key,
-            lifetime_anchor,
-        )
-        subject = PluginHookTrustSubject(visibility, manifest.name, workspace_state_key)
-        provenance = FrozenHookSourceProvenance(
-            identity,
-            subject,
-            None,
-            f"PLUGIN:{manifest.name}",
-            declaration_environment,
-            lifetime_anchor,
-        )
-        parsed = parse_hook_config(raw, provenance=provenance)
+        if package_install_id is None:
+            parsed = parse_hook_declarations(raw)
+            bound_config = None
+        else:
+            identity = PluginHookSourceIdentity(
+                visibility, manifest.name, package_install_id, relative.as_posix(),
+                source.joinpath(*relative.parts), workspace_state_key, lifetime_anchor,
+            )
+            subject = PluginHookTrustSubject(visibility, manifest.name, workspace_state_key)
+            provenance = FrozenHookSourceProvenance(
+                identity, subject, None, f"PLUGIN:{manifest.name}",
+                declaration_environment, lifetime_anchor,
+            )
+            parsed = parse_hook_config(raw, provenance=provenance)
+            bound_config = parsed
+
     except (HookConfigParseError, JsonBoundExceeded):
         diagnostic = HookDiagnostic(
             "HOOK_SOURCE_PARSE_FAILED",
@@ -1201,7 +1199,7 @@ def _parse_hooks(
             hook_definitions=summaries,
             diagnostics=parsed.diagnostics,
         ),
-        parsed,
+        bound_config,
     )
 
 

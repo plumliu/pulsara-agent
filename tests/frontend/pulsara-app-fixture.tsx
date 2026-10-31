@@ -248,7 +248,7 @@ const userCapabilitySnapshot: UserCapabilitySnapshot = {
       description: '个人工作流插件。',
       version: '1.0.0',
       enabled: true,
-      packageInstallId: 'pkg_0123456789abcdef0123456789abcdef',
+      packageInstallId: {visibility: 'VISIBLE', value: 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'},
       packageRoot: '/Users/test/.pulsara/plugins/personal-tools',
       skillCount: 2,
       mcpCount: 1, hookCount: 3,

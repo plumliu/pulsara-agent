@@ -1,3 +1,4 @@
+import { randomIdentity } from '../lib/identity';
 import { WorkspaceLoading } from './workspace-loading';
 import {
   ArrowLeft,
@@ -197,7 +198,11 @@ export function FilePreviewProvider({
   };
   const prepare = async (path: string, valid: () => boolean, root?: string, deduplicate = true): Promise<PreparedWorkspaceTab> => {
     const expected = connection.current;
-    const tab: BrowserTab = { id: crypto.randomUUID(), sessionId: expected.sessionId, root,
+    const idInUse = (id: string) => tabs.current.has(id) || Boolean(workspaceRef.current?.tabs.some(item => item.id === id))
+      || Boolean(workspaceRef.current?.browserTabs.records.has(id));
+    let id: string;
+    do { id = randomIdentity('tab'); } while (idInUse(id));
+    const tab: BrowserTab = { id, sessionId: expected.sessionId, root,
       history: [visit(path)], index: 0, loading: false, touched: Date.now() };
     let adopted = false;
     const alive = () => valid() && connection.current === expected && workspaceRef.current?.sessionId === expected.sessionId;
@@ -224,6 +229,7 @@ export function FilePreviewProvider({
           if (tab.history[0].anchor) match.history[match.index].anchor = tab.history[0].anchor;
           release(tab); changed(); return describe(match);
         }
+        while (idInUse(tab.id)) tab.id = randomIdentity('tab');
         adopted = true; tabs.current.set(tab.id, tab); changed();
         return describe(tab);
       },

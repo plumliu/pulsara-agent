@@ -1,3 +1,4 @@
+from pulsara_agent.identity import derive_id
 """Query association uses frozen Host provenance, independently of discovery."""
 
 import asyncio
@@ -38,8 +39,7 @@ def saved_connection(service, *, scope="USER", enabled=False, subagents=False):
 
 def supervisor_for(service, config):
     return McpHostSupervisor(
-        session_id="session:association-test", workspace_root=service.workspace_root,
-        configs=(config,), credential_boundary=ProcessCredentialBoundary(),
+        workspace_root=service.workspace_root, configs=(config,), credential_boundary=ProcessCredentialBoundary(),
     )
 
 
@@ -82,7 +82,7 @@ def test_undiscovered_local_connection_is_one_model_visible_item(tmp_path, scope
                                      "source_kind": "LOCAL", "server_id": "firecrawl"}
             assert state.value in row["status"]
             detail = await query(service, runtime, {"target": row["target"]})
-            assert detail["runtime_target"] == {"kind": "MCP_SERVER", "runtime_server_id": "firecrawl"}
+            assert detail["runtime_target"] == {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "firecrawl")}
             assert detail["catalog_discovered"] is False
             children = await query(service, runtime, {"parent": row["target"], "kind": "MCP_TOOL"})
             assert children["items"] == [] and children["completeness"] == "PARTIAL"
@@ -106,7 +106,7 @@ def test_retained_discovery_keeps_its_own_source_during_config_reconnect(tmp_pat
         raw = {"enabled": True, "required": True,
                "transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"}}
         config = _parse_server("firecrawl", raw, runtime_source=config.runtime_source)
-        supervisor = McpHostSupervisor(session_id="session:retained-source",
+        supervisor = McpHostSupervisor(
             workspace_root=service.workspace_root, configs=(config,),
             credential_boundary=ProcessCredentialBoundary(), client_factory=_FakeMcpClient)
         await supervisor.start()
@@ -193,7 +193,7 @@ def test_plugin_connection_requires_exact_package_provenance(tmp_path, same_inst
             detail = await query(service, runtime, {"target": row["target"]})
             assert ("runtime_target" in detail) == same_install
             if same_install:
-                assert detail["runtime_target"]["runtime_server_id"] == runtime_id
+                assert detail["runtime_target"]["runtime_server_id"] == derive_id("mcp-server", "runtime-target", runtime_id)
                 assert detail["catalog_discovered"] is False
         finally:
             runtime.release()
@@ -220,7 +220,7 @@ def test_runtime_provenance_is_frozen_and_child_query_keeps_scope(tmp_path, suba
             assert (await query(service, old, {"kind": "MCP_SERVER"}))["total_count"] == 1
             assert (await query(service, new, {"kind": "MCP_SERVER"}))["total_count"] == 2
             # No provenance field is serialized into the scoped runtime result.
-            target = {"kind": "MCP_SERVER", "runtime_server_id": "firecrawl"}
+            target = {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "firecrawl")}
             if subagents:
                 detail = await query(None, old, {"target": target}, scope=ModelInputScopeKind.SUBAGENT)
                 assert detail["source"] is None

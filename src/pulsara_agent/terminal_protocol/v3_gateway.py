@@ -110,7 +110,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 6
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:a7e010183bcd013b868a0cfcbc976526d6badfe4cad383afbcba94fb82691b6a"
+    "sha256:fc4b4b0aa76fde3a31c6e672023cd5ff5c039813b9ade33110de3e3cb72d38be"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -348,6 +348,9 @@ class TerminalKernelProtocolServer:
             bytes(request.launch_capability), self._launch_capability
         ):
             return _error(request.request_id, "INVALID_LAUNCH_CAPABILITY")
+        from pulsara_agent.identity import is_valid_id
+        if not is_valid_id(request.client_instance_id, "transport"):
+            return _error(request.request_id, "CLIENT_INSTANCE_ID_INVALID")
         try:
             session = self._session_provider(request.host_session_id)
         except (KeyError, RuntimeError):
@@ -1250,7 +1253,9 @@ class TerminalKernelProtocolServer:
         if not 1 <= request.limit_bytes <= 1 << 20:
             return _error(request.request_id, "CONTENT_RANGE_INVALID")
         target = request.WhichOneof("target")
-        if target is None or (target == "image_ref" and (request.block_id or request.HasField("image_ref_ordinal") or request.HasField("visualization_ordinal"))) or (target == "queue_item_id" and request.block_id) or (
+        from pulsara_agent.identity import is_valid_id
+        reasoning_selector = is_valid_id(request.block_id, "reasoning-block")
+        if (request.HasField("reasoning_ordinal") != reasoning_selector) or (request.HasField("reasoning_ordinal") and (target != "entry_id" or request.HasField("image_ref_ordinal") or request.HasField("visualization_ordinal"))) or target is None or (target == "image_ref" and (request.block_id or request.HasField("image_ref_ordinal") or request.HasField("visualization_ordinal"))) or (target == "queue_item_id" and request.block_id) or (
             request.HasField("image_ref_ordinal") and request.block_id
         ) or (
             request.HasField("visualization_ordinal")
@@ -1261,7 +1266,6 @@ class TerminalKernelProtocolServer:
         ):
             return _error(request.request_id, "CONTENT_TARGET_INVALID")
         if target == "image_ref":
-            from pulsara_agent.identity import is_valid_id
             if not is_valid_id(request.image_ref, "image"):
                 return _error(request.request_id, "CONTENT_TARGET_INVALID")
         try:
@@ -1284,6 +1288,7 @@ class TerminalKernelProtocolServer:
                     if request.HasField("visualization_ordinal")
                     else None
                 ),
+                reasoning_ordinal=(request.reasoning_ordinal if request.HasField("reasoning_ordinal") else None),
                 deadline_monotonic=monotonic() + 10.0,
             )
         except CanonicalImageReferenceUnavailable:

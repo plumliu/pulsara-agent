@@ -321,7 +321,6 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
     from pulsara_agent.capability.management_form import AcceptedCapabilityFormSubmission
     from pulsara_agent.capability.render import render_catalog_prompt
     from pulsara_agent.capability.resolver import _catalog_entry
-    from pulsara_agent.capability.source_query import parse_query
     from pulsara_agent.cli import _plugin_summary_payload
     from pulsara_agent.conversation_kernel.capability_management_execution import (
         CapabilityManagementCall,
@@ -387,7 +386,7 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
         async def query(arguments, *, inspect=False):
             return await CapabilitySourceQuery(
                 service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT
-            ).execute(parse_query(arguments, inspect=inspect), inspect=inspect)
+            ).execute(arguments)
 
         listed = await query({"kind": "SKILL", "source_kind": "PLUGIN"})
         row = next(item for item in listed["items"] if item["name"] == "example")
@@ -507,3 +506,17 @@ def test_unreferenced_gemini_commands_are_resources_in_claude_import(tmp_path):
     (source / "commands/host-command.md").write_text("Claude command")
     with observe(source, "claude") as observed:
         assert any(item.component == "commands" for item in observed.diagnostics)
+
+
+def test_import_prevalidation_uses_declarations_without_hook_binding(tmp_path, monkeypatch):
+    from pulsara_agent.plugins import package_core
+
+    source = fixture(tmp_path, {"hooks": {"hooks": {"SessionStart": [
+        {"hooks": [{"type": "command", "command": "echo imported"}]}
+    ]}}})
+    def forbidden(*args, **kwargs):
+        raise AssertionError("prevalidation must not bind executable Hook provenance")
+    monkeypatch.setattr(package_core, "parse_hook_config", forbidden)
+    with observe(source) as observation:
+        assert observation.hook_config is None
+        assert observation.summary.hooks.hook_definitions[0].command == "echo imported"

@@ -104,5 +104,8 @@
     },
     "afterPack": "scripts/linux-cli-entry.cjs"
   },
-  "homepage": "https://github.com/plumliu/pulsara-agent"
+  "homepage": "https://github.com/plumliu/pulsara-agent",
+  "dependencies": {
+    "@noble/hashes": "1.8.0"
+  }
 }

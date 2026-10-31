@@ -1,3 +1,4 @@
+from pulsara_agent.identity import derive_id
 """Unified source queries prove observable selection and existing owner boundaries."""
 
 import asyncio
@@ -402,7 +403,7 @@ def test_runtime_detail_without_source_service_does_not_read_configuration(
 ):
     import pulsara_agent.conversation_kernel.capability_query as owner
 
-    target = {"kind": "MCP_SERVER", "runtime_server_id": "docs"}
+    target = {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "docs")}
     detail = {
         "target": target,
         "name": "Docs",
@@ -554,7 +555,7 @@ def test_credential_scrub_happens_before_page_budget(tmp_path, monkeypatch):
         minimal_row(
             "MCP_SERVER",
             f"server-{i}",
-            {"kind": "MCP_SERVER", "runtime_server_id": f"server-{i}"},
+            {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", f"server-{i}")},
             None,
             "known",
             "short-test-key " * 400,
@@ -567,7 +568,7 @@ def test_credential_scrub_happens_before_page_budget(tmp_path, monkeypatch):
         lambda *args, **kwargs: (
             rows,
             {
-                ("MCP_SERVER", item["target"]["runtime_server_id"]): {
+                ("MCP_SERVER", item["name"]): {
                     "target": item["target"],
                     "name": item["name"],
                     "connection_status": "READY",
@@ -1095,7 +1096,7 @@ def test_local_mcp_unavailable_is_not_absent_but_complete_missing_target_is_abse
 @pytest.mark.parametrize(
     "target",
     [
-        {"kind": "MCP_SERVER", "runtime_server_id": "docs"},
+        {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "docs")},
         {"kind": "MCP_RESOURCE", "server_id": "docs", "uri": "fixture://note"},
     ],
 )
@@ -1143,3 +1144,77 @@ def test_remote_metadata_miss_only_proves_absence_in_complete_visible_catalog(
         assert error.value.diagnostics[0]["code"] == "MCP_CATALOG_NOT_DISCOVERED"
     else:
         assert error.value.diagnostics == ()
+
+
+def test_runtime_parent_resolves_canonical_id_to_natural_child_key(monkeypatch):
+    import pulsara_agent.conversation_kernel.capability_query as owner
+
+    key = "plugin:7:example:docs"
+    canonical = derive_id("mcp-server", "runtime-target", key)
+    server = {"kind": "MCP_SERVER", "runtime_server_id": canonical}
+    child = {"kind": "MCP_TOOL", "server_id": key, "tool_name": "mcp__docs__find"}
+    rows = [minimal_row("MCP_SERVER", "Docs", server, None, "ready"),
+            minimal_row("MCP_TOOL", "Find", child, None, "ready")]
+    details = {("MCP_SERVER", key): {"target": server, "name": "Docs", "connection_status": "READY", "catalog_discovered": True, "diagnostics": []}}
+    monkeypatch.setattr(owner, "runtime_rows", lambda *args, **kwargs: (rows, details, []))
+    result = asyncio.run(query(None, {"parent": server, "kind": "MCP_TOOL"}, scope=ModelInputScopeKind.SUBAGENT))
+    assert [item["target"] for item in result["items"]] == [child]
+    with pytest.raises(CapabilityQueryError) as error:
+        parse_query({"parent": {"kind": "MCP_SERVER", "runtime_server_id": key}})
+    assert error.value.code == "INVALID_ARGUMENTS"
+    absent = {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "other")}
+    with pytest.raises(CapabilityQueryError) as error:
+        asyncio.run(query(None, {"target": absent}, scope=ModelInputScopeKind.SUBAGENT))
+    assert error.value.code == "CAPABILITY_NOT_FOUND"
+
+
+def test_runtime_directory_rejects_derived_id_collision(monkeypatch):
+    from pulsara_agent.conversation_kernel.mcp import directory
+    monkeypatch.setattr(directory, "derive_id", lambda *_: "mcp-server:" + "a" * 26)
+    catalog = SimpleNamespace(servers=(SimpleNamespace(server_id="one"), SimpleNamespace(server_id="two")))
+    runtime = SimpleNamespace(catalog_for_scope=lambda _: catalog)
+    with pytest.raises(ValueError, match="identity collision"):
+        directory.runtime_rows(runtime, None, ModelInputScopeKind.ROOT, code_direct_specs=())
+
+
+def test_public_query_scrubs_captured_and_rotated_package_secrets(tmp_path, monkeypatch):
+    from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+    service = preparation(tmp_path)
+    old = ProcessCredentialScrubSet()
+    secret = "package:" + "a" * 26
+    old.observe(secret[12:18])
+    current = ProcessCredentialScrubSet()
+    current.observe("other-credential")
+    query_owner = CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT)
+    query_owner.held.append(SimpleNamespace(scrub_set=old))
+    async def capture(*_args, **_kwargs):
+        return current
+    monkeypatch.setattr(query_owner, "_native", capture)
+    public = asyncio.run(query_owner._scrub({"package_install_id": secret, "description": "other-credential"}))
+    assert public["package_install_id"] == {"visibility": "WITHHELD"}
+    assert "other-credential" not in public["description"]
+    assert secret not in str(public)
+    asyncio.run(service.mcp.aclose())
+
+
+def test_query_keeps_package_named_external_schema_fields(tmp_path, monkeypatch):
+    from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+    from pulsara_agent.conversation_kernel.capability_query import _public_query_detail
+    scrub = ProcessCredentialScrubSet()
+    schema = {"type": "object", "properties": {"package_install_id": {"type": "string"}}}
+    result = _public_query_detail({"input_schema": schema}, scrub)
+    assert result["input_schema"] == schema
+
+
+def test_query_refuses_only_secret_key_block(tmp_path, monkeypatch):
+    from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+    service = preparation(tmp_path)
+    scrub = ProcessCredentialScrubSet()
+    scrub.observe("private-token")
+    query_owner = CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT)
+    async def capture(*_args, **_kwargs):
+        return scrub
+    monkeypatch.setattr(query_owner, "_native", capture)
+    value = asyncio.run(query_owner._scrub({"description": "retained", "input_schema": {"properties": {"private-token": {"type": "string"}}}}))
+    assert value == {"description": "retained", "withheld_fields": ["input_schema"]}
+    asyncio.run(service.mcp.aclose())

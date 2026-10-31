@@ -3376,3 +3376,28 @@ it.each(['agent','cell','scheduled'] as const)('opens the correct source for ove
  expect(readAgent).toHaveBeenCalledTimes(kind==='agent'?1:0);
  expect(readSource).toHaveBeenCalledTimes(kind==='cell'?1:0);
 });
+
+it('keeps process and final views distinct while targeting the canonical entry', async () => {
+  const readEnd = vi.fn(async () => {}), fork = vi.fn(async () => {}), hydrate = vi.fn(async () => {});
+  const answer: Message = {id:'entry:final',role:'assistant',assistantKind:'terminal',turnId:'turn:one',rootFinal:true,
+    forkEligible:true,time:'',body:'已完成的回答',status:'completed',sourceEntryIds:['entry:final'],
+    reasoning:[{id:'reasoning-block:one',kind:'full',body:'处理过程中的思考'}]};
+  const view = render(<WorkbenchView {...props({isRunning:false,messages:[answer],onReadProcessEnd:readEnd,onFork:fork,onHydrateEntries:hydrate})} />);
+  fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
+  await waitFor(() => expect(readEnd).toHaveBeenCalledWith('entry:final', expect.any(AbortSignal)));
+  await waitFor(() => expect(view.container.querySelectorAll('[data-source-entry="entry:final"]')).toHaveLength(2));
+  expect(view.container.querySelector('[data-source-entry="entry:final:process"]')).toBeNull();
+  fireEvent.click(screen.getByRole('button',{name:'从此处分叉'}));
+  expect(fork).toHaveBeenCalledWith('entry:final');
+  expect(hydrate).not.toHaveBeenCalledWith(expect.arrayContaining(['entry:final:process']), expect.anything());
+});
+
+it('keeps a detached live view out of canonical history targets', () => {
+  const hydrate = vi.fn(async () => {});
+  const message: Message = {id:'view:aaaaaaaaaaaaaaaaaaaaaaaaaa',viewSource:{kind:'detached-result',id:'view:aaaaaaaaaaaaaaaaaaaaaaaaaa'},
+    role:'assistant',assistantKind:'tool-request',turnId:'turn:active',time:'',body:'',status:'running',contentState:'unloaded',
+    traces:[{id:'view:aaaaaaaaaaaaaaaaaaaaaaaaaa',kind:'artifact',title:'操作结果',subtitle:'调用信息尚未加载',status:'running',resultText:'已收到'}]};
+  const view=render(<WorkbenchView {...props({isRunning:true,activeTurnId:'turn:active',messages:[message],onHydrateEntries:hydrate})}/>);
+  expect(view.container.querySelector('[data-source-entry="view:aaaaaaaaaaaaaaaaaaaaaaaaaa"]')).toBeNull();
+  expect(hydrate).not.toHaveBeenCalled();
+});

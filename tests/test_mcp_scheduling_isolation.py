@@ -86,7 +86,7 @@ class _Peers:
 
 def _supervisor(tmp_path, configs, *, attempt_timeout=120):
     return McpHostSupervisor(
-        session_id="session:scheduling", workspace_root=tmp_path, configs=configs,
+        workspace_root=tmp_path, configs=configs,
         credential_boundary=ProcessCredentialBoundary(),
         connect_attempt_timeout_seconds=attempt_timeout,
     )
@@ -95,7 +95,7 @@ def _supervisor(tmp_path, configs, *, attempt_timeout=120):
 def _invoke(executor, call_id):
     permit = executor.admit(
         session_id="session:scheduling", scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None, turn_id="turn:scheduling", tool_call_id=call_id,
+        turn_id="turn:scheduling", tool_call_id=call_id,
     )
     permit.mark_attempt_accepted()
     return asyncio.create_task(executor.invoke(permit, {}))

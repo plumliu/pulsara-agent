@@ -272,7 +272,6 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
                 },
             )
             supervisor = McpHostSupervisor(
-                session_id=session_id,
                 workspace_root=tmp_path,
                 configs=(config,),
                 credential_boundary=ProcessCredentialBoundary(),

@@ -8,6 +8,7 @@ export default defineConfig({
   root: fileURLToPath(new URL('./local', import.meta.url)),
   publicDir: fileURLToPath(new URL('./public', import.meta.url)),
   css: { postcss: { plugins: [tailwindcss()] } },
+  resolve: { alias: { '@noble/hashes/sha256': fileURLToPath(new URL('./node_modules/@noble/hashes/esm/sha256.js', import.meta.url)) } },
   plugins: [react(), {
     name: 'bundled-font-notices',
     generateBundle() {

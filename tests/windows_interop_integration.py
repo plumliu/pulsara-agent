@@ -584,7 +584,6 @@ def test_real_mcp_supervisor_closes_its_stdio_scope(tmp_path, child):
             },
         )
         supervisor = McpHostSupervisor(
-            session_id="session:interop",
             workspace_root=tmp_path,
             configs=(config,),
             credential_boundary=ProcessCredentialBoundary(),

@@ -157,7 +157,7 @@ def test_sse_receive_failure_keeps_network_and_protocol_classification(tmp_path,
                 "type": "sse", "endpoint": base + "/sse", "allow_http_localhost": True,
             }})
             supervisor = McpHostSupervisor(
-                session_id="session:receive-failure", workspace_root=tmp_path,
+                workspace_root=tmp_path,
                 configs=(config,), credential_boundary=ProcessCredentialBoundary(),
             )
             try:
@@ -231,7 +231,7 @@ def test_shutdown_joins_replaced_connect_attempt_cleanup(tmp_path, replacement):
                 "allow_http_localhost": True,
             }})
             supervisor = McpHostSupervisor(
-                session_id="session:replacement", workspace_root=tmp_path,
+                workspace_root=tmp_path,
                 configs=(config,), credential_boundary=ProcessCredentialBoundary(),
             )
             close = None

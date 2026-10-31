@@ -292,7 +292,7 @@ def test_catalog_is_sparse_and_ignores_meta_schema_churn_and_removed_server():
     from pulsara_agent.conversation_kernel.mcp.contracts import build_catalog_snapshot
 
     empty_catalog = build_catalog_snapshot(
-        owner_epoch=1, catalog_revision=1, entries=()
+        owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=()
     )
     normal = json.loads(
         _render_mcp_catalog(
@@ -393,7 +393,7 @@ def test_catalog_budget_prioritizes_native_exceptions_across_all_servers():
             predecessor=predecessor(cold),
         )
     )
-    catalog = build_catalog_snapshot(owner_epoch=1, catalog_revision=1, entries=())
+    catalog = build_catalog_snapshot(owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=())
     payload = json.loads(
         _bounded_mcp_catalog_provider_body(
             catalog,
@@ -423,10 +423,12 @@ def test_meta_ref_churn_reclaims_capacity_and_late_full_delivery_is_isolated(
         continuity_epoch_nonce="epoch:evolution",
     )
 
+    identity = fact().identity
+
     def prepare(version, entry):
         return owner.prepare(
             **scope,
-            capability_identity_fingerprint="identity",
+            capability_identity=identity,
             tool_semantic_fingerprint=version,
             mcp_execution_policy_fingerprint="policy",
             tool_route_fingerprint="route",

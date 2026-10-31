@@ -721,7 +721,7 @@ class _PostCompactionHookContextCollector(StaticContextSourceCollector):
                 (ContextRenderMode.COMPACT, self._text),
             )
         )
-        instance_id = "context-source:hook-context:test"
+        instance_id = f"context-source:{ContextSourceKind.HOOK_CONTEXT.value.lower()}"
         semantic = context_fingerprint(
             "context-source-candidate:v1",
             {
@@ -733,7 +733,6 @@ class _PostCompactionHookContextCollector(StaticContextSourceCollector):
         )
         candidate = ContextSourceCandidate(
             source_kind=ContextSourceKind.HOOK_CONTEXT,
-            source_instance_id=instance_id,
             source_contract_version=binding.contract_version,
             source_contract_fingerprint=binding.contract_fingerprint,
             source_semantic_fingerprint=semantic,

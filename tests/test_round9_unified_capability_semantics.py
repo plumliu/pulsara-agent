@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.mcp_config import LocalConfiguredMcpRuntimeSource
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
@@ -88,6 +89,7 @@ def test_remember_is_main_only_in_frozen_and_model_surfaces(tmp_path):
     from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
     from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
     from tests.support.round3 import prepare_test_direct_tool_surface
+    from pulsara_agent.primitives.permission import PermissionMode
 
     async def exercise():
         port = DirectKernelToolPort(
@@ -99,14 +101,14 @@ def test_remember_is_main_only_in_frozen_and_model_surfaces(tmp_path):
         try:
             for scope, task, expected in (
                 (ModelInputScopeKind.ROOT, None, True),
-                (ModelInputScopeKind.SUBAGENT_TASK, 'task:t2ptfli5koch6nfrihpkwl3kvi', False),
+                (ModelInputScopeKind.SUBAGENT, 'task:t2ptfli5koch6nfrihpkwl3kvi', False),
             ):
                 surface = prepare_test_direct_tool_surface(
-                    port, conversation_scope_kind=scope, scope_subagent_task_id=task,
+                    port, conversation_scope_kind=scope,
                 )
                 assert ("remember" in {s.name for s in surface.model_surface.tool_specs}) is expected
                 snapshot = port.sealed_builtin_capability_snapshot(
-                    conversation_scope_kind=scope, scope_subagent_task_id=task,
+                    conversation_scope_kind=scope, effective_permission_mode=PermissionMode.ASK_PERMISSIONS,
                 )
                 assert ("remember" in {b.tool_name for b in snapshot.executor_bindings}) is expected
             assert len(builtin_tool_catalog_entry("remember").availability_requirement.allowed_invocation_owners) == 1
@@ -224,15 +226,13 @@ def _planning_view(
     )
     builtin_owner = issue_sealed_builtin_capability_snapshot(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=builtin_snapshot,
         executor_bindings=(),
         builtin_composition_seal=object(),
     )
-    catalog = build_catalog_snapshot(owner_epoch=1, catalog_revision=1, entries=())
+    catalog = build_catalog_snapshot(owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=())
     mcp_owner = issue_mcp_capability_source_snapshot_set(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshots=mcp_snapshots,
         catalog_snapshot=catalog,
         inspection_inputs=(),
@@ -241,7 +241,6 @@ def _planning_view(
     inspection = _empty_skill_inspection()
     skill_owner = issue_skill_catalog_source_snapshot(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshot=skill_snapshot,
         inspection=inspection,
         owner_authenticity=object(),
@@ -254,7 +253,6 @@ def _planning_view(
     all_facts = (*builtin_facts, *mcp_facts)
     native = freeze_openai_native_tool_eligibility(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         wire_api=wire_api,
         tool_facts=all_facts,
         retained_direct_inputs=(
@@ -292,7 +290,6 @@ def _planning_view(
     )
     mcp_input = FrozenMcpCapabilityProjectionInput(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         source_snapshots=mcp_snapshots,
         catalog_semantic_fingerprint=catalog.semantic_fingerprint,
         inspectability_facts=inspectability,
@@ -308,7 +305,6 @@ def _planning_view(
     )
     _cut, tool_view, _skill_view = freeze_capability_dispatch_cut_and_views(
         conversation_scope_kind=conversation_scope_kind,
-        scope_subagent_task_id=scope_subagent_task_id,
         registry=registry,
         tools=tools,
         skills=skill_input,
@@ -333,7 +329,6 @@ def _finalized_plan(*, view):
         )
         projection_set = materialize_openai_native_tool_projection_set(
             conversation_scope_kind=native.conversation_scope_kind,
-            scope_subagent_task_id=native.scope_subagent_task_id,
             wire_api=wire_api,
             tool_versions=selection.direct_tool_versions,
             tool_specs=selection.direct_tool_surface.tool_specs,
@@ -353,7 +348,6 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
     )
     forged = PreparedSkillCatalogSourceSnapshot(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         source_snapshot=snapshot,
         inspection=_empty_skill_inspection(),
         owner_authenticity=object(),
@@ -361,7 +355,6 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
     )
     builtin = issue_sealed_builtin_capability_snapshot(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         source_snapshot=_source_snapshot(
             source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
             source_id="builtin-registry",
@@ -372,10 +365,9 @@ def test_round9_owner_snapshot_authenticity_rejects_same_shape_forgery() -> None
     )
     mcp = issue_mcp_capability_source_snapshot_set(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         source_snapshots=(),
         catalog_snapshot=build_catalog_snapshot(
-            owner_epoch=1, catalog_revision=1, entries=()
+            owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=()
         ),
         inspection_inputs=(),
         owner_authenticity=object(),
@@ -404,7 +396,6 @@ def test_round9_duplicate_source_registration_is_idempotent_or_conflict() -> Non
     ).registration
     admitted = freeze_capability_registration_set(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         builtin_registration=builtin,
         mcp_registrations=(mcp, mcp),
         local_skill_catalog_registration=skill,
@@ -421,8 +412,7 @@ def test_round9_duplicate_source_registration_is_idempotent_or_conflict() -> Non
     with pytest.raises(ValueError, match="conflicting registrations"):
         freeze_capability_registration_set(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-            builtin_registration=builtin,
+                builtin_registration=builtin,
             mcp_registrations=(mcp, conflicting),
             local_skill_catalog_registration=skill,
         )
@@ -745,7 +735,7 @@ def test_round9_new_mcp_ref_requires_exact_full_install_and_epoch() -> None:
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-        capability_identity_fingerprint="sha256:identity",
+        capability_identity=capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="identity"),
         tool_semantic_fingerprint="sha256:semantic",
         mcp_execution_policy_fingerprint="sha256:policy",
         tool_route_fingerprint="sha256:route",
@@ -797,7 +787,7 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
         session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-        capability_identity_fingerprint="sha256:identity-one",
+        capability_identity=capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="identity-one"),
         tool_semantic_fingerprint="sha256:semantic-one",
         mcp_execution_policy_fingerprint="sha256:policy",
         tool_route_fingerprint="sha256:route-one",
@@ -808,7 +798,7 @@ def test_round9_new_mcp_ref_capacity_is_closed_and_does_not_evict(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
             session_id="session:aaaaaaaaaaaaaaaaaaaaaaaaaa",
             continuity_epoch_nonce='epoch:l7z2gzxlhyebe4jaidrsoamlca',
-            capability_identity_fingerprint="sha256:identity-two",
+            capability_identity=capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="identity-two"),
             tool_semantic_fingerprint="sha256:semantic-two",
             mcp_execution_policy_fingerprint="sha256:policy",
             tool_route_fingerprint="sha256:route-two",
@@ -861,7 +851,7 @@ def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
         )
         for index in range(3)
     )
-    catalog = build_catalog_snapshot(owner_epoch=1, catalog_revision=1, entries=entries)
+    catalog = build_catalog_snapshot(owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa", catalog_revision=1, entries=entries)
     routes = FrozenMcpRouteProjection(
         routes=(),
         joined_catalog_semantic_fingerprint=catalog.semantic_fingerprint,
@@ -877,12 +867,12 @@ def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
     first = render_page(rows, {"limit": 1})
     assert len(first["items"]) == 1 and first["next_offset"] == 1
     second = render_page(rows, {"limit": 1, "offset": first["next_offset"]})
-    assert second["items"][0]["target"]["runtime_server_id"] == "server-1"
+    assert second["items"][0]["target"]["runtime_server_id"] == derive_id("mcp-server", "runtime-target", "server-1")
     assert render_page(rows, {"offset": 99})["next_offset"] is None
     with pytest.raises(CapabilityQueryError):
         parse_query({"cursor": "old-shape"})
-    child_plan = _directory_plan(replace(routes, joined_catalog_semantic_fingerprint=catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint, projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": catalog.for_scope(ModelInputScopeKind.SUBAGENT_TASK).semantic_fingerprint})))
-    child_rows, _, diagnostics = runtime_rows(runtime, child_plan, ModelInputScopeKind.SUBAGENT_TASK)
+    child_plan = _directory_plan(replace(routes, joined_catalog_semantic_fingerprint=catalog.for_scope(ModelInputScopeKind.SUBAGENT).semantic_fingerprint, projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": catalog.for_scope(ModelInputScopeKind.SUBAGENT).semantic_fingerprint})))
+    child_rows, _, diagnostics = runtime_rows(runtime, child_plan, ModelInputScopeKind.SUBAGENT)
     assert diagnostics == [] and len(child_rows) == 3
     drifted_routes = replace(routes, joined_catalog_semantic_fingerprint="sha256:foreign-catalog", projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": "sha256:foreign-catalog"}))
     stale_rows, _, diagnostics = runtime_rows(runtime, SimpleNamespace(mcp_catalog_route_projection=drifted_routes), ModelInputScopeKind.ROOT)
@@ -952,7 +942,7 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
         ),
     )
     catalog = build_catalog_snapshot(
-        owner_epoch=1,
+        owner_epoch="epoch:aaaaaaaaaaaaaaaaaaaaaaaaaa",
         catalog_revision=1,
         entries=(
             McpServerCatalogEntry(
@@ -1013,14 +1003,12 @@ def test_round9_projection_wire_bytes_are_derived_not_caller_supplied() -> None:
     )
     eligibility = freeze_openai_native_tool_eligibility(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         wire_api="openai_chat_completions",
         tool_facts=(fact,),
     )
     version = tool_capability_version_ref(fact)
     projection_set = materialize_openai_native_tool_projection_set(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         wire_api="openai_chat_completions",
         tool_versions=(version,),
         tool_specs=(fact.canonical_tool_spec,),
@@ -1066,7 +1054,6 @@ def test_round9_large_mcp_cohort_quotes_before_meta_fallback() -> None:
     }
     projection_set = materialize_openai_native_tool_projection_set(
         conversation_scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
         wire_api="openai_chat_completions",
         tool_versions=selection.direct_tool_versions,
         tool_specs=selection.direct_tool_surface.tool_specs,
@@ -1093,14 +1080,13 @@ def test_round9_native_quote_loop_obeys_dispatch_deadline(
     with pytest.raises(TimeoutError, match="planning deadline"):
         freeze_openai_native_tool_eligibility(
             conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None,
-            wire_api="openai_chat_completions",
+                wire_api="openai_chat_completions",
             tool_facts=(fact,),
             deadline_monotonic=1.0,
         )
 
 
-def test_round9_installed_predecessor_rejects_foreign_child_task() -> None:
+def test_round9_installed_predecessor_rejects_foreign_scope() -> None:
     fact = _fact(
         source_kind=CapabilitySourceKind.BUILTIN_REGISTRY,
         source_id="builtin-registry",
@@ -1111,7 +1097,7 @@ def test_round9_installed_predecessor_rejects_foreign_child_task() -> None:
     child_a = _planning_view(
         builtin_facts=(fact,),
         mcp_facts=(),
-        conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
+        conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
         scope_subagent_task_id='task:xf2km7nsw6mnh2uevbbikzaseu',
     )
     first = _finalized_plan(view=child_a)
@@ -1127,8 +1113,7 @@ def test_round9_installed_predecessor_rejects_foreign_child_task() -> None:
             builtin_facts=(fact,),
             mcp_facts=(),
             predecessor=predecessor,
-            conversation_scope_kind=ModelInputScopeKind.SUBAGENT_TASK,
-            scope_subagent_task_id='task:ql7r3tmtnkfblocnrgoiict6g4',
+            conversation_scope_kind=ModelInputScopeKind.ROOT,
         )
 
 
@@ -1348,3 +1333,49 @@ def test_mcp_native_token_budget_is_shared_across_servers_and_does_not_rebase_ep
         next_cold.mcp_catalog_route_projection.routes[0].route
         is ToolCapabilityRouteKind.DIRECT
     )
+
+
+def test_capability_identity_digest_vectors_sort_and_provider_wire_are_stable():
+    from pulsara_agent.capability.contracts import capability_identity_digest, capability_source_identity_digest, tool_capability_version_identity_digest
+    from pulsara_agent.primitives.context import canonical_json_bytes
+
+    facts = tuple(_fact(source_kind=CapabilitySourceKind.MCP_SERVER, source_id="fixture", name=name,
+                        origin=ToolCapabilityOrigin.MCP, schema={"type": "object", "properties": {}})
+                  for name in ("a", "b"))
+    assert capability_source_identity_digest(facts[0].identity.source) == "sha256:97f68523f26809d00f0448fe9d8fc89417b5b36aa1c2bf5d093845f7ffedbccd"
+    assert capability_identity_digest(facts[0].identity) == "sha256:49a503a891efce74f13931075cb1782ee58ef521b5f7443922dd83006c6738da"
+    assert tool_capability_version_identity_digest(tool_capability_version_ref(facts[0])) == "sha256:fcc5ed38f35a417010c305bb73c4a9439d56c3d1c5418d9d19c749b8c58c848c"
+    assert facts[0].identity.stable_name < facts[1].identity.stable_name
+    assert capability_identity_digest(facts[0].identity) > capability_identity_digest(facts[1].identity)
+    plan = _finalized_plan(view=_planning_view(builtin_facts=(), mcp_facts=facts))
+    assert [f.identity.stable_name for f in plan.dispatch_view.registry_tool_facts] == ["b", "a"]
+    assert all(route.route is ToolCapabilityRouteKind.DIRECT for route in plan.mcp_catalog_route_projection.routes)
+    assert canonical_json_bytes([p.wire_tool for p in plan.direct_projection_set.projections]) == (b'[{"function":{"description":"Capability a","name":"a","parameters":{"properties":{},"type":"object"},"strict":false},"type":"function"},{"function":{"description":"Capability b","name":"b","parameters":{"properties":{},"type":"object"},"strict":false},"type":"function"}]')
+    assert plan.direct_projection_set.projection_set_fingerprint == "sha256:1dea59d55fc9dd3121c9fda7b70cc8e115e33656025cc16bbf9527661437f756"
+    assert all(version.identity is fact.identity for version, fact in zip(plan.direct_projection_set.tool_versions, facts, strict=True))
+
+
+def test_capability_multisource_framing_uses_original_digest_bytes(monkeypatch):
+    from pulsara_agent.capability import registry as registry_module
+    facts = tuple(_fact(source_kind=CapabilitySourceKind.MCP_SERVER, source_id=source, name=name,
+                        origin=ToolCapabilityOrigin.MCP, schema={"type": "object", "properties": {}})
+                  for source, name in (("server-a", "a"), ("server-b", "b")))
+    view = _planning_view(builtin_facts=(), mcp_facts=facts)
+    cut = view.parent_dispatch_cut
+    kwargs = dict(registry=cut.registry, tools=cut.tools, skills=cut.skills)
+    low, high = 0, registry_module.MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES
+    while low < high:
+        middle = (low + high) // 2
+        monkeypatch.setattr(registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", middle)
+        try:
+            registry_module._require_bounded_planner_framing(**kwargs)
+        except ValueError:
+            low = middle + 1
+        else:
+            high = middle
+    monkeypatch.setattr(registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", low)
+    registry_module._require_bounded_planner_framing(**kwargs)
+    monkeypatch.setattr(registry_module, "MAXIMUM_CAPABILITY_PLANNER_FRAMING_BYTES", low - 1)
+    with pytest.raises(ValueError, match="framing"):
+        registry_module._require_bounded_planner_framing(**kwargs)
+    assert low == 3392

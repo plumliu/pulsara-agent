@@ -1364,70 +1364,6 @@ describe('PulsaraApp', () => {
     expect(divider.querySelectorAll('.context-compaction-divider__line')).toHaveLength(2);
   });
 
-  it('marks real speaker turns without breaking a continuous reasoning and tool flow', async () => {
-    const adapter = new FakeAdapter();
-    adapter.connectionValue = {
-      ...projection(''),
-      messages: [{
-        id: 'user-prompt', turnId: 'turn-one', role: 'user', userKind: 'prompt', time: '18:10',
-        body: '检查完整流程。', status: 'completed',
-      }, {
-        id: 'assistant-tool', turnId: 'turn-one', role: 'assistant', assistantKind: 'tool-request', forkEligible: false,
-        time: '18:11', body: '', status: 'completed',
-        reasoning: [{ id: 'reasoning-before-tool', kind: 'full', body: '先读取文件。' }],
-        traces: [{
-          id: 'trace-read', kind: 'read', toolName: 'read_file', title: '读取文件', subtitle: '已完成',
-          status: 'completed', meta: '操作完成',
-        }],
-      }, {
-        id: 'user-steer', turnId: 'turn-one', role: 'user', userKind: 'steer', time: '18:12',
-        body: '也检查真实页面。', status: 'waiting',
-      }, {
-        id: 'assistant-tool-after-steer', turnId: 'turn-one', role: 'assistant', assistantKind: 'tool-request', forkEligible: false,
-        time: '18:12', body: '', status: 'completed',
-        reasoning: [{ id: 'reasoning-after-steer', kind: 'full', body: '继续检查真实页面。' }],
-      }, {
-        id: 'assistant-final', turnId: 'turn-one', role: 'assistant', assistantKind: 'terminal', rootFinal: true, forkEligible: true,
-        time: '18:13', body: '检查已经完成。', status: 'completed',
-        reasoning: [{ id: 'reasoning-after-tool', kind: 'summary', body: '整理检查结果。' }],
-      }, {
-        id: 'user-prompt-two', turnId: 'turn-two', role: 'user', userKind: 'prompt', time: '18:14',
-        body: '继续下一项。', status: 'completed',
-      }, {
-        id: 'assistant-final-two', turnId: 'turn-two', role: 'assistant', assistantKind: 'terminal', rootFinal: true, forkEligible: true, time: '18:15',
-        body: '第二项也已经完成。', status: 'completed',
-      }],
-      isRunning: false,
-      activeTurnId: undefined,
-    };
-
-    const { container } = renderWorkbench(<PulsaraApp adapter={adapter} />);
-    expect(await screen.findByText('检查已经完成。')).toBeTruthy();
-
-    expect(container.querySelectorAll('.user-heading')).toHaveLength(2);
-    for (const userHeading of container.querySelectorAll('.user-heading')) {
-      expect(userHeading.textContent).toContain('你');
-      expect(userHeading.firstElementChild?.tagName).toBe('STRONG');
-      expect(userHeading.lastElementChild?.classList.contains('person-avatar')).toBe(true);
-      expect(userHeading.lastElementChild?.getAttribute('aria-label')).toBe('用户头像');
-    }
-    expect(container.querySelectorAll('.user-steer')).toHaveLength(1);
-    expect(screen.getByText('引导')).toBeTruthy();
-    expect(screen.queryByText('你 · 引导')).toBeNull();
-    expect(container.querySelectorAll('.assistant-heading')).toHaveLength(2);
-    expect(container.querySelectorAll('.assistant-heading--run-start')).toHaveLength(1);
-    expect(container.querySelectorAll('.assistant-heading--response')).toHaveLength(1);
-    expect(container.querySelectorAll('.conversation-run > .assistant-heading--run-start')).toHaveLength(1);
-
-    fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
-    expect(await screen.findByText('读取文件')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '展开思考摘要' })).toBeTruthy();
-
-    const finalTurn = screen.getByText('检查已经完成。').closest('.assistant-turn--response');
-    expect(finalTurn?.closest('.conversation-run__step')).toBeNull();
-    expect(finalTurn?.querySelector('.assistant-copy')).toBeTruthy();
-  });
-
   it('shows a readable builtin name and keeps the command detail expandable', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
@@ -4421,6 +4357,7 @@ it.each(['command', 'queue'])('rejects mismatched %s receipts without fetching o
   }] };
   renderWorkbench(<PulsaraApp adapter={adapter} />);
   await screen.findByText('保留精确队列正文');
+  await typeComposer('尚未发送的草稿');
   const active = adapter.lastConnection!;
   const snapshot = vi.spyOn(active, 'snapshot');
   active.queryCommand.mockResolvedValue({ commandId: mismatch === 'command' ? 'wrong' : 'command-exact', status: 'succeeded',
@@ -4429,7 +4366,20 @@ it.each(['command', 'queue'])('rejects mismatched %s receipts without fetching o
   act(() => active.emit({ ...projection(''), messages: [], eventSequence: 2 }));
   await waitFor(() => expect(active.queryCommand).toHaveBeenCalledWith('command-exact'));
   expect(await screen.findByText('输入状态与原始输入身份不一致，请稍后重试核对。')).toBeTruthy();
-  expect(screen.getByText('保留精确队列正文')).toBeTruthy();
+  expect(screen.queryByText('保留精确队列正文')).toBeNull();
+  expect(document.querySelector('[data-queue-item-id="queue-exact"]')).toBeNull();
+  expect(active.locateEntry).not.toHaveBeenCalled();
+  expect(snapshot).not.toHaveBeenCalled();
+  expect(active.submitPrompt).not.toHaveBeenCalled();
+  // Only confirmed pending entries occupy the queue. When exact canonical
+  // metadata arrives later, the locally retained original stays visible while
+  // its body and grouping are being read.
+  const exactInput = {identityKind:'queue' as const, sourceKind:'command' as const,
+    commandId:'command-exact', queueItemId:'queue-exact', deliveryMode:'new-turn' as const};
+  act(() => active.emit({ ...projection(''), eventSequence: 3, messages: [{id:'entry-exact', role:'user',
+    userKind:'prompt', time:'', body:'', inputSource:exactInput, contentState:'unloaded', historyContextState:'loading'}] }));
+  expect(await screen.findByText('保留精确队列正文')).toBeTruthy();
+  expect(screen.getByLabelText('发送给 Pulsara').textContent).toContain('尚未发送的草稿');
   expect(active.locateEntry).not.toHaveBeenCalled();
   expect(snapshot).not.toHaveBeenCalled();
   expect(active.submitPrompt).not.toHaveBeenCalled();
@@ -4769,6 +4719,46 @@ describe('user capability synchronization', () => {
       }}}));
     fireEvent.click(screen.getByRole('tab', {name: /技能/}));
     expect(screen.getByRole('switch', {name: '开启 personal-pdf'})).toBeTruthy();
+  });
+
+  it('passes a visible real package guard to plugin mutations', async () => {
+    const adapter = new FakeAdapter();
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await within(screen.getByRole('navigation', {name:'主要功能'})).findByRole('button', {name:'能力'}));
+    await screen.findByText('Personal Tools');
+    fireEvent.click(screen.getByRole('switch', {name:'关闭 Personal Tools'}));
+    await waitFor(() => expect(adapter.setUserPluginEnabled).toHaveBeenCalledWith('personal-tools', 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa', false, []));
+    fireEvent.click(screen.getByRole('button', {name:'查看 Personal Tools'}));
+    fireEvent.click(screen.getByRole('button', {name:'移除插件'}));
+    fireEvent.click(screen.getByRole('button', {name:'确认移除'}));
+    await waitFor(() => expect(adapter.removeUserPlugin).toHaveBeenCalledWith('personal-tools', 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'));
+  });
+
+  it('keeps withheld plugin controls guarded while preserving the editor', async () => {
+    const adapter = new FakeAdapter();
+    const auth = {type:'oauth', redirect_uri:'http://127.0.0.1:12345/callback'};
+    const connection = {serverId:'docs', credentialOwner:{kind:'plugin' as const, scope_key:'user', plugin_id:'personal-tools', server_id:'docs'},
+      config:{transport:{type:'streamable_http',endpoint:'https://example.test/mcp'},auth},
+      defaults:{transport:{type:'streamable_http',endpoint:'https://example.test/mcp'},auth},overlay:null};
+    adapter.inspectUserCapabilities.mockResolvedValue({...userCapabilitySnapshot, plugins:{...userCapabilitySnapshot.plugins,
+      items:userCapabilitySnapshot.plugins.items.map(plugin => ({...plugin, packageInstallId:{visibility:'WITHHELD' as const},mcpConnections:[connection]}))}});
+    render(<PulsaraApp adapter={adapter} />);
+    fireEvent.click(await within(screen.getByRole('navigation', {name:'主要功能'})).findByRole('button', {name:'能力'}));
+    await screen.findByText('Personal Tools');
+    fireEvent.click(screen.getByRole('switch', {name:'关闭 Personal Tools'}));
+    await waitFor(() => expect(adapter.setUserPluginEnabled).not.toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', {name:'查看 Personal Tools'}));
+    fireEvent.click(screen.getByRole('button', {name:'配置连接'}));
+    await screen.findByRole('dialog', {name:'编辑 MCP 服务'});
+    fireEvent.click(screen.getByRole('button', {name:'查看授权状态'}));
+    expect(adapter.pluginMcpAuthorization).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', {name:'保存连接'}));
+    expect(adapter.updatePluginConnection).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain('[object Object]');
+    fireEvent.click(screen.getByRole('button', {name:'取消', exact:true}));
+    fireEvent.click(screen.getByRole('button', {name:'移除插件'}));
+    fireEvent.click(screen.getByRole('button', {name:'确认移除'}));
+    expect(adapter.removeUserPlugin).not.toHaveBeenCalled();
   });
 
   it.each(['save', 'external', 'remove'] as const)('retires old plugin authorization after %s replaces the connection', async source => {

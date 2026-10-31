@@ -85,6 +85,7 @@ def _create_project_mcp(*, workspace_root, server_id, entry):
 class _Session:
     def __init__(self, session_id: str, workspace_root: Path) -> None:
         self.session_id = session_id
+        self.root_session_id = None
         self.host_session_id = derive_id("host", "test-fixture", f"host:{session_id}")
         self.workspace = SimpleNamespace(
             workspace_root=workspace_root,
@@ -111,6 +112,8 @@ def _refresh_core(sessions=()):
     core._closing = False
     core._sessions = {session.host_session_id: session for session in sessions}
     core._extension_routes = {}
+    core._suspended_agent_roots = set()
+    core._agent_runtime = SimpleNamespace(wake_agent_requests=AsyncMock())
     core._credential_boundary = ProcessCredentialBoundary()
     core._canonical_deadline = lambda: monotonic() + 5
     core._workspace_capability_revisions = {session.workspace.workspace_root.resolve(): 0 for session in sessions}
@@ -286,9 +289,9 @@ def test_plugin_install_controller_does_not_reacquire_shared_management_lane(tmp
     workspace.mkdir()
     controller, _, _, _, _ = _controller_with_sessions(workspace, tmp_path / "other")
 
-    async def install(source, *, source_format, import_classifications, import_public_values):
+    async def install(source, *, source_format, import_classifications, import_public_values, mcp_scope_policies):
         assert source_format == "native"
-        assert import_classifications == import_public_values == ()
+        assert import_classifications == import_public_values == mcp_scope_policies == ()
         assert not controller._capability_mutation_lock.locked()
         async with controller._capability_mutation_lock:
             return FailedPluginInstallOutcome(PluginInstallDisposition.UNAVAILABLE, source)
@@ -316,7 +319,7 @@ def test_project_skill_switch_derives_target_from_session_and_marks_same_directo
     result = asyncio.run(
         controller.set_session_skill_enabled(
             handle.session_id,
-            skill_id="pulsara:review",
+            skill_id=derive_id("skill", "ui-target", "pulsara", "review"),
             enabled=False,
         )
     )
@@ -737,7 +740,7 @@ def test_project_skill_switch_rejects_a_symlinked_project_capability_directory(
         asyncio.run(
             controller.set_session_skill_enabled(
                 handle.session_id,
-                skill_id="pulsara:review",
+                skill_id=derive_id("skill", "ui-target", "pulsara", "review"),
                 enabled=False,
             )
         )

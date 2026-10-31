@@ -36,6 +36,10 @@ class ProcessCredentialBoundaryTimedOut(TimeoutError):
     pass
 
 
+class CredentialObjectKeyConflict(ValueError):
+    """An external JSON block cannot be displayed without changing its keys."""
+
+
 @dataclass(slots=True)
 class _HttpAdmissionAttempt:
     boundary: "ProcessCredentialBoundary"
@@ -120,7 +124,7 @@ class ProcessCredentialScrubSet:
             for key, item in root.items():
                 safe_key: object = self.scrub_text(key) if isinstance(key, str) else key
                 if safe_key != key or safe_key in scrubbed:
-                    raise ValueError("credential scrub changed an object key")
+                    raise CredentialObjectKeyConflict("credential scrub changed an object key")
                 scrubbed[safe_key] = self.scrub_json(item)
             return scrubbed
         return root

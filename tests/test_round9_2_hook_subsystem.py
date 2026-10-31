@@ -356,7 +356,15 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
     assert external_permission_mode("bypass-permissions") == "bypassPermissions"
 
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert LIVE_EVENT_TYPES == (
+        "TextStart", "TextDelta", "TextEnd",
+        "ThinkingStart", "ThinkingDelta", "ThinkingEnd",
+        "DataStart", "DataDelta", "DataEnd",
+        "ToolCallStart", "ToolCallDelta", "ToolCallEnd",
+        "ToolResultStart", "ToolResultDelta", "ToolResultEnd",
+        "InteractionOpened", "InteractionReplaced", "InteractionClosed",
+        "TerminalProcessCompleted", "TodoSnapshotUpdated",
+    )
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
     assert len(CONVERSATION_KERNEL_RELATIONS) == 30

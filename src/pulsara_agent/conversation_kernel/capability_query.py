@@ -28,6 +28,7 @@ from pulsara_agent.mcp_config import (
     StdioTransportConfig,
     ExactAbsoluteMcpCwd,
 )
+from pulsara_agent.identity import derive_id
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.plugins.contracts import (
     InspectLocalPluginsRequest,
@@ -35,6 +36,7 @@ from pulsara_agent.plugins.contracts import (
     PluginInspectionOutcome,
     PluginInspectionDisposition,
     PluginScopeKind,
+    public_package_id,
 )
 from pulsara_agent.plugins.management import (
     EventPluginCancellationPort,
@@ -45,6 +47,10 @@ from pulsara_agent.plugins.mcp_adapter import (
     plugin_configured_connection,
 )
 from .mcp.directory import runtime_rows, frozen_runtime_config
+from pulsara_agent.public_projection import public_record
+from pulsara_agent.capability.public_projection import (
+    public_diagnostic, public_source, public_target, public_transport,
+)
 
 
 def transport_summary(transport):
@@ -294,7 +300,7 @@ class CapabilitySourceQuery:
                 self.runtime_ids[self._key(target)] = runtime_id
                 detail["runtime_target"] = {
                     "kind": "MCP_SERVER",
-                    "runtime_server_id": runtime_id,
+                    "runtime_server_id": derive_id("mcp-server", "runtime-target", runtime_id),
                 }
                 live = self.runtime_details.get(("MCP_SERVER", runtime_id))
                 if live:
@@ -698,7 +704,7 @@ class CapabilitySourceQuery:
                         self.runtime_ids[self._key(target)] = config.server_id
                         detail["runtime_target"] = {
                             "kind": "MCP_SERVER",
-                            "runtime_server_id": config.server_id,
+                            "runtime_server_id": derive_id("mcp-server", "runtime-target", config.server_id),
                         }
                         live = self.runtime_details.get(
                             ("MCP_SERVER", config.server_id)
@@ -945,9 +951,8 @@ class CapabilitySourceQuery:
                     )
                     if runtime_target:
                         self.diagnostics.extend(runtime_diagnostics)
-                        server_id = target.get(
-                            "runtime_server_id", target.get("server_id")
-                        )
+                        server_id = (self._runtime_source_key(target["runtime_server_id"])
+                                     if "runtime_server_id" in target else target.get("server_id"))
                         live = self.runtime_details.get(("MCP_SERVER", server_id))
                         if (
                             kind in CHILD_KINDS
@@ -989,9 +994,9 @@ class CapabilitySourceQuery:
                         and (item["source"] or {}).get("target") == target
                     ]
                 else:
-                    runtime_id = target.get(
-                        "runtime_server_id"
-                    ) or self.runtime_ids.get(self._key(target))
+                    runtime_id = (self._runtime_source_key(target["runtime_server_id"])
+                                  if "runtime_server_id" in target
+                                  else self.runtime_ids.get(self._key(target)))
                     if runtime_id is None:
                         self.diagnostics.append(
                             {
@@ -1071,7 +1076,8 @@ class CapabilitySourceQuery:
                     linked_sources[runtime_id]["scope"] = row["target"]["scope"]
         for row in self.runtime_rows:
             target = row["target"]
-            server_id = target.get("runtime_server_id") or target.get("server_id")
+            server_id = (self._runtime_source_key(target["runtime_server_id"])
+                         if "runtime_server_id" in target else target.get("server_id"))
             if row["kind"] == "MCP_SERVER" and (
                 not include_servers or server_id in linked_sources
             ):
@@ -1111,6 +1117,14 @@ class CapabilitySourceQuery:
                     **detail,
                     "source": projected["source"],
                 }
+
+    def _runtime_source_key(self, target_id):
+        matches = [key[1] for key in self.runtime_details
+                   if len(key) == 2 and key[0] == "MCP_SERVER"
+                   and derive_id("mcp-server", "runtime-target", key[1]) == target_id]
+        if len(matches) > 1:
+            raise ValueError("MCP runtime target identity collision")
+        return matches[0] if matches else None
 
     def _runtime_detail(self, server_id, target, source):
         detail = {**self.runtime_details[("MCP_SERVER", server_id)], "source": source}
@@ -1214,4 +1228,50 @@ class CapabilitySourceQuery:
             self.service.plugins._capture_scrub_set,
             InspectLocalPluginsRequest(self.deadline, cancellation=self.cancellation),
         )
-        return scrub.scrub_json(value)
+        for outcome in self.held:
+            observed = getattr(outcome, "scrub_set", None)
+            if observed is not None:
+                for secret in observed.values:
+                    scrub.observe(secret)
+        if isinstance(value, list):
+            return [public_diagnostic(item, scrub) for item in value]
+        if "rows" in value:
+            return {
+                "rows": [_public_query_detail(item, scrub) for item in value["rows"]],
+                "diagnostics": [public_diagnostic(item, scrub) for item in value["diagnostics"]],
+            }
+        return _public_query_detail(value, scrub)
+
+
+def _public_query_detail(value, scrub):
+    children = {}
+    for name in ("target", "runtime_target"):
+        if name in value:
+            children[name] = public_target(value[name], scrub)
+    if "source" in value:
+        children["source"] = public_source(value["source"], scrub)
+    if "package_install_id" in value:
+        children["package_install_id"] = public_package_id(value["package_install_id"], scrub)
+    if "diagnostics" in value:
+        children["diagnostics"] = [public_diagnostic(item, scrub) for item in value["diagnostics"]]
+    if "connection" in value:
+        children["connection"] = public_transport(value["connection"], scrub)
+    if "components" in value:
+        children["components"] = {name: public_record(component, scrub) for name, component in value["components"].items()}
+    if "tool_listing" in value:
+        children["tool_listing"] = public_record(value["tool_listing"], scrub, fixed=("kind",), children={
+            "parent": public_target(value["tool_listing"]["parent"], scrub),
+        })
+    if "arguments" in value:
+        children["arguments"] = [public_record(item, scrub) for item in value["arguments"]]
+    if "definitions" in value:
+        children["definitions"] = [public_record(item, scrub, fixed=("event",), children={
+            "diagnostics": [public_diagnostic(d, scrub) for d in item["diagnostics"]],
+        } if "diagnostics" in item else {}) for item in value["definitions"]]
+    fixed = ("kind", "source_disposition", "authorization", "connection_status")
+    # List rows carry explanatory text; the exact Plugin detail's status is a
+    # compiled disposition. Neither takes meaning from an external field name.
+    if "kind" not in value:
+        fixed += ("status",)
+    return public_record(value, scrub, fixed=fixed, children=children,
+                         external=("input_schema", "output_schema"))

@@ -1,6 +1,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { readFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
+import { randomIdentity, isCanonicalIdentity } from '../../_vendor/code_mode/identity-core.mjs';
 import { QuickJS } from '../../_vendor/code_mode/quickjs-wasi/dist/index.js';
 
 const {limits, cellBuffer, hostBuffer, timingBuffer, toolNames} = workerData;
@@ -14,7 +15,7 @@ let vm, root, helper, deferredFactory, parse, render, diagnose, errorFactory;
 let active = false, segmentStart = 0, segmentSpent = 0, segmentSequence = 0;
 let returnRendered = false, returnPresent = false, returnText, returnCharge = 0;
 let accepting = true;
-let tripped = false, ended = false, requestId = 0n, sequence = 0n, awaitingResume = null;
+let tripped = false, ended = false, sequence = 0n, awaitingResume = null;
 const owned = [];
 const send = message => parentPort.postMessage(message);
 const wireBytes = message => Buffer.byteLength(JSON.stringify(message), 'utf8') + 1;
@@ -117,7 +118,9 @@ function newRequest(type, name, json, preparation) {
   if (!accepting || ended || tripped || Atomics.load(cell, 1)) throw new Error('Code Mode cell has stopped');
   if (Buffer.byteLength(json, 'utf8') > limits.value_bytes)
     throw new RangeError('Code Mode bridge value boundary exceeded');
-  const id = String(++requestId);
+  let id;
+  do { id = randomIdentity('request'); }
+  while (pending.has(id) || preparationCharges.has(id) || awaitingResume === id);
   const message = {type, request_id: id, ...(type === 'call' ? {sequence: String(++sequence), tool_name: name} : {}),
     arguments_json: json, ...(preparation === null ? {} : {preparation})};
   // A pending call also reserves its eventual small accepted-result locator.
@@ -214,6 +217,7 @@ try {
     const prepare = vm.newFunction('pulsaraPrepare', json => newRequest('prepare', '', json.toString(), null));
     const discard = vm.newFunction('pulsaraDiscard', id => {
       const key = id.toString();
+      if (!isCanonicalIdentity(key, 'request')) throw new Error('Invalid Code Mode preparation request identity');
       const charge = preparationCharges.get(key);
       if (charge !== undefined) { release(charge); preparationCharges.delete(key); }
       send({type: 'discard_preparation', preparation: key}); return vm.undefined;
@@ -244,6 +248,9 @@ try {
 parentPort.on('message', async message => {
   if (ended) return;
   try {
+    if (message.type === 'result' || message.type === 'resume') {
+      if (!isCanonicalIdentity(message.request_id, 'request')) throw new Error('Invalid Code Mode request identity');
+    }
     if (message.type === 'result') {
       if (awaitingResume !== null) throw new Error('Overlapping Code Mode result delivery');
       const record = pending.get(message.request_id);

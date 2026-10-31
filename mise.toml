@@ -50,8 +50,8 @@ run = ".venv/bin/python tools/prepare_ripgrep.py"
 
 [tasks."desktop:code-mode"]
 depends = ["desktop:environment"]
-sources = ["tools/prepare_code_mode.py", "tools/code_mode_node/package.json", "tools/code_mode_node/package-lock.json", "desktop/build/environment.json"]
-outputs = ["src/pulsara_agent/_vendor/code_mode/node", "src/pulsara_agent/_vendor/code_mode/NODE-LICENSE.txt", "src/pulsara_agent/_vendor/code_mode/quickjs-wasi/quickjs.wasm", "src/pulsara_agent/_vendor/code_mode/quickjs-wasi/dist/index.js"]
+sources = ["desktop/src/identity-core.mjs", "tools/prepare_code_mode.py", "tools/code_mode_node/package.json", "tools/code_mode_node/package-lock.json", "desktop/build/environment.json"]
+outputs = ["src/pulsara_agent/_vendor/code_mode/identity-core.mjs", "src/pulsara_agent/_vendor/code_mode/node", "src/pulsara_agent/_vendor/code_mode/NODE-LICENSE.txt", "src/pulsara_agent/_vendor/code_mode/quickjs-wasi/quickjs.wasm", "src/pulsara_agent/_vendor/code_mode/quickjs-wasi/dist/index.js"]
 run = ".venv/bin/python tools/prepare_code_mode.py"
 
 [tasks."desktop:frontend-dependencies"]

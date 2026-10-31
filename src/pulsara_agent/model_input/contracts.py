@@ -479,7 +479,6 @@ class ContextRenderVariant:
 @dataclass(frozen=True, slots=True)
 class ContextSourceCandidate:
     source_kind: ContextSourceKind
-    source_instance_id: str
     source_contract_version: str
     source_contract_fingerprint: str
     source_semantic_fingerprint: str
@@ -495,7 +494,7 @@ class ContextSourceCandidate:
     initial_mode: ContextRenderMode = ContextRenderMode.FULL
 
     def __post_init__(self) -> None:
-        if not self.source_instance_id or not self.source_contract_version:
+        if not self.source_contract_version:
             raise ValueError("source candidate identity is incomplete")
         if (
             not 0 <= self.placement_ordinal <= 999
@@ -575,7 +574,7 @@ class ContextSourceCandidate:
             raise ValueError("source contract fingerprint mismatch")
         semantic_payload: dict[str, object] = {
             "source_kind": self.source_kind.value,
-            "source_instance_id": self.source_instance_id,
+            "source_instance_id": f"context-source:{self.source_kind.value.lower()}",
             "source_contract_fingerprint": self.source_contract_fingerprint,
             "variants": tuple(v.semantic_fingerprint for v in self.variants),
         }
@@ -637,16 +636,14 @@ class CollectedContextSources:
     capability_change: FrozenCapabilityChange | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        identities = tuple(item.source_instance_id for item in self.candidates)
         kinds = tuple(item.source_kind for item in self.candidates)
         absent_kinds = tuple(item.source_kind for item in self.absent_facts)
         if (
-            len(identities) != len(set(identities))
-            or len(kinds) != len(set(kinds))
+            len(kinds) != len(set(kinds))
             or len(absent_kinds) != len(set(absent_kinds))
             or set(kinds).intersection(absent_kinds)
         ):
-            raise ValueError("collected source identities or kinds are duplicated")
+            raise ValueError("collected source kinds are duplicated")
         expected = context_fingerprint(
             "collected-context-sources:v1",
             {

@@ -177,6 +177,8 @@ export interface UserMcpServerCapability {
   tools: McpToolCapability[];
 }
 
+export type PublicPackageId = { visibility: 'VISIBLE'; value: string } | { visibility: 'WITHHELD' };
+
 export interface UserPluginCapability {
   id: string;
   name: string;
@@ -184,7 +186,7 @@ export interface UserPluginCapability {
   version?: string;
   author?: string;
   enabled: boolean;
-  packageInstallId: string;
+  packageInstallId: PublicPackageId;
   packageRoot: string;
   skillCount: number;
   mcpCount: number;
@@ -247,6 +249,15 @@ export interface CapabilityOperation {
   message: string;
   details: string[];
   pluginId?: string;
+  packageInstallId?: PublicPackageId | null;
+  attemptedPackageInstallId?: PublicPackageId | null;
+  expectedPackageInstallId?: PublicPackageId | null;
+  observedPackageInstallId?: PublicPackageId | null;
+  priorPackageInstallId?: PublicPackageId | null;
+  lastKnownCut?: string | null;
+  priorOperationStatus?: string;
+  intendedEnabled?: boolean | null;
+  desiredEnabled?: boolean | null;
 }
 
 export interface ProjectCapabilityAdoption {
@@ -313,7 +324,7 @@ export type ArchivedSessionDeletionItem = {
 };
 
 export interface TodoItem {
-  id: string;
+  ordinal: number;
   label: string;
   status: 'pending' | 'in-progress' | 'completed';
 }
@@ -359,6 +370,9 @@ export interface ReasoningBlock {
 }
 
 export interface Message {
+  /** Local projections never identify a canonical entry. */
+  viewSource?: { kind: 'draft'; identity: { kind: 'draft' | 'generation' | 'turn' | 'revision'; value: string | number | undefined } } | { kind: 'detached-result'; id: string };
+  viewRole?: 'ordinary' | 'final' | 'process';
   sourceEntryIds?: string[];
   historyGroupId?: string;
   /** Navigation hint only: page context may name a final beyond its cut. */
@@ -504,4 +518,11 @@ export interface McpImportSelection extends McpImportSource {
   values: Record<string, string>;
   transport?: 'streamable_http' | 'sse';
   allow_http_localhost?: boolean;
+}
+
+export function messageSourceEntryId(message: Message): string | undefined {
+  return message.viewSource ? undefined : message.id;
+}
+export function messageViewKey(message: Message): string {
+  return JSON.stringify([message.viewRole ?? 'ordinary', message.viewSource ?? {kind: 'entry', id: message.id}]);
 }

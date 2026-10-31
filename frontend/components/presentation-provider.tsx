@@ -58,7 +58,7 @@ export function PresentationProvider({ connection, visible, isOpen, onNotify, ch
             const tab = inspectorTab(owner.sessionId, target.name, presentationLabel(target));
             prepared.push({ release: () => {}, adopt: () => tab });
           } else if (target.type === 'terminal' || target.type === 'mcp') {
-            const tab = inspectorTab(owner.sessionId, target.type === 'terminal' ? 'process' : 'mcp', presentationLabel(target), target.type === 'terminal' ? target.process_id : target.runtime_server_id, target.host_session_id);
+            const tab = inspectorTab(owner.sessionId, target.type === 'terminal' ? 'process' : 'mcp', presentationLabel(target), target.type === 'terminal' ? target.process_id : target.runtime_server_id, target.host_session_id, target.type === 'mcp' ? 'runtime' : 'configuration');
             prepared.push({ release: () => {}, adopt: () => tab });
           }
         } catch (error) {

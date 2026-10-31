@@ -98,7 +98,6 @@ from pulsara_agent.ports.tool_execution import (
 from pulsara_agent.ports.tool_registry import (
     tool_binding_contract_identity_fingerprint,
 )
-from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.terminal_process import (
     TerminalCwdScope,
     TerminalProcessInfo,
@@ -1547,7 +1546,7 @@ class DirectKernelToolPort:
                           else "MCP_DIRECT_CURRENTLY_UNAVAILABLE")
                 leaves.append(
                     PreparedUnavailableDirectMcpGate(
-                        capability_identity_fingerprint=(version.identity_fingerprint),
+                        capability_identity=(version.identity),
                         tool_semantic_fingerprint=spec.descriptor_fingerprint,
                         provider_tool_name=spec.name,
                         unavailable_reason_code=reason,
@@ -1767,7 +1766,7 @@ class DirectKernelToolPort:
                 if (route.route is ToolCapabilityRouteKind.NEW_MCP_META_ONLY
                         and executor is not None
                         and _mcp_executor_capability_version(executor) == route.version):
-                    allowed.add((route.version.identity_fingerprint, route.version.semantic_fingerprint,
+                    allowed.add((route.version.identity, route.version.semantic_fingerprint,
                                  execution_policy_fingerprint(executor.policy), route.route_fingerprint, executor.runtime_generation_id))
         self._mcp_meta_refs.retire_unroutable(
             conversation_scope_kind=epoch.conversation_scope_kind,
@@ -2220,7 +2219,7 @@ class DirectKernelToolPort:
             executors = [runtime.executors[item.provider_tool_name] for item in specs
                          if item.provider_tool_name in runtime.executors]
             matches = [item for item in executors
-                       if _mcp_executor_capability_version(item).identity_fingerprint == ref.capability_identity_fingerprint
+                       if _mcp_executor_capability_version(item).identity == ref.capability_identity
                        and _mcp_executor_capability_version(item).semantic_fingerprint == ref.tool_semantic_fingerprint
                        and execution_policy_fingerprint(item.policy) == ref.mcp_execution_policy_fingerprint
                        and item.runtime_generation_id == ref.runtime_generation]
@@ -2234,7 +2233,7 @@ class DirectKernelToolPort:
             item
             for item in plan.mcp_catalog_route_projection.routes
             if item.route_fingerprint == ref.tool_route_fingerprint
-            and item.version.identity_fingerprint == ref.capability_identity_fingerprint
+            and item.version.identity == ref.capability_identity
             and item.version.semantic_fingerprint == ref.tool_semantic_fingerprint
         )
         if len(matches) != 1:
@@ -2835,7 +2834,7 @@ class DirectKernelToolPort:
                     self._capability_management.plugins._capture_scrub_set,
                     InspectLocalPluginsRequest(self._capability_management.deadline()),
                 )
-                result = scrub.scrub_json(result)
+                result = query_error("SOURCE_OBSERVATION_UNAVAILABLE", scrub.scrub_text(str(exc)))
             return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="APPLICATION_ERROR",
                 content=canonical_json_bytes(result),
@@ -2972,7 +2971,7 @@ class DirectKernelToolPort:
                 current = runtime.executors.get(semantic.provider_tool_name)
                 if current is not None:
                     version = _mcp_executor_capability_version(current)
-                    allowed.add((version.identity_fingerprint, version.semantic_fingerprint,
+                    allowed.add((version.identity, version.semantic_fingerprint,
                                  execution_policy_fingerprint(current.policy), "CODE_CELL", current.runtime_generation_id))
             self._mcp_meta_refs.retire_unroutable(**self._mcp_ref_consumer_for_borrow(borrow), allowed=allowed)
         values = _mcp_inspection_values(executor)
@@ -2982,7 +2981,7 @@ class DirectKernelToolPort:
         try:
             prepared = self._mcp_meta_refs.prepare(
                 **self._mcp_ref_consumer_for_borrow(borrow),
-                capability_identity_fingerprint=_mcp_executor_capability_version(executor).identity_fingerprint,
+                capability_identity=_mcp_executor_capability_version(executor).identity,
                 tool_semantic_fingerprint=_mcp_executor_capability_version(executor).semantic_fingerprint,
                 mcp_execution_policy_fingerprint=(
                     execution_policy_fingerprint(executor.policy)
@@ -3409,13 +3408,8 @@ class DirectKernelToolPort:
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 )
             )
-            safe_values = HookSecretScrubSet.capture().scrub_json(dict(values))
-            if not isinstance(safe_values, dict):
-                raise RuntimeError(
-                    "Capability reload result lost its JSON object shape"
-                )
             content = json.dumps(
-                safe_values,
+                dict(values),
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
@@ -3500,6 +3494,7 @@ class DirectKernelToolPort:
                 state=known.state,
                 content=known.content,
                 remote_identity=known.remote_identity,
+                remote_identity_verification=known.remote_identity_verification,
                 output_artifact_candidate=ToolOutputArtifactCandidate(
                     role="OUTPUT",
                     text=text,
@@ -3561,6 +3556,7 @@ class DirectKernelToolPort:
                 state=known.state,
                 content=known.content,
                 remote_identity=known.remote_identity,
+                remote_identity_verification=known.remote_identity_verification,
                 output_artifact_candidate=ToolOutputArtifactCandidate(
                     role="OUTPUT",
                     text=text,
@@ -4185,7 +4181,7 @@ class DirectKernelToolPort:
         turn_id: str,
         scope_kind: ModelInputScopeKind,
     ) -> None:
-        draft_identity = f"todo:{todo_run_id}:{todo_revision}"
+        draft_identity = derive_id("block", "todo-snapshot", todo_run_id, str(todo_revision))
         try:
             self._live_bus.offer_nowait(
                 event_type=LiveEventType.TODO_SNAPSHOT_UPDATED,
@@ -4711,7 +4707,7 @@ def _mcp_unavailable_reason(reason: str) -> str:
 
 
 def _mcp_unavailable_inspection_message(reason: str, server_id: str) -> str:
-    target = json.dumps({"kind": "MCP_SERVER", "runtime_server_id": server_id}, ensure_ascii=False)
+    target = json.dumps({"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", server_id)}, ensure_ascii=False)
     return _mcp_unavailable_reason(reason) + (
         f" If this blocks the task, check the server with query_capabilities target={target}."
     )
@@ -4752,6 +4748,7 @@ def _kernel_result_from_mcp_known(
         state=known.state,
         content=known.content,
         remote_identity=known.remote_identity,
+        remote_identity_verification=known.remote_identity_verification,
         output_artifact_candidate=ToolOutputArtifactCandidate(
             role="OUTPUT",
             text=text,

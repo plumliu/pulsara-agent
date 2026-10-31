@@ -1,3 +1,5 @@
+import { isCanonicalIdentity } from './identity';
+
 /** The tool requests views, never execution or confirmation of rendering. */
 export type PresentationTarget =
   | { type: 'file'; path: string }
@@ -34,10 +36,12 @@ export function parsePresentationResult(raw: string): PresentationResult | undef
       const rootBound = target.kind === 'AGENT' || target.kind === 'CELL' || (target.kind === 'PANEL' && ['subagents', 'cells'].includes(value));
       const hostBound = ['PROCESS', 'MCP_SERVER', 'CELL'].includes(target.kind) || (target.kind === 'PANEL' && value === 'cells');
       if (!closed(item, ['target', ...(rootBound ? ['root_session_id'] : []), ...(hostBound ? ['host_session_id'] : [])])) return;
-      if ((rootBound && !text(item.root_session_id)) || (hostBound && !text(item.host_session_id))) return;
+      if ((rootBound && !isCanonicalIdentity(item.root_session_id, 'session')) || (hostBound && !isCanonicalIdentity(item.host_session_id, 'host'))) return;
       if (target.kind === 'PATH' && !value.startsWith('/')) return;
-      if (target.kind === 'AGENT' && !/^session:[a-z2-7]{25}[aeimquy4]$/.test(value)) return;
-      if (target.kind === 'CELL' && !/^cell:[a-z2-7]{25}[aeimquy4]$/.test(value)) return;
+      if (target.kind === 'AGENT' && !isCanonicalIdentity(value, 'session')) return;
+      if (target.kind === 'CELL' && !isCanonicalIdentity(value, 'cell')) return;
+      if (target.kind === 'PROCESS' && !isCanonicalIdentity(value, 'process')) return;
+      if (target.kind === 'MCP_SERVER' && !isCanonicalIdentity(value, 'mcp-server')) return;
       // Browser policy remains with the browser owner so one bad URL cannot discard other views.
       if (target.kind === 'PANEL' && !['capabilities', 'background', 'subagents', 'cells', 'browser'].includes(value)) return;
       targets.push({ type, [field]: value, ...(rootBound ? { root_session_id: item.root_session_id } : {}), ...(hostBound ? { host_session_id: item.host_session_id } : {}) } as PresentationTarget);

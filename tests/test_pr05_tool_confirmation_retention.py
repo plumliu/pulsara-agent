@@ -223,6 +223,7 @@ def test_r14_writer_response_loss_recovers_full_facts_read_only(decision):
             accepted = await resolve(owner, live, decision=decision)
             result = await asyncio.wait_for(asyncio.shield(waiter), 1)
             assert result.decision == decision
+            assert result.reference == accepted.decision_id
             assert result.attempt_id == accepted.attempt_id
             assert result.result_entry_sequence == accepted.result_entry_sequence
             assert len(repository.writes) == len(repository.reads) == 1
@@ -564,7 +565,7 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
             monkeypatch.setattr(repository, "confirm_tool_interaction_decision", held_read)
         owner, live, _ = make_owner(repository)
         await owner.attach_controller("controller:1")
-        supervisor = McpHostSupervisor(session_id='session:tdspn5k2oo6jafhz5tcbmngqga', workspace_root=tmp_path, configs=(_config(tmp_path),))
+        supervisor = McpHostSupervisor(workspace_root=tmp_path, configs=(_config(tmp_path),))
         port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:u7b6kknm42lxuopzrawwykdfbu',
             session_id='session:tdspn5k2oo6jafhz5tcbmngqga', live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy())
@@ -573,8 +574,7 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
         _seal_mcp_test_port(port)
         await supervisor.start()
         port.prepare_tool_surface_safe_point()
-        surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.ROOT,
-            scope_subagent_task_id=None)
+        surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.ROOT)
         effect = next(item for item in surface.model_surface.tool_specs if item.name.endswith("fixture_effect"))
         borrow = port.borrow_tool_surface(surface)
         permission = build_run_permission_snapshot(snapshot_id='permission:lsf3jcj5tfegppf2erwmuymj4e',

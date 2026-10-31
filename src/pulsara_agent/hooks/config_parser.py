@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 import json
 from typing import Any
 
@@ -67,6 +67,31 @@ class _DuplicateKey(HookConfigParseError):
 class ParsedHookConfig:
     provenance: FrozenHookSourceProvenance
     definitions: tuple[FrozenHookDefinition, ...]
+    diagnostics: tuple[HookDiagnostic, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HookDeclaration:
+    """Validated declaration without execution provenance or authority."""
+    source_local_definition_ordinal: int
+    event_ordinal: int
+    group_ordinal: int
+    handler_ordinal: int
+    event_type: HookEventType
+    matcher: FrozenHookMatcherFact
+    command: str
+    command_windows: str | None
+    timeout_seconds: int
+    asynchronous: bool
+    status_message: str | None
+    additional_context_limit: int
+    scope_policy: HookScopePolicy
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedHookDeclarations:
+    description: str | None
+    definitions: tuple[HookDeclaration, ...]
     diagnostics: tuple[HookDiagnostic, ...]
 
 
@@ -135,6 +160,19 @@ def _validate_json_shape(root: object) -> None:
 def parse_hook_config(
     raw: bytes, *, provenance: FrozenHookSourceProvenance
 ) -> ParsedHookConfig:
+    declarations = parse_hook_declarations(raw)
+    final_provenance = replace(provenance, description=declarations.description)
+    definitions = tuple(
+        FrozenHookDefinition(
+            provenance=final_provenance,
+            **{field.name: getattr(item, field.name) for field in fields(HookDeclaration)},
+        )
+        for item in declarations.definitions
+    )
+    return ParsedHookConfig(final_provenance, definitions, declarations.diagnostics)
+
+
+def parse_hook_declarations(raw: bytes) -> ParsedHookDeclarations:
     root = _bounded_json(raw)
     if not isinstance(root, dict):
         raise HookConfigParseError("hooks.json root must be an object")
@@ -150,7 +188,7 @@ def parse_hook_config(
     if not isinstance(hooks, dict):
         raise HookConfigParseError("hooks must be an object")
 
-    definitions: list[FrozenHookDefinition] = []
+    definitions: list[HookDeclaration] = []
     next_ordinal = 0
     for event_ordinal, (event_name, groups) in enumerate(hooks.items()):
         try:
@@ -236,7 +274,6 @@ def parse_hook_config(
             for handler_ordinal, handler in enumerate(handlers):
                 definition = _parse_handler(
                     handler,
-                    provenance=provenance,
                     event_type=event_type,
                     event_ordinal=event_ordinal,
                     group_ordinal=group_ordinal,
@@ -248,21 +285,12 @@ def parse_hook_config(
                 if definition is not None:
                     definitions.append(definition)
                     next_ordinal += 1
-    final_provenance = replace(provenance, description=description)
-    if final_provenance is not provenance:
-        definitions = [
-            replace(definition, provenance=final_provenance)
-            for definition in definitions
-        ]
-    return ParsedHookConfig(
-        final_provenance, tuple(definitions), tuple(diagnostics)
-    )
+    return ParsedHookDeclarations(description, tuple(definitions), tuple(diagnostics))
 
 
 def _parse_handler(
     value: object,
     *,
-    provenance: FrozenHookSourceProvenance,
     event_type: HookEventType,
     event_ordinal: int,
     group_ordinal: int,
@@ -270,7 +298,7 @@ def _parse_handler(
     source_local_definition_ordinal: int,
     matcher: FrozenHookMatcherFact,
     diagnostics: list[HookDiagnostic],
-) -> FrozenHookDefinition | None:
+) -> HookDeclaration | None:
     label = f"{event_type.external_name} handler {group_ordinal}:{handler_ordinal}"
     if not isinstance(value, dict):
         diagnostics.append(_diag("HOOK_CONFIG_INVALID_HANDLER", label, event_type))
@@ -371,8 +399,7 @@ def _parse_handler(
                 HookDiagnosticSeverity.INFO,
             )
         )
-    return FrozenHookDefinition(
-        provenance=provenance,
+    return HookDeclaration(
         source_local_definition_ordinal=source_local_definition_ordinal,
         event_ordinal=event_ordinal,
         group_ordinal=group_ordinal,
@@ -403,5 +430,7 @@ __all__ = [
     "HookConfigParseError",
     "MAXIMUM_HOOK_CONFIG_BYTES",
     "ParsedHookConfig",
+    "ParsedHookDeclarations",
+    "parse_hook_declarations",
     "parse_hook_config",
 ]

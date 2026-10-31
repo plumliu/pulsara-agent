@@ -6,8 +6,14 @@ from contextlib import contextmanager
 from functools import wraps
 
 from pulsara_agent.capability.change_observation import CapabilityUiChange
+from pulsara_agent.public_projection import public_record
+from pulsara_agent.capability.public_projection import (
+    public_connection_editor, public_connection_review, public_credentials,
+    public_mcp_config,
+)
+from pulsara_agent.plugins.public_projection import project_hook_public
 
-from pulsara_agent.identity import random_id
+from pulsara_agent.identity import derive_id, random_id, require_id
 
 import asyncio
 from dataclasses import dataclass
@@ -773,13 +779,17 @@ class LocalSessionController:
                     for session_id, handle in sorted(self._by_session.items())
                     if session_id not in self._operations
                 )
-            return _user_capability_payload(
+            payload = _user_capability_payload(
                 skills=skills,
                 mcp_configs=mcp_configs,
                 plugins=plugins,
                 secret_resolver=self.core.mcp_management.settings.read().mcp_secret,
                 live_inspections=live_inspections,
             )
+            scrub = plugins.scrub_set if isinstance(plugins, PluginInspectionOutcome) else None
+            if scrub is None:
+                scrub = ProcessCredentialScrubSet()
+            return _public_user_capabilities(payload, scrub)
         finally:
             if isinstance(plugins, PluginInspectionOutcome):
                 plugins.close()
@@ -914,7 +924,9 @@ class LocalSessionController:
                     "details": details,
                 }
                 payload["sources"][0].update(local_info)
-                return scrub.scrub_json(payload)
+                return public_record(payload, scrub, children={
+                    "sources": [project_hook_public(source, scrub) for source in payload["sources"]],
+                })
 
         return await asyncio.to_thread(read)
 
@@ -937,7 +949,7 @@ class LocalSessionController:
                     raise HookSourceConflict(
                         "需要可读取且非空的完整 Hook 定义才能审阅批准。"
                     )
-                return scrub.scrub_json(value)
+                return project_hook_public(value, scrub)
 
         return await asyncio.to_thread(read)
 
@@ -1451,7 +1463,7 @@ class LocalSessionController:
             )
         capabilities = await self.inspect_user_capabilities()
         return {
-            "operation": _plugin_install_operation(outcome),
+            "operation": _public_plugin_operation(outcome, _plugin_install_operation(outcome)),
             "capabilities": capabilities,
         }
 
@@ -1490,7 +1502,7 @@ class LocalSessionController:
         )
         capabilities = await self.inspect_user_capabilities()
         return {
-            "operation": _plugin_enablement_operation(outcome),
+            "operation": _public_plugin_operation(outcome, _plugin_enablement_operation(outcome)),
             "adoption": {
                 "updated_sessions": 0,
                 "pending_sessions": pending,
@@ -1514,7 +1526,7 @@ class LocalSessionController:
         )
         capabilities = await self.inspect_user_capabilities()
         return {
-            "operation": _plugin_removal_operation(outcome),
+            "operation": _public_plugin_operation(outcome, _plugin_removal_operation(outcome)),
             "adoption": {
                 "updated_sessions": 0,
                 "pending_sessions": pending,
@@ -3148,15 +3160,25 @@ def _inspect_loose_skill_management(scope, workspace_root) -> dict[str, object]:
     observed, _, _ = LocalSkillManagementService().inspect_loose_skills(
         scope=scope, workspace_root=workspace_root)
     observed["status"] = "ready" if observed["status"] == "COMPLETE" and observed["config_available"] else "attention"
+    target_facts = []
     for item in observed["items"]:
         path = Path(item["path"])
         item["removal_identity"] = _skill_removal_identity(path, scope, workspace_root)
         if workspace_root is not None:
-            item["id"] = f"{item['root']}:{item['name']}"
+            item["id"] = derive_id("skill", "ui-target", item["root"], item["name"])
+            target_facts.append((item["id"], (item["root"], item["name"])))
+    _check_skill_target_collisions(target_facts)
     return observed
 
 
+def _check_skill_target_collisions(facts):
+    ordered = sorted(facts)
+    if any(a[0] == b[0] and a[1] != b[1] for a, b in zip(ordered, ordered[1:])):
+        raise ValueError("Skill target identity collision")
+
+
 def _workspace_skill_path(observed: dict[str, object], skill_id: str) -> Path:
+    require_id(skill_id, "skill")
     raw_items = observed.get("items")
     if not isinstance(raw_items, list):
         raise RuntimeError("project Skill inventory is invalid")
@@ -3298,6 +3320,44 @@ def _user_capability_payload(
     }
 
 
+def _public_user_capabilities(value, scrub):
+    from pulsara_agent.plugins.contracts import public_package_id
+
+    def roots(items):
+        return [public_record(item, scrub, fixed=("kind",)) for item in items]
+
+    skills = value["skills"]
+    skill_children = {
+        "items": [public_record(item, scrub, fixed=("root", "root_kind", "authoring_notes")) for item in skills["items"]],
+        "issues": [public_record(item, scrub, fixed=("kind", "diagnostic_codes")) for item in skills["issues"]],
+        "roots": roots(skills["roots"]),
+    }
+    mcp = value["mcp"]
+    servers = []
+    for server in mcp["servers"]:
+        servers.append(public_record(server, scrub,
+            fixed=("status", "failure_category"), children={
+                "config": public_mcp_config(server["config"], scrub),
+                "credentials": public_credentials(server["credentials"], scrub),
+                "transport": public_record(server["transport"], scrub, fixed=("kind",)),
+                "tools": [public_record(tool, scrub, fixed=("effect",)) for tool in server["tools"]],
+            }))
+    plugins = value["plugins"]
+    items = []
+    for item in plugins["items"]:
+        items.append(public_record(item, scrub, children={
+            "package_install_id": public_package_id(item["package_install_id"], scrub),
+            "mcp_connections": [public_connection_editor(connection, scrub) for connection in item["mcp_connections"]],
+            "connection_review": public_connection_review(item["connection_review"], scrub),
+        }))
+    return {
+        "roots": roots(value["roots"]),
+        "skills": public_record(skills, scrub, fixed=("status", "effective_catalog_status"), children=skill_children),
+        "mcp": public_record(mcp, scrub, children={"servers": servers}),
+        "plugins": public_record(plugins, scrub, fixed=("status",), children={"items": items}),
+    }
+
+
 def _user_plugins_payload(inspection: object, secret_resolver) -> dict[str, object]:
     from pulsara_agent.plugins.mcp_connection import connection_review, review_to_dict
 
@@ -3401,9 +3461,37 @@ def _diagnostic_message(value: object) -> str:
     )
 
 
+def _public_plugin_operation(outcome: object, payload: dict[str, object]) -> dict[str, object]:
+    from pulsara_agent.plugins.contracts import public_package_id
+
+    prior = getattr(outcome, "prior", None)
+    source = prior if prior is not None else outcome
+    children = {}
+    for field in ("package_install_id", "attempted_package_install_id",
+                  "expected_package_install_id", "observed_package_install_id",
+                  "prior_package_install_id", "last_known_cut", "intended_enabled",
+                  "desired_enabled"):
+        if hasattr(source, field):
+            payload[field] = getattr(source, field)
+    scrub = ProcessCredentialScrubSet()
+    for current in (outcome, prior):
+        observed = getattr(current, "scrub_set", None)
+        if observed is not None:
+            for secret in observed.values:
+                scrub.observe(secret)
+    for field in ("package_install_id", "attempted_package_install_id",
+                  "expected_package_install_id", "observed_package_install_id",
+                  "prior_package_install_id"):
+        if field in payload:
+            children[field] = public_package_id(payload[field], scrub)
+    return public_record(payload, scrub,
+        fixed=("status", "prior_operation_status", "last_known_cut"), children=children)
+
+
 def _plugin_install_operation(outcome: object) -> dict[str, object]:
     if isinstance(outcome, CleanupUnavailablePluginInstallOutcome):
         result = _plugin_install_operation(outcome.prior)
+        result["prior_operation_status"] = outcome.prior.disposition.value
         result["status"] = outcome.disposition.value
         result["message"] = f"{result['message']} 旧安装文件稍后可以清理。"
         return result
@@ -3431,7 +3519,8 @@ def _plugin_install_operation(outcome: object) -> dict[str, object]:
         return {
             "status": outcome.disposition.value,
             "success": False,
-            "message": "插件没有安装，请检查所选目录。",
+            "message": ("插件安装结果尚未确认，请刷新检查。" if outcome.disposition.value == "ACK_UNKNOWN"
+                        else "插件没有安装，请检查所选目录。"),
             "details": [_diagnostic_message(item) for item in outcome.diagnostics],
         }
     raise TypeError("Plugin install outcome is open")
@@ -3448,7 +3537,8 @@ def _plugin_enablement_operation(outcome: object) -> dict[str, object]:
         return {
             "status": outcome.disposition.value,
             "success": False,
-            "message": "插件状态没有改变，请刷新后重试。",
+            "message": ("插件状态结果尚未确认，请刷新检查。" if outcome.disposition.value == "ACK_UNKNOWN"
+                        else "插件状态没有改变，请刷新后重试。"),
             "details": [_diagnostic_message(item) for item in outcome.diagnostics],
         }
     raise TypeError("Plugin enablement outcome is open")
@@ -3468,7 +3558,8 @@ def _plugin_removal_operation(outcome: object) -> dict[str, object]:
         return {
             "status": outcome.disposition.value,
             "success": False,
-            "message": "插件没有移除，请刷新后重试。",
+            "message": ("插件移除结果尚未确认，请刷新检查。" if outcome.disposition.value == "ACK_UNKNOWN"
+                        else "插件没有移除，请刷新后重试。"),
             "details": [_diagnostic_message(item) for item in outcome.diagnostics],
         }
     raise TypeError("Plugin removal outcome is open")
@@ -3633,6 +3724,7 @@ def _capability_payload(
 
     skill_catalog = inspection.skill_catalog
     skill_items: list[dict[str, object]] = []
+    skill_target_facts = []
     skill_issues: list[dict[str, object]] = []
     unavailable_details: list[str] = []
     if isinstance(skill_catalog, CompleteEffectiveSkillCatalogInspection):
@@ -3648,6 +3740,7 @@ def _capability_payload(
                 continue
             path = Path(str(raw["path"])).resolve(strict=False)
             workspace_paths.add(path)
+            skill_target_facts.append((str(raw.get("id", "")), (str(raw.get("root", "")), str(raw.get("name", "")))))
             skill_items.append(
                 {
                     "id": str(raw.get("id", "")),
@@ -3669,9 +3762,11 @@ def _capability_payload(
             path = item.path.resolve(strict=False)
             if path in workspace_paths:
                 continue
+            target_id = derive_id("skill", "ui-target", item.source.value, item.name)
+            skill_target_facts.append((target_id, (item.source.value, item.name)))
             skill_items.append(
                 {
-                    "id": f"{item.source.value}:{item.name}",
+                    "id": target_id,
                     "name": item.name,
                     "description": item.description,
                     "skill_path": item.skill_path,
@@ -3688,6 +3783,7 @@ def _capability_payload(
                     ],
                 }
             )
+        _check_skill_target_collisions(skill_target_facts)
         skill_issues = [
             _skill_issue_payload(item) for item in skill_catalog.candidate_issues
         ]

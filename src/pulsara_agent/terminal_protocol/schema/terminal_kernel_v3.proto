@@ -163,7 +163,7 @@ enum ReasoningPresentationKind {
 
 message CanonicalReasoningBlock {
   string block_id = 1;
-  uint32 ordinal = 2;
+  optional uint32 ordinal = 2;
   ReasoningPresentationKind presentation_kind = 3;
   CanonicalContentReference content = 4;
 }
@@ -1116,6 +1116,7 @@ message ReadContentRequest {
   uint32 limit_bytes = 7;
   optional uint32 image_ref_ordinal = 9;
   optional uint32 visualization_ordinal = 10;
+  optional uint32 reasoning_ordinal = 12;
 }
 
 message ReadToolArtifactRequest {

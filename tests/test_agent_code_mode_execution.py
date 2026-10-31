@@ -36,13 +36,16 @@ def test_public_value_uses_owner_format_without_json_guessing():
 
 
 def test_code_source_does_not_require_or_copy_model_tool_call():
-    source = ToolInvocationSource('call:source', ToolInvocationSourceKind.CODE_MODE_CALL,
-        'turn:source', source_exec_attempt_id='attempt:exec', call_sequence=1,
+    from pulsara_agent.identity import random_id
+
+    turn_id = random_id('turn')
+    source = ToolInvocationSource(random_id('call'), ToolInvocationSourceKind.CODE_MODE_CALL,
+        turn_id, source_exec_attempt_id=random_id('attempt'), call_sequence=1,
         tool_name='read_file', original_arguments=freeze_json({'target': {'kind': 'PATH', 'path': 'a'}}))
     assert source.assistant_entry_id is None and source.tool_call_id is None
     with pytest.raises(ValueError):
-        replace(source, assistant_entry_id='entry:fake')
-    model = ToolInvocationSource.model('session:root', 'turn:source', 'entry:real', 'call:real')
+        replace(source, assistant_entry_id=random_id('entry'))
+    model = ToolInvocationSource.model(random_id('session'), turn_id, random_id('entry'), 'provider-call')
     assert model.tool_name is None and model.original_arguments is None
 
 

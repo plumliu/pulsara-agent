@@ -70,6 +70,16 @@ PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 
 
+def _render_cli_output(output, boundary):
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from pulsara_agent.cli import _plugin_cli_print
+    text = StringIO()
+    with redirect_stdout(text):
+        _plugin_cli_print(output, boundary)
+    return text.getvalue()
+
+
 def _make_package(
     root: Path,
     *,
@@ -670,7 +680,7 @@ def test_round9_3_async_gate_cancel_joins_waiter_and_json_preflight_uses_stderr(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "Exact package review" in captured.err
-    assert json.loads(rendered)["disposition"] == "DECLINED"
+    assert json.loads(_render_cli_output(rendered, boundary))["disposition"] == "DECLINED"
     assert status == 1
 
 
@@ -928,3 +938,149 @@ def test_round9_3_http_boundary_only_exempts_frozen_credential_header() -> None:
             await client.aclose()
 
     asyncio.run(run())
+
+
+def test_cli_review_and_result_keep_earlier_secret_after_credential_rotation(tmp_path, monkeypatch, capsys):
+    source = _make_package(tmp_path / "source", mcp_kind="none")
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+    boundary = ProcessCredentialBoundary()
+    service = PluginManagementService(credential_boundary=boundary)
+    installed = _install(service, InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30))
+    package = installed.package_install_id
+    secret = package[10:20]
+    boundary.rotate_sync(secret)
+    def accept_after_rotation():
+        boundary.rotate_sync("new-credential")
+        return "yes"
+    monkeypatch.setattr("builtins.input", accept_after_rotation)
+    args = build_parser().parse_args(["plugins", "enable", "--scope", "user", "--json", "physical-plugin"])
+    rendered, status = _plugins_command(args, credential_boundary=boundary)
+    stderr = capsys.readouterr().err
+    payload = json.loads(_render_cli_output(rendered, boundary))
+    assert status == 0
+    assert payload["disposition"] == "ENABLED"
+    assert payload["package_install_id"] == {"visibility": "WITHHELD"}
+    assert payload["reviewed_package"]["package_install_id"] == {"visibility": "WITHHELD"}
+    assert secret not in _render_cli_output(rendered, boundary) and secret not in stderr
+
+
+def test_cli_keeps_package_named_dynamic_mcp_values(tmp_path, monkeypatch):
+    source = _make_package(tmp_path / "source", mcp_kind="stdio")
+    manifest_path = source / "mcp.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["mcpServers"]["fixture"]["env"]["package_install_id"] = "ordinary-env"
+    manifest["mcpServers"]["web"] = {
+        "type": "streamable-http", "url": "https://example.invalid/mcp",
+        "headers": {"package_install_id": "ordinary-header"},
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+    boundary = ProcessCredentialBoundary()
+    service = PluginManagementService(credential_boundary=boundary)
+    installed = _install(service, InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30))
+    assert installed.disposition is PluginInstallDisposition.INSTALLED
+    rendered, status = _plugins_command(build_parser().parse_args(["plugins", "doctor", "--json"]), credential_boundary=boundary)
+    assert status == 0
+    instance = json.loads(_render_cli_output(rendered, boundary))["instances"][0]
+    assert instance["package_install_id"] == {"visibility": "VISIBLE", "value": installed.package_install_id}
+    servers = {server["server_id"]: server for server in instance["summary"]["mcp"]["servers"]}
+    assert servers["fixture"]["env"]["package_install_id"] == "ordinary-env"
+    assert servers["web"]["public_headers"]["package_install_id"] == "ordinary-header"
+
+
+def test_dynamic_mcp_key_matching_secret_still_rejected():
+    from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
+    scrub = ProcessCredentialScrubSet()
+    scrub.observe("install_id")
+    with pytest.raises(ValueError, match="changed an object key"):
+        scrub.scrub_json({"env": {"package_install_id": "ordinary-env"}})
+
+
+@pytest.mark.parametrize("transport", ["stdio", "http"])
+def test_cli_withholds_only_actual_dynamic_mcp_secret_key_block(tmp_path, monkeypatch, transport):
+    source = _make_package(tmp_path / "source", mcp_kind=transport)
+    path = source / "mcp.json"
+    manifest = json.loads(path.read_text())
+    server = manifest["mcpServers"]["fixture"]
+    dynamic_map = server["env"] if transport == "stdio" else server["headers"]
+    dynamic_map["DYNAMIC_SECRET_KEY"] = "ordinary-value"
+    path.write_text(json.dumps(manifest))
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+    boundary = ProcessCredentialBoundary()
+    service = PluginManagementService(credential_boundary=boundary)
+    installed = _install(service, InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30))
+    assert installed.disposition is PluginInstallDisposition.INSTALLED
+    boundary.rotate_sync("DYNAMIC_SECRET")
+    args = build_parser().parse_args(["plugins", "doctor", "--json"])
+    rendered, status = _plugins_command(args, credential_boundary=boundary)
+    payload = json.loads(_render_cli_output(rendered, boundary))
+    assert status == 0
+    assert payload["disposition"] == "COMPLETE"
+    server = payload["instances"][0]["summary"]["mcp"]["servers"][0]
+    field = "env" if transport == "stdio" else "public_headers"
+    assert field not in server
+    assert server["withheld_fields"] == [field]
+    assert "DYNAMIC_SECRET" not in _render_cli_output(rendered, boundary)
+
+
+@pytest.mark.parametrize("transport", ["stdio", "http"])
+def test_cli_scrubs_secret_in_actual_dynamic_mcp_value(tmp_path, monkeypatch, transport):
+    source = _make_package(tmp_path / "source", mcp_kind=transport)
+    path = source / "mcp.json"
+    manifest = json.loads(path.read_text())
+    server = manifest["mcpServers"]["fixture"]
+    dynamic_map = server["env"] if transport == "stdio" else server["headers"]
+    dynamic_map["PUBLIC_VALUE"] = "prefix-private-token-suffix"
+    path.write_text(json.dumps(manifest))
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+    boundary = ProcessCredentialBoundary()
+    installed = _install(PluginManagementService(credential_boundary=boundary),
+        InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30))
+    assert installed.disposition is PluginInstallDisposition.INSTALLED
+    boundary.rotate_sync("private-token")
+    args = build_parser().parse_args(["plugins", "doctor", "--json"])
+    rendered, status = _plugins_command(args, credential_boundary=boundary)
+    assert status == 0
+    server = json.loads(_render_cli_output(rendered, boundary))["instances"][0]["summary"]["mcp"]["servers"][0]
+    dynamic = server["env"] if transport == "stdio" else server["public_headers"]
+    assert dynamic["PUBLIC_VALUE"] == "prefix-[REDACTED_CREDENTIAL]-suffix"
+    assert "private-token" not in _render_cli_output(rendered, boundary)
+
+
+@pytest.mark.parametrize("command", ["list", "inspect", "doctor"])
+@pytest.mark.parametrize("secret_kind", ["unrelated", "full_id", "id_substring", "rotated"])
+def test_hooks_cli_uses_saved_credentials_for_real_package_identity(tmp_path, monkeypatch, capsys, command, secret_kind):
+    import sys
+    from pulsara_agent import cli
+    from pulsara_agent.mcp_credentials import LocalMcpCredential, McpCredentialBinding, McpCredentialOwner
+    from pulsara_agent.settings import LOCAL_SETTINGS_FILE_NAME, LocalSettings, write_local_settings
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("PULSARA_HOME", str(home))
+    source = _make_package(tmp_path / "source", mcp_kind="none", hooks=True)
+    service = PluginManagementService(credential_boundary=ProcessCredentialBoundary())
+    installed = _install(service, InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 30))
+    assert installed.disposition is PluginInstallDisposition.INSTALLED
+    _enable(service, installed, "physical-plugin", monotonic() + 30)
+    package = installed.package_install_id
+    secret = ("unrelated-private-credential" if secret_kind == "unrelated" else package
+              if secret_kind == "full_id" else package[10:20])
+    binding = McpCredentialBinding(McpCredentialOwner("local", "user", "fixture"), "bearer")
+    settings_path = home / LOCAL_SETTINGS_FILE_NAME
+    def save(value):
+        write_local_settings(settings_path, LocalSettings(mcp_credentials=(LocalMcpCredential(binding, value),)))
+    save(secret)
+    if secret_kind == "rotated":
+        original = cli._hooks_command
+        def rotate_during_command(args):
+            result = original(args)
+            save("different-private-credential")
+            return result
+        monkeypatch.setattr(cli, "_hooks_command", rotate_during_command)
+    monkeypatch.setattr(sys, "argv", ["pulsara", "hooks", command, "--scope", "user", "--source", "plugin:physical-plugin"])
+    cli.main()
+    output = capsys.readouterr().out
+    plugin = next(item for item in json.loads(output)["sources"] if item.get("plugin_id") == "physical-plugin")
+    expected = {"visibility": "VISIBLE", "value": package} if secret_kind == "unrelated" else {"visibility": "WITHHELD"}
+    assert plugin["package_install_id"] == expected
+    assert secret not in output

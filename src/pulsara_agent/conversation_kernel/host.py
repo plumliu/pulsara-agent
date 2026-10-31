@@ -304,6 +304,8 @@ from pulsara_agent.hooks.dispatcher import (
 from pulsara_agent.hooks.executor import HookSecretScrubSet
 from pulsara_agent.hooks.source import LocalHookSourceProvider
 from pulsara_agent.hooks.presentation import hook_snapshot_model_public
+from pulsara_agent.public_projection import public_record
+from pulsara_agent.plugins.public_projection import project_hook_public
 from pulsara_agent.capability.local_skill_management import LocalSkillManagementService
 from pulsara_agent.hooks.matcher import event_matcher_subject
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -826,7 +828,6 @@ class KernelHostSession:
         from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor
 
         self._mcp_supervisor = McpHostSupervisor(
-            session_id=session_id,
             workspace_root=workspace.workspace_root,
             configs=mcp_configs,
             credential_boundary=credential_boundary,
@@ -1153,10 +1154,10 @@ class KernelHostSession:
                 for snapshot in view.source_snapshots
             ],
         }
-        safe = HookSecretScrubSet.capture().scrub_json(result)
-        if not isinstance(safe, dict):
-            raise RuntimeError("Hook reload result lost its JSON object shape")
-        return safe
+        scrub = HookSecretScrubSet.capture()
+        return public_record(result, scrub, fixed=("status",), children={
+            "sources": [public_record(source, scrub, fixed=("source", "scan", "trust")) for source in result["sources"]],
+        })
 
     async def reload_capabilities(
         self, *, deadline_monotonic: float | None
@@ -1489,10 +1490,10 @@ class KernelHostSession:
         }
         if interrupted:
             result["interruption"] = "CANCELLED"
-        safe = HookSecretScrubSet.capture().scrub_json(result)
-        if not isinstance(safe, dict):
-            raise RuntimeError("Capability reload result lost its JSON object shape")
-        return safe
+        scrub = HookSecretScrubSet.capture()
+        return public_record(result, scrub,
+            fixed=("status", "plugin_view", "skill_producer", "mcp", "diagnostics", "same_epoch_prefix", "interruption"),
+            children={"plugin_hook_sources": [project_hook_public(source, scrub) for source in result["plugin_hook_sources"]]})
 
     def reconnect_mcp_server(self, server_id: str) -> None:
         """Request a fresh physical generation for future safe-point borrows."""

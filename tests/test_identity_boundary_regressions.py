@@ -192,12 +192,15 @@ def test_gateway_retains_revoked_attachment_until_old_stream_cleanup(
             asyncio.create_task(server._accept(r, w)) for r, w in zip(readers, writers)
         ]
 
-        def hello():
+        client_id = random_id("transport")
+
+        def hello(client_instance_id=client_id):
             return wire.ClientFrame(
                 hello=wire.HelloRequest(
                     protocol=gateway.protocol_identity(),
                     launch_id=server._launch_id,
                     launch_capability=server._launch_capability,
+                    client_instance_id=client_instance_id,
                     session_id=host.session_id,
                     host_session_id=host.host_session_id,
                     requested_role=wire.ATTACHMENT_ROLE_CONTROLLER,
@@ -205,6 +208,9 @@ def test_gateway_retains_revoked_attachment_until_old_stream_cleanup(
             )
 
         try:
+            await readers[0].put(hello("transport:invalid"))
+            invalid = await asyncio.wait_for(writers[0].responses.get(), 2)
+            assert invalid.error.stable_code == "CLIENT_INSTANCE_ID_INVALID"
             await readers[0].put(hello())
             a = await asyncio.wait_for(writers[0].responses.get(), 2)
             assert a.hello.attachment_id == first

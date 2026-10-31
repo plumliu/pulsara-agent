@@ -1,3 +1,4 @@
+import { deriveIdentity } from '../../frontend/lib/identity';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { webcrypto } from 'node:crypto';
 import { createHash } from 'node:crypto';
@@ -1127,8 +1128,8 @@ describe('exact prompt projection', () => {
     expect(connection.current().todo).toEqual({
       id: 'todo-root',
       items: [
-        { id: 'todo-root:0', label: '检查契约', status: 'completed' },
-        { id: 'todo-root:1', label: '目视验证', status: 'pending' },
+        { ordinal: 0, label: '检查契约', status: 'completed' },
+        { ordinal: 1, label: '目视验证', status: 'pending' },
       ],
     });
     expect(connection.current().messages).toEqual([]);
@@ -1143,6 +1144,7 @@ describe('exact prompt projection', () => {
 
   it('hydrates a large historical reasoning block through the content reader', async () => {
     const reasoning = 'large provider reasoning';
+    const reasoningBlockId = deriveIdentity('reasoning-block', 'provider-reasoning', 'assistant-1', '0');
     const digest = blobContent(reasoning).digest;
     const requests: Array<Record<string, unknown>> = [];
     const responses = [
@@ -1157,7 +1159,7 @@ describe('exact prompt projection', () => {
               entry_id: 'assistant-1', turn_id: 'turn-1', entry_sequence: '1',
               entry_kind: 'ASSISTANT_MESSAGE', scope_kind: 'ROOT',
               reasoning_blocks: [{
-                block_id: 'assistant-1:provider-reasoning:0', ordinal: '0',
+                block_id: reasoningBlockId, ordinal: '0',
                 presentation_kind: 'REASONING_PRESENTATION_FULL',
                 content: {
                   kind: 'CANONICAL_BLOB', digest, size: String(reasoning.length),
@@ -1192,7 +1194,7 @@ describe('exact prompt projection', () => {
     await connection.hydrateEntries!(['assistant-1'], undefined, true);
     expect(connection.current().messages[0].reasoning?.[0].body).toBe(reasoning);
     expect(requests.at(-1)).toMatchObject({
-      entry_id: 'assistant-1', block_id: 'assistant-1:provider-reasoning:0', offset_bytes: 0,
+      entry_id: 'assistant-1', block_id: reasoningBlockId, reasoning_ordinal: 0, offset_bytes: 0,
     });
   });
 
@@ -2242,7 +2244,7 @@ describe('source text fidelity hard cut', () => {
     expect(messages.find((message) => message.id === 'assistant-canonical')?.reasoning).toEqual([
       { id: 'reasoning-canonical', kind: 'full', body: SOURCE_FIDELITY_TEXT },
     ]);
-    expect(messages.find((message) => message.id === 'live:draft-live')?.reasoning).toEqual([
+    expect(messages.find((message) => message.viewSource?.kind === 'draft' && message.assistantKind === 'live')?.reasoning).toEqual([
       { id: 'reasoning-live', kind: 'summary', body: SOURCE_FIDELITY_TEXT, active: true },
     ]);
   });
@@ -2366,7 +2368,7 @@ describe('source text fidelity hard cut', () => {
     const projection=connection.current();
     expect(projection.messages.find(message=>message.id==='guidance')).toMatchObject({role:'user',userKind:'steer',body:SOURCE_FIDELITY_TEXT});
     expect(projection.messages.find(message=>message.id==='answer')).toMatchObject({body:SOURCE_FIDELITY_TEXT,reasoning:[{body:SOURCE_FIDELITY_TEXT}],visualizations:[{imageRef:visualizations[0].image_ref,width:7,height:5}]});
-    expect(projection.todo?.items).toEqual([{id:'todo-root:0',label:SOURCE_FIDELITY_TEXT,status:'in-progress'}]);
+    expect(projection.todo?.items).toEqual([{ordinal:0,label:SOURCE_FIDELITY_TEXT,status:'in-progress'}]);
   });
 
   it('preserves plain and JSON message tool text while keeping typed tool labels', async () => {
@@ -3150,9 +3152,11 @@ it('keeps settled live reasoning until the exact canonical reasoning bytes are h
   const responses = [connectPayload([], {active_turns:[{turn_id:'turn-live',scope_kind:'ROOT',status:'RUNNING'}]}, events),
     {observation:{through_event_sequence:'1',committed:[{projection_kind:'IMMUTABLE_ENTRY',entry}],
       settlements:[{kind:'LIVE_GENERATION_COMMITTED',draft_identity:'draft-live',committed_entry_id:'entry-reason'}]}}];
-  stubRuntimeFetch(vi.fn(async input => new Response(JSON.stringify(String(input).endsWith('/read-content')
-    ? {content:{digest,complete_size:String(bytes.length),offset_bytes:'0',content:bytes.toString('base64'),complete:true}}
-    : responses.shift()), {status:200})));
+  const reads: Record<string, unknown>[] = [];
+  stubRuntimeFetch(vi.fn(async (input, init) => {
+    if (String(input).endsWith('/read-content')) { reads.push(JSON.parse(String(init?.body))); return new Response(JSON.stringify({content:{digest,complete_size:String(bytes.length),offset_bytes:'0',content:bytes.toString('base64'),complete:true}}), {status:200}); }
+    return new Response(JSON.stringify(responses.shift()), {status:200});
+  }));
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   expect(connection.current().messages[0].reasoning?.[0].body).toBe(text);
   await connection.observe();
@@ -3162,6 +3166,7 @@ it('keeps settled live reasoning until the exact canonical reasoning bytes are h
   await connection.hydrateEntries!(['entry-reason'], undefined, true);
   expect(connection.current().messages[0].reasoning?.[0].body).toBe(text);
   expect(connection.current().messages[0]).not.toHaveProperty('pendingAssistant');
+  expect(reads).toEqual([expect.objectContaining({entry_id:'entry-reason',block_id:'reason-canonical',reasoning_ordinal:0})]);
 });
 
 it('keeps an Agent live draft until its own canonical reasoning is hydrated', async () => {
@@ -3313,4 +3318,90 @@ it('sends the explicit exact-turn lane when paging pending steer inputs',async()
  const responses=[connectPayload([],{},[],{}),{items:[],next_cursor:null}];const fetcher=vi.fn(async()=>new Response(JSON.stringify(responses.shift()),{status:200}));stubRuntimeFetch(fetcher);
  const connection=await new LocalHttpRuntimeAdapter().connect('session-1');await connection.readQueuePage('128',undefined,{deliveryMode:'steer',targetTurnId:'turn:a'});
  expect(JSON.parse(String(fetcher.mock.calls.at(-1)?.[1]?.body))).toEqual({cursor:'128',delivery_mode:'STEER_ACTIVE_TURN',target_turn_id:'turn:a'});
+});
+
+it('retains no-START live content and a detached result view through observation and key changes', async () => {
+  const hello = [
+    {live_revision:'1',event_type:'THINKING_DELTA',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'provider-block',payload:{thinking_delta:{block_identity:'provider-block',delta:'first'}}},
+    {live_revision:'2',event_type:'TOOL_CALL_DELTA',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'provider-tool-block',payload:{tool_call_delta:{tool_call_id:'provider-call',delta:'{"path":'}}},
+    {live_revision:'3',event_type:'TOOL_RESULT_DELTA',draft_identity:'result',generation_id:'generation',turn_id:'turn',scope_kind:'ROOT',payload:{tool_result_delta:{text:'partial'}}},
+  ];
+  const later = [
+    {live_revision:'4',event_type:'THINKING_END',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'provider-block',payload:{thinking_end:{block_identity:'provider-block',final_text:'first final'}}},
+    {live_revision:'5',event_type:'TOOL_CALL_END',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'provider-tool-block',payload:{tool_call_end:{tool_call_id:'provider-call',tool_name:'read_file',arguments_json:'{"path":"a"}'}}},
+    {live_revision:'6',event_type:'TOOL_RESULT_END',draft_identity:'result',generation_id:'generation',channel_attempt_id:'attempt',turn_id:'turn',scope_kind:'ROOT',payload:{tool_result_end:{result_state:'SUCCESS',final_text:'complete'}}},
+  ];
+  const responses = [connectPayload([], {active_turns:[{turn_id:'turn',scope_kind:'ROOT',status:'RUNNING'}]}, hello),
+    {observation:{through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'6',live:later}}];
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(responses.shift()), {status:200})));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const initial = connection.current();
+  const draft = initial.messages.find(message => message.assistantKind === 'live')!;
+  const result = initial.messages.find(message => message.traces?.some(trace => trace.associationPending))!;
+  expect(draft.id).toMatch(/^view:[a-z2-7]{25}[aeimquy4]$/);
+  expect(result.id).toMatch(/^view:[a-z2-7]{25}[aeimquy4]$/);
+  expect(result.sourceEntryIds).toBeUndefined();
+  expect(result.traces?.[0].resultText).toBe('partial');
+  expect(draft.reasoning?.[0]).toMatchObject({id:'provider-block',body:'first'});
+  expect(draft.traces?.[0]).toMatchObject({id:'provider-call',argumentsJson:'{"path":'});
+  const next = await connection.observe();
+  const updated = next.messages.find(message => message.id === draft.id)!;
+  expect(updated.reasoning?.[0]).toMatchObject({id:'provider-block',body:'first final',active:false});
+  expect(updated.traces?.[0]).toMatchObject({id:'provider-call',toolName:'read_file',argumentsJson:'{"path":"a"}'});
+  expect(next.messages.find(message => message.id === result.id)?.traces?.[0].resultText).toBe('complete');
+  expect(next.presentationNotices).toEqual([]);
+});
+
+it('preserves null and empty fallback slots and advances the advisory cursor', async () => {
+  const events = [
+    {live_revision:'1',event_type:'THINKING_START',turn_id:'turn',scope_kind:'ROOT',payload:{thinking_start:{block_identity:''}}},
+    {live_revision:'2',event_type:'THINKING_DELTA',turn_id:'turn',scope_kind:'ROOT',payload:{thinking_delta:{block_identity:'',delta:'empty slot'}}},
+    {live_revision:'3',event_type:'THINKING_END',turn_id:'turn',scope_kind:'ROOT',payload:{thinking_end:{block_identity:'',final_text:''}}},
+    {live_revision:'4',event_type:'THINKING_DELTA',turn_id:'turn',scope_kind:'ROOT',payload:{thinking_delta:{delta:'missing slot'}}},
+  ];
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([], {active_turns:[{turn_id:'turn',status:'RUNNING'}]}, events)), {status:200})));
+  const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+  const blocks = projection.messages[0].reasoning!;
+  expect(blocks.map(block => block.body)).toEqual(['empty slotmissing slot']);
+  expect(blocks[0].id).toMatch(/^block:[a-z2-7]{25}[aeimquy4]$/);
+  expect(projection.liveRevision).toBe(4);
+  expect(projection.presentationNotices).toEqual([]);
+});
+
+it('joins a no-START tool delta and its later call ID using the existing block slot', async () => {
+  const events = [
+    {live_revision:'1',event_type:'TOOL_CALL_DELTA',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'block',payload:{tool_call_delta:{delta:'partial'}}},
+    {live_revision:'2',event_type:'TOOL_CALL_END',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'block',payload:{tool_call_end:{tool_call_id:'provider-call',tool_name:'read_file',arguments_json:'{"path":"x"}'}}},
+  ];
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([], {active_turns:[{turn_id:'turn',status:'RUNNING'}]}, events)), {status:200})));
+  const projection = (await new LocalHttpRuntimeAdapter().connect('session-1')).current();
+  expect(projection.messages[0].traces).toEqual([expect.objectContaining({id:'provider-call',toolName:'read_file',argumentsJson:'{"path":"x"}'})]);
+});
+
+it.each([
+  {status:'ACK_UNKNOWN', attempted_package_install_id:{visibility:'WITHHELD'}, intended_enabled:true, last_known_cut:'cut-1'},
+  {status:'STALE', expected_package_install_id:{visibility:'VISIBLE',value:'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}, observed_package_install_id:{visibility:'WITHHELD'}, desired_enabled:false, last_known_cut:null},
+  {status:'REMOVED', prior_package_install_id:{visibility:'VISIBLE',value:'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}},
+  {status:'CLEANUP_UNAVAILABLE', prior_operation_status:'ACK_UNKNOWN', attempted_package_install_id:{visibility:'WITHHELD'}, intended_enabled:true, last_known_cut:'cut-1'},
+  {status:'CLEANUP_UNAVAILABLE', prior_operation_status:'INSTALLED', package_install_id:{visibility:'VISIBLE',value:'package:aaaaaaaaaaaaaaaaaaaaaaaaaa'}},
+])('preserves public plugin operation facts for $status', async operation => {
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({operation:{...operation,success:operation.status === 'REMOVED' || ('prior_operation_status' in operation && operation.prior_operation_status === 'INSTALLED'),message:'操作结果',details:[]},capabilities:{}}), {status:200}));
+  stubRuntimeFetch(fetcher);
+  const {operation: actual} = await new LocalHttpRuntimeAdapter().removeUserPlugin('plugin', 'package:aaaaaaaaaaaaaaaaaaaaaaaaaa');
+  expect(actual.status).toBe(operation.status);
+  if ('prior_operation_status' in operation) expect(actual.priorOperationStatus).toBe(operation.prior_operation_status);
+  if ('attempted_package_install_id' in operation) expect(actual).toMatchObject({attemptedPackageInstallId:operation.attempted_package_install_id,intendedEnabled:true,lastKnownCut:'cut-1'});
+  if ('expected_package_install_id' in operation) expect(actual).toMatchObject({expectedPackageInstallId:operation.expected_package_install_id,observedPackageInstallId:operation.observed_package_install_id,desiredEnabled:false,lastKnownCut:null});
+  if ('prior_package_install_id' in operation) expect(actual).toMatchObject({priorPackageInstallId:operation.prior_package_install_id,success:true});
+  if ('package_install_id' in operation) expect(actual).toMatchObject({packageInstallId:operation.package_install_id,success:true});
+});
+
+it('joins no-START tool delta and end with only the local block identity', async () => {
+  const events = [
+    {live_revision:'1',event_type:'TOOL_CALL_DELTA',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'block',payload:{tool_call_delta:{delta:'partial'}}},
+    {live_revision:'2',event_type:'TOOL_CALL_END',draft_identity:'draft',turn_id:'turn',scope_kind:'ROOT',block_id:'block',payload:{tool_call_end:{tool_name:'read_file',arguments_json:'{"path":"x"}'}}},
+  ];
+  stubRuntimeFetch(vi.fn(async () => new Response(JSON.stringify(connectPayload([], {active_turns:[{turn_id:'turn',status:'RUNNING'}]}, events)), {status:200})));
+  const traces = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages[0].traces;
+  expect(traces).toEqual([expect.objectContaining({id:'block',toolName:'read_file',argumentsJson:'{"path":"x"}'})]);
 });

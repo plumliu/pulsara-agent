@@ -13,6 +13,7 @@ from pulsara_agent.capability.bundled_skills import (
 )
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
+    capability_identity_digest,
     CapabilitySourceKind,
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
@@ -231,7 +232,7 @@ class KernelSkillProjectionComposer:
                 ),
                 key=lambda fact: (
                     fact.identity.kind.value,
-                    fact.identity.identity_fingerprint,
+                    capability_identity_digest(fact.identity),
                     fact.fact_semantic_fingerprint,
                 ),
             )
@@ -276,7 +277,7 @@ def _skill_fact(source, skill: SkillManifest) -> FrozenSkillCapabilityFact:
         },
     )
     fact_fingerprint = skill_capability_fact_fingerprint(
-        identity_fingerprint=identity.identity_fingerprint,
+        identity=identity,
         catalog_semantic_fingerprint=catalog,
         activation_semantic_fingerprint=activation,
         origin=skill.origin,

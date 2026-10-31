@@ -2174,6 +2174,7 @@ class ToolBatchExecutor:
                 session_id=session_id,
                 attempt_id=attempt_id,
                 remote_identity=result.remote_identity,
+                remote_identity_verification=result.remote_identity_verification,
                 occurred_at=datetime.now(timezone.utc),
                 actor_id=tool_name,
             )

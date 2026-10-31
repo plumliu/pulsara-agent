@@ -8,6 +8,7 @@ export default defineConfig({
     fs: { allow: [fileURLToPath(new URL('../', import.meta.url))] },
   },
   resolve: {
+    alias: { '@noble/hashes/sha256': fileURLToPath(new URL('./node_modules/@noble/hashes/esm/sha256.js', import.meta.url)) },
     // Tests and mocks outside frontend share this root's dependency instances.
     dedupe: [
       'react',
