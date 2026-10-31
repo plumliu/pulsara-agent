@@ -2,19 +2,19 @@ import { isCanonicalIdentity } from './identity';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-function workspaceKey(key: string, name: 'open' | 'width'): boolean {
-  const prefix = `pulsara-workspace-${name}:`;
+function workspaceOpenKey(key: string): boolean {
+  const prefix = 'pulsara-workspace-open:';
   return key.startsWith(prefix) && isCanonicalIdentity(key.slice(prefix.length), 'session');
 }
 function knownKey(key: string): boolean {
-  return ['pulsara-theme', 'pulsara-active-session', 'pulsara-show-builtin-tool-results', 'pulsara-sidebar-open'].includes(key)
-    || workspaceKey(key, 'open') || workspaceKey(key, 'width');
+  return ['pulsara-theme', 'pulsara-active-session', 'pulsara-show-builtin-tool-results', 'pulsara-sidebar-open', 'pulsara-workspace-width'].includes(key)
+    || workspaceOpenKey(key);
 }
 function valid(key: string, value: unknown): value is string {
   if (key === 'pulsara-theme') return value === 'light' || value === 'dark';
   if (key === 'pulsara-active-session') return value === '' || isCanonicalIdentity(value, 'session');
-  if (workspaceKey(key, 'width')) return typeof value === 'string' && Number.isFinite(Number(value)) && Number(value) >= 320;
-  if (key === 'pulsara-sidebar-open' || key === 'pulsara-show-builtin-tool-results' || workspaceKey(key, 'open')) return value === 'true' || value === 'false';
+  if (key === 'pulsara-workspace-width') return typeof value === 'string' && Number.isFinite(Number(value)) && Number(value) >= 350;
+  if (key === 'pulsara-sidebar-open' || key === 'pulsara-show-builtin-tool-results' || workspaceOpenKey(key)) return value === 'true' || value === 'false';
   return false;
 }
 

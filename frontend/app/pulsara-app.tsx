@@ -717,7 +717,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const forgetSession = useCallback((sessionId: string) => {
     suggestionCache.forget(sessionId);
     workspaceControl.current?.forgetSession(sessionId);
-    uiPreferences.removeItem(`pulsara-workspace-width:${sessionId}`);
     changeSessionList(current => current.filter(s => s.id !== sessionId));
     promptDraftStore.removeSession(sessionId);
     setLocalSubmissions(current => current.filter(item => item.sessionId !== sessionId));

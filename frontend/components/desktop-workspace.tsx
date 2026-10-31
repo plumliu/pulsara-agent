@@ -234,6 +234,7 @@ function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: Worksp
 // Keep content readable at 350px; a deliberate drag past half that width hides the pane.
 const workspaceMinWidth = 350;
 const workspaceCollapseWidth = workspaceMinWidth / 2;
+const workspaceWidthKey = 'pulsara-workspace-width';
 type WorkspaceProps = { isOpen: boolean; onClose: () => void; toolbar: ReactNode; renderTab: (tab: WorkspaceTab) => ReactNode; sessionContentAvailable?: boolean };
 export function DesktopWorkspace(props: WorkspaceProps) {
   const workspace = useDesktopWorkspace();
@@ -242,18 +243,12 @@ export function DesktopWorkspace(props: WorkspaceProps) {
 function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvailable = true }: WorkspaceProps) {
   const workspace = useDesktopWorkspace();
   const sessionId = workspace?.sessionId ?? '';
-  const browserSelected = workspace?.tabs.find(tab => tab.id === workspace.activeId)?.kind === 'browser';
-  const widthKey = browserSelected || !sessionId ? 'pulsara-workspace-width' : `pulsara-workspace-width:${sessionId}`;
-  const readWidth = () => {
-    const saved = Number(uiPreferences.getItem(widthKey));
+  const [width, setWidth] = useState(() => {
+    const saved = Number(uiPreferences.getItem(workspaceWidthKey));
     return Number.isFinite(saved) && saved >= workspaceMinWidth ? saved : workspaceMinWidth;
-  };
-  const [size, setSize] = useState(() => ({ widthKey, width: readWidth() }));
-  if (size.widthKey !== widthKey) setSize({ widthKey, width: readWidth() });
-  const width = size.widthKey === widthKey ? size.width : readWidth();
-  const setWidth = (value: number) => setSize({ widthKey, width: value });
+  });
   const saveWidth = (value: number) => {
-    uiPreferences.setItem(widthKey, String(value));
+    uiPreferences.setItem(workspaceWidthKey, String(value));
   };
   const [resizing, setResizing] = useState(false);
   const drag = useRef<{ x: number; width: number; nextWidth: number } | undefined>(undefined);
@@ -263,10 +258,10 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvai
     setResizing(false);
   };
   useEffect(() => () => {
-    if (drag.current) uiPreferences.setItem(widthKey, String(drag.current.nextWidth));
+    if (drag.current) uiPreferences.setItem(workspaceWidthKey, String(drag.current.nextWidth));
     drag.current = undefined;
     setResizing(false);
-  }, [widthKey]);
+  }, []);
   if (!workspace) return null;
   const selected = workspace.tabs.find(tab => tab.id === workspace.activeId) ?? workspace.tabs.at(-1);
   const closeTab = (id: string) => {

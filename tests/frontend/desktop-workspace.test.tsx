@@ -309,7 +309,8 @@ it('collapses only after closing the current session last tab and retains other 
   expect(screen.getByRole('tab', { name: 'Other' })).toBeTruthy();
 });
 
-it('remembers widths per session across switching and remounting, saving after drag completion', () => {
+it('shares the saved pane width across webpages, sessions and remounting, saving after drag completion', async () => {
+  userBrowserHost();
   vi.stubGlobal('PointerEvent', MouseEvent);
   let view = render(<Host sessionId="a" />);
   const pane = () => screen.getByLabelText('会话标签工作区');
@@ -318,19 +319,25 @@ it('remembers widths per session across switching and remounting, saving after d
   vi.spyOn(pane(), 'getBoundingClientRect').mockReturnValue({width:350} as DOMRect);
   fireEvent.pointerDown(separator, {clientX:800,button:0});
   fireEvent.pointerMove(separator, {clientX:700});
-  expect(uiPreferences.getItem('pulsara-workspace-width:a')).toBeNull();
+  expect(uiPreferences.getItem('pulsara-workspace-width')).toBeNull();
   fireEvent.pointerUp(separator);
-  expect(uiPreferences.getItem('pulsara-workspace-width:a')).toBe('450');
-  view.rerender(<Host sessionId="b" />);
-  expect(pane().style.getPropertyValue('--workspace-width')).toBe('350px');
-  vi.spyOn(pane(), 'getBoundingClientRect').mockReturnValue({width:350} as DOMRect);
-  fireEvent.keyDown(screen.getByRole('separator'), {key:'ArrowLeft'});
-  expect(uiPreferences.getItem('pulsara-workspace-width:b')).toBe('382');
-  view.rerender(<Host sessionId="a" />);
+  expect(uiPreferences.getItem('pulsara-workspace-width')).toBe('450');
+  act(() => workspace.open({ id:'file', sessionId:'a', kind:'file', title:'guide.md' }));
+  await act(async () => { workspace.browserTabs.open(); });
   expect(pane().style.getPropertyValue('--workspace-width')).toBe('450px');
+  expect(screen.getByText('在上方输入网址')).toBeTruthy();
+  act(() => workspace.activate('file'));
+  expect(pane().style.getPropertyValue('--workspace-width')).toBe('450px');
+  view.rerender(<Host sessionId="b" />);
+  expect(pane().style.getPropertyValue('--workspace-width')).toBe('450px');
+  vi.spyOn(pane(), 'getBoundingClientRect').mockReturnValue({width:450} as DOMRect);
+  fireEvent.keyDown(screen.getByRole('separator'), {key:'ArrowLeft'});
+  expect(uiPreferences.getItem('pulsara-workspace-width')).toBe('482');
+  view.rerender(<Host sessionId="a" />);
+  expect(pane().style.getPropertyValue('--workspace-width')).toBe('482px');
   view.unmount();
   view = render(<Host sessionId="b" />);
-  expect(pane().style.getPropertyValue('--workspace-width')).toBe('382px');
+  expect(pane().style.getPropertyValue('--workspace-width')).toBe('482px');
 });
 
 function userBrowserHost() {

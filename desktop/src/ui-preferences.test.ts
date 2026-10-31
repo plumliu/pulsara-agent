@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -16,7 +16,9 @@ test('desktop UI preferences survive a new owner independently of renderer ports
     first.write({key:b,value:'false'});
     first.write({key:'pulsara-theme',value:'dark'});
     first.write({key:'pulsara-sidebar-open',value:'false'});
-    const widthKey = a.replace('-open:', '-width:');
+    const widthKey = 'pulsara-workspace-width';
+    first.write({key:widthKey,value:'350'});
+    assert.throws(() => first.write({key:widthKey,value:'349'}));
     first.write({key:widthKey,value:'564.5'});
     const restored = new UiPreferences(file);
     assert.equal(restored.read()[widthKey], '564.5');
@@ -35,7 +37,13 @@ test('desktop UI preferences survive a new owner independently of renderer ports
     const noncanonical = 'session:' + 'a'.repeat(25) + 'b';
     assert.throws(() => second.write({key:'pulsara-active-session', value:noncanonical}));
     assert.throws(() => second.write({key:'pulsara-workspace-open:' + noncanonical, value:'true'}));
-    assert.throws(() => second.write({key:'pulsara-workspace-width:' + noncanonical, value:null}));
+    const sessionWidthKey = a.replace('-open:', '-width:');
+    assert.throws(() => second.write({key:sessionWidthKey, value:'600'}));
+    assert.throws(() => second.write({key:sessionWidthKey, value:null}));
     assert.deepEqual(new UiPreferences(file).read(), second.read());
+    writeFileSync(file, JSON.stringify({...second.read(), [widthKey]:'564.5', [sessionWidthKey]:'900'}));
+    const loaded = new UiPreferences(file);
+    assert.equal(loaded.read()[widthKey], '564.5');
+    assert.equal(loaded.read()[sessionWidthKey], undefined);
   } finally { rmSync(root, {recursive:true,force:true}); }
 });
