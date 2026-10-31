@@ -17,10 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_resource(tmp_path):
     source = tmp_path / 'source with spaces'
     source.mkdir()
-    for name in ['pyproject.toml', 'README.md']:
+    for name in ['pyproject.toml', 'README.md', 'mise.toml', '.gitignore']:
         shutil.copy2(ROOT / name, source / name)
     shutil.copytree(ROOT / 'tools', source / 'tools', ignore=shutil.ignore_patterns('__pycache__'))
-    shutil.copytree(ROOT / 'src', source / 'src', ignore=shutil.ignore_patterns('_vendor', '__pycache__'))
+    shutil.copytree(ROOT / 'src', source / 'src', ignore=shutil.ignore_patterns('_vendor', '__pycache__', 'static'))
     frontend = source / 'frontend'
     dependency = frontend / 'node_modules' / 'fixture-package'
     dependency.mkdir(parents=True)
@@ -43,9 +43,30 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         assert failed.returncode != 0
         assert 'prepare_ripgrep.py explicitly' in failed.stderr
     shutil.copytree(ROOT / 'src/pulsara_agent/_vendor', source / 'src/pulsara_agent/_vendor')
-    for expression in ["build_wheel('dist')", "build_editable('editable')", "build_sdist('dist')"]:
-        built = subprocess.run([sys.executable, '-c', f"from hatchling.build import *; print({expression})"], cwd=source, capture_output=True, text=True)
-        assert built.returncode == 0, built.stderr
+    # Editable setup precedes renderer generation in the production task graph.
+    editable = subprocess.run(
+        [sys.executable, '-c', "from hatchling.build import build_editable; print(build_editable('editable'))"],
+        cwd=source, capture_output=True, text=True,
+    )
+    assert editable.returncode == 0, editable.stderr
+    missing_renderer = subprocess.run(
+        [sys.executable, '-c', "from hatchling.build import build_wheel; build_wheel('dist')"],
+        cwd=source, capture_output=True, text=True,
+    )
+    assert missing_renderer.returncode != 0
+    assert 'npm --prefix frontend run build:desktop' in missing_renderer.stderr
+    renderer = source / 'src/pulsara_agent/desktop_app/static'
+    renderer_files = {
+        'index.html': b'<script src="/assets/ui.js"></script>',
+        'assets/ui.js': b'window.pulsara = true;',
+        'assets/ui.css': b'body { color: black; }',
+        'assets/font.woff2': b'fixture font',
+        'assets/font-licenses/OFL.txt': b'fixture license',
+    }
+    for name, content in renderer_files.items():
+        path = renderer / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
     # Build both directly from the prepared tree: the intentionally vendor-free
     # sdist cannot be implicitly used as a prepared wheel source by uv.
     built = subprocess.run(
@@ -66,12 +87,18 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         assert archive.read('pulsara_agent/_vendor/ripgrep/LICENSE-MIT')
         assert archive.read('pulsara_agent/_vendor/ripgrep/COPYING')
         assert archive.read('pulsara_agent/_vendor/ripgrep/LICENSE-PCRE2')
-        assert archive.read('pulsara_agent/desktop_app/static/index.html')
+        prefix = 'pulsara_agent/desktop_app/static/'
+        assert {name.removeprefix(prefix) for name in archive.namelist() if name.startswith(prefix)} == set(renderer_files)
+        for name, content in renderer_files.items():
+            assert archive.read(prefix + name) == content
+    with zipfile.ZipFile(next((source / 'editable').glob('*.whl'))) as archive:
+        assert not any('/desktop_app/static/' in name for name in archive.namelist())
     with tarfile.open(next((source / 'dist').glob('*.tar.gz'))) as archive:
         names = archive.getnames()
         assert not any('_vendor/ripgrep' in name for name in names)
         assert not any('node_modules' in name.split('/') for name in names)
         assert not any('/desktop/resources/' in name or '/desktop/release/' in name for name in names)
+        assert not any('/desktop_app/static/' in name for name in names)
         assert any(name.endswith('frontend/package.json') for name in names)
         assert any(name.endswith('frontend/package-lock.json') for name in names)
         assert any(name.endswith('desktop/package-lock.json') for name in names)

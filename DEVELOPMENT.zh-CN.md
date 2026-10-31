@@ -81,6 +81,8 @@ amd64 使用 `linux/amd64` 和独立输出目录。Docker 只用于构建，不�
 
 ## 增量构建与检查
 
+`src/pulsara_agent/desktop_app/static/` 由 Vite 生成，不受 Git 追踪，也不进入源码归档。`desktop:application` 依赖 `desktop:renderer`，桌面打包会先生成前端，再创建应用 wheel；Hatch 显式把生成目录加入 wheel，缺少前端时明确报错，避免生成没有界面的安装包。开发用 editable 安装可先于前端构建。单独构建 wheel 时，按原流程准备原生依赖，运行 `npm --prefix frontend ci` 和 `npm --prefix frontend run build:desktop`，再用 uv 构建 wheel。
+
 两次构建之间保留 `desktop/build`、`desktop/resources` 和 mise 缓存。应用修改会重建前端与 wheel，未变的原生依赖继续复用；构建脚本、工具、SDK 或系统库变化时，刷新对应资源。标准 `desktop:verify`、`desktop:package` 任务包含资源冒烟检查。
 
 单项重建使用 `mise run --force desktop:postgres` 或 `mise run --force desktop:python-dependencies`。自定义 PostgreSQL 扩展使用 `mise run --force desktop:postgres -- --extension-lib /path/to/lib --extension-share /path/to/extension`，外部输入变化后重新运行。不要修改 SDK 缓存或更改 payload 摘要来复用旧资源。

@@ -44,6 +44,10 @@ jobs:
         run: uv run --no-project --python 3.12 python tools/prepare_code_mode.py
       - name: Install editable application and test dependencies
         run: uv sync --locked --dev
+      - name: Build desktop renderer from source
+        run: |
+          npm --prefix frontend ci --no-audit --no-fund
+          npm --prefix frontend run build:desktop
       - name: Prepare Chromium with Ubuntu dependencies
         run: uv run --no-sync python -m playwright install --with-deps chromium
       - name: Initialize PostgreSQL runtime role

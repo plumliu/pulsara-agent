@@ -59,6 +59,7 @@ logs/
 .pulsara/
 
 # Local experiment and generated output
+/src/pulsara_agent/desktop_app/static/
 /experiments/
 /output/
 /windows_compatibility/

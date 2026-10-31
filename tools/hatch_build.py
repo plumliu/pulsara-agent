@@ -1,4 +1,4 @@
-"""Hatch wheel gate for the exact read-only bundled Skill inventory."""
+"""Hatch preparation gates and explicit inclusion of generated wheel resources."""
 
 from __future__ import annotations
 
@@ -109,7 +109,6 @@ class CustomBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict[str, object]) -> None:
-        del version
         root = Path(self.root)
         executable = root / "src/pulsara_agent/_vendor/ripgrep/rg"
         target = (platform.system(), platform.machine())
@@ -161,3 +160,12 @@ class CustomBuildHook(BuildHookInterface):
         classification = _classify_source_inventory(Path(self.root))
         if not classification.valid:
             raise RuntimeError("; ".join(classification.diagnostics))
+        # mise's renderer task owns generation. Hatch only requires and packages
+        # its output; editable installs expose the source tree before UI build.
+        if self.target_name == "wheel" and version == "standard":
+            renderer = root / "src/pulsara_agent/desktop_app/static"
+            if not (renderer / "index.html").is_file():
+                raise RuntimeError(
+                    "Run npm --prefix frontend run build:desktop explicitly before building a wheel"
+                )
+            build_data["force_include"][str(renderer)] = "pulsara_agent/desktop_app/static"

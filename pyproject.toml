@@ -39,13 +39,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pulsara_agent"]
-exclude = ["src/pulsara_agent/_vendor/ripgrep", "src/pulsara_agent/_vendor/code_mode"]
+exclude = [
+    "src/pulsara_agent/_vendor/ripgrep",
+    "src/pulsara_agent/_vendor/code_mode",
+    "src/pulsara_agent/desktop_app/static",
+]
 
 [tool.hatch.build.targets.sdist]
 # Hatch reads the root VCS ignores, not nested desktop/frontend ignores.
 exclude = [
     "src/pulsara_agent/_vendor/ripgrep",
     "src/pulsara_agent/_vendor/code_mode",
+    "src/pulsara_agent/desktop_app/static",
     "**/node_modules",
     "desktop/resources",
     "desktop/release",
