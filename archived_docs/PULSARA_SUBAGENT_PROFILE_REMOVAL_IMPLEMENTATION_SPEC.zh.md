@@ -108,7 +108,7 @@ baseline 修改后，同步更新既有 expected catalog 资源的 `observed_cat
 - `run_pr04_prompt_queue_dogfood.py` 删除或按现行 Work 改写退役 wait／FIFO 子场景，保留独立队列验证及仍被其他脚本导入的辅助函数。
 - 其他仍教模型使用旧 Task API 的脚本不能直接作为本次通过证据；仅当选作当前验收入口时，先按现行 Agent／Work 合同调整所用场景。不借本次删除扩展重写全部历史 dogfood。
 
-前端源代码删除后运行既有 `npm run build:desktop`，确认生成的桌面资源及 source map 不残留五种预设。`src/pulsara_agent/desktop_app/static/` 是 Git 忽略的构建产物，不提交；桌面打包先构建前端，wheel 显式包含生成目录，缺少产物时构建失败。构建与安装边界以 [开发说明](DEVELOPMENT.zh-CN.md#增量构建与检查) 为准。
+前端源代码删除后运行既有 `npm run build:desktop`，确认生成的桌面资源及 source map 不残留五种预设。`src/pulsara_agent/desktop_app/static/` 是 Git 忽略的构建产物，不提交；桌面打包先构建前端，wheel 显式包含生成目录，缺少产物时构建失败。构建与安装边界以 [开发说明](../DEVELOPMENT.zh-CN.md#增量构建与检查) 为准。
 
 ## 5. 验证范围
 

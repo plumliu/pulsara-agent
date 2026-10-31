@@ -1,6 +1,6 @@
 # Pulsara 子代理与 Cell 侧边栏实施规格
 
-日期：2026-11-01。状态：**当前实现合同。** 输入呈现、源码阅读和协作图采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
+日期：2026-11-01。状态：**当前实现合同。** 输入呈现、源码阅读和协作图采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
 本文确定两个侧边栏入口、共同阅读链、Work 输入存储 hard cut、Cell 局部编排图及 `open_in_pulsara` 接入。保留原文件路径供现有链接引用。
 
@@ -166,14 +166,14 @@ Pulsara 仅拥有真实对象与关系读取、卡片导航、分页和标签页
 
 | 链路 | 当前所有者与职责 |
 |---|---|
-| Tab 与导航 | [desktop-workspace.tsx](frontend/components/desktop-workspace.tsx) 管理承载 ROOT、目标身份、标签去重与阅读视角；[agent-cell-api.ts](frontend/lib/agent-cell-api.ts) 沿共同读取入口核验目标 |
-| 会话阅读 | [workbench-view.tsx](frontend/components/workbench-view.tsx) 复用共同阅读行为；[agent-conversation-pane.tsx](frontend/components/agent-conversation-pane.tsx) 装配只读 Agent 会话 |
-| 排队与来源 | [runtime-adapter.ts](frontend/lib/runtime-adapter.ts) 和 [canonical_v3.py](src/pulsara_agent/terminal_protocol/canonical_v3.py) 投影队列身份、来源与依赖等待；ROOT 操作和 Agent 只读阅读各自装配 |
-| Agent 与 Work | [collaboration_api.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py) 与 [_repository/subagents.py](src/pulsara_agent/conversation_kernel/_repository/subagents.py) 管理当前 ROOT 可见成员、Work 及其输入事实 |
-| 只读打开 | [session_controller.py](src/pulsara_agent/desktop_app/session_controller.py) 与 [renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 校验 ROOT／Agent，沿 canonical reader 和 live observer 读取，不 resume 或取得 writer |
-| Cell、源码与图 | [code_mode/host.py](src/pulsara_agent/code_mode/host.py) 管理当前存活 Cell 与进程内参与观察；[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 复用冻结源码和图读取，Desktop 按 ROOT/session＋canonical attempt 校验源码读取范围，图仍使用 live Cell |
-| 源码展示 | [file-preview-panel.tsx](frontend/components/file-preview-panel.tsx) 共用文件阅读外壳及正文滚动区；[file-code.tsx](frontend/components/file-code.tsx) 与 [code-highlight.ts](frontend/lib/code-highlight.ts) 提供行号与 JS 高亮，不借用文件路径身份 |
-| 图布局与手势 | [cell-graph-layout.ts](frontend/components/cell-graph-layout.ts) 使用 ELK Worker 布局与路由；[cell-graph-map.tsx](frontend/components/cell-graph-map.tsx) 使用 D3 手势、已有 tab view 状态和同源小地图，不拥有业务调度 |
+| Tab 与导航 | [desktop-workspace.tsx](../frontend/components/desktop-workspace.tsx) 管理承载 ROOT、目标身份、标签去重与阅读视角；[agent-cell-api.ts](../frontend/lib/agent-cell-api.ts) 沿共同读取入口核验目标 |
+| 会话阅读 | [workbench-view.tsx](../frontend/components/workbench-view.tsx) 复用共同阅读行为；[agent-conversation-pane.tsx](../frontend/components/agent-conversation-pane.tsx) 装配只读 Agent 会话 |
+| 排队与来源 | [runtime-adapter.ts](../frontend/lib/runtime-adapter.ts) 和 [canonical_v3.py](../src/pulsara_agent/terminal_protocol/canonical_v3.py) 投影队列身份、来源与依赖等待；ROOT 操作和 Agent 只读阅读各自装配 |
+| Agent 与 Work | [collaboration_api.py](../src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py) 与 [_repository/subagents.py](../src/pulsara_agent/conversation_kernel/_repository/subagents.py) 管理当前 ROOT 可见成员、Work 及其输入事实 |
+| 只读打开 | [session_controller.py](../src/pulsara_agent/desktop_app/session_controller.py) 与 [renderer_bridge.py](../src/pulsara_agent/desktop_app/renderer_bridge.py) 校验 ROOT／Agent，沿 canonical reader 和 live observer 读取，不 resume 或取得 writer |
+| Cell、源码与图 | [code_mode/host.py](../src/pulsara_agent/code_mode/host.py) 管理当前存活 Cell 与进程内参与观察；[tool_runtime.py](../src/pulsara_agent/conversation_kernel/tool_runtime.py) 复用冻结源码和图读取，Desktop 按 ROOT/session＋canonical attempt 校验源码读取范围，图仍使用 live Cell |
+| 源码展示 | [file-preview-panel.tsx](../frontend/components/file-preview-panel.tsx) 共用文件阅读外壳及正文滚动区；[file-code.tsx](../frontend/components/file-code.tsx) 与 [code-highlight.ts](../frontend/lib/code-highlight.ts) 提供行号与 JS 高亮，不借用文件路径身份 |
+| 图布局与手势 | [cell-graph-layout.ts](../frontend/components/cell-graph-layout.ts) 使用 ELK Worker 布局与路由；[cell-graph-map.tsx](../frontend/components/cell-graph-map.tsx) 使用 D3 手势、已有 tab view 状态和同源小地图，不拥有业务调度 |
 
 ### 5.1 输入身份与共同队列阅读
 
@@ -275,7 +275,7 @@ Workspace 切换 tab 会卸载选中内容，外层 scrollTop 不能恢复内部
 
 ### 5.4 读取与启动／控制连接耦合：显式分离 Reader 和 Controller
 
-[renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 的 Agent 只读入口与负责 resume 和控制的 `connect` 分开；前端沿共同 canonical 与 live 阅读机制装配 Agent 会话。
+[renderer_bridge.py](../src/pulsara_agent/desktop_app/renderer_bridge.py) 的 Agent 只读入口与负责 resume 和控制的 `connect` 分开；前端沿共同 canonical 与 live 阅读机制装配 Agent 会话。
 
 只读打开及共同 reader 遵循：
 
@@ -373,7 +373,7 @@ Agent 会话在其 Host 卸载／重载后仍是同一会话；Cell 实时图绑
 
 ### 5.9 活跃观察与退役
 
-[subagent.py](src/pulsara_agent/conversation_kernel/subagent.py) 已区分卸载 live session 与最终删除。卸载不一定意味着 ROOT 查不到；UI 应服从查询结果，不自行以“没有 live Host”删除 Agent 行，也不为了读历史重新唤醒它。
+[subagent.py](../src/pulsara_agent/conversation_kernel/subagent.py) 已区分卸载 live session 与最终删除。卸载不一定意味着 ROOT 查不到；UI 应服从查询结果，不自行以“没有 live Host”删除 Agent 行，也不为了读历史重新唤醒它。
 
 Cell 的终止与退役同样不同：`_collect` 在物理终态、VM 释放、pending/结算完成及输出 FULL 等条件满足后移除对象；静默终态不等待模型 ACK。UI 按现有清单观察这个变化，不能把“脚本结束”提前当作退役，也不能占用输出观察 reservation 来延迟退役。
 
@@ -437,4 +437,4 @@ Agent／Cell／队列超过一页时仍沿共同 owner 完整读取，ROOT 队�
 
 界面合同包括五个顶层名称、统一气泡列表、无重复标题、按生命周期显示的「查看协作图」、轻量等待状态及真实导航。过渡覆盖 tab 切换、列表打开详情、源码到图、条目增减、局部展开收起、图节点直接打开的例外、快速重入／关闭时清理、减少动态效果及无 View Transition 降级，不产生重复共享元素名称。按改动范围完成必要 build／typecheck 与合同测试；视觉效果交由用户审阅，不要求 Playwright 操作。
 
-定向测试、clean-v0／catalog 核对、前端构建和安装后的本地数据库重置见 [侧边栏验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)；统一输入和重试的实施验证见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。两份记录各保留其实际场景、失败、独立补测和未测边界，不合并为一次全绿或扩大为全仓验证。
+定向测试、clean-v0／catalog 核对、前端构建和安装后的本地数据库重置见 [侧边栏验证记录](../output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)；统一输入和重试的实施验证见 [激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)。两份记录各保留其实际场景、失败、独立补测和未测边界，不合并为一次全绿或扩大为全仓验证。

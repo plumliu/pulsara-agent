@@ -1,6 +1,6 @@
 # Pulsara：模型流式中断安全重试实施规格
 
-日期：2026-10-30。状态：**实施与激活完成，2026-10-31 经 ROOT 最终语义验收。** 证据见[激活报告](output/unified-input-retry-20261031/activation-report.zh.md)、[逐项语义矩阵](output/unified-input-retry-20261031/verification-plan.zh.md)与[原始证据索引](output/unified-input-retry-20261031/activation-index.json)。保存生产配置只读。
+日期：2026-10-30。状态：**实施与激活完成，2026-10-31 经 ROOT 最终语义验收。** 证据见[激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)、[逐项语义矩阵](../output/unified-input-retry-20261031/verification-plan.zh.md)与[原始证据索引](../output/unified-input-retry-20261031/activation-index.json)。保存生产配置只读。
 
 ## 0. 目标、依据与范围
 
@@ -10,7 +10,7 @@ Pulsara 的 ROOT 与 Subagent 在网络短暂故障后，应能自动重新请�
 
 ### 0.1 现场证据与结论边界
 
-2026-10-30 的“能否看到MCP及Firecrawl”会话：风险研究员在 22:14:24、ROOT 在 22:15:10 分别以 `unknown_provider_error: Connection error.` 中断。定价与能力研究员完成；Cell 在 22:15:03 完成并交付结果后正常回收。Clash 服务日志确认当时 DeepSeek 连接 `using GLOBAL`；22:12–22:16 无对应 warning/error，22:17:59 同一日本节点另有访问 ChatGPT 的连接超时。日志摘录见 [现场证据](output/clash-investigation-20261030/incident-excerpts.log)。
+2026-10-30 的“能否看到MCP及Firecrawl”会话：风险研究员在 22:14:24、ROOT 在 22:15:10 分别以 `unknown_provider_error: Connection error.` 中断。定价与能力研究员完成；Cell 在 22:15:03 完成并交付结果后正常回收。Clash 服务日志确认当时 DeepSeek 连接 `using GLOBAL`；22:12–22:16 无对应 warning/error，22:17:59 同一日本节点另有访问 ChatGPT 的连接超时。日志摘录见 [现场证据](../output/clash-investigation-20261030/incident-excerpts.log)。
 
 这些证据支持“代理链路是可疑因素”，不能证明这两次失败的具体根因、是否已有流式输出、或重试耗尽。本文的验收依靠受控故障注入，不把这次事故推断当作已验证根因。
 
@@ -228,8 +228,8 @@ cause/context 遍历用对象身份去环，不递归无限循环；本轮不设
 
 ## 10. 规格审查结论
 
-实现已完成执行安全、产品观察和跨模块独立审阅，并通过 ROOT 对生产代码及原始激活证据的最终语义验收。§8 的每个类别对应实现 owner、聚焦断言、真实 SDK/Provider 场景和证据位置，见[逐项语义矩阵](output/unified-input-retry-20261031/verification-plan.zh.md)。
+实现已完成执行安全、产品观察和跨模块独立审阅，并通过 ROOT 对生产代码及原始激活证据的最终语义验收。§8 的每个类别对应实现 owner、聚焦断言、真实 SDK/Provider 场景和证据位置，见[逐项语义矩阵](../output/unified-input-retry-20261031/verification-plan.zh.md)。
 
 本规格的权限合同以用户明确决议为准：首次 gate 放行覆盖同一逻辑请求的全部重试，具体合同见 §1、§4.5。安全审查范围包括 typed 网络 EOF 与协议 EOF 区分、成功 terminal 后物理失败结果，以及最终有效 wire 请求的副作用证明。产品审查范围包括 current execution 观察入口、observer 可读及显式 null 清除、30/36 秒口径、超范围 Retry-After、真实重试计数、URL 凭据与停止目标。均沿现有 owner 实现，不增加持久机制。
 
-本地真实 SDK 的 Chat/Responses 八场景、真实 DeepSeek 十一场景及必要回归均已验收。证据保留本地故障注入、usage/计费和源码进程边界，不能将单次本地工具作用解释为单次远端推理或计费；具体见[激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。
+本地真实 SDK 的 Chat/Responses 八场景、真实 DeepSeek 十一场景及必要回归均已验收。证据保留本地故障注入、usage/计费和源码进程边界，不能将单次本地工具作用解释为单次远端推理或计费；具体见[激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)。

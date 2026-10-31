@@ -25,7 +25,7 @@ ROOT 与 Subagent 共享后两种语义。Subagent 的配置来自该 Work 接�
 
 ### 1.1 必须保持的边界
 
-- 根 [AGENTS.md](AGENTS.md) 及本轮用户决定优先。本文覆盖相关旧合同中与本次配置来源、首次调用前活动边界和压缩后输入接纳冲突的部分。
+- 根 [AGENTS.md](../AGENTS.md) 及本轮用户决定优先。本文覆盖相关旧合同中与本次配置来源、首次调用前活动边界和压缩后输入接纳冲突的部分。
 - 同 epoch 的 SYSTEM、provider tools 字节不变，messages 只追加。仅沿既有 cold epoch 或明确采用的 compaction successor 重建根输入。
 - 压缩前后，当前请求的原文、开启 entry、权限与绑定身份保持；后续补充不替换原请求，不与原请求合成一个 entry。
 - 不增加压缩表、消息表、Work 状态表、持久 job、事件种类、subject、append guard、registry 或新指纹。当前请求、turn、queue、命令与摘要采用事实仍由原有关系保存。

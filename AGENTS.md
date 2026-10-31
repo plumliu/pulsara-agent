@@ -67,6 +67,14 @@ This file applies to the entire repository. Human instructions and the active im
 
 Outside the conversation page and its session-scoped controls, pages must use user-level data and service owners. Do not derive their reads, refreshes, availability, or authorization tracking from the active session; explicit actions on a chosen session retain that target.
 
+## 9. Generate all Pulsara-owned identities through the shared ID layer
+
+- Every Pulsara-owned entity, request, instance, runtime object, and actionable projection must use the shared identity layer and the canonical `<kind>:<26-character lowercase Base32 payload>` format. Persistence, process-local lifetime, backend/frontend placement, and field names such as token or ref do not create exceptions.
+- Python uses [identity.py](src/pulsara_agent/identity.py) for `random_id`, `derive_id`, and kind-aware validation. TypeScript uses [identity.ts](desktop/src/identity.ts); JavaScript allocation and validation reuse its [shared core](desktop/src/identity-core.mjs). Renderer and Code Mode must reuse these implementations rather than copy or recreate the encoding.
+- Do not allocate object IDs with local UUIDs, counters, timestamps, ad hoc hashes/HMACs, or random-string helpers. Add a required kind to the shared vocabulary; do not introduce a parallel generator, alias, registry, or compatibility fallback.
+- Allocate at the existing creation boundary and reuse the same ID for the same object. Stable derivation uses explicit roles and canonical semantic inputs. Validate the expected kind at acceptance boundaries without coercion or format repair. ID changes must not alter ownership, permissions, lifecycle, ordering, deduplication, or settlement.
+- External/provider-owned identifiers, sequence counters, content revisions, and full verification digests retain their existing meanings. They must neither become alternate Pulsara object IDs nor be rewritten merely to resemble one.
+
 ## Execution discipline
 
 - Read the active specification and current production code before changing behavior. Do not treat historical implementation details as current authority.

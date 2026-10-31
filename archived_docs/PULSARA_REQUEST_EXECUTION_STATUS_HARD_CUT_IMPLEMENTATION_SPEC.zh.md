@@ -190,7 +190,7 @@ prompt_queue_items.id
 ## 9. SUPERSEDES 与调研证据
 
 - 本规格统一 NEW_TURN 的公开执行读取合同；不替代 queue 交付、命令操作、ROOT steer 转换或内部 turn 状态职责。
-- 替代 [Agent／Work 设计](../PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) §4.1 的八态公开枚举：未来 WORK 统一四态，等待和结束的细分原因不再作为独立公开状态。本轮不因此实施其余协作重构。
+- 替代 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md) §4.1 的八态公开枚举：未来 WORK 统一四态，等待和结束的细分原因不再作为独立公开状态。本轮不因此实施其余协作重构。
 - [调度 Target 规格](PULSARA_SCHEDULING_TARGET_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) 的调度行为与 queue provenance 保持；其中涉及单次执行结果的公开状态表达以本规格为准，不替代任务启停／聚合合同。
 - 本次不改变已有模型重试、Stop Hook、接管和精确事务确认的行为，不新增恢复链路。
 

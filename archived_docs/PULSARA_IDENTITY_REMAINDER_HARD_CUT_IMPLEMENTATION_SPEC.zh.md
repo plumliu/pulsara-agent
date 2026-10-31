@@ -25,7 +25,7 @@ Pulsara 自己分配、派生并用来识别对象、请求、实例或可操作
 
 ### 2.1 唯一格式
 
-复用 [Python identity owner](src/pulsara_agent/identity.py) 和现有 [TypeScript identity 入口](frontend/lib/identity.ts)。不得在领域 owner、Electron、UI 组件或测试支持代码再复制 Base32／摘要编码算法。
+复用 [Python identity owner](../src/pulsara_agent/identity.py) 和现有 [TypeScript identity 入口](../frontend/lib/identity.ts)。不得在领域 owner、Electron、UI 组件或测试支持代码再复制 Base32／摘要编码算法。
 
 - 后缀承载 128 bit，正则为 `[a-z2-7]{25}[aeimquy4]`，严格检查零 padding bits、允许的 kind 和完整字符串。
 - `R(kind)` 代表共享 `random_id`／`randomIdentity`，使用系统 CSPRNG；不是时间戳、计数器、Math.random、UUID 的二次手工拼装或十六进制编码。
@@ -34,7 +34,7 @@ Pulsara 自己分配、派生并用来识别对象、请求、实例或可操作
 - 未发布的 R 若在原 owner 已有且可枚举的占用集合／唯一约束中发现碰撞，就在原创建流程重抽；已经发布的 ID 不换号。对跨 owner、已退休对象或只有闭包的 presentation 不新建全局注册表／墓碑，沿既有 128-bit 剩余概率合同。D 命中必须仍由原 owner 核对其持有的完整语义或真实跨重启验证事实，冲突明确失败，不能加盐回退。
 - 保留原 PK／UNIQUE、live collection、对象身份和私有 authority 检查，不另建“短 ID → 原 ID”表。有限 128-bit 空间的剩余碰撞风险沿既有统一 ID 合同，不承诺删除后数学上的零复现。
 
-JS 随机身份、kind 词表、编码与校验由 [identity-core.mjs](desktop/src/identity-core.mjs) 单一依赖无关源码拥有；desktop identity.ts 保留现有 SHA 派生入口并复用该 core，renderer 从同一入口引用。Electron 编译将 core 纳入 dist；现有 prepare_code_mode.py 将同一源码原样复制到离线 Code Mode 资源，worker 从随 Python 包提供的该产物导入，不读取开发目录、不下载依赖、不保留第二份手写算法或路径 fallback。mise 的真实 sources/outputs 跟踪 core，Hatch 要求已准备资源并放入 wheel。Python 与 JS 使用同一 kind／编码合同和共享测试向量，不建立跨语言身份服务。
+JS 随机身份、kind 词表、编码与校验由 [identity-core.mjs](../desktop/src/identity-core.mjs) 单一依赖无关源码拥有；desktop identity.ts 保留现有 SHA 派生入口并复用该 core，renderer 从同一入口引用。Electron 编译将 core 纳入 dist；现有 prepare_code_mode.py 将同一源码原样复制到离线 Code Mode 资源，worker 从随 Python 包提供的该产物导入，不读取开发目录、不下载依赖、不保留第二份手写算法或路径 fallback。mise 的真实 sources/outputs 跟踪 core，Hatch 要求已准备资源并放入 wheel。Python 与 JS 使用同一 kind／编码合同和共享测试向量，不建立跨语言身份服务。
 
 ### 2.2 本轮闭合配方表
 
@@ -85,7 +85,7 @@ JS 随机身份、kind 词表、编码与校验由 [identity-core.mjs](desktop/s
 
 ### ID-01：浏览器对象和 Electron／renderer 共享层
 
-位置：[browser-tabs.ts](frontend/lib/browser-tabs.ts:75)、[browser-owner.ts](desktop/src/browser-owner.ts:75)、[browser-presentation.ts](frontend/lib/browser-presentation.ts:9)。
+位置：[browser-tabs.ts](../frontend/lib/browser-tabs.ts:75)、[browser-owner.ts](../desktop/src/browser-owner.ts:75)、[browser-presentation.ts](../frontend/lib/browser-presentation.ts:9)。
 
 三种身份跨 IPC 进入 records/pages、BrowserState、activate/layout/hide/close 和显示所有权匹配，不是 DOM key。按 §2 分配，并在 IPC 接受处使用统一 kind 校验。
 
@@ -93,7 +93,7 @@ JS 随机身份、kind 词表、编码与校验由 [identity-core.mjs](desktop/s
 
 ### ID-02：Code Mode 请求、准备结果与 retain reservation
 
-位置：[host.py](src/pulsara_agent/code_mode/host.py:498)、[sidecar.mjs](src/pulsara_agent/code_mode/node/sidecar.mjs)。retain 请求存入 cell.reservations，sidecar 原样回传后完成原 future。
+位置：[host.py](../src/pulsara_agent/code_mode/host.py:498)、[sidecar.mjs](../src/pulsara_agent/code_mode/node/sidecar.mjs)。retain 请求存入 cell.reservations，sidecar 原样回传后完成原 future。
 
 改用 `R(request)`；字段 reservation、bytes、accepted 与现有 retain 协议不因命名统一变成工具请求。保留 cell 内并发关联、资源预算、关闭时 future 结算、异常/finally 释放，不增加 ACK、重试、保留期或恢复协议。
 
@@ -106,25 +106,25 @@ prepare 返回内容精确为 `{request_id, peers}`，request_id 与对应 prepa
 
 ### ID-03：桌面宿主控制 requestId
 
-位置：[runtime.ts](desktop/src/runtime.ts:186)、[desktop_runtime.py](src/pulsara_agent/desktop_runtime.py:213)。
+位置：[runtime.ts](../desktop/src/runtime.ts:186)、[desktop_runtime.py](../src/pulsara_agent/desktop_runtime.py:213)。
 
 两方向都改用 `R(request)`，发送与回显必须是同一个值，接受处验证 request kind。保留 inspect-quit 现有超时、preparing 时不排入真实查询、宿主退出／管道断开时 pending 请求失败，以及 OAuth 浏览器 opened 结果语义。不要将该 requestId 改成 OAuth state 或认证秘密，也不改变 OAuth 会话。
 
 ### ID-04：HELLO 的 client_instance_id
 
-位置：[protocol_client.py](src/pulsara_agent/desktop_app/protocol_client.py:301)、[terminal_kernel_v3.proto](src/pulsara_agent/terminal_protocol/schema/terminal_kernel_v3.proto:21)。
+位置：[protocol_client.py](../src/pulsara_agent/desktop_app/protocol_client.py:301)、[terminal_kernel_v3.proto](../src/pulsara_agent/terminal_protocol/schema/terminal_kernel_v3.proto:21)。
 
 按 §2 派生，审清 schema、serialize、parser 及外部测试 caller。目前未找到服务端用此字段授权或定位的证据，不能借统一 ID 新增授权、去重或 controller 互斥语义；现有角色和附件所有权仍由原字段和 owner 决定。
 
 ### ID-05：MCP supervisor incarnation
 
-位置：[supervisor.py](src/pulsara_agent/conversation_kernel/mcp/supervisor.py:1364)、[mcp/contracts.py](src/pulsara_agent/conversation_kernel/mcp/contracts.py)。`_epoch` 用来判别 candidate 属于哪个 supervisor。
+位置：[supervisor.py](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py:1364)、[mcp/contracts.py](../src/pulsara_agent/conversation_kernel/mcp/contracts.py)。`_epoch` 用来判别 candidate 属于哪个 supervisor。
 
 使用 `R(epoch)` 并同步相关 DTO 的类型和校验。只改变该随机 incarnation；connection_generation、runtime_generation、配置 revision 等原递增整数不改成对象 ID。supervisor 重建时失效、slot/lease/candidate/permit 的归属与当前完整事实比较保持。
 
 ### ID-06：MCP remote_identity 两条路径
 
-位置：[supervisor.py](src/pulsara_agent/conversation_kernel/mcp/supervisor.py:3703)、[标准操作](src/pulsara_agent/conversation_kernel/mcp/supervisor.py:1086)、[tool_execution.py](src/pulsara_agent/conversation_kernel/tool_execution.py:2172)、[_repository/tools.py](src/pulsara_agent/conversation_kernel/_repository/tools.py:501)。
+位置：[supervisor.py](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py:3703)、[标准操作](../src/pulsara_agent/conversation_kernel/mcp/supervisor.py:1086)、[tool_execution.py](../src/pulsara_agent/conversation_kernel/tool_execution.py:2172)、[_repository/tools.py](../src/pulsara_agent/conversation_kernel/_repository/tools.py:501)。
 
 远端工具和标准操作进入 McpKnownToolResult 和持久 attempt 的 remote_identity，按 §2 的两个闭合 role 派生；同一现有组合在所有成功、失败、取消前分支一致生成。保留原始 server/name/generation typed 值供路由和诊断，短身份不替代完整确认事实，也不伪称由 MCP 服务端签发。
 
@@ -138,7 +138,7 @@ prepare 返回内容精确为 `{request_id, peers}`，request_id 与对应 prepa
 
 ### ID-07：reasoning block 可读定位符
 
-位置：[canonical_v3.py](src/pulsara_agent/terminal_protocol/canonical_v3.py:1933) 和 `_resolve_reasoning_content`，以及 [runtime-adapter.ts](frontend/lib/runtime-adapter.ts:2619)。
+位置：[canonical_v3.py](../src/pulsara_agent/terminal_protocol/canonical_v3.py:1933) 和 `_resolve_reasoning_content`，以及 [runtime-adapter.ts](../frontend/lib/runtime-adapter.ts:2619)。
 
 projection block_id 使用独立 `reasoning-block:` kind（§2），避免与持久 `block:` 命名空间混同。ReadContentRequest／renderer selector 同步增加有 presence 的非负 `reasoning_ordinal`，值来自原 CanonicalReasoningBlock.ordinal；它只是已有 ordinal 的显式编码，不授予读取资格。该字段只在 reasoning-block selector 分支合法；普通 block／entry／queue／image／visualization selector 不允许混入它，保留原互斥选择规则，更新 proto、生成文件和实际 parser。
 
@@ -148,25 +148,25 @@ projection block_id 使用独立 `reasoning-block:` kind（§2），避免与持
 
 ### ID-08：历史 segment_id
 
-位置：[canonical_v3.py](src/pulsara_agent/terminal_protocol/canonical_v3.py:1069) 的 entry_contexts，消费者为 [runtime-adapter.ts](frontend/lib/runtime-adapter.ts:2663) 的 historyGroupId。
+位置：[canonical_v3.py](../src/pulsara_agent/terminal_protocol/canonical_v3.py:1069) 的 entry_contexts，消费者为 [runtime-adapter.ts](../frontend/lib/runtime-adapter.ts:2663) 的 historyGroupId。
 
 三种分段精确按 §2 替换，更新线上投影 DTO、分页边界、renderer 与测试；不根据新 ID 的字典序排列，不增加或合并分段。跨页、冻结 cut、导入中断前后、steer 前后仍按原 entry/event sequence 分组，同一分段在重复读取和相邻页中仍相等。
 
 ### ID-09：TODO live 快照身份
 
-位置：[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py:4175)、[live.py](src/pulsara_agent/conversation_kernel/live.py)、[v3_gateway.py](src/pulsara_agent/terminal_protocol/v3_gateway.py:1598)。
+位置：[tool_runtime.py](../src/pulsara_agent/conversation_kernel/tool_runtime.py:4175)、[live.py](../src/pulsara_agent/conversation_kernel/live.py)、[v3_gateway.py](../src/pulsara_agent/terminal_protocol/v3_gateway.py:1598)。
 
 使用 §2 的同一 block ID。generation_id 的既有配方不改，todo_run_id、todo_revision、计数和有序 items 不改。继续只作现有快照失效／advisory 观察，真正 TODO 内容由原当前 owner 快照提供；不写入 canonical、不唤醒模型、不增加 durable occurrence，也不使丢失的 live 观察获得可靠交付承诺。
 
 ### ID-10：历史搜索投影主键
 
-位置：[history_publication.py](src/pulsara_agent/conversation_kernel/history_publication.py:167)、[history_search.py](src/pulsara_agent/conversation_kernel/history_search.py:114)、[clean-v0](src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql:2424)。
+位置：[history_publication.py](../src/pulsara_agent/conversation_kernel/history_publication.py:167)、[history_search.py](../src/pulsara_agent/conversation_kernel/history_search.py:114)、[clean-v0](../src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql:2424)。
 
 该 id 虽可丢弃，但已是现有投影表主键和 BM25 key，纳入统一生成。替换它不新增 canonical 文档实体；原 session/q1/variant/include_tools 事实和索引职责保持。保持 QA／QAQ 互斥布局、同 cut 替换、stale publish 防回退、检索排序和分页。不允许因为新 id 字典序改变 tie-break、遗漏／重复结果；遇到以旧主键作 tie-break 的地方必须显式保留原语义排序元组。
 
 ### ID-11：renderer page、文件 tab、草稿对象
 
-位置：[runtime-adapter.ts](frontend/lib/runtime-adapter.ts:2339)、[file-browser.tsx](frontend/components/file-browser.tsx:200)、[prompt-draft.ts](frontend/lib/prompt-draft.ts:153)。
+位置：[runtime-adapter.ts](../frontend/lib/runtime-adapter.ts:2339)、[file-browser.tsx](../frontend/components/file-browser.tsx:200)、[prompt-draft.ts](../frontend/lib/prompt-draft.ts:153)。
 
 这些是现有可操作对象的本地身份，按 §2 统一；不因仅在 renderer 中就继续使用计数器／UUID。page 重用、history window/aperture、加载方向与 cut 保持；文件 tab 导航、dedupe、关闭和异步失效保持；导入重试、图片 ready promise、批注节点编辑和 undo 继续关联原对象。
 
@@ -174,7 +174,7 @@ projection block_id 使用独立 `reasoning-block:` kind（§2），避免与持
 
 ### ID-12：MCP doctor 的虚构 session 参数
 
-位置：[cli.py](src/pulsara_agent/cli.py:1475)、McpHostSupervisor.session_id。
+位置：[cli.py](../src/pulsara_agent/cli.py:1475)、McpHostSupervisor.session_id。
 
 诊断不凭空建会话或写库；supervisor 不保留无实际用途的 session 参数／存储字段；诊断状态仍由原 owner 管理。若复查发现生产消费者，必须先补全该真实依赖并在现有 caller session 上传递原 canonical session，不能擅自创建一个随机“诊断 session”。
 
@@ -184,7 +184,7 @@ projection block_id 使用独立 `reasoning-block:` kind（§2），避免与持
 
 ### ID-13：Skill UI 引用和 MCP runtime server target
 
-位置：[session_controller.py](src/pulsara_agent/desktop_app/session_controller.py:3155)、[只读 Skill](src/pulsara_agent/desktop_app/session_controller.py:3674)、[mcp_adapter.py](src/pulsara_agent/plugins/mcp_adapter.py:188)、[capability_query.py](src/pulsara_agent/conversation_kernel/capability_query.py:248)。
+位置：[session_controller.py](../src/pulsara_agent/desktop_app/session_controller.py:3155)、[只读 Skill](../src/pulsara_agent/desktop_app/session_controller.py:3674)、[mcp_adapter.py](../src/pulsara_agent/plugins/mcp_adapter.py:188)、[capability_query.py](../src/pulsara_agent/conversation_kernel/capability_query.py:248)。
 
 workspace Skill 的 root:name 已被 UI 回传用于精确查询和启停；source:name 是 editable=false 的 session 只读 winner。user inventory 没有这个 id 字段，仍使用原 name/path/root 和 path-based 操作。MCP 的 runtime_server_id 是可操作 runtime target。这些引用按 §2 统一，不保留两套可接受输入。
 
@@ -207,7 +207,7 @@ MCP 字段合同固定如下：
 
 ### ID-14：capability/source identity fingerprint
 
-位置：[capability/contracts.py](src/pulsara_agent/capability/contracts.py:65)、[registry.py](src/pulsara_agent/capability/registry.py:91)、[planner.py](src/pulsara_agent/capability/planner.py:237)、[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py:2209)。
+位置：[capability/contracts.py](../src/pulsara_agent/capability/contracts.py:65)、[registry.py](../src/pulsara_agent/capability/registry.py:91)、[planner.py](../src/pulsara_agent/capability/planner.py:237)、[tool_runtime.py](../src/pulsara_agent/conversation_kernel/tool_runtime.py:2209)。
 
 直接使用完整冻结值：CapabilitySourceRef 的 source kind＋stable_source_id，CapabilityIdentity 的 kind＋source kind＋stable_source_id＋stable_name。移除只为查找／DTO 自校验携带的上述重复字段，不新增 capability/source 对象、registry 或短码。
 
@@ -221,7 +221,7 @@ snapshot/fact/native projection 排序仍使用原 `(kind, identity digest, fact
 
 ### ID-15：context source 固定槽位和授权来源包装
 
-位置：[context_sources.py](src/pulsara_agent/conversation_kernel/context_sources.py:1198)、[model_input/contracts.py](src/pulsara_agent/model_input/contracts.py:639)、[interaction.py](src/pulsara_agent/conversation_kernel/interaction.py:555)、[_repository/tools.py](src/pulsara_agent/conversation_kernel/_repository/tools.py:1245)。
+位置：[context_sources.py](../src/pulsara_agent/conversation_kernel/context_sources.py:1198)、[model_input/contracts.py](../src/pulsara_agent/model_input/contracts.py:639)、[interaction.py](../src/pulsara_agent/conversation_kernel/interaction.py:555)、[_repository/tools.py](../src/pulsara_agent/conversation_kernel/_repository/tools.py:1245)。
 
 `context-source:<kind>` 与闭合 source kind 一一对应，用于候选唯一性、选择和排序，也进入普通、memory、compaction 三个 context-source-candidate:v1 的 semantic payload 和独立校验。删除这份冗余字符串 instance ID，直接使用现有 typed source kind 作为同一槽位键；保留“一种 kind 至多一份候选”、原降级／预算选择和稳定 tie-break。这些真实边界和独立 verifier 从 typed kind 局部重建完全相同的 context-source:<kind.value.lower()> 值，以及原 JSON 字段名、嵌套和序列化，所得完整 digest 必须逐字节一致；不再把该字符串携带为 DTO 实例 ID。compiler 的原排序先比较 kind，且 kind 唯一，因此移除末级冗余键不能改变顺序；不得借删字段重建安装中的 epoch。
 
@@ -231,7 +231,7 @@ snapshot/fact/native projection 排序仍使用原 `(kind, identity digest, fact
 
 ### ID-16：插件预校验／脱敏的全零 package ID
 
-位置：[package_core.py](src/pulsara_agent/plugins/package_core.py:90)、[management.py](src/pulsara_agent/plugins/management.py:1411)、[plugins/contracts.py](src/pulsara_agent/plugins/contracts.py)。
+位置：[package_core.py](../src/pulsara_agent/plugins/package_core.py:90)、[management.py](../src/pulsara_agent/plugins/management.py:1411)、[plugins/contracts.py](../src/pulsara_agent/plugins/contracts.py)。
 
 预校验不注入全零或随机假 package ID。提取同一套无授权的声明解析规则，输出纯声明验证结果；没有真实安装实例时不构造可执行 PluginHookSourceIdentity/provenance、不授予 trust。真实安装仍按原 package_store 路径保留受控 source descriptor/重校验、复制到 stage、重新打开 stage、用真实 package/scope/lifetime anchor 绑定并重新解析 Hook，进行原语义摘要对照、paired bytes 和 race 检查；不能把预校验输出的临时 provenance 变为运行定义。native/imported 两条入口、所有 Hook 声明规则、路径限制、环境替换、信任和原失败诊断均保持。声明解析不能少一条规则，也不能提前读取／执行本来只在绑定阶段发生的内容。
 
@@ -266,7 +266,7 @@ CLI、HTTP、模型输出序列化、renderer、capability-interaction-editor、
 
 ### ID-17：live 和 process 的 UI 包装／缺字段 fallback
 
-位置：[runtime-adapter.ts](frontend/lib/runtime-adapter.ts:3933)、project/applyProjectedLiveResults，以及 [workbench-view.tsx](frontend/components/workbench-view.tsx:1362)。本项不改变现有 best-effort live 行为，不新增 gap、清空、重连、恢复或通知。
+位置：[runtime-adapter.ts](../frontend/lib/runtime-adapter.ts:3933)、project/applyProjectedLiveResults，以及 [workbench-view.tsx](../frontend/components/workbench-view.tsx:1362)。本项不改变现有 best-effort live 行为，不新增 gap、清空、重连、恢复或通知。
 
 1. Message 的视图身份与 canonical 操作目标分开。view key 使用 closed view role＋typed source identity；canonical entry 只有实际存在时才进入 sourceEntryId 等操作目标。live:原ID、live-result:原ID、entry:…:process 不再作为可操作 message/entry ID。纯 React/DOM key 可稳定序列化结构键；不让它反向授权或冒充 entry。
 2. 普通/final/process 共享实际 canonical entry 作为来源，但保留不同 view role，所以同一 entry 的 final 与 process 不合并。live draft 使用原 draft/turn/generation 事实关联；detached result 可能尚无 canonical entry，创建原 LiveToolResult 时分配 R(view) 并随原对象复用，保留 attempt/proposedEntry/draft/generation/block/assistantEntry/providerToolCall 的原多字段匹配、后到合并和文本结算。不凭空造 entry，不新增 registry；已有 LiveToolResult Map 的键切换不重分配 view ID。
@@ -280,7 +280,7 @@ CLI、HTTP、模型输出序列化、renderer、capability-interaction-editor、
 
 ### ID-18：统一校验及模型 schema
 
-位置：[ui-preferences.ts](desktop/src/ui-preferences.ts:6)、[presentation-targets.ts](frontend/lib/presentation-targets.ts:39)、[memory/targets.py](src/pulsara_agent/memory/targets.py:22)、[artifact 工具](src/pulsara_agent/tools/builtins/artifact.py:295)、[builtin_catalog.py](src/pulsara_agent/capability/builtin_catalog.py:455)。
+位置：[ui-preferences.ts](../desktop/src/ui-preferences.ts:6)、[presentation-targets.ts](../frontend/lib/presentation-targets.ts:39)、[memory/targets.py](../src/pulsara_agent/memory/targets.py:22)、[artifact 工具](../src/pulsara_agent/tools/builtins/artifact.py:295)、[builtin_catalog.py](../src/pulsara_agent/capability/builtin_catalog.py:455)。
 
 - 删除领域代码自写的 session/cell 宽松或重复正则，调用适用平台共享 validator；保持原 preference key、文件位置和可丢弃性质，不因 key 含有 session: 就给 preference 另造 ID。
 - PRESENTATION 与 open_in_pulsara 的各字段按实际 kind 统一：PROCESS.process_id=process，MCP_SERVER.runtime_server_id=mcp-server，AGENT.agent_id 与 root_session_id=session，CELL.cell_id=cell，host_session_id=host；PANEL 及条件性 root/host 字段沿原分支验证。保持原整批 target 格式失败与原逐条资源不可用／URL 错误隔离，不能改成逐条过滤或新增 authority。
@@ -290,7 +290,7 @@ CLI、HTTP、模型输出序列化、renderer、capability-interaction-editor、
 
 ### ID-19：tool_invocations 和 output_artifact 的 clean-v0 约束
 
-位置：[ToolInvocationSource](src/pulsara_agent/conversation_kernel/tool_invocations.py:29)、[_repository/tools.py](src/pulsara_agent/conversation_kernel/_repository/tools.py:179)、[baseline.sql](src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql:632)。
+位置：[ToolInvocationSource](../src/pulsara_agent/conversation_kernel/tool_invocations.py:29)、[_repository/tools.py](../src/pulsara_agent/conversation_kernel/_repository/tools.py:179)、[baseline.sql](../src/pulsara_agent/storage/migrations/sql/0000_conversation_kernel_baseline.sql:632)。
 
 正常 invocation 已由 D(call, …) 生成，正常 artifact 已由 D(artifact, …) 生成；问题是 DTO／SQL 没有完整守住格式。对接受边界的 invocation_id／关联 turn 等本地身份使用共享验证，tool_invocations.id 添加严格 call: CHECK；tool_results.output_artifact_id 在原非空情况下添加 artifact: CHECK。保留原 NULL、AVAILABLE/INCOMPLETE/UNAVAILABLE、PK/FK/UNIQUE 和所有结算关系。
 
@@ -298,7 +298,7 @@ CLI、HTTP、模型输出序列化、renderer、capability-interaction-editor、
 
 ### ID-20：随附 Skill 示例与相关文档
 
-位置：[workflows.md](src/pulsara_agent/bundled_skills/pulsara-code-mode/references/agent-orchestration/workflows.md:69)。全 b session 和全 c queue 的末位不满足 padding bits 规则。
+位置：[workflows.md](../src/pulsara_agent/bundled_skills/pulsara-code-mode/references/agent-orchestration/workflows.md:69)。全 b session 和全 c queue 的末位不满足 padding bits 规则。
 
 示例通过共享层的确定测试向量产生合法值，并明确实际调用复制工具返回的目标；不能教模型自行计算、补齐、截短或按名称猜测 ID。更新本轮活跃规格和当前提示词／Skill 的旧编码说明，清理当前活跃指导中要求使用旧 MCP ref HMAC／分配 monitor 身份的陈旧说明；明确要求删除 monitor 的现行条款保留，历史验收证据不改写为新实验。
 

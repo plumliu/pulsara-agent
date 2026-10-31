@@ -1,6 +1,6 @@
 # Subagent 已知对象、查询与压缩交接实施规格
 
-状态：已实施并完成验证；ROOT 完整 diff 审阅与独立一致性审阅完成。结果及范围见 [验收记录](output/known-agents-implementation-20261030/verification.zh.md)。
+状态：已实施并完成验证；ROOT 完整 diff 审阅与独立一致性审阅完成。结果及范围见 [验收记录](../output/known-agents-implementation-20261030/verification.zh.md)。
 
 ## 1. 目标与边界
 
@@ -224,4 +224,4 @@ ROOT 是通信目标别名，不是 Subagent，也没有委派 Work。为了单�
 - 当前 `tests/dogfood/run_compaction_request_start_dogfood.py` 可复用配置和证据收集，但只覆盖 ROOT，不能当作 Subagent 已通过的证据。子代理触发与采用链路参考 `test_compaction_request_start_integration.py::test_subagent_first_summary_uses_full_initial_group_and_current_work` 和 `test_agent_session_host.py::test_child_first_preparation_adopts_real_common_snapshot_for_next_work`，使用现有 owner 与压缩策略，不添加生产捷径或复活旧任务工具。
 - provider 验证复用有效 Pulsara home 的只读生产配置，通过 LocalSettingsStore 加载；保留具体工具参数、返回和 provider 证据，排除实际凭据值。不以模型未实际调用工具的自然语言陈述代替验证。
 
-上述实施与验证已完成；实际测试、真实 provider 证据及保留的失败现场见 [验收记录](output/known-agents-implementation-20261030/verification.zh.md)。
+上述实施与验证已完成；实际测试、真实 provider 证据及保留的失败现场见 [验收记录](../output/known-agents-implementation-20261030/verification.zh.md)。

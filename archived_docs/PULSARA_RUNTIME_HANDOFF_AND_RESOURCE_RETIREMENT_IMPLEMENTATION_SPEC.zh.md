@@ -1,22 +1,22 @@
 # Pulsara：运行时摘要状态筛选与资源退役实施规格
 
-日期：2026-11-01。状态：**当前实现合同。** 当前输入与 Cell 回收合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各资源验证记录保留其原范围。
+日期：2026-11-01。状态：**当前实现合同。** 当前输入与 Cell 回收合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)。各资源验证记录保留其原范围。
 
 本文明确 Process 到期自动尝试回收、Cell 主动输出接纳后的回收、普通环境 Cell 索引移除，以及压缩 runtime handoff 的状态筛选。TODO 始终完整保留；3,200 个 V3 启发式 token 上限仅约束 PCA 状态与相关说明，不约束 TODO。
 
 ## 0. 权威、范围与不变量
 
-根 [AGENTS.md](AGENTS.md) 与用户当前决议优先。本文承接 [工具查询与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) §15 中与机械 runtime handoff 直接相关的部分；其他行为遵循各自的现行规格。
+根 [AGENTS.md](../AGENTS.md) 与用户当前决议优先。本文承接 [工具查询与 Cell 身份统一规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md) §15 中与机械 runtime handoff 直接相关的部分；其他行为遵循各自的现行规格。
 
 现行相关合同：
 
 - [Code Mode 执行、资源与生命周期](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)。
 - [Agent／Work 与两段退役](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)。
 - [子代理与 Cell 侧边栏规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
-- [工具 schema 兼容性实验](output/tool-schema-compatibility-20261026/REPORT.zh.md)：本轮不修改工具参数 schema 或 provider lowering。
-- 调查证据：[摘要与查询](output/compaction-query-research-20261030/REPORT.zh.md)、[资源计费与退役](output/compaction-query-research-20261030/RESOURCE_RETIREMENT.zh.md)。调查中的候选方案只在本文明确采用后才构成实施要求。
-- 尺寸依据：[状态筛选后摘要的 V3 离线矩阵](output/compaction-query-research-20261030/token-budget/REPORT.zh.md)。本轮上限是单份观察中 PCA 视图的输入成本边界，不是 TODO、对象数量或执行寿命限制。
-- 补充依据：[规格复审与合法 TODO 转义反例](output/compaction-query-research-20261030/spec-review/REVIEW.zh.md)、[普通环境 Cell 索引链路与矩阵](output/runtime-environment-cell-index-20261030/REPORT.zh.md)。旧尺寸实验中的重复中文 TODO 仅为合成尺寸样本，不作为合法 TODO 上界证明。
+- [工具 schema 兼容性实验](../output/tool-schema-compatibility-20261026/REPORT.zh.md)：本轮不修改工具参数 schema 或 provider lowering。
+- 调查证据：[摘要与查询](../output/compaction-query-research-20261030/REPORT.zh.md)、[资源计费与退役](../output/compaction-query-research-20261030/RESOURCE_RETIREMENT.zh.md)。调查中的候选方案只在本文明确采用后才构成实施要求。
+- 尺寸依据：[状态筛选后摘要的 V3 离线矩阵](../output/compaction-query-research-20261030/token-budget/REPORT.zh.md)。本轮上限是单份观察中 PCA 视图的输入成本边界，不是 TODO、对象数量或执行寿命限制。
+- 补充依据：[规格复审与合法 TODO 转义反例](../output/compaction-query-research-20261030/spec-review/REVIEW.zh.md)、[普通环境 Cell 索引链路与矩阵](../output/runtime-environment-cell-index-20261030/REPORT.zh.md)。旧尺寸实验中的重复中文 TODO 仅为合成尺寸样本，不作为合法 TODO 上界证明。
 
 ### 0.1 已明确决议
 
@@ -352,4 +352,4 @@ Process 原保留策略、Agent 两段退役、普通环境无 Cell 索引和完
 
 PCA 预算为 3,200 个 V3 启发式 tokens，含三类对象的封装与说明；TODO/counts 完整保留，不受局部额度限制。全空时为空 source，仅实际预算省略时补一句查询提示。保持 cold/明确 adopted successor 边界及已有 epoch 的精确前缀。
 
-本轮激活状态与逐项证据见 [验收计划](output/unified-input-retry-20261031/verification-plan.zh.md)。既往资源实验见 [总交付报告](output/runtime-handoff-retirement-20261030/REPORT.zh.md)，只证明当时实际执行范围，不充当本轮新合同的通过证据。
+本轮激活状态与逐项证据见 [验收计划](../output/unified-input-retry-20261031/verification-plan.zh.md)。既往资源实验见 [总交付报告](../output/runtime-handoff-retirement-20261030/REPORT.zh.md)，只证明当时实际执行范围，不充当本轮新合同的通过证据。

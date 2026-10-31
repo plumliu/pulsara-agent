@@ -1,6 +1,6 @@
 {
   "status": "IMPLEMENTED_AND_VALIDATED",
-  "specification": "PULSARA_IDENTITY_REMAINDER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md",
+  "specification": "archived_docs/PULSARA_IDENTITY_REMAINDER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md",
   "scope": "Current implementation and validation evidence; historical acceptance reports are not evidence of this run.",
   "cases": {
     "ID-01": {

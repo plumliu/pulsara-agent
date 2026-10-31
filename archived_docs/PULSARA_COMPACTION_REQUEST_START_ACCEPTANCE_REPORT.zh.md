@@ -10,7 +10,7 @@
 - 保存配置通过 `LocalSettingsStore`／`require_pulsara_home()` 读取，effective home 是 `/Users/plumliu/.pulsara`。保存设置未修改，模型凭据未输出或导出。
 - 保存的 DeepSeek `deepseek-flash` 有 Chat Completions 与 Responses 两个真实连接。两者当前 catalog 的 effort 集合均为 `low/high/max`，本次只测试用户指定的 `high/max`，两档 binding 校验合法。
 - 保存设置没有 PostgreSQL 字段。经授权，使用现有 test harness 的本地目标验证后，在内存中注入 UUID 临时数据库。验证的 admin DSN 为 `postgresql://plumliu@localhost:5432/pulsara`，runtime DSN 为 `postgresql://pulsara:pulsara@localhost:5432/pulsara`；物理连接均为 `::1:5432`、数据库 `pulsara`，用户分别为 `plumliu`／`pulsara`。不修改这两个根数据库的业务内容。
-- 真实实验脚本：[run_compaction_request_start_dogfood.py](tests/dogfood/run_compaction_request_start_dogfood.py)。记录真实 adapter payload、summary／ordinary 输出、terminal 和 usage，并精确清除保存的凭据值。每次实验使用独立临时 home、workspace 和迁移数据库，结束后删除该数据库。
+- 真实实验脚本：[run_compaction_request_start_dogfood.py](../tests/dogfood/run_compaction_request_start_dogfood.py)。记录真实 adapter payload、summary／ordinary 输出、terminal 和 usage，并精确清除保存的凭据值。每次实验使用独立临时 home、workspace 和迁移数据库，结束后删除该数据库。
 
 ## 确定性回归范围与结果
 
@@ -18,11 +18,11 @@
 
 | 范围／命令 | 实际结果 | 证据 |
 |---|---|---|
-| 32 模块联合回归，完整模块清单见 `joint_executed_modules.json`；命令为 `.venv/bin/python -m pytest <清单内32模块> -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/joint_regression.xml` | 330 passed／4 个旧 Hook API 测试失败，309.05s；旧 Hook 已由下面当前合同的整模块补测闭合 | [模块清单](dogfood_evidence/compaction-request-start-20261030/joint_executed_modules.json)、[JUnit](dogfood_evidence/compaction-request-start-20261030/joint_regression.xml)；四项失败均为旧 Hook 模块退役 API；对应当前合同的整模块补测已通过 |
-| `.venv/bin/python -m pytest tests/test_session_workspace_recovery.py tests/test_compaction_handle_settlement.py tests/test_compaction_host_lifecycle.py -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/supplement_regression.xml` | 31 passed in 30.79s | [JUnit](dogfood_evidence/compaction-request-start-20261030/supplement_regression.xml)；workspace／handle4／Hook question 后第二 steer／manual 与 stop lifecycle |
-| `.venv/bin/python -m pytest tests/test_compaction_successor_control_races.py -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/successor_races_regression.xml` | 8 passed in 14.77s | [JUnit](dogfood_evidence/compaction-request-start-20261030/successor_races_regression.xml)；terminal FULL→group fresh／ACK、原 cause／raw cancel／Host close、零重驱动与占用释放 |
-| `.venv/bin/python -m pytest tests/test_compaction_starting_stop_control.py -q --disable-warnings --maxfail=1 --junitxml=dogfood_evidence/compaction-request-start-20261030/starting_stop_regression.xml` | 1 passed in 3.04s | [JUnit](dogfood_evidence/compaction-request-start-20261030/starting_stop_regression.xml)；读取终态失败时 control 为 FAILED／FINISHED，原 turn USER_STOPPED，零伪结果与 busy |
-| `.venv/bin/python -m pytest tests/test_provider_usage_postgres.py -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/provider_usage_regression.xml` | 6 passed in 5.79s | [JUnit](dogfood_evidence/compaction-request-start-20261030/provider_usage_regression.xml)；idle manual 新接口、usage anchor 和 current SUBAGENT scope |
+| 32 模块联合回归，完整模块清单见 `joint_executed_modules.json`；命令为 `.venv/bin/python -m pytest <清单内32模块> -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/joint_regression.xml` | 330 passed／4 个旧 Hook API 测试失败，309.05s；旧 Hook 已由下面当前合同的整模块补测闭合 | [模块清单](../dogfood_evidence/compaction-request-start-20261030/joint_executed_modules.json)、[JUnit](../dogfood_evidence/compaction-request-start-20261030/joint_regression.xml)；四项失败均为旧 Hook 模块退役 API；对应当前合同的整模块补测已通过 |
+| `.venv/bin/python -m pytest tests/test_session_workspace_recovery.py tests/test_compaction_handle_settlement.py tests/test_compaction_host_lifecycle.py -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/supplement_regression.xml` | 31 passed in 30.79s | [JUnit](../dogfood_evidence/compaction-request-start-20261030/supplement_regression.xml)；workspace／handle4／Hook question 后第二 steer／manual 与 stop lifecycle |
+| `.venv/bin/python -m pytest tests/test_compaction_successor_control_races.py -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/successor_races_regression.xml` | 8 passed in 14.77s | [JUnit](../dogfood_evidence/compaction-request-start-20261030/successor_races_regression.xml)；terminal FULL→group fresh／ACK、原 cause／raw cancel／Host close、零重驱动与占用释放 |
+| `.venv/bin/python -m pytest tests/test_compaction_starting_stop_control.py -q --disable-warnings --maxfail=1 --junitxml=dogfood_evidence/compaction-request-start-20261030/starting_stop_regression.xml` | 1 passed in 3.04s | [JUnit](../dogfood_evidence/compaction-request-start-20261030/starting_stop_regression.xml)；读取终态失败时 control 为 FAILED／FINISHED，原 turn USER_STOPPED，零伪结果与 busy |
+| `.venv/bin/python -m pytest tests/test_provider_usage_postgres.py -q --tb=short --junitxml=dogfood_evidence/compaction-request-start-20261030/provider_usage_regression.xml` | 6 passed in 5.79s | [JUnit](../dogfood_evidence/compaction-request-start-20261030/provider_usage_regression.xml)；idle manual 新接口、usage anchor 和 current SUBAGENT scope |
 | `tests/test_kernel_image_input_k3.py`，由其 owner 执行完整模块 | 82 passed in 40.29s | 退役 tier selector 清理，保留图片／owner／目标投影边界 |
 | `tests/test_kernel_image_input_k4_lifecycle.py`，由其 owner 执行完整模块 | 2 passed in 5.00s | 双协议 idle manual 后新 turn 采用 revision>0／SNAPSHOT；原 terminal cut／refs／content 保留，后续 wire 不含历史图片 |
 | `.venv/bin/python -m pytest tests/test_round9_2_hook_integration_postgres.py tests/test_round9_2_hook_subsystem.py::test_round9_2_post_adoption_status_revalidation_is_bounded_and_control_linearized -q --disable-warnings --maxfail=1`，由该 owner 执行 | 12 passed in 31.23s；subsystem 最后 trigger 语义更新后单项另 1 passed in 0.41s | 当前 integration11 项＋subsystem1；替换退役 SubagentStart/Stop、active manual 和旧 alias，保留共同 Hook、Work final、Pre/Post/compact SessionStart 与实际 wire prefix |
@@ -32,7 +32,7 @@
 | `tests/test_compaction_first_call_source_boundary.py`／历史 interruption／provider safe point／资源屏障，由 owner 执行 focused 组合 | 102 passed | 整组 source ceiling、snapshot-only 前驱、Interrupted 来源保留、freeze 物理取消 drain、Installed／Empty 权限分型 |
 | 配置／协议／前端由对应 owner 执行 | 配置与协议 focused 84 passed；模型 target/connection 91 passed；allowance PostgreSQL 9 passed；frontend adapter 111 passed，Workbench 新项 1 passed | typed effort／toggle／budget、actual fake-wire summary/repair、snapshot target、manual 与 exact stop 投影；tsc 与 desktop build 通过 |
 
-全仓 collect-only 已实跑 **4,661 tests collected in 2.00s**，只证明可收集，不等于执行全部测试。退役 root candidate/admission／prospective／source-summary 接口检索已清理；已审阅全部 51 个 compaction/manual 调用点。最后覆盖全部 **99 个已改／新增 Python 文件的 Ruff 通过**，`git diff --check` 通过；原始结果见 [final_checks.json](dogfood_evidence/compaction-request-start-20261030/final_checks.json)。无剩余阻断，不再扩大检查范围。
+全仓 collect-only 已实跑 **4,661 tests collected in 2.00s**，只证明可收集，不等于执行全部测试。退役 root candidate/admission／prospective／source-summary 接口检索已清理；已审阅全部 51 个 compaction/manual 调用点。最后覆盖全部 **99 个已改／新增 Python 文件的 Ruff 通过**，`git diff --check` 通过；原始结果见 [final_checks.json](../dogfood_evidence/compaction-request-start-20261030/final_checks.json)。无剩余阻断，不再扩大检查范围。
 
 ## 实际缺陷的修复证据
 
@@ -42,7 +42,7 @@
 
 ## 新真实 owner 屏障集成
 
-文件：[test_compaction_request_start_integration.py](tests/test_compaction_request_start_integration.py)。模型 transport 可控，Host、writer、queue、canonical reader、压缩采用、输入 safe point 和数据库均使用真实 owner。
+文件：[test_compaction_request_start_integration.py](../tests/test_compaction_request_start_integration.py)。模型 transport 可控，Host、writer、queue、canonical reader、压缩采用、输入 safe point 和数据库均使用真实 owner。
 
 | 场景 | 当前结果 | 证据要求 |
 |---|---|---|
@@ -125,10 +125,10 @@
 
 原始证据保存在忽略提交的本地证据目录，均已通过保存凭据 scrubber 再检查；两次 UUID 数据库均已删除：
 
-- [完整首轮报告](dogfood_evidence/compaction-request-start-20261030/pulsara-compaction-request-start-20261030.json)：三个 case 通过。Chat/max 首次 ordinary 与工具实际成功，但按预响应 heuristic 设定的实验阈值高于 provider usage-anchor 校准后的输入，未触发摘要，因此该 case 及报告总状态明确保留 `failed`。
-- [Chat/max 定向重跑报告](dogfood_evidence/compaction-request-start-20261030/pulsara-compaction-request-start-chat-max-20261030.json)：按首 ordinary 真实 terminal 的 reported input tokens 设置实验软阈值，在工具后共同边界真实触发摘要，summary 与后续 ordinary 均通过。没有修改首轮证据或生产预算语义。
+- [完整首轮报告](../dogfood_evidence/compaction-request-start-20261030/pulsara-compaction-request-start-20261030.json)：三个 case 通过。Chat/max 首次 ordinary 与工具实际成功，但按预响应 heuristic 设定的实验阈值高于 provider usage-anchor 校准后的输入，未触发摘要，因此该 case 及报告总状态明确保留 `failed`。
+- [Chat/max 定向重跑报告](../dogfood_evidence/compaction-request-start-20261030/pulsara-compaction-request-start-chat-max-20261030.json)：按首 ordinary 真实 terminal 的 reported input tokens 设置实验软阈值，在工具后共同边界真实触发摘要，summary 与后续 ordinary 均通过。没有修改首轮证据或生产预算语义。
 
-原始输出位置亦保留 `/tmp/pulsara-compaction-request-start-20261030.json` 与 `/tmp/pulsara-compaction-request-start-chat-max-20261030.json`；最终本地证据以仓库内 `dogfood_evidence/compaction-request-start-20261030/` 的副本为准。该目录被 Git 忽略，不能假定会随提交分发；已另提供 [真实 provider 证据压缩包](dogfood_evidence/compaction-request-start-20261030/real-provider-evidence.zip) 供独立保存。
+原始输出位置亦保留 `/tmp/pulsara-compaction-request-start-20261030.json` 与 `/tmp/pulsara-compaction-request-start-chat-max-20261030.json`；最终本地证据以仓库内 `dogfood_evidence/compaction-request-start-20261030/` 的副本为准。该目录被 Git 忽略，不能假定会随提交分发；已另提供 [真实 provider 证据压缩包](../dogfood_evidence/compaction-request-start-20261030/real-provider-evidence.zip) 供独立保存。
 
 执行命令：
 

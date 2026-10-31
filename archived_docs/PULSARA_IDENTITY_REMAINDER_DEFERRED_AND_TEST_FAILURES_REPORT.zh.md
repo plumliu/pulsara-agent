@@ -2,7 +2,7 @@
 
 报告日期：2026-11-01。
 
-本轮约定范围已完成实施与验证。worker 请求身份和固定 wire key／秘密重叠的后续收口均已按人类决议实现，验证范围分别列于下文。本轮没有 commit 或 push。完整命令、各批次结果及审阅记录见 [验收证据](benchmarks/suites/core/v1/identity_remainder_hard_cut_validation.json)，产品合同见 [实施规格](PULSARA_IDENTITY_REMAINDER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。
+本轮约定范围已完成实施与验证。worker 请求身份和固定 wire key／秘密重叠的后续收口均已按人类决议实现，验证范围分别列于下文。本轮没有 commit 或 push。完整命令、各批次结果及审阅记录见 [验收证据](../benchmarks/suites/core/v1/identity_remainder_hard_cut_validation.json)，产品合同见 [实施规格](PULSARA_IDENTITY_REMAINDER_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。
 
 ## 本轮实现
 
@@ -37,7 +37,7 @@ Code Mode prepare/call 的 request_id 统一由共享 `randomIdentity("request")
 - HTTP／协议 PostgreSQL 组合：212 passed、0 skipped、21 warnings。
 - renderer 七文件回归：397 passed；插件相关九组回归：237 passed、1 skipped、1 warning。
 - 前端两文件组合：380 passed；真实 compaction owner 相关组合：39 passed、0 skipped，独立模块复跑：35 passed。
-- 上述 1 个 skipped 是 [大型 Hook 查询经 canonical PostgreSQL owner 往返测试](tests/test_capability_source_query.py#L913)，该无 DSN 批次未配置测试数据库；包含该文件的独立真实 PostgreSQL 批次已通过且无跳过。数据库测试使用已核实的本机隔离临时库。
+- 上述 1 个 skipped 是 [大型 Hook 查询经 canonical PostgreSQL owner 往返测试](../tests/test_capability_source_query.py#L913)，该无 DSN 批次未配置测试数据库；包含该文件的独立真实 PostgreSQL 批次已通过且无跳过。数据库测试使用已核实的本机隔离临时库。
 
 frontend 类型检查与构建、正式资源准备及 macOS arm64 目录打包均已完成，包位于 `desktop/release/mac-arm64/Pulsara.app`。该批次打包时与当时源码对照的 422 个应用文件及 284 个 renderer 文件均无缺失、额外或差异；包内 sourcemap 的 app.tsx 和共享 identity 源与该批次当时源码完全一致，包内 Electron 的 Unicode 派生、随机 ID 和非法 padding 检查通过。desktop 测试为 138 passed，Electron 浏览器测试为 14 passed。各命令和日志见验收证据。
 

@@ -1,8 +1,8 @@
 # Pulsara：工具查询、命名与 Cell 身份统一实施规格
 
-日期：2026-11-01。状态：**当前实现合同。** 当前接口采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md) 的 hard cut，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
+日期：2026-11-01。状态：**当前实现合同。** 当前接口采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md) 的 hard cut，其实施与激活已完成，见 [激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
-本文确定本轮目标合同。生产代码、公共消费者与现行设计采用当前单路径合同，不保留旧工具别名、旧参数双读或第二条执行路径。实现落点、验收结果与未测边界见 [实施记录](output/tool-query-cell-unification-20261030/IMPLEMENTATION.zh.md)；该结论不代表全仓测试或全部外部连接均已验证。
+本文确定本轮目标合同。生产代码、公共消费者与现行设计采用当前单路径合同，不保留旧工具别名、旧参数双读或第二条执行路径。实现落点、验收结果与未测边界见 [实施记录](../output/tool-query-cell-unification-20261030/IMPLEMENTATION.zh.md)；该结论不代表全仓测试或全部外部连接均已验证。
 
 ## 0. 权威、范围与非目标
 
@@ -11,12 +11,12 @@
 - [Subagent／Work 与双入口编排设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)。
 - [Code Mode 接入合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)。
 - [子代理与 Cell 侧边栏规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)：侧边栏与 `open_in_pulsara` 展示接入合同。
-- [统一身份合同](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)的 canonical ID 编码与唯一 owner 原则。
-- [target 共同规则](archived_docs/PULSARA_TOOL_TARGET_HARD_CUT_OVERVIEW.zh.md)中仍适用的对象身份、角色与参数分离规则。历史文档中的旧 Subagent／Task 表面不复活。
+- [统一身份合同](PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)的 canonical ID 编码与唯一 owner 原则。
+- [target 共同规则](PULSARA_TOOL_TARGET_HARD_CUT_OVERVIEW.zh.md)中仍适用的对象身份、角色与参数分离规则。历史文档中的旧 Subagent／Task 表面不复活。
 
-Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Schema 兼容性报告](output/tool-schema-compatibility-20261026/REPORT.zh.md)。它约束本规格的 schema 投影与验证方案（§3.4、§16.4）；报告中的候选不是已经发布的生产合同，也不授权取消现有适配。
+Provider schema 的实验证据必须同时阅读：[Qwen／DeepSeek 工具 Schema 兼容性报告](../output/tool-schema-compatibility-20261026/REPORT.zh.md)。它约束本规格的 schema 投影与验证方案（§3.4、§16.4）；报告中的候选不是已经发布的生产合同，也不授权取消现有适配。
 
-已有 target 合同及其 [target 实际接口实验](output/target-schema-2x2-20261028/REPORT.zh.md)作为本轮基线继承：复用对象形状、角色区分、lowering、本地校验和简短函数说明。本轮只验证查询合并、新增详情与 Cell 身份等实际差异，不重新选型整套 target 接口。
+已有 target 合同及其 [target 实际接口实验](../output/target-schema-2x2-20261028/REPORT.zh.md)作为本轮基线继承：复用对象形状、角色区分、lowering、本地校验和简短函数说明。本轮只验证查询合并、新增详情与 Cell 身份等实际差异，不重新选型整套 target 接口。
 
 ### 0.1 本轮必须完成
 
@@ -642,7 +642,7 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 
 真实 provider 使用保存的生产配置，经 LocalSettingsStore 与 require_pulsara_home 读取，不更改设置、不导出秘密。需要隔离时复用只读设置注入和经确认的可丢弃本地数据库。证据保留实际提示、响应、工具参数与结果，只去除真实凭据。未完成该场景时不宣称 provider 侧接口激活已验证。
 
-本轮已完成本规格要求的实现与验收核对，实际回归、dogfood 结果及未测边界以 [实施记录](output/tool-query-cell-unification-20261030/IMPLEMENTATION.zh.md) 及其证据链接为准。
+本轮已完成本规格要求的实现与验收核对，实际回归、dogfood 结果及未测边界以 [实施记录](../output/tool-query-cell-unification-20261030/IMPLEMENTATION.zh.md) 及其证据链接为准。
 
 ### 16.4 Provider schema 专项验收
 
@@ -670,15 +670,15 @@ HTTP 200 + response.failed 不能记为成功，预算耗尽或 thinking／tool_
 
 | 领域 | 当前代码入口 |
 |---|---|
-| 全部descriptor、权限与可见性 | [builtin_catalog.py](src/pulsara_agent/capability/builtin_catalog.py)、[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) |
-| Provider schema 与兼容性证据 | [function_tools.py](src/pulsara_agent/llm/adapters/openai/function_tools.py)、[参数与默认值合同测试](tests/test_builtin_default_null_contracts.py)、[兼容性报告](output/tool-schema-compatibility-20261026/REPORT.zh.md) |
-| Capability查询与分页 | [source_query.py](src/pulsara_agent/capability/source_query.py)、[capability_query.py](src/pulsara_agent/conversation_kernel/capability_query.py) |
-| Agent／Work查询 | [collaboration_contracts.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_contracts.py)、[collaboration_api.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py)、[subagents repository](src/pulsara_agent/conversation_kernel/_repository/subagents.py) |
-| Process | [terminal.py](src/pulsara_agent/ports/terminal.py)、[manager.py](src/pulsara_agent/terminal_process/manager.py)、[models.py](src/pulsara_agent/terminal_process/models.py) |
-| Cell与源码 | [host.py](src/pulsara_agent/code_mode/host.py)、[contracts.py](src/pulsara_agent/code_mode/contracts.py)、[tool_execution.py](src/pulsara_agent/conversation_kernel/tool_execution.py)、[tools repository](src/pulsara_agent/conversation_kernel/_repository/tools.py)、[reader.py](src/pulsara_agent/conversation_kernel/reader.py) |
-| 统一身份 | [identity.py](src/pulsara_agent/identity.py) |
-| JS目录与结果 | [tool_surface.py](src/pulsara_agent/conversation_kernel/tool_surface.py)、[tool_result_projection.py](src/pulsara_agent/primitives/tool_result_projection.py) |
-| 定时计划 | [requests.py](src/pulsara_agent/scheduling/requests.py)、[service.py](src/pulsara_agent/scheduling/service.py)、[scheduling repository](src/pulsara_agent/conversation_kernel/_repository/scheduling.py) |
-| 会话内容 | [session_content.py](src/pulsara_agent/ports/session_content.py) |
-| Hook与使用指引 | [matcher.py](src/pulsara_agent/hooks/matcher.py)、[system_prompt.py](src/pulsara_agent/ports/system_prompt.py)、[pulsara-code-mode](src/pulsara_agent/bundled_skills/pulsara-code-mode/SKILL.md) |
-| Deferred摘要 | [runtime_handoff.py](src/pulsara_agent/conversation_kernel/compaction/runtime_handoff.py)、[context_sources.py](src/pulsara_agent/conversation_kernel/context_sources.py) |
+| 全部descriptor、权限与可见性 | [builtin_catalog.py](../src/pulsara_agent/capability/builtin_catalog.py)、[tool_runtime.py](../src/pulsara_agent/conversation_kernel/tool_runtime.py) |
+| Provider schema 与兼容性证据 | [function_tools.py](../src/pulsara_agent/llm/adapters/openai/function_tools.py)、[参数与默认值合同测试](../tests/test_builtin_default_null_contracts.py)、[兼容性报告](../output/tool-schema-compatibility-20261026/REPORT.zh.md) |
+| Capability查询与分页 | [source_query.py](../src/pulsara_agent/capability/source_query.py)、[capability_query.py](../src/pulsara_agent/conversation_kernel/capability_query.py) |
+| Agent／Work查询 | [collaboration_contracts.py](../src/pulsara_agent/conversation_kernel/subagents/collaboration_contracts.py)、[collaboration_api.py](../src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py)、[subagents repository](../src/pulsara_agent/conversation_kernel/_repository/subagents.py) |
+| Process | [terminal.py](../src/pulsara_agent/ports/terminal.py)、[manager.py](../src/pulsara_agent/terminal_process/manager.py)、[models.py](../src/pulsara_agent/terminal_process/models.py) |
+| Cell与源码 | [host.py](../src/pulsara_agent/code_mode/host.py)、[contracts.py](../src/pulsara_agent/code_mode/contracts.py)、[tool_execution.py](../src/pulsara_agent/conversation_kernel/tool_execution.py)、[tools repository](../src/pulsara_agent/conversation_kernel/_repository/tools.py)、[reader.py](../src/pulsara_agent/conversation_kernel/reader.py) |
+| 统一身份 | [identity.py](../src/pulsara_agent/identity.py) |
+| JS目录与结果 | [tool_surface.py](../src/pulsara_agent/conversation_kernel/tool_surface.py)、[tool_result_projection.py](../src/pulsara_agent/primitives/tool_result_projection.py) |
+| 定时计划 | [requests.py](../src/pulsara_agent/scheduling/requests.py)、[service.py](../src/pulsara_agent/scheduling/service.py)、[scheduling repository](../src/pulsara_agent/conversation_kernel/_repository/scheduling.py) |
+| 会话内容 | [session_content.py](../src/pulsara_agent/ports/session_content.py) |
+| Hook与使用指引 | [matcher.py](../src/pulsara_agent/hooks/matcher.py)、[system_prompt.py](../src/pulsara_agent/ports/system_prompt.py)、[pulsara-code-mode](../src/pulsara_agent/bundled_skills/pulsara-code-mode/SKILL.md) |
+| Deferred摘要 | [runtime_handoff.py](../src/pulsara_agent/conversation_kernel/compaction/runtime_handoff.py)、[context_sources.py](../src/pulsara_agent/conversation_kernel/context_sources.py) |

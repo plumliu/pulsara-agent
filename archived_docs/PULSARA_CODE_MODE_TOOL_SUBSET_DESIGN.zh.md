@@ -1,6 +1,6 @@
 # Pulsara Code Mode：ROOT＋bypass、工具子集与执行合同
 
-日期：2026-11-01。状态：**当前实现合同。** 输入与输出采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
+日期：2026-11-01。状态：**当前实现合同。** 输入与输出采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
 子代理与 Cell 侧边栏及其 `open_in_pulsara` 接入见 [侧边栏实施规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
 
@@ -324,15 +324,15 @@ exec_cell 接纳后立即返回，ROOT 可回复或压缩，research／review �
 | reader／history／fork／UI／用户控制 | 模型来源过滤在分页／预算前完成；UI 使用同一真实结果并归组到父 exec_cell；状态、输出、精确停止复用既有 owner |
 | SYSTEM／工具／bundled skill | 短环境合同＋原生 schema；复杂编排按需读取既有 skill，不写实验过程 |
 
-本轮实施与验证总览见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)，逐项行为、证据层级和未覆盖边界见 [验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)。
+本轮实施与验证总览见 [实施记录](../output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)，逐项行为、证据层级和未覆盖边界见 [验收矩阵](../output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)。
 
 ### 10.2 本轮证据
 
-- [QuickJS 初探](output/quickjs-compute-budget-20261028/REVIEW.zh.md)：排除异步等待的计时。
-- [SDK 边界实测](output/code-mode-freeze-20261028/quickjs_limits/REVIEW.zh.md)：循环／微任务、编译盲区、Worker 中断、正常计算、未 await 调用及 handle。
-- [实际结果实验](output/code-mode-freeze-20261028/output_contract/REVIEW.zh.md)：terminal tail／artifact、MCP JSON 图片、序列化。
-- [ROOT 汇总](output/code-mode-freeze-20261028/root/REVIEW.zh.md)：专项代码证据与最终选择。
-- [共同引擎复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md)：请求／turn、上下文、消息、工具结果的唯一归属与必要适配。
+- [QuickJS 初探](../output/quickjs-compute-budget-20261028/REVIEW.zh.md)：排除异步等待的计时。
+- [SDK 边界实测](../output/code-mode-freeze-20261028/quickjs_limits/REVIEW.zh.md)：循环／微任务、编译盲区、Worker 中断、正常计算、未 await 调用及 handle。
+- [实际结果实验](../output/code-mode-freeze-20261028/output_contract/REVIEW.zh.md)：terminal tail／artifact、MCP JSON 图片、序列化。
+- [ROOT 汇总](../output/code-mode-freeze-20261028/root/REVIEW.zh.md)：专项代码证据与最终选择。
+- [共同引擎复用审阅](../output/code-mode-root-reuse-20261028/root/REVIEW.zh.md)：请求／turn、上下文、消息、工具结果的唯一归属与必要适配。
 
 以上前置实验不作为生产端到端通过证据。旧 fake compaction 实验仅给模拟窗口换标签，没有执行 Pulsara 真实压缩。[SDK 官方接口](https://github.com/vercel-labs/quickjs-wasi#interrupt-handler) 用于核对公开能力，结论以固定发布版本实测为准。
 
@@ -347,7 +347,7 @@ exec_cell 接纳后立即返回，ROOT 可回复或压缩，research／review �
 7. Stop、steer、Plan、manage_cell.stop、Host close、进程死亡按表工作；未 await 的已提交操作正确结算。
 8. 配套 Agent 的 batch／history／message／轻量 wait 与显式 query 验收；WORK ID 从队列到 turn 保持不变，启动／取消只结算一个实际阶段，final 读原 entry；已接纳请求不依赖 cell 存活。
 
-只测可观察行为，不冻结自然语言或整份 schema。本轮已用保存 provider 配置验证两种 API 的实际 prefix、调用、结果与生产压缩；真实 SDK MCP 的同 cell／ref 跨压缩也已验证。完整输入、canonical 核对与覆盖层级见 [验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)，不把文档例子当通过证据。
+只测可观察行为，不冻结自然语言或整份 schema。本轮已用保存 provider 配置验证两种 API 的实际 prefix、调用、结果与生产压缩；真实 SDK MCP 的同 cell／ref 跨压缩也已验证。完整输入、canonical 核对与覆盖层级见 [验收矩阵](../output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)，不把文档例子当通过证据。
 
 ### SUPERSEDES
 

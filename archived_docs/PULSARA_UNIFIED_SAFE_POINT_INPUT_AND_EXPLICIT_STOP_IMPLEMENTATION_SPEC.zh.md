@@ -1,6 +1,6 @@
 # 统一安全点输入与显式停止实施规格
 
-状态：已实施并完成验收，ROOT 完整 diff 与交叉复审已完成，可冻结。实际验证、保留的失败和范围见 [验收记录](output/unified-safe-point-20261030/verification.zh.md)。
+状态：已实施并完成验收，ROOT 完整 diff 与交叉复审已完成，可冻结。实际验证、保留的失败和范围见 [验收记录](../output/unified-safe-point-20261030/verification.zh.md)。
 
 ## 1. 目标与范围
 
@@ -82,4 +82,4 @@ ENTER、空 EXIT 和 DRAFT 按原 Plan 语义正常结算，不因补充输入�
 5. 明确 Stop 与多项工具、已派发效果、未派发步骤、Cell 自身关闭、MCP lane、interaction 以及输入接纳并发；实际 side effect／attempt／reservation／结果按原 owner 结算；独立 Cell 和被等待 Work 不误停。
 6. 资源不足、连接故障、Host close／writer replacement 保持真实失败和已提交内容，保留单次限制、不新增总量限制。更新 `test_blocking_steer_host.py`、`test_agent_session_host.py`、`test_round4_plan_host.py`、`test_agent_wait_controls_host.py`、`test_agent_collaboration_api.py`、`test_capability_management_execution.py` 的受影响场景和原 `CANCELLED_BEFORE_DISPATCH` 重试 fixture；保留真实 Stop／Cell Stop、Plan barrier、OAuth 和实际错误断言。
 
-真实 provider 验证合同：通过 `LocalSettingsStore` 和 `require_pulsara_home()` 只读用户保存配置，使用内存配置覆盖与核实后的本地隔离数据库；在模型真实发出多工具批次时用屏障于中途接纳用户引导、Agent 消息及 Cell 正式输出，保存实际模型请求、工具参数、真实结果、canonical 消费顺序和后续输入，证明未发生普通输入诱发的 no-attempt 取消，并保留显式 Stop 对照。实际协议、模型、reasoning、失败和凭据清理按真实运行记录，不用模拟模型输出冒充 provider 验证。实际双协议运行结果及边界见 [验收记录](output/unified-safe-point-20261030/verification.zh.md)。
+真实 provider 验证合同：通过 `LocalSettingsStore` 和 `require_pulsara_home()` 只读用户保存配置，使用内存配置覆盖与核实后的本地隔离数据库；在模型真实发出多工具批次时用屏障于中途接纳用户引导、Agent 消息及 Cell 正式输出，保存实际模型请求、工具参数、真实结果、canonical 消费顺序和后续输入，证明未发生普通输入诱发的 no-attempt 取消，并保留显式 Stop 对照。实际协议、模型、reasoning、失败和凭据清理按真实运行记录，不用模拟模型输出冒充 provider 验证。实际双协议运行结果及边界见 [验收记录](../output/unified-safe-point-20261030/verification.zh.md)。

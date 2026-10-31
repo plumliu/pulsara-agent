@@ -1,6 +1,6 @@
 # Pulsara：Subagent／Work 与双入口编排设计
 
-日期：2026-11-01。状态：**当前实现合同。** 输入与输出采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
+日期：2026-11-01。状态：**当前实现合同。** 输入与输出采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
 子代理与 Cell 侧边栏及其 `open_in_pulsara` 接入见 [侧边栏实施规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
 
@@ -21,7 +21,7 @@
 
 `agent_id:"ROOT"` 是保留标识，指向本次协作的 ROOT session；普通 Subagent ID 不使用这个值。统一身份格式不改变各操作的适用对象：消息可以发给 ROOT，派活与委派工作查询仍针对 Subagent。ROOT 不因此成为 `run_agent` 的派活目标。
 
-ID 遵循 [统一身份规格](archived_docs/PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)：同一对象在数据库、工具参数、返回值和 UI 中使用同一个完整 canonical ID，格式为 `<kind>:<26 位小写 Base32>`。普通 `agent_id` 使用 session 的完整 `session:` ID，`work_id` 使用 `prompt_queue_items.id` 的完整 `queue:` ID；不截短、不去掉前缀，也不包装为另一份 agent／subagent／work ID。`ROOT` 仅由可信调用上下文解析为本次协作的 ROOT，不需要别名映射表。模型复制真实返回的 target，无需推导 ID 或理解内部请求与 turn 的对应关系。
+ID 遵循 [统一身份规格](PULSARA_UNIFIED_IDENTITY_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)：同一对象在数据库、工具参数、返回值和 UI 中使用同一个完整 canonical ID，格式为 `<kind>:<26 位小写 Base32>`。普通 `agent_id` 使用 session 的完整 `session:` ID，`work_id` 使用 `prompt_queue_items.id` 的完整 `queue:` ID；不截短、不去掉前缀，也不包装为另一份 agent／subagent／work ID。`ROOT` 仅由可信调用上下文解析为本次协作的 ROOT，不需要别名映射表。模型复制真实返回的 target，无需推导 ID 或理解内部请求与 turn 的对应关系。
 
 本文调用示例使用符合格式的示意 ID，不代表实际存在的对象；运行时须替换为真实返回值。概念说明中的 `session:…`／`queue:…` 不是可提交参数。
 
@@ -298,7 +298,7 @@ Subagent 不提供记忆、会话检索工具或隐式记忆/历史/响应偏好
 | `completed` | 对应 turn 正常完成，final 从其 entry 读取 |
 | `stopped` | 请求启动前被取消／拒绝，或对应 turn 中断；保留真实 `terminal_reason` |
 
-`completed` 和 `stopped` 为终态。只有 stopped 带终态原因，其他状态的 `terminal_reason` 为 null。继续工作接纳新请求，不改变旧请求终态。共同读取合同见[统一请求执行四态规格](archived_docs/PULSARA_REQUEST_EXECUTION_STATUS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。队列交付和内部 turn 状态继续各自承担权威事实；公开四态不单独存储。
+`completed` 和 `stopped` 为终态。只有 stopped 带终态原因，其他状态的 `terminal_reason` 为 null。继续工作接纳新请求，不改变旧请求终态。共同读取合同见[统一请求执行四态规格](PULSARA_REQUEST_EXECUTION_STATUS_HARD_CUT_IMPLEMENTATION_SPEC.zh.md)。队列交付和内部 turn 状态继续各自承担权威事实；公开四态不单独存储。
 
 派活成功是接纳成功，不是工作成功。查询和等待正常返回失败 Work 的状态，不因 Work 失败而把这次查询变成工具异常；工具参数、调用权限或执行失败则走共同 ToolError 合同。ROOT 可以继续独立工作，也可以等待。
 
@@ -846,7 +846,7 @@ Subagent 发消息不以读取复杂 workflow skill 为前提。模型不需要�
 
 ### SUPERSEDES 范围
 
-本文替代旧方案中以下协作产品表述。既有协作运行时的实施及实际验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)；`work_inputs` 与侧边栏合同的实际验证范围见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)，旧记录不作为新合同的验收证据。
+本文替代旧方案中以下协作产品表述。既有协作运行时的实施及实际验收见 [实施记录](../output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md)；`work_inputs` 与侧边栏合同的实际验证范围见 [验证记录](../output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)，旧记录不作为新合同的验收证据。
 
 | 来源 | 本文负责的新语义 |
 |---|---|
@@ -882,4 +882,4 @@ Agent 使用 session 身份及 `root_session_id` 归属；委派来源与初始�
 
 能力验收覆盖 §1.5 的四种变化：手动配置与插件 MCP 使用同一提供范围设置；每个受影响的活动 session 收到相应观察；禁用后阻止新调用，同 epoch 已安装 schema 保持不变；能力查询不扩大原生管理工具权限。
 
-前置调查依据见 [ROOT 复用审阅](output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。SYSTEM 与 Skill 教学见 §8；子代理与 Cell 侧边栏及其展示接入按侧边栏规格处理。
+前置调查依据见 [ROOT 复用审阅](../output/code-mode-root-reuse-20261028/root/REVIEW.zh.md) 与 [请求链路证据](../output/code-mode-root-reuse-20261028/requests/REVIEW.zh.md)。本轮运行时实施、真实共同 owner 和保存 provider 验收见 [实施记录](../output/agent-code-mode-implementation-20261029/integration/IMPLEMENTATION.zh.md) 与 [逐项验收矩阵](../output/agent-code-mode-implementation-20261029/integration/ACCEPTANCE_MATRIX.zh.md)；矩阵明确区分实际执行层级与未覆盖边界。SYSTEM 与 Skill 教学见 §8；子代理与 Cell 侧边栏及其展示接入按侧边栏规格处理。

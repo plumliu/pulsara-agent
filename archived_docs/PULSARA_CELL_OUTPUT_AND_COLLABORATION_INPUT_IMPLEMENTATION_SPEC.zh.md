@@ -1,6 +1,6 @@
 # Pulsara：统一输入队列、Cell 主动输出与协作阅读实施规格
 
-日期：2026-10-31。状态：**实施与激活完成，已通过 ROOT 最终语义验收。** 逐条 Cell 输出、统一队列、协作阅读、定时触发及源码/图边界已按本规格验收，见[激活报告](output/unified-input-retry-20261031/activation-report.zh.md)、[逐项语义矩阵](output/unified-input-retry-20261031/verification-plan.zh.md)与[原始证据索引](output/unified-input-retry-20261031/activation-index.json)。保存生产配置只读。
+日期：2026-10-31。状态：**实施与激活完成，已通过 ROOT 最终语义验收。** 逐条 Cell 输出、统一队列、协作阅读、定时触发及源码/图边界已按本规格验收，见[激活报告](../output/unified-input-retry-20261031/activation-report.zh.md)、[逐项语义矩阵](../output/unified-input-retry-20261031/verification-plan.zh.md)与[原始证据索引](../output/unified-input-retry-20261031/activation-index.json)。保存生产配置只读。
 
 ## 0. 目标与权威
 
