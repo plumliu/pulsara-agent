@@ -3300,7 +3300,7 @@ describe('PulsaraApp', () => {
     expect(container.querySelectorAll('.user-turn.user-steer')).toHaveLength(1);
   });
 
-  it('keeps an observed queue item visible when it reaches a terminal state', async () => {
+  it('removes an observed cancelled queue item after exact reconciliation', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionRole = 'observer';
     adapter.queryCommandResult = {
@@ -3329,14 +3329,15 @@ describe('PulsaraApp', () => {
     });
 
     await waitFor(() => expect(active.queryCommand).toHaveBeenCalledWith('command-observed'));
-    expect(await screen.findByText('队列已取消')).toBeTruthy();
-    expect(screen.getByText('观察者看到的队列正文')).toBeTruthy();
+    await waitFor(()=>expect(screen.queryByText('观察者看到的队列正文')).toBeNull());
+    expect(screen.queryByRole('region',{name:'等待处理的输入'})).toBeNull();
+    expect(screen.queryByText('队列已取消')).toBeNull();
     expect(screen.queryByText('目标轮次：turn-observed')).toBeNull();
     expect(screen.queryByText('适用权限：每次询问')).toBeNull();
-    expect(screen.getByText('Observed queue item was cancelled.')).toBeTruthy();
+    expect(await screen.findByText('输入未投递')).toBeTruthy();
   });
 
-  it('pages ROOT queue by queue identity and confirms an omitted item before removing it', async () => {
+  it('automatically reads ROOT queue pages to the actual tail and confirms an omitted item before removing it', async () => {
     const adapter = new FakeAdapter();
     const first = {queueItemId:'queue-page-1',sourceKind:'command' as const,commandId:'command-page-1',
       sequence: '1',status:'pending' as const,deliveryMode:'new-turn' as const,content:textPrompt('first page')};
@@ -3354,8 +3355,8 @@ describe('PulsaraApp', () => {
     });
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     expect(await screen.findByText('first page')).toBeTruthy();
-    fireEvent.click(await screen.findByRole('button', {name:'加载更多排队任务'}));
     expect(await screen.findByText('second page')).toBeTruthy();
+    expect(screen.queryByRole('button', {name:'加载更多排队任务'})).toBeNull();
     const active = adapter.lastConnection!;
     active.readQueuePage.mockImplementation(async () => ({items:[first],nextCursor:null}));
     act(() => active.emit({...active.current(),eventSequence:9}));
@@ -3368,12 +3369,38 @@ describe('PulsaraApp', () => {
     await waitFor(() => expect(document.querySelector('[data-queue-item-id="queue-page-2"]')).toBeNull());
   });
 
-  it.each([
-    ['cancelled', '队列已取消'],
-    ['rejected', '队列已拒绝'],
-  ] as const)('shows an initial-hydration %s terminal without a local submission', async (
+  it('shows the real ROOT tail beyond the 50-item page and slides it for a newly accepted input', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionRole = 'observer';
+    const make = (sequence: number) => ({queueItemId:`preview-${sequence}`,sourceKind:'command' as const,
+      commandId:`preview-command-${sequence}`,sequence:String(sequence),status:'pending' as const,
+      deliveryMode:'new-turn' as const,content:textPrompt(`排队正文 ${sequence}`)});
+    let all = Array.from({length:51},(_,index)=>make(index+1));
+    adapter.connectionValue = {...projection(''),messages:[],isRunning:true,queuedCount:51,queuedPrompts:all.slice(0,50)};
+    const connect = adapter.connect.bind(adapter);
+    vi.spyOn(adapter,'connect').mockImplementation(async (...args) => {
+      const reader = await connect(...args);
+      reader.readQueuePage.mockImplementation(async cursor => cursor
+        ? {items:all.slice(50),nextCursor:null} : {items:all.slice(0,50),nextCursor:'50'});
+      reader.readQueueItem.mockImplementation(async id => all.find(item=>item.queueItemId===id)??null);
+      return reader;
+    });
+    renderWorkbench(<PulsaraApp adapter={adapter}/>);
+    const queue = await screen.findByRole('region',{name:'等待处理的输入'});
+    await waitFor(()=>expect([...queue.querySelectorAll('article')].map(item=>item.dataset.queueItemId))
+      .toEqual(['preview-1','preview-2','preview-3','preview-50','preview-51']));
+    expect(within(queue).getByText('中间省略 46 条排队消息')).toBeTruthy();
+    all = [...all,make(52)];
+    act(()=>adapter.lastConnection!.emit({...adapter.lastConnection!.current(),eventSequence:5,queuedCount:52}));
+    await waitFor(()=>expect([...queue.querySelectorAll('article')].map(item=>item.dataset.queueItemId))
+      .toEqual(['preview-1','preview-2','preview-3','preview-51','preview-52']));
+    expect(within(queue).getByText('中间省略 47 条排队消息')).toBeTruthy();
+    expect(adapter.lastConnection!.readQueuePage).toHaveBeenCalledWith('50',expect.any(AbortSignal));
+    expect(within(queue).queryByRole('button',{name:'加载更多排队任务'})).toBeNull();
+  });
+
+  it.each(['cancelled','rejected'] as const)('does not create a queue card for an initial-hydration %s terminal', async (
     status,
-    label,
   ) => {
     const adapter = new FakeAdapter();
     const transition: LocalPromptSubmission = {
@@ -3390,11 +3417,11 @@ describe('PulsaraApp', () => {
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
 
-    expect(await screen.findByText(label)).toBeTruthy();
-    expect(screen.getByText('正文未能在队列终止前完成读取。')).toBeTruthy();
+    await screen.findByRole('heading',{name:'准备发布'});
+    expect(screen.queryByRole('region',{name:'等待处理的输入'})).toBeNull();
+    expect(screen.queryByText('正文未能在队列终止前完成读取。')).toBeNull();
     expect(screen.queryByText('目标轮次：turn-race')).toBeNull();
     expect(screen.queryByText('适用权限：只读')).toBeNull();
-    expect(screen.getByText(`Queue ${status} before hydration completed.`)).toBeTruthy();
   });
 
   it('moves an accepted idle submission into the real ordered queue until canonical adoption', async () => {
@@ -3512,8 +3539,27 @@ describe('PulsaraApp', () => {
     });
 
     await waitFor(() => expect(active.queryCommand).toHaveBeenCalledWith(commandId));
-    expect(await screen.findByText('队列已取消')).toBeTruthy();
-    expect(screen.getByText('The queued prompt was cancelled.')).toBeTruthy();
+    await waitFor(()=>expect(screen.queryByRole('region',{name:'等待处理的输入'})).toBeNull());
+    expect(screen.queryByText('队列已取消')).toBeNull();
+    expect(await screen.findByText('输入未投递')).toBeTruthy();
+  });
+
+  it('retains an uncertain submission in the composer and queries its original identity without a queue card', async () => {
+    const adapter = new FakeAdapter();
+    adapter.connectionValue = {...projection(''),messages:[],isRunning:true,queuedPrompts:[],queuedCount:0};
+    renderWorkbench(<PulsaraApp adapter={adapter}/>);
+    await screen.findByRole('heading',{name:'准备发布'});
+    const original = adapter.lastConnection!;
+    original.submitPrompt.mockRejectedValueOnce(new RuntimeApiError('LOCAL_TRANSPORT_UNAVAILABLE','连接断开。',true));
+    await typeComposer('需要保留的未确认原文');
+    fireEvent.click(screen.getByRole('button',{name:'排队发送'}));
+    expect(await screen.findByText('提交状态未知')).toBeTruthy();
+    expect(screen.getByLabelText('发送给 Pulsara').textContent).toBe('需要保留的未确认原文');
+    expect(screen.queryByRole('region',{name:'等待处理的输入'})).toBeNull();
+    const commandId = original.submitPrompt.mock.calls[0][0];
+    expect(original.submitPrompt).toHaveBeenCalledTimes(1);
+    expect(adapter.lastConnection!.queryCommand).toHaveBeenCalledWith(commandId);
+    expect(adapter.lastConnection!.submitPrompt).not.toHaveBeenCalled();
   });
 
   it('queries the original command on the replacement connection after transport failure', async () => {

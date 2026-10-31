@@ -48,19 +48,19 @@ describe('PromptContentView', () => {
     const content = view.container.querySelector('.queued-prompt-content') as HTMLElement;
     let animatedHeight: number | undefined;
     content.getBoundingClientRect = () => new DOMRect(0, 0, 400,
-      animatedHeight ?? (content.classList.contains('is-expanded') ? 120 : 40));
+      animatedHeight ?? (content.classList.contains('is-expanded') ? 120 : 20));
     const cancel = vi.fn(() => { animatedHeight = undefined; });
     const animate = vi.fn<(frames: Keyframe[], options: KeyframeAnimationOptions) => Animation>(() => ({ cancel }) as unknown as Animation);
     content.animate = animate;
     await userEvent.click(screen.getByRole('button', { name: '展开' }));
     expect(animate.mock.calls[0]?.[0]).toEqual([
-      { height: '40px', overflow: 'hidden' }, { height: '120px', overflow: 'hidden' },
+      { height: '20px', overflow: 'hidden' }, { height: '120px', overflow: 'hidden' },
     ]);
     animatedHeight = 80;
     await userEvent.click(screen.getByRole('button', { name: '收起' }));
     expect(cancel).toHaveBeenCalledOnce();
     expect(animate.mock.calls[1]?.[0]).toEqual([
-      { height: '80px', overflow: 'hidden' }, { height: '40px', overflow: 'hidden' },
+      { height: '80px', overflow: 'hidden' }, { height: '20px', overflow: 'hidden' },
     ]);
   });
 

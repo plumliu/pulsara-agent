@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { AnimatedPromptQueue } from '../../frontend/components/animated-prompt-queue';
+import { AnimatedPromptQueue, queuePreviewCapacity } from '../../frontend/components/animated-prompt-queue';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -73,4 +73,59 @@ it('removes immediately with reduced motion', () => {
     expect(screen.queryByText('原文')).toBeNull();
     expect(motion.animate).not.toHaveBeenCalled();
   } finally { cleanup(); motion.restore(); }
+});
+
+const rows = (first: number, last: number) => Array.from({ length: last - first + 1 }, (_, index) => {
+  const id = first + index;
+  return <article key={id} data-id={id}>消息 {id}</article>;
+});
+const visibleIds = () => screen.getAllByRole('article').map(item => Number(item.dataset.id));
+
+it('slides a full head/tail preview when a 51st input arrives, without animating omission as consumption', async () => {
+  const motion = animations();
+  try {
+    const view = render(<AnimatedPromptQueue maxVisibleItems={5}>{rows(1, 50)}</AnimatedPromptQueue>);
+    expect(visibleIds()).toEqual([1, 2, 3, 49, 50]);
+    expect(screen.getByText('中间省略 45 条排队消息')).toBeTruthy();
+    const last = screen.getByText('消息 50');
+    view.rerender(<AnimatedPromptQueue maxVisibleItems={5}>{rows(1, 51)}</AnimatedPromptQueue>);
+    expect(visibleIds()).toEqual([1, 2, 3, 50, 51]);
+    expect(screen.getByText('中间省略 46 条排队消息')).toBeTruthy();
+    expect(screen.getByText('消息 50')).toBe(last);
+    expect(screen.queryByText('消息 49')).toBeNull();
+
+    view.rerender(<AnimatedPromptQueue maxVisibleItems={5}>{rows(2, 51)}</AnimatedPromptQueue>);
+    expect(visibleIds()).toEqual([2, 3, 4, 50, 51]);
+    expect(screen.getByText('消息 1').closest('[inert]')).toBeTruthy();
+    expect(screen.getByText('中间省略 45 条排队消息')).toBeTruthy();
+    await act(async () => motion.running.forEach(animation => animation.finish()));
+    expect(screen.queryByText('消息 1')).toBeNull();
+  } finally { cleanup(); motion.restore(); }
+});
+
+it('rebalances on resize and removes the omission line when everything fits', () => {
+  const view = render(<AnimatedPromptQueue maxVisibleItems={5}>{rows(1, 6)}</AnimatedPromptQueue>);
+  expect(visibleIds()).toEqual([1, 2, 3, 5, 6]);
+  expect(screen.getByText('中间省略 1 条排队消息')).toBeTruthy();
+  view.rerender(<AnimatedPromptQueue maxVisibleItems={4}>{rows(1, 6)}</AnimatedPromptQueue>);
+  expect(visibleIds()).toEqual([1, 2, 5, 6]);
+  expect(screen.getByText('中间省略 2 条排队消息')).toBeTruthy();
+  view.rerender(<AnimatedPromptQueue maxVisibleItems={6}>{rows(1, 6)}</AnimatedPromptQueue>);
+  expect(visibleIds()).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(screen.queryByText(/省略/)).toBeNull();
+});
+
+it('does not present the end of an incomplete page as the real tail', () => {
+  const view = render(<AnimatedPromptQueue maxVisibleItems={5} unloadedCount={50}>{rows(1, 50)}</AnimatedPromptQueue>);
+  expect(visibleIds()).toEqual([1, 2, 3]);
+  expect(screen.getByText('还有 97 条排队消息')).toBeTruthy();
+  view.rerender(<AnimatedPromptQueue maxVisibleItems={5}>{rows(1, 100)}</AnimatedPromptQueue>);
+  expect(visibleIds()).toEqual([1, 2, 3, 99, 100]);
+  expect(screen.getByText('中间省略 95 条排队消息')).toBeTruthy();
+});
+
+it('uses the available height for a preview budget, retaining both ends in a small window', () => {
+  expect(queuePreviewCapacity(324, 720)).toBe(5);
+  expect(queuePreviewCapacity(324, 480)).toBe(3);
+  expect(queuePreviewCapacity(0, 720)).toBe(2);
 });

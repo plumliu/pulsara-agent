@@ -1,3 +1,5 @@
+import { createPortal } from 'react-dom';
+import { usePromptHover } from '../lib/prompt-hover';
 import { LocalScheduledTasksApi } from '../lib/scheduled-tasks-api';
 import { useDesktopWorkspace } from './desktop-workspace';
 import { prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
@@ -108,7 +110,7 @@ import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
 import { WelcomeTypewriter } from './welcome-typewriter';
 import { AnimatedDisclosure } from './animated-disclosure';
-import { AnimatedPromptQueue } from './animated-prompt-queue';
+import { AnimatedPromptQueue, queuePreviewCapacity } from './animated-prompt-queue';
 import { builtinToolSummary } from '../lib/builtin-tool-summary';
 import { ToolResultDisplayContext } from '../lib/tool-result-display';
 import { PromptDraftStore } from '../lib/prompt-draft';
@@ -130,6 +132,33 @@ export interface WorkbenchHistory {
 }
 
 interface LocatedEntry { sessionId: string; entryId: string }
+
+function QueueActionButton({ icon: Icon, label, tooltip, onClick, deleteQueueId, busy = false }: {
+  icon: typeof Copy;
+  label: string;
+  tooltip: string;
+  onClick: () => void;
+  deleteQueueId?: string;
+  busy?: boolean;
+}) {
+  const { trigger, details, position, show, hide, dismiss } = usePromptHover(180);
+  const [placement, setPlacement] = useState(position);
+  if (position && position !== placement) setPlacement(position);
+  const id = useId();
+  if (busy) return <span className="composer-queue__action-busy" role="status" aria-label={`${label}处理中`}>
+    <LoaderCircle size={13} className="is-spinning" aria-hidden="true" />
+  </span>;
+  return <>
+    <button ref={trigger} type="button" aria-label={label} aria-describedby={position ? id : undefined}
+      data-delete-queue={deleteQueueId}
+      onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}
+      onClick={() => { dismiss(); onClick(); }}><Icon size={13} aria-hidden="true" /></button>
+    {placement && createPortal(<span ref={details} id={id} role="tooltip" className="queue-action-tooltip"
+      data-open={Boolean(position)} data-side={placement.above ? 'above' : 'below'} aria-hidden={!position} inert={!position}
+      style={{ left: placement.left, top: placement.top, translate: placement.above ? '0 calc(-100% - 6px)' : '0 6px' }}
+      >{tooltip}</span>, document.body)}
+  </>;
+}
 
 interface WorkbenchViewProps {
   history?: WorkbenchHistory;
@@ -157,12 +186,10 @@ interface WorkbenchViewProps {
   inspectorOpen: boolean;
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
-  queueNextCursor?: string | null;
   steerNextCursor?: string | null;
   steerLoading?: boolean;
   steerReadError?: string;
   onLoadMoreSteers?: () => void;
-  onLoadMoreQueue?: () => void;
   localSubmissions: LocalPromptSubmission[];
   queueActions: QueuedPromptAction[];
   onQueueAction: (item: QueuedPrompt, kind: QueuedPromptAction['kind']) => Promise<void>;
@@ -2386,8 +2413,6 @@ export function WorkbenchView({
   inspectorOpen,
   queuedCount,
   queuedPrompts,
-  queueNextCursor,
-  onLoadMoreQueue,
   steerNextCursor, steerLoading, steerReadError, onLoadMoreSteers,
   localSubmissions,
   queueActions,
@@ -2500,6 +2525,7 @@ export function WorkbenchView({
   const [modelBindingBusy, setModelBindingBusy] = useState(false);
   const [preparingQueueEdit, setPreparingQueueEdit] = useState<string>();
   const [jumpBottom, setJumpBottom] = useState(126);
+  const [queueVisibleItems, setQueueVisibleItems] = useState(5);
   const workbenchRef = useRef<HTMLElement>(null);
   const sessionActionsRef = useRef<HTMLDivElement>(null);
   const sessionActionsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -2530,10 +2556,14 @@ export function WorkbenchView({
     && conversationSubmissions.find(item => ['synchronizing', 'queued'].includes(item.status));
   const awaitingFirstActivity = isRunning && runtimeStatus === 'online' && activeTurnId && !interaction
     && !messages.some(message => message.role === 'assistant' && message.turnId === activeTurnId && !isEmptyLiveAssistant(message));
-  const conversationCommandIds = new Set(conversationSubmissions.map(item => item.commandId));
-  const queuedDisplayCount = queuedCount;
+  const terminalQueueIds = new Set(localSubmissions.filter(item => ['cancelled', 'rejected', 'consumed'].includes(item.status))
+    .map(item => item.queueItemId));
+  for (const action of activeQueueActions) if (action.status === 'accepted') terminalQueueIds.add(action.source.queueItemId);
+  for (const message of messages) if (message.inputSource?.queueItemId) terminalQueueIds.add(message.inputSource.queueItemId);
   const visibleQueue = queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
-    && !activeQueueActions.some(action => action.status === 'accepted' && action.source.queueItemId === item.queueItemId));
+    && !terminalQueueIds.has(item.queueItemId));
+  const queuedDisplayCount = Math.max(0, queuedCount - queuedPrompts.filter(item => item.deliveryMode === 'new-turn'
+    && terminalQueueIds.has(item.queueItemId)).length);
   const pendingSteers = queuedPrompts.filter(item => item.deliveryMode === 'steer' && item.targetTurnId === activeTurnId
     && !messages.some(message => message.userKind === 'steer'
       && message.inputSource?.queueItemId === item.queueItemId));
@@ -2603,57 +2633,52 @@ export function WorkbenchView({
       }
     }
   };
-  // Keep one presentation and React identity while a local submission becomes
-  // an accepted queue item; only the existing action availability changes.
-  const queueCards = [
-    ...visibleQueue.map(queued => ({ queued, local: undefined })),
-    ...localSubmissions.filter(item => !canonicalSubmission(item) && !conversationCommandIds.has(item.commandId) && !visibleQueue.some(queued => queued.commandId === item.commandId) && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER')
-      .map(local => ({ queued: undefined, local })),
-  ];
+  const restoreConflictId = editRestoreConflict ? pendingEditRestoration.commandId : undefined;
+  const notifiedRestoreConflict = useRef<string>(undefined);
+  useEffect(() => {
+    if (!restoreConflictId || notifiedRestoreConflict.current === restoreConflictId) return;
+    notifiedRestoreConflict.current = restoreConflictId;
+    onNotify('请先处理当前草稿', '已取消排队的原文会在草稿清空后恢复。');
+  }, [restoreConflictId, onNotify]);
+
+  // Only confirmed pending rows occupy queue positions. Local submissions
+  // remain available to reconciliation and canonical-content hydration.
   const composerQueue = (
-    <AnimatedPromptQueue key={session.id}>
-      {editRestoreConflict && <article key="edit-restore-conflict" data-command-id={pendingEditRestoration.commandId} className="is-local">
-        <Pencil size={13} aria-hidden="true" />
-        <PromptContentView
-          content={pendingEditRestoration.restoredContent ?? pendingEditRestoration.source.content}
-          variant="queue"
-          onReadImage={onReadPromptImage}
-        />
-        <small role="status">已取消排队，原文等待恢复；请先处理当前草稿。</small>
-      </article>}
-      {queueCards.map(({ queued, local }) => {
-        const item = queued ?? local!;
-        const action = queued && activeQueueActions.find(action => action.source.queueItemId === queued.queueItemId
+    <AnimatedPromptQueue key={session.id} maxVisibleItems={queueVisibleItems}
+      unloadedCount={Math.max(0, queuedDisplayCount - visibleQueue.length)}>
+      {visibleQueue.map(queued => {
+        const QueueIcon = queued.inputOrigin === 'SCHEDULED_TASK' ? AlarmClock
+          : queued.sourceKind === 'command' ? CornerDownRight : Bot;
+        const queueIconLabel = queued.inputOrigin === 'SCHEDULED_TASK' ? '定时输入'
+          : queued.sourceKind === 'command' ? '人类输入' : '助手输入';
+        const action = activeQueueActions.find(action => action.source.queueItemId === queued.queueItemId
           && ['submitting', 'unknown'].includes(action.status));
-        const busy = Boolean(action) || Boolean(local && ['sending', 'synchronizing'].includes(local.status));
-        const notice = action?.status === 'unknown' ? '正在核对操作状态'
-          : local?.status === 'unknown' ? '提交状态未知'
-            : local?.status === 'rejected' ? '队列已拒绝'
-              : local?.status === 'cancelled' ? '队列已取消'
-                : local?.status === 'consumed' && local.execution?.status === 'stopped' ? '已接收 · 执行已中断'
-                  : undefined;
-        return <article key={queued ? queued.sourceKind === 'command' ? queued.commandId : queued.queueItemId : local!.commandId}
-          data-queue-item-id={queued?.queueItemId} data-command-id={item.commandId} aria-busy={busy}>
-          <CornerDownRight size={13} aria-hidden="true" />
+        const busyKind = action?.kind ?? (preparingQueueEdit === `${session.id}:${queued.queueItemId}` ? 'edit' : undefined);
+        const busy = Boolean(busyKind);
+        const canSendQueued = Boolean(queued.sourceKind === 'command' && queued.inputOrigin !== 'SCHEDULED_TASK'
+          && !busy && !editingQueue && canControl && (isRunning || interaction?.kind === 'plan-draft'));
+        const canEditQueued = Boolean((queued.sourceKind === 'command' || queued.inputOrigin === 'SCHEDULED_TASK')
+          && !busy && !editingQueue && canControl);
+        const canDeleteQueued = !busy && !editingQueue && canControl;
+        return <article key={queued.sourceKind === 'command' ? queued.commandId : queued.queueItemId}
+          data-queue-item-id={queued.queueItemId} data-command-id={queued.commandId} aria-busy={busy}>
+          <QueueIcon size={13} role="img" aria-label={queueIconLabel} />
           <div className="composer-queue__body">
-            {queued && <small className={`composer-queue__source composer-queue__source--${queued.inputOrigin === 'CELL_OUTPUT' ? queued.cellOutput?.kind === 'error' ? 'error' : 'cell' : queued.inputOrigin === 'SCHEDULED_TASK' ? 'scheduled' : 'human'}`}>{queued.inputOrigin === 'SCHEDULED_TASK' && queued.scheduledInput ? <ScheduledSource taskId={queued.scheduledInput.taskId} trigger={queued.scheduledInput.triggerSource} onNotify={onNotify} /> : inputLabel(queued)}<InputSourceLink item={{ ...queued, inputSource: { identityKind: 'queue', ...queued } }} onNotify={onNotify} /></small>}
-            {queued?.contentUnavailable ? <p role="status">输入正文暂时无法完整读取，正在核对…</p> : local?.contentUnavailable || !item.content
-              ? <p>正文未能在队列终止前完成读取。</p>
-              : <PromptContentView content={item.content} variant="queue" markdown={queued && queued.sourceKind !== 'command'} onNotify={onNotify} onReadImage={onReadPromptImage} />}
+            {queued.contentUnavailable ? <p role="status">输入正文暂时无法完整读取，正在核对…</p>
+              : <PromptContentView content={queued.content} variant="queue" markdown={queued.sourceKind !== 'command'} onNotify={onNotify} onReadImage={onReadPromptImage} />}
           </div>
-          {queued && <button type="button" className="user-message-copy" aria-label="复制排队输入" title="复制完整原文" onClick={() => { void writeClipboardText(promptContentTextProjection(queued.content)).then(() => onNotify('已复制输入'), () => onNotify('无法复制输入')); }}><Copy size={13} /></button>}
-          {!isObserver && <div className="composer-queue__actions">
-            <button type="button" aria-label="发送" title="作为引导发送到当前任务" disabled={!queued || queued.sourceKind !== 'command' || queued.inputOrigin === 'SCHEDULED_TASK' || busy || editingQueue || !canControl || (!isRunning && interaction?.kind !== 'plan-draft')}
-              onClick={() => { if (queued) void queueAction(queued, 'send'); }}><CornerDownRight size={13} />发送</button>
-            <button type="button" aria-label="编辑" title="取消排队并放回输入框" disabled={!queued || (queued.sourceKind !== 'command' && queued.inputOrigin !== 'SCHEDULED_TASK') || busy || editingQueue || !canControl}
-              onClick={() => { if (queued) void queueAction(queued, 'edit'); }}><Pencil size={13} />编辑</button>
-            <button type="button" aria-label="删除" title="取消这条排队输入" disabled={!queued || busy || editingQueue || !canControl}
-              data-delete-queue={queued?.queueItemId} onClick={() => { if (queued) void queueAction(queued, 'delete'); }}><Trash2 size={13} />删除</button>
-          </div>}
-          {notice && <small className="composer-queue__notice" role="status"><span>{notice}</span>{local?.detail && <>：<span>{local.detail}</span></>}</small>}
+          <div className="composer-queue__actions">
+            <QueueActionButton icon={Copy} label="复制" tooltip="复制"
+              onClick={() => { void writeClipboardText(promptContentTextProjection(queued.content)).then(() => onNotify('已复制输入'), () => onNotify('无法复制输入')); }} />
+            {!isObserver && (canEditQueued || busyKind === 'edit') && <QueueActionButton icon={Pencil} label="编辑" tooltip="编辑" busy={busyKind === 'edit'}
+              onClick={() => { void queueAction(queued, 'edit'); }} />}
+            {!isObserver && (canDeleteQueued || busyKind === 'delete') && <QueueActionButton icon={Trash2} label="删除" tooltip="删除" deleteQueueId={queued.queueItemId} busy={busyKind === 'delete'}
+              onClick={() => { void queueAction(queued, 'delete'); }} />}
+            {!isObserver && (canSendQueued || busyKind === 'send') && <QueueActionButton icon={CornerDownLeft} label="发送" tooltip="发送" busy={busyKind === 'send'}
+              onClick={() => { void queueAction(queued, 'send'); }} />}
+          </div>
         </article>;
       })}
-      {queueNextCursor && onLoadMoreQueue && <button key="queue-more" type="button" onClick={onLoadMoreQueue}>加载更多排队任务</button>}
     </AnimatedPromptQueue>
   );
   const selectedModel = modelConfigurations.find((item) => item.id === modelCallBinding?.connection_id);
@@ -2793,6 +2818,10 @@ export function WorkbenchView({
       }
       const availableHeight = Math.max(0, maximum - otherComposerHeight - todoSpace);
       queue.style.setProperty('--composer-queue-available-height', `${availableHeight}px`);
+      if (workbench.clientHeight > 0 && queue.clientWidth > 0) {
+        const capacity = queuePreviewCapacity(availableHeight, queue.clientWidth);
+        setQueueVisibleItems(current => current === capacity ? current : capacity);
+      }
     }
     const composerTop = composer.getBoundingClientRect().top;
     if (todoTrigger && todoPopover) {

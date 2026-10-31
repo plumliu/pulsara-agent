@@ -1,3 +1,4 @@
+import { ChevronUp, MoreHorizontal } from 'lucide-react';
 import { MarkdownBody, type MarkdownNotify } from './markdown-body';
 import { AnnotationCard } from './response-annotations';
 import { SentAnnotationChip } from './sent-annotation-chip';
@@ -61,13 +62,22 @@ export function PromptContentView({
   const disclosureHeight = useRef<number | undefined>(undefined);
   useLayoutEffect(() => {
     const node = bodyRef.current;
-    if (variant !== 'queue' || !node || expanded) return;
-    // Follow AnnotationQuote's actual-layout measurement rather than text
-    // length: line wrapping also depends on width, fonts, and inline chips.
-    const measure = () => setOverflowing(node.scrollHeight > node.clientHeight);
+    if (variant !== 'queue' || !node) return;
+    // Measure this owner's natural layout at the original two-line height.
+    // The temporary style is restored synchronously before paint, so a one-line
+    // preview never becomes its own overflow threshold. The inline control slot
+    // keeps the available body width stable when expansion becomes available.
+    const measure = () => {
+      let next: boolean;
+      node.setAttribute('data-queue-measuring', '');
+      try { next = node.scrollHeight > node.clientHeight; }
+      finally { node.removeAttribute('data-queue-measuring'); }
+      setOverflowing(next);
+    };
     measure();
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
     observer?.observe(node);
+    for (const child of node.children) observer?.observe(child);
     let current = true;
     void document.fonts?.ready.then(() => { if (current) measure(); });
     return () => { current = false; observer?.disconnect(); };
@@ -147,7 +157,7 @@ export function PromptContentView({
   }, [load]);
 
   const body = variant === 'message' && content.parts.every(part => part.type === 'annotation' || (part.type === 'text' && !part.text)) ? null : (
-    <div ref={bodyRef} className="prompt-content-body" onCopy={event => {
+    <div ref={bodyRef} className={`prompt-content-body${variant === 'queue' && markdown ? ' is-markdown' : ''}`} onCopy={event => {
       const selection = window.getSelection();
       if (!selection?.rangeCount || !event.currentTarget.contains(selection.anchorNode)
         || !event.currentTarget.contains(selection.focusNode)) return;
@@ -181,18 +191,20 @@ export function PromptContentView({
           ))}
         </div>
       ) : variant === 'queue' ? (
-        <div ref={queueContentRef} className={`queued-prompt-content${expanded ? ' is-expanded' : ''}`}>
+        <div ref={queueContentRef} className={`queued-prompt-content${expanded ? ' is-expanded' : overflowing ? ' is-collapsed' : ''}`}>
           {body}
-          {(images.length > 0 || overflowing || expanded) && <div className="queued-prompt-content__meta">
+          <div className="queued-prompt-content__meta">
             {images.length > 0 && <span>{promptImageCount(content)} 张图片</span>}
-            {(overflowing || expanded) && <button type="button" aria-expanded={expanded} onClick={() => {
-              // Read the in-flight height too, so rapid reversals stay smooth.
-              disclosureHeight.current = queueContentRef.current?.getBoundingClientRect().height;
-              setExpanded(value => !value);
-            }}>
-              {expanded ? '收起' : '展开'}
-            </button>}
-          </div>}
+            <span className="queued-prompt-content__toggle-slot">
+              {(overflowing || expanded) && <button type="button" aria-label={expanded ? '收起' : '展开'} aria-expanded={expanded} onClick={() => {
+                // Read the in-flight height too, so rapid reversals stay smooth.
+                disclosureHeight.current = queueContentRef.current?.getBoundingClientRect().height;
+                setExpanded(value => !value);
+              }}>
+                {expanded ? <ChevronUp size={14} aria-hidden="true" /> : <MoreHorizontal size={14} aria-hidden="true" />}
+              </button>}
+            </span>
+          </div>
         </div>
       ) : renderMessageBody ? renderMessageBody(body) : body}
       <Lightbox

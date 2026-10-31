@@ -314,7 +314,6 @@ export interface RuntimeProjection {
   initialContextBase?: ProtocolCanonicalControl['initial_context_base'];
   providerRetry?: ProviderRetry | null;
   isRunning: boolean;
-  futureQueueNextCursor?: string | null;
   pendingSteerPage?: { targetTurnId: string; totalCount: number; nextCursor: string | null };
   queuedCount: number;
   queuedPrompts: QueuedPrompt[];
@@ -3007,7 +3006,6 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
     return {messages: readingMessages, canonicalInputs: canonicalInputs(messages), history: this.presentationHistory(readingMessages), interruptionNotices: this.projectInterruptionNotices(readingMessages), canonicalTurnIds,
       presentationNotices: [], contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base, isRunning: this.scopeKind === 'SUBAGENT' && Boolean(this.control.active_turns?.length),
-      futureQueueNextCursor: this.control.prompt_queue_next_cursor === undefined ? null : decimal(this.control.prompt_queue_next_cursor),
       pendingSteerPage: projectPendingSteerPage(this.control),
       queuedCount: numeric(this.control.prompt_queue_total_count), queuedPrompts: projectQueuedPrompts(this.control),
       promptTransitions: [], planMode: Boolean(this.control.active_plan_workflow),
@@ -4207,7 +4205,6 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       contextCompaction: projectContextCompaction(this.control),
       initialContextBase: this.control.initial_context_base,
       isRunning: !manualCommandId && (Boolean(this.liveControl.active_root_turn_id) || Boolean(activeTurn) || hasActiveDraft),
-      futureQueueNextCursor: this.control.prompt_queue_next_cursor === undefined ? null : decimal(this.control.prompt_queue_next_cursor),
       pendingSteerPage: projectPendingSteerPage(this.control),
       queuedCount: numeric(this.control.prompt_queue_total_count),
       queuedPrompts: projectQueuedPrompts(this.control).filter(item => !(item.sourceKind === 'command' && ['consumed', 'cancelled', 'rejected'].includes(this.promptTransitions.get(item.commandId)?.status ?? '')) && !canonical.some(entry => entry.input_source?.queue_item_id === item.queueItemId)),

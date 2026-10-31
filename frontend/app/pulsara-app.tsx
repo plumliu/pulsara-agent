@@ -265,7 +265,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   // Selection feedback is local UI state; only a connected runtime becomes active.
   const [openingSessionId, setOpeningSessionId] = useState('');
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
-  const [queuePages, setQueuePages] = useState<{owner: RuntimeConnection | CanonicalHistoryView; items: QueuedPrompt[]; nextCursor: string | null; depth: number; absent: Set<string>}>();
+  const [queuePages, setQueuePages] = useState<{owner: RuntimeConnection | CanonicalHistoryView; items: QueuedPrompt[]; absent: Set<string>}>();
   const queuePagesRef = useRef(queuePages);
   queuePagesRef.current = queuePages;
   const queueReadGeneration = useRef(0);
@@ -542,16 +542,16 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const controller = new AbortController();
     const generation = ++queueReadGeneration.current;
     const previous = queuePagesRef.current?.owner === reader ? queuePagesRef.current : undefined;
-    const depth = previous?.depth ?? 1;
     void (async () => {
       const found = new Map<string, QueuedPrompt>();
-      let cursor: string | undefined, nextCursor: string | null = null;
-      for (let index = 0; index < depth; index++) {
+      let cursor: string | undefined;
+      // Use the existing read-only pagination to obtain the actual tail.
+      // Rendering a bounded preview must not confuse page 1's end with it.
+      for (;;) {
         const page = await reader.readQueuePage(cursor, controller.signal);
         for (const item of page.items) found.set(item.queueItemId, item);
-        nextCursor = page.nextCursor;
-        if (!nextCursor) break;
-        cursor = nextCursor;
+        if (!page.nextCursor) break;
+        cursor = page.nextCursor;
       }
       const presentInControl = new Set(projection.queuedPrompts.map(item => item.queueItemId));
       const absent = new Set([...previous?.absent ?? []].filter(id => presentInControl.has(id)));
@@ -562,24 +562,12 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         if (exact) found.set(exact.queueItemId, exact); else absent.add(item.queueItemId);
       }
       if (!controller.signal.aborted && generation === queueReadGeneration.current && ownsHistoryReader(reader)) {
-        setQueuePages({owner:reader, items:[...found.values()], nextCursor, depth, absent});
+        setQueuePages({owner:reader, items:[...found.values()], absent});
       }
     })().catch(() => { /* A failed read retains the last confirmed queue. */ });
     return () => controller.abort();
   }, [activeReader, activeSessionId, ownsHistoryReader, projection.eventSequence, projection.queuedPrompts]);
 
-  const loadMoreQueue = useCallback(() => {
-    const state = queuePagesRef.current;
-    if (!state?.nextCursor || !ownsHistoryReader(state.owner)) return;
-    const generation = ++queueReadGeneration.current;
-    void state.owner.readQueuePage(state.nextCursor).then(page => {
-      if (generation !== queueReadGeneration.current || !ownsHistoryReader(state.owner)) return;
-      const items = new Map(state.items.map(item => [item.queueItemId, item]));
-      for (const item of page.items) items.set(item.queueItemId, item);
-      setQueuePages({owner:state.owner, items:[...items.values()], nextCursor:page.nextCursor,
-        depth:state.depth + 1, absent:state.absent});
-    }).catch(() => { /* Leave the cursor available for retry. */ });
-  }, [ownsHistoryReader]);
   useEffect(() => {
     if (!activeReader || !ownsHistoryReader(activeReader)) return;
     const publish = () => {
@@ -2816,8 +2804,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           inspectorOpen={inspectorOpen}
           queuedCount={projection.queuedCount}
           queuedPrompts={renderedQueuedPrompts}
-          queueNextCursor={visibleQueuePages ? visibleQueuePages.nextCursor : projection.futureQueueNextCursor}
-          onLoadMoreQueue={loadMoreQueue}
           steerNextCursor={pendingSteerReading.nextCursor}
           steerLoading={pendingSteerReading.loading}
           steerReadError={pendingSteerReading.error}
@@ -2830,7 +2816,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             && !item.handledByQueueAction
             && item.outcomeCode !== 'USER_REDIRECTED_TO_STEER'
             && !queueActions.some(action => action.status === 'accepted' && action.source.commandId === item.commandId)
-            && (item.displayAsMessage || !renderedQueuedPrompts.some((queued) => queued.commandId === item.commandId))
             && !projection.canonicalInputs.some(message => canonicalInputMatches(message, item) && canonicalPromptReady(message, projection))
           ))}
           runtimeStatus={runtimeStatus}

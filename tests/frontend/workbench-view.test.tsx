@@ -140,18 +140,18 @@ describe('PR04 composer queue hard cut', () => {
     },
   });
 
-  it('keeps the same compact card when a local submission is accepted into the queue', () => {
+  it('creates a queue card only after confirmation and preserves it on refresh', () => {
     const view = render(<WorkbenchView {...props({ localSubmissions: [{
       sessionId: 'session-one', connectionGeneration: 1, commandId: item.commandId,
       content: item.content, deliveryMode: 'new-turn', status: 'sending',
       targetTurnId: 'internal-turn-id', permission: 'read-only', detail: '正在核对投递状态',
     }] })} />);
+    expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item] })} />);
     const queue = screen.getByRole('region', { name: '等待处理的输入' });
     const card = queue.querySelector('article');
     const content = queue.querySelector('.queued-prompt-content');
-    expect(queue.textContent).not.toMatch(/适用权限|目标轮次|internal-turn-id|正在核对投递状态|正在加入/);
-    expect((within(queue).getByRole('button', { name: '编辑' }) as HTMLButtonElement).disabled).toBe(true);
-    view.rerender(<WorkbenchView {...props({ queuedPrompts: [item] })} />);
+    view.rerender(<WorkbenchView {...props({ queuedPrompts: [{ ...item }] })} />);
     expect(queue.querySelector('article')).toBe(card);
     expect(queue.querySelector('.queued-prompt-content')).toBe(content);
     expect((within(queue).getByRole('button', { name: '编辑' }) as HTMLButtonElement).disabled).toBe(false);
@@ -164,9 +164,10 @@ describe('PR04 composer queue hard cut', () => {
     expect(screen.queryByRole('article', { name: '引导' })).toBeNull();
     const queue = screen.getByRole('region', { name: '等待处理的输入' });
     for (const name of ['发送', '编辑', '删除']) {
-      expect((within(queue).getByRole('button', { name }) as HTMLButtonElement).disabled)
-        .toBe(true);
+      expect(within(queue).queryByRole('button', { name })).toBeNull();
     }
+    expect(within(queue).getByRole('status', {name:'发送处理中'})).toBeTruthy();
+    expect(queue.querySelector('.composer-queue__notice')).toBeNull();
     view.rerender(<WorkbenchView {...props({ queuedPrompts: [item], queueActions: [action] })} />);
     expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
     expect(screen.getAllByRole('article', { name: '引导' })).toHaveLength(1);
@@ -255,20 +256,55 @@ describe('PR04 composer queue hard cut', () => {
     expect(promptDraftStore.summary('session-one').text).toBe('');
   });
 
+  it.each(['sending','unknown','cancelled','rejected','consumed'] as const)('does not add local %s records to the queue or its omission count', status => {
+    const view = render(<WorkbenchView {...props({queuedCount:1,queuedPrompts:[item],localSubmissions:[{
+      sessionId:'session-one',connectionGeneration:1,commandId:'local-only',queueItemId:'local-only-queue',
+      deliveryMode:'new-turn',status,content:textPrompt('本地状态原文'),
+    }]})}/>);
+    const queue = screen.getByRole('region',{name:'等待处理的输入'});
+    expect(queue.querySelectorAll('article')).toHaveLength(1);
+    expect(queue.textContent).not.toContain('本地状态原文');
+    expect(view.container.querySelector('.composer-queue__omission')).toBeNull();
+  });
+
+  it('lets an exact cancellation override a stale pending page without a cancelled card', () => {
+    const view = render(<WorkbenchView {...props({queuedCount:1,queuedPrompts:[item]})}/>);
+    view.rerender(<WorkbenchView {...props({queuedCount:1,queuedPrompts:[item],localSubmissions:[{
+      sessionId:'session-one',connectionGeneration:1,commandId:item.commandId,queueItemId:item.queueItemId,
+      deliveryMode:'new-turn',status:'cancelled',content:item.content,
+    }]})}/>);
+    expect(screen.queryByRole('region',{name:'等待处理的输入'})).toBeNull();
+    expect(screen.queryByText('队列已取消')).toBeNull();
+  });
+
+  it('keeps an uncertain delete on the existing card with one inert spinner', () => {
+    const action = {...acceptedAction('delete'),status:'unknown' as const};
+    const onQueueAction = vi.fn(async () => {});
+    const view = render(<WorkbenchView {...props({queuedPrompts:[item],queuedCount:1,queueActions:[action],onQueueAction})}/>);
+    const queue = screen.getByRole('region',{name:'等待处理的输入'});
+    expect(queue.querySelectorAll('article')).toHaveLength(1);
+    expect(within(queue).getByRole('status',{name:'删除处理中'})).toBeTruthy();
+    expect(within(queue).queryByRole('button',{name:'删除'})).toBeNull();
+    expect(queue.textContent).not.toContain('正在核对操作状态');
+    expect(onQueueAction).not.toHaveBeenCalled();
+    view.rerender(<WorkbenchView {...props({queuedPrompts:[item],queuedCount:1,queueActions:[{...action,status:'rejected'}],onQueueAction})}/>);
+    expect(within(queue).queryByRole('status',{name:'删除处理中'})).toBeNull();
+    expect(within(queue).getByRole('button',{name:'删除'})).toBeTruthy();
+  });
+
   it('keeps an unexpected draft editable while retaining an accepted edit for later restoration', async () => {
+    const onNotify = vi.fn();
     const view = render(<WorkbenchView {...props()} />);
     const input = screen.getByLabelText('发送给 Pulsara');
     act(() => promptDraftStore.insertText('session-one', 'another draft'));
     // A restored connection can reveal an accepted edit after a local draft exists.
     const action = acceptedAction('edit');
     const onQueueActionHandled = vi.fn();
-    view.rerender(<WorkbenchView {...props({ queueActions: [action], onQueueActionHandled })} />);
+    view.rerender(<WorkbenchView {...props({ queueActions: [action], onQueueActionHandled, onNotify })} />);
     expect(input.getAttribute('contenteditable')).toBe('true');
     expect(promptDraftStore.summary('session-one').text).toBe('another draft');
-    expect(screen.getByRole('region', { name: '等待处理的输入' })
-      .querySelector('.prompt-content-body')?.textContent)
-      .toBe(promptContentTextProjection(item.content));
-    expect(screen.getByRole('status').textContent).toContain('请先处理当前草稿');
+    expect(screen.queryByRole('region', { name: '等待处理的输入' })).toBeNull();
+    expect(onNotify).toHaveBeenCalledWith('请先处理当前草稿', '已取消排队的原文会在草稿清空后恢复。');
     expect(onQueueActionHandled).not.toHaveBeenCalled();
     const current = await promptDraftStore.capture('session-one');
     act(() => { promptDraftStore.clearIfSnapshot('session-one', current); });
@@ -390,7 +426,7 @@ describe('PR04 composer queue hard cut', () => {
     expect(animate).not.toHaveBeenCalled();
   });
 
-  it('places exact duplicate inputs in composer with three accessible flat actions', () => {
+  it('places exact duplicate inputs in composer with accessible icon actions and copy first', () => {
     const queuedPrompts = ['one', 'two'].map((id, index) => ({
       queueItemId: id, sourceKind: 'command' as const, commandId: `command-${id}`, sequence: String(index + 1),
       status: 'pending' as const, deliveryMode: 'new-turn' as const,
@@ -403,8 +439,9 @@ describe('PR04 composer queue hard cut', () => {
     expect(within(queue).getAllByRole('button', { name: '发送' })).toHaveLength(2);
     expect(within(queue).getAllByRole('button', { name: '编辑' })).toHaveLength(2);
     expect(within(queue).getAllByRole('button', { name: '删除' })).toHaveLength(2);
-    expect(queue.querySelectorAll('.composer-queue__actions button svg')).toHaveLength(6);
-    expect(within(queue).getAllByRole('button', { name: '复制排队输入' })).toHaveLength(2);
+    expect(queue.querySelectorAll('.composer-queue__actions button svg')).toHaveLength(8);
+    expect([...queue.querySelectorAll('.composer-queue__actions')[0].querySelectorAll('button')].map(button => button.getAttribute('aria-label'))).toEqual(['复制', '编辑', '删除', '发送']);
+    expect(within(queue).getAllByRole('button', { name: '复制' })).toHaveLength(2);
   });
 });
 
@@ -551,15 +588,15 @@ describe('prompt delivery and preparation', () => {
     deliveryMode: 'new-turn' as const, permission: 'read-only' as const, displayAsMessage: true,
   };
 
-  it.each([true, false])('shows stopped execution while preserving consumed input placement (message: %s)', displayAsMessage => {
+  it('shows stopped execution while preserving consumed input in the conversation', () => {
     const view = render(<WorkbenchView {...props({ isRunning: false, localSubmissions: [{
-      ...submission, displayAsMessage, status: 'consumed',
+      ...submission, status: 'consumed',
       outcomeCode: 'HOST_TAKEOVER',
       execution: { status: 'stopped', terminal_reason: 'HOST_TAKEOVER' },
     }] })} />);
     expect(screen.getByText('已接收 · 执行已中断')).toBeTruthy();
     expect(screen.getByText('开始处理这条消息')).toBeTruthy();
-    expect(Boolean(view.container.querySelector('[data-pending-message]'))).toBe(displayAsMessage);
+    expect(view.container.querySelector('[data-pending-message]')).toBeTruthy();
     expect(screen.queryByText('准备开始…')).toBeNull();
   });
 
@@ -3214,19 +3251,20 @@ it('shows mixed future inputs in one queue and cancels only the selected Cell re
  const region=screen.getByRole('region',{name:'等待处理的输入'});
  expect([...region.querySelectorAll('[data-queue-item-id]')].map(row=>row.getAttribute('data-queue-item-id'))).toEqual(queue.map(item=>item.queueItemId));
  expect(screen.getByText('4 条等待处理')).toBeTruthy();
- expect(within(region).getByText('脚本输出 · cell:a')).toBeTruthy();
- expect(within(region).getByText('脚本错误 · cell:a')).toBeTruthy();
+ expect(region.querySelector('.composer-queue__source')).toBeNull();
+ expect(within(region).getByText('real failure')).toBeTruthy();
  const first=region.querySelector('[data-queue-item-id="cell-a"]')!;
- expect(within(first as HTMLElement).getByRole('button',{name:'发送'}).hasAttribute('disabled')).toBe(true);
- expect(within(first as HTMLElement).getByRole('button',{name:'编辑'}).hasAttribute('disabled')).toBe(true);
+ expect(within(first as HTMLElement).queryByRole('button',{name:'发送'})).toBeNull();
+ expect(within(first as HTMLElement).queryByRole('button',{name:'编辑'})).toBeNull();
  fireEvent.click(within(first as HTMLElement).getByRole('button',{name:'删除'}));
  await waitFor(()=>expect(onQueueAction).toHaveBeenCalledExactlyOnceWith(queue[1],'delete'));
  expect(region.querySelector('[data-queue-item-id="cell-b"]')).toBeTruthy();
  const scheduled=region.querySelector('[data-queue-item-id="timer-a"]')!;
  expect(within(scheduled as HTMLElement).getByRole('button',{name:'编辑'}).hasAttribute('disabled')).toBe(false);
- expect(within(scheduled as HTMLElement).getByRole('button',{name:'发送'}).hasAttribute('disabled')).toBe(true);
+ expect(within(scheduled as HTMLElement).queryByRole('button',{name:'发送'})).toBeNull();
  view.rerender(<WorkbenchView {...props({queuedPrompts:queue,queuedCount:4,isObserver:true,canControl:false})}/>);
- expect(screen.getByRole('region',{name:'等待处理的输入'}).querySelectorAll('.composer-queue__actions')).toHaveLength(0);
+ const observerQueue=screen.getByRole('region',{name:'等待处理的输入'});
+ expect([...observerQueue.querySelectorAll('.composer-queue__actions button')].map(button=>button.getAttribute('aria-label'))).toEqual(Array(4).fill('复制'));
 });
 it('keeps a Cell steer inside the same process with collapsed Markdown and a real next-turn boundary',()=>{
  const messages:import('../../frontend/lib/pulsara-types').Message[]=[{id:'input',turnId:'turn:a',role:'user',userKind:'prompt',body:'task',time:''},

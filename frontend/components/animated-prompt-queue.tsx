@@ -1,4 +1,10 @@
-import { Children, useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
+import { Children, Fragment, useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react';
+
+// A display budget, not a queue limit. The row estimate includes card padding
+// and spacing; reserve one quiet line for the omitted middle.
+export function queuePreviewCapacity(availableHeight: number, width: number): number {
+  return Math.max(2, Math.floor((availableHeight - 24) / (width <= 480 ? 80 : 60)));
+}
 
 const timing = { duration: 240, easing: 'cubic-bezier(.2,.7,.2,1)' };
 const reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -38,25 +44,52 @@ function QueueBubble({ children, exiting, onExitComplete }: {
 }
 
 /** Short-lived visual presence only; the caller owns all queue semantics. */
-export function AnimatedPromptQueue({ children }: { children: ReactNode }) {
+export function AnimatedPromptQueue({ children, maxVisibleItems, unloadedCount = 0 }: {
+  children: ReactNode; maxVisibleItems?: number; unloadedCount?: number;
+}) {
   const incoming = useMemo(() => Children.toArray(children) as ReactElement[], [children]);
-  const [present, setPresent] = useState(incoming);
+  const limit = Math.max(2, maxVisibleItems ?? incoming.length);
+  const headCount = Math.ceil(limit / 2);
+  const visible = useMemo(() => {
+    // Until the remaining pages arrive, the last loaded row is not the tail.
+    if (unloadedCount > 0) return incoming.slice(0, headCount);
+    return incoming.length <= limit ? incoming
+      : [...incoming.slice(0, headCount), ...incoming.slice(-Math.floor(limit / 2))];
+  }, [incoming, limit, headCount, unloadedCount]);
+  const omittedCount = incoming.length + unloadedCount - visible.length;
+  const firstTailKey = omittedCount > 0 && unloadedCount === 0 ? visible[headCount]?.key : undefined;
+  const [present, setPresent] = useState(visible);
   useLayoutEffect(() => {
     // Preserve the same bubble when a local submission becomes canonical,
-    // and retain removed bubbles solely until the exit animation settles.
-    setPresent(current => [
-      ...current.map(item => incoming.find(next => next.key === item.key) ?? item),
-      ...incoming.filter(item => !current.some(previous => previous.key === item.key)),
-    ]);
-  }, [incoming]);
+    // retaining only actual departures for exit animation. Moving into the
+    // omitted middle is a display change, never a consumption/cancel signal.
+    setPresent(current => {
+      const next = [...visible];
+      const incomingKeys = new Set(incoming.map(item => item.key));
+      current.forEach((item, index) => {
+        if (incomingKeys.has(item.key)) return;
+        const following = current.slice(index + 1).find(candidate => next.some(value => value.key === candidate.key));
+        const position = following ? next.findIndex(value => value.key === following.key) : next.length;
+        next.splice(position, 0, item);
+      });
+      return next;
+    });
+  }, [incoming, visible]);
   const finishExit = useCallback((key: string) => {
     setPresent(current => current.filter(item => String(item.key) !== key));
   }, []);
 
-  if (!present.length) return null;
+  if (!present.length && !omittedCount) return null;
+  const omission = omittedCount > 0 ? <p className="composer-queue__omission">
+    {unloadedCount > 0 ? `还有 ${omittedCount} 条排队消息` : `中间省略 ${omittedCount} 条排队消息`}
+  </p> : null;
   return <section className="composer-queue" aria-label="等待处理的输入">
-    {present.map(item => <QueueBubble key={item.key} exiting={!incoming.some(next => next.key === item.key)} onExitComplete={finishExit}>
-      {item}
-    </QueueBubble>)}
+    {present.map(item => <Fragment key={item.key}>
+      {item.key === firstTailKey && omission}
+      <QueueBubble exiting={!incoming.some(next => next.key === item.key)} onExitComplete={finishExit}>
+        {item}
+      </QueueBubble>
+    </Fragment>)}
+    {unloadedCount > 0 && omission}
   </section>;
 }
