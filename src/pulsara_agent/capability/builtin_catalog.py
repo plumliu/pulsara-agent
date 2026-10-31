@@ -409,6 +409,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         name="query_capabilities",
         description=(
             "Query capabilities. Omit target for an overview or listing; optional fields: kind, scope, source_kind, parent, offset, limit. parent selects whose children to list; kind filters the catalog category. To inspect an object itself, pass only its complete target, without list filters or pagination. target.kind identifies the object type. Omit unused fields; target does not accept null. Read Skill bodies with read_file using a PATH target built from skill_path. "
+            "For MCP_TOOL, copy the listed full tool_name (mcp__<server>__<tool>), not the bare remote name. "
             "Continue lists with next_offset and the same filters. Results describe the observed catalog and its completeness. SUBAGENT callers can query only their assigned MCP runtime. For MCP tools, follow invocation.mode: DIRECT uses the listed named tool; META uses the returned input_schema and invocation.target with use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE gives the current obstacle. Use read_mcp_resource for resource content and get_mcp_prompt for rendered prompts."
         ),
         input_schema=query_input_schema(),
