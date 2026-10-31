@@ -562,7 +562,7 @@ export function InspectorPanel({
   const renderTab = (tab: WorkspaceTab) => {
     if (!session.id) return <div className="inspector-empty" role="status">创建或选择会话后查看内容</div>;
     if (tab.kind === 'subagents') return <AgentList root={session.id} onOpen={(agent, source) => void openPrepared({ kind: 'agent', rootSessionId: session.id, agentSessionId: agent.agent_id }, source)} />;
-    if (tab.kind === 'cells-unavailable') return <div className="inspector-empty" role="status">暂无可用运行实例</div>;
+    if (tab.kind === 'cells-unavailable') return <div className="inspector-empty" role="status"><FileCode2 size={18}/><span>暂无可用运行实例</span></div>;
     if (tab.kind === 'cells') {
       if (backgroundHostSessionId && tab.hostSessionId !== backgroundHostSessionId) return <div className="inspector-empty" role="status">对象已不可用</div>;
       return <CellList root={session.id} host={tab.hostSessionId} onOpen={(cell, host, source) => void openPrepared({ kind: 'cell', rootSessionId: session.id, hostSessionId: host, cellId: cell.target.cell_id, sourceExecAttemptId: cell.source_exec_attempt_id }, source)} />;

@@ -347,7 +347,7 @@ export function BackgroundTerminalPanel({
 
   if (loading && items.size === 0) return <WorkspaceLoading/>;
   if (error && items.size === 0) return <div className="task-inventory-notice task-inventory-notice--error"><AlertTriangle size={15} /><span><strong>后台终端不可用</strong><small>{error}</small></span><button onClick={() => void refresh()}><RefreshCw size={11} /> 重试</button></div>;
-  if (!items.size) return <div className="inspector-empty"><TerminalSquare size={18} /><span>{selectedProcessId ? '原进程记录已不在当前保留范围。' : '当前没有已交付的后台命令'}</span></div>;
+  if (!items.size) return <div className="inspector-empty"><TerminalSquare size={18} /><span>{selectedProcessId ? '原进程记录已不在当前保留范围。' : '暂无后台进程'}</span></div>;
 
   return <div className={selectedProcessId ? 'process-detail-panel' : 'background-terminal-panel'}>
     {[...items.values()].map((item) => <article className={`background-process${selectedProcessId ? ' process-detail' : ''}`} key={item.process.processId}>

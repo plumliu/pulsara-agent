@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronRight, GitFork, LoaderCircle, Network } from 'lucide-react';
+import { Bot, ChevronRight, FileCode2, LoaderCircle, Network } from 'lucide-react';
 import { flushSync } from 'react-dom';
 import { agentCellApi, AgentCellError, type AgentRow, type CellGraphPage, type CellRow, type Participant, type WorkFact } from '../lib/agent-cell-api';
 import { FilePreviewPanel, FileTextContent } from './file-preview-panel';
@@ -86,10 +86,11 @@ export function AgentList({ root, onOpen }: { root: string; onOpen: (agent: Agen
   const readOne = useCallback(async (id: string, signal: AbortSignal) => (await agentCellApi.agent(root, id, signal)).agent, [root]);
   const page = usePages(fetchPage, key, readOne);
   if (page.unavailable) return <div className="inspector-empty" role="status">对象已不可用</div>;
-  return <section className="agent-cell-list">
+  const empty = !page.loading && !page.error && !page.rows.length;
+  return <section className={empty ? undefined : 'agent-cell-list'}>
     {page.loading && <div className="agent-cell-empty"><LoaderCircle size={16} className="spin" /></div>}
     {page.error && <div role="status" className="agent-cell-error">{page.error}</div>}
-    {!page.loading && !page.error && !page.rows.length && <div className="agent-cell-empty">暂无子代理</div>}
+    {empty && <div className="inspector-empty"><Bot size={18}/><span>暂无子代理</span></div>}
     {page.rows.map(agent => <button key={agent.agent_id} type="button" className="agent-cell-row" onClick={event => onOpen(agent, event.currentTarget)}>
       <span className="agent-cell-avatar"><Bot size={15}/></span><span className="agent-cell-row-name">{agent.title || '子代理'}</span><span className={`agent-cell-indicator${agent.current_work_id ? ' is-active' : ''}`} title={agent.current_work_id ? '工作中' : '空闲'} />{agent.queued_count > 0 && <span className="agent-cell-count">{agent.queued_count}</span>}<ChevronRight size={14}/>
     </button>)}
@@ -102,12 +103,13 @@ export function CellList({ root, host, onOpen }: { root: string; host: string; o
   const readOne = useCallback(async (id: string, signal: AbortSignal) => (await agentCellApi.cell(root, host, id, signal)).cell, [root, host]);
   const page = usePages(fetchPage, key, readOne);
   if (page.unavailable) return <div className="inspector-empty" role="status">对象已不可用</div>;
-  return <section className="agent-cell-list">
+  const empty = !page.loading && !page.error && !page.rows.length;
+  return <section className={empty ? undefined : 'agent-cell-list'}>
     {page.loading && <div className="agent-cell-empty"><LoaderCircle size={16} className="spin" /></div>}
     {page.error && <div role="status" className="agent-cell-error">{page.error}</div>}
-    {!page.loading && !page.error && !page.rows.length && <div className="agent-cell-empty">暂无 Cell</div>}
+    {empty && <div className="inspector-empty"><FileCode2 size={18}/><span>暂无 Cell</span></div>}
     {page.rows.map(cell => <button key={cell.target.cell_id} type="button" className="agent-cell-row" onClick={event => onOpen(cell, host, event.currentTarget)}>
-      <span className="agent-cell-avatar agent-cell-avatar--cell"><GitFork size={15}/></span><span className="agent-cell-row-name">{cell.target.cell_id}</span><span className={`agent-cell-indicator${['running','queued'].includes(cell.state) ? ' is-active' : ''}`} title={cell.state}/><ChevronRight size={14}/>
+      <span className="agent-cell-avatar agent-cell-avatar--cell"><FileCode2 size={15}/></span><span className="agent-cell-row-name">{cell.target.cell_id}</span><span className={`agent-cell-indicator${['running','queued'].includes(cell.state) ? ' is-active' : ''}`} title={cell.state}/><ChevronRight size={14}/>
     </button>)}
     {page.next && <button className="agent-cell-more" type="button" onClick={page.more}>加载更多</button>}
   </section>;
