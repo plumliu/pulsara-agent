@@ -94,8 +94,7 @@ baseline 修改后，同步更新既有 expected catalog 资源的 `observed_cat
 当前文档原地修改，删除预设说明、参数、默认与继承规则和输入示意中的身份 entry：
 
 - `PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md`：请求表、事实归属、输入顺序、复用、示例、实施范围和验收。
-- `PULSARA_AGENT_CODE_MODE_DEFERRED_SURFACES.zh.md`：删除预设提示词暂缓事项，以及依赖该概念的 SYSTEM 职责说明。
-- `PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md`、`PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md`：删除仍将 Subagent profile 列为暂缓事项的说明，保留其他独立暂缓事项与 Code Mode 资源配置概念。
+- `PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md`、`PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md`：不提供 Subagent profile 参数、来源或待实现入口；Code Mode 资源配置保持独立合同。
 - `PULSARA_COMPACTION_MODEL_CONFIGURATION_AND_MANUAL_IDLE_ONLY_IMPLEMENTATION_SPEC.zh.md`：以真实的初始 context／材料保留“instruction 前存在输入”的整组边界说明与验收。
 - `bundled_skills/pulsara-code-mode/references/agent-orchestration/coordination.md`、`workflows.md`、`examples.md`：删除全部 profile 教学和示例参数。
 - `bundled_skills/pulsara-plugin-installer/references/pulsara-hook-extension.md`：删除已经没有现行生产消费者的 worker-profile matcher 说明。
@@ -109,7 +108,7 @@ baseline 修改后，同步更新既有 expected catalog 资源的 `observed_cat
 - `run_pr04_prompt_queue_dogfood.py` 删除或按现行 Work 改写退役 wait／FIFO 子场景，保留独立队列验证及仍被其他脚本导入的辅助函数。
 - 其他仍教模型使用旧 Task API 的脚本不能直接作为本次通过证据；仅当选作当前验收入口时，先按现行 Agent／Work 合同调整所用场景。不借本次删除扩展重写全部历史 dogfood。
 
-前端源代码删除后运行既有 `npm run build:desktop`，同步提交生成的桌面资源及 source map；即使可执行 JS 已 tree-shake，内嵌旧源码的 source map 也不得残留五种预设。
+前端源代码删除后运行既有 `npm run build:desktop`，确认生成的桌面资源及 source map 不残留五种预设。`src/pulsara_agent/desktop_app/static/` 是 Git 忽略的构建产物，不提交；桌面打包先构建前端，wheel 显式包含生成目录，缺少产物时构建失败。构建与安装边界以 [开发说明](DEVELOPMENT.zh-CN.md#增量构建与检查) 为准。
 
 ## 5. 验证范围
 

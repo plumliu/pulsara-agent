@@ -1,6 +1,6 @@
 # Pulsara Code Mode：ROOT＋bypass、工具子集与执行合同
 
-日期：2026-10-31。当前合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)。本轮实现与激活验证进行中；既往证据仅说明其原有范围。
+日期：2026-11-01。状态：**当前实现合同。** 输入与输出采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
 子代理与 Cell 侧边栏及其 `open_in_pulsara` 接入见 [侧边栏实施规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
 
@@ -208,14 +208,14 @@ ROOT 可以独立压缩。JS 结果交付不安装 provider input；正式输出
 
 ## 6. MCP 的查询与调用
 
-cell 创建时冻结 JS 目录的名称和精确签名，包括当时直接 MCP。每次调用复核当前 server、schema、policy 和 executor。新工具／不匹配原签名的工具 inspect 后走 META，不让 cell 目录或 provider tools 原地长大。
+cell 创建时冻结 JS 目录的名称和精确签名，包括当时直接 MCP。每次调用复核当前 server、schema、policy 和 executor。新工具／不匹配原签名的工具通过 `query_capabilities` 查询后走 META，不让 cell 目录或 provider tools 原地长大。
 
-当前 META ref 只有完整 inspect schema 进入 provider 后才激活，需在同一个进程内 ref owner 区分 MODEL_EPOCH 与 CODE_CELL 消费者：
+META ref 的同一进程内 owner 区分 MODEL_EPOCH 与 CODE_CELL 消费者，完整查询结果按各自交付边界激活：
 
 - 原生仍由模型实际获得完整 schema 后激活。
 - JS 在完整结果成功交给该 cell 时激活；交付失败不激活。
 - JS DIRECT／META 以 cell 固定直接签名为基准；当前事实取 Host MCP owner，不依赖活动 provider view。
-- ref 绑定真实 Host、会话、调用方、工具事实和消费者。纯 ROOT compaction／cold 不销毁 cell ref；generation、schema／policy、范围或可用性实际改变时拒绝未派发调用，必要时重 inspect。
+- ref 绑定真实 Host、会话、调用方、工具事实和消费者。纯 ROOT compaction／cold 不销毁 cell ref；generation、schema／policy、范围或可用性实际改变时拒绝未派发调用，必要时重新查询。
 - cell 结束释放 ref；已接纳物理调用沿自己的 permit 结算。
 
 不新增持久 token、连接管理、旧接口别名或自动副作用重试。响应丢失不能当作未执行。
@@ -304,7 +304,7 @@ const selected = await tools.query_agents({ target: review.work });
 console.log(selected.final ?? selected.diagnostic ?? "The selected work ended without text.");
 ```
 
-exec_cell 接纳后立即返回，ROOT 可回复或压缩，research／review 仍按依赖执行。review 结束后脚本显式 query，只输出选定结果；正式输出主动入队，idle ROOT 可由该输入开启新 turn。若先 manage_cell.stop，已经接纳的 Work 仍独立运行，可用原生 inspect／wait／stop 管理。
+exec_cell 接纳后立即返回，ROOT 可回复或压缩，research／review 仍按依赖执行。review 结束后脚本显式 query，只输出选定结果；正式输出主动入队，idle ROOT 可由该输入开启新 turn。若先 manage_cell.stop，已经接纳的 Work 仍独立运行，可用原生 query_agents／wait_agent／stop_agent 管理。
 
 单 Agent、初始队友引用以及调查→审查→修订→实现→原 critic 代码审查的完整例子见配套文档。
 
@@ -318,7 +318,7 @@ exec_cell 接纳后立即返回，ROOT 可回复或压缩，research／review �
 | tool_contracts／execution／repository／clean-v0 | 最小调用来源；共用 decision／attempt／TOOL_RESULT entry 与逐调用结算，不另建 JS 结果或执行状态 |
 | 共同请求／turn／协作入口 | WORK 直接引用已接纳请求；原生与 JS 派活共用请求队列、turn 与 final 链路，按目标 session 调度；依赖与 batch 原子接纳遵循配套设计 |
 | ToolOutput／artifact／projection | typed 值、终端 artifact 入口、完整输出页，不以 preview 冒充实际值 |
-| MCP ref／runtime | 双消费者、当前真实 binding、完整 inspect 激活 |
+| MCP ref／runtime | 双消费者、当前真实 binding、完整查询结果交付后激活 |
 | runner／compaction／Host／Hook | 持续 cell、实际 Hook 来源、handoff 状态观察与用户 Cell 索引、准确 stop／close／reopen |
 | Node／QuickJS 打包 | 可复现 Node／WASM 依赖、隔离、计时、handle、有限 IPC；运行时不联网下载依赖 |
 | reader／history／fork／UI／用户控制 | 模型来源过滤在分页／预算前完成；UI 使用同一真实结果并归组到父 exec_cell；状态、输出、精确停止复用既有 owner |
@@ -341,7 +341,7 @@ exec_cell 接纳后立即返回，ROOT 可回复或压缩，research／review �
 1. 原生与 JS 使用同一结果 entry、artifact 和业务值；CODE 过滤在分页／报价前完成，模型读取、压缩、搜索与 fork 不混入内部结果，UI 可从父 exec_cell 查看真实调用。
 2. 原生批次／两个 cell／慢快调用并存，取消、Hook、结果归属不串线。
 3. cell 等真实 Work 时 ROOT 完成生产压缩，结束后下一条工具只执行一次；ROOT final 后也能继续。
-4. JS inspect→META 不经模型可调用；纯压缩不坏 ref，真实 server／schema 变化仍约束调用。
+4. JS query_capabilities→META 不经模型可调用；纯压缩不坏 ref，真实 server／schema 变化仍约束调用。
 5. 循环、微任务、编译卡住、OOM、输出满能结束；长外部等待和多段短计算不被总寿命限制杀掉。
 6. 多页／大单条输出、terminal gap、artifact 不可用、unsafe 数字与失败不静默丢失或假成功。
 7. Stop、steer、Plan、manage_cell.stop、Host close、进程死亡按表工作；未 await 的已提交操作正确结算。

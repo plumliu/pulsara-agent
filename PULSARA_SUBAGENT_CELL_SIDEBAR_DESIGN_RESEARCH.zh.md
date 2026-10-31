@@ -1,10 +1,10 @@
 # Pulsara 子代理与 Cell 侧边栏实施规格
 
-日期：2026-10-31。当前源码阅读和实时图生命周期以 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md) 为准；实现与激活验证进行中。既往证据保留其原验证范围。
+日期：2026-11-01。状态：**当前实现合同。** 输入呈现、源码阅读和协作图采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
 本文确定两个侧边栏入口、共同阅读链、Work 输入存储 hard cut、Cell 局部编排图及 `open_in_pulsara` 接入。保留原文件路径供现有链接引用。
 
-本规格范围内以本文为准；其余运行时语义沿用 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)、[Code Mode 合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)及[工具查询与 Cell 身份规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md)。不改变 Agent／Work／Cell 身份、执行权限、停止范围、闲置期限或模型输入前缀边界。新 schema／SYSTEM 只在新 cold epoch 或显式采用的 compaction successor 安装；已有 epoch 的 SYSTEM／tools 保持原字节，messages 仅追加。
+本文说明侧边栏的读取与导航所有权；输入展示、列表样式及实时图行为以统一输入规格 §6、§8 为准。其余运行时语义沿用 [Agent／Work 设计](PULSARA_SUBAGENT_WORK_CODE_MODE_DESIGN.zh.md)、[Code Mode 合同](PULSARA_CODE_MODE_TOOL_SUBSET_DESIGN.zh.md)及[工具查询与 Cell 身份规格](PULSARA_TOOL_QUERY_AND_CELL_ID_UNIFICATION_IMPLEMENTATION_SPEC.zh.md)。不改变 Agent／Work／Cell 身份、执行权限、停止范围、闲置期限或模型输入前缀边界。新 schema／SYSTEM 只在新 cold epoch 或显式采用的 compaction successor 安装；已有 epoch 的 SYSTEM／tools 保持原字节，messages 仅追加。
 
 ## 1. 已确定的产品语义
 
@@ -18,7 +18,7 @@
 | cell | `cells` |
 | 网页 | `browser` |
 
-本轮新增「子代理」「cell」两个入口；各自打开列表 tab，列表项继续打开独立详情 tab。依赖图是从 Cell 打开的详情 tab，不另增顶层入口。本文的 Cell 指运行时对象，界面顶层名称统一为 `cell`；界面名称与既有内部标识按上表映射。
+「子代理」「cell」各自打开列表 tab，列表项继续打开独立详情 tab。协作图是从 Cell 打开的详情 tab，不另增顶层入口。本文的 Cell 指运行时对象，界面顶层名称统一为 `cell`；界面名称与既有内部标识按上表映射。
 
 未选择会话时，「能力」「进程」「子代理」「cell」仍可打开，页面以正常可读样式显示「创建或选择会话后查看内容」，不构造会话／Host 身份或发起会话读取。「网页」入口不依赖选中会话；切换会话保留已打开的网页 tab。
 
@@ -31,8 +31,9 @@
 | 子代理列表 | 一个 Subagent session 一行 | 用类似 MCP 的过渡动画打开该 Agent 的只读会话 tab |
 | 子代理会话 | 同一个 Agent 的连续对话 | 复用 ROOT 会话主体，无输入框；复用只读排队展示 |
 | Cell 列表 | 一个 Cell 一行 | 打开该 Cell 实际执行的冻结 JS 源码 |
-| Cell 源码 | 冻结源码及必要状态 | 复用脚本阅读与 JS 高亮；涉及 Subagent 时提供依赖图入口 |
-| Cell 依赖图 | 该 Cell 实际涉及的 Subagent 编排 | 不画普通工具调用；点击 Agent 打开其会话 tab，不播放列表展开动画 |
+| Cell 源码 | 冻结源码及必要状态 | 完全复用文件源码阅读组件；活动 Cell 确认存在协作节点时提供图入口 |
+| Cell 协作图 | 该 Cell 实际涉及的 Subagent 编排 | 不画普通工具调用，不递归扩展依赖；点击 Agent 打开其会话 tab，不播放列表展开动画 |
+| 进程列表 | 一个终端进程一张气泡卡片 | 点击整条直接打开进程 tab；详情与终止按钮独立操作，列表不读取输出 |
 
 **列表只展示 ROOT 当前能够查询到的对象。Subagent 与 Cell 按现有生命周期消失。**
 
@@ -48,11 +49,13 @@
 
 ### 1.1 界面密度、文案与过渡
 
-本规格涉及的所有页面采用简洁、紧凑的布局，**不添加灰色小字说明、常驻注释段落或副标题式教学文案**。这些是界面验收要求，不以页面底部注释的形式交付。必要的状态、错误和覆盖不完整信息使用正常可读的短文案或明确状态标记，按需出现；不把内部机制写成界面说明。会话正文与源码仍忠实展示原内容。
+本规格涉及的所有页面采用简洁、紧凑的布局，不添加常驻注释段落、副标题式教学文案或内部机制说明。必要的状态、错误和覆盖不完整信息按需使用简短文案；Subagent 等待队列的状态使用小号灰色文字轻量说明。会话正文与源码忠实展示原内容。
 
-「子代理」「cell」列表以现有「后台进程」（顶层名改为「进程」）的紧凑列表为密度基准：一条一行、控制垂直留白，不做高卡片或上下堆叠多行元数据。名称／短标识为主体，状态用简洁标记；详细信息进入详情页。
+子代理、Cell 和进程列表与能力列表共用气泡卡片的圆角、边框、底色和阴影，卡片间距6px、内边距8px。名称／标识为主体，状态用简洁标记，不堆放多行元数据；子代理和 Cell 列表不重复显示页内标题。保留子代理淡橙色和 Cell 淡蓝色图标底座，终端进程在命令前使用28px淡青色终端图标底座。进程卡片只导航，不展开输出；详情按钮保留目录、来源和物理状态等已有元数据，详情和终止操作不触发导航。
 
-优雅而克制的过渡覆盖主要浏览场景：顶层与详情 tab 切换、列表打开详情、源码打开工作流图、列表条目出现／移除，以及局部展开收起。复用现有动画机制；列表到详情适合共享元素过渡，普通切换与内容变化使用轻量淡入／位置过渡，不让流式更新反复触发整页动画。图节点打开 Agent 会话沿既定例外直接导航，不播放展开动画。保留用户视角与焦点，快速切换可打断，尊重减少动态效果设置。
+所有新 tab 紧接当前选中 tab 的右侧插入，五个顶部入口及文件、进程、Cell、图、子代理和网页都使用同一规则；批量发布按原顺序连续插入。已有 tab 再次打开只聚焦或更新，不移动位置；后台打开不抢选中状态。标签栏将鼠标纵向滚轮转换为横向滚动，向上往左、向下往右，保留原生横向手势和浏览器缩放。
+
+优雅而克制的过渡覆盖顶层与详情 tab 切换、列表打开详情、源码打开协作图、列表条目出现／移除及局部展开收起。复用现有动画机制；进程列表打开详情与 MCP 共用卡片上移、正文展开动画，已读元数据只作目标页首帧，不提前读取输出或另建读取缓存。普通切换与内容变化使用轻量淡入／位置过渡，不让流式更新反复触发整页动画。图节点打开 Agent 会话直接导航，不播放展开动画。保留用户视角与焦点，快速切换可打断，尊重减少动态效果设置。
 
 ## 2. 子代理列表与只读会话
 
@@ -86,6 +89,8 @@ Work 原始输入、后续 steer 和依赖材料保持各自的 entry 边界，�
 
 排队卡片只展示，不出现发送为 steer、编辑、删除、拖拽重排等操作。复用的是排队 UI 和数据来源，不是 ROOT 的人类命令控制流程。
 
+“回到最新”位于聊天滚动区下缘、独立等待队列上方；没有等待项时落在内容区底部，不按固定队列高度偏移。等待依赖、排队中及相关终态定位的说明使用小号灰色文字，不改变队列内容或导航语义。
+
 ## 3. Cell 列表与冻结源码
 
 ### 3.1 列表
@@ -96,9 +101,9 @@ Work 原始输入、后续 steer 和依赖材料保持各自的 entry 边界，�
 
 ### 3.2 源码阅读
 
-复用当前文件代码阅读组件的版式、文本选择／复制、滚动和 JS 高亮，内容来源改为 Cell 对应 `exec_cell` attempt 已冻结的源码。
+直接复用普通文件的 `FilePreviewPanel`、`FileTextContent` 和 `FileCode` 页面外壳、滚动区、文本选择／复制、行号及 JS 高亮，不保留 Cell 专属源码卡片。内容由对应 `exec_cell` canonical attempt 的冻结源码 reader 提供，保留独立分页和阅读位置，不改走可变文件路径。
 
-源码上方可以复用文件阅读页顶栏的尺寸与布局，但**顶栏只有一个轻量文字按钮「查看工作流图」**，按 §4.1 的参与条件显示。没有图入口时不保留空顶栏，源码直接接在 tab 栏下方。顶栏不出现后退、前进、刷新、复制、打开目录、路径导航或其他文件操作按钮；文本仍可正常选择和复制。它展示冻结内容，与冻结发布的可视化一样，不伪装成正在浏览的真实文件。
+源码上方共用文件阅读器工具栏位置，**仅在 Cell 尚未进入 completed／failed／terminated 终态，且已确认存在真实可见的关联 Work 或参与者节点时显示「查看协作图」**，使用关系图图标。没有入口时整栏消失，源码直接接在 tab 栏下方。空图、尚未参与或覆盖不确定不新建入口；活动 Cell 后续真正参与时可显示，短暂读取失败保留已确认入口。Cell 一进入终态即隐藏整栏并停止入口观察，不等待输出接纳、VM 释放或关联 Work 结束。已打开图的关闭仍依据 §3.3 的真实退役事实。顶栏不出现后退、前进、刷新、复制、打开目录、路径导航或其他文件操作按钮；文本仍可正常选择和复制。
 
 - `exec_cell(code=...)` 与 `exec_cell(path=...)` 都读取同一冻结结果。
 - 显示经过 Hook 处理、实际读取并交给运行时的源码，不读取工具最初参数来冒充执行内容。
@@ -108,7 +113,7 @@ Work 原始输入、后续 steer 和依赖材料保持各自的 entry 边界，�
 
 HTML 可视化可借鉴的是“引用已冻结内容而不是重读原文件”的模式。Cell 不需要进入 HTML 发布链，也不需要再复制一份冻结内容。
 
-Cell 状态是动态观察，源码是固定值。Cell 完成或停止不代表其已接纳 Work 完成或停止。源码页可沿现有来源关联读取输出／错误，但本轮不建设通用工具流程图，也不通过 `manage_cell(wait)` 消费模型侧输出来刷新 UI。
+Cell 状态是动态观察，源码是固定值。Cell 完成或停止不代表其已接纳 Work 完成或停止。源码阅读不消费或确认正式输出，不通过 `manage_cell(wait)` 刷新页面，也不建设通用工具流程图。
 
 ### 3.3 对象消失
 
@@ -120,15 +125,15 @@ Cell 回收后，源码 tab 保留 canonical attempt 身份、正文与阅读位
 
 ### 4.1 入口与范围
 
-Cell 实际涉及仍可见的 Subagent 时显示“查看工作流图”。参与包括派活、具体 Agent／Work 查询、消息、`wait_agent`／`wait_agent.works` 和 `stop_agent`；WORK 解析到其所属 Agent。ROOT 目标不生成 Subagent 节点。普通工具调用完全不进入图。
+活动 Cell 实际涉及仍可见的 Subagent 时，按 §3.2 显示“查看协作图”。参与包括派活、具体 Agent／Work 查询、消息、`wait_agent`／`wait_agent.works` 和 `stop_agent`；WORK 解析到其所属 Agent。ROOT 目标不生成 Subagent 节点。普通工具调用完全不进入图。
 
-图只包含这个 Cell 实际关联、且 ROOT 仍可见的 Agent／Work，以及解释这些 Work 当前关系所必需的、仍可查询的依赖对象。不要把 ROOT 的全部 Agent 和所有 Work 历史塞入每一张图。
+图只包含这个 Cell 实际关联、且 ROOT 仍可见的 Agent／Work。依赖仅用于已显示 Work 之间连线，不读取额外依赖节点，不提供递归展开入口，也不把 ROOT 的全部 Agent 和 Work 历史塞入每一张图。
 
-对只查询／等待、没有派活或依赖的 Cell，图可以只有 Agent 卡片，没有依赖边。无效目标不生成节点，无 target 的清单查询不构成参与。只验证 Agent 身份时不自动展开其全部历史 Work。观察覆盖不完整时保留图入口说明覆盖状态；不能把“不知道是否参与”显示成“确定没有参与”。只有 canonical Work 查询完成且 `participation_coverage=complete` 时，图的空状态才可表示没有 Subagent 编排；在途、incomplete／unavailable 显示覆盖情况，不将空数组当作确定无参与。
+对只查询／等待、没有派活或依赖的 Cell，图可以只有 Agent 卡片，没有依赖边。无效目标不生成节点，无 target 的清单查询不构成参与。只验证 Agent 身份时不自动加载其全部历史 Work。源码页遇到过滤后的空页须沿下一页核对；覆盖不完整不能证明确定无参与，也不能仅凭该标记新建入口。图内只有 canonical Work 查询完成、分页结束且 `participation_coverage=complete` 时，空状态才表示没有 Subagent 编排；在途、incomplete／unavailable 保留真实覆盖状态。临时错误不清除已有确认内容。
 
 ### 4.2 Agent 是视觉主体，Work 是依赖端点
 
-用户看到的是可点击的 Agent 卡片。每个 Agent 一张卡片，内部列出该图相关的 Work，依赖线连接具体 Work 行。
+协作图是 advisory 概览。每个 Agent 一张可点击卡片，只显示代理名称、Work ID 和各 Work 当前状态；名称独立一行，每个 Work 独立一行，状态放该行右侧，不用分隔符拼接信息，不展示查询／等待／消息／停止等操作标签。仅参与而没有相关 Work 的 Agent 保留名称，不补造任务状态。依赖线连接具体 Work 行。
 
 这样既保留“点击 Subagent 节点进入它的会话”，也避免把一个 Agent 多次参与不同 Work 的关系混在一起：
 
@@ -142,20 +147,20 @@ Agent A                       Agent B
 
 - 成功依赖用有向实线，方向从前置 Work 指向后继 Work。“成功依赖”是成功门槛，不声称来源已经成功；当前结果使用实际 Work 状态标识。
 - 同 Agent 的串行位置不自动画成成功依赖。
-- 消息只在卡片中标记参与，不画消息边、不声称已送达。
+- 消息参与只决定实际相关对象，不显示操作历史、不画消息边，也不声称消息已送达。
 - 普通材料引用不等同于成功依赖；`Promise.all`、代码先后顺序也不自动变成业务边。
 - 从图点击 Agent 身份打开会话 tab，不播放列表过渡动画；点击 Work 可以进一步定位到相关输入。
 - 对象退役后移除对应节点及关联边，不用历史工具结果复活它。
 
 ### 4.3 视觉方向
 
-图可以比普通流程图精致：Agent 卡片包含身份、状态和 Work 摘要；用清晰的有向曲线、柔和分组背景与克制的状态动效。提供缩放、平移、适配视图和当前选中关系强调。
+地图铺满标签页可用区域，可以大于侧边栏。ELK layered 依据卡片真实尺寸和已加载依赖安排前置在左、后继在右，以具体 Work 行的固定左右端口和 CONSERVATIVE 样条生成避开卡片的有向曲线；同 Agent 内依赖及复用 Agent 的回边也交给布局库。间距及外围空白沿统一输入规格 §8.2，不依据侧边栏宽高换列或缩放适配全部节点。
 
-数据更新尽量保持节点位置与用户视角，不因每次状态刷新重排整张图。暗色主题、窄侧栏、键盘打开节点和减少动态效果沿现有应用习惯。大图按相关范围渐进展开，不增加 Agent／Work 总量上限。
+首次有效布局以100%缩放将节点区包围盒中心对准视窗中心，水平和垂直都居中；用户已移动或缩放时不覆盖其操作。首次定位后，标签切换、视窗大小或图变化均保持当前镜头。仅节点、依赖或真实卡片尺寸改变才重排；布局和测量输入在既有 tab view owner 内保存一份可丢弃投影，输入相同则复用。布局使用 ELK Web Worker，离开页面释放 Worker，迟到结果不得覆盖新图。
 
-现有 Mermaid 最终渲染成图片，不能直接满足交互卡片与导航。实施时优先检查现有依赖可用的布局能力，再决定是否引入维护中的图组件／布局库；本文不预定新依赖，也不要求自研布局算法。
+D3 zoom／selection 负责围绕指针的滚轮缩放、空白处左键平移及既有缩放范围，不接管右键或卡片点击。移除图内标题、缩放与适配按钮；右下角小地图共用主图节点、路径控制点与固定地图边界，蓝框标示视窗，不为概览额外读取节点。键盘平移／缩放、减少动态效果和卡片导航保留。
 
-种子为当前 Cell 接纳的 Work 和已验证的具体参与对象；从已选 Work 沿 dependency 向前置 Work 按需展开，可以包含其他 Cell 或原生派活产生的前置 Work。只读取窄身份／状态／关系，不为绘图 hydrate 全部 instruction／final，不扫描 ROOT 全历史，不设图深或总 Work 数上限。
+Pulsara 仅拥有真实对象与关系读取、卡片导航、分页和标签页阅读位置，不自研第二套布局或手势框架。图只读取相关身份、状态与关系，不 hydrate 全部 instruction／final，不扫描 ROOT 全历史，不增加 Agent／Work 总量上限。分页只扩展该 Cell 的真实参与集合，不沿 dependency 递归补齐前置 Work。
 
 ## 5. 所有权与读取合同
 
@@ -167,7 +172,8 @@ Agent A                       Agent B
 | Agent 与 Work | [collaboration_api.py](src/pulsara_agent/conversation_kernel/subagents/collaboration_api.py) 与 [_repository/subagents.py](src/pulsara_agent/conversation_kernel/_repository/subagents.py) 管理当前 ROOT 可见成员、Work 及其输入事实 |
 | 只读打开 | [session_controller.py](src/pulsara_agent/desktop_app/session_controller.py) 与 [renderer_bridge.py](src/pulsara_agent/desktop_app/renderer_bridge.py) 校验 ROOT／Agent，沿 canonical reader 和 live observer 读取，不 resume 或取得 writer |
 | Cell、源码与图 | [code_mode/host.py](src/pulsara_agent/code_mode/host.py) 管理当前存活 Cell 与进程内参与观察；[tool_runtime.py](src/pulsara_agent/conversation_kernel/tool_runtime.py) 复用冻结源码和图读取，Desktop 按 ROOT/session＋canonical attempt 校验源码读取范围，图仍使用 live Cell |
-| 源码展示 | [file-code.tsx](frontend/components/file-code.tsx) 与 [code-highlight.ts](frontend/lib/code-highlight.ts) 显示冻结源码并提供 JS 高亮，不借用文件路径身份 |
+| 源码展示 | [file-preview-panel.tsx](frontend/components/file-preview-panel.tsx) 共用文件阅读外壳及正文滚动区；[file-code.tsx](frontend/components/file-code.tsx) 与 [code-highlight.ts](frontend/lib/code-highlight.ts) 提供行号与 JS 高亮，不借用文件路径身份 |
+| 图布局与手势 | [cell-graph-layout.ts](frontend/components/cell-graph-layout.ts) 使用 ELK Worker 布局与路由；[cell-graph-map.tsx](frontend/components/cell-graph-map.tsx) 使用 D3 手势、已有 tab view 状态和同源小地图，不拥有业务调度 |
 
 ### 5.1 输入身份与共同队列阅读
 
@@ -300,7 +306,7 @@ Reader／Controller 是职责划分，可以共享现有物理连接；不要求
 
 模型工具和 Desktop 读取同一业务查询 owner，各自做响应格式适配。UI 不执行模型工具，不经过 Hook，也不套模型 tool-result envelope 的预算裁剪。
 
-共同队列按 session／queue sequence 提供只读分页，保留已有单页大小约束；ROOT 与 Agent 都能渐进浏览。队列总数、Work 排队数、待处理 steer 数按明确类型计算，不把所有 PENDING 输入都称作 Work。页面使用真实状态与真实身份合并变化，不能把“本页未出现”当作“已退役”。
+共同队列按 session／queue sequence 提供只读分页，保留已有单页大小约束。ROOT 未来 turn 队列后台读至队尾，前端按统一输入规格 §6.1 展示头尾卡片及中间省略数，不显示“加载更多排队任务”；Agent 使用同一队列读取 owner。队列总数、Work 排队数、待处理 steer 数按明确类型计算，不把所有 PENDING 输入都称作 Work。页面使用真实状态与真实身份合并变化，不能把“本页未出现”当作“已退役”。
 
 Cell 统一列表和详情的存活／不可用判定；保留展示当前仍存在的终态 Cell。Agent 统一可见性查询；Host 卸载与 session 删除分开。刷新复用现有 session 观察与进程内变化通知，必要时在可见期间做只读刷新；通知只提示重新读取，不变成新的状态来源。
 
@@ -312,7 +318,7 @@ Cell 统一列表和详情的存活／不可用判定；保留展示当前仍存
 
 `FileCode` 只负责原文、高亮和行号，适合直接复用；`FilePreviewProvider`／文件浏览页还管理 path、read token、路径历史、重新打开文件和“在文件夹中显示”。把 Cell 填成一个假路径会把两种内容语义混在一起。
 
-共用 `FileCode` 和必要的阅读页壳：接收内容页、语言、加载状态与读取下一页行为。普通文件由原 `FilePreviewApi` 提供内容，保留路径导航和刷新；Cell 由既有冻结源码 reader 提供内容，保留 Cell 状态与图入口。两种外层使用同一显示组件；Cell 不继承文件工具栏，按 §3.2 仅装配工作流图按钮。不给 Cell 伪造 filesystem token，也不为了复用建立通用文档框架。
+共用 `FilePreviewPanel`、`FileTextContent` 和 `FileCode`：接收内容页、语言、加载状态与读取下一页行为。普通文件由原 `FilePreviewApi` 提供内容，保留路径导航和刷新；Cell 由既有冻结源码 reader 提供内容。两种外层使用同一显示组件；Cell 不继承文件操作，按 §3.2 仅在满足条件时装配协作图按钮。不给 Cell 伪造 filesystem token，也不为了复用建立通用文档框架。
 
 文件页使用字节 cursor，Cell 使用服务端字符 offset；UI 把下一页位置视为数据源返回的 opaque 值，不用 JS UTF-16 字符数自行计算，不强行统一两种分页单位。
 
@@ -335,6 +341,8 @@ Cell 统一列表和详情的存活／不可用判定；保留展示当前仍存
 - 无 target 的纯清单查询不自动吸纳所有返回对象；无效目标不产生节点；所有图节点仍与当前 ROOT 可见性相交。
 - 观察归于现有进程内 Cell owner，按下面的预算合同处理，退役时一起释放；不建立持久化参与者表，不扫描无限历史，观察失败不替换业务调用结果，也不重放副作用。
 - 图的边来自 §5.2 的 Work 输入关系，参与者观察只解决“哪些对象与此 Cell 有关”，不成为第二份编排状态。
+
+参与种类属于内部观察信息，不在协作卡片上展示操作标签，不由简化界面反向删除实际参与判定。
 
 首版不画消息边，因此不为图补写消息 provenance 字段，也不增加事件或消息表。
 
@@ -421,12 +429,12 @@ Cell 的终止与退役同样不同：`_collect` 在物理终态、VM 释放、p
 | 共同阅读 | ROOT／Agent 的历史分页、推理、工具、压缩、TODO、live settlement 与阅读定位一致；ROOT 注释监听不捕获 Agent 选区；图片及衍生内容使用实际 Agent owner | `history-paging.test.ts`、`history-paging-review.test.ts`、`thread-follow-controller.test.ts` 及对应组件测试 |
 | 导航与生命周期 | 同 Agent 多 Work 仍一行一 tab；ROOT 切换和迟到响应不串数据；源码退役仍按 attempt 读取，图关闭清空节点但留 tab；暂时错误不假装删除；tab 切换恢复内部阅读位置 | `tests/frontend/desktop-workspace.test.tsx` |
 | 冻结源码 | inline／path／Hook 后实际源码；文件后来修改删除无影响；Unicode 分页不丢不重；Desktop 源码跨 Cell/Host 退役与重启读取，越权 attempt 拒绝；模型侧已捕获读取仍可跨退役完成；不消费输出 | `test_query_cells_contract.py`，保留 captured-source-survives-release 合同 |
-| 图与参与 | 纯工具／纯 Agent／混合 Cell；同 Agent 多 Work；跨 Cell 与原生来源依赖；失败、取消、退役无假边／幽灵节点；具体 query/wait/message/stop 及 batch／Hook 后身份；无 target 查询不吸纳清单 | `test_agent_code_mode_execution.py`、`test_agent_collaboration_api.py` 及只读图接口测试 |
+| 图与参与 | 纯工具／纯 Agent／混合 Cell；同 Agent 多 Work；只连接已显示 Work，不递归读取跨 Cell／原生来源依赖；失败、取消、退役无假边／幽灵节点；具体 query/wait/message/stop 及 batch／Hook 后身份；无 target 查询不吸纳清单 | `test_agent_code_mode_execution.py`、`test_agent_collaboration_api.py` 及只读图接口测试 |
 | 观察资源 | 不等待观察 ACK 才完成业务；资源拒绝／真实遗漏保持 incomplete，UI 不显示确定无编排；在途 ACK 与 Cell 退役交错不泄漏、不重复释放、不延迟 collect；存续终态仍可读取观察 | 现有 Code Mode 资源与执行测试 |
 | 展示工具 | 所有 target 分支、混合有效／无效元素的原数组错误索引、最后成功焦点；单目标失效不吞有效项；用户导航优先；严格结果解析与上下文绑定 | `test_open_in_pulsara.py`、`presentation-provider.test.tsx`、`presentation-result.test.tsx` |
 
-Agent／Cell／队列超过一页时仍能完整渐进浏览，缺席一页不等于退役；不新增逻辑对象总量上限。图只读取需要的 ID、关系与状态，不顺带加载全部正文。
+Agent／Cell／队列超过一页时仍沿共同 owner 完整读取，ROOT 队列前端只展示头尾预览；缺席一页不等于退役，不新增逻辑对象总量上限。图只读取需要的 ID、关系与状态，不顺带加载全部正文。
 
-视觉验收核对五个顶层名称、两个列表的紧凑单行密度、Cell 顶栏仅有「查看工作流图」（无入口时整栏消失），以及所有页面没有附加灰色小字说明。动画验收包括 tab 切换、列表展开、源码到图、条目增减、局部展开收起、图节点直接打开的例外、快速重入／关闭时清理、减少动态效果设置及无 View Transition 降级；不产生重复共享元素名称。本轮保留必要 build／typecheck 与合同测试；按人类决议无需视觉验收或 Playwright。
+界面合同包括五个顶层名称、统一气泡列表、无重复标题、按生命周期显示的「查看协作图」、轻量等待状态及真实导航。过渡覆盖 tab 切换、列表打开详情、源码到图、条目增减、局部展开收起、图节点直接打开的例外、快速重入／关闭时清理、减少动态效果及无 View Transition 降级，不产生重复共享元素名称。按改动范围完成必要 build／typecheck 与合同测试；视觉效果交由用户审阅，不要求 Playwright 操作。
 
-定向测试、clean-v0／catalog 核对、前端构建和安装后的本地数据库重置记录见 [验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)。两组后端联合运行各有一项环境相关失败及独立补测，按记录分别报告，不合并为一次全绿。未运行全仓测试或真实 provider；本规格不要求真实 provider。本轮按人类决议无需视觉验收或 Playwright。
+定向测试、clean-v0／catalog 核对、前端构建和安装后的本地数据库重置见 [侧边栏验证记录](output/subagent-cell-sidebar-implementation-20261030/verification.zh.md)；统一输入和重试的实施验证见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。两份记录各保留其实际场景、失败、独立补测和未测边界，不合并为一次全绿或扩大为全仓验证。

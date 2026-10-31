@@ -1,6 +1,6 @@
 # Pulsara：工具查询、命名与 Cell 身份统一实施规格
 
-日期：2026-10-31。当前接口采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md) 的 hard cut；本轮激活验证进行中。
+日期：2026-11-01。状态：**当前实现合同。** 当前接口采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md) 的 hard cut，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
 本文确定本轮目标合同。生产代码、公共消费者与现行设计采用当前单路径合同，不保留旧工具别名、旧参数双读或第二条执行路径。实现落点、验收结果与未测边界见 [实施记录](output/tool-query-cell-unification-20261030/IMPLEMENTATION.zh.md)；该结论不代表全仓测试或全部外部连接均已验证。
 
@@ -296,15 +296,15 @@ native 已列出的 direct 工具按当前路由直接调用；META 通过 `quer
 
 | 分支 | 输入 | 输出主体 | 分页 |
 |---|---|---|---|
-| 当前协作成员 | cursor?、max_items? | `agents`、next_cursor | 当前 ROOT 下按 session ID 顺序 |
+| 当前协作成员 | cursor?、max_items? | `root`、`agents`、next_cursor | ROOT 查询全部成员；Subagent 查询自身及已知成员，按 session ID 顺序 |
 | 指定 Agent | AGENT target、cursor?、max_items? | `agent`、`works`、next_cursor | 指定 Agent 内按 queue_sequence 顺序 |
 | 指定 Work | WORK target | 原 `_public_work` 对象 | 不接受分页参数 |
 
 max_items 默认 50、范围 1–50，沿当前协作单页限制。Agent 列表 cursor 为 session 位置；Work 列表 cursor 为该 Agent 内的 queue 引用。客户端把它们视为 opaque，不能跨分支、跨 Agent 或跨 ROOT 互换。AGENT 续页须继续携带同一 target；WORK 请求必须只有 target。
 
-保留当前 ROOT 的归属过滤、仍存在的完成／空闲／排队成员，以及 Work 的 instruction、final、diagnostic、失败依赖等结果。Agent 空 Work 列表仍应验证归属；不存在与越界目标不得退回到全局搜索。此查询不开放 ROOT 的非委派请求作为 Work。
+列表、指定 Agent 和指定 Work 共用调用方查询范围：ROOT 为当前 ROOT 下仍保留的成员，Subagent 为自身及已知成员。保留范围内完成／空闲／排队成员，以及 Work 的 instruction、final、diagnostic、失败依赖等结果。Agent 空 Work 列表仍应验证范围；不存在与越界目标不得退回到全局搜索。此查询不开放 ROOT 的非委派请求作为 Work。
 
-该入口名称表示协作领域，因此允许查询 WORK；不新增 `query_works`。不自动把 ROOT 保留标识加入查询：ROOT 作为消息接收者的例外仍只在原已允许工具适用。
+该入口名称表示协作领域，因此允许查询 WORK；不新增 `query_works`。无 target 查询独立返回 `root:{"kind":"AGENT","agent_id":"ROOT"}`，不占普通 Agent 页名额、不参与 cursor。ROOT 别名用于 send_agent_message／wait_agent；query_agents 的 target 只接受实际 Subagent ID 或 WORK，不提供 ROOT 历史或伪造 ROOT Work。已知对象与范围合同见 [已知 Agent 查询规格](PULSARA_SUBAGENT_KNOWN_AGENTS_QUERY_AND_HANDOFF_IMPLEMENTATION_SPEC.zh.md)。
 
 旧结果结构和大正文既有投影方式保留，不为统一形状另包装一层 data。没有全局一致快照的承诺；已有游标校验、失效与并发变化行为不得在改名时重写。
 
@@ -620,10 +620,10 @@ Hook 用户配置中匹配旧 Pulsara 工具名的表达式需要使用新名称
 | Agent | ROOT 成员分页、AGENT Work 分页、WORK 无分页；不串 cursor、scope或Agent；已完成和队列中对象可查；已知target无需先枚举 |
 | Process | 新 shell、TTY、输入与观察默认值；列表／详情复用 `_info`，允许其只读快照但不返回或消费日志；列表保留 terminal_process_action；poll/wait游标与coverage；write/submit/EOF/kill及取消结算不变 |
 | Cell ID | canonical格式及padding bits；错误kind/旧hex/大小写/截短拒绝；同脚本两次不同ID；Host／Node／输出／UI同值，无映射表 |
-| Cell 输出交付 | 新 target 包装计入完整页预算；近字节边界页报价与实际序列化一致；exec_cell／manage_cell.wait/stop 保留既有 FULL 分类；输出页完整成功交付才确认消费，失败不确认；stop不消费输出 |
+| Cell 输出交付 | exec_cell／manage_cell.wait/stop 的接纳或状态回执保持 FULL_REQUIRED，均不领取或确认正式输出；每条 console/诊断由共同队列完整接纳，FULL 后才推进本地前缀；UNKNOWN 保持原候选确认，不重复正文 |
 | Cell 列表 | 超过默认50条仍可续页；字节预算缩页不漏游标；静止库存完整遍历；边界对象回收后可续；并发新增的弱一致语义；只见当前Host |
 | Cell 源码 | inline与blob；path运行后文件修改仍返回冻结源码；Hook后实际代码；Unicode及跨页重组准确；查询不消费输出；缺失／损坏明确不可用 |
-| Cell 生命周期 | query与wait并存不抢消费owner；终态但pending/输出未清仍可查；回收后unavailable；stop不取消已接纳Work；没有JS递归入口 |
+| Cell 生命周期 | query／wait 与主动输出接纳相互独立；终态但pending/未FULL输出未清仍可查；live对象回收后unavailable，Desktop canonical源码继续可读；stop不取消已接纳Work；没有JS递归入口 |
 | Schedule | 模型默认当前session、显式session、list/get完整值、分页filter；列表status:null拒绝，create的status省略／null默认PAUSED；修订冲突、原子switch、无权限升级；不增加模型run-once |
 | Artifact／Memory／Session | 改名后原分页／coverage／导出写权限、搜索放宽与精确get保持；Session自包含cursor规则不受影响 |
 | 权限与前缀 | §12的原生／JS／Subagent矩阵；active Plan写入仍拒绝；冷epoch／successor新定义；已有epoch不改前缀；Cell沿原快照 |

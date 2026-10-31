@@ -14,7 +14,7 @@ Pulsara 的 ROOT 与 Subagent 在网络短暂故障后，应能自动重新请�
 
 这些证据支持“代理链路是可疑因素”，不能证明这两次失败的具体根因、是否已有流式输出、或重试耗尽。本文的验收依靠受控故障注入，不把这次事故推断当作已验证根因。
 
-已确认的代码缺口：adapter 将连接失败输出为 `provider_transport_error`，现有 sanitizer 没有识别此 hint，因而显示 `unknown_provider_error`；最终失败路径又仅保留 `code: message`，未记录结构化重试决定及底层异常链。错误分类与诊断修复属于本次同一实施范围，分别由 §3 与 §6 规定，不能只调整次数和退避而漏掉它们。
+连接失败由 adapter 输出 `provider_transport_error`，sanitizer 映射为稳定公开码 `provider_connection_error`；最终失败保留结构化重试决定及底层异常链，不再仅留下 `code: message`。错误分类和诊断合同分别见 §3、§6，不能只调整次数和退避而省略诊断。
 
 ### 0.2 外部实践及采用边界
 

@@ -1,6 +1,6 @@
 # Pulsara：运行时摘要状态筛选与资源退役实施规格
 
-日期：2026-10-31。当前合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，本轮实现与激活验证进行中。既有资源验证记录保留其原范围。
+日期：2026-11-01。状态：**当前实现合同。** 当前输入与 Cell 回收合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各资源验证记录保留其原范围。
 
 本文明确 Process 到期自动尝试回收、Cell 主动输出接纳后的回收、普通环境 Cell 索引移除，以及压缩 runtime handoff 的状态筛选。TODO 始终完整保留；3,200 个 V3 启发式 token 上限仅约束 PCA 状态与相关说明，不约束 TODO。
 
@@ -330,7 +330,7 @@ SYSTEM 中删除关于 omitted task counts 的旧说法，改为准确的状态�
 
 ### 12.2 真实 Host 场景
 
-至少构造同一 ROOT 下的运行／结束 Process、未关闭／待结算活动／未领取终态／仅收尾 Cell、活动／闲置 Agent 和完整 TODO。触发 mid-turn compaction 并采用 successor，检查**实际发给模型**的 source 与 §6 状态及 §8 最终预算合同一致。
+至少构造同一 ROOT 下的运行／结束 Process、未关闭／待结算活动／终态仍有未 FULL 输出／仅收尾 Cell、活动／闲置 Agent 和完整 TODO。触发 mid-turn compaction 并采用 successor，检查**实际发给模型**的 source 与 §6 状态及 §8 最终预算合同一致。
 
 另外验证 Subagent 当前 Work 压缩，证明 Process/已知 Agent 的范围正确。读取源码/元数据不消费输出；wait 只返回真实状态；原对象不因压缩重新执行。Plan 权限及上下文依原专门 source 保持。
 

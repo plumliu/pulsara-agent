@@ -1,6 +1,6 @@
 # Pulsara：Subagent／Work 与双入口编排设计
 
-日期：2026-10-31。当前合同采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)。本轮实现与激活验证进行中；既往证据仅说明其原有范围。
+日期：2026-11-01。状态：**当前实现合同。** 输入与输出采用 [统一输入、Cell 输出与协作阅读规格](PULSARA_CELL_OUTPUT_AND_COLLABORATION_INPUT_IMPLEMENTATION_SPEC.zh.md)，其实施与激活已完成，见 [激活报告](output/unified-input-retry-20261031/activation-report.zh.md)。各报告只证明所记录的验证范围。
 
 子代理与 Cell 侧边栏及其 `open_in_pulsara` 接入见 [侧边栏实施规格](PULSARA_SUBAGENT_CELL_SIDEBAR_DESIGN_RESEARCH.zh.md)。
 
@@ -402,7 +402,7 @@ WORK 示例：
 }
 ```
 
-final 通过这个请求对应的 turn 定位，不取“该 agent 最新的回答”。list／inspect／wait 共用请求→turn 的读取与状态投影，沿 ROOT 已有队列查询关系实现。结果长度与 artifact 引用复用公共工具输出规则，截断展示不冒充完整 final；`materials` 由运行时读取实际结果，不要求模型复制展示预览。
+final 通过这个请求对应的 turn 定位，不取“该 agent 最新的回答”。query_agents 的清单、详情与 wait 共用请求→turn 的身份及状态投影，沿 ROOT 已有队列查询关系实现；wait 只返回轻量状态，结果正文由显式 query_agents 获取。结果长度与 artifact 引用复用公共工具输出规则，截断展示不冒充完整 final；`materials` 由运行时读取实际结果，不要求模型复制展示预览。
 
 ### 4.3 `send_agent_message`
 
@@ -435,7 +435,7 @@ queued 表示进入当前 turn 的共同待输入链路；正文在既有输入�
 
 调用者依据 delivery 判断是否发送成功；未接纳时不能假定问题已经送达并等待这条消息的回复。需要接收方开始新工作时，由 ROOT 通过 run_agent 派活。
 
-普通 final 与消息接纳由共同 turn／输入 owner 裁决：正常完成时，消息先进入当前 turn 的待收队列则在原 turn 处理后再判断完成；终态先成立则返回未接纳。停止 turn 时，尚未消费的 steer 按共同链路拒绝，已经进入历史的内容保留，均不转投下一份请求。完成交付使用真实 final 正文，作为接收方的用户输入；作为后继工作材料时通过其已接纳请求交付，并分别追加在 instruction 后，不借助 send_agent_message 唤醒空闲 Agent。接收方输入是已交付内容，不是另一份 Work 结果状态或报告表。
+普通 final 与消息接纳由共同 turn／输入 owner 裁决：正常完成时，消息先进入当前 turn 的待收队列则在原 turn 处理后再判断完成；终态先成立则返回未接纳。停止 turn 时，尚未消费的 steer 按共同链路拒绝，已经进入历史的内容保留，均不转投下一份请求。后继 Work 的依赖／materials 通过其已接纳请求交付真实 final 或公开诊断，分别追加在 instruction 后；不向 ROOT 自动广播，也不借助 send_agent_message 唤醒空闲 Agent。接收方输入是已交付内容，不是另一份 Work 结果状态或报告表。
 
 接纳时确定接收方的当前请求／turn，消息不转投接收者的下一份 Work。发送者标识仅作归因；发送方结束或 session 被删除都不撤销已交付正文，不需要跨 session 外键。重复发送是新的消息，不按正文去重；不新增送达／阅读回执。
 

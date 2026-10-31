@@ -13,7 +13,7 @@
 </p>
 <p align="center">
   <a href="https://github.com/plumliu/pulsara-agent/releases/latest">下载桌面版</a> &nbsp; | &nbsp;
-  <a href="#演示">观看演示</a> &nbsp; | &nbsp;
+  <a href="#demo">观看演示</a> &nbsp; | &nbsp;
   <a href="INSTALL.zh-CN.md">安装说明</a> &nbsp; | &nbsp;
   <a href="README.md">English</a>
 </p>

@@ -28,7 +28,7 @@ This file applies to the entire repository. Human instructions and the active im
 
 ## 4. Use fingerprints only at real boundaries
 
-- Follow `PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md` for the authoritative subtraction contract.
+- Follow [the fingerprint subtraction contract](archived_docs/PULSARA_FINGERPRINT_SUBTRACTION_HARD_CUT_IMPLEMENTATION_SPEC.zh.md) for the authoritative subtraction rules.
 - Do not record per-file code SHA, document SHA, activation-evidence SHA, or ordinary working-tree aggregate hashes. Git owns repository content identity; tests and dogfood prove behavior.
 - Do not add a DTO fingerprint when the complete frozen value is already carried to the consumer. Use exact typed values, owner slots, object identity/equality, existing nonce/revision/generation, and database constraints.
 - A hash must not stand in for owner authenticity, permission, inventory completeness, physical liveness, or execution authority.
