@@ -3328,7 +3328,18 @@ def _public_user_capabilities(value, scrub):
 
     skills = value["skills"]
     skill_children = {
-        "items": [public_record(item, scrub, fixed=("root", "root_kind", "authoring_notes")) for item in skills["items"]],
+        "items": [
+            public_record(
+                item,
+                scrub,
+                fixed=("root", "root_kind", "authoring_notes"),
+                children={
+                    "removal_identity": public_record(item["removal_identity"], scrub)
+                    if item.get("removal_identity") is not None else None,
+                },
+            )
+            for item in skills["items"]
+        ],
         "issues": [public_record(item, scrub, fixed=("kind", "diagnostic_codes")) for item in skills["issues"]],
         "roots": roots(skills["roots"]),
     }

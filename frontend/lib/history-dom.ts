@@ -1,6 +1,7 @@
 /** Browser-only semantic positions; these never represent canonical read coverage. */
 export interface HistoryReadingAnchor {
   entryId: string;
+  viewRole?: 'process' | 'final';
   traceId?: string;
   sourceOffset?: number;
   header?: boolean;
@@ -61,13 +62,17 @@ function visibleHost(element: HTMLElement): HTMLElement {
   return element.dataset.sourceEntry ? element.firstElementChild as HTMLElement ?? element : element;
 }
 
-export function findHistoryEntry(root: HTMLElement, entryId: string): HTMLElement | undefined {
+export function findHistoryEntry(root: HTMLElement, entryId: string, viewRole?: HistoryReadingAnchor['viewRole']): HTMLElement | undefined {
   const trace = [...root.querySelectorAll<HTMLElement>('[data-result-entry]')]
     .find(node => node.dataset.resultEntry === entryId && !node.closest('[inert], [hidden]'));
   if (trace) return trace;
   const entries = [...root.querySelectorAll<HTMLElement>('[data-source-entry]')].filter(node => !node.closest('[inert], [hidden]'));
-  const entry = entries.find(node => node.dataset.sourceEntry === entryId)
-    ?? entries.find(node => node.dataset.sourceEntries?.split(' ').includes(entryId));
+  const exact = entries.filter(node => node.dataset.sourceEntry === entryId);
+  const candidates = exact.length ? exact : entries.filter(node => node.dataset.sourceEntries?.split(' ').includes(entryId));
+  // One canonical reply can appear in both its process drawer and final body.
+  // Keep the reader's part; ordinary entry navigation prefers the final body.
+  const entry = candidates.find(node => viewRole ? node.dataset.viewRole === viewRole : node.dataset.viewRole !== 'process')
+    ?? candidates[0];
   return entry && visibleHost(entry);
 }
 
@@ -99,7 +104,9 @@ export function captureHistoryAnchor(root: HTMLElement): HistoryReadingAnchor | 
       const entryId = candidate.dataset.historyEntry ?? candidate.dataset.resultEntry ?? candidate.closest<HTMLElement>('[data-source-entry]')?.dataset.sourceEntry;
       if (!entryId) continue;
       const mapping = candidate.dataset.sourceText && JSON.parse(candidate.dataset.sourceText) as number[][];
+      const viewRole = candidate.closest<HTMLElement>('[data-source-entry]')?.dataset.viewRole;
       return { entryId, traceId: candidate.dataset.resultEntry, sourceOffset: mapping ? mapping[0]?.[0] : undefined,
+        ...(viewRole === 'process' || viewRole === 'final' ? {viewRole} : {}),
         ...(candidate.dataset.historyEntry ? {header: true, processEdge: candidate.dataset.processEdge} : {}), top: rect.top - viewport.top };
     }
   }
@@ -109,7 +116,7 @@ export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAn
   const headers = anchor.header ? [...root.querySelectorAll<HTMLElement>('[data-history-entry]')].filter(node => !node.closest('[hidden], [inert]') && (!anchor.processEdge || node.dataset.processEdge === anchor.processEdge)) : [];
   let node = anchor.header ? headers.find(node => node.dataset.historyEntry === anchor.entryId)
     ?? headers.find(node => node.dataset.historyEntryAliases?.split(' ').includes(anchor.entryId))
-    : findHistoryEntry(root, anchor.traceId ?? anchor.entryId);
+    : findHistoryEntry(root, anchor.traceId ?? anchor.entryId, anchor.viewRole);
   if (anchor.disclosureKey) {
     const controls = [...root.querySelectorAll<HTMLElement>('[data-disclosure-key]')]
       .filter(candidate => candidate.dataset.disclosureKey === anchor.disclosureKey && !candidate.closest('[hidden], [inert]'));
@@ -124,7 +131,7 @@ export function restoreHistoryAnchor(root: HTMLElement, anchor: HistoryReadingAn
   if (!node) {
     const nearby = captureHistoryAnchor(root);
     if (nearby) Object.assign(anchor, {
-      entryId: nearby.entryId, top: nearby.top, traceId: nearby.traceId,
+      entryId: nearby.entryId, viewRole: nearby.viewRole, top: nearby.top, traceId: nearby.traceId,
       sourceOffset: nearby.sourceOffset, header: nearby.header,
       processEdge: nearby.processEdge, disclosureKey: nearby.disclosureKey,
     });

@@ -1254,7 +1254,7 @@ function HistoryMessageHost({ message, children, knownContent, contextLoadingSum
   }, [contextPending, hydrate, message.id, contentState, message.sourceEntryIds, includeReasoning]);
   const summarized = contextLoadingSummarized && message.historyContextState === 'loading';
   if (summarized && !knownContent) return null;
-  return <div ref={ref} data-source-entry={messageSourceEntryId(message)} data-content-state={contextPending ? 'loading' : contentState} data-source-entries={message.sourceEntryIds?.join(' ')}>
+  return <div ref={ref} data-source-entry={messageSourceEntryId(message)} data-view-role={message.viewRole} data-content-state={contextPending ? 'loading' : contentState} data-source-entries={message.sourceEntryIds?.join(' ')}>
     {/* Exact known input/output keeps its layout while canonical reads catch up.
         Errors still expose their status and retry action below. */}
     {knownContent && (contextPending || pending || message.pendingAssistant)

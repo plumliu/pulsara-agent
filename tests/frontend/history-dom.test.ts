@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { captureHistoryAnchor, collectHistoryResidence, hasHistorySelection, restoreHistoryAnchor, waitForHistoryEntry } from '../../frontend/lib/history-dom';
+import { captureHistoryAnchor, collectHistoryResidence, findHistoryEntry, hasHistorySelection, restoreHistoryAnchor, waitForHistoryEntry } from '../../frontend/lib/history-dom';
 import { registerAnnotationBody, waitForAnnotationBody } from '../../frontend/lib/response-selection';
 
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
@@ -109,6 +109,27 @@ describe('canonical history DOM completion and anchors', () => {
     rect.mockReturnValue(new DOMRect(0, 140, 60, 20));
     restoreHistoryAnchor(root, anchor);
     expect(root.scrollTop).toBe(120);
+  });
+
+  it.each(['process', 'final'] as const)('restores the %s view when one canonical reply has both process and final hosts', viewRole => {
+    const root = document.createElement('div'); document.body.append(root);
+    root.innerHTML = '<div data-source-entry="answer" data-view-role="process"><article><span data-source-text="[[0,1]]">思考</span></article></div>'
+      + '<div data-source-entry="answer" data-view-role="final"><article><span data-source-text="[[0,1]]">正文</span></article></div>';
+    let top = viewRole === 'process' ? 50 : 650;
+    Object.defineProperty(root, 'scrollTop', { get: () => top, set: value => { top = value; } });
+    vi.spyOn(root, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 600, 400));
+    for (const host of root.querySelectorAll<HTMLElement>('[data-source-entry]')) {
+      const offset = host.dataset.viewRole === 'process' ? 100 : 700;
+      for (const node of host.querySelectorAll<HTMLElement>('article, span')) {
+        vi.spyOn(node, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, offset - top, 600, 24));
+      }
+    }
+    const anchor = captureHistoryAnchor(root)!;
+    const readingTop = top;
+    restoreHistoryAnchor(root, anchor);
+    expect(top).toBe(readingTop);
+    expect(anchor).toMatchObject({ entryId: 'answer', viewRole, sourceOffset: 0, top: 50 });
+    expect(findHistoryEntry(root, 'answer')?.closest('[data-source-entry]')?.getAttribute('data-view-role')).toBe('final');
   });
 });
 

@@ -142,6 +142,45 @@ def test_inventory_reads_all_loaded_owners_and_drops_retired_owner(config, monke
     asyncio.run(exercise())
 
 
+def test_user_inventory_keeps_real_loose_skill_removal_identity(config, tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(controller_module.Path, "home", lambda: home)
+    skill = tmp_path / "skills" / "inventory-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: inventory-skill\ndescription: Inventory regression fixture.\n---\n"
+        "Read the supplied material.\n"
+    )
+
+    async def exercise():
+        controller = object.__new__(LocalSessionController)
+        controller._lock = asyncio.Lock()
+        controller._operations = {}
+        controller._by_session = {}
+        controller.core = SimpleNamespace(
+            mcp_management=SimpleNamespace(
+                load_configs=lambda: (config,),
+                settings=SimpleNamespace(read=lambda: SimpleNamespace(mcp_secret=lambda _: None)),
+            ),
+            inspect_user_plugins=AsyncMock(return_value=object()),
+        )
+        result = await controller.inspect_user_capabilities()
+        item, = result["skills"]["items"]
+        assert item["name"] == "inventory-skill"
+        root = skill.parent.stat()
+        directory = skill.stat()
+        assert item["removal_identity"] == {
+            "root_device": str(root.st_dev),
+            "root_inode": str(root.st_ino),
+            "directory_device": str(directory.st_dev),
+            "directory_inode": str(directory.st_ino),
+        }
+        assert result["mcp"]["servers"][0]["id"] == config.server_id
+
+    asyncio.run(exercise())
+
+
 def test_workspace_skill_target_is_exact_and_collisions_fail(tmp_path, monkeypatch):
     from pulsara_agent.identity import derive_id
     from pulsara_agent.capability.local_skill_publisher import LocalSkillInstallScope
