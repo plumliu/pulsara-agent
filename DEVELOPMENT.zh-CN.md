@@ -109,6 +109,6 @@ Electron 壳只打包启动页需要的 Inter、Noto Sans SC 和 Gelasio。工�
 
 0.1.3-alpha.1 仅提供本地构建的 macOS ARM64 DMG。Python/CLI 版本为 `0.1.3a1`，桌面端与 npm 元数据使用 `0.1.3-alpha.1`，设置页显示 `0.1.3`；Python 包、运行时常量、npm 包及所有锁文件必须一致。新的数据库基线不兼容早期发行版数据，见[安装说明](INSTALL.zh-CN.md)。
 
-GitHub Actions 仅手动触发。Native Desktop Packages 工作流与 `release_artifacts.py assemble/draft` 要求四个平台安装包，因此本次仅 macOS 发布使用本地 `desktop:package` 和 GitHub CLI：提交版本及文档、推送对应标签，使用 `--verify-tag` 创建预发布草稿，仅上传 `Pulsara-0.1.3-alpha.1-macos-arm64.dmg`，核对远端文件名与大小后发布。已发布的标签与资产保持不变。本版不附带 Windows、Ubuntu、blockmap 或更新源资产。
+GitHub Actions 仅手动触发。Native Desktop Packages 工作流与 `release_artifacts.py assemble/draft` 要求四个平台安装包，因此本次仅 macOS 发布使用本地 `desktop:package` 和 GitHub CLI：提交版本及文档、推送对应标签，使用 `--verify-tag` 创建草稿，仅上传 `Pulsara-0.1.3-alpha.1-macos-arm64.dmg`，核对远端文件名与大小后，以 `--prerelease=false --latest` 发布为普通 Release 并标记 Latest。已发布的标签与资产保持不变。本版不附带 Windows、Ubuntu、blockmap 或更新源资产。
 
 版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.3-alpha.1`。
