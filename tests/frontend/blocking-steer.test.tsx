@@ -29,7 +29,14 @@ describe('blocking input production conversation path', () => {
     expect(connection.resolveInteraction).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', {name:'引导', exact:true})).toBeNull();
     expect(screen.getByText('A plan for review')).toBeTruthy();
-    expect(screen.getByRole('region', {name: '等待处理的输入'}).textContent).toContain('do this after the plan');
+    expect(screen.queryByRole('region', {name: '等待处理的输入'})).toBeNull();
+    const commandId = connection.submitPrompt.mock.calls[0][0];
+    act(() => connection.emit({...pendingReview(), queuedCount: 1, queuedPrompts: [{
+      queueItemId: 'normal-queue', sourceKind: 'command', commandId, sequence: '1',
+      status: 'pending', inputOrigin: 'HUMAN_MESSAGE', deliveryMode: 'new-turn',
+      content: textPrompt('do this after the plan'),
+    }]}));
+    expect((await screen.findByRole('region', {name: '等待处理的输入'})).textContent).toContain('do this after the plan');
   });
 
   it('queues the composer input and only steers after the queue send is clicked', async () => {
@@ -56,7 +63,7 @@ describe('blocking input production conversation path', () => {
       queueItemId:'permission-queue', sourceKind:'command', commandId, sequence:'1', status:'pending', inputOrigin:'HUMAN_MESSAGE',
       deliveryMode:'new-turn', content:textPrompt('keep the files unchanged'),
     }]}));
-    const queueSend = within(screen.getByRole('region', {name:'等待处理的输入'})).getByRole('button', {name:'发送', exact:true});
+    const queueSend = within(await screen.findByRole('region', {name:'等待处理的输入'})).getByRole('button', {name:'发送', exact:true});
     await waitFor(() => expect((queueSend as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(queueSend);
     await waitFor(() => expect(steer).toHaveBeenCalledWith(expect.any(String), 'permission-queue', 'turn-exact'));

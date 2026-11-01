@@ -1,6 +1,6 @@
 # 从源码构建 Pulsara
 
-[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.1.1-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.2)
+[English](DEVELOPMENT.md) · [安装说明](INSTALL.zh-CN.md) · [下载 0.1.3-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1)
 
 修改代码前请阅读 [AGENTS.md](AGENTS.md)。原生资源在目标系统构建；Windows 使用 WSL2 Ubuntu 中构建的 Linux 资源，以及 Windows 中构建的 Electron 界面。
 
@@ -28,7 +28,11 @@ mise install
 mise run --jobs 1 desktop:package
 ```
 
-DMG 位于 `desktop/release`。只生成未封装应用时，先运行 `mise run --jobs 1 desktop:verify`，再运行 `mise exec -- npm --prefix desktop run package:dir`。签名与公证需要单独配置。
+DMG 位于 `desktop/release`。只生成未封装应用时，先运行 `mise run --jobs 1 desktop:verify`，再运行 `mise exec -- npm --prefix desktop run package:dir`。递归 ad-hoc 签名与严格应用包校验交给 electron-builder（`mac.identity: "-"`）；不要设为 `null` 跳过签名，否则可能保留缺少资源封装的 Electron 链接器签名。预览版沿用现有非 hardened runtime 行为。Developer ID 签名与 Apple 公证需要单独配置。
+
+上传 DMG 前，运行 `hdiutil verify`，只读挂载，并用 `ditto` 将应用复制出来，对复制后的应用执行 `codesign --verify --deep --strict --verbose=2`，同时确认存在 `Contents/_CodeSignature/CodeResources`。签名后不得再修改应用。Gatekeeper 信任是另一项检查，ad-hoc 签名不提供 Developer ID 身份或 Apple 公证。
+
+隔离首次启动时，使用真实规范路径下的私有数据目录，路径长度须满足 Unix socket 限制。macOS 的 `/var`、`/tmp` 是 `/private/var`、`/private/tmp` 的别名，后端会拒绝带路径别名的运行目录。版本检查使用随包 Python/CLI 入口；`--pulsara-cli` 是 Linux 可执行包装器的参数，不是 macOS 图形应用参数。
 
 ## Windows + WSL2
 
@@ -51,11 +55,11 @@ mise install
 mise run --jobs 1 desktop:windows-package
 ```
 
-EXE 位于 `desktop/release/Pulsara-<版本>-windows-x64.exe`。构建会校验 payload 版本与摘要，并编译 Windows helper。安装和数据位置见 [INSTALL.zh-CN.md](INSTALL.zh-CN.md)，剩余验收矩阵见 [windows_compatibility](windows_compatibility/README.md)。
+EXE 位于 `desktop/release/Pulsara-<版本>-windows-x64.exe`。构建会校验 payload 版本与摘要，并编译 Windows helper。本版不发布 Windows 安装包。安装和数据位置见 [INSTALL.zh-CN.md](INSTALL.zh-CN.md)。
 
 ## 原生 Ubuntu
 
-0.1.1-alpha.2 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
+0.1.3-alpha.1 不发布 Ubuntu deb，原生 x64/arm64 桌面验收仍延期。本地构建先安装 mise，再以普通用户运行：
 
 ```sh
 sudo apt update
@@ -66,7 +70,7 @@ mise install
 mise run desktop:bootstrap
 mise exec -- .venv/bin/python -m playwright install-deps chromium
 mise run --jobs 1 desktop:package
-sudo apt install ./desktop/release/Pulsara-0.1.1-alpha.2-linux-amd64.deb
+sudo apt install ./desktop/release/Pulsara-0.1.3-alpha.1-linux-amd64.deb
 ```
 
 ARM64 用户换用 arm64 文件名。容器构建使用同一任务图：
@@ -103,8 +107,8 @@ Electron 壳只打包启动页需要的 Inter、Noto Sans SC 和 Gelasio。工�
 
 ## 发布
 
-0.1.1-alpha.2 提供本地构建的 macOS ARM64 DMG 和 Windows x64 EXE。应用代码基于 `v0.1.1-alpha.2` 标签；Windows 测试维护不改变运行行为。Python 版本为 `0.1.1a2`，设置页显示 `0.1.1`。
+0.1.3-alpha.1 仅提供本地构建的 macOS ARM64 DMG。Python/CLI 版本为 `0.1.3a1`，桌面端与 npm 元数据使用 `0.1.3-alpha.1`，设置页显示 `0.1.3`；Python 包、运行时常量、npm 包及所有锁文件必须一致。新的数据库基线不兼容早期发行版数据，见[安装说明](INSTALL.zh-CN.md)。
 
-GitHub Actions 仅手动触发。现有 Native Desktop Packages 工作流与 `release_artifacts.py` 汇总仍要求一个 DMG、两个 Ubuntu deb 和一个 Windows EXE，本次 macOS/Windows 发布不使用该汇总流程。将各本地安装包上传到对应的 Release，不替换已有制品；已发布的标签保持不变。
+GitHub Actions 仅手动触发。Native Desktop Packages 工作流与 `release_artifacts.py assemble/draft` 要求四个平台安装包，因此本次仅 macOS 发布使用本地 `desktop:package` 和 GitHub CLI：提交版本及文档、推送对应标签，使用 `--verify-tag` 创建预发布草稿，仅上传 `Pulsara-0.1.3-alpha.1-macos-arm64.dmg`，核对远端文件名与大小后发布。已发布的标签与资产保持不变。本版不附带 Windows、Ubuntu、blockmap 或更新源资产。
 
-版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.1-alpha.2`。
+版本一致性检查：`mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.3-alpha.1`。

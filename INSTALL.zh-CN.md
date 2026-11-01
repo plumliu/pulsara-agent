@@ -2,22 +2,25 @@
 
 [English](INSTALL.md) · [从源码构建](DEVELOPMENT.zh-CN.md)
 
-## 下载 0.1.1-alpha.2
+## 下载 0.1.3-alpha.1
 
 | 系统 | 安装包 |
 | --- | --- |
-| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-macos-arm64.dmg) |
-| Windows 11 x64 + WSL2 Ubuntu | [下载 EXE](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-windows-x64.exe) |
+| macOS 15+，Apple Silicon | [下载 DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.3-alpha.1/Pulsara-0.1.3-alpha.1-macos-arm64.dmg) |
 
-本版不提供原生 Ubuntu 安装包。amd64、arm64 的本地构建见[开发指南](DEVELOPMENT.zh-CN.md)；原生 Ubuntu 桌面验收仍延期。
+本版仅提供 macOS Apple Silicon DMG；0.1.3-alpha.1 不发布 Windows 或 Ubuntu 安装包。这些平台的源码构建方式保留在[开发指南](DEVELOPMENT.zh-CN.md)中。
 
 ## macOS
 
 1. 打开 DMG，将 Pulsara 拖入“应用程序”。
 2. 推出 DMG，从“应用程序”打开 Pulsara。
-3. 若被系统拦截，确认下载来源后，进入“系统设置 → 隐私与安全性 → 仍要打开”。此预览版没有 Apple Developer ID 分发签名，也未经过 Apple 公证。[Apple 说明](https://support.apple.com/zh-cn/102445)
+3. 若被系统拦截，确认下载来源后，进入“系统设置 → 隐私与安全性 → 仍要打开”。此预览版使用覆盖应用与随包资源的 ad-hoc 签名，没有 Apple Developer ID 分发签名，也未经过 Apple 公证；ad-hoc 签名有效不代表 Gatekeeper 会自动信任。[Apple 说明](https://support.apple.com/zh-cn/102445)
+
+若系统提示应用已损坏，请勿全局关闭 Gatekeeper。请重新下载当前 DMG；本版修正了早期安装包不完整的应用签名。若仍失败，请在反馈中附上 `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` 的输出。
 
 ## Windows + WSL2
+
+本版没有 Windows 安装包，以下步骤适用于另行构建的 Windows 包。
 
 1. 尚未安装时，先按 [Microsoft 说明](https://learn.microsoft.com/zh-cn/windows/wsl/install)安装 WSL2 和 Ubuntu。按提示重启，首次打开 Ubuntu 并完成 Linux 用户创建。
 2. 运行 EXE 安装包，再从开始菜单打开 Pulsara。安装包尚未签名，Windows 可能提示未知发布者。
@@ -48,7 +51,7 @@ Windows 卸载器只有两个选项，两者都会删除应用和 WSL 运行资�
 
 Ubuntu 和 Pulsara 数据目录之外的工程文件会保留。WSL 清理失败时，卸载会停止，可处理后重试。
 
-**从 0.1.0-alpha.5 或更早版本升级：**alpha.6 更改了数据库基线，不提供这些旧版本的自动迁移。请先备份数据，保留旧会话需要另行迁移，不要删除整个 `~/.pulsara`。
+**从 0.1.1 或更早版本升级：**0.1.3 更改了数据库基线、代理会话结构与身份格式，早期发行版数据库不能直接沿用，也不提供自动迁移。首次打开新版前，请完全退出旧版并备份整个 Pulsara 数据目录。保留旧应用和旧数据以查看历史；将历史迁入新版需要另行迁移。请为新版使用新的数据目录，不要删除已有 `~/.pulsara`。例如，安装后运行 `PULSARA_HOME="$HOME/.pulsara-0.1.3" /Applications/Pulsara.app/Contents/MacOS/pulsara`，再到设置中配置模型连接。
 
 开发版与安装版默认共用数据目录，打开另一份前先退出当前应用。当前采用手动更新。
 

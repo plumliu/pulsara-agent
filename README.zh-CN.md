@@ -5,14 +5,14 @@
   <img src="assets/banner.png" alt="Pulsara — 持久会话、可审阅的工作记录、语义记忆" width="100%">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/latest"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
   <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/latest">下载桌面版</a> &nbsp; | &nbsp;
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1">下载桌面版</a> &nbsp; | &nbsp;
   <a href="#demo">观看演示</a> &nbsp; | &nbsp;
   <a href="INSTALL.zh-CN.md">安装说明</a> &nbsp; | &nbsp;
   <a href="README.md">English</a>
@@ -43,9 +43,9 @@ https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
 
 ## 别忘了你有一整支团队
 
-让一个 Agent 追查问题，另一个比较方案，再安排独立审阅。Pulsara 可以按任务搭配模型，每个 Subagent 都有自己的上下文；你能打开任务图点进任何一个任务，看它做到了哪里。
+让一个 Agent 追查问题，另一个比较方案，再安排独立审阅。Pulsara 可以按任务搭配模型，每个 Subagent 都有自己的上下文；在代理与 Cell 面板中，可以查看代理对话、工作进展和运行中的代码。
 
-一份扎实的调查还可以接着用。已完成子任务的对话和工具历史，能交给后续任务继续推进。实现与审阅从同一份发现出发，各自判断，省掉重新解释整个问题的功夫。
+一份扎实的调查还可以接着用。继续与已有代理协作，或创建继承历史的新代理，让实现与审阅从同一份发现出发，各自判断。
 
 > 追一下这个 Bug，比较两种修法。选定后帮我改好，让另一个 Agent 独立审阅，再跑相关测试。
 
@@ -54,6 +54,8 @@ https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
 工具调用、后台命令和子代理进度都能展开看。临时想起一个新想法，就能把那条消息及时告诉 Pulsara。
 
 你也能选中回复针对它做批注，比反复讲“刚才那个文件”省心多了。
+
+Skill 和 MCP Prompt 共用 `/` 菜单。选中 MCP Prompt 后，填写参数、查看预览，再插入草稿并发送。
 
 ## 工作再繁杂 Pulsara 也跟得上
 
@@ -67,20 +69,19 @@ Pulsara 也认真对待长上下文的开销。稳定的提示词前缀让支持
 
 ## 装好就能开工
 
-[下载 Pulsara 0.1.1-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.2)
+[下载 Pulsara 0.1.3-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1)
 
 | 操作系统 | 快捷通道 |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-macos-arm64.dmg) |
-| Windows 11 x64 + WSL2 Ubuntu | [下载 EXE 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-windows-x64.exe) |
+| macOS 15+ (Apple Silicon) | [下载 DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.3-alpha.1/Pulsara-0.1.3-alpha.1-macos-arm64.dmg) |
 
-本版不提供 Ubuntu 安装包，原生 Ubuntu 构建见[开发指南](DEVELOPMENT.zh-CN.md)。
+本版仅发布 macOS Apple Silicon DMG，不提供 Windows 或 Ubuntu 安装包。源码构建见[开发指南](DEVELOPMENT.zh-CN.md)。
 
-1. 安装并打开 Pulsara。macOS 把应用拖进“应用程序”；Windows 运行 EXE，首次启动时选择已有的 WSL2 Ubuntu。尚未安装时，先按 [Microsoft 说明](https://learn.microsoft.com/zh-cn/windows/wsl/install)安装 WSL2 和 Ubuntu。
+1. 打开 DMG，将 Pulsara 拖入“应用程序”，推出 DMG，再打开应用。
 2. 在设置中添加模型连接，选择提供方、模型和 API 协议，再填写认证信息。
 3. 开一个快速开始会话，拖进文件，或者直接打开项目目录。把任务交给它。
 
-当前是桌面预览版。macOS 系统授权、Windows 设置、更新方式与数据位置见[安装说明](INSTALL.zh-CN.md)。偏爱终端的话，应用也带了 `pulsara` 命令行入口。
+当前是桌面预览版。0.1.3 更改了数据库基线，不自动迁移早期发行版的数据，升级前请阅读[安装说明](INSTALL.zh-CN.md)。偏爱终端的话，应用也带了 `pulsara` 命令行入口。
 
 ## 30 秒上手，把脏活累活交出去
 

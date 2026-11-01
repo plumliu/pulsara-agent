@@ -1,6 +1,6 @@
 # Build Pulsara
 
-[简体中文](DEVELOPMENT.zh-CN.md) · [Installation](INSTALL.md) · [Downloads: 0.1.1-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.2)
+[简体中文](DEVELOPMENT.zh-CN.md) · [Installation](INSTALL.md) · [Downloads: 0.1.3-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1)
 
 Read [AGENTS.md](AGENTS.md) before changing code. Build native resources on the target OS; Windows uses a Linux payload built in WSL2 Ubuntu and an Electron shell built on Windows.
 
@@ -28,7 +28,11 @@ mise install
 mise run --jobs 1 desktop:package
 ```
 
-The DMG is written to `desktop/release`. For an unpacked app, run `mise run --jobs 1 desktop:verify`, then `mise exec -- npm --prefix desktop run package:dir`. Signing and notarization require separate configuration.
+The DMG is written to `desktop/release`. For an unpacked app, run `mise run --jobs 1 desktop:verify`, then `mise exec -- npm --prefix desktop run package:dir`. electron-builder owns recursive ad-hoc signing (`mac.identity: "-"`) and strict bundle verification; do not set the identity to `null`, which skips signing and can leave Electron's linker signature without a resource seal. The preview retains its existing non-hardened runtime behavior. Developer ID signing and notarization require separate configuration.
+
+Before uploading a DMG, run `hdiutil verify`, mount it read-only, copy the app out with `ditto`, and run `codesign --verify --deep --strict --verbose=2` on the copied app. Also verify `Contents/_CodeSignature/CodeResources` exists. Do not modify the app after signing. Gatekeeper trust is a separate check; ad-hoc signing does not provide Developer ID identity or notarization.
+
+For an isolated first-launch check, use a private data home with its real, canonical path and keep it short enough for the Unix socket. macOS `/var` and `/tmp` aliases resolve to `/private/var` and `/private/tmp`; the backend rejects aliased runtime paths. Run the bundled Python/CLI entry for `--version`; `--pulsara-cli` is the Linux executable wrapper's flag, not a macOS GUI option.
 
 ## Windows + WSL2
 
@@ -51,11 +55,11 @@ mise install
 mise run --jobs 1 desktop:windows-package
 ```
 
-The EXE is written to `desktop/release/Pulsara-<version>-windows-x64.exe`. The build verifies the payload version and checksum and compiles the Windows helper. User setup and data locations are covered in [INSTALL.md](INSTALL.md); the remaining acceptance matrix is in [windows_compatibility](windows_compatibility/README.md).
+The EXE is written to `desktop/release/Pulsara-<version>-windows-x64.exe`. The build verifies the payload version and checksum and compiles the Windows helper. No Windows installer is published for this version. User setup and data locations are covered in [INSTALL.md](INSTALL.md).
 
 ## Native Ubuntu
 
-No Ubuntu deb is published for 0.1.1-alpha.2. Native x64/arm64 desktop acceptance remains deferred. To build locally, install mise and run as a normal user:
+No Ubuntu deb is published for 0.1.3-alpha.1. Native x64/arm64 desktop acceptance remains deferred. To build locally, install mise and run as a normal user:
 
 ```sh
 sudo apt update
@@ -66,7 +70,7 @@ mise install
 mise run desktop:bootstrap
 mise exec -- .venv/bin/python -m playwright install-deps chromium
 mise run --jobs 1 desktop:package
-sudo apt install ./desktop/release/Pulsara-0.1.1-alpha.2-linux-amd64.deb
+sudo apt install ./desktop/release/Pulsara-0.1.3-alpha.1-linux-amd64.deb
 ```
 
 Use the arm64 filename on ARM64. A container build uses the same task graph:
@@ -103,8 +107,8 @@ The Electron archive includes only startup fonts (Inter, Noto Sans SC and Gelasi
 
 ## Releases
 
-Version 0.1.1-alpha.2 ships locally built macOS ARM64 DMG and Windows x64 EXE installers. Application code comes from tag `v0.1.1-alpha.2`; Windows test maintenance does not change runtime behavior. Python uses version `0.1.1a2`; Settings displays `0.1.1`.
+Version 0.1.3-alpha.1 ships only a locally built macOS ARM64 DMG. Python/CLI uses `0.1.3a1`; desktop and npm metadata use `0.1.3-alpha.1`; Settings displays `0.1.3`. Keep the Python package, runtime constant, npm packages and all lockfiles consistent. The new database baseline is not compatible with earlier release data; see [installation notes](INSTALL.md).
 
-GitHub Actions are manual. The existing Native Desktop Packages workflow and `release_artifacts.py` assembly still require a DMG, two Ubuntu debs and a Windows EXE; this macOS/Windows release does not use that assembly flow. Upload each local installer to its matching Release without replacing existing assets. Keep published tags fixed.
+GitHub Actions are manual. The Native Desktop Packages workflow and `release_artifacts.py assemble/draft` require all four platform installers, so this macOS-only release uses the local `desktop:package` task and GitHub CLI directly. Commit version metadata and documentation, push the matching tag, create a prerelease draft with `--verify-tag`, upload only `Pulsara-0.1.3-alpha.1-macos-arm64.dmg`, verify its remote name and size, then publish the draft. Keep published tags and assets fixed. No Windows, Ubuntu, blockmap or update-feed assets are included.
 
-Check version consistency with `mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.1-alpha.2`.
+Check version consistency with `mise exec -- uv run --no-sync python desktop/scripts/release_artifacts.py check --tag v0.1.3-alpha.1`.

@@ -2,22 +2,25 @@
 
 [简体中文](INSTALL.zh-CN.md) · [Build from source](DEVELOPMENT.md)
 
-## Download 0.1.1-alpha.2
+## Download 0.1.3-alpha.1
 
 | System | Installer |
 | --- | --- |
-| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-macos-arm64.dmg) |
-| Windows 11 x64 + WSL2 Ubuntu | [Download EXE](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-windows-x64.exe) |
+| macOS 15+, Apple Silicon | [Download DMG](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.3-alpha.1/Pulsara-0.1.3-alpha.1-macos-arm64.dmg) |
 
-This release includes no native Ubuntu installer. For local amd64 or arm64 builds, follow the [development guide](DEVELOPMENT.md); native Ubuntu desktop acceptance remains deferred.
+This release includes only the macOS Apple Silicon DMG. No Windows or Ubuntu installer is published for 0.1.3-alpha.1. Source-build instructions for those platforms remain in the [development guide](DEVELOPMENT.md).
 
 ## macOS
 
 1. Open the DMG and drag Pulsara into Applications.
 2. Eject the DMG, then open Pulsara from Applications.
-3. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway after checking the download source. This preview has no Developer ID distribution signature or Apple notarization. [Apple instructions](https://support.apple.com/en-us/102445)
+3. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway after checking the download source. This preview has an ad-hoc signature covering the app and bundled resources; it has no Developer ID distribution signature or Apple notarization. A valid ad-hoc signature does not establish Gatekeeper trust. [Apple instructions](https://support.apple.com/en-us/102445)
+
+If macOS reports that the application is damaged, do not disable Gatekeeper globally. Download the current DMG again; this version fixes the incomplete bundle signature in earlier packages. Include the output of `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` in an issue if verification still fails.
 
 ## Windows + WSL2
+
+No Windows installer is included in this release. The following setup applies to a separately built Windows package.
 
 1. If needed, [install WSL2 and Ubuntu](https://learn.microsoft.com/windows/wsl/install). Restart when prompted, open Ubuntu once, and finish creating your Linux user.
 2. Run the EXE installer, then open Pulsara from the Start menu. The installer is unsigned; Windows may show an unknown-publisher warning.
@@ -48,7 +51,7 @@ The Windows uninstaller offers two choices. Both remove the app and its WSL runt
 
 Ubuntu and project folders outside the Pulsara data directory are preserved. If WSL cleanup fails, uninstalling stops so you can retry.
 
-**Upgrading from 0.1.0-alpha.5 or earlier:** the database baseline changed in alpha.6, with no automatic migration from those versions. Back up your data first; retaining old sessions requires a separate migration. Do not delete the entire `~/.pulsara` directory.
+**Upgrading from 0.1.1 or earlier:** 0.1.3 changes the database baseline, agent sessions and identity format. Earlier release databases cannot be reused directly, and there is no automatic migration. Fully quit the old app and back up the entire Pulsara data directory before opening this version. Keep the old app and data for access to past sessions; retaining that history in this version requires a separate migration. Use a fresh data home for this version rather than deleting the existing `~/.pulsara` directory. For example, launch the installed macOS app with `PULSARA_HOME="$HOME/.pulsara-0.1.3" /Applications/Pulsara.app/Contents/MacOS/pulsara`, then configure your model connection in Settings.
 
 Development and installed builds share the default data home. Quit one before opening the other. Updates are manual.
 

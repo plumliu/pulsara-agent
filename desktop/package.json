@@ -2,7 +2,7 @@
   "name": "pulsara-desktop",
   "productName": "Pulsara",
   "desktopName": "pulsara-desktop.desktop",
-  "version": "0.1.1-alpha.2",
+  "version": "0.1.3-alpha.1",
   "description": "Pulsara local agent workbench",
   "author": "Pulsara",
   "private": true,
@@ -60,7 +60,8 @@
       "icon": "assets/pulsara.icns",
       "minimumSystemVersion": "15.0.0",
       "category": "public.app-category.productivity",
-      "identity": null,
+      "identity": "-",
+      "hardenedRuntime": false,
       "artifactName": "Pulsara-${version}-macos-${arch}.${ext}"
     },
     "linux": {

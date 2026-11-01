@@ -5,14 +5,14 @@
   <img src="assets/banner.png" alt="Pulsara — persistent sessions, auditable events, semantic memory" width="100%">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/latest"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1"><img src="https://img.shields.io/github/v/release/plumliu/pulsara-agent?include_prereleases&style=for-the-badge&color=b87b2d" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Python-3.12%2B-111827?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/Electron-44-47848F?style=for-the-badge&logo=electron&logoColor=white" alt="Electron 44">
   <img src="https://img.shields.io/badge/React-19-149ECA?style=for-the-badge&logo=react&logoColor=white" alt="React 19">
   <img src="https://img.shields.io/badge/PostgreSQL-17-336791?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL 17">
 </p>
 <p align="center">
-  <a href="https://github.com/plumliu/pulsara-agent/releases/latest">Download</a> &nbsp; | &nbsp;
+  <a href="https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1">Download</a> &nbsp; | &nbsp;
   <a href="#demo">Watch the demo</a> &nbsp; | &nbsp;
   <a href="INSTALL.md">Installation</a> &nbsp; | &nbsp;
   <a href="README.zh-CN.md">简体中文</a>
@@ -43,9 +43,9 @@ https://github.com/user-attachments/assets/f78ec29d-f18f-4f9a-b98d-4ce3638ed35f
 
 ## Remember, you have a whole team
 
-Have one agent investigate, another compare approaches, and bring in an independent reviewer. Pulsara lets you match models to tasks, and each subagent has its own context. Open the task graph and click into any task to see how it is going.
+Have one agent investigate, another compare approaches, and bring in an independent reviewer. Pulsara lets you match models to tasks, and each subagent has its own context. Open Agents & Cells to inspect an agent's conversation, work, or running code.
 
-A solid investigation is worth using again. Follow-up tasks can inherit the conversation and tool history of a completed subtask. Implementation and review start with the same findings, then reach their own conclusions, saving you the trouble of explaining the whole problem again.
+A solid investigation is worth using again. Continue working with an existing agent, or start a new agent with inherited history. Implementation and review can start with the same findings and reach their own conclusions.
 
 > Track down this bug and compare two fixes. Once we pick one, implement it, ask another agent to review it independently, and run the relevant tests.
 
@@ -54,6 +54,8 @@ A solid investigation is worth using again. Follow-up tasks can inherit the conv
 Expand tool calls, background commands, and subagent progress to see what is happening. If a new idea comes to you, pass it to Pulsara right away.
 
 Select part of a reply and annotate it directly. It beats repeatedly explaining which file you meant.
+
+Skills and MCP prompts share the `/` menu. Select an MCP prompt, fill its parameters, preview the result, and insert it into your draft before sending.
 
 New sessions can get a title from your first message. After an answer finishes, the empty composer may suggest a follow-up question. Suggestions stay in memory: typing hides them, clearing the draft reveals them, and sending the next message clears them. Neither feature delays the answer.
 
@@ -67,20 +69,19 @@ Save preferences, project constraints, and decisions in memory for later tasks t
 
 ## Install it and get to work
 
-[Download Pulsara 0.1.1-alpha.2](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.1-alpha.2)
+[Download Pulsara 0.1.3-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1)
 
 | Operating system | Quick download |
 | --- | --- |
-| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-macos-arm64.dmg) |
-| Windows 11 x64 + WSL2 Ubuntu | [Download EXE 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.1-alpha.2/Pulsara-0.1.1-alpha.2-windows-x64.exe) |
+| macOS 15+ (Apple Silicon) | [Download DMG 🚀](https://github.com/plumliu/pulsara-agent/releases/download/v0.1.3-alpha.1/Pulsara-0.1.3-alpha.1-macos-arm64.dmg) |
 
-No Ubuntu installer is included in this release. For native Ubuntu builds, see the [development guide](DEVELOPMENT.md).
+This release provides only the macOS Apple Silicon DMG. Windows and Ubuntu builds are not included. See the [development guide](DEVELOPMENT.md) for source builds.
 
-1. Install and open Pulsara. On macOS, drag the app into Applications. On Windows, run the EXE and select your WSL2 Ubuntu on first launch. If needed, [install WSL2 and Ubuntu](https://learn.microsoft.com/windows/wsl/install) first.
+1. Open the DMG, drag Pulsara into Applications, eject the DMG, and open the app.
 2. Add a model connection in Settings. Choose the provider, model, and API protocol, then follow the prompts for authentication or custom settings.
 3. Start a quick session and drop in files, or open a project directory. Give it the job.
 
-This is a desktop preview. See the [installation notes](INSTALL.md) for macOS permissions, Windows setup, updates, and data locations. The app also includes a `pulsara` command-line entry if you prefer a terminal.
+This is a desktop preview. Version 0.1.3 changes the database baseline and does not automatically migrate earlier releases. Read the [installation notes](INSTALL.md) before upgrading. The app also includes a `pulsara` command-line entry if you prefer a terminal.
 
 ## Get started in 30 seconds and hand off the busywork
 
