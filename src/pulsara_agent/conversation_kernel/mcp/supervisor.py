@@ -472,7 +472,7 @@ class McpConnectionSlot:
         # SDK listings mutate its output-schema cache. Drain every pre-fence
         # admission before listing, including bounded HTTP calls, then own the
         # existing lane. Do not duplicate SDK caches or result validators.
-        while self.active_dispatch_count:
+        while self.active_dispatch_count or self.active_operation_count:
             await asyncio.sleep(0.01)
         # Waiting for discovery memory is also queueing, not physical I/O.
         # Semaphore contexts unwind every partial acquisition in reverse order.
@@ -492,6 +492,20 @@ class McpConnectionSlot:
             if lease._slot is not self or lease._authority is not self._lease_authority:  # noqa: SLF001
                 raise RuntimeError("MCP slot lease authority conflicts")
             self._leases.discard(lease)
+
+    @asynccontextmanager
+    async def user_prompt_operation(self, lease: McpSlotLease):
+        """User template reads share physical lanes without inventing a tool call."""
+        async with self._lane, self._host_lane:
+            with self._lock:
+                if not self.lease_is_current(lease):
+                    raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+                self._active_operation_count += 1
+            try:
+                yield
+            finally:
+                with self._lock:
+                    self._active_operation_count -= 1
 
     def mark_dirty(self) -> int:
         with self._lock:
@@ -971,7 +985,6 @@ class McpInstalledRuntimeGeneration:
     ) -> str | None:
         if tool_name in {
             "read_mcp_resource",
-            "get_mcp_prompt",
         }:
             value = _standard_operation_target(tool_name, arguments)["server_id"]
             return value if isinstance(value, str) else None
@@ -1036,39 +1049,7 @@ class McpInstalledRuntimeGeneration:
         if tool_name == "read_mcp_resource":
             _standard_resource_uri(arguments, candidate.discovery_snapshot)
             return candidate
-        if tool_name != "get_mcp_prompt":
-            raise ValueError("unknown MCP standard operation")
-        prompt_name = _standard_operation_target(tool_name, arguments)["name"]
-        if not isinstance(prompt_name, str):
-            raise ValueError("MCP prompt name is invalid")
-        prompt = next(
-            (
-                item
-                for item in candidate.discovery_snapshot.prompts
-                if item.name == prompt_name
-            ),
-            None,
-        )
-        if prompt is None:
-            raise ValueError("MCP prompt is absent from the exact snapshot")
-        raw_arguments = arguments.get("arguments")
-        if "arguments" in arguments and not isinstance(raw_arguments, Mapping):
-            raise ValueError("MCP prompt arguments must be an object")
-        if isinstance(raw_arguments, Mapping) and any(
-            not isinstance(key, str) or not isinstance(value, str)
-            for key, value in raw_arguments.items()
-        ):
-            raise ValueError("MCP prompt arguments must contain strings")
-        supplied = set(raw_arguments or {})
-        declared = {name for name, _description, _required in prompt.arguments}
-        required = {
-            name
-            for name, _description, is_required in prompt.arguments
-            if is_required
-        }
-        if not required.issubset(supplied) or not supplied.issubset(declared):
-            raise ValueError("MCP prompt arguments do not exact-join discovery")
-        return candidate
+        raise ValueError("unknown MCP standard operation")
 
     async def invoke_standard(
         self,
@@ -1275,44 +1256,23 @@ async def _invoke_standard_remote_result(
                     "MCP_RESULT_TYPE_PAYLOAD_CONTRADICTION"
                 )
             request_state = input_owner.prepare_state_only_continuation(result)
-    if tool_name != "get_mcp_prompt":
-        raise RuntimeError("unknown MCP standard operation")
-    prompt_name = _standard_operation_target(tool_name, arguments)["name"]
-    prompt = next(
-        (
-            item
-            for item in candidate.discovery_snapshot.prompts
-            if item.name == prompt_name
-        ),
-        None,
-    )
-    if prompt is None:
-        raise ValueError("MCP prompt is absent from the exact snapshot")
-    raw_arguments = arguments.get("arguments")
-    if "arguments" in arguments and not isinstance(raw_arguments, Mapping):
-        raise ValueError("MCP prompt arguments must be an object")
-    prompt_arguments = (
-        {
-            str(key): str(value)
-            for key, value in raw_arguments.items()
-            if isinstance(key, str) and isinstance(value, str)
-        }
-        if isinstance(raw_arguments, Mapping)
-        else None
-    )
-    if isinstance(raw_arguments, Mapping) and len(prompt_arguments or {}) != len(
-        raw_arguments
-    ):
-        raise ValueError("MCP prompt arguments must contain strings")
-    supplied = set(prompt_arguments or {})
-    declared = {name for name, _description, _required in prompt.arguments}
-    required = {
-        name
-        for name, _description, is_required in prompt.arguments
-        if is_required
-    }
-    if not required.issubset(supplied) or not supplied.issubset(declared):
-        raise ValueError("MCP prompt arguments do not exact-join discovery")
+    raise RuntimeError("unknown MCP standard operation")
+
+
+def user_prompt_text(result):
+    """Only plain user text has a lossless representation in the current composer."""
+    if any(message.role != "user" or message.content.type != "text" for message in result.messages):
+        return {"state": "unsupported_content", "message": "此提示词包含暂不支持的消息内容。"}
+    text = "\n\n".join(message.content.text for message in result.messages)
+    if not text.strip():
+        return {"state": "empty", "message": "提示词内容为空。"}
+    return {"state": "ready", "text": text}
+
+
+async def _get_prompt_result(client, prompt_name, prompt_arguments, input_owner):
+    from .sdk_facade import types
+
+    request_state = None
     while True:
         result = await client.session.get_prompt(
             prompt_name,
@@ -2340,6 +2300,121 @@ class McpHostSupervisor:
     def catalog_snapshot(self) -> McpCatalogSnapshot:
         with self._lock:
             return self._catalog_locked(ModelInputScopeKind.ROOT)
+
+    def _user_prompt_candidate_locked(self, server_id):
+        config = next((c for c in self.configs if c.server_id == server_id and c.enabled), None)
+        candidate = self._pending.get(server_id) or self._installed.get(server_id)
+        if (self._closed or config is None or candidate is None
+                or not _candidate_exact_joins_config(candidate, config, supervisor_epoch=self._epoch)
+                or not candidate.slot_lease._slot.lease_is_current(candidate.slot_lease)):
+            return None
+        return candidate
+
+    def list_user_prompts(self, *, offset=0, limit=200, query=""):
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("invalid MCP prompt page")
+        from urllib.parse import quote
+
+        if not isinstance(query, str):
+            raise ValueError("invalid MCP prompt query")
+
+        with self._lock:
+            rows = []
+            pending = False
+            for config in self.configs:
+                if not config.enabled:
+                    continue
+                candidate = self._user_prompt_candidate_locked(config.server_id)
+                if candidate is None:
+                    pending = True
+                    continue
+                for prompt in candidate.discovery_snapshot.prompts:
+                    rows.append({
+                        **mcp_prompt_public_item(config.server_id, prompt),
+                        "target": {"kind": "MCP_PROMPT", "server_id": config.server_id, "name": prompt.name},
+                        "server_name": config.display_name,
+                    })
+            rows.sort(key=lambda row: (row["server_id"], row["name"]))
+            needle = query.casefold()
+            if "/" in query:
+                rows = [row for row in rows if any(path.casefold().startswith(needle) for path in (
+                    row["server_id"] + "/" + row["name"],
+                    quote(row["server_id"], safe="-_.!~*'()") + "/" + quote(row["name"], safe="-_.!~*'()"),
+                ))]
+            else:
+                rows = [row for row in rows if any(value.casefold().startswith(needle) for value in (
+                    row["server_id"], row["name"], quote(row["server_id"], safe="-_.!~*'()"),
+                    quote(row["name"], safe="-_.!~*'()")))]
+            end = offset + limit
+            return {"state": "updating" if pending else "ready", "items": rows[offset:end],
+                    "next_offset": end if end < len(rows) else None}
+
+    async def preview_user_prompt(self, target, arguments):
+        from .sdk_facade import MCPError
+
+        if (not isinstance(target, Mapping) or set(target) != {"kind", "server_id", "name"}
+                or target.get("kind") != "MCP_PROMPT"
+                or not all(isinstance(target.get(key), str) and target[key] for key in ("server_id", "name"))
+                or not isinstance(arguments, Mapping)
+                or any(not isinstance(k, str) or not isinstance(v, str) for k, v in arguments.items())):
+            return {"state": "invalid_arguments", "message": "提示词参数无效。"}
+        with self._lock:
+            candidate = self._user_prompt_candidate_locked(target["server_id"])
+            if candidate is None:
+                return {"state": "unavailable", "message": "连接或提示词目录已变化，请重新选择。"}
+            prompt = next((p for p in candidate.discovery_snapshot.prompts if p.name == target["name"]), None)
+            if prompt is None:
+                return {"state": "unavailable", "message": "提示词已不在当前目录中，请重新选择。"}
+            declared = {name for name, _, _ in prompt.arguments}
+            missing = [name for name, _, required in prompt.arguments
+                       if required and not arguments.get(name, "").strip()]
+            if missing or set(arguments) - declared:
+                return {"state": "invalid_arguments", "message": "请填写声明的必填参数。", "fields": missing}
+            slot = candidate.slot_lease._slot
+            lease = slot.issue_lease(candidate.slot_lease.admitted_discovery_generation)
+        client = slot.client
+        owner = McpInputRequiredRoundOwner(operation_identity=random_id("operation"),
+                                         connection_generation=slot.connection_generation)
+        try:
+            async with slot.user_prompt_operation(lease):
+                with self._lock:
+                    if self._user_prompt_candidate_locked(target["server_id"]) is not candidate:
+                        raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+                async with asyncio.timeout(candidate.standard_read_timeout_ms / 1000):
+                    result = await _get_prompt_result(client, prompt.name, dict(arguments), owner)
+                with self._lock:
+                    if self._user_prompt_candidate_locked(target["server_id"]) is not candidate:
+                        raise McpSnapshotStale("MCP_SNAPSHOT_STALE")
+                if len(result.model_dump_json().encode("utf-8")) > MAXIMUM_MCP_REMOTE_BODY_BYTES:
+                    return {"state": "resource_boundary", "message": "提示词超过 MCP 响应大小边界。"}
+                rendered = user_prompt_text(result)
+                if rendered["state"] == "ready":
+                    rendered["text"] = self._credential_boundary.capture_scrub_set().scrub_text(rendered["text"])
+                return rendered
+        except asyncio.CancelledError:
+            raise
+        except McpSnapshotStale:
+            return {"state": "unavailable", "message": "连接或提示词目录已变化，请重新选择。"}
+        except McpProtocolConformanceError as exc:
+            slot.report_transport_failure("MCP_PROTOCOL_CONFORMANCE_FAILED", retryable=False)
+            return {"state": "failed", "message": client.diagnostic_message(exc)}
+        except McpTransportOperationError as exc:
+            slot.report_transport_failure("MCP_TRANSPORT_FAILED", retryable=True)
+            return {"state": "failed", "message": client.diagnostic_message(exc)}
+        except MCPError as exc:
+            if _mcp_error_is_transport_failure(exc):
+                slot.report_transport_failure("MCP_TRANSPORT_FAILED", retryable=True)
+            return {"state": "failed", "message": client.diagnostic_message(exc)}
+        except (TimeoutError, McpInputRequiredUnsupported) as exc:
+            return {"state": "failed", "message": client.diagnostic_message(exc)}
+        except MemoryError:
+            raise
+        except Exception as exc:
+            slot.report_transport_failure("MCP_TRANSPORT_FAILED", retryable=True)
+            return {"state": "failed", "message": client.diagnostic_message(exc)}
+        finally:
+            owner.close()
+            lease.release()
 
     def inspect_discovery_catalog(
         self,
@@ -3396,10 +3471,6 @@ def _standard_operation_target(tool_name, arguments):
         allowed = {"target"} if kind == "MCP_RESOURCE" else {"target", "uri"}
         if set(arguments) != allowed:
             raise ValueError("MCP resource fields do not match its target kind")
-    elif tool_name == "get_mcp_prompt" and kind == "MCP_PROMPT":
-        identity = "name"
-        if set(arguments) - {"target", "arguments"}:
-            raise ValueError("MCP prompt fields are unsupported")
     else:
         raise ValueError("MCP standard target kind is unsupported")
     if set(target) != {"kind", "server_id", identity}:

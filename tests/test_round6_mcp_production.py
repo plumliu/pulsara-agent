@@ -1559,23 +1559,13 @@ def test_round6_stdio_discovery_direct_tool_resource_and_prompt(tmp_path: Path) 
             )
             assert b"round6 resource body" in resource.content
 
-            prompt_permit = runtime.admit_standard_operation(
-                tool_name="get_mcp_prompt",
-                arguments={'arguments': {"topic": "MCP"}, 'target': {"kind":'MCP_PROMPT', "server_id":"fixture", 'name':"round6_prompt"}},
-                descriptor_fingerprint="sha256:prompt-descriptor",
-                session_id='session:qcxkhtntcrrxggj2dfjkj7xdjy',
-                scope_kind=ModelInputScopeKind.ROOT,
-                turn_id='turn:nzc36cttgo7xxki7bcjc7ops7a',
-                tool_call_id="tool-call:prompt",
+            prompt = await supervisor.preview_user_prompt(
+                {"kind": "MCP_PROMPT", "server_id": "fixture", "name": "round6_prompt"},
+                {"topic": "MCP"},
             )
-            assert prompt_permit is not None
-            prompt = await runtime.invoke_standard(
-                tool_name="get_mcp_prompt",
-                arguments={'arguments': {"topic": "MCP"}, 'target': {"kind":'MCP_PROMPT', "server_id":"fixture", 'name':"round6_prompt"}},
-                permit=prompt_permit,
-                scope_kind=ModelInputScopeKind.ROOT,
-            )
-            assert b"Discuss MCP" in prompt.content
+            assert prompt["state"] == "ready"
+            assert "Discuss MCP" in prompt["text"]
+
         finally:
             runtime.release()
             await supervisor.aclose()

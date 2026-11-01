@@ -1,3 +1,4 @@
+import { mcpPromptPath, type McpPrompt, type ListMcpPrompts } from '../lib/mcp-prompts';
 import type { Editor, Range } from '@tiptap/core';
 import { shift } from '@floating-ui/dom';
 import { PluginKey } from '@tiptap/pm/state';
@@ -10,7 +11,8 @@ import { formatWorkspaceReference, type CompleteWorkspacePaths, type WorkspacePa
 import { explicitReferenceAllowedAt } from '../lib/skill-reference';
 import type { SkillCapability } from '../lib/pulsara-types';
 
-type Candidate = { kind: 'skill'; name: string } | WorkspacePathCandidate;
+type Candidate = { kind: 'skill'; name: string } | { kind: 'prompt'; name: string; prompt: McpPrompt } | WorkspacePathCandidate;
+function candidateKey(item: Candidate) { return item.kind === 'skill' ? `skill:${item.name}` : item.kind === 'prompt' ? mcpPromptPath(item.prompt) : item.path; }
 type Selection = { item: Candidate };
 interface Page { rows: Candidate[]; cursor: string | null; error?: string }
 interface PopupProps extends SuggestionProps<Page, Selection> {
@@ -61,7 +63,7 @@ const CandidatePopup = forwardRef<PopupHandle, PopupProps>(function CandidatePop
     if (controller.signal.aborted) return;
     setPage(current => next.error ? { ...current, error: next.error } : {
       rows: [...current.rows, ...next.rows.filter(row => !current.rows.some(existing =>
-        existing.kind === 'skill' || row.kind === 'skill' ? existing.name === row.name : existing.path === row.path))],
+        candidateKey(existing) === candidateKey(row)))],
       cursor: next.cursor,
     });
     request.current = null;
@@ -93,11 +95,12 @@ const CandidatePopup = forwardRef<PopupHandle, PopupProps>(function CandidatePop
   return <div className="prompt-candidates" data-annotation-ui="" onMouseDown={event => event.preventDefault()}>
     <div ref={list} id={id} role="listbox" aria-label={kind === 'skill' ? '技能候选' : '文件和目录候选'} aria-busy={loading || pending}>
       {page.rows.map((item, index) => {
-        const Icon = item.kind === 'skill' ? BookOpenText : item.kind === 'directory' ? Folder : File;
-        return <div key={item.kind === 'skill' ? item.name : item.path} id={`${id}-${index}`} role="option"
+        const Icon = item.kind === 'skill' || item.kind === 'prompt' ? BookOpenText : item.kind === 'directory' ? Folder : File;
+        return <div key={candidateKey(item)} aria-label={item.name} aria-description={item.kind === 'skill' ? 'Skill' : item.kind === 'prompt' ? 'MCP Prompt' : undefined} id={`${id}-${index}`} role="option"
           aria-selected={active === index} className="prompt-candidates__row" onMouseEnter={() => setSelected(index)}>
-          <button type="button" tabIndex={-1} onClick={() => command({ item })} title={item.kind === 'skill' ? item.name : item.path}>
-            <Icon size={14} aria-hidden="true" /><span>{item.name}</span>
+          <button type="button" tabIndex={-1} aria-label={item.name} onClick={() => command({ item })} title={item.kind === 'skill' ? item.name : item.kind === 'prompt' ? mcpPromptPath(item.prompt) : item.path}>
+            <Icon size={14} aria-hidden="true" /><span>{item.kind === 'skill' ? `/${item.name}` : item.name}</span>
+            {(item.kind === 'skill' || item.kind === 'prompt') && <span className="prompt-candidates__type">{item.kind === 'skill' ? 'Skill' : 'MCP Prompt'}</span>}
           </button>
           {item.kind === 'directory' && <button type="button" tabIndex={-1} className="prompt-candidates__browse"
             aria-label={`进入 ${item.name}`} title="进入目录 →" onClick={() => command({ item })}><ChevronRight size={14} /></button>}
@@ -113,7 +116,10 @@ const CandidatePopup = forwardRef<PopupHandle, PopupProps>(function CandidatePop
   </div>;
 });
 
-interface Options { skills: readonly SkillCapability[]; completePaths?: CompleteWorkspacePaths }
+interface Options {
+  skills: readonly SkillCapability[]; completePaths?: CompleteWorkspacePaths;
+  listPrompts?: ListMcpPrompts; onPrompt?: (prompt: McpPrompt, range: Range) => void;
+}
 
 /** Suggestion owns matching, async cancellation and Floating UI. We supply rows and existing nodes. */
 export function usePromptSuggestions(editor: Editor, disabled: boolean, options: Options) {
@@ -127,6 +133,7 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
     let directory: { item: WorkspacePathCandidate; range: Range; text: string } | undefined;
     const insertReference = (item: Candidate, range: Range) => {
       directory = undefined;
+      if (item.kind === 'prompt') { current.current.onPrompt?.(item.prompt, range); return; }
       const node = item.kind === 'skill'
         ? { type: 'skillReference', attrs: { raw: `/${item.name}` } }
         : { type: 'fileReference', attrs: { raw: formatWorkspaceReference(item), name: item.name, kind: item.kind, state: 'ready' } };
@@ -136,9 +143,21 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
     const plugins = (['skill', 'path'] as const).map(kind => {
       const key = new PluginKey(`prompt-${kind}-candidates`);
       const load = async (query: string, cursor: string | null, signal: AbortSignal): Promise<Page> => {
-        if (kind === 'skill') return { rows: current.current.skills
-          .filter(skill => skill.name.toLowerCase().startsWith(query.toLowerCase()))
-          .map(skill => ({ kind: 'skill' as const, name: skill.name })), cursor: null };
+        if (kind === 'skill') {
+          const rows: Candidate[] = cursor ? [] : current.current.skills
+            .filter(skill => skill.name.toLowerCase().startsWith(query.toLowerCase()))
+            .map(skill => ({ kind: 'skill' as const, name: skill.name }));
+          if (!current.current.listPrompts) return {rows, cursor: null};
+          try {
+            const page = await current.current.listPrompts(query, cursor ? Number(cursor) : 0, signal);
+            return {rows: [...rows, ...page.items.map(prompt => ({kind: 'prompt' as const, name: mcpPromptPath(prompt), prompt}))],
+              cursor: page.next_offset === null ? null : String(page.next_offset),
+              ...(page.state === 'updating' ? {error: '部分提示词目录尚未就绪。'} : {})};
+          } catch (error) {
+            if (signal.aborted) return {rows: [], cursor: null};
+            return {rows, cursor: null, error: error instanceof Error ? error.message : '提示词目录读取失败。'};
+          }
+        }
         try {
           const page = await current.current.completePaths!(query, cursor, signal);
           return { rows: page.items, cursor: page.next_cursor };
@@ -148,7 +167,7 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
       };
       const plugin = Suggestion<Page, Selection>({
         editor, pluginKey: key, char: kind === 'skill' ? '/' : '@',
-        allowSpaces: kind === 'path', allowedPrefixes: null,
+        allowSpaces: kind === 'path', allowToIncludeChar: kind === 'skill', allowedPrefixes: null,
         debounce: kind === 'path' ? 100 : 0,
         placement: 'top-start', offset: { mainAxis: 6 },
         // A narrow viewport can fit neither alignment at a mid-line cursor.
@@ -161,7 +180,7 @@ export function usePromptSuggestions(editor: Editor, disabled: boolean, options:
           if ((kind === 'skill' ? /[\p{L}\p{N}_/@.$:\\-]/u : /[A-Za-z0-9_/@.$-]/).test(before)) return false;
           const query = state.doc.textBetween(range.from + 1, range.to);
           // eslint-disable-next-line no-control-regex -- Reject control characters in user-supplied paths.
-          return kind === 'skill' ? /^[a-z0-9-]*$/i.test(query) : !/[\u0000-\u001f\u007f]/.test(query);
+          return kind === 'skill' ? (current.current.listPrompts ? /^[\p{L}\p{N}\p{M}%_.!~*'()/-]*$/u : /^[a-z0-9-]*$/i).test(query) : !/[\u0000-\u001f\u007f]/.test(query);
         },
         items: async ({ query, signal }) => [await load(query, null, signal)],
         command: ({ editor, range, props: { item } }) => {

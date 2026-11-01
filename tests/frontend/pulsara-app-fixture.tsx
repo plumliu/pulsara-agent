@@ -471,6 +471,9 @@ class FakeConnection implements RuntimeConnection {
     return { commandId: 'command-5', status: 'succeeded' };
   });
 
+  async listMcpPrompts() { return {state: 'ready' as const, items: [], next_offset: null}; }
+  async previewMcpPrompt() { return {state: 'unavailable' as const, message: 'No prompt in fixture'}; }
+
   async readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent> {
     if (this.interactionContent) return this.interactionContent;
     switch (interaction.kind) {

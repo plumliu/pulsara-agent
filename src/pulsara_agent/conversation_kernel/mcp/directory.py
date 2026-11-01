@@ -58,12 +58,8 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
     }
     for server in catalog.servers:
         target = {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", server.server_id)}
-        status = f"连接状态：{server.status.value}。"
-        if server.stable_failure_category:
-            status += f" {server.stable_failure_category}。"
+        status = server.status.value
         candidate = runtime.candidates.get(server.server_id) if server.server_id in complete_sources else None
-        if candidate is None:
-            status += "远端目录尚未发现。"
         rows.append(
             minimal_row("MCP_SERVER", server.display_name, target, None, status)
         )
@@ -78,11 +74,12 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
             "resource_template_count": server.resource_template_count if candidate is not None else None,
             "prompt_count": server.prompt_count if candidate is not None else None,
             "tool_listing": {"kind": "MCP_TOOL", "parent": target},
+            "prompt_listing": {"kind": "MCP_PROMPT", "parent": target},
             "diagnostics": [],
         }
         if server.stable_failure_category:
             detail["diagnostics"].append(
-                {"code": server.stable_failure_category, "message": status}
+                {"code": server.stable_failure_category, "message": f"连接状态：{status}。 {server.stable_failure_category}。"}
             )
         if server.sanitized_instructions:
             detail["instructions"] = server.sanitized_instructions
@@ -158,7 +155,7 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
                         item.name,
                         target,
                         None,
-                        "已发现元数据；尚未读取或渲染。",
+                        "用户通过 slash 菜单使用。" if kind == "MCP_PROMPT" else "已发现元数据；尚未读取或渲染。",
                         item.description,
                     )
                 )

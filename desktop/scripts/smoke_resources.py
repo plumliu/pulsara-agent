@@ -145,22 +145,23 @@ with sync_playwright() as playwright:
     browser.close()
 import asyncio
 from pulsara_agent.code_mode import CodeModeHost
+from pulsara_agent.identity import random_id
 async def check_vm():
     owner=CodeModeHost()
     async def no_tool(_):
         raise AssertionError('unexpected tool dispatch')
     try:
-        cell=await owner.start(source="return 'relocated QuickJS';", source_exec_attempt_id='smoke',
-            turn_id='smoke', snapshot=None, tool_catalog={}, invoke=no_tool)
+        cell=await owner.start(source="return 'relocated QuickJS';", source_exec_attempt_id=random_id('attempt'),
+            turn_id=random_id('turn'), snapshot=None, tool_catalog={}, invoke=no_tool)
         records=[]
         async with asyncio.timeout(10):
-            while True:
-                page=await owner.observe(cell,100)
-                records.extend(page.output)
-                await owner.acknowledge(page)
-                if page.state in {'completed','failed','terminated'} and not page.pending_calls and not page.has_more:
-                    assert page.state=='completed',page.error
-                    break
+            state=await owner.wait_state(cell,10_000)
+            assert state['state']=='completed',state
+            while cell in owner.pending_output_cells():
+                lease=await owner.lease_output(cell)
+                assert lease is not None
+                records.append(dict(lease.record))
+                await owner.acknowledge_output(lease)
         assert records==[{'kind':'return','text':'relocated QuickJS'}]
     finally:
         await owner.aclose()

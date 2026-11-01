@@ -1,3 +1,4 @@
+import type { ListMcpPrompts, PreviewMcpPrompt } from '../lib/mcp-prompts';
 import { createPortal } from 'react-dom';
 import { usePromptHover } from '../lib/prompt-hover';
 import { useDesktopWorkspace } from './desktop-workspace';
@@ -168,6 +169,8 @@ interface WorkbenchViewProps {
   onRetainHistory?: (interest: import('../lib/runtime-adapter').HistoryResidence) => void;
   onLocateAnnotation?: (entryId: string, signal: AbortSignal) => Promise<void>;
   onCompletePaths?: import('../lib/file-reference').CompleteWorkspacePaths;
+  onListMcpPrompts?: ListMcpPrompts;
+  onPreviewMcpPrompt?: PreviewMcpPrompt;
   workspace: Workspace;
   session: SessionSummary;
   messages: Message[];
@@ -2477,6 +2480,8 @@ export function WorkbenchView({
   promptDraftStore: draftStore,
   onLocateAnnotation,
   onCompletePaths,
+  onListMcpPrompts,
+  onPreviewMcpPrompt,
   onNotify,
   onPermissionChange,
 }: WorkbenchViewProps) {
@@ -2496,6 +2501,7 @@ export function WorkbenchView({
     setPlanRequests(current => ({ ...current, [session.id]: typeof value === 'function' ? value(current[session.id] ?? false) : value }));
   }, [session.id]);
   const [submitting, setSubmitting] = useState(false);
+  const [promptPanelOpen, setPromptPanelOpen] = useState(false);
   const [welcomeState, setWelcomeState] = useState({ sessionId: session.id, started: false });
   if (welcomeState.sessionId !== session.id) {
     setWelcomeState({ sessionId: session.id, started: false });
@@ -2871,7 +2877,7 @@ export function WorkbenchView({
   }, [acceptedDraftLayout, draftStore, session.id]);
 
   const submit = useCallback(async () => {
-    if (!canControl) return;
+    if (!canControl || promptPanelOpen) return;
     if (!draft.hasContent || submitting || editingQueue) return;
     if (!modelReady) {
       if (!welcome) onNotify(
@@ -2918,7 +2924,7 @@ export function WorkbenchView({
     if (draftStore.clearIfSnapshot(session.id, snapshot)) setAcceptedDraftLayout(layout);
     setRequestPlan(false);
     onPermissionChange('bypass-permissions');
-  }, [canControl, activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
+  }, [canControl, promptPanelOpen, activePlanMode, draft.hasContent, draftStore, editingQueue, isRunning,
     modelBindingMissing, modelReady, onNotify, onPermissionChange, onSend,
     permission, requestPlan, session.id, setRequestPlan, submitting, welcome, jumpToLatest, queuedCount, interaction]);
 
@@ -3150,6 +3156,7 @@ export function WorkbenchView({
             onLayoutChange={updateJumpPosition}
           />
           {composerQueue}
+          <div data-prompt-panel-host="" />
           <div className={`composer${draft.hasContent ? ' has-content' : ''}`}>
           <div className="composer-editor" ref={composerEditorRef}>
             {((requestPlan && !isRunning) || activePlanMode) && <span className="composer-plan-status"><WandSparkles size={12} />{activePlanMode ? '规划进行中' : '本轮先规划'}</span>}
@@ -3164,6 +3171,10 @@ export function WorkbenchView({
               onNotify={onNotify}
               skills={skills}
               onCompletePaths={onCompletePaths}
+              onListMcpPrompts={onListMcpPrompts}
+              onPreviewMcpPrompt={onPreviewMcpPrompt}
+              interactionOpen={Boolean(interaction)}
+              onPromptPanelOpenChange={setPromptPanelOpen}
             />
           </div>
           <div className="composer-actions">
@@ -3285,7 +3296,7 @@ export function WorkbenchView({
                     title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，任务、排队输入和后台命令不会自动取消。"
                   ><Square size={14} fill="currentColor" strokeWidth={0} aria-hidden="true" /></button>
                 ) : (
-                  <button className="send-button" onClick={() => void submit()} disabled={!draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0 || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning || interaction ? '排队发送' : '发送'}>
+                  <button className="send-button" onClick={() => void submit()} disabled={promptPanelOpen || !draft.hasContent || draft.pendingFiles > 0 || draft.failedFiles > 0 || submitting || runtimeStatus !== 'online' || !session.id || (!modelReady && !welcome)} aria-label={isRunning || interaction ? '排队发送' : '发送'}>
                     {isRunning ? <Play size={14} fill="currentColor" /> : <ArrowUp size={16} />}
                   </button>
                 )}

@@ -26,7 +26,6 @@ from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 
 _MCP_STANDARD_TOOL_NAMES = frozenset(
     {
-        "get_mcp_prompt",
         "read_mcp_resource",
         "use_new_mcp_tool",
     }
@@ -239,7 +238,7 @@ CODE_MODE_SHARED_TOOL_NAMES = frozenset({
     "exec_process", "query_processes", "manage_process", "read_artifact", "export_artifact",
     "search_sessions", "search_session_content", "read_session_content",
     "query_capabilities", "use_new_mcp_tool", "read_mcp_resource",
-    "get_mcp_prompt", "run_agent", "query_agents", "send_agent_message",
+    "run_agent", "query_agents", "send_agent_message",
     "wait_agent", "stop_agent",
 })
 

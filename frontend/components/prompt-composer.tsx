@@ -1,3 +1,5 @@
+import { useMcpPromptPanel } from './mcp-prompt-panel';
+import type { ListMcpPrompts, PreviewMcpPrompt } from '../lib/mcp-prompts';
 import type { Editor } from '@tiptap/core';
 import { EditorContent } from '@tiptap/react';
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
@@ -21,6 +23,10 @@ interface PromptComposerProps {
   onNotify: MarkdownNotify;
   skills?: readonly SkillCapability[];
   onCompletePaths?: CompleteWorkspacePaths;
+  onListMcpPrompts?: ListMcpPrompts;
+  onPreviewMcpPrompt?: PreviewMcpPrompt;
+  interactionOpen?: boolean;
+  onPromptPanelOpenChange?: (open: boolean) => void;
 }
 
 export function PromptComposer({
@@ -33,6 +39,10 @@ export function PromptComposer({
   onNotify,
   skills = [],
   onCompletePaths,
+  onListMcpPrompts,
+  onPreviewMcpPrompt,
+  interactionOpen = false,
+  onPromptPanelOpenChange,
 }: PromptComposerProps) {
   const editor: Editor = store.getEditor(sessionId);
   useSyncExternalStore(store.subscribe, store.getVersion, store.getVersion);
@@ -44,14 +54,23 @@ export function PromptComposer({
   const submitRef = useRef(onSubmit);
   const followUpRef = useRef(suggestion);
   const imageStatuses = store.imageStatuses(sessionId);
-  const suggestionKeyDown = usePromptSuggestions(editor, disabled, { skills, completePaths: onCompletePaths });
+  const promptPanel = useMcpPromptPanel(editor, disabled || interactionOpen, onPreviewMcpPrompt);
+  const editorDisabled = disabled || promptPanel.active;
+  useEffect(() => {
+    onPromptPanelOpenChange?.(promptPanel.active);
+    return () => onPromptPanelOpenChange?.(false);
+  }, [onPromptPanelOpenChange, promptPanel.active]);
+  const suggestionKeyDown = usePromptSuggestions(editor, editorDisabled, {
+    skills, completePaths: onCompletePaths,
+    listPrompts: interactionOpen ? undefined : onListMcpPrompts, onPrompt: promptPanel.select,
+  });
 
   useEffect(() => {
-    disabledRef.current = disabled;
+    disabledRef.current = editorDisabled;
     notifyRef.current = onNotify;
     submitRef.current = onSubmit;
     followUpRef.current = suggestion;
-  }, [disabled, onNotify, onSubmit, suggestion]);
+  }, [editorDisabled, onNotify, onSubmit, suggestion]);
 
   useEffect(() => {
     editor.setOptions({
@@ -165,11 +184,12 @@ export function PromptComposer({
   }, [editor, sessionId, store, suggestionKeyDown]);
 
   useEffect(() => {
-    if (editor.isEditable !== !disabled) editor.setEditable(!disabled);
-  }, [disabled, editor]);
+    if (editor.isEditable !== !editorDisabled) editor.setEditable(!editorDisabled);
+  }, [editorDisabled, editor]);
 
   return (
     <div className="prompt-composer">
+      {promptPanel.panel}
       <DraftImagePreviewContext.Provider value={{ images: imageStatuses,
         imageUrl: assetId => store.imageObjectUrl(sessionId, assetId), open: (index, trigger) => {
         previewTrigger.current = trigger;

@@ -36,6 +36,8 @@ listings = {
     ]),
     'prompts/list': ('prompts', [{'name':'first'},{'name':'second'}]),
 }
+if options.get('prompt_arguments') is not None:
+    listings['prompts/list'][1][0]['arguments'] = options['prompt_arguments']
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -104,6 +106,7 @@ def _config(tmp_path, options):
         }
     config = _parse_server("probe", {
         "required": True,
+        "scope_policy": options.get("scope_policy", "ROOT_ONLY"),
         "effect_policy": {"default_effect": "READ_ONLY"},
         "transport": transport,
     })
@@ -180,7 +183,7 @@ def test_remote_error_data_retains_diagnostics_and_scrubs_actual_secret(tmp_path
 @pytest.mark.parametrize("method,tool_name,arguments", [
     ("tools/call", None, {}),
     ("resources/read", "read_mcp_resource", {"target":{"kind":"MCP_RESOURCE","server_id":"probe", "uri":"fixture://first"}}),
-    ("prompts/get", "get_mcp_prompt", {"target":{"kind":"MCP_PROMPT","server_id":"probe", "name":"first"}}),
+    ("prompts/get", "user_prompt", {"target":{"kind":"MCP_PROMPT","server_id":"probe", "name":"first"}}),
 ])
 def test_remote_rpc_error_keeps_slot_and_allows_next_operation(
     tmp_path, error_code, method, tool_name, arguments,
@@ -196,6 +199,17 @@ def test_remote_rpc_error_keeps_slot_and_allows_next_operation(
                     "turn_id": "turn:rpc-review",
                     "tool_call_id": f"call:rpc-review:{index}",
                 }
+                if tool_name == "user_prompt":
+                    result = await supervisor.preview_user_prompt(arguments["target"], {})
+                    if index == 0:
+                        assert result["state"] == "failed"
+                        assert "requested operation rejected" in result["message"]
+                    else:
+                        assert result == {"state": "ready", "text": "same connection success"}
+                    assert slot.dispatch_fence_state.value == "OPEN"
+                    assert slot.client is client
+                    assert "probe" not in supervisor._retry_tasks
+                    continue
                 if tool_name is None:
                     executor = next(iter(runtime.executors.values()))
                     permit = executor.admit(**identity)

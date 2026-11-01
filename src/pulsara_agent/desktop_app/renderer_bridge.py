@@ -1021,6 +1021,23 @@ class RendererBridge:
             await connection.controller.request("resolve_interaction", request)
         )
 
+    async def mcp_prompts(self, connection_id: str, body: dict[str, object], *, preview: bool):
+        connection = await self._connection(connection_id)
+        await self.require_chat_controller(connection_id, connection.generation,
+                                           session_id=_required_string(body, "session_id"))
+        allowed = {"session_id", "target", "arguments"} if preview else {"session_id", "offset", "limit", "query"}
+        if set(body) - allowed:
+            raise ValueError("unsupported MCP prompt fields")
+        session = self.sessions.session_by_host_id(connection.host_session_id)
+        if preview:
+            result = await session.preview_mcp_prompt(body.get("target"), body.get("arguments", {}))
+        else:
+            result = session.list_mcp_prompts(offset=body.get("offset", 0), limit=body.get("limit", 200), query=body.get("query", ""))
+        # A window takeover during a remote read invalidates its delivery.
+        await self.require_chat_controller(connection_id, connection.generation,
+                                           session_id=connection.session_id)
+        return result
+
     async def capability_form(
         self,
         connection_id: str,

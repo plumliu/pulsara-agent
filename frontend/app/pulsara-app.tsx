@@ -2793,6 +2793,16 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
         <div className="session-connected-views" hidden={Boolean(openingSession)}>
         <WorkbenchView
           onCompletePaths={(prefix, cursor, signal) => adapter.completeWorkspacePaths(activeSession.id, prefix, cursor, signal)}
+          onListMcpPrompts={async (query, offset, signal) => {
+            const connection = connectionRef.current;
+            if (!connection || connection.sessionId !== activeSession.id) throw new Error('会话尚未连接。');
+            return connection.listMcpPrompts(query, offset, signal);
+          }}
+          onPreviewMcpPrompt={async (target, args, signal) => {
+            const connection = connectionRef.current;
+            if (!connection || connection.sessionId !== activeSession.id) throw new Error('会话尚未连接。');
+            return connection.previewMcpPrompt(target, args, signal);
+          }}
           workspace={activeWorkspace}
           session={activeSession}
           messages={renderedMessages}

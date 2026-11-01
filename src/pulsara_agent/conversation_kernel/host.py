@@ -1501,6 +1501,18 @@ class KernelHostSession:
         self._require_open()
         self._mcp_supervisor.reconnect(server_id)
 
+    def list_mcp_prompts(self, *, offset=0, limit=200, query=""):
+        self._require_open()
+        if self._session_scope_kind is not ModelInputScopeKind.ROOT:
+            raise ValueError("Prompt selection requires the conversation owner")
+        return self._mcp_supervisor.list_user_prompts(offset=offset, limit=limit, query=query)
+
+    async def preview_mcp_prompt(self, target, arguments):
+        self._require_open()
+        if self._session_scope_kind is not ModelInputScopeKind.ROOT:
+            raise ValueError("Prompt selection requires the conversation owner")
+        return await self._mcp_supervisor.preview_user_prompt(target, arguments)
+
     def inspect_capability_catalog(self) -> KernelCapabilityCatalogInspection:
         """Freeze one UI-safe view without creating another capability owner."""
 

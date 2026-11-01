@@ -1,3 +1,4 @@
+import type { McpPromptPage, McpPromptTarget, McpPromptPreview } from './mcp-prompts';
 import { requestExecutionFromWire, type RequestExecution } from './request-execution';
 import { parseMcpAuthorizationResult, parsePublicPackageId, type McpAuthorizationRequest, type McpAuthorizationResult } from './mcp-authorization-result';
 import { parsePresentationResult, type PresentationRequest } from './presentation-targets';
@@ -810,6 +811,8 @@ export interface RuntimeConnection {
   readPromptForEdit(content: CanonicalPromptContent): Promise<EditablePromptContent>;
   compactContext(): Promise<CommandReceipt>;
   enterPlan(reason: string, permission: PermissionMode): Promise<CommandReceipt>;
+  listMcpPrompts(query: string, offset: number, signal: AbortSignal): Promise<McpPromptPage>;
+  previewMcpPrompt(target: McpPromptTarget, args: Record<string, string>, signal: AbortSignal): Promise<McpPromptPreview>;
   readInteraction(interaction: RuntimeInteractionSummary): Promise<RuntimeInteractionContent>;
   resolveInteraction(
     interaction: RuntimeInteractionSummary,
@@ -1978,6 +1981,15 @@ abstract class CanonicalHistoryReader {
   protected get historyPath(): string { return `/api/sessions/${encodeURIComponent(this.sessionId)}/history`; }
   protected abstract post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T>;
   protected abstract project(): RuntimeProjection;
+
+  listMcpPrompts(query: string, offset: number, signal: AbortSignal): Promise<McpPromptPage> {
+    return this.post('list-mcp-prompts', {session_id: this.sessionId, query, offset}, signal);
+  }
+
+  previewMcpPrompt(target: McpPromptTarget, args: Record<string, string>, signal: AbortSignal): Promise<McpPromptPreview> {
+    return this.post('preview-mcp-prompt', {session_id: this.sessionId, target, arguments: args}, signal);
+  }
+
 
   async readQueuePage(cursor?: string, signal?: AbortSignal, lane?: QueueLane): Promise<{items: QueuedPrompt[]; nextCursor: string | null}> {
     const page = await apiRequest<{items: NonNullable<ProtocolCanonicalControl['prompt_queue']>; next_cursor: string | null}>(

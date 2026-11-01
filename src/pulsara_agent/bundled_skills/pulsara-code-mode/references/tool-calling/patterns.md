@@ -21,7 +21,7 @@ The JS subset is:
 | Artifacts | `read_artifact`, `export_artifact` |
 | Conversation history | `search_sessions`, `search_session_content`, `read_session_content` |
 | Capability discovery | `query_capabilities` |
-| MCP | `use_new_mcp_tool`, `read_mcp_resource`, `get_mcp_prompt`, and direct MCP tools in the script's initial directory |
+| MCP | `use_new_mcp_tool`, `read_mcp_resource`, and direct MCP tools in the script's initial directory |
 | Agents | `run_agent`, `query_agents`, `send_agent_message`, `wait_agent`, `stop_agent` |
 
 JS also has `tools.run_agent.batch(...)` and `tools.wait_agent.works(...)`, described
@@ -69,7 +69,8 @@ not required. For names that are not JavaScript identifiers, use
 `tools[toolName](arguments)`.
 
 Use the actual discovered targets for resources, resource templates, and prompts
-as well. A script keeps its initial direct-tool directory. Newly discovered tools
+as well. Prompt queries return metadata only; users expand prompts in the composer
+slash menu. A script keeps its initial direct-tool directory. Newly discovered tools
 can be accessed through inspection and the MCP meta tool. Actual capability
 changes can invalidate a reference; inspect the current capability when the
 reported failure indicates that change.

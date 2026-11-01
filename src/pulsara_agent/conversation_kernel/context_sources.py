@@ -1949,7 +1949,6 @@ def _bounded_mcp_catalog_provider_body(
                 for field in (
                     "resource_count",
                     "resource_template_count",
-                    "prompt_count",
                 ):
                     public[field] = row[field]
             for field in ("meta_tool_names", "unavailable_tool_names"):
@@ -2038,7 +2037,6 @@ def _bounded_mcp_catalog_provider_body(
             "resource_template_count": 0
             if server is None
             else server.resource_template_count,
-            "prompt_count": 0 if server is None else server.prompt_count,
             "meta_tool_count": len(meta) if complete else None,
             "native_exception_count": len(exceptions),
             "meta_tool_names": [],
@@ -2049,7 +2047,7 @@ def _bounded_mcp_catalog_provider_body(
             "omitted_unavailable_tool_count": len(unavailable),
         }
         if not complete:
-            for field in ("resource_count", "resource_template_count", "prompt_count"):
+            for field in ("resource_count", "resource_template_count"):
                 row[field] = None
         if not fits([*included, row]):
             continue

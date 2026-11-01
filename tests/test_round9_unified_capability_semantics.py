@@ -922,8 +922,8 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
             McpPromptSemanticFact(
                 server_id="server",
                 name=f"prompt-{index}",
-                description="",
-                arguments=(),
+                description="Build a component",
+                arguments=(("component", "Component name", True),),
                 semantic_fingerprint=context_fingerprint(
                     "test:round9-prompt:v1", index
                 ),
@@ -987,7 +987,20 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
     assert second["items"][0]["target"]["uri"] == "fixture://resource/1"
     assert details[("MCP_RESOURCE", "server", "fixture://resource/0")]["uri"] == "fixture://resource/0"
     prompts = [item for item in rows if item["kind"] == "MCP_PROMPT"]
-    assert prompts and prompts[0]["target"]["name"] == snapshot.prompts[0].name
+    first_prompt = render_page(prompts, {"limit": 1})
+    prompt_target = {"kind": "MCP_PROMPT", "server_id": "server", "name": "prompt-0"}
+    assert first_prompt["items"][0]["target"] == prompt_target
+    assert first_prompt["items"][0]["description"] == "Build a component"
+    assert "arguments" not in first_prompt["items"][0]
+    assert render_page(prompts, {"limit": 1, "offset": first_prompt["next_offset"]})["items"][0]["target"]["name"] == "prompt-1"
+    assert details[("MCP_PROMPT", "server", "prompt-0")] == {
+        "target": prompt_target, "source": None, "server_id": "server",
+        "name": "prompt-0", "description": "Build a component",
+        "arguments": [{"name": "component", "description": "Component name", "required": True}],
+    }
+    assert details[("MCP_SERVER", "server")]["prompt_count"] == 2
+    assert parse_query({"kind": "MCP_PROMPT"}) == {"kind": "MCP_PROMPT"}
+    assert parse_query({"target": prompt_target}) == {"target": prompt_target}
     assert render_page(resources, {"offset": 99})["items"] == []
     with pytest.raises(CapabilityQueryError):
         parse_query({"kind": "MCP_RESOURCE", "cursor": "old-shape"})

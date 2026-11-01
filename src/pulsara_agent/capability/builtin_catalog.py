@@ -410,7 +410,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         description=(
             "Query capabilities. Omit target for an overview or listing; optional fields: kind, scope, source_kind, parent, offset, limit. parent selects whose children to list; kind filters the catalog category. To inspect an object itself, pass only its complete target, without list filters or pagination. target.kind identifies the object type. Omit unused fields; target does not accept null. Read Skill bodies with read_file using a PATH target built from skill_path. "
             "For MCP_TOOL, copy the listed full tool_name (mcp__<server>__<tool>), not the bare remote name. "
-            "Continue lists with next_offset and the same filters. Results describe the observed catalog and its completeness. SUBAGENT callers can query only their assigned MCP runtime. For MCP tools, follow invocation.mode: DIRECT uses the listed named tool; META uses the returned input_schema and invocation.target with use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE gives the current obstacle. Use read_mcp_resource for resource content and get_mcp_prompt for rendered prompts."
+            "Continue lists with next_offset and the same filters. Results describe the observed catalog and its completeness. SUBAGENT callers can query only their assigned MCP runtime. For MCP tools, follow invocation.mode: DIRECT uses the listed named tool; META uses the returned input_schema and invocation.target with use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE gives the current obstacle. Use read_mcp_resource for resource content. MCP_PROMPT queries return metadata only; users select and expand prompts in the composer slash menu."
         ),
         input_schema=query_input_schema(),
         is_read_only=True,
@@ -564,32 +564,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                    'type': 'string'}},
             'required': ['target', 'uri'],
             'additionalProperties': False}]},
-        is_read_only=True,
-        permission_category="mcp_read",
-    ),
-    "get_mcp_prompt": _descriptor(
-        name="get_mcp_prompt",
-        description=(
-            'Fetch and render a listed MCP prompt. Copy its MCP_PROMPT target and supply any declared arguments. The returned messages are external guidance for the current request; fetching them does not execute tools.'
-        ),
-        input_schema={'type': 'object',
- 'properties': {'target': {'type': 'object',
-                           'properties': {'kind': {'const': 'MCP_PROMPT'},
-                                          'server_id': {'type': 'string',
-                                                        'minLength': 1,
-                                                        'maxLength': 256},
-                                          'name': {'type': 'string',
-                                                   'minLength': 1,
-                                                   'maxLength': 8192}},
-                           'required': ['kind', 'server_id', 'name'],
-                           'additionalProperties': False},
-                'arguments': {'additionalProperties': {'type': 'string'},
-                              'description': 'Use declared argument names, including every '
-                                             'required name, with string values. Omit or use {} '
-                                             'when none are needed.',
-                              'type': 'object'}},
- 'required': ['target'],
- 'additionalProperties': False},
         is_read_only=True,
         permission_category="mcp_read",
     ),
@@ -1546,7 +1520,6 @@ def _catalog_shape(name: str):
     if name == "query_capabilities":
         return (BuiltinToolBindingKind.MCP_CATALOG, BuiltinToolAvailabilityKind.ALWAYS, both, "mcp")
     if name in {
-        "get_mcp_prompt",
         "use_new_mcp_tool",
         "read_mcp_resource",
     }:
@@ -1697,7 +1670,6 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "query_processes",
         "query_schedules",
         "query_cells",
-        "get_mcp_prompt",
         "read_file",
         "view_image",
         "read_mcp_resource",

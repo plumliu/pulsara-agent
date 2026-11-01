@@ -24,6 +24,10 @@ omit `overlay` for that editor. Package declarations remain package-owned.
    is not necessarily an MCP server. The official SDK supports Streamable HTTP
    and explicit legacy SSE; do not guess transport from a product name.
 2. Reuse `USER` or `WORKSPACE` from the user's intent; ask only if ambiguous.
+   Read the current session context: a quick/transient session has no project
+   scope. Use `USER` for setup there; do not query or manage `WORKSPACE`, or treat
+   its temporary working directory as a project. If the user explicitly wants
+   project configuration, ask them to open the intended project first.
    List `kind:"MCP_SERVER"` to avoid duplicates. Inspect an observed target for
    the connection location and details; copy its `MCP_CONNECTION` target into management.
 3. Use the editor for unknown settings or credentials. Never put secret values
@@ -38,6 +42,11 @@ Read `references/connection-configuration.md` only when supplying a complete
 public config or handling user-only import/out-of-band administration.
 
 ## Verify and recover
+
+When checking a connection, copy the exact `MCP_CONNECTION` target returned by
+management or query. A runtime `MCP_SERVER` target is a separate identity: copy
+its complete `runtime_server_id` from query results. Never construct it by
+prefixing the configured `server_id` with `mcp-server:`.
 
 Capability-page actions may produce a brief Runtime result notice. Use its
 reported origin and outcome without repeating the action or inventing leftover
@@ -71,8 +80,11 @@ List `kind:"MCP_TOOL"` with the copied MCP_CONNECTION or runtime MCP_SERVER targ
 an exact tool target. Its `input_schema` and `invocation.mode` decide the call:
 `DIRECT` uses the named native tool; `META` copies `invocation.target` into
 `use_new_mcp_tool.target` and supplies the tool's `arguments`; `UNAVAILABLE` explains the obstacle. Never guess schemas,
-names or availability. Copy resource/prompt targets from list/inspect into
-`read_mcp_resource` / `get_mcp_prompt`. A resource-template target also needs a concrete
+names or availability. Copy resource targets from list/inspect into
+`read_mcp_resource`. Query `kind:"MCP_PROMPT"` with the copied connection or runtime
+server target as `parent` to check prompt metadata; inspect an exact prompt target
+for its parameter declarations. Users select and expand prompts in the composer
+slash menu. A resource-template target also needs a concrete
 `uri` matching its `uri_template`.
 
 Perform a representative call only when requested and appropriate; report what

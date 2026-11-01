@@ -278,7 +278,6 @@ class CapabilitySourceQuery:
                 "name": server.local_server_id,
                 "config_path": str(item.package_root / "mcp.json"),
                 "enabled": item.enabled,
-                "adopted": None,
                 "diagnostics": [],
             }
             try:
@@ -295,7 +294,7 @@ class CapabilitySourceQuery:
                 detail["diagnostics"].append(
                     {"code": "MCP_DECLARATION_INVALID", "message": str(exc)}
                 )
-            status = disabled + "已声明；当前配置采用情况未知。"
+            status = disabled + "已声明。"
             if linked:
                 self.runtime_ids[self._key(target)] = runtime_id
                 detail["runtime_target"] = {
@@ -308,7 +307,7 @@ class CapabilitySourceQuery:
                         connection_status=live["connection_status"],
                         catalog_discovered=live["catalog_discovered"],
                     )
-                    status += f"连接状态：{live['connection_status']}。"
+                    status = live["connection_status"]
             else:
                 detail["catalog_discovered"] = False
                 detail["diagnostics"].append(
@@ -697,7 +696,6 @@ class CapabilitySourceQuery:
                         ),
                         "enabled": config.enabled,
                         "connection": transport_summary(config.transport),
-                        "adopted": None,
                         "diagnostics": [],
                     }
                     if linked:
@@ -714,11 +712,7 @@ class CapabilitySourceQuery:
                                 connection_status=live["connection_status"],
                                 catalog_discovered=live["catalog_discovered"],
                             )
-                            status = (
-                                ("安装配置已禁用；" if not config.enabled else "")
-                                + f"连接状态：{live['connection_status']}；"
-                                + "已保存配置的当前采用情况未知。"
-                            )
+                            status = live["connection_status"]
                     self._add(
                         minimal_row(
                             "MCP_SERVER", config.display_name, target, source, status
@@ -1095,7 +1089,7 @@ class CapabilitySourceQuery:
                 if self.service is not None
                 else None
             )
-            if projected["source"] is None:
+            if projected["source"] is None and row["kind"] != "MCP_SERVER":
                 projected["status"] += " 来源信息未在当前观察范围提供。"
             self.rows.append(projected)
             key = (

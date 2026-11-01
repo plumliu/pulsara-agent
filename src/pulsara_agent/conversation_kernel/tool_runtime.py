@@ -775,7 +775,6 @@ class DirectKernelToolPort:
             _DirectMcpCatalogTool("query_capabilities"),
             _DirectMcpCatalogTool("use_new_mcp_tool"),
             _DirectMcpCatalogTool("read_mcp_resource"),
-            _DirectMcpCatalogTool("get_mcp_prompt"),
         )
         if artifact_read_port is not None:
             tools = (
@@ -2120,7 +2119,7 @@ class DirectKernelToolPort:
             )
         if decision.kind is not ToolDispatchDecisionKind.ALLOW:
             raise RuntimeError("permission decision vocabulary is invalid")
-        if tool_name in {"read_mcp_resource", "get_mcp_prompt"}:
+        if tool_name in {"read_mcp_resource"}:
             generation = surface_borrow.prepared.access.surface_generation
             runtime, _current_generation = self._current_mcp_runtime_for_borrow(surface_borrow)
             if runtime is None:
@@ -2149,7 +2148,7 @@ class DirectKernelToolPort:
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.INVALID_ARGUMENTS,
                     "mcp-runtime:catalog-join-invalid",
-                    "MCP resource or prompt arguments do not match the exact catalog",
+                    "MCP resource arguments do not match the exact catalog",
                 )
             if permit is None:
                 raise RuntimeError("MCP remote read did not create a permit")
@@ -3517,8 +3516,7 @@ class DirectKernelToolPort:
                 ),
             )
         if tool_name in {
-            "get_mcp_prompt",
-            "read_mcp_resource",
+                "read_mcp_resource",
         }:
             generation = (
                 invocation_context.surface_borrow.prepared.access.surface_generation

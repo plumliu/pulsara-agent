@@ -708,6 +708,8 @@ class LocalHttpServer:
             "live-control-snapshot",
             "resolve-interaction",
             "read-capability-form",
+            "list-mcp-prompts",
+            "preview-mcp-prompt",
             "resolve-capability-form",
             "resolve-plan-interaction",
             "read-plan-question",
@@ -2808,6 +2810,8 @@ class LocalHttpServer:
                     body,
                     submit=False,
                 ),
+                "list-mcp-prompts": lambda: self.bridge.mcp_prompts(connection_id, body, preview=False),
+                "preview-mcp-prompt": lambda: self.bridge.mcp_prompts(connection_id, body, preview=True),
                 "resolve-capability-form": lambda: self.bridge.capability_form(
                     connection_id,
                     body,
@@ -2836,6 +2840,19 @@ class LocalHttpServer:
                     self.bridge.read_background_process_log(connection_id, body)
                 ),
             }
+            if operation == "preview-mcp-prompt":
+                task = asyncio.create_task(methods[operation]())
+                try:
+                    while not task.done():
+                        await asyncio.wait({task}, timeout=0.1)
+                        if request.transport is None or request.transport.is_closing():
+                            task.cancel()
+                            raise asyncio.CancelledError
+                    return web.json_response(await task)
+                finally:
+                    if not task.done():
+                        task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             return web.json_response(await methods[operation]())
 
         return handler

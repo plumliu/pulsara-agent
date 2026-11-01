@@ -100,7 +100,7 @@ describe('builtin tool summaries', () => {
     expect(builtinToolSummary(trace('query_capabilities', { target: { kind: 'PLUGIN' } }, { target: { kind: 'PLUGIN', scope: 'USER', plugin_id: 'fixture' } }))?.title).toBe('查看能力详情');
   });
 
-  it.each(['mcp__server__read_file', 'use_new_mcp_tool', 'read_mcp_resource', 'get_mcp_prompt'])('leaves %s to the external tool presentation', (name) => {
+  it.each(['mcp__server__read_file', 'use_new_mcp_tool', 'read_mcp_resource'])('leaves %s to the external tool presentation', (name) => {
     expect(builtinToolSummary(trace(name, { content: 'external' }))).toBeUndefined();
   });
 });

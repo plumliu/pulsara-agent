@@ -1,4 +1,3 @@
-from pulsara_agent.identity import derive_id
 """Unified source queries prove observable selection and existing owner boundaries."""
 
 import asyncio
@@ -10,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from jsonschema import Draft202012Validator
 
+from pulsara_agent.identity import derive_id
 from pulsara_agent.capability.source_query import (
     CapabilityQueryError,
     query_input_schema,
@@ -722,7 +722,7 @@ def test_plugin_connection_detail_uses_input_defaults_and_saved_overlay(tmp_path
         detail = await query(service, {"target": target})
         assert (
             detail["connection"]["endpoint"] == "https://configured.example/mcp"
-            and detail["adopted"] is None
+            and "adopted" not in detail
         )
         await service.mcp.aclose()
 
@@ -776,7 +776,7 @@ def test_local_query_never_materializes_credentials_or_runtime_config(
         detail = await query(service, {"target": row["target"]})
         assert (
             detail["connection"]["endpoint"] == "https://docs.example/mcp"
-            and detail["adopted"] is None
+            and "adopted" not in detail
         )
         assert "bearer" not in json.dumps(detail)
         await service.mcp.aclose()

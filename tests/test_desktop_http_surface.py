@@ -2203,7 +2203,7 @@ def test_user_capability_http_preserves_dynamic_mcp_package_named_fields(tmp_pat
         installed = await owner.plugins.install_local_plugin(InstallLocalPluginRequest(source, PluginScopeKind.USER, monotonic() + 10), connections=owner.mcp)
         assert installed.disposition.value == "INSTALLED"
         package_id = installed.package_install_id
-        monkeypatch.setattr(session_controller_module, "_inspect_user_skills", lambda: {})
+        monkeypatch.setattr(session_controller_module, "_inspect_user_skills", lambda: {"items": [], "issues": [], "roots": []})
         controller = object.__new__(LocalSessionController)
         controller._lock = asyncio.Lock()
         controller._operations = {}
@@ -2224,7 +2224,7 @@ def test_user_capability_http_preserves_dynamic_mcp_package_named_fields(tmp_pat
         try:
             async with ClientSession(headers={"X-Pulsara-Connection-Id": "connection-1", "X-Pulsara-Connection-Generation": "1"}) as client:
                 async with client.get(f"{server.origin}/api/capabilities") as response:
-                    assert response.status == 200
+                    assert response.status == 200, await response.text()
                     payload = await response.json()
             configs_by_id = {item["id"]: item["config"] for item in payload["mcp"]["servers"]}
             assert configs_by_id["stdio"]["transport"]["env"]["package_install_id"] == "plain-env"
@@ -2238,7 +2238,7 @@ def test_user_capability_http_preserves_dynamic_mcp_package_named_fields(tmp_pat
             owner.plugins._credential_boundary.rotate_sync(package_id)
             async with ClientSession(headers={"X-Pulsara-Connection-Id": "connection-1", "X-Pulsara-Connection-Generation": "1"}) as client:
                 async with client.get(f"{server.origin}/api/capabilities") as response:
-                    assert response.status == 200
+                    assert response.status == 200, await response.text()
                     withheld = await response.json()
             assert withheld["plugins"]["items"][0]["package_install_id"] == {"visibility": "WITHHELD"}
             assert package_id not in json.dumps(withheld)
