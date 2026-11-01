@@ -66,6 +66,7 @@ logs/
 /windows_compatibility/
 /.benchmarks/
 /benchmarks/
+/scripts/
 /dogfood_evidence/
 .playwright-cli/
 
