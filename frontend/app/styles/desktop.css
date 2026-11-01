@@ -11,8 +11,12 @@
 /* Native traffic lights start at y=16 and have a 14px diameter (center y=23).
    The 44px row has a 1px bottom border; 3px top padding aligns its controls. */
 .desktop-titlebar.is-macos { padding-left: 82px; padding-top: 3px; }
-.desktop-titlebar button, .desktop-window-controls button { -webkit-app-region: no-drag; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); background: transparent; border-radius: 6px; }
-.desktop-titlebar button:hover, .desktop-window-controls button:hover { background: var(--paper-deep); color: var(--ink); }
+/* Reserve the toggle's place; its actual hit region belongs to the shell. */
+.desktop-titlebar::before { content: ''; flex: none; width: 28px; height: 28px; }
+.desktop-titlebar button, .desktop-sidebar-toggle, .desktop-window-controls button { -webkit-app-region: no-drag; display: grid; place-items: center; width: 28px; height: 28px; color: var(--muted); background: transparent; border-radius: 6px; }
+.desktop-titlebar button:hover, .desktop-sidebar-toggle:hover, .desktop-window-controls button:hover { background: var(--paper-deep); color: var(--ink); }
+.desktop-sidebar-toggle { position: fixed; top: 8px; left: 14px; z-index: 50; }
+.desktop-sidebar-toggle.is-macos { top: 9px; left: 82px; }
 .desktop-titlebar__title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: center; font: 550 12px var(--sans); color: var(--muted); }
 .desktop-window-controls { display: flex; gap: 8px; -webkit-app-region: no-drag; }
 .desktop-shell .workbench, .desktop-shell .surface-view, .desktop-shell .session-opening-view { grid-row: 2; }
@@ -141,8 +145,8 @@
 .desktop-shell[data-platform='win32'] .workspace-topbar .workspace-toolbar > button { margin-left: auto; }
 /* Windows uses software compositing to avoid capture artifacts; full-window blur stalls modal rendering. */
 :root:has(.desktop-shell[data-platform='win32']) .linux-directory-picker::backdrop { backdrop-filter: none; }
-/* Reserve a real box for native controls: padding would leave this drag region
-   overlapping the sidebar button when the navigation column shrinks to 62px. */
+/* Keep session controls clear of the native controls and sidebar toggle,
+   including when the navigation column shrinks to 62px. */
 @media (min-width: 1151px) {
   .desktop-shell.is-workbench:has(.desktop-titlebar.is-macos) .topbar { margin-left: max(0px, calc(124px - var(--desktop-navigation-width))); padding-left: 14px; }
 }

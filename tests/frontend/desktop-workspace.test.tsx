@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { DesktopWorkspace, DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/components/desktop-workspace';
-import { DesktopTitlebar, DesktopWindowControls } from '../../frontend/components/desktop-titlebar';
+import { DesktopSidebarToggle, DesktopTitlebar, DesktopWindowControls } from '../../frontend/components/desktop-titlebar';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { rejectDirectoryDrop } from '../../frontend/lib/file-drop';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
@@ -245,9 +245,10 @@ it('keeps category controls in the top header and instance tabs below it', () =>
 it('leaves session title and workspace switch with the session header and keeps native controls', () => {
   const sidebar=vi.fn(), maximize=vi.fn();
   window.pulsaraDesktop={platform:'darwin',toggleMaximize:maximize} as unknown as PulsaraDesktop;
-  const view=render(<DesktopTitlebar workbench title="Session name" onToggleSidebar={sidebar} onToggleWorkspace={vi.fn()}/>);
+  const view=render(<main><DesktopTitlebar workbench title="Session name" onToggleWorkspace={vi.fn()}/><DesktopSidebarToggle onToggle={sidebar}/></main>);
   expect(screen.queryByText('Session name')).toBeNull();
   expect(screen.queryByRole('button',{name:'切换标签工作区'})).toBeNull();
+  expect(screen.getByRole('button',{name:'切换会话侧栏'}).parentElement).toBe(view.container.querySelector('main'));
   fireEvent.click(screen.getByRole('button',{name:'切换会话侧栏'}));
   expect(sidebar).toHaveBeenCalledOnce();
   fireEvent.doubleClick(screen.getByRole('button',{name:'切换会话侧栏'}));
@@ -259,7 +260,7 @@ it('leaves session title and workspace switch with the session header and keeps 
 it('routes Linux window controls to the desktop host without maximizing on a button double-click', () => {
   const minimize = vi.fn(), maximize = vi.fn(), close = vi.fn();
   window.pulsaraDesktop = { platform: 'linux', minimize, toggleMaximize: maximize, closeWindow: close } as unknown as PulsaraDesktop;
-  const view = render(<main><DesktopTitlebar workbench title="Session" onToggleSidebar={vi.fn()} onToggleWorkspace={vi.fn()} /><DesktopWindowControls /></main>);
+  const view = render(<main><DesktopTitlebar workbench title="Session" onToggleWorkspace={vi.fn()} /><DesktopSidebarToggle onToggle={vi.fn()} /><DesktopWindowControls /></main>);
   expect(screen.getByRole('group', { name: '窗口控制' }).parentElement).toBe(view.container.querySelector('main'));
   fireEvent.click(screen.getByRole('button', { name: '最小化' }));
   fireEvent.click(screen.getByRole('button', { name: '最大化或还原' }));

@@ -108,11 +108,11 @@
 @starting-style { .process-command-tooltip[data-open='true'] { opacity: 0; transform: translateY(4px); } }
 .process-detail-panel { padding: 14px; }
 .process-detail { view-transition-name: process-card; box-shadow: none; }
-.process-detail > header { view-transition-name: process-identity; }
-.process-detail__identity { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.process-detail > header { align-items: flex-start; view-transition-name: process-identity; }
+.process-detail__identity { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
 .process-detail__identity .background-process__icon { flex: none; }
 .process-detail__identity span { min-width: 0; }
-.process-detail__identity strong { display: block; font: 500 var(--type-caption)/1.65 var(--mono); overflow-wrap: anywhere; white-space: pre-wrap; }
+.process-detail__identity strong { display: block; max-height: 120px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--ink) 22%, transparent) transparent; font: 500 var(--type-caption)/1.65 var(--mono); overflow-wrap: anywhere; white-space: pre-wrap; }
 .process-detail__identity small { display: block; color: var(--faint); font: var(--type-micro)/1.5 var(--sans); margin-top: 4px; }
 .process-detail__body { view-transition-name: process-detail-content; }
 .process-detail .background-process__details dl { padding: 10px 13px; background: transparent; }

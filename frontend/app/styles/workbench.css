@@ -916,13 +916,16 @@
 .annotation-editor__header button { padding: 4px; border-radius: 5px; }
 .annotation-editor__header button:hover:not(:disabled) { background: var(--paper-deep); color: var(--ink); }
 .annotation-editor--preview blockquote { max-height: 72px; margin: 8px 0 4px; color: var(--ink); border-left-color: color-mix(in srgb, var(--annotation-accent) 45%, transparent); }
-.annotation-editor textarea { display: block; width: 100%; min-height: 24px; resize: none; border: 0; outline: none; padding: 0; margin: 0; background: transparent; color: inherit; font: 14px/1.55 var(--sans); }
-.annotation-editor--inline textarea { flex: 1; min-width: 0; }
+.annotation-comment-field { width: 100%; min-width: 0; font: 14px/1.55 var(--sans); }
+.annotation-editor--inline .annotation-comment-field { flex: 1; }
+.annotation-comment-editor { min-height: 24px; max-height: 160px; overflow: auto; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+.annotation-comment-editor p { margin: 0; }
+.annotation-comment-editor:has(> p:only-child > br.ProseMirror-trailingBreak:only-child)::before { content: attr(data-placeholder); color: var(--faint); float: left; height: 0; pointer-events: none; }
 .annotation-editor__delete { display: grid; place-items: center; flex: none; width: 24px; height: 24px; border-radius: 5px; color: var(--faint); }
 .annotation-editor__delete:hover { background: var(--paper-deep); color: var(--red); }
 .annotation-editor__delete:focus-visible { outline: 2px solid var(--annotation-accent); outline-offset: -2px; }
-.annotation-editor--preview textarea { border-top: 1px solid var(--line); padding-top: var(--annotation-divider-gap); margin-top: var(--annotation-divider-gap); min-height: 40px; font-size: 12px; }
-.annotation-editor textarea::placeholder { color: var(--faint); }
+.annotation-editor--preview .annotation-comment-field { border-top: 1px solid var(--line); padding-top: var(--annotation-divider-gap); margin-top: var(--annotation-divider-gap); font-size: 12px; }
+.annotation-editor--preview .annotation-comment-editor { min-height: 40px; }
 
 [data-annotation-entry] ::selection { background-color: color-mix(in srgb, var(--amber) 43%, transparent); }
 .annotation-selection-menu > svg { color: var(--annotation-accent); }
@@ -1096,6 +1099,3 @@
 .user-steer__source-link:hover { color: var(--ink); }
 .user-steer__source-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 3px; }
 .user-steer--automatic.is-error .user-steer__heading { color: #b3574d; }
-.annotation-comment-editor { min-height: 24px; max-height: 160px; overflow: auto; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
-.annotation-comment-editor p { margin: 0; }
-.annotation-comment-editor p:only-child:has(> br.ProseMirror-trailingBreak:only-child)::before { content: attr(data-placeholder); color: var(--text-secondary); pointer-events: none; }

@@ -235,6 +235,11 @@ export class ThreadFollowController {
   endNavigation() { this.navigating = false; this.coordinate(); }
   latest() {
     if (this.disposed || !this.containsLatest()) return;
+    const root = this.root();
+    // Successful explicit navigation supersedes this conversation's selection
+    // protection; a selection in another pane must remain untouched.
+    if (root && hasHistorySelection(root)) root.ownerDocument.getSelection()?.removeAllRanges();
+    this.selecting = false;
     this.navigating = false;
     this.intent = 'follow';
     this.views.clear();

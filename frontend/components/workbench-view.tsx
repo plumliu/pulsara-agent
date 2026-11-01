@@ -1211,6 +1211,11 @@ function isCompleteAnswer(message: Message): boolean {
     && (message.rootFinal === true || message.forkEligible === true);
 }
 
+function isStreamingAnswerPreview(message: Message): boolean {
+  return message.role === 'assistant' && message.assistantKind === 'live'
+    && message.status === 'running' && Boolean(message.body.trim()) && !message.traces?.length;
+}
+
 const HistoryHydrationContext = createContext<WorkbenchViewProps['onHydrateEntries']>(undefined);
 // Only explicit choices live beyond a mounted page. No page/body or measured
 // height directory is retained by this UI owner.
@@ -1297,8 +1302,10 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   earlierProcess?: boolean;
   onNotify: MarkdownNotify;
 } & ProcessReadingControls) {
-  const answer = messages.find(message => isCompleteAnswer(message));
-  const complete = completed || Boolean(answer);
+  const finalAnswer = messages.find(message => isCompleteAnswer(message));
+  const latest = messages.at(-1);
+  const answer = finalAnswer ?? (latest && isStreamingAnswerPreview(latest) ? latest : undefined);
+  const complete = completed || Boolean(finalAnswer);
   const choices = useContext(HistoryDisclosureContext);
   const choiceKey = `process:${processIdentity(messages[0])}`;
   const revealRequest = revealEarlierProcess?.key === choiceKey ? revealEarlierProcess : undefined;
@@ -1333,7 +1340,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
     request.current = undefined;
     requestedExpansion.current = undefined;
     if (cancelling) { setBusy(false); onProcessLayout?.(); return; }
-    const finalId = (answer && messageSourceEntryId(answer)) ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
+    const finalId = (finalAnswer && messageSourceEntryId(finalAnswer)) ?? messages.find(message => message.historyFinalEntryId)?.historyFinalEntryId;
     const commit = () => {
       choices?.set(choiceKey, expanded);
       // Reverse an unfinished exit from its current clip edge. A fresh open
@@ -1363,7 +1370,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
       ? [{ ...message, viewRole: 'process' as const, body: '', forkEligible: false, visualizations: undefined,
           pendingAssistant: message.pendingAssistant ? { ...message.pendingAssistant, body: '' } : undefined }] : [];
   });
-  const afterFinalEvents = new Set(compactions.filter(marker => answer && !marker.displayBeforeEntryId && marker.displayAfterEntryId === answer.id).map(marker => marker.eventId));
+  const afterFinalEvents = new Set(compactions.filter(marker => finalAnswer && !marker.displayBeforeEntryId && marker.displayAfterEntryId === finalAnswer.id).map(marker => marker.eventId));
   const hasProcess = earlierProcess || compactions.some(marker => !afterFinalEvents.has(marker.eventId)) || compactionInProgress
     || process.some((message) => message.role === 'assistant');
   if (!hasProcess) return <>{renderMessage({ ...answer!, viewRole: 'final' }, true)}{afterFinalEvents.size > 0 && <ContextCompactionDivider count={afterFinalEvents.size} />}</>;
@@ -1389,7 +1396,7 @@ function ConversationRun({ messages, renderMessage, focusRequest, completed, act
   const latestSteer = steers.at(-1);
   const steerStackDepth = Math.min(steers.length, 3);
   const toggle = (edge: 'top' | 'bottom') => (<button type="button" className={`conversation-run__toggle conversation-run__toggle--${edge}`} data-process-toggle="" data-process-key={choiceKey} data-process-edge={edge} data-process-earlier={earlierProcess || undefined}
-      data-history-entry={edge === 'top' ? messageSourceEntryId(messages[0]) : (answer && messageSourceEntryId(answer)) ?? messageSourceEntryId(messages[0])}
+      data-history-entry={edge === 'top' ? messageSourceEntryId(messages[0]) : (finalAnswer && messageSourceEntryId(finalAnswer)) ?? messageSourceEntryId(messages[0])}
       data-history-entry-aliases={messages.flatMap(message => message.sourceEntryIds ?? (messageSourceEntryId(message) ? [messageSourceEntryId(message)!] : [])).join(' ')}
       data-thread-disclosure="" data-disclosure-key={choiceKey} aria-expanded={disclosure.expanded} aria-busy={busy}
       aria-label={edge === 'top' ? '从顶部收起处理过程' : disclosure.expanded ? '收起处理过程' : '展开处理过程'}

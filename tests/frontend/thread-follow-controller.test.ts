@@ -139,6 +139,31 @@ describe('semantic detail protection and animation ownership', () => {
     controller.selectionChanged(); geometry.height += 500; controller.coordinate(); expect(geometry.top).toBe(600); expect(controller.intent).toBe('follow'); expect(controller.canFollow).toBe(false);
     document.getSelection()!.removeAllRanges(); controller.selectionChanged(); expect(geometry.top).toBe(1100);
   });
+  it('successful latest navigation releases the conversation selection and resumes following', () => {
+    const {controller, root, geometry} = setup();
+    vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(0, 20, 100, 20)] as unknown as DOMRectList);
+    const selection = document.getSelection()!;
+    const range = document.createRange(); range.selectNodeContents(root.querySelector('p')!);
+    selection.addRange(range); controller.selectionChanged();
+    geometry.height += 500; controller.coordinate(); expect(geometry.top).toBe(600);
+    controller.beginNavigation(); controller.latest();
+    expect(selection.isCollapsed).toBe(true);
+    expect(controller.canFollow).toBe(true);
+    expect(geometry.top).toBe(1100);
+    // The browser delivers selectionchange asynchronously after removeAllRanges.
+    controller.selectionChanged(); geometry.height += 60; controller.coordinate();
+    expect(geometry.top).toBe(1160);
+  });
+  it('latest navigation does not clear a selection outside its conversation', () => {
+    const {controller, geometry} = setup();
+    const other = document.createElement('p'); other.textContent = '另一面板的选区'; document.body.append(other);
+    const range = document.createRange(); range.selectNodeContents(other);
+    document.getSelection()!.addRange(range); controller.selectionChanged();
+    geometry.height += 100;
+    controller.beginNavigation(); controller.latest();
+    expect(document.getSelection()!.toString()).toBe(other.textContent);
+    expect(geometry.top).toBe(700);
+  });
   it('disposed navigation/animation callbacks cannot write a successor session', () => {
     const {controller, geometry, frame} = setup(); controller.input('down'); controller.dispose(); geometry.height += 300;
     controller.coordinate(); controller.latest(); frame(); expect(geometry.top).toBe(600);

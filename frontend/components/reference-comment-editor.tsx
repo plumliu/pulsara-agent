@@ -61,5 +61,5 @@ export function ReferenceCommentEditor({ value, onChange, skills, completePaths 
     } });
     return () => editor.destroy();
   }, [editor, keydown]);
-  return <EditorContent editor={editor} />;
+  return <EditorContent className="annotation-comment-field" editor={editor} />;
 }

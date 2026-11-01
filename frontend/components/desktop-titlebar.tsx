@@ -1,10 +1,15 @@
 import { Minus, PanelLeft, PanelRight, Square, X } from 'lucide-react';
 import { desktopHost } from '../lib/desktop-host';
-export function DesktopTitlebar({ title, workbench = false, onToggleSidebar, onToggleWorkspace }: { title: string; workbench?: boolean; onToggleSidebar: () => void; onToggleWorkspace: () => void }) {
+export function DesktopTitlebar({ title, workbench = false, onToggleWorkspace }: { title: string; workbench?: boolean; onToggleWorkspace: () => void }) {
   const host = desktopHost();
   return <header className={`desktop-titlebar ${host?.platform === 'darwin' ? 'is-macos' : ''}`} onDoubleClick={event => { if (!(event.target as HTMLElement).closest('button')) void host?.toggleMaximize(); }}>
-    <button type="button" aria-label="切换会话侧栏" onClick={onToggleSidebar}><PanelLeft size={15} /></button>{!workbench && <><span className="desktop-titlebar__title">{title || 'Pulsara'}</span><button type="button" aria-label="切换标签工作区" onClick={onToggleWorkspace}><PanelRight size={15} /></button></>}
+    {!workbench && <><span className="desktop-titlebar__title">{title || 'Pulsara'}</span><button type="button" aria-label="切换标签工作区" onClick={onToggleWorkspace}><PanelRight size={15} /></button></>}
   </header>;
+}
+
+/** Keep its native no-drag hit region outside the collapsing titlebar column. */
+export function DesktopSidebarToggle({ onToggle }: { onToggle: () => void }) {
+  return <button type="button" className={`desktop-sidebar-toggle${desktopHost()?.platform === 'darwin' ? ' is-macos' : ''}`} aria-label="切换会话侧栏" onClick={onToggle}><PanelLeft size={15} /></button>;
 }
 
 /** Linux controls belong to the shell; Windows and macOS use native controls. */

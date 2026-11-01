@@ -6,7 +6,7 @@ import { uiPreferences } from '../lib/ui-preferences';
 import { randomIdentity, isCanonicalIdentity } from '../lib/identity';
 
 import { DesktopWorkspaceProvider, type WorkspaceControl } from '../components/desktop-workspace';
-import { DesktopTitlebar, DesktopWindowControls } from '../components/desktop-titlebar';
+import { DesktopSidebarToggle, DesktopTitlebar, DesktopWindowControls } from '../components/desktop-titlebar';
 import { desktopHost } from '../lib/desktop-host';
 import { FilePreviewProvider } from '../components/file-browser';
 import { UserAvatarProvider } from '../components/user-avatar';
@@ -2740,7 +2740,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     <PresentationProvider connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen} onNotify={notify}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main data-platform={desktopHost()?.platform} className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
-      <DesktopTitlebar workbench={activeView === "workbench"} title={activeView === "workbench" ? activeSession.title : "Pulsara"} onToggleSidebar={() => setSidebarOpen(value => !value)} onToggleWorkspace={() => setInspectorOpen(value => !value)} />
+      <DesktopTitlebar workbench={activeView === "workbench"} title={activeView === "workbench" ? activeSession.title : "Pulsara"} onToggleWorkspace={() => setInspectorOpen(value => !value)} />
       <div className="desktop-navigation"><ActivityRail activeView={activeView} onNavigate={navigate} />
 
       {activeView === 'workbench' && !databaseBlocked && (
@@ -3089,6 +3089,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           if (!bulkDeletion.running) setBulkNoticeDismissed(true);
         }}
         onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
+      <DesktopSidebarToggle onToggle={() => setSidebarOpen(value => !value)} />
       <DesktopWindowControls />
     </main>
     </ToolResultDisplayContext.Provider>

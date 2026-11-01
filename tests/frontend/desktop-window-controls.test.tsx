@@ -33,6 +33,18 @@ it('retains macOS native controls without rendering Linux replacements', async (
   await screen.findByLabelText('发送给 Pulsara');
   expect(view.container.querySelector('.desktop-titlebar.is-macos')).toBeTruthy();
   expect(screen.queryByRole('group', { name: '窗口控制' })).toBeNull();
+  const toggle = screen.getByRole('button', { name: '切换会话侧栏' });
+  const shell = view.container.querySelector('.desktop-shell')!;
+  expect(toggle.parentElement).toBe(shell);
+  expect(toggle.closest('header, .desktop-navigation')).toBeNull();
+  expect(shell.lastElementChild).toBe(toggle);
+  const initiallyOpen = shell.classList.contains('sidebar-visible');
+  fireEvent.click(toggle);
+  expect(shell.classList.contains('sidebar-visible')).toBe(!initiallyOpen);
+  expect(toggle.closest('[inert]')).toBeNull();
+  fireEvent.click(toggle);
+  expect(shell.classList.contains('sidebar-visible')).toBe(initiallyOpen);
+  expect(screen.getByRole('button', { name: '切换会话侧栏' })).toBe(toggle);
 });
 
 it('uses Windows native controls on both overview and conversation pages', async () => {

@@ -172,6 +172,25 @@ describe('draft annotation UI', () => {
     expect(screen.queryByRole('button', { name: '完成' })).toBeNull();
   });
 
+  it('focuses the comment after its popup becomes visible without stealing later button focus', async () => {
+    const focus = HTMLElement.prototype.focus;
+    vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, options) {
+      // JSDOM accepts focus on hidden elements; real browsers reject it.
+      if (this.closest<HTMLElement>('.annotation-editor')?.style.visibility === 'hidden') return;
+      focus.call(this, options);
+    });
+    const id = store.addAnnotation('one', first);
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: '编辑批注 1' }));
+    const input = await screen.findByRole('textbox', { name: '批注内容' });
+    await waitFor(() => expect(document.activeElement).toBe(input));
+    const close = screen.getByRole('button', { name: '关闭批注编辑' });
+    close.focus();
+    act(() => store.updateAnnotation('one', id, '继续编辑'));
+    await waitFor(() => expect(input.textContent).toBe('继续编辑'));
+    expect(document.activeElement).toBe(close);
+  });
+
   it('keeps edit highlighting while another marker is hovered and reopens comments from markers', async () => {
     store.addAnnotation('one', first); store.addAnnotation('one', second);
     render(<Harness />);

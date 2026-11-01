@@ -1281,6 +1281,7 @@ describe('completed reply process disclosure', () => {
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, draft] })} />);
     expect(hiddenProgress()).toBe(false);
     const streamingLayout = screen.getByText(draft.body).closest('.assistant-markdown')?.className;
+    expect(screen.getByText(draft.body).closest('.conversation-run__drawer')).toBeNull();
     expect(screen.getByText(draft.body).closest('.assistant-copy')?.querySelector('.response-actions')).toBeNull();
     // A committed assistant text without terminal-final eligibility is not enough.
     view.rerender(<WorkbenchView {...props({ activeTurnId: 'turn-one', messages: [progress, steer, { ...final, rootFinal: false, forkEligible: false }] })} />);
@@ -1303,6 +1304,43 @@ describe('completed reply process disclosure', () => {
     expect(body.indexOf(steer.body)).toBeLessThan(body.indexOf(final.body));
     view.rerender(<WorkbenchView {...props({ isRunning: false, messages: [{ ...progress }, { ...steer }, { ...final }] })} />);
     expect(hiddenProgress()).toBe(false);
+  });
+
+  it('separates a streaming answer from its process without completing the turn or hiding text on collapse', () => {
+    const readProcess = vi.fn(async () => {});
+    const draft = { ...final, id: 'draft-answer', assistantKind: 'live' as const,
+      status: 'running' as const, rootFinal: false, forkEligible: false,
+      body: '正在输出第一段。', reasoning: [{ id: 'draft-reasoning', kind: 'full' as const, body: '核对过来源。' }] };
+    const base = { activeTurnId: 'turn-one', isRunning: true, artifactOwnerKey: 'session-one',
+      onReadToolArtifact: vi.fn(), onNotify: vi.fn(), onReadProcessEnd: readProcess };
+    const display = (body: string) => <ConversationMessages {...base} messages={[progress, { ...draft, body }]} />;
+    const view = render(display(draft.body));
+    const answer = screen.getByText(draft.body).closest('[data-view-role="final"]');
+    expect(answer).toBeTruthy();
+    expect(view.container.querySelector('.conversation-run__toggle--bottom')?.nextElementSibling).toBe(answer);
+    expect(screen.getByText('正在执行')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '收起处理过程' }));
+    expect(readProcess).not.toHaveBeenCalled();
+    expect(screen.queryByText(progress.body)).toBeNull();
+    expect(screen.getByText(draft.body).closest('[inert]')).toBeNull();
+    view.rerender(display(draft.body + '继续输出第二段。'));
+    expect(screen.getByText(draft.body + '继续输出第二段。').closest('.conversation-run__drawer')).toBeNull();
+    expect(screen.getByRole('button', { name: '展开处理过程' })).toBeTruthy();
+  });
+
+  it('returns a live preface to the process once that response announces a tool call', () => {
+    const draft = { ...final, id: 'draft-preface', assistantKind: 'live' as const,
+      status: 'running' as const, rootFinal: false, forkEligible: false, body: '我再核对一个来源。' };
+    const base = { activeTurnId: 'turn-one', isRunning: true, artifactOwnerKey: 'session-one',
+      onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+    const view = render(<ConversationMessages {...base} messages={[progress, draft]} />);
+    expect(screen.getByText(draft.body).closest('.conversation-run__drawer')).toBeNull();
+    view.rerender(<ConversationMessages {...base} messages={[progress, { ...draft, traces: [progress.traces[0]] }]} />);
+    expect(screen.getByText(draft.body).closest('.conversation-run__drawer')).toBeTruthy();
+    expect(view.container.querySelector('[data-view-role="final"]')).toBeNull();
+    expect(screen.getAllByText(draft.body)).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: '复制回复' })).toBeNull();
   });
 
   it.each(['full', 'summary'] as const)('loads history collapsed, preserves %s reasoning when expanded, and leaves standalone answers alone', (kind) => {
@@ -2803,7 +2841,7 @@ it('still releases tail-follow for native upward scrolling during a drawer resiz
 
 describe('selection and empty-space reading intent', () => {
   afterEach(() => document.getSelection()?.removeAllRanges());
-  function setup() {
+  function setup(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}) {
     const observations = new Map<Element, () => void>();
     vi.stubGlobal('ResizeObserver', class {
       constructor(private callback: () => void) {}
@@ -2813,7 +2851,7 @@ describe('selection and empty-space reading intent', () => {
     vi.spyOn(Range.prototype, 'getClientRects').mockReturnValue([new DOMRect(0, 20, 100, 20)] as unknown as DOMRectList);
     const base = props({ isRunning: false, messages: [
       { id: 'selection-answer', role: 'assistant', assistantKind: 'terminal', rootFinal: true, status: 'completed', time: '', body: '供选择的正文' },
-    ] });
+    ], ...overrides });
     const view = render(<WorkbenchView {...base} />);
     const thread = view.container.querySelector<HTMLElement>('.thread-scroll')!;
     const geometry = {height: 1000, top: 600};
@@ -2863,6 +2901,40 @@ describe('selection and empty-space reading intent', () => {
     geometry.height += 60; resize();
     expect(geometry.top).toBe(660);
     expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+  });
+  it.each(['success', 'failure'] as const)('returns to latest with selected response text after %s', async outcome => {
+    // Give Floating UI a visible viewport rather than JSDOM's zero-size layout.
+    vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(document.documentElement, 'clientHeight', 'get').mockReturnValue(800);
+    let resolve!: () => void, reject!: (error: Error) => void;
+    const read = vi.fn(() => new Promise<void>((done, fail) => { resolve = done; reject = fail; }));
+    const notify = vi.fn();
+    const {geometry, select, resize} = setup({onReadLatestHistory: read, onNotify: notify});
+    const source = screen.getByText('供选择的正文').closest<HTMLElement>('[data-annotation-entry]')!;
+    vi.spyOn(source, 'getClientRects').mockReturnValue([new DOMRect(0, 20, 100, 20)] as unknown as DOMRectList);
+    vi.spyOn(Range.prototype, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 20, 100, 20));
+    select(); geometry.height += 100; resize();
+    expect(await screen.findByRole('button', {name: '添加注释'})).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', {name: '回到最新'}));
+    expect(read).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal));
+    expect(document.getSelection()?.toString()).toBe('供选择的正文');
+    expect(geometry.top).toBe(600);
+    if (outcome === 'failure') {
+      await act(async () => reject(new Error('读取失败')));
+      expect(document.getSelection()?.toString()).toBe('供选择的正文');
+      expect(geometry.top).toBe(600);
+      expect(notify).toHaveBeenCalledWith('无法回到最新', '读取失败', 'warning');
+      expect(screen.getByRole('button', {name: '回到最新'})).toBeTruthy();
+    } else {
+      await act(async () => resolve());
+      expect(document.getSelection()?.isCollapsed).toBe(true);
+      expect(geometry.top).toBe(700);
+      fireEvent(document, new Event('selectionchange'));
+      expect(screen.queryByRole('button', {name: '添加注释'})).toBeNull();
+      geometry.height += 60; resize();
+      expect(geometry.top).toBe(760);
+      expect(screen.queryByRole('button', {name: '回到最新'})).toBeNull();
+    }
   });
   it('lets an upward gesture take ownership from a paused selection', () => {
     const {geometry, thread, select, clear, resize} = setup();

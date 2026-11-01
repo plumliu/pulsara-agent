@@ -153,6 +153,7 @@ function AnnotationEditor({ item, anchor, store, sessionId, onClose, owner, skil
   onClose: (focus?: boolean) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const focused = useRef(false);
   const preview = Boolean(anchor);
   useLayoutEffect(() => {
     const editor = store.getEditor(sessionId);
@@ -172,7 +173,16 @@ function AnnotationEditor({ item, anchor, store, sessionId, onClose, owner, skil
       void computePosition(reference, floating, { placement: 'top-start', strategy: 'fixed',
         middleware: [offset(10), flip({ boundary, padding: 10 }), shift({ boundary, padding: 10, crossAxis: true }), hide({ boundary })],
       }).then(({ x, y, middlewareData }) => {
-        if (!disposed) Object.assign(floating.style, { left: `${x}px`, top: `${y}px`, visibility: middlewareData.hide?.referenceHidden ? 'hidden' : 'visible' });
+        if (disposed) return;
+        const visible = !middlewareData.hide?.referenceHidden;
+        Object.assign(floating.style, { left: `${x}px`, top: `${y}px`, visibility: visible ? 'visible' : 'hidden' });
+        // Browsers cannot focus the editor while the positioning shell is hidden.
+        // Focus once after it becomes visible, without taking focus on later updates.
+        if (visible && !focused.current) {
+          const textbox = floating.querySelector<HTMLElement>('[contenteditable="true"]');
+          textbox?.focus({ preventScroll: true });
+          focused.current = document.activeElement === textbox;
+        }
       });
     };
     const cleanup = autoUpdate(reference, floating, update);
