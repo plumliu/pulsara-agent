@@ -18,6 +18,8 @@ This release includes only the macOS Apple Silicon DMG. No Windows or Ubuntu ins
 
 If macOS reports that the application is damaged, do not disable Gatekeeper globally. Download the current DMG again; this version fixes the incomplete bundle signature in earlier packages. Include the output of `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` in an issue if verification still fails.
 
+macOS separately controls access to Desktop, Documents and other protected folders. Choose the folders you need in System Settings → Privacy & Security → Files & Folders. [Apple file-access guidance](https://support.apple.com/guide/mac-help/mchld5a35146/mac). After re-signing, an existing Full Disk Access grant may no longer match the app. If system logs report a code-requirement mismatch, remove the old entry and add the current Pulsara app to renew that grant. Full Disk Access covers the entire disk; choose the scope you need.
+
 ## Windows + WSL2
 
 No Windows installer is included in this release. The following setup applies to a separately built Windows package.

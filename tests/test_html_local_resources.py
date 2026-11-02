@@ -263,13 +263,14 @@ def test_publication_isolates_failed_items_and_cache_bases(tmp_path):
         try:
             shared = tmp_path / "shared.html"
             shared.write_text('<img src="image.png">')
+            (tmp_path / "bad.html").write_text('<link rel="stylesheet" href="missing.css">')
             for directory, color in [("a", "red"), ("b", "blue")]:
                 folder = tmp_path / directory
                 folder.mkdir()
                 (folder / "index.html").symlink_to(shared)
                 (folder / "image.png").write_bytes(png(color))
             result = await materialize_visualizations(
-                "```pulsara-viz\na/index.html\nb/index.html\na/index.html\nshared.html\n```",
+                "```pulsara-viz\na/index.html\nb/index.html\na/index.html\nshared.html\nbad.html\n```",
                 tool._read_access_path,
                 io=io,
                 validator=validator,
@@ -278,7 +279,7 @@ def test_publication_isolates_failed_items_and_cache_bases(tmp_path):
                 workspace_id=random_id("workspace"),
                 deadline_monotonic=monotonic() + 20,
             )
-            assert [x.state for x in result] == ["READY", "READY", "READY", "FAILED"]
+            assert [x.state for x in result] == ["READY", "READY", "READY", "READY", "FAILED"]
             assert result[0].html == result[2].html != result[1].html
             return result[0].html
         finally:
@@ -513,3 +514,31 @@ def test_svg_renderer_rejects_invalid_or_over_pixel_budget_instead_of_cropping(s
             await owner.aclose()
         assert not owner._processes
     asyncio.run(exercise())
+
+
+def test_published_html_keeps_layout_code_and_current_media_references(tmp_path):
+    from pulsara_agent.conversation_kernel.visualization import (
+        FrozenVisualizationOccurrence, VisualizationOccurrenceState,
+        VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE, html_snapshot_content,
+        local_media_reference,
+    )
+    path = tmp_path / 'gallery.html'
+    (tmp_path / 'app.js').write_text('window.published=true')
+    (tmp_path / 'style.css').write_text('main{background:url(image.png)}')
+    body = b'<link rel="stylesheet" href="style.css"><script src="app.js"></script><img src="missing.png"><video src="clip.mp4" poster="poster.png"></video>'
+    async def run():
+        io = KernelSessionIO()
+        try:
+            return await freeze_html_resources(body, path, io=io, validator=None,
+                deadline_monotonic=monotonic()+20, media_url=local_media_reference)
+        finally:
+            await io.aclose(deadline_monotonic=monotonic()+20)
+    frozen = asyncio.run(run())
+    assert elements(frozen, 'img')[0].getAttribute('src') == str(tmp_path / 'missing.png')
+    assert elements(frozen, 'video')[0].getAttribute('src') == str(tmp_path / 'clip.mp4')
+    assert elements(frozen, 'video')[0].getAttribute('poster') == str(tmp_path / 'poster.png')
+    assert b'window.published=true' in decode(elements(frozen, 'script')[0].getAttribute('src'))
+    assert str(tmp_path / 'image.png').encode() in decode(elements(frozen, 'link')[0].getAttribute('href'))
+    item = FrozenVisualizationOccurrence('gallery.html', VisualizationOccurrenceState.READY, html=frozen, html_path=str(path))
+    assert item.media_type == VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE
+    assert html_snapshot_content(item.content) == (frozen, path)

@@ -10,6 +10,7 @@ import base64
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from collections.abc import Callable
 import re
 from time import monotonic
 from urllib.parse import unquote
@@ -245,7 +246,8 @@ def _serialize_css(nodes, *, deadline_monotonic):
 
 
 async def freeze_html_resources(
-    body: bytes, access_path: Path, *, io, validator, deadline_monotonic: float
+    body: bytes, access_path: Path, *, io, validator, deadline_monotonic: float,
+    media_url: Callable[[Path], str] | None = None, base_url: str | None = None,
 ) -> bytes:
     """Use the caller's IO, image validator and deadline; retain no durable state."""
 
@@ -256,6 +258,14 @@ async def freeze_html_resources(
     cache = {}
     html_size = len(body)
     changed = False
+    if base_url is not None:
+        for element in list(document.getElementsByTagName("base")):
+            element.parentNode.removeChild(element)
+        base = document.createElementNS(_HTML_NS, "base")
+        base.setAttribute("href", base_url)
+        head = document.getElementsByTagName("head")[0]
+        head.insertBefore(base, head.firstChild)
+        changed = True
 
     def replace_size(old, new):
         nonlocal html_size, changed
@@ -265,8 +275,21 @@ async def freeze_html_resources(
         changed |= old != new
 
     async def resource(value, base, kind):
+        if kind == "media" and media_url is None:
+            return value
         path = _path(value, base)
         if path is None:
+            # CSS was frozen into a data URL. Reuse tinycss2 to bind its media
+            # declarations too; JavaScript strings are never parsed or rewritten.
+            if kind == "css" and media_url is not None and value.startswith("data:text/css;charset=utf-8;base64,"):
+                payload = base64.b64decode(value.split(",", 1)[1], validate=True)
+                payload = (await css(payload.decode("utf-8"), base, False)).encode("utf-8")
+                return await run(_data_url, payload, "text/css;charset=utf-8")
+            return value
+        if kind in {"image", "media"} and media_url is not None:
+            return media_url(path)
+        if kind == "media":
+            # Screenshots do not read or embed video/audio bytes.
             return value
         # Access path is part of the CSS cache key: aliases in different
         # directories may share bytes yet refer to different relative images.
@@ -330,6 +353,8 @@ async def freeze_html_resources(
         attribute, kind = None, None
         if tag == "img" and element.getAttribute("src").strip(_HTML_SPACE):
             attribute, kind = "src", "image"
+        elif tag in {"video", "audio", "source"} and element.hasAttribute("src"):
+            attribute, kind = "src", "media"
         elif tag == "link" and "stylesheet" in re.split(
             r"[ \t\n\f\r]+", element.getAttribute("rel").lower()
         ):
@@ -355,6 +380,11 @@ async def freeze_html_resources(
             new = await resource(value, access_path.parent, kind)
             replace_size(value, new)
             element.setAttribute(attribute, new)
+        if tag == "video" and element.getAttribute("poster").strip(_HTML_SPACE):
+            value = element.getAttribute("poster")
+            new = await resource(value, access_path.parent, "image")
+            replace_size(value, new)
+            element.setAttribute("poster", new)
         if element.hasAttribute("style"):
             value = element.getAttribute("style")
             new = await css(value, access_path.parent, True)

@@ -26,6 +26,7 @@ const scriptValue = (value: string) =>
 type HtmlPreviewSource =
   | {
       html: string;
+      resourcePrefix?: string;
       measure?: boolean;
       allowTextSelection?: boolean;
       environment?: VisualizationEnvironment;
@@ -60,6 +61,11 @@ export function htmlPreviewShell(source: HtmlPreviewSource): string {
   const prefix = url
     ? `${url.origin}${url.pathname.split("/resources/")[0]}/resources/`
     : undefined;
+  const mediaPrefix = !local ? source.resourcePrefix : undefined;
+  if (mediaPrefix) {
+    const media = new URL(mediaPrefix, window.location.origin);
+    if (media.origin !== window.location.origin || !/^\/api\/file-previews\/[A-Za-z0-9_-]+\/resources\/$/.test(media.pathname) || media.search || media.hash || media.href !== mediaPrefix) throw new Error('媒体地址不属于当前本地文件。');
+  }
   const html = local
     ? ""
     : `${source.html}<style>${visualizationScrollbars}</style>${source.measure ? visualizationFrameMeasurementScript : ""}`;
@@ -73,9 +79,12 @@ let environment=${scriptValue(!local && source.environment ? JSON.stringify(sour
 environment=JSON.parse(environment);
 const validEnv=e=>e && ['light','dark'].includes(e.theme) && typeof e.visible==='boolean' && typeof e.reducedMotion==='boolean' && e.colors && ['background','foreground','muted','accent','border','soft'].every(k=>typeof e.colors[k]==='string');
 const sendEnvironment=()=>{if(environment)frame.contentWindow.postMessage({type:'${environmentMessageType}',environment},'*');};
+let visible=false;
+const sendVisibility=()=>frame.contentWindow.postMessage({type:'pulsara-preview-visibility',visible},'*');
 addEventListener('securitypolicyviolation',()=>report('pulsara-preview-error'));
 addEventListener('message',event=>{
   if(event.source===parent && event.data?.type==='pulsara-preview-restore'){frame.contentWindow.postMessage(event.data,'*');return;}
+  if(event.source===parent && event.data?.type==='pulsara-preview-visibility' && typeof event.data.visible==='boolean'){visible=event.data.visible;sendVisibility();return;}
   if(event.source===parent && event.data?.type==='${environmentMessageType}' && validEnv(event.data.environment)){
     const e=event.data.environment;
     environment={theme:e.theme,visible:e.visible,reducedMotion:e.reducedMotion,colors:Object.fromEntries(['background','foreground','muted','accent','border','soft'].map(k=>[k,e.colors[k]]))};
@@ -95,7 +104,7 @@ addEventListener('message',event=>{
       parent.postMessage({type:d.type,mode:'root',viewport,rect:{x:d.rect.x,y:d.rect.y,width:d.rect.width,height:d.rect.height}},'*');
   }
 });
-frame.addEventListener('load',()=>{sendEnvironment();report('pulsara-preview-ready');});
+frame.addEventListener('load',()=>{sendEnvironment();sendVisibility();report('pulsara-preview-ready');});
 `;
   return visualizationShell({
     html,
@@ -103,6 +112,7 @@ frame.addEventListener('load',()=>{sendEnvironment();report('pulsara-preview-rea
     setup,
     sourceUrl: local ? source.url : undefined,
     resourcePrefix: url?.href ?? prefix,
+    mediaPrefix,
   });
 }
 
@@ -135,6 +145,7 @@ export function SandboxedHtmlPreview({
   const ref = frameRef ?? ownRef;
   const html = "html" in source ? source.html : undefined;
   const url = "url" in source ? source.url : undefined;
+  const resourcePrefix = "html" in source ? source.resourcePrefix : undefined;
   const measure = "measure" in source && source.measure;
   const allowTextSelection =
     "allowTextSelection" in source ? source.allowTextSelection : undefined;
@@ -158,13 +169,26 @@ export function SandboxedHtmlPreview({
           ? { url }
           : {
               html: html ?? "",
+              resourcePrefix,
               measure,
               allowTextSelection,
               environment: initialEnvironment,
             },
       ),
-    [html, url, measure, allowTextSelection, initialEnvironment],
+    [html, url, resourcePrefix, measure, allowTextSelection, initialEnvironment],
   );
+  useEffect(() => {
+    if (!url || !ref.current) return;
+    let intersecting = false;
+    const update = () => ref.current?.contentWindow?.postMessage({type: 'pulsara-preview-visibility', visible: intersecting && document.visibilityState !== 'hidden' && !ref.current.closest('[hidden],[inert]')}, '*');
+    const observer = new IntersectionObserver(entries => {const entry=entries.at(-1); intersecting=Boolean(entry?.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0); update();}, {threshold: Number.EPSILON});
+    const frame = ref.current;
+    observer.observe(frame);
+    frame.addEventListener('load', update);
+    document.addEventListener('visibilitychange', update);
+    update();
+    return () => {observer.disconnect(); frame.removeEventListener('load', update); document.removeEventListener('visibilitychange', update); frame.contentWindow?.postMessage({type: 'pulsara-preview-visibility', visible: false}, '*');};
+  }, [url, ref, shell]);
   useLayoutEffect(() => {
     const receive = (event: MessageEvent) => {
       if (event.source !== ref.current?.contentWindow) return;

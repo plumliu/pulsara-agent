@@ -2759,7 +2759,7 @@ abstract class CanonicalHistoryReader {
     const image = Boolean(item?.imageRef);
     const expected: ContentMedia = image
       ? { media_type: item?.mediaType, codec: 'binary', image_ref: item?.imageRef, width: item?.width, height: item?.height }
-      : { media_type: 'text/html', codec: 'utf-8' };
+      : { media_type: item?.mediaType ?? 'text/html', codec: 'utf-8' };
     const bytes = await this.readExactContentBytes(
       { entry_id: entryId, visualization_ordinal: ordinal }, digest, size,
       '可视化内容暂时无法读取。', !image, signal, expected,
@@ -3151,6 +3151,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   protected get queuePath() { return this.queueRoot ?? super.queuePath; }
 
   readonly filePreview: FilePreviewApi = {
+    snapshot: (path, html) => this.previewRequest('/snapshot', {path, html}),
     open: (path, basePreview, readingRoot) => this.previewRequest('', { path, base_preview: basePreview, reading_root: readingRoot }),
     close: async token => { await this.previewRequest('', { read_token: token }, 'DELETE'); },
     page: (token, cursor, mode, signal) => this.previewRequest('/page', { read_token: token, cursor, mode }, 'POST', signal),

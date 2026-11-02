@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import os
+import json
+from urllib.parse import quote
 from pathlib import Path
 import re
 import stat
@@ -21,6 +23,11 @@ from markdown_it.rules_block.fence import make_fence_rule
 from mdit_py_plugins.texmath.index import make_block_func
 from pulsara_agent.conversation_kernel.blob import MAXIMUM_BLOB_BYTES
 
+from pulsara_agent.media_types import VIDEO_TYPES
+from pulsara_agent.primitives.context import canonical_json_bytes
+
+VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE = "application/vnd.pulsara.html-snapshot+json"
+VISUALIZATION_VIDEO_MEDIA_TYPE = "application/vnd.pulsara.video-reference+json"
 VISUALIZATION_MEDIA_TYPE = "text/html"
 VISUALIZATION_CODEC = "utf-8"
 
@@ -116,24 +123,80 @@ class FrozenVisualizationOccurrence:
     state: VisualizationOccurrenceState
     html: bytes | None = None
     image: LLMImagePart | None = None
+    video: bytes | None = None
+    html_path: str | None = None
     failure_code: str | None = None
     failure_detail: str | None = None
 
     def __post_init__(self) -> None:
+        if self.html_path is not None and (self.html is None or not Path(self.html_path).is_absolute()):
+            raise ValueError("HTML snapshot requires an absolute source path")
         if self.state is VisualizationOccurrenceState.READY:
             if (
-                (bool(self.html) == (self.image is not None))
+                sum((bool(self.html), self.image is not None, bool(self.video))) != 1
                 or self.failure_code
                 or self.failure_detail
             ):
                 raise ValueError("READY visualization has invalid content")
         elif (
             self.html is not None
+            or self.video is not None
             or self.image is not None
             or not self.failure_code
             or not self.failure_detail
         ):
             raise ValueError("FAILED visualization has invalid content")
+
+    @property
+    def content(self) -> bytes:
+        if self.image is not None:
+            return self.image.immutable_bytes
+        if self.video is not None:
+            return self.video
+        assert self.html is not None
+        if self.html_path is not None:
+            return canonical_json_bytes({"html": self.html.decode("utf-8"), "path": self.html_path})
+        return self.html
+
+    @property
+    def media_type(self) -> str:
+        if self.image is not None:
+            return self.image.media_type
+        if self.video is not None:
+            return VISUALIZATION_VIDEO_MEDIA_TYPE
+        return VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE if self.html_path is not None else VISUALIZATION_MEDIA_TYPE
+
+    @property
+    def codec(self) -> str:
+        return "binary" if self.image is not None else VISUALIZATION_CODEC
+
+
+def html_snapshot_content(content: bytes) -> tuple[bytes, Path]:
+    value = json.loads(content)
+    if (not isinstance(value, dict) or set(value) != {"html", "path"}
+            or not isinstance(value["html"], str) or not isinstance(value["path"], str)
+            or not Path(value["path"]).is_absolute()):
+        raise ValueError("invalid HTML snapshot")
+    return value["html"].encode("utf-8"), Path(value["path"])
+
+
+def local_media_reference(path: Path) -> str:
+    # An absolute URL path is only a declaration. The preview owner later maps
+    # it to its scoped resource URL; publication never reads the media bytes.
+    return quote(os.path.abspath(path), safe="/")
+
+
+def read_video_reference(path: Path, *, deadline_monotonic: float) -> bytes:
+    """Freeze only the authorized absolute path, never video bytes or a preview URL."""
+    if monotonic() >= deadline_monotonic:
+        raise TimeoutError("visualization publication deadline expired")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("VIDEO_NOT_REGULAR")
+        return canonical_json_bytes({"path": str(path)})
+    finally:
+        os.close(fd)
 
 
 def validate_html_path(value: str) -> None:
@@ -261,6 +324,12 @@ async def materialize_visualizations(
                 if key in cache:
                     results.append(replace(cache[key], source_filename=name))
                     continue
+                if Path(value).suffix.lower() in VIDEO_TYPES and not html_source:
+                    payload = await io.run(read_video_reference, path, deadline_monotonic=deadline_monotonic)
+                    item = FrozenVisualizationOccurrence(name, VisualizationOccurrenceState.READY, video=payload)
+                    cache[key] = item
+                    results.append(item)
+                    continue
                 payload = await io.run(
                     _read_source,
                     path,
@@ -270,11 +339,13 @@ async def materialize_visualizations(
                 if html_source:
                     payload = await freeze_html_resources(
                         payload, path, io=io, validator=validator,
-                        deadline_monotonic=deadline_monotonic,
+                        deadline_monotonic=deadline_monotonic, media_url=local_media_reference,
                     )
                     item = FrozenVisualizationOccurrence(
-                        name, VisualizationOccurrenceState.READY, html=payload
+                        name, VisualizationOccurrenceState.READY, html=payload, html_path=str(path)
                     )
+                    if len(item.content) > MAXIMUM_BLOB_BYTES:
+                        raise ValueError("HTML_RESOURCES_TOO_LARGE")
                 else:
                     if validator is None:
                         raise RuntimeError(
@@ -373,7 +444,7 @@ def visualization_metadata(row: Mapping[str, object]) -> dict:
             row["codec"] != "binary"
             if image
             else row["codec"] != VISUALIZATION_CODEC
-            or row["media_type"] != VISUALIZATION_MEDIA_TYPE
+            or row["media_type"] not in {VISUALIZATION_MEDIA_TYPE, VISUALIZATION_VIDEO_MEDIA_TYPE, VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE}
         )
         or (
             not isinstance(row["width"], int)

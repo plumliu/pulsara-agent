@@ -6,7 +6,7 @@ Read this reference when an HTML figure needs JavaScript theme, animation or scr
 
 Create responsive HTML with legible labels and controls. Keep outer backgrounds transparent by default, with opaque surfaces where the design or contrast calls for them. For compact content, mark exactly one visible containing element with `pulsara-viz-root` and keep the figure within its bounds. The host also attempts automatic fitting for ordinary layouts; other content uses page mode.
 
-HTML can use inline SVG, Canvas, ordinary elements or a locally included library. Network resources are unavailable. Local resource paths resolve relative to the HTML or CSS file that declares them. Publishing freezes the HTML and supported local resources; a current-file link is appropriate for a document package with cross-file navigation.
+HTML can use inline SVG, Canvas, ordinary elements or a locally included library. Network resources are unavailable. Local resource paths resolve relative to the HTML or CSS file that declares them. Publishing freezes HTML layout, CSS and JavaScript. Referenced local images, posters and videos read the current files, including relative media paths assigned by JavaScript. Media must stay within the project directory, or the HTML directory for files outside the project; a current-file link is appropriate for a document package with cross-file navigation.
 
 ## Theme and animation
 
@@ -36,7 +36,7 @@ if (environment) {
 }
 ```
 
-The live host pauses ordinary `requestAnimationFrame`, function timers, CSS/WAAPI and SVG animations while hidden, without requiring a subscription. Use rAF timestamps or `performance.now()` for elapsed animation time: their activity clock excludes host pauses, while `Date` remains real wall time. Live displays use `reducedMotion=false` independently of OS preferences. Still-image capture uses `reducedMotion=true`; render a stable frame in that mode. Hidden pages receive `visible=false`; retained pages keep their controls, while reopening an unloaded page can reset local state. The environment API supplies display context, not host-file, tool or messaging access.
+The live host pauses ordinary `requestAnimationFrame`, function timers, CSS/WAAPI and SVG animations while hidden, without requiring a subscription. Use rAF timestamps or `performance.now()` for elapsed animation time: their activity clock excludes host pauses, while `Date` remains real wall time. Live displays use `reducedMotion=false` independently of OS preferences. Still-image capture uses `reducedMotion=true`; render a stable frame in that mode. Hidden pages receive `visible=false`; native videos pause and remain paused on return. Removed media and unloaded frames release their sources. Retained pages keep their controls, while reopening an unloaded page can reset local state. The environment API supplies display context, not host-file, tool or messaging access.
 
 ## Inspect current content
 

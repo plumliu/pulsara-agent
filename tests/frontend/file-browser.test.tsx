@@ -12,7 +12,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, beforeAll, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { FilePreviewProvider } from "../../frontend/components/file-browser";
 import { MarkdownBody } from "../../frontend/components/markdown-body";
 import type {
@@ -66,6 +66,7 @@ afterEach(() => {
   cleanup();
   delete window.pulsaraDesktop;
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 const notify = vi.fn();
 const file = (name: string): FilePreview => ({
@@ -83,6 +84,7 @@ const file = (name: string): FilePreview => ({
 });
 function api(): FilePreviewApi {
   return {
+    snapshot: vi.fn(),
     open: vi.fn(async (path) => file(path)),
     close: vi.fn(async () => undefined),
     action: vi.fn(async () => undefined),
@@ -101,6 +103,57 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
+
+it('shares video tabs across local links and the native picker and restores playback position', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+  const reader = api();
+  let issued = 0;
+  vi.mocked(reader.open).mockImplementation(async path => ({
+    ...file(path.endsWith('.txt') ? 'notes.txt' : 'clip.mp4'),
+    read_token: `preview-${++issued}`,
+    kind: path.endsWith('.txt') ? 'text' : 'video',
+  }));
+  window.pulsaraDesktop = { chooseFiles: vi.fn().mockResolvedValue(['/project/clip.mp4']) } as unknown as import('../../frontend/lib/desktop-host').PulsaraDesktop;
+  const view = render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}>
+    <MarkdownBody body="[视频](clip.mp4) [文字](notes.txt)" onNotify={notify} />
+  </FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('link', { name: '视频' }));
+  await screen.findByRole('button', { name: '从目录中打开' });
+  const video = view.container.querySelector('video')!;
+  expect(video.src).toContain('/api/file-previews/clip.mp4/content');
+  expect(reader.page).not.toHaveBeenCalled();
+  Object.defineProperty(video, 'duration', { value: 96, configurable: true });
+  fireEvent.loadedMetadata(video);
+  video.currentTime = 42;
+  fireEvent.timeUpdate(video);
+  fireEvent.click(screen.getByRole('button', { name: '从目录中打开' }));
+  await waitFor(() => expect(reader.close).toHaveBeenCalledWith('preview-2'));
+  expect(reader.open).toHaveBeenLastCalledWith('file:///project/clip.mp4', undefined, undefined);
+  expect(screen.getAllByRole('tab')).toHaveLength(1);
+  expect(view.container.querySelector('video')).toBe(video);
+  expect(video.currentTime).toBe(42);
+  fireEvent.click(screen.getByRole('link', { name: '文字' }));
+  await screen.findByText('hello');
+  fireEvent.click(screen.getByRole('tab', { name: 'clip.mp4' }));
+  const restored = view.container.querySelector('video')!;
+  Object.defineProperty(restored, 'duration', { value: 96, configurable: true });
+  fireEvent.loadedMetadata(restored);
+  expect(restored.currentTime).toBe(42);
+  expect(play).not.toHaveBeenCalled();
+  expect(view.container.querySelector('.video-reading-track')).toBeNull();
+  expect(view.container.querySelector('.video-notes')).toBeNull();
+  const latePicker = deferred<string[]>();
+  vi.mocked(window.pulsaraDesktop.chooseFiles).mockReturnValue(latePicker.promise);
+  fireEvent.click(screen.getByRole('button', { name: '从目录中打开' }));
+  const beforeClose = vi.mocked(reader.open).mock.calls.length;
+  fireEvent.click(screen.getByRole('button', { name: '关闭 clip.mp4' }));
+  expect(reader.close).toHaveBeenCalledWith('preview-1');
+  await act(async () => latePicker.resolve(['/project/late.mp4']));
+  expect(reader.open).toHaveBeenCalledTimes(beforeClose);
+});
 
 it("keeps file actions in one navigation row and copies the actual native path", async () => {
   const reader = api();
@@ -773,4 +826,8 @@ it.each(['load', 'error'] as const)('settles the shared image loader on %s', asy
   fireEvent[outcome](screen.getByRole('img', {name:'plot.png'}));
   expect(screen.queryByText('正在加载...')).toBeNull();
   if (outcome === 'error') expect(screen.getByText(/图片暂时无法解码/)).toBeTruthy();
+});
+
+beforeEach(() => {
+  vi.stubGlobal('IntersectionObserver', class {observe() {} disconnect() {}});
 });

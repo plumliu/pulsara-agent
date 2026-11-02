@@ -375,7 +375,7 @@ class LocalHttpServer:
         self._refresh_database_state = refresh_database_state
         self._reset_postgres_data = reset_postgres
         self._postgres_operation_lock = asyncio.Lock()
-        self._visualization_previews = VisualizationPreviews(bridge)
+        self._visualization_previews = VisualizationPreviews(bridge, lambda: self.origin)
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
         self._port: int | None = None

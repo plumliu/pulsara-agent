@@ -1,6 +1,6 @@
 # Explain findings with charts
 
-Choose each figure for the question it answers. A number or table may be enough; add a figure when its pattern, comparison or distribution makes the result easier to understand. Publish saved images or HTML through `pulsara-viz` using the conversation's display rules.
+Choose each figure for the question it answers. A number or table may be enough; add a figure when its pattern, comparison or distribution makes the result easier to understand. Publish saved images, HTML or local videos through `pulsara-viz` in the final answer after tool calls finish. Group existing media paths in one fence for a gallery; use HTML for custom layout or interaction.
 
 ## Match the view to the question
 

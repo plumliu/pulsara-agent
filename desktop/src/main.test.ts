@@ -81,7 +81,7 @@ function fixture(options: {
     webContents = Object.assign(new EventEmitter(), {
       mainFrame: { url: workbenchUrl },
       isDestroyed() { return false; },
-      setWindowOpenHandler() {}, session: { setPermissionRequestHandler() {} },
+      setWindowOpenHandler() {}, session: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} },
     });
     isMinimized() { return false; }
     isMaximized() { return false; }

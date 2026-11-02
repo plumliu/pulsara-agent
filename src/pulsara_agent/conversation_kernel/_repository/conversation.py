@@ -49,8 +49,6 @@ from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 from pulsara_agent.conversation_kernel.visualization import (
     FrozenVisualizationOccurrence,
     VisualizationOccurrenceState,
-    VISUALIZATION_CODEC,
-    VISUALIZATION_MEDIA_TYPE,
 )
 from pulsara_agent.conversation_kernel.prompt_storage import (
     canonical_prompt_owner_is_exact,
@@ -1850,13 +1848,13 @@ class _ConversationOperations:
             for ordinal, item in enumerate(visualizations):
                 blob_id = None
                 if item.state is VisualizationOccurrenceState.READY:
-                    assert item.html is not None or item.image is not None
+                    assert item.html is not None or item.image is not None or item.video is not None
                     blob_id = PostgresCanonicalBlobStore.publish_in_connection(
                         connection,
                         workspace_id=str(turn["workspace_id"]),
-                        content=item.html if item.image is None else item.image.immutable_bytes,
-                        media_type=VISUALIZATION_MEDIA_TYPE if item.image is None else item.image.media_type,
-                        codec=VISUALIZATION_CODEC if item.image is None else "binary",
+                        content=item.content,
+                        media_type=item.media_type,
+                        codec=item.codec,
                         validated_image=item.image,
                     ).blob_id
                 connection.execute(
@@ -2176,9 +2174,9 @@ class _ConversationOperations:
                         "assistant visualization differs from stable candidate"
                     )
                 if item.state is VisualizationOccurrenceState.READY:
-                    assert item.html is not None or item.image is not None
+                    assert item.html is not None or item.image is not None or item.video is not None
                     blob_id = visualization_row["blob_id"]
-                    payload = item.html if item.image is None else item.image.immutable_bytes
+                    payload = item.content
                     if item.image is not None and blob_id != item.image.image_ref:
                         raise ConversationKernelConflict("assistant visualization image identity differs")
                     if blob_id is None or PostgresCanonicalBlobStore.read_exact_in_connection(
@@ -2187,8 +2185,8 @@ class _ConversationOperations:
                         expected_digest="sha256:" + sha256(payload).hexdigest(),
                         expected_size=len(payload),
                         expected_workspace_id=str(row["workspace_id"]),
-                        expected_media_type=VISUALIZATION_MEDIA_TYPE if item.image is None else item.image.media_type,
-                        expected_codec=VISUALIZATION_CODEC if item.image is None else "binary",
+                        expected_media_type=item.media_type,
+                        expected_codec=item.codec,
                     ) != payload:
                         raise ConversationKernelConflict(
                             "assistant visualization content differs"

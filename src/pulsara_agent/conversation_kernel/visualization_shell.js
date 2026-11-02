@@ -1,6 +1,6 @@
 // The UI and disposable screenshot worker share the same document boundary.
-export default function visualizationShell({ html, bootstrap = '', setup = '', sourceUrl, resourcePrefix }) {
-  const frozenPolicy = "default-src 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline' data:; img-src data:; font-src data:; connect-src 'none'; worker-src 'none'; frame-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
+export default function visualizationShell({ html, bootstrap = '', setup = '', sourceUrl, resourcePrefix, mediaPrefix }) {
+  const frozenPolicy = `default-src 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline' data:; img-src data:${mediaPrefix ? ` ${mediaPrefix}` : ''}; font-src data:; connect-src 'none'; worker-src 'none'; frame-src 'none'; media-src ${mediaPrefix || "'none'"}; object-src 'none'; base-uri ${mediaPrefix || "'none'"}; form-action 'none'`;
   // Ordinary file previews retain their existing resource-server policy.
   const policy = sourceUrl === undefined ? frozenPolicy : frozenPolicy.replace("script-src 'unsafe-inline' data:", "script-src 'unsafe-inline'").replace("style-src 'unsafe-inline' data:", "style-src 'unsafe-inline'");
   const outerPolicy = resourcePrefix ? policy.replace("frame-src 'none'", `frame-src ${resourcePrefix}`) : policy;

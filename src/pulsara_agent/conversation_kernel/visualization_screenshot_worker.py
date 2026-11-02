@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sys
+import json
+import re
+from urllib.parse import urlsplit
 from pathlib import Path
 from io import BytesIO
 from math import isfinite
@@ -82,6 +85,15 @@ def _render_svg(page: Page, source: str) -> bytes:
 
 def main() -> None:
     html = sys.stdin.buffer.read().decode("utf-8")
+    resource_prefix = None
+    if "--local-media" in sys.argv:
+        value = json.loads(html)
+        html, resource_prefix = value["html"], value["resource_prefix"]
+        url = urlsplit(resource_prefix)
+        if (url.scheme not in {"http", "https"} or url.hostname != "127.0.0.1"
+                or url.username or url.password or url.query or url.fragment
+                or not re.fullmatch(r"/api/file-previews/[A-Za-z0-9_-]+/resources/", url.path)):
+            raise ValueError("invalid local screenshot resource prefix")
     bootstrap = (
         Path(__file__)
         .with_name("visualization_environment.js")
@@ -106,7 +118,9 @@ def main() -> None:
                 service_workers="block",
                 accept_downloads=False,
             )
-            context.route("**/*", lambda route: route.abort())
+            # Screenshots may load only images from this exact temporary mount;
+            # video bytes, scripts and all other network requests stay blocked.
+            context.route("**/*", lambda route: route.continue_() if resource_prefix and route.request.url.startswith(resource_prefix) and route.request.resource_type == "image" else route.abort())
             page = context.new_page()
             page.set_default_timeout(10_000)
             if "--svg" in sys.argv:
@@ -114,7 +128,7 @@ def main() -> None:
                 return
             document = page.evaluate(
                 "args => {" + shell + "; return visualizationShell(args); }",
-                {"html": html + "<style>" + Path(__file__).with_name("visualization_scrollbars.css").read_text() + "</style>", "bootstrap": environment},
+                {"html": html + "<style>" + Path(__file__).with_name("visualization_scrollbars.css").read_text() + "</style>", "bootstrap": environment, "mediaPrefix": resource_prefix},
             )
             page.set_content(document, wait_until="load", timeout=10_000)
             frame = page.locator("#content").element_handle().content_frame()

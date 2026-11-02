@@ -227,6 +227,7 @@
 .inline-visualization__status { box-sizing: border-box; width: 100%; min-height: 104px; padding: 20px; display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper-deep); color: var(--muted); text-align: left; }
 .inline-visualization__status-icon { width: 36px; height: 36px; display: grid; place-items: center; border-radius: 8px; background: var(--paper-solid); }
 .inline-visualization__status-copy { min-width: 0; }
+.inline-visualization__media-status { padding: 10px 12px; color: var(--ink); font-size: var(--type-body); line-height: 1.5; border-bottom: 1px solid var(--line); }
 .inline-visualization__status-copy strong { display: block; color: var(--ink-soft); font-size: var(--type-small); font-weight: 600; line-height: 1.5; }
 .inline-visualization__status-copy p { margin: 4px 0 0; font-size: var(--type-caption); line-height: 1.5; overflow-wrap: anywhere; }
 .inline-visualization__status-copy button { margin-top: 8px; padding: 5px 8px; border: 1px solid var(--line); background: var(--paper-solid); font-size: var(--type-caption); }
@@ -1129,3 +1130,9 @@
 .mcp-prompt-instant > span { flex: 1; overflow-wrap: anywhere; }
 .mcp-prompt-instant .interaction-actions { flex: none; padding: 0; }
 .mcp-prompt-instant .interaction-actions button { color: var(--ink); font-size: inherit; }
+
+.inline-visualization__video-page { position:relative; width:100%; min-height:100px; }
+.inline-visualization__video-page > video { display:block; width:100%; max-height:70vh; background:#20221e; border-radius:8px; }
+.inline-visualization__video-thumbnail { position:relative; width:100%; }
+.inline-visualization__video-play { position:absolute; inset:0; display:grid; place-items:center; margin:auto; width:28px; height:28px; border-radius:50%; color:white; background:rgb(20 22 26 / 58%); }
+.inline-visualization__video-play svg { margin-left:2px; }

@@ -8,11 +8,13 @@ export interface FilePreview {
     | "markdown"
     | "table"
     | "image"
+    | "video"
     | "svg"
     | "pdf"
     | "html"
     | "file"
     | "directory";
+  modified_ns?: string;
   size: number | null;
   notice: string | null;
   content_url: string | null;
@@ -33,6 +35,7 @@ export interface FilePreviewApi {
     basePreview?: string,
     readingRoot?: string,
   ): Promise<FilePreview>;
+  snapshot(path: string, html: string): Promise<{read_token: string; html: string; resource_prefix: string}>;
   close(token: string): Promise<void>;
   page(
     token: string,

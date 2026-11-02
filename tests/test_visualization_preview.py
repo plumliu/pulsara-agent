@@ -25,7 +25,7 @@ class Bridge:
         offset = body['offset_bytes']
         part = self.content[offset:offset + min(7, body['limit_bytes'])]
         return {'content': {'digest': 'sha256:' + sha256(self.content).hexdigest(),
-            'complete_size': len(self.content), 'offset_bytes': offset,
+            'complete_size': len(self.content), 'offset_bytes': offset, 'media_type': 'text/html', 'codec': 'utf-8',
             'content': base64.b64encode(part).decode(), 'complete': offset + len(part) == len(self.content)}}
 
 
@@ -151,4 +151,59 @@ def test_thumbnail_http_origin_boundary_and_canonical_response(tmp_path):
                 assert renderer.await_count == 1
         finally:
             await server.aclose()
+    asyncio.run(run())
+
+
+def test_video_reference_never_enters_html_screenshot_worker():
+    async def run():
+        bridge = Bridge(b'{"path":"/project/demo.mp4"}')
+        original = bridge.read_content
+        async def read(*args):
+            result = await original(*args)
+            result['content']['media_type'] = 'application/vnd.pulsara.video-reference+json'
+            return result
+        bridge.read_content = read
+        owner = VisualizationPreviews(bridge)
+        owner.screenshots.render = AsyncMock()
+        try:
+            with pytest.raises(ValueError, match='requires HTML'):
+                await owner.read('connection', target(bridge))
+            owner.screenshots.render.assert_not_called()
+        finally:
+            await owner.aclose()
+    asyncio.run(run())
+
+
+def test_snapshot_thumbnail_binds_current_media_and_releases_directory_on_failure(tmp_path):
+    async def run():
+        from pulsara_agent.conversation_kernel.visualization import VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE
+        from pulsara_agent.primitives.context import canonical_json_bytes
+        from tests.test_session_file_preview import bridge_for
+        from pulsara_agent.desktop_app.file_preview import FilePreviewError
+        files = bridge_for(tmp_path.resolve())
+        bridge = Bridge(canonical_json_bytes({'path':str(tmp_path.resolve()/'one/gallery.html'), 'html':'<h1>saved</h1>'}))
+        original = bridge.read_content
+        async def read(connection, body):
+            result = await original(connection, body)
+            result['content']['media_type'] = VISUALIZATION_HTML_SNAPSHOT_MEDIA_TYPE
+            return result
+        files.read_content = read
+        owner = VisualizationPreviews(files, lambda:'http://127.0.0.1:8080')
+        tokens = []
+        async def screenshot(html, **kwargs):
+            token = kwargs['resource_prefix'].split('/')[-3]
+            tokens.append(token)
+            assert (await files.require_file_preview('one', token)).resources_only
+            assert b'<h1>saved</h1>' in html
+            raise ValueError('screenshot failed')
+        owner.screenshots.render = screenshot
+        try:
+            with pytest.raises(ValueError, match='screenshot failed'):
+                await owner.read('one', target(bridge))
+            with pytest.raises(FilePreviewError) as expired:
+                await files.require_file_preview('one', tokens[0])
+            assert expired.value.code == 'PREVIEW_EXPIRED'
+        finally:
+            await owner.aclose()
+            await files.aclose()
     asyncio.run(run())

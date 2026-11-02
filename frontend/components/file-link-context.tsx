@@ -6,3 +6,11 @@ export const FileLinkContext = createContext<{
   basePreview?: string;
   imagesUrl?: string;
 } | undefined>(undefined);
+
+/** File previews own read leases; the gallery owns no separate media service. */
+export const FileMediaContext = createContext<{
+  api: import('../lib/file-preview').FilePreviewApi;
+  ownerKey: string;
+  sessionId: string;
+  open: (path: string, time?: number) => void;
+} | undefined>(undefined);

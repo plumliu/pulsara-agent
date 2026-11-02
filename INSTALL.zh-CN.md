@@ -18,6 +18,8 @@
 
 若系统提示应用已损坏，请勿全局关闭 Gatekeeper。请重新下载当前 DMG；本版修正了早期安装包不完整的应用签名。若仍失败，请在反馈中附上 `codesign --verify --deep --strict --verbose=2 /Applications/Pulsara.app` 的输出。
 
+桌面、文稿等目录由 macOS 单独授权，可在“系统设置 → 隐私与安全性 → 文件与文件夹”中按需要开启。[Apple 文件授权说明](https://support.apple.com/guide/mac-help/mchld5a35146/mac)。重新签名后，既有“完全磁盘访问”授权可能与新程序不匹配；若系统日志报告签名要求不匹配，需由用户移除旧条目、重新添加当前 Pulsara。“完全磁盘访问”允许访问整盘，请按实际需要选择授权范围。
+
 ## Windows + WSL2
 
 本版没有 Windows 安装包，以下步骤适用于另行构建的 Windows 包。

@@ -20,6 +20,7 @@ import secrets
 import stat
 from urllib.parse import quote, unquote, urlsplit
 
+from pulsara_agent.media_types import VIDEO_TYPES
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.local_source_binding import (
     DIRECTORY_NOFOLLOW_FLAGS,
@@ -135,6 +136,8 @@ def classify(path: Path, fd: int) -> tuple[str, str]:
         return "html", "text/html"
     if ext in RASTER:
         return "image", RESOURCE_TYPES[ext]
+    if ext in VIDEO_TYPES:
+        return "video", VIDEO_TYPES[ext]
     if ext == ".svg":
         return "svg", "image/svg+xml"
     if ext == ".pdf":
@@ -198,6 +201,8 @@ class Preview:
     mime: str = "application/octet-stream"
     notice: str | None = None
     closed: bool = False
+    resources_only: bool = False
+    video_sources: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
     page_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     lines: BudgetLines | None = None
     reader: object | None = None
@@ -224,6 +229,20 @@ class Preview:
     def check(self):
         if self.closed:
             raise expired()
+        if self.resources_only:
+            if self.root_fd is None:
+                raise expired()
+            try:
+                current = open_absolute_directory_nofollow(self.reading_root)
+                try:
+                    before, after = os.fstat(self.root_fd), os.fstat(current)
+                    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                        raise FilePreviewError("FILE_CHANGED", "资源目录已变化，请重新打开预览。", 409)
+                finally:
+                    os.close(current)
+            except OSError as exc:
+                raise file_error(exc) from exc
+            return
         if self.fd is None or self.info is None:
             return
         # fstat alone misses unlink and atomic rename: verify the current path
@@ -249,8 +268,10 @@ class Preview:
             "read_token": self.token,
             "path": str(self.path),
             "reading_root": str(self.reading_root or self.path.parent),
+            **({"resources_url": base + "/resources/"} if self.kind == "html" else {}),
             "name": self.path.name or str(self.path),
             "kind": self.kind,
+            **({"modified_ns": str(self.info.st_mtime_ns)} if self.kind == "video" and self.info else {}),
             "size": self.info.st_size if self.info else None,
             "notice": self.notice,
             "content_url": base + "/content" if self.fd is not None else None,
@@ -401,18 +422,19 @@ class Preview:
         # aiohttp has already decoded match_info once. Never unquote it again.
         parts = relative.split("/")
         if not parts or any(
-            not p or p.startswith(".") or "\\" in p or re.search(r"[\x00-\x1f\x7f]", p)
+            not p or p in {".", ".."} or "\\" in p or re.search(r"[\x00-\x1f\x7f]", p)
             for p in parts
         ):
             raise FilePreviewError(
                 "RESOURCE_OUTSIDE_ROOT", "资源不在允许的目录范围内。", 403
             )
         ext = Path(parts[-1]).suffix.lower()
-        if ext not in (RASTER if images else RESOURCE_TYPES):
+        types = ({key: RESOURCE_TYPES[key] for key in RASTER} | {".svg": "image/svg+xml"} | VIDEO_TYPES) if self.resources_only else RESOURCE_TYPES | VIDEO_TYPES
+        if ext not in (RASTER if images else types):
             raise FilePreviewError(
                 "FILE_PREVIEW_UNSUPPORTED", "此资源类型不支持内嵌预览。", 415
             )
-        if not images and parts == list(
+        if not images and not self.resources_only and parts == list(
             self.path.relative_to(self.reading_root or self.path.parent).parts
         ):
             return os.dup(self.fd), self.mime
@@ -432,7 +454,13 @@ class Preview:
                 raise FilePreviewError(
                     "FILE_PREVIEW_UNSUPPORTED", "资源不是普通文件。", 415
                 )
-            return fd, RESOURCE_TYPES[ext]
+            if ext in VIDEO_TYPES:
+                current = identity(os.fstat(fd))
+                previous = self.video_sources.setdefault(relative, current)
+                if previous != current:
+                    os.close(fd)
+                    raise FilePreviewError("FILE_CHANGED", "视频已变化，请重新打开预览。", 409)
+            return fd, types[ext]
         except OSError as exc:
             raise file_error(exc) from exc
         finally:
@@ -465,7 +493,7 @@ def file_error(exc: OSError) -> FilePreviewError:
 
 
 def open_preview(
-    connection_id: str, path: Path, reading_root: Path | None = None
+    connection_id: str, path: Path, reading_root: Path | None = None, *, resources_only: bool = False
 ) -> Preview:
     root = reading_root or path.parent
     if not path.is_relative_to(root):
@@ -475,6 +503,11 @@ def open_preview(
     item = Preview(connection_id, path, reading_root=root)
     try:
         item.root_fd = open_absolute_directory_nofollow(root)
+        if resources_only:
+            if path.suffix.lower() not in HTML:
+                raise FilePreviewError("FILE_PREVIEW_UNSUPPORTED", "资源引用只用于 HTML 快照。", 415)
+            item.kind, item.mime, item.resources_only = "html", "text/html", True
+            return item
         parent_fd = open_absolute_directory_nofollow(path.parent)
         try:
             item.fd = os.open(

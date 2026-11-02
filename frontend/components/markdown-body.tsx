@@ -336,7 +336,7 @@ export const MarkdownBody = memo(function MarkdownBody({ body, onNotify, streami
         const ordinal = code.properties['data-visualization-ordinal'];
         const count = Number(code.properties['data-visualization-count']);
         const items = Array.from({length: count}, (_, index) => visualization.items.find(value => value.ordinal === ordinal + index));
-        if (items.every(item => item !== undefined)) return <div data-source-atom={node?.properties['data-source-atom']}><InlineVisualization key={`${visualization.entryId}:${ordinal}`} entryId={visualization.entryId} items={items} onRead={visualization.onRead} onReadThumbnail={visualization.onReadThumbnail}/></div>;
+        if (items.every(item => item !== undefined)) return <div data-source-atom={node?.properties['data-source-atom']}><InlineVisualization key={`${visualization.entryId}:${ordinal}`} entryId={visualization.entryId} items={items} sourcePaths={Object.fromEntries(toText(code, {whitespace: 'pre'}).split('\n').map(line => line.trim()).filter(Boolean).map((path, index) => [ordinal + index, path]))} onRead={visualization.onRead} onReadThumbnail={visualization.onReadThumbnail}/></div>;
         if (streaming) return <div role="status">正在准备可视化…</div>;
         // A completed unbound fence remains ordinary code; never load its path.
       }

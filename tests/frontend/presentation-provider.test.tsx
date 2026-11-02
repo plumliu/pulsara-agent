@@ -18,7 +18,7 @@ function fixture() {
   let hostSessionId = 'host:one';
   const connection={sessionId:'one',role:'controller',generation:1,current:()=>({hostSessionId}),subscribePresentation:(fn:(r:PresentationRequest)=>void)=>{listener=fn;return()=>{listener=undefined;};}} as unknown as RuntimeConnection;
   const file=(path:string):FilePreview=>({path:decodeURIComponent(new URL(path).pathname),name:'a.md',kind:'text',reading_root:'/project',read_token:crypto.randomUUID(),size:0,notice:null,content_url:'',document_url:null,images_url:null,can_open:false});
-  const api:FilePreviewApi={open:vi.fn(async path=>file(path)),close:vi.fn(async()=>{}),page:vi.fn(),action:vi.fn()};
+  const api:FilePreviewApi={snapshot:vi.fn(),open:vi.fn(async path=>file(path)),close:vi.fn(async()=>{}),page:vi.fn(),action:vi.fn()};
   const create=vi.fn(async ({tabId})=>({instanceId:crypto.randomUUID(),tabId,url:'',loading:false}));
   const command=vi.fn(async()=>{});
   window.pulsaraDesktop={browser:{create,command,close:vi.fn(async()=>{}),clear:vi.fn(async()=>{}),onEvent:()=>()=>{}}} as unknown as PulsaraDesktop;

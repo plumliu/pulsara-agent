@@ -1,3 +1,5 @@
+import { InlineVideoPage, VideoThumbnail, isVideoVisualization, type VideoSource } from './inline-video';
+import { readThumbnailInOrder } from '../lib/visualization-thumbnails';
 import { WorkspaceLoading } from './workspace-loading';
 import { Images, Maximize2, ImageOff, RotateCcw } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
@@ -7,14 +9,17 @@ import { usableVisualizationRootRect, visualizationLayoutMessageType, type Visua
 import { useDesktopWorkspace } from './desktop-workspace';
 import { SavedImage, useSavedImage } from './saved-image';
 import { SandboxedHtmlPreview } from './sandboxed-html-preview';
+import { FileMediaContext } from './file-link-context';
 
 export type ReadVisualization = (entry: string, ordinal: number, digest: string, size: number, item?: VisualizationOccurrence, signal?: AbortSignal) => Promise<string | Uint8Array>;
 export type ReadVisualizationThumbnail = (entry: string, ordinal: number, digest: string, size: number, signal: AbortSignal) => Promise<string>;
-export interface InlineVisualizationContext { entryId: string; items: VisualizationOccurrence[]; onRead: ReadVisualization; onReadThumbnail?: ReadVisualizationThumbnail }
+export interface InlineVisualizationContext { entryId: string; items: VisualizationOccurrence[]; onRead: ReadVisualization; onReadThumbnail?: ReadVisualizationThumbnail; sourcePaths?: Record<number, string> }
 export const VisualizationOwnerContext = createContext<((signal: AbortSignal) => Promise<boolean>) | undefined>(undefined);
 
-function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: {entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization; active: boolean; maximized: boolean; zoomControl: ReactNode}) {
-  const [result, setResult] = useState<{html?: string; error?: string}>({});
+function GalleryPage({ entryId, item, onRead, sourcePath, active, maximized, zoomControl }: {entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization; sourcePath?: string; active: boolean; maximized: boolean; zoomControl: ReactNode}) {
+  const media = useContext(FileMediaContext);
+  const api = media?.api, ownerKey = media?.ownerKey;
+  const [result, setResult] = useState<{html?: string; resourcePrefix?: string; resourceError?: string; error?: string}>({});
   const [attempt, setAttempt] = useState(0);
   const [size, setSize] = useState({width: 0, height: 0});
   const [measurement, setMeasurement] = useState<{rect: VisualizationRootRect | null; width: number; height: number}>();
@@ -28,13 +33,32 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
   const {ordinal, contentDigest: digest, contentSize, state, mediaType, codec} = item;
   useEffect(() => {
     if (!readStarted || state !== 'READY' || !digest || !contentSize) return;
+    setResult({});
     let live = true;
+    let token: string | undefined;
     const controller = new AbortController();
     const args = [entryId, ordinal, digest, contentSize, onRead, attempt];
     if (!pending.current || args.some((v, i) => v !== pending.current!.args[i])) pending.current = {args, promise: onRead(entryId, ordinal, digest, contentSize, {ordinal, contentDigest: digest, contentSize, state, mediaType, codec}, controller.signal)};
-    void pending.current.promise.then(html => {if (live) setResult(typeof html === "string" ? {html} : {error: "可视化类型不匹配。"});}, () => {if (live) setResult({error: '已保存的可视化暂时无法读取。'});});
-    return () => {live = false; controller.abort(); pending.current = undefined;};
-  }, [readStarted, entryId, ordinal, digest, contentSize, state, mediaType, codec, onRead, attempt]);
+    void pending.current.promise.then(async content => {
+      if (!live) return;
+      if (typeof content !== 'string') {setResult({error: '可视化类型不匹配。'}); return;}
+      let html = content, path = sourcePath;
+      if (mediaType === 'application/vnd.pulsara.html-snapshot+json') {
+        const snapshot: unknown = JSON.parse(content);
+        if (!snapshot || typeof snapshot !== 'object' || !('html' in snapshot) || typeof snapshot.html !== 'string' || !('path' in snapshot) || typeof snapshot.path !== 'string') throw new Error('invalid HTML snapshot');
+        html = snapshot.html; path = snapshot.path;
+      }
+      if (path && api) {
+        try {
+          const bound = await api.snapshot(path, html);
+          if (!live) {void api.close(bound.read_token).catch(() => {}); return;}
+          token = bound.read_token;
+          setResult({html: bound.html, resourcePrefix: bound.resource_prefix});
+        } catch {if (live) setResult({html, resourceError: '本地媒体暂时无法读取，布局快照仍可查看。'});}
+      } else setResult({html});
+    }).catch(() => {if (live) setResult({error: '已保存的可视化暂时无法读取。'});});
+    return () => {live = false; controller.abort(); pending.current = undefined; if (token) void api?.close(token).catch(() => {});};
+  }, [readStarted, entryId, ordinal, digest, contentSize, state, mediaType, codec, onRead, attempt, sourcePath, api, ownerKey]);
   useLayoutEffect(() => {
     if (!probe.current) return;
     const measure = () => {
@@ -91,6 +115,7 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
   const error = state === 'FAILED' ? item.failureDetail ?? '可视化未能生成。' : !digest || !contentSize ? '可视化引用不完整。' : result.error;
   const errorText = item.failureCode === 'HTML_NOT_FOUND' ? '未找到 HTML 文件' : error;
   return <div ref={page} className="inline-visualization__page" hidden={!active} aria-hidden={!active} inert={!active} data-visualization-ordinal={ordinal}>
+      {result.resourceError && <div role="status" className="inline-visualization__media-status">{result.resourceError}</div>}
       <div className="inline-visualization__viewport-probe" ref={probe}/>
       <div className="inline-visualization__stage" data-visualization-compact={compact || undefined} data-visualization-layout={rect ? 'root' : selectedRoot ? 'root-scroll' : 'page'} style={{height: error ? undefined : cropHeight ?? (size.height || 'var(--visualization-height)')}}>
         {error ? <div className="inline-visualization__status" role="status" title={error}>
@@ -103,7 +128,7 @@ function GalleryPage({ entryId, item, onRead, active, maximized, zoomControl }: 
             ? <WorkspaceLoading/>
             : <div role="status">正在加载可视化…</div>
           : <div className="inline-visualization__crop" style={rect ? {height: cropHeight} : undefined}>
-            <SandboxedHtmlPreview frameRef={frame} title={item.sourceFilename || '可视化'} source={{html: result.html, measure: true, allowTextSelection: false, environment}}
+            <SandboxedHtmlPreview frameRef={frame} title={item.sourceFilename || '可视化'} source={{html: result.html, resourcePrefix: result.resourcePrefix, measure: true, allowTextSelection: false, environment}}
               style={{width: size.width || '100%', height: size.height || '100%', transform: rect ? `translateY(${-cropTop}px)` : undefined}}/>
           </div>}
         {active && !compact && <div className="inline-visualization__zoom-anchor">{zoomControl}</div>}
@@ -144,12 +169,6 @@ function ImageThumbnail({ entryId, item, enabled, onRead }: { entryId: string; i
 // recent pages retain arbitrary script state. Older pages can always reopen.
 const residentFrames = 3;
 const visualizationName = (item: VisualizationOccurrence) => item.sourceFilename || `可视化 ${item.ordinal + 1}`;
-let thumbnailQueue: Promise<unknown> = Promise.resolve();
-function readThumbnailInOrder(read: () => Promise<string>, signal: AbortSignal): Promise<string> {
-  const pending = thumbnailQueue.then(() => { signal.throwIfAborted(); return read(); });
-  thumbnailQueue = pending.catch(() => undefined);
-  return pending;
-}
 
 function Thumbnail({ item, entryId, enabled, onRead }: {
   item: VisualizationOccurrence; entryId: string; enabled: boolean; onRead?: ReadVisualizationThumbnail;
@@ -173,8 +192,11 @@ function Thumbnail({ item, entryId, enabled, onRead }: {
 }
 
 
-export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: InlineVisualizationContext) {
+export function InlineVisualization({entryId, items, onRead, onReadThumbnail, sourcePaths}: InlineVisualizationContext) {
   const checkOwner = useContext(VisualizationOwnerContext);
+  const [videoSources, setVideoSources] = useState<Record<number, VideoSource>>({});
+  const reportVideoSource = useCallback((ordinal: number, source: VideoSource) => setVideoSources(old =>
+    old[ordinal]?.path === source.path && old[ordinal]?.modified_ns === source.modified_ns ? old : {...old, [ordinal]: {path: source.path, modified_ns: source.modified_ns}}), []);
   const [selected, setSelected] = useState(items[0]?.ordinal);
   const [resident, setResident] = useState<number[]>(() => items.length ? [items[0].ordinal] : []);
   const workspace = useDesktopWorkspace();
@@ -220,19 +242,21 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
   return <section className="inline-visualization" aria-label="可视化图集">
     <div className={`inline-visualization__layout${items.length > 1 ? ' has-thumbnails' : ''}`}>
       <div className="inline-visualization__figure">
-        {items.filter(item => !item.imageRef && resident.includes(item.ordinal)).map(item => <GalleryPage
-          key={`${entryId}:${item.ordinal}:${item.contentDigest ?? item.state}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} maximized={false} zoomControl={
+        {items.filter(item => !item.imageRef && !isVideoVisualization(item) && resident.includes(item.ordinal)).map(item => <GalleryPage
+          key={`${entryId}:${item.ordinal}:${item.contentDigest ?? item.state}`} entryId={entryId} item={item} sourcePath={sourcePaths?.[item.ordinal]} onRead={onRead} active={item.ordinal === current.ordinal} maximized={false} zoomControl={
         <button className="inline-visualization__zoom" title={visualizationName(current)}
           aria-label="放大可视化" onClick={() => workspace?.open({
             id: JSON.stringify([workspace.sessionId, 'visualization', entryId, current.ordinal]),
             sessionId: workspace.sessionId, title: visualizationName(current), kind: 'visualization',
-            render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} checkOwner={checkOwner} />,
+            render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} sourcePath={sourcePaths?.[current.ordinal]} onRead={onRead} checkOwner={checkOwner} />,
           })}>
           <Maximize2 size={16}/>
 
         </button>
         }/>)}
 
+        {items.filter(item => isVideoVisualization(item) && resident.includes(item.ordinal)).map(item => <InlineVideoPage
+          key={`${entryId}:${item.ordinal}:${item.contentDigest}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} onSource={reportVideoSource}/>)}
         {current.imageRef && <><button className="inline-visualization__zoom" title="在标签中打开图片" aria-label="在标签中打开图片" onClick={() => workspace?.open({
           id: JSON.stringify([workspace.sessionId, 'visualization', entryId, current.ordinal]), sessionId: workspace.sessionId,
           title: visualizationName(current), kind: 'visualization', render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} checkOwner={checkOwner} />,
@@ -251,9 +275,9 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
           (strip.current?.children[next] as HTMLElement)?.focus({preventScroll: true});
         }}>
         {items.map((item, at) => <button key={`${item.ordinal}:${item.contentDigest ?? item.state}`} data-ordinal={item.ordinal}
-          aria-label={`查看可视化 ${at + 1}${item.state === 'FAILED' ? '（无法显示）' : ''}`} title={visualizationName(item)}
+          aria-label={`查看${isVideoVisualization(item) ? '视频' : '可视化'} ${at + 1}${item.state === 'FAILED' ? '（无法显示）' : ''}`} title={visualizationName(item)}
           aria-pressed={item.ordinal === current.ordinal} onClick={() => select(at)}>
-          <>{item.imageRef ? <ImageThumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onRead}/> : <Thumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onReadThumbnail}/>}</>
+          <>{isVideoVisualization(item) ? <VideoThumbnail entryId={entryId} item={item} onRead={onRead} enabled={visible.has(item.ordinal)} source={videoSources[item.ordinal]}/> : item.imageRef ? <ImageThumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onRead}/> : <Thumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onReadThumbnail}/>}</>
         </button>)}
       </div>
       </aside>}
@@ -261,7 +285,7 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail}: I
   </section>;
 }
 
-function FrozenVisualization({ sessionId, entryId, item, onRead, checkOwner }: { sessionId: string; entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization; checkOwner?: (signal: AbortSignal) => Promise<boolean> }) {
+function FrozenVisualization({ sessionId, entryId, item, sourcePath, onRead, checkOwner }: { sessionId: string; entryId: string; item: VisualizationOccurrence; sourcePath?: string; onRead: ReadVisualization; checkOwner?: (signal: AbortSignal) => Promise<boolean> }) {
   const workspace = useDesktopWorkspace();
   const [ownerState, setOwnerState] = useState<'checking' | 'available' | 'unavailable' | 'error'>(checkOwner ? 'checking' : 'available');
   useEffect(() => {
@@ -291,6 +315,6 @@ function FrozenVisualization({ sessionId, entryId, item, onRead, checkOwner }: {
   return <section className="frozen-visualization" aria-label={`历史可视化：${visualizationName(item)}`}>
     {ownerState === 'unavailable' ? <p role="status">子代理已不可用。</p>
       : ownerState !== 'available' ? <p role="status">{ownerState === 'checking' ? '正在确认内容所属会话…' : '暂时无法确认内容所属会话。'}</p>
-        : item.imageRef ? <ImagePage entryId={entryId} item={item} onRead={read} maximized /> : <GalleryPage entryId={entryId} item={item} onRead={read} active maximized zoomControl={null} />}
+        : item.imageRef ? <ImagePage entryId={entryId} item={item} onRead={read} maximized /> : <GalleryPage entryId={entryId} item={item} sourcePath={sourcePath} onRead={read} active maximized zoomControl={null} />}
   </section>;
 }

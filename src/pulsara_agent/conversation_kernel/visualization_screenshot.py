@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import json
 import signal
 import sys
 from time import monotonic
@@ -18,7 +19,7 @@ class VisualizationScreenshotOwner:
         self._processes: set[asyncio.subprocess.Process] = set()
         self._closed = False
 
-    async def render(self, html: bytes, *, deadline_monotonic: float, thumbnail: bool = False, svg: bool = False) -> bytes:
+    async def render(self, html: bytes, *, deadline_monotonic: float, thumbnail: bool = False, svg: bool = False, resource_prefix: str | None = None) -> bytes:
         if self._closed:
             raise VisualizationScreenshotError("PREVIEW_OWNER_CLOSED")
         remaining = deadline_monotonic - monotonic()
@@ -30,6 +31,7 @@ class VisualizationScreenshotOwner:
             "pulsara_agent.conversation_kernel.visualization_screenshot_worker",
             *(["--thumbnail"] if thumbnail else []),
             *(["--svg"] if svg else []),
+            *(["--local-media"] if resource_prefix is not None else []),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -39,7 +41,7 @@ class VisualizationScreenshotOwner:
         try:
             try:
                 stdout, stderr = await asyncio.wait_for(
-                    process.communicate(html), timeout=remaining
+                    process.communicate(html if resource_prefix is None else json.dumps({"html": html.decode("utf-8"), "resource_prefix": resource_prefix}, ensure_ascii=False).encode("utf-8")), timeout=remaining
                 )
             except TimeoutError as exc:
                 raise VisualizationScreenshotError("PREVIEW_DEADLINE_EXPIRED") from exc

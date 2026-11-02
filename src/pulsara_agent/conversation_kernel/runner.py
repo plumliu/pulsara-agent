@@ -1981,7 +1981,7 @@ class ConversationKernelRunner:
                     if complete_turn:
                         complete_turn = not pending_control_feedback
                     frozen_visualizations = ()
-                    if not calls:
+                    if complete_turn and not calls:
                         frozen_visualizations = (
                             await self._tools.prepare_visualizations(
                                 assistant_display_body(

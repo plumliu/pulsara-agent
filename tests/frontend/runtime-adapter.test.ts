@@ -3405,3 +3405,18 @@ it('joins no-START tool delta and end with only the local block identity', async
   const traces = (await new LocalHttpRuntimeAdapter().connect('session-1')).current().messages[0].traces;
   expect(traces).toEqual([expect.objectContaining({id:'block',toolName:'read_file',argumentsJson:'{"path":"x"}'})]);
 });
+
+it('reads video-reference JSON through the canonical visualization media boundary', async () => {
+  vi.stubGlobal('crypto',webcrypto);
+  const json='{"path":"/project/demo.mp4"}';
+  const bytes=new TextEncoder().encode(json), mediaType='application/vnd.pulsara.video-reference+json';
+  const response=contentBytes(bytes);
+  const requests:unknown[]=[];
+  stubRuntimeFetch(vi.fn(async (_input,init) => {
+    requests.push(JSON.parse(String(init?.body)));
+    return new Response(JSON.stringify({content:{...response.content,media_type:mediaType,codec:'utf-8'}}),{status:200});
+  }));
+  const reader=new LocalHttpRuntimeAdapter().createAgentContentReader('root','agent');
+  expect(await reader.readVisualizationContent('entry',2,sha256Digest(bytes),bytes.length,{ordinal:2,state:'READY',mediaType,codec:'utf-8'})).toBe(json);
+  expect(requests).toEqual([expect.objectContaining({entry_id:'entry',visualization_ordinal:2})]);
+});

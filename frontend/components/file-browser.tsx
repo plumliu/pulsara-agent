@@ -27,10 +27,11 @@ import type {
 import { classifyFileLink, fileUrl } from "../lib/file-preview";
 import { desktopHost, writeClipboardText } from "../lib/desktop-host";
 import { type PreparedWorkspaceTab, type WorkspaceTab, useDesktopWorkspace } from "./desktop-workspace";
-import { FileLinkContext } from "./file-link-context";
+import { FileLinkContext, FileMediaContext } from "./file-link-context";
 import { type MarkdownNotify } from "./markdown-body";
 import { FileMarkdown } from "./file-markdown";
 import { FilePreviewPanel, FileTextContent } from "./file-preview-panel";
+import { FileVideoContent, type VideoPlaybackState } from "./file-video-content";
 import { SandboxedHtmlPreview } from "./sandboxed-html-preview";
 
 const detail = (error: unknown) =>
@@ -45,6 +46,8 @@ type Visit = {
   title?: string;
   columnPage?: number;
   zoom?: number;
+  video?: VideoPlaybackState;
+  videoPosition?: {time: number};
 };
 type Request = {
   path: string;
@@ -196,7 +199,7 @@ export function FilePreviewProvider({
       changed();
     }
   };
-  const prepare = async (path: string, valid: () => boolean, root?: string, deduplicate = true): Promise<PreparedWorkspaceTab> => {
+  const prepare = async (path: string, valid: () => boolean, root?: string, deduplicate = true, videoTime?: number): Promise<PreparedWorkspaceTab> => {
     const expected = connection.current;
     const idInUse = (id: string) => tabs.current.has(id) || Boolean(workspaceRef.current?.tabs.some(item => item.id === id))
       || Boolean(workspaceRef.current?.browserTabs.records.has(id));
@@ -226,16 +229,21 @@ export function FilePreviewProvider({
           other.sessionId === tab.sessionId && !other.loading && !other.error && other.file?.path === tab.file!.path && other.root === tab.root) : [];
         const match = candidates.find(other => other.id === workspaceRef.current?.activeId) ?? candidates[0];
         if (match) {
+          if (match.file?.kind === 'video' && tab.file?.kind === 'video' && match.file.modified_ns !== tab.file.modified_ns) {
+            release(match); match.file = tab.file; match.api = tab.api; tab.file = undefined; tab.api = undefined;
+          }
+          if (videoTime !== undefined) match.history[match.index].videoPosition = {time: videoTime};
           if (tab.history[0].anchor) match.history[match.index].anchor = tab.history[0].anchor;
           release(tab); changed(); return describe(match);
         }
         while (idInUse(tab.id)) tab.id = randomIdentity('tab');
+        if (videoTime !== undefined) tab.history[0].videoPosition = {time: videoTime};
         adopted = true; tabs.current.set(tab.id, tab); changed();
         return describe(tab);
       },
     };
   };
-  const create = (path: string, root?: string, deduplicate = false) => {
+  const create = (path: string, root?: string, deduplicate = false, videoTime?: number) => {
     if (!workspaceRef.current) {
       onNotify("无法打开文件", "文件工作区当前不可用。", "warning");
       return;
@@ -245,7 +253,7 @@ export function FilePreviewProvider({
     workspaceOwner.interact();
     const interaction = workspaceOwner.interactionVersion();
     const valid = () => connection.current === expected && workspaceRef.current?.visible === true;
-    void prepare(path, valid, root, deduplicate).then(prepared => {
+    void prepare(path, valid, root, deduplicate, videoTime).then(prepared => {
       try { const tab = prepared.adopt(); if (tab) workspaceRef.current?.publish([tab], workspaceOwner.interactionVersion() === interaction); }
       finally { prepared.release(); }
     });
@@ -294,10 +302,23 @@ export function FilePreviewProvider({
     if (source) navigate(source, path, newTab);
     else create(path, undefined, !newTab);
   };
-  const actions = useRef({ load, navigate, open, close, prepare });
+  const chooseFiles = async (source: BrowserTab) => {
+    const expected = connection.current;
+    const preview = source.file;
+    const host = desktopHost();
+    if (!host) return;
+    try {
+      const paths = await host.chooseFiles();
+      if (connection.current !== expected || !preview || source.file !== preview || tabs.current.get(source.id) !== source) return;
+      for (const path of paths) open(fileUrl(path), document.body);
+    } catch (error) { onNotify('无法打开文件', detail(error), 'warning'); }
+  };
+  const openVideo = (path: string, time?: number) => create(fileUrl(path), undefined, true, time);
+  const actions = useRef({ load, navigate, open, close, prepare, chooseFiles, openVideo });
   useLayoutEffect(() => {
-    actions.current = { load, navigate, open, close, prepare };
+    actions.current = { load, navigate, open, close, prepare, chooseFiles, openVideo };
   });
+  const stableOpenVideo = useCallback((path: string, time?: number) => actions.current.openVideo(path, time), []);
   const stablePrepare = useCallback((path: string, valid: () => boolean) => actions.current.prepare(path, valid), []);
   const stableOpen = useCallback<OpenFile>(
     (...args) => actions.current.open(...args),
@@ -340,6 +361,7 @@ export function FilePreviewProvider({
           <FileBrowserView
             tab={tab}
             onNotify={onNotify}
+            onChooseFiles={() => void actions.current.chooseFiles(tab)}
             onVisitChange={(patch) => {
               Object.assign(page, patch);
               if (patch.title !== undefined || patch.source !== undefined)
@@ -380,6 +402,7 @@ export function FilePreviewProvider({
     for (const tab of tabs.current.values()) workspaceRef.current?.update(tab.id, describe(tab));
   }, [revision, describe, ownerKey]);
   return (
+    <FileMediaContext.Provider value={api ? {api, ownerKey, sessionId, open: stableOpenVideo} : undefined}>
     <FilePresentationContext.Provider value={stablePrepare}>
     <FileLinkContext.Provider
       value={{ open: stableOpen, readImageReference, imageOwnerKey }}
@@ -387,6 +410,7 @@ export function FilePreviewProvider({
       {children}
     </FileLinkContext.Provider>
     </FilePresentationContext.Provider>
+    </FileMediaContext.Provider>
   );
 }
 
@@ -398,6 +422,7 @@ function FileBrowserView({
   onRetry,
   onRefresh,
   onHistory,
+  onChooseFiles,
   open,
 }: {
   tab: BrowserTab;
@@ -407,6 +432,7 @@ function FileBrowserView({
   onRetry: () => void;
   onRefresh: () => void;
   onHistory: (index: number) => void;
+  onChooseFiles: () => void;
   open: OpenFile;
 }) {
   const file = tab.file;
@@ -423,7 +449,9 @@ function FileBrowserView({
   return (
     <FilePreviewPanel
       label={`文件预览：${file?.name ?? page?.path ?? ""}`}
-      toolbar={
+      className={file?.kind === 'video' ? 'video-file-preview' : undefined}
+      toolbar={file?.kind === 'video' ?
+        <button type="button" className="file-preview-action" disabled={!desktopHost()} onClick={onChooseFiles}><FolderOpen size={14} />从目录中打开</button> :
         <nav aria-label="文件操作">
           <button
             aria-label="后退"
@@ -600,6 +628,10 @@ function FileBody({
         {file.notice}
       </div>
     );
+  if (file.kind === 'video' && file.content_url)
+    return <FileVideoContent src={file.content_url} name={file.name}
+      initialState={visit?.video} previewPosition={visit?.videoPosition} onPreviewPositioned={() => onVisitChange?.({videoPosition: undefined})} onPlaybackStateChange={video => onVisitChange?.({ video })}
+      onNotify={onNotify} onRetry={onRetry} />;
   if (file.kind === "html" && file.document_url)
     return (
       <>

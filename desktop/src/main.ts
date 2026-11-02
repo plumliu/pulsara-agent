@@ -9,6 +9,7 @@ import { cliLauncherScript, cliStatus, registerCli, type CliRegistration } from 
 import { BrowserOwner } from './browser-owner';
 import { StartupCover } from './startup-cover';
 import { isOAuthReturn } from './oauth-return';
+import { installWorkbenchPermissions } from './workbench-permissions';
 import { desktopResourcePaths } from './resource-paths';
 import { posixHostOperations } from './host-posix';
 import { createPosixPostgresOperations } from './postgres-posix';
@@ -167,7 +168,7 @@ function createWindow(session?: Electron.Session) {
   });
   window.webContents.on('will-navigate', event => event.preventDefault());
   window.webContents.on('will-attach-webview', event => event.preventDefault());
-  window.webContents.session.setPermissionRequestHandler((_contents, _permission, done) => done(false));
+  installWorkbenchPermissions(window.webContents, () => origin);
   window.on('close', event => {
     if (quitting) return;
     event.preventDefault();

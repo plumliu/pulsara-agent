@@ -1,5 +1,6 @@
 import install from '../../src/pulsara_agent/conversation_kernel/visualization_environment.js';
 import installPlayback from '../../src/pulsara_agent/conversation_kernel/visualization_playback.js';
+import installMedia from '../../src/pulsara_agent/conversation_kernel/visualization_media.js';
 export interface VisualizationEnvironment {
   theme: 'light' | 'dark'; visible: boolean; reducedMotion: boolean;
   colors: Record<'background' | 'foreground' | 'muted' | 'accent' | 'border' | 'soft', string>;
@@ -17,5 +18,5 @@ export function visualizationEnvironment(visible: boolean): VisualizationEnviron
 }
 export function environmentBootstrap(environment?: VisualizationEnvironment): string {
   const initial = JSON.stringify(environment ?? null).replace(/</g, '\\u003c');
-  return `<script>(${install.toString()})(${initial}, (${installPlayback.toString()})(${Boolean(environment?.visible)}))</script>`;
+  return `<script>{const playback=(${installPlayback.toString()})(${Boolean(environment?.visible)});const media=(${installMedia.toString()})(${Boolean(environment?.visible)});(${install.toString()})(${initial},visible=>{playback(visible);media(visible);});}</script>`;
 }

@@ -7,11 +7,16 @@ import os
 import json
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
 from aiohttp import web
 from aiohttp.helpers import content_disposition_header
 
-from .file_preview import FilePreviewError, PAGE_BYTES
+from .file_preview import FilePreviewError, PAGE_BYTES, identity
+from pulsara_agent.conversation_kernel.blob import MAXIMUM_BLOB_BYTES
+from pulsara_agent.conversation_kernel.io import KernelSessionIO
+from pulsara_agent.conversation_kernel.html_resources import freeze_html_resources
+from time import monotonic
 
 HEADERS = {
     "Cache-Control": "no-store",
@@ -24,6 +29,9 @@ OBSERVATION_SCRIPT = (
     b"<!doctype html><style>"
     + (Path(__file__).parent.parent / "conversation_kernel" / "visualization_scrollbars.css").read_bytes()
     + b"</style><script>"
+    + b"const setMediaVisibility=("
+    + (Path(__file__).parent.parent / "conversation_kernel" / "visualization_media.js").read_bytes().removeprefix(b"export default ")
+    + b")(false);"
     + b"""
 (()=>{
 const token=location.pathname.split('/')[3];
@@ -40,7 +48,9 @@ addEventListener('submit',event=>{event.preventDefault();report('pulsara-preview
 addEventListener('DOMContentLoaded',()=>report('pulsara-preview-title',{title:document.title}));
 addEventListener('scroll',()=>report('pulsara-preview-position',{top:scrollY,left:scrollX}),{passive:true});
 addEventListener('message',event=>{
- if(event.source!==parent||event.data?.type!=='pulsara-preview-restore')return;
+ if(event.source!==parent)return;
+ if(event.data?.type==='pulsara-preview-visibility'){setMediaVisibility(event.data.visible===true);return;}
+ if(event.data?.type!=='pulsara-preview-restore')return;
  scrollTo(event.data.left||0,event.data.top||0);
  if(event.data.anchor){const el=document.getElementById(event.data.anchor);if(el)el.scrollIntoView();}
 });
@@ -66,8 +76,38 @@ def html_policy(resource_prefix: str) -> str:
         "sandbox allow-scripts; default-src 'none'; "
         f"script-src 'unsafe-inline' {resource_prefix}; style-src 'unsafe-inline' {resource_prefix}; "
         f"img-src data: {resource_prefix}; font-src data: {resource_prefix}; connect-src {resource_prefix}; "
-        "worker-src 'none'; frame-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+        f"worker-src 'none'; frame-src 'none'; media-src {resource_prefix}; object-src 'none'; base-uri 'none'; form-action 'none'"
     )
+
+
+async def bind_html_snapshot(bridge, origin: str, connection_id: str, path: str, html: str) -> dict:
+    """Bind immutable layout to one disposable, descriptor-owned media directory."""
+    metadata = await bridge.open_file_preview(connection_id, path, None, resources_only=True)
+    token = metadata["read_token"]
+    io = KernelSessionIO()
+    deadline = monotonic() + 30
+    try:
+        item = await bridge.require_file_preview(connection_id, token)
+        root = item.reading_root or item.path.parent
+        prefix = origin + metadata["resources_url"]
+        def media_url(target):
+            return prefix + quote(os.path.relpath(target, root), safe="/")
+        result = await freeze_html_resources(
+            html.encode("utf-8"), item.path, io=io, validator=None,
+            deadline_monotonic=deadline, media_url=media_url,
+            base_url=prefix + quote(str(item.path.relative_to(root)), safe="/"),
+        )
+        await bridge.require_file_preview(connection_id, token)
+        return {"read_token": token, "html": result.decode("utf-8"), "resource_prefix": prefix}
+    except BaseException:
+        bridge.file_previews.revoke(connection_id, token)
+        raise
+    finally:
+        try:
+            await io.aclose(deadline_monotonic=deadline)
+        except BaseException:
+            bridge.file_previews.revoke(connection_id, token)
+            raise
 
 
 class FilePreviewHttp:
@@ -78,6 +118,7 @@ class FilePreviewHttp:
         path = "/api/connections/{connection_id}/file-preview"
         router.add_post(path, self.open)
         router.add_delete(path, self.close)
+        router.add_post(path + "/snapshot", self.snapshot)
         router.add_post(path + "/page", self.page)
         router.add_post(path + "/action", self.action)
         router.add_get("/api/file-previews/{token}/content", self.content)
@@ -121,6 +162,15 @@ class FilePreviewHttp:
             request.match_info["connection_id"], path, base, root
         )
         return web.json_response(result, headers=HEADERS)
+
+    async def snapshot(self, request):
+        # The canonical HTML envelope already has this bound. Do not raise the
+        # application's unrelated request limit merely to bind one snapshot.
+        body = await self.body(request.clone(client_max_size=MAXIMUM_BLOB_BYTES))
+        path, html = body.get("path"), body.get("html")
+        if not isinstance(path, str) or not isinstance(html, str):
+            raise ValueError("HTML snapshot requires path and html")
+        return web.json_response(await bind_html_snapshot(self.bridge, self.origin(), request.match_info["connection_id"], path, html), headers=HEADERS)
 
     async def close(self, request):
         item = await self.current(
@@ -174,7 +224,7 @@ class FilePreviewHttp:
         attachment = request.query.get("download") == "1"
         mime = (
             item.mime
-            if item.kind in {"image", "svg", "pdf"}
+            if item.kind in {"image", "svg", "pdf", "video"}
             else "text/plain"
             if item.kind in {"html", "text", "table", "markdown"}
             else "application/octet-stream"
@@ -232,7 +282,9 @@ class FilePreviewHttp:
         self, request, fd, mime, headers, *, html_document=False, item=None
     ):
         try:
-            size = os.fstat(fd).st_size
+            source_info = os.fstat(fd)
+            source_identity = identity(source_info)
+            size = source_info.st_size
             start, stop, status = 0, size, 200
             prefix = OBSERVATION_SCRIPT if html_document else b""
             headers["Content-Type"] = mime + (
@@ -285,7 +337,7 @@ class FilePreviewHttp:
                             if request.transport:
                                 request.transport.close()
                             return response
-                    if not chunk or (item is not None and item.closed):
+                    if not chunk or identity(os.fstat(fd)) != source_identity or (item is not None and item.closed):
                         # Can't replace an already-started response with JSON.
                         if request.transport:
                             request.transport.close()

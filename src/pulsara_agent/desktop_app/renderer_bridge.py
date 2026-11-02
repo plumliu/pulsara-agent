@@ -553,7 +553,7 @@ class RendererBridge:
         async with self._lock:
             self._quarantined_sessions.add(session_id)
 
-    async def open_file_preview(self, connection_id: str, path: str, base_token: str | None, reading_root: str | None = None):
+    async def open_file_preview(self, connection_id: str, path: str, base_token: str | None, reading_root: str | None = None, *, resources_only: bool = False):
         connection = await self._connection(connection_id)
         async with self._lock:
             if self._connections.get(connection_id) is not connection:
@@ -573,7 +573,9 @@ class RendererBridge:
                     raise expired()
                 base = Path(summary.workspace_root)
             target = local_path(path, base)
-            task = asyncio.create_task(asyncio.to_thread(open_preview, connection_id, target, root))
+            if resources_only and root is None and target.is_relative_to(base):
+                root = base
+            task = asyncio.create_task(asyncio.to_thread(open_preview, connection_id, target, root, resources_only=resources_only))
             try:
                 item = await asyncio.shield(task)
             except asyncio.CancelledError:

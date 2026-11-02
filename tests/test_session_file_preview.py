@@ -19,6 +19,7 @@ from pulsara_agent.desktop_app.file_preview import (
 )
 from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from pulsara_agent.desktop_app.http_server import LocalHttpServer
+from pulsara_agent.identity import derive_id
 from tests.test_desktop_http_surface import _model_server_dependencies
 
 
@@ -29,12 +30,15 @@ def bridge_for(root):
     sessions = SimpleNamespace(
         core=SimpleNamespace(read_resumable_session=summary),
         memory_domain_id="device",
+        host_writer_unavailable=lambda _host: False,
     )
     bridge = RendererBridge(sessions=sessions, protocol_server=object())
     for name in ("one", "two"):
         (root / name).mkdir(exist_ok=True)
         bridge._connections[name] = SimpleNamespace(
-            connection_id=name, session_id=name, is_open=True, aclose=AsyncMock()
+            connection_id=name, session_id=name,
+            host_session_id=derive_id("host", "file-preview-test", name),
+            is_open=True, aclose=AsyncMock()
         )
     return bridge
 
@@ -127,7 +131,6 @@ def test_descriptor_binding_resources_and_no_symlink_follow(tmp_path):
         item = open_preview("one", root / "index.html")
         for name in (
             "../data.json",
-            ".private.json",
             "linked.json",
             "x\\data.json",
             "data.py",
@@ -278,6 +281,68 @@ def test_http_preview_contract(tmp_path):
     asyncio.run(run())
 
 
+def test_video_content_and_html_media_use_bound_range_reads(tmp_path):
+    async def run():
+        root = tmp_path.resolve()
+        bridge = bridge_for(root)
+        payload = bytes(range(256)) * 8192
+        (root / "index.html").write_text("Pulsara")
+        path = root / "one" / "clip.MP4"
+        path.write_bytes(payload)
+        (root / "one" / "index.html").write_text('<video src="clip.MP4"></video>')
+        server = LocalHttpServer(
+            sessions=bridge.sessions, bridge=bridge, static_root=root,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                headers = {"Origin": server.origin, "Sec-Fetch-Site": "same-origin"}
+
+                async def open_file(name):
+                    response = await client.post(
+                        server.origin + "/api/connections/one/file-preview",
+                        json={"path": name}, headers=headers,
+                    )
+                    assert response.status == 200
+                    return await response.json()
+
+                video = await open_file("clip.MP4")
+                assert video["kind"] == "video"
+                assert video["modified_ns"] == str(path.stat().st_mtime_ns)
+                assert video["document_url"] is None
+                assert video["images_url"] is None
+                url = server.origin + video["content_url"]
+                response = await client.get(url, headers={"Range": "bytes=16-47"})
+                assert response.status == 206
+                assert response.headers["Content-Type"] == "video/mp4"
+                assert response.headers["Content-Range"] == f"bytes 16-47/{len(payload)}"
+                assert "Content-Disposition" not in response.headers
+                assert await response.read() == payload[16:48]
+                tail = await client.get(url, headers={"Range": "bytes=-64"})
+                assert tail.status == 206 and await tail.read() == payload[-64:]
+                outside = await client.get(url, headers={"Range": f"bytes={len(payload)}-"})
+                assert outside.status == 416
+                head = await client.head(url)
+                assert head.status == 200 and head.headers["Content-Length"] == str(len(payload))
+
+                html = await open_file("index.html")
+                document = await client.get(server.origin + html["document_url"], headers={"Sec-Fetch-Dest": "iframe"})
+                assert f"media-src {server.origin}{html['resources_url']}" in document.headers["Content-Security-Policy"]
+                embedded = await client.get(server.origin + html["document_url"].replace("index.html", "clip.MP4"))
+                assert embedded.status == 200
+                assert await embedded.read() == payload
+                path.write_bytes(b"replacement")
+                changed = await client.get(url, headers={"Range": "bytes=0-3"})
+                assert changed.status == 409
+        finally:
+            await bridge.aclose()
+            await server.aclose()
+
+    asyncio.run(run())
+
+
 def test_independent_open_and_disconnect_release_all_instances(tmp_path, monkeypatch):
     async def run():
         root = tmp_path.resolve()
@@ -290,11 +355,11 @@ def test_independent_open_and_disconnect_release_all_instances(tmp_path, monkeyp
         entered, release = threading.Event(), threading.Event()
         opened = []
 
-        def slow(connection, path, reading_root=None):
+        def slow(connection, path, reading_root=None, **kwargs):
             if path.name == "slow.txt":
                 entered.set()
                 release.wait(5)
-            result = real_open(connection, path, reading_root)
+            result = real_open(connection, path, reading_root, **kwargs)
             opened.append(result)
             return result
 
@@ -475,3 +540,100 @@ def test_unlink_and_atomic_replacement_never_reuse_old_page_or_cursor(tmp_path):
         assert missing.value.code == "FILE_NOT_FOUND"
     finally:
         item.close()
+
+
+def test_html_snapshot_binds_project_media_without_reopening_layout(tmp_path):
+    async def run():
+        from pulsara_agent.desktop_app.file_preview_http import bind_html_snapshot
+        root = tmp_path.resolve()
+        bridge = bridge_for(root)
+        project = root / 'one'
+        directory = project / '.pulsara' / 'viz'
+        directory.mkdir(parents=True)
+        path = directory / 'gallery.html'
+        image = project / 'image.png'
+        image.write_bytes(b'first image')
+        video = project / 'clip.mp4'
+        video.write_bytes(b'video bytes')
+        (project / 'secret.json').write_text('{}')
+        (project / 'linked.png').symlink_to(image)
+        html = '<h1>frozen layout</h1><img src="../../image.png"><button data-src="../../clip.mp4">Open</button>'
+        bound = await bind_html_snapshot(bridge, 'http://127.0.0.1:8080', 'one', str(path), html)
+        item = await bridge.require_file_preview('one', bound['read_token'])
+        try:
+            assert item.reading_root == project and item.fd is None
+            assert '<h1>frozen layout</h1>' in bound['html']
+            assert f'<base href="{bound["resource_prefix"]}.pulsara/viz/gallery.html">' in bound['html']
+            assert f'src="{bound["resource_prefix"]}image.png"' in bound['html']
+            assert 'data-src="../../clip.mp4"' in bound['html']
+            path.write_text('different layout')
+            path.unlink()
+            for body in [b'first image', b'new image']:
+                image.write_bytes(body)
+                fd, mime = item.resource('image.png', images=False)
+                try:
+                    assert mime == 'image/png' and os.read(fd, 50) == body
+                finally:
+                    os.close(fd)
+            fd, mime = item.resource('clip.mp4', images=False)
+            os.close(fd)
+            assert mime == 'video/mp4'
+            video.write_bytes(b'replaced video')
+            with pytest.raises(FilePreviewError) as changed:
+                item.resource('clip.mp4', images=False)
+            assert changed.value.code == 'FILE_CHANGED'
+            for name in ['secret.json', 'gallery.html', '../image.png', 'linked.png']:
+                with pytest.raises(FilePreviewError):
+                    item.resource(name, images=False)
+        finally:
+            bridge.file_previews.revoke('one', bound['read_token'])
+            assert item.closed and item.root_fd is None
+            await bridge.aclose()
+    asyncio.run(run())
+
+
+def test_html_snapshot_http_media_ranges_and_real_thumbnail(tmp_path):
+    async def run():
+        from io import BytesIO
+        from time import monotonic
+        from PIL import Image
+        from tests.test_html_local_resources import png
+        from pulsara_agent.conversation_kernel.visualization_screenshot import VisualizationScreenshotOwner
+        root = tmp_path.resolve()
+        bridge = bridge_for(root)
+        (root / 'index.html').write_text('test')
+        (root / 'one' / 'image.png').write_bytes(png())
+        video = root / 'one' / 'clip.mp4'
+        video.write_bytes(b'0123456789')
+        server = LocalHttpServer(sessions=bridge.sessions, bridge=bridge, static_root=root,
+            requested_port=0, is_ready=lambda:True, is_draining=lambda:False, **_model_server_dependencies())
+        screenshots = VisualizationScreenshotOwner()
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                endpoint = server.origin+'/api/connections/one/file-preview'
+                headers = {'Origin':server.origin, 'Sec-Fetch-Site':'same-origin'}
+                html = '<style>body{margin:0}main,img{width:20px;height:20px}</style><main pulsara-viz-root><img src="image.png"></main>'
+                response = await client.post(endpoint+'/snapshot',headers=headers,json={'path':'gallery.html','html':html})
+                assert response.status == 200
+                snapshot = await response.json()
+                screenshot = await screenshots.render(snapshot['html'].encode(), deadline_monotonic=monotonic()+30, resource_prefix=snapshot['resource_prefix'])
+                image = Image.open(BytesIO(screenshot)).convert('RGB')
+                assert image.getpixel((10,10)) == (255,165,0)
+                url = snapshot['resource_prefix']+'clip.mp4'
+                ranged = await client.get(url,headers={'Range':'bytes=2-5'})
+                assert ranged.status == 206 and await ranged.read() == b'2345'
+                head = await client.head(url)
+                assert head.status == 200 and head.headers['Content-Length'] == '10'
+                video.write_bytes(b'replaced')
+                assert (await client.get(url,headers={'Range':'bytes=0-1'})).status == 409
+                closed = await client.delete(endpoint,headers=headers,json={'read_token':snapshot['read_token']})
+                assert closed.status == 200
+                expired = await client.get(snapshot['resource_prefix']+'image.png')
+                assert expired.status == 409
+                assert (await expired.json())['error']['code'] == 'PREVIEW_EXPIRED'
+        finally:
+            await screenshots.aclose()
+            await bridge.aclose()
+            await server.aclose()
+    asyncio.run(run())

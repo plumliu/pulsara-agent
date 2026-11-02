@@ -471,3 +471,37 @@ it('cancels only the image viewer when its session owner changes', async () => {
   expect(create).not.toHaveBeenCalled();
   expect(read).toHaveBeenCalledTimes(1);
 });
+
+it('binds saved HTML to local media once and releases its own lease, including late binding', async () => {
+  const {FileMediaContext} = await import('../../frontend/components/file-link-context');
+  const files = {snapshot:vi.fn(async (_path:string, html:string) => ({read_token:'media-root', html, resource_prefix:window.location.origin+'/api/file-previews/media-root/resources/'})),close:vi.fn(async () => {}),open:vi.fn(),page:vi.fn(),action:vi.fn()};
+  const read = vi.fn(async () => JSON.stringify({path:'/work/.pulsara/viz/gallery.html',html:'<h1>saved</h1>'}));
+  const props = {entryId:'entry',items:[{...item,mediaType:'application/vnd.pulsara.html-snapshot+json'}],onRead:read};
+  const view = render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open:vi.fn()}}><InlineVisualization {...props}/></FileMediaContext.Provider>);
+  await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
+  expect(files.snapshot).toHaveBeenCalledExactlyOnceWith('/work/.pulsara/viz/gallery.html','<h1>saved</h1>');
+  const frame=view.container.querySelector('iframe')!;
+  expect(frame.srcdoc).toContain('media-src '+window.location.origin+'/api/file-previews/media-root/resources/');
+  view.rerender(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open:vi.fn()}}><InlineVisualization {...props}/></FileMediaContext.Provider>);
+  expect(view.container.querySelector('iframe')).toBe(frame);
+  view.unmount();
+  expect(files.close).toHaveBeenCalledExactlyOnceWith('media-root');
+  let finish!: (value:Awaited<ReturnType<typeof files.snapshot>>) => void;
+  files.close.mockClear();
+  files.snapshot.mockImplementation(() => new Promise(resolve => {finish=resolve;}));
+  const late = render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open:vi.fn()}}><InlineVisualization {...props}/></FileMediaContext.Provider>);
+  await waitFor(() => expect(files.snapshot).toHaveBeenCalledTimes(2));
+  late.unmount();
+  await act(async () => finish({read_token:'late-root',html:'saved',resource_prefix:'unused'}));
+  expect(files.close).toHaveBeenCalledExactlyOnceWith('late-root');
+});
+
+it('uses the original fence path for an existing HTML snapshot and keeps its layout on missing media', async () => {
+  const {FileMediaContext} = await import('../../frontend/components/file-link-context');
+  const files={snapshot:vi.fn().mockRejectedValue(Error('directory removed')),close:vi.fn(),open:vi.fn(),page:vi.fn(),action:vi.fn()};
+  const view=render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open:vi.fn()}}><MarkdownBody body={marker} onNotify={vi.fn()} visualization={{entryId:'entry',items:[item],onRead:async () => '<h1>original layout</h1>'}}/></FileMediaContext.Provider>);
+  await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
+  expect(files.snapshot).toHaveBeenCalledExactlyOnceWith('chart.html','<h1>original layout</h1>');
+  expect(screen.getByText('本地媒体暂时无法读取，布局快照仍可查看。')).toBeTruthy();
+  expect(view.container.querySelector('iframe')!.srcdoc).toContain('original layout');
+});

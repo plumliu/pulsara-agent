@@ -2376,8 +2376,16 @@ def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
         )
 
     monkeypatch.setattr(runner, "_require_post_response_resources", observe_resources)
+    prepared_visualizations = []
+
+    async def prepare_visualizations(body, **kwargs):
+        prepared_visualizations.append(body)
+        return ()
+
+    monkeypatch.setattr(runner._tools, "prepare_visualizations", prepare_visualizations)
     result = asyncio.run(runner.run_turn(frozen_test_prompt("question")))
     assert result.final_text == "feedback-aware answer"
+    assert prepared_visualizations == ["feedback-aware answer"]
     assert result.model_call_count == 2
     assert len(barriers) == 2
     assert fences == [result.turn_id, result.turn_id]
