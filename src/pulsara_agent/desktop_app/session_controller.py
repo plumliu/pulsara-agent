@@ -72,9 +72,12 @@ from pulsara_agent.conversation_kernel.host import (
     KernelCapabilityCatalogInspection,
     KernelHostCore,
     KernelHostCoreClosing,
+    HostSessionCloseAttempt,
+    SessionControlRejected,
     KernelHostSession,
     KernelSessionSummary,
     KernelRuntimeReopenQuiescence,
+    KernelSessionSettlementUnconfirmed,
 )
 from pulsara_agent.llm.model_connections import (
     ModelCallBinding,
@@ -167,14 +170,6 @@ _NO_LIVE_HOST_SEAL = object()
 _RUNTIME_REOPEN_OPERATION_SEAL = object()
 _RUNTIME_REOPEN_OUTCOME_SEAL = object()
 _RAW_CLOSE_OPERATION_SEAL = object()
-
-
-class SessionControlRejected(RuntimeError):
-    """Typed process-local rejection for a current Session control fence."""
-
-    def __init__(self, public_code: str, message: str) -> None:
-        super().__init__(message)
-        self.public_code = public_code
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -293,11 +288,13 @@ class PreparedRawCloseOperation:
 @dataclass(frozen=True, slots=True, init=False)
 class OldHostCloseFull:
     operation: PreparedRuntimeReopenOperation
+    settlement_unconfirmed: bool
 
-    def __init__(self, operation: PreparedRuntimeReopenOperation, *, _seal: object):
+    def __init__(self, operation: PreparedRuntimeReopenOperation, *, _seal: object, settlement_unconfirmed: bool = False):
         if _seal is not _RUNTIME_REOPEN_OUTCOME_SEAL:
             raise TypeError("old-Host close outcome is controller-issued")
         object.__setattr__(self, "operation", operation)
+        object.__setattr__(self, "settlement_unconfirmed", settlement_unconfirmed)
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -336,7 +333,7 @@ RuntimeReopenHostOutcome = (
 @dataclass(slots=True)
 class _ResumeInFlight:
     task: asyncio.Task[HostSessionHandle]
-    scheduled: bool = False
+    core_operation: asyncio.Future[None] | None = None
 
 
 @dataclass(slots=True)
@@ -348,19 +345,22 @@ class _WorkspaceRestoreInFlight(_ResumeInFlight):
 class _RawCloseInFlight:
     operation: PreparedRawCloseOperation
     physical_close_full: bool = False
+    core_operation: asyncio.Future[None] | None = None
+    task: asyncio.Task[None] | None = None
+    close_attempt: HostSessionCloseAttempt | None = None
 
 
 @dataclass(slots=True)
 class _RuntimeReopenInFlight:
     operation: RuntimeReopenOperation
     abort_requested: bool = False
+    core_operation: asyncio.Future[None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _Quarantined:
     public_code: str
-    # Keep the physical close error available on a later user retry.
-    cause: BaseException | None = None
+    core_operation: asyncio.Future[None] | None = None
 
 
 @dataclass(eq=False, slots=True)
@@ -2145,15 +2145,19 @@ class LocalSessionController:
             else:
                 if current is not None:
                     raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
+                core_operation = await self.core.reserve_session_operation(session_id)
                 live = self._by_session.get(session_id)
                 task = asyncio.create_task(
                     self._restore_live_owner(session_id, live) if live is not None
                     else self._resume_owner(session_id, restore_missing_workspace=True),
                     name=f"desktop-workspace-restore:{session_id}")
-                self._operations[session_id] = _WorkspaceRestoreInFlight(task)
+                self._operations[session_id] = _WorkspaceRestoreInFlight(task, core_operation)
         return await asyncio.shield(task)
 
     async def _restore_live_owner(self, session_id: str, handle: HostSessionHandle) -> HostSessionHandle:
+        async with self._lock:
+            operation = self._operations[session_id]
+            core_operation = operation.core_operation
         try:
             await handle.session.restore_missing_workspace()
             return handle
@@ -2162,13 +2166,14 @@ class LocalSessionController:
                 current = self._operations.get(session_id)
                 if isinstance(current, _WorkspaceRestoreInFlight) and current.task is asyncio.current_task():
                     self._operations.pop(session_id, None)
+            if core_operation is not None:
+                await self.core.release_session_operation(core_operation)
 
     async def resume_session(
         self,
         session_id: str,
         *,
         no_live_observation: StableNoLiveHostObservation | None = None,
-        scheduled: bool = False,
     ) -> HostSessionHandle:
         if not session_id:
             raise ValueError("session_id is required")
@@ -2188,26 +2193,21 @@ class LocalSessionController:
             if isinstance(current, _Quarantined):
                 raise SessionControlRejected(
                     current.public_code,
-                    ("连接恢复未完成，旧会话关闭失败。请查看日志并重新打开 Pulsara。" if current.cause is not None
-                     else "Session runtime is quarantined; restart Pulsara to continue."),
-                ) from current.cause
+                    "会话仍在停止，当前只能查看已保存的历史。",
+                )
             if live is not None:
                 if no_live_observation is not None or current is not None:
                     raise RuntimeError("Session has another current operation")
-                if not getattr(live.session, "writer_unavailable", False):
-                    return live
-                # Reuse the normal resume reservation. An unavailable writer does not
-                # release its physical owners or authorize another cold open.
+                # UI publication is a handle cache. Core decides whether its
+                # execution owner is reusable, stopping or requires recovery.
                 task = asyncio.create_task(
-                    self._recover_writer_owner(session_id, live, scheduled=scheduled),
+                    self._resume_owner(session_id),
                     name=f"desktop-resume:{session_id}",
                 )
-                self._operations[session_id] = _ResumeInFlight(task, scheduled=scheduled)
+                self._operations[session_id] = _ResumeInFlight(task)
                 self._by_session.pop(session_id, None)
                 self._by_host.pop(live.host_session_id, None)
             elif isinstance(current, _ResumeInFlight):
-                if scheduled and not current.scheduled:
-                    raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在打开或恢复，请稍后再试。")
                 if no_live_observation is not None:
                     raise RuntimeError("runtime reopen observation raced with resume")
                 task = current.task
@@ -2225,44 +2225,28 @@ class LocalSessionController:
                     if current is not None:
                         raise RuntimeError("Session has another current operation")
                     self._issue_no_live_observation_locked(session_id)._consume(self)
+                core_operation = current.core_operation if isinstance(current, _RuntimeReopenInFlight) else None
                 task = asyncio.create_task(
-                    self._resume_owner(session_id, scheduled=scheduled),
+                    self._resume_owner(session_id),
                     name=f"desktop-resume:{session_id}",
                 )
-                self._operations[session_id] = _ResumeInFlight(task, scheduled=scheduled)
+                self._operations[session_id] = _ResumeInFlight(task, core_operation)
         return await asyncio.shield(task)
-
-    async def _recover_writer_owner(
-        self, session_id: str, previous: HostSessionHandle, *, scheduled: bool
-    ) -> HostSessionHandle:
-        try:
-            await self.core.close_session(previous.host_session_id)
-        except BaseException as exc:
-            async with self._lock:
-                current = self._operations.get(session_id)
-                if isinstance(current, _ResumeInFlight) and current.task is asyncio.current_task():
-                    self._operations[session_id] = _Quarantined("SESSION_RECOVERY_CLOSE_FAILED", exc)
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise SessionControlRejected(
-                "SESSION_RECOVERY_CLOSE_FAILED", "连接恢复未完成，旧会话关闭失败。请查看日志并重新打开 Pulsara。"
-            ) from exc
-        async with self._lock:
-            if self._closing:
-                current = self._operations.get(session_id)
-                if isinstance(current, _ResumeInFlight) and current.task is asyncio.current_task():
-                    self._operations.pop(session_id, None)
-                raise KernelHostCoreClosing("Desktop application is draining")
-        # Stay in this same task: publication/finally compare the existing
-        # reservation's task identity. The original cold resume owns the epoch.
-        return await self._resume_owner(session_id, scheduled=scheduled)
 
     def host_writer_unavailable(self, host_session_id: str) -> bool:
         handle = self._by_host.get(host_session_id)
         return handle is not None and bool(getattr(handle.session, "writer_unavailable", False))
 
-    async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False, scheduled: bool = False) -> HostSessionHandle:
+    async def runtime_closing(self, session_id: str) -> bool:
+        async with self._lock:
+            current = self._operations.get(session_id)
+            return isinstance(current, (_RawCloseInFlight, _Quarantined)) or self.core.session_runtime_closing(session_id)
+
+    async def _resume_owner(self, session_id: str, *, restore_missing_workspace: bool = False) -> HostSessionHandle:
         task = asyncio.current_task()
+        async with self._lock:
+            current = self._operations.get(session_id)
+            core_operation = current.core_operation if isinstance(current, _ResumeInFlight) else None
         try:
             summary = await self.core.read_resumable_session(
                 session_id,
@@ -2292,7 +2276,7 @@ class LocalSessionController:
                 permission_policy=self.permission_policy,
                 active_skill_names=self.active_skill_names,
                 restore_missing_workspace=restore_missing_workspace,
-                scheduled=scheduled,
+                operation=core_operation,
             )
             handle = HostSessionHandle(session, workspace_input)
             try:
@@ -2329,16 +2313,8 @@ class LocalSessionController:
                 current = self._operations.get(session_id)
                 if isinstance(current, _ResumeInFlight) and current.task is task:
                     self._operations.pop(session_id, None)
-
-    async def scheduled_management_host(self, session_id: str) -> KernelHostSession | None:
-        """Independent management uses the same lifecycle/cache owner, without opening it."""
-        async with self._lock:
-            if self._closing:
-                raise KernelHostCoreClosing("Desktop application is draining")
-            if session_id in self._operations:
-                raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
-            handle = self._by_session.get(session_id)
-            return None if handle is None else handle.session
+            if core_operation is not None:
+                await self.core.release_session_operation(core_operation)
 
     def _issue_no_live_observation_locked(
         self, session_id: str
@@ -2454,12 +2430,14 @@ class LocalSessionController:
         async with self._lock:
             handle = self._by_session.get(session_id)
             if not self._closing and session_id not in self._operations and handle is not None:
-                return handle.session.read_ephemeral_results()
+                return {**handle.session.read_ephemeral_results(),
+                        "mcp_readiness": handle.session.mcp_readiness_progress()}
         return {
             'session_id': session_id, 'host_session_id': None,
             'suggestion': {'state': 'absent', 'origin_turn_id': None, 'turn_id': None,
                            'final_entry_id': None, 'model_call_binding': None, 'text': None},
             'title': {'state': 'absent'},
+            'mcp_readiness': None,
         }
 
     async def update_model_call_binding(
@@ -2662,6 +2640,69 @@ class LocalSessionController:
                 raise
             raise SessionDeleteRejected("SESSION_ARCHIVE_QUARANTINED" if operation.action == 'archive' else "SESSION_DELETE_QUARANTINED", "未能安全关闭运行时，操作尚未完成，请重启 Pulsara 后重试。") from exc
 
+    async def request_raw_close(self, session_id: str, *, bridge) -> str:
+        """Transfer an accepted close to the existing session operation owner."""
+        async def admit():
+            operation = await self.prepare_raw_close(session_id)
+            if operation is None:
+                return "closed"
+            async with self._lock:
+                current = self._operations.get(session_id)
+                if not isinstance(current, _RawCloseInFlight) or current.operation is not operation:
+                    raise RuntimeError("raw close admission lost its operation")
+                current.task = asyncio.create_task(
+                    self._raw_close_owner(operation, bridge),
+                    name=f"desktop-session-close:{session_id}",
+                )
+                current.task.add_done_callback(self._observe_raw_close)
+            return "closing"
+
+        admission = asyncio.create_task(admit())
+        try:
+            return await asyncio.shield(admission)
+        except asyncio.CancelledError:
+            # Losing an HTTP waiter cannot strand a prepared close reservation.
+            while not admission.done():
+                try:
+                    await asyncio.shield(admission)
+                except asyncio.CancelledError:
+                    continue
+            admission.result()
+            raise
+
+    @staticmethod
+    def _observe_raw_close(task):
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logging.getLogger(__name__).warning("Session close did not fully settle", exc_info=error)
+
+    async def _raw_close_owner(self, operation, bridge):
+        from pulsara_agent.desktop_app.renderer_bridge import (
+            BridgeDetachNotStarted, BridgeDetachFailed, BridgeDetachFull,
+            BridgeSettlementFailed,
+        )
+        session_id = operation.session_id
+        detach = await bridge.detach_session_for_raw_close(operation)
+        if isinstance(detach, BridgeDetachNotStarted):
+            await self.abort_prepared_raw_close(session_id, operation=operation)
+            raise SessionControlRejected("SESSION_CLOSE_BUSY", detach.reason)
+        if isinstance(detach, BridgeDetachFailed):
+            await bridge.quarantine_detach_failure(detach.token, error=detach.error)
+            await self.quarantine_raw_close(operation, public_code="SESSION_CLOSE_QUARANTINED")
+            raise SessionControlRejected("SESSION_CLOSE_QUARANTINED", "任务仍在停止。")
+        assert isinstance(detach, BridgeDetachFull)
+        try:
+            await self.settle_raw_close(session_id, operation=operation)
+        except BaseException:
+            await bridge.settle_raw_close_detach(
+                detach.token, close_full=operation.handle.session.physical_close_complete,
+            )
+            raise
+        settlement = await bridge.settle_raw_close_detach(detach.token, close_full=True)
+        if isinstance(settlement, BridgeSettlementFailed):
+            await self.quarantine_raw_close(operation, public_code="SESSION_CLOSE_QUARANTINED")
+            raise SessionControlRejected("SESSION_CLOSE_QUARANTINED", "任务仍在停止。")
+        await self.finalize_raw_close(operation, bridge_settlement=settlement, bridge_owner=bridge)
+
     async def prepare_raw_close(self, session_id: str) -> PreparedRawCloseOperation | None:
         async with self._lock:
             if self._closing:
@@ -2686,7 +2727,11 @@ class LocalSessionController:
                 owner=self,
                 _seal=_RAW_CLOSE_OPERATION_SEAL,
             )
-            self._operations[session_id] = _RawCloseInFlight(operation)
+            core_operation = await self.core.reserve_session_operation(session_id)
+            close_attempt = await self.core.request_close_session(handle.host_session_id)
+            self._operations[session_id] = _RawCloseInFlight(
+                operation, core_operation=core_operation, close_attempt=close_attempt,
+            )
             return operation
 
     async def confirm_raw_close_operation(
@@ -2718,10 +2763,10 @@ class LocalSessionController:
                 raise RuntimeError("raw close lost its exact live Host")
             self._by_session.pop(session_id, None)
             self._by_host.pop(operation.handle.host_session_id, None)
+            close_attempt = current.close_attempt
         try:
-            await self.core.close_session(
-                operation.handle.host_session_id,
-            )
+            if close_attempt is not None:
+                await asyncio.shield(close_attempt.task)
         except BaseException:
             async with self._lock:
                 current = self._operations.get(session_id)
@@ -2729,9 +2774,14 @@ class LocalSessionController:
                     isinstance(current, _RawCloseInFlight)
                     and current.operation is operation
                 ):
-                    self._operations[session_id] = _Quarantined(
-                        "SESSION_CLOSE_QUARANTINED"
-                    )
+                    if operation.handle.session.physical_close_complete:
+                        self._operations.pop(session_id, None)
+                        if current.core_operation is not None:
+                            await self.core.release_session_operation(current.core_operation)
+                    else:
+                        self._operations[session_id] = _Quarantined(
+                            "SESSION_CLOSE_QUARANTINED", core_operation=current.core_operation
+                        )
             raise
         async with self._lock:
             current = self._operations.get(session_id)
@@ -2762,6 +2812,8 @@ class LocalSessionController:
             ):
                 raise RuntimeError("raw close finalization is stale")
             self._operations.pop(operation.session_id, None)
+            if current.core_operation is not None:
+                await self.core.release_session_operation(current.core_operation)
 
     async def abort_prepared_raw_close(
         self, session_id: str, *, operation: PreparedRawCloseOperation
@@ -2775,6 +2827,8 @@ class LocalSessionController:
                 and self._by_session.get(session_id) is operation.handle
             ):
                 self._operations.pop(session_id, None)
+                if current.core_operation is not None:
+                    await self.core.release_session_operation(current.core_operation)
 
     async def quarantine_raw_close(
         self, operation: PreparedRawCloseOperation, *, public_code: str
@@ -2785,7 +2839,7 @@ class LocalSessionController:
                 isinstance(current, _RawCloseInFlight)
                 and current.operation is operation
             ):
-                self._operations[operation.session_id] = _Quarantined(public_code)
+                self._operations[operation.session_id] = _Quarantined(public_code, core_operation=current.core_operation)
 
     async def prepare_runtime_reopen(self, session_id: str) -> RuntimeReopenOperation:
         if not session_id:
@@ -2810,6 +2864,7 @@ class LocalSessionController:
                     code, "Session has another current operation"
                 )
             handle = self._by_session.get(session_id)
+            core_operation = await self.core.reserve_session_operation(session_id)
             operation: RuntimeReopenOperation
             if handle is None:
                 observation = self._issue_no_live_observation_locked(session_id)
@@ -2823,7 +2878,10 @@ class LocalSessionController:
             else:
                 try:
                     quiescence = await handle.session.prepare_safe_runtime_reopen()
-                except RuntimeError as exc:
+                except BaseException as exc:
+                    await self.core.release_session_operation(core_operation)
+                    if not isinstance(exc, RuntimeError):
+                        raise
                     raise SessionControlRejected(
                         "RUNTIME_REOPEN_BUSY",
                         "Session still has accepted process-local work.",
@@ -2836,7 +2894,7 @@ class LocalSessionController:
                     owner=self,
                     _seal=_RUNTIME_REOPEN_OPERATION_SEAL,
                 )
-            self._operations[session_id] = _RuntimeReopenInFlight(operation)
+            self._operations[session_id] = _RuntimeReopenInFlight(operation, core_operation=core_operation)
             return operation
 
     async def confirm_runtime_reopen_operation(
@@ -2884,6 +2942,8 @@ class LocalSessionController:
                     operation.host_quiescence
                 )
             self._operations.pop(operation.session_id, None)
+            if current.core_operation is not None:
+                await self.core.release_session_operation(current.core_operation)
 
     async def prepare_abort_runtime_reopen(
         self, operation: RuntimeReopenOperation
@@ -2941,6 +3001,8 @@ class LocalSessionController:
             elif self._by_session.get(operation.session_id) is not None:
                 raise RuntimeError("runtime-resume abort gained a live Host")
             self._operations.pop(operation.session_id, None)
+            if current.core_operation is not None:
+                await self.core.release_session_operation(current.core_operation)
 
     async def prepare_runtime_reopen_close(
         self, operation: RuntimeReopenOperation
@@ -2978,6 +3040,9 @@ class LocalSessionController:
             await self.core.close_session(
                 operation.old_handle.host_session_id,
             )
+        except KernelSessionSettlementUnconfirmed:
+            logging.getLogger(__name__).warning("Runtime stopped with unconfirmed canonical settlement", exc_info=True)
+            return OldHostCloseFull(operation, _seal=_RUNTIME_REOPEN_OUTCOME_SEAL, settlement_unconfirmed=True)
         except BaseException:
             await self.quarantine_runtime_reopen(
                 operation, public_code="RUNTIME_REOPEN_OLD_HOST_CLOSE_QUARANTINED"
@@ -2996,7 +3061,7 @@ class LocalSessionController:
         host_outcome: RuntimeReopenHostOutcome,
         bridge_settlement: object,
         bridge_owner: object,
-    ) -> StableNoLiveHostObservation:
+    ) -> StableNoLiveHostObservation | None:
         from pulsara_agent.desktop_app.renderer_bridge import BridgeSettlementFull
 
         async with self._lock:
@@ -3014,6 +3079,11 @@ class LocalSessionController:
                 or self._by_session.get(operation.session_id) is not None
             ):
                 raise RuntimeError("runtime-reopen finalization is stale")
+            if isinstance(host_outcome, OldHostCloseFull) and host_outcome.settlement_unconfirmed:
+                self._operations.pop(operation.session_id, None)
+                if current.core_operation is not None:
+                    await self.core.release_session_operation(current.core_operation)
+                return None
             return StableNoLiveHostObservation(
                 session_id=operation.session_id,
                 operation_nonce=operation.operation_nonce,
@@ -3030,7 +3100,7 @@ class LocalSessionController:
                 isinstance(current, _RuntimeReopenInFlight)
                 and current.operation is operation
             ):
-                self._operations[operation.session_id] = _Quarantined(public_code)
+                self._operations[operation.session_id] = _Quarantined(public_code, core_operation=current.core_operation)
 
     async def aclose(self) -> None:
         task = self._close_task
@@ -3048,7 +3118,7 @@ class LocalSessionController:
                 *(
                     operation.task
                     for operation in self._operations.values()
-                    if isinstance(operation, (_ResumeInFlight, SessionRetirementOperation)) and operation.task is not None
+                    if isinstance(operation, (_ResumeInFlight, _RawCloseInFlight, SessionRetirementOperation)) and operation.task is not None
                 ),
                 *self._forks,
             )
@@ -3057,14 +3127,18 @@ class LocalSessionController:
                 *(asyncio.shield(task) for task in resumes), return_exceptions=True
             )
         async with self._lock:
-            handles = tuple(self._by_session.values())
             self._by_session.clear()
             self._by_host.clear()
-            self._operations.clear()
-        for handle in handles:
-            await self.core.close_session(
-                handle.host_session_id
+            core_operations = tuple(
+                operation.core_operation for operation in self._operations.values()
+                if isinstance(operation, (_ResumeInFlight, _RawCloseInFlight, _RuntimeReopenInFlight, _Quarantined))
+                and operation.core_operation is not None
             )
+            self._operations.clear()
+        for core_operation in core_operations:
+            await self.core.release_session_operation(core_operation)
+        # Core owns execution shutdown, including Hosts opened by scheduling.
+        # These maps only publish desktop handles.
 
     @staticmethod
     def _summary_payload(
@@ -3285,7 +3359,6 @@ def _user_capability_payload(
                 "name": config.display_name,
                 "enabled": config.enabled,
                 "status": status,
-                "required": config.required,
                 "available_to_subagents": (
                     config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
                 ),
@@ -3669,7 +3742,6 @@ def _capability_payload(
                 "needs_approval": config.enabled and not entry_trusted,
                 "effective": exact_workspace,
                 "status": status,
-                "required": config.required,
                 "available_to_subagents": (
                     config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS
                 ),
@@ -3718,7 +3790,6 @@ def _capability_payload(
                 "needs_approval": False,
                 "effective": True,
                 "status": live.status.value,
-                "required": live.required,
                 "available_to_subagents": live.scope_subagents,
                 "tool_count": live.exposed_tool_count,
                 "discovered_tool_count": live.discovered_tool_count,

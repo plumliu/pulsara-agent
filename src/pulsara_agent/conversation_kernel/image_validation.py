@@ -460,6 +460,10 @@ class HostPromptImageValidator:
         with suppress(BaseException):
             task.result()
 
+    @property
+    def local_children_stopped(self) -> bool:
+        return self._closed and self._active_process is None
+
     async def aclose(self) -> None:
         async with self._state_lock:
             self._closed = True

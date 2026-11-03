@@ -251,7 +251,6 @@ class McpServerCatalogEntry:
     runtime_source: McpRuntimeSourceIdentity = field(repr=False)
     display_name: str
     status: McpServerState
-    required: bool
     exposed_tool_count: int
     discovered_tool_count: int
     resource_count: int
@@ -428,7 +427,6 @@ def _catalog_semantic_payload(item: McpServerCatalogEntry) -> Mapping[str, objec
         "server_id": item.server_id,
         "display_name": item.display_name,
         "status": item.status.value,
-        "required": item.required,
         "exposed_tool_count": item.exposed_tool_count,
         "discovered_tool_count": item.discovered_tool_count,
         "resource_count": item.resource_count,

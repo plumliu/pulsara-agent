@@ -158,7 +158,7 @@ def test_archived_delete_unconfirmed_retry_only_confirms_original_worker(tmp_pat
         core.canonical_session_exists.side_effect = [True, OSError('offline'), False]
         with pytest.raises(SessionDeleteRejected, match='暂时无法确认'):
             await c.delete_session(session.session_id, bridge=bridge, action='delete_archived')
-        from pulsara_agent.desktop_app.session_controller import SessionControlRejected
+        from pulsara_agent.conversation_kernel.host import SessionControlRejected
         with pytest.raises(SessionControlRejected):
             await c.delete_session(session.session_id, bridge=bridge)
         result = await c.delete_session(session.session_id, bridge=bridge, action='delete_archived')
@@ -232,7 +232,7 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
             delete_session=AsyncMock(
                 return_value={"status": "DELETED", "session_id": 'session:zj56xaiwutqcu36hnvrihidlzq'}
             ),
-            prepare_raw_close=AsyncMock(return_value=None),
+            request_raw_close=AsyncMock(return_value="closed"),
             archive_session=AsyncMock(return_value={"status": "ARCHIVED", "session_id": 'session:zj56xaiwutqcu36hnvrihidlzq'}),
             unarchive_session=AsyncMock(return_value={"status": "OPEN", "session_id": 'session:zj56xaiwutqcu36hnvrihidlzq'}),
             list_archived_sessions=AsyncMock(return_value=[{"session_id": 'session:zj56xaiwutqcu36hnvrihidlzq', "lifecycle": "ARCHIVED"}]),
@@ -279,8 +279,8 @@ def test_deletion_http_is_strict_and_old_close_has_separate_route(tmp_path):
                     url + "/close", json={}
                 ) as response:
                     assert response.status == 200
-                sessions.prepare_raw_close.assert_awaited_once_with(
-                    "target"
+                sessions.request_raw_close.assert_awaited_once_with(
+                    "target", bridge=bridge
                 )
                 async with client.post(url + '/close', json={'close_conversation': True}) as response:
                     assert response.status == 400
@@ -351,7 +351,7 @@ def test_archived_delete_http_needs_no_chat_connection_and_preserves_public_resu
     from pulsara_agent.desktop_app.http_server import LocalHttpServer
     from pulsara_agent.desktop_app.application import packaged_static_root
     from tests.test_desktop_http_surface import _model_server_dependencies
-    from pulsara_agent.desktop_app.session_controller import SessionControlRejected
+    from pulsara_agent.conversation_kernel.host import SessionControlRejected
 
     async def run():
         c, core, bridge, session, _ = control(tmp_path)
@@ -399,7 +399,8 @@ def test_core_commit_joins_physical_database_worker_even_after_waiter_cancel():
     from pulsara_agent.conversation_kernel.session_deletion import KernelSessionRetirement
 
     async def run():
-        core = object.__new__(KernelHostCore)
+        from tests.support.model_config import test_model_runtime
+        core = KernelHostCore(model_runtime=test_model_runtime())
         entered, release = Event(), Event()
 
         def delete(**_):

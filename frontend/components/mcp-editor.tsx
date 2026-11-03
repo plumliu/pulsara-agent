@@ -239,7 +239,6 @@ export function McpEditor({ server, onClose, onSave, onTest, onNotify, onAuthori
           {!packageDefinition && <>
             <div className="mcp-option-group">
             {kind === 'streamable_http' && <label className="capability-check"><input type="checkbox" checked={stateless} onChange={(event) => setStateless(event.target.checked)} />按无状态 HTTP 配置此服务</label>}
-            <label className="capability-check"><input type="checkbox" checked={Boolean(policy.required)} onChange={(event) => setPolicy('required', event.target.checked)} />将此服务标记为必需</label>
             <label className="capability-check"><input type="checkbox" checked={Boolean(policy.supports_parallel_tool_calls)} onChange={(event) => setPolicy('supports_parallel_tool_calls', event.target.checked)} />允许并行工具调用</label>
             </div>
             {kind === 'streamable_http' && stateless && <label className="capability-field"><span>无状态请求并发数</span><input type="number" min={1} max={16} value={String(policy.stateless_http_max_in_flight ?? 1)} onChange={(event) => setPolicy('stateless_http_max_in_flight', Number(event.target.value))} /></label>}

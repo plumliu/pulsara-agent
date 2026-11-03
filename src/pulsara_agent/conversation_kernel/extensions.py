@@ -294,6 +294,13 @@ class KernelExtensionHost:
         with self._lock:
             self._accepting = False
 
+    @property
+    def physical_close_complete(self) -> bool:
+        with self._lock:
+            return not self._accepting and all(
+                item.worker is None or item.worker.done() for item in self._registrations.values()
+            )
+
     async def aclose(self, *, deadline_monotonic: float) -> None:
         self.stop_admission()
         with self._lock:
@@ -304,12 +311,10 @@ class KernelExtensionHost:
                 item.queue_bytes = 0
                 item.wake.set()
         remaining = deadline_monotonic - monotonic()
-        if remaining <= 0 and registrations:
-            raise TimeoutError("extension close deadline expired")
         if registrations:
             done, pending = await asyncio.wait(
                 tuple(item.worker for item in registrations if item.worker is not None),
-                timeout=remaining,
+                timeout=max(0.0, remaining),
             )
             for task in pending:
                 task.cancel()

@@ -105,7 +105,6 @@ def _config(tmp_path, options):
             "MCP_TOKEN": {"source":"environment", "name":"MCP_RPC_TEST_SECRET"},
         }
     config = _parse_server("probe", {
-        "required": True,
         "scope_policy": options.get("scope_policy", "ROOT_ONLY"),
         "effect_policy": {"default_effect": "READ_ONLY"},
         "transport": transport,
@@ -123,6 +122,7 @@ async def _runtime(tmp_path, **options):
     runtime = None
     try:
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         yield supervisor, runtime

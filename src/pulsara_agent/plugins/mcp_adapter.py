@@ -398,7 +398,6 @@ def materialize_plugin_mcp_definition(
         server_id=server_id,
         display_name=f"{plugin_id}:{server.local_server_id}",
         enabled=True,
-        required=False,
         transport=transport,
         auth=auth,
         exposure_policy=McpExposurePolicy(),

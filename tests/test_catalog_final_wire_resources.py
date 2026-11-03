@@ -147,7 +147,6 @@ def _mcp_source():
             server_id=f"server-{index:03d}",
             display_name=f"Server {index}",
             status=McpServerState.READY,
-            required=False,
             exposed_tool_count=0,
             discovered_tool_count=0,
             resource_count=1,

@@ -1,5 +1,6 @@
 """Shared execution facts, delivery and physical-owner behavior."""
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 import asyncio
 import json
@@ -89,8 +90,8 @@ def test_child_close_does_not_release_shared_terminal_owner(tmp_path):
     async def scenario():
         common = dict(workspace_root=tmp_path, live_bus=LiveAgentEventBus(),
                       authorization_policy=DefaultToolDispatchAuthorizationPolicy())
-        root = DirectKernelToolPort(**common, host_owner_id='root-host', session_id='session:root')
-        child = DirectKernelToolPort(**common, host_owner_id='child-host', session_id='session:child', shared_terminal_owner=root)
+        root = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), **common, host_owner_id='root-host', session_id='session:root')
+        child = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), **common, host_owner_id='child-host', session_id='session:child', shared_terminal_owner=root)
         assert child._terminal is root._terminal
         assert child._terminal_owner_id == root._terminal_owner_id
         await child.aclose()
@@ -629,7 +630,7 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
     operations = {'exec_cell','query_cells','manage_cell','run_agent','query_agents','send_agent_message','wait_agent','stop_agent'}
     mode = PermissionMode(permission_mode)
     async def scenario():
-        port = DirectKernelToolPort(workspace_root=tmp_path,host_owner_id='mode-host',session_id=random_id('session'),
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path,host_owner_id='mode-host',session_id=random_id('session'),
             live_bus=LiveAgentEventBus(),authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         from pulsara_agent.code_mode import CodeModeHost
         port.bind_subagent_port(SimpleNamespace(tool_names=frozenset(operations-{'exec_cell','query_cells','manage_cell'}),

@@ -229,6 +229,14 @@ class CodeModeHost:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 limit=self.limits.cell_bytes + self.limits.control_bytes,
             )
+            if self._closed:
+                # Close may win while asyncio is creating the child, before
+                # its handle is published. The startup owner still joins that
+                # exact child; a closed Host never leaves a late sidecar live.
+                if self._process.returncode is None:
+                    self._process.terminate()
+                await self._process.wait()
+                raise CodeModeError("unavailable", "Code Mode Host closed during startup")
             self._reader = asyncio.create_task(self._read_messages(), name="code-mode-sidecar")
             self._stderr_reader = asyncio.create_task(self._drain_stderr(), name="code-mode-stderr")
             await self._send({"type": "configure", "limits": asdict(self.limits)})
@@ -900,6 +908,19 @@ class CodeModeHost:
     def has_live_cells(self) -> bool:
         return any(cell.state not in _TERMINAL or cell.pending for cell in self._cells.values())
 
+    @property
+    def local_children_stopped(self) -> bool:
+        return (self._closed and not self._startup.locked()
+                and (self._process is None or self._process.returncode is not None))
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return (self.local_children_stopped
+                and all(pending.task is None or pending.task.done()
+                        for cell in self._cells.values() for pending in cell.pending.values())
+                and all(task is None or task.done()
+                        for task in (self._reader, self._stderr_reader)))
+
     async def aclose(self) -> None:
         if self._closed:
             return
@@ -922,6 +943,10 @@ class CodeModeHost:
             await self._reader
         if self._stderr_reader is not None:
             await self._stderr_reader
+        # A late spawn is joined by the existing startup owner above. Waiting
+        # for its original lock also covers the pre-publication handle gap.
+        async with self._startup:
+            pass
         # An ambiguous queue admission still owns its original record until
         # exact confirmation. Closing never manufactures another delivery.
         self._cells = {key: cell for key, cell in self._cells.items() if cell.output_lease is not None}

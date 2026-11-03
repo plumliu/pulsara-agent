@@ -218,6 +218,14 @@ class HistoryProjectionMaintainer:
             # Its fixed cut has been published; new hints will resolve to a
             # later pending tail item on the next pass.
 
+    @property
+    def physical_operation_deadline(self) -> float | None:
+        return self._io.physical_operation_deadline
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closing and self._task.done() and self._io.physical_close_complete
+
     async def aclose(self, *, deadline_monotonic: float) -> None:
         self._closing = True
         self._hints.clear()

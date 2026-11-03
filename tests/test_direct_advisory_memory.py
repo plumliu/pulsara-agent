@@ -839,6 +839,7 @@ def test_memory_deletion_http_round_trip_commits_the_actual_preview(
     from aiohttp import ClientSession
     from pulsara_agent.conversation_kernel.host import KernelHostCore
     from tests.test_desktop_memory_management import server_for
+    from tests.support.model_config import test_model_runtime
 
     repository, _, invoke, remember = direct_memory_session
     suffix = uuid4().hex
@@ -858,7 +859,7 @@ def test_memory_deletion_http_round_trip_commits_the_actual_preview(
         ))
         root = other["target"]["memory_id"]
 
-    core = object.__new__(KernelHostCore)
+    core = KernelHostCore.production(model_runtime=test_model_runtime())
     async def resources():
         return repository
     core._ensure_resources = resources
@@ -902,6 +903,7 @@ def test_memory_deletion_http_round_trip_commits_the_actual_preview(
                     assert (await response.json())["error"]["code"] == "MEMORY_NOT_FOUND"
         finally:
             await server.aclose()
+            await core.shutdown()
 
     asyncio.run(run())
     with repository.connection_provider.connection(

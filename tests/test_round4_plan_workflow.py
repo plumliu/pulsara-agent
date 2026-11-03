@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 from tests.support.model_config import frozen_test_prompt
 from pulsara_agent.llm.input import PromptContent
@@ -176,7 +177,7 @@ def test_round4_permission_modes_authorize_workspace_and_host_writes_exactly(
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         session_id = 'session:2cjeau7nnodslaadjktq7cybp4'
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=workspace,
             host_owner_id='host:stnketegsrtgmc2jewrtonbxxy',
             session_id=session_id,
@@ -537,7 +538,7 @@ def test_round4_question_option_ordinal_rejects_negative_python_input() -> None:
 
 def test_round4_root_plan_tools_are_absent_from_subagent_surface(tmp_path: Path) -> None:
     async def scenario() -> None:
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:67t6d6rn367knw34uofudcef2m',
             session_id='session:q4ekby5llymjxbkqle4ou2k3ce',

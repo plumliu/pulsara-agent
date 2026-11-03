@@ -82,7 +82,7 @@ assert "pulsara_agent.desktop_app.application" not in sys.modules
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
-@pytest.mark.parametrize("termination", ["shutdown", "eof"])
+@pytest.mark.parametrize("termination", ["shutdown", "shutdown-workbench", "eof"])
 def test_host_channel_readiness_and_parent_loss_use_existing_close(desktop_home, termination):
     async def exercise():
         reader = asyncio.StreamReader()
@@ -94,6 +94,10 @@ def test_host_channel_readiness_and_parent_loss_use_existing_close(desktop_home,
         class App:
             database_state = DatabaseDataPlaneState.READY
             origin = "http://127.0.0.1:12345"
+            core = SimpleNamespace(workbench_exit_ready=False, workbench_exit_deadline=None)
+            @property
+            def workbench_exit_ready(self):
+                return self.core.workbench_exit_ready
 
             def __init__(self, *, settings, permission_policy):
                 assert settings.read().postgres == config(desktop_home)
@@ -115,7 +119,7 @@ def test_host_channel_readiness_and_parent_loss_use_existing_close(desktop_home,
                 if termination == "eof":
                     reader.feed_eof()
                 else:
-                    reader.feed_data(b'{"type":"shutdown"}\n')
+                    reader.feed_data((json.dumps({"type": termination}) + "\n").encode())
 
         def prepare(postgres, *, initialize):
             prepared.append((postgres, initialize))
@@ -129,6 +133,182 @@ def test_host_channel_readiness_and_parent_loss_use_existing_close(desktop_home,
         os.close(module.acquire_kernel_lock())
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_explicit_workbench_exit_terminates_only_its_original_runtime_after_owner_boundary(desktop_home, close_fails):
+    # An actual subprocess verifies self-termination without replacing os._exit
+    # or terminating the test runner. Core's physical facts are exercised by
+    # the lifecycle tests; this tests only their native runtime boundary.
+    code = r'''
+import asyncio, json, sys
+from time import monotonic
+from pulsara_agent import desktop_runtime as module
+from pulsara_agent.desktop_app.application import DatabaseDataPlaneState
+
+async def exercise():
+    reader = asyncio.StreamReader()
+    reader.feed_data((sys.argv[1] + "\n").encode())
+    class Core:
+        workbench_exit_ready = False
+        workbench_exit_deadline = monotonic() - 1
+    class App:
+        database_state = DatabaseDataPlaneState.READY
+        origin = "http://127.0.0.1:12345"
+        core = Core()
+        @property
+        def workbench_exit_ready(self): return self.core.workbench_exit_ready
+        def __init__(self, **kwargs): pass
+        async def start(self): pass
+        async def aclose(self):
+            print(json.dumps({"type": "close-started"}), flush=True)
+            self.core.workbench_exit_ready = True
+            if sys.argv[2] == "True":
+                raise RuntimeError("physical owner retained after close failure")
+            await asyncio.Future()
+    def emit(value):
+        print(json.dumps(value), flush=True)
+        if value["type"] == "ready":
+            reader.feed_data(b'{"type":"shutdown-workbench"}\n')
+    await module.run_desktop_child(reader, emit, application_factory=App,
+                                  database_preparer=lambda *a, **k: None)
+asyncio.run(exercise())
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code, json.dumps(frame(desktop_home)), str(close_fails)],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 1, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert "close-started" in [event["type"] for event in events]
+    assert events[-1]["type"] == "failed"
+    assert events[-1]["phase"] == "shutdown"
+    assert "已确认数据保留" in events[-1]["error"]
+    assert "未确认的操作不自动重做" in events[-1]["error"]
+    if close_fails:
+        assert any("physical owner retained after close failure" in event.get("error", "") for event in events[:-1])
+        assert "physical owner retained after close failure" in result.stderr
+    assert not any(event["type"] == "stopped" for event in events)
+    # The OS lifetime lock is released by this exact child's actual exit.
+    os.close(module.acquire_kernel_lock())
+
+
+def test_closed_core_allows_workbench_exit_while_disposable_app_cleanup_waits(desktop_home):
+    marker = desktop_home / "desktop" / "accepted.data"
+    marker.write_text("already confirmed")
+    code = r'''
+import asyncio, json, sys
+from pulsara_agent import desktop_runtime as module
+from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.desktop_app.application import DatabaseDataPlaneState
+from tests.support.model_config import test_model_runtime as make_runtime
+
+async def exercise():
+    reader = asyncio.StreamReader()
+    reader.feed_data((sys.argv[1] + "\n").encode())
+    core = KernelHostCore.production(model_runtime=make_runtime(postgres_dsn="postgresql://unused/unused"))
+    class App:
+        database_state = DatabaseDataPlaneState.READY
+        origin = "http://127.0.0.1:12345"
+        def __init__(self, **kwargs): self.core = core
+        @property
+        def workbench_exit_ready(self): return core.workbench_exit_ready
+        async def start(self): pass
+        async def aclose(self):
+            await core.shutdown()
+            assert core._closed and not core._sessions
+            assert core.workbench_exit_deadline is None
+            assert core.workbench_exit_ready
+            print(json.dumps({"type": "temporary-cleanup-wait"}), flush=True)
+            await asyncio.Future()
+    def emit(value):
+        print(json.dumps(value), flush=True)
+        if value["type"] == "ready":
+            reader.feed_data(b'{"type":"shutdown-workbench"}\n')
+    await module.run_desktop_child(reader, emit, application_factory=App,
+                                  database_preparer=lambda *a, **k: None)
+asyncio.run(exercise())
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code, json.dumps(frame(desktop_home))],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 1, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert any(item["type"] == "temporary-cleanup-wait" for item in events)
+    assert events[-1]["type"] == "failed" and events[-1]["phase"] == "shutdown"
+    assert "未完成的临时收尾已丢弃" in events[-1]["error"]
+    assert "结果未确认" not in events[-1]["error"]
+    assert not any(item["type"] == "stopped" for item in events)
+    assert marker.read_text() == "already confirmed"
+    os.close(module.acquire_kernel_lock())
+
+
+@pytest.mark.parametrize("initializing", [False, True])
+def test_workbench_exit_during_startup_joins_the_original_sessionless_core_boundary(desktop_home, initializing):
+    code = r'''
+import asyncio, json, sys, threading
+import pytest
+from pulsara_agent import desktop_runtime as module
+from pulsara_agent.conversation_kernel import host
+from pulsara_agent.desktop_app.application import DatabaseDataPlaneState
+from tests.test_kernel_resource_lifecycle import resources
+
+async def exercise():
+    patch = pytest.MonkeyPatch()
+    core, leases, entered, release = resources(patch)
+    reader = asyncio.StreamReader()
+    reader.feed_data((sys.argv[1] + "\n").encode())
+    class App:
+        database_state = DatabaseDataPlaneState.READY
+        origin = "http://127.0.0.1:12345"
+        def __init__(self, **kwargs): self.core = core
+        @property
+        def workbench_exit_ready(self): return core.workbench_exit_ready
+        async def start(self):
+            if sys.argv[2] == "True":
+                pending = asyncio.create_task(core.prepare_resources())
+                await entered.wait()
+                deadline = core._resource_initialization.deadline_monotonic
+            else:
+                release.set()
+                await core.prepare_resources()
+                physical_started = asyncio.Event()
+                loop = asyncio.get_running_loop()
+                def rows(*args):
+                    loop.call_soon_threadsafe(physical_started.set)
+                    threading.Event().wait()
+                patch.setattr(host, "_list_resumable_session_rows_across_workspaces", rows)
+                pending = asyncio.create_task(core.list_resumable_sessions_across_workspaces())
+                await physical_started.wait()
+                deadline = next(iter(core._resource_operations.values()))
+            assert not core._sessions and not core._close_attempts
+            # Advance only the test observation clock beyond this actual
+            # operation's installed deadline; no application timeout is added.
+            patch.setattr(host, "monotonic", lambda: deadline + 1)
+            patch.setattr(module, "monotonic", lambda: deadline + 1)
+            print(json.dumps({"type": "cold-owner-started"}), flush=True)
+            reader.feed_data(b'{"type":"shutdown-workbench"}\n')
+            await pending
+        async def aclose(self):
+            print(json.dumps({"type": "close-started"}), flush=True)
+            await core.shutdown()
+    def emit(value): print(json.dumps(value), flush=True)
+    await module.run_desktop_child(reader, emit, application_factory=App,
+                                  database_preparer=lambda *a, **k: None)
+asyncio.run(exercise())
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code, json.dumps(frame(desktop_home)), str(initializing)],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 1, result.stderr
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert "cold-owner-started" in [item["type"] for item in events]
+    assert "close-started" in [item["type"] for item in events]
+    assert not any(item["type"] in {"ready", "stopped"} for item in events)
+    assert events[-1]["type"] == "failed" and events[-1]["phase"] == "shutdown"
+    os.close(module.acquire_kernel_lock())
 
 
 def test_database_failure_never_announces_ready_or_deletes_data(desktop_home):

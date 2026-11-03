@@ -106,7 +106,7 @@ def test_notice_pending_follows_actual_dispatch_install(notice_database, boundar
             _lock=asyncio.Lock(), _require_open=lambda: None,
             _capability_notification_revision=None,
             _freeze_effective_capability_state=lambda: freeze_json(current_state),
-            _capability_refresh_requested_revision=0,
+            _capability_refresh_requested_revision=0, _capability_refresh_wake=asyncio.Event(),
             _capability_refresh_applied_revision=0, _capability_refresh_attention=None,
             reload_capabilities=AsyncMock(return_value={"status": "RELOADED"}),
         )

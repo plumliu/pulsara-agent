@@ -15,7 +15,6 @@ from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
-from pulsara_agent.scheduling.service import ScheduledTaskService
 from tests.test_scheduled_tasks_host import queue
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.tool_permission import default_permission_policy
@@ -76,8 +75,7 @@ async def run(destination: Path):
                 permission_policy=default_permission_policy(),
                 active_skill_names=frozenset(),
             )
-            scheduler = ScheduledTaskService(sessions)
-            core.scheduled_tasks = scheduler
+            scheduler = core.scheduled_tasks
             try:
                 session = (
                     await sessions.create_session(

@@ -1,4 +1,5 @@
 """Runtime adapters use complete pages, exact next calls and physical cancellation."""
+from tests.support.model_config import scheduled_task_service
 
 import asyncio
 from dataclasses import replace
@@ -270,9 +271,11 @@ def test_schedule_mutation_keeps_complete_short_receipt_as_required_facts(action
             code_cell_id=None, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
         port = object.__new__(DirectKernelToolPort)
         port._closed, port._session_id = False, ctx.session_id
+        port._memory_domain_id = "scheduled-receipt-user"
         port._validate_surface_borrow = lambda *args: binding
-        async def manage(arguments, *, default_session_id, permission_mode, page_budget):
+        async def manage(arguments, *, default_session_id, memory_domain_id, permission_mode, page_budget):
             assert default_session_id == ctx.session_id
+            assert memory_domain_id == "scheduled-receipt-user"
             assert permission_mode is ctx.effective_permission_mode
             assert page_budget is ctx.page_budget
             return receipt
@@ -293,7 +296,7 @@ def test_todo_budget_rejection_precedes_prepared_or_installed_change(tmp_path):
     from tests.test_lightweight_todo_refinement import _root_activation
     async def run():
         session = "session:cbauiajfisf4gvpdotrq4qgxhq"
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id=random_id("host"), session_id=session,
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id=random_id("host"), session_id=session,
             live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.todo_owner.activate_root_run(_root_activation())
         ids = {"tool_name": "todo", "tool_call_id": random_id("call"), "attempt_id": random_id("attempt"),

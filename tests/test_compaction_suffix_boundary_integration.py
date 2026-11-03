@@ -61,6 +61,9 @@ async def _begin_summary(root, model):
     await _wait_summary(model, root, command, None)
     turn_id = root.active_root_turn_id()
     assert turn_id is not None and not model.root_requests
+    async def unexpected_mcp_wait(**_kwargs):
+        raise AssertionError("Adopted compaction roots must retain their frozen candidates without another MCP wait")
+    root._tools.wait_initial_mcp_readiness = unexpected_mcp_wait
     return command, turn_id
 
 

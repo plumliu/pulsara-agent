@@ -33,8 +33,11 @@ def test_app_starts_without_a_workspace(tmp_path, monkeypatch):
     args = build_parser().parse_args(["app"])
     assert not hasattr(args, "workspace")
     assert not hasattr(args, "workspace_kind")
-    core = SimpleNamespace(mcp_management=SimpleNamespace(lane=asyncio.Lock()))
     runtime = make_runtime()
+    core = SimpleNamespace(model_runtime=runtime, memory_domain_id="u_local",
+                           root_permission_policy=None, root_active_skill_names=frozenset(),
+                           trust_workspace_mcp_config=False,
+                           scheduled_tasks=object(), mcp_management=SimpleNamespace(lane=asyncio.Lock()))
     app = DesktopApplication(
         core=core, settings=runtime.settings, catalog=runtime.catalog, model_runtime=runtime,
         permission_policy=None,

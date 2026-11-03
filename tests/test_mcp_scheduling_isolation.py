@@ -67,7 +67,6 @@ class _Peers:
         port = site._server.sockets[0].getsockname()[1]
         try:
             yield tuple(_parse_server(server_id, {
-                "required": not self.block_listing,
                 "effect_policy": {"default_effect": "READ_ONLY"},
                 "supports_parallel_tool_calls": self.parallel,
                 "stateless_http_max_in_flight": MAXIMUM_MCP_HOST_IN_FLIGHT,
@@ -176,6 +175,7 @@ def test_serial_server_queue_leaves_host_capacity_for_healthy_server(tmp_path):
             tasks = []
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 runtime = supervisor.install_pending_at_safe_point()
                 executors = {item.semantic.server_id: item for item in runtime.executors.values()}
                 slow_slot = runtime.slot_lease_by_server["a_slow"]._slot
@@ -219,6 +219,7 @@ def test_cancel_waiting_for_host_releases_server_lane(tmp_path, waiting_operatio
             tasks = []
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 runtime = supervisor.install_pending_at_safe_point()
                 executors = {item.semantic.server_id: item for item in runtime.executors.values()}
                 fast_slot = runtime.slot_lease_by_server["b_fast"]._slot
@@ -293,7 +294,6 @@ def test_catalog_refresh_queue_does_not_reserve_host_io_capacity(tmp_path):
         async with _sdk_http(server) as endpoint, peers.serve() as peer_configs:
             slow_ids = [f"slow_{index:02}" for index in range(MAXIMUM_MCP_HOST_IN_FLIGHT)]
             configs = tuple(_parse_server(server_id, {
-                "required": True,
                 "transport": {"type": "streamable_http", "endpoint": endpoint,
                               "allow_http_localhost": True},
             }) for server_id in slow_ids) + (peer_configs[1],)
@@ -301,6 +301,7 @@ def test_catalog_refresh_queue_does_not_reserve_host_io_capacity(tmp_path):
             runtime = None
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 runtime = supervisor.install_pending_at_safe_point()
                 refreshing = True
                 await bus.publish(ToolsListChanged())

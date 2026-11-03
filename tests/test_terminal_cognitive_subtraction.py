@@ -1,6 +1,7 @@
 """Observable hard-cut contract for independent commands and process follow-up."""
 
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
 import json
@@ -267,7 +268,7 @@ def test_stale_descriptor_is_refused_and_surface_handoff_keeps_live_owners(
     tmp_path, monkeypatch
 ):
     async def scenario():
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:45aj6sixiaarr5ta455q3trmwi',
             session_id='session:liqqsnm2qenssqznkop23s5kji',

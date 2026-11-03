@@ -238,7 +238,7 @@ def test_timer_tick_drains_runtime_delay_without_collapsing_occurrences(monkeypa
             return "PREPARE" if kwargs["admission"].due_at <= now else "STALE"
 
         async def resume(*args, **kwargs):
-            return SimpleNamespace(session=object())
+            return object()
 
         async def submit(_host, admission):
             submitted.append(admission)
@@ -248,7 +248,7 @@ def test_timer_tick_drains_runtime_delay_without_collapsing_occurrences(monkeypa
         monkeypatch.setattr(service, "_read", read)
         monkeypatch.setattr(service, "_manage", manage)
         monkeypatch.setattr(service, "_submit", submit)
-        service.sessions.resume_session = resume
+        service._core.resume_scheduled_session = resume
         await service.tick()
         assert [a.due_at for a in submitted] == [
             instant("2030-01-01T00:01:00Z"), instant("2030-01-01T00:02:00Z"), instant("2030-01-01T00:03:00Z"),

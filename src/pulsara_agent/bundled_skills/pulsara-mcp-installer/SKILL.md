@@ -43,6 +43,13 @@ public config or handling user-only import/out-of-band administration.
 
 ## Verify and recover
 
+Enabled and approved connections initialize and read their catalogs in the
+background. Opening a session stays available; its first cold-epoch model
+request waits for those initial attempts. A failed connection reports its
+reason while the request continues with the capabilities that are ready.
+Later reconnects adopt through the existing safe point and META path without
+changing the current provider roots.
+
 When checking a connection, copy the exact `MCP_CONNECTION` target returned by
 management or query. A runtime `MCP_SERVER` target is a separate identity: copy
 its complete `runtime_server_id` from query results. Never construct it by

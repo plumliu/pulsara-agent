@@ -79,7 +79,7 @@ lines.on('line', line => {
     }
     if (typeof message.requestId !== 'string') throw new Error('requestId must be a string');
     output({type:'quit-state', requestId:message.requestId, activeTasks:1, scheduledTasks:2});
-  } else if (message.type === 'shutdown') {
+  } else if (['shutdown','shutdown-workbench'].includes(message.type)) {
     if (mode === 'startup-settlement-drain') return;
     if (mode === 'ready-on-shutdown-failure') output({type:'ready', origin:'http://127.0.0.1:12345'});
     output({type:'stopping'});
@@ -315,6 +315,17 @@ for (const mode of ['inspect-timeout', 'inspect-exit']) {
     } finally { await value.close(); }
   });
 }
+
+test('explicit workbench exit uses the existing child control owner', {timeout:10000}, async () => {
+  const value = await fixture();
+  try {
+    await value.runtime.start(async () => settings, () => true);
+    await value.runtime.stop({workbenchExit:true});
+    assert.deepEqual((await value.calls()).map(call => call.type), ['start','shutdown-workbench']);
+    assert.equal(value.runtime.running, false);
+    assert.equal(value.children[0].exitCode, 0);
+  } finally { await value.close(); }
+});
 
 test('host uses one child, private startup frame and correlated quit inspection', {timeout:10000}, async () => {
   const value = await fixture();

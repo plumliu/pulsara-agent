@@ -49,7 +49,7 @@ describe('PulsaraApp', () => {
     expect(details.textContent).toContain('SESSION_RECOVERY_CLOSE_FAILED');
     expect(details.textContent).toContain('OSError: scope join failed');
     expect(screen.queryByRole('button', {name:'重新连接'})).toBeNull();
-    expect(screen.getByText(/旧会话关闭失败，请查看技术详情与日志，并重新打开 Pulsara。/)).toBeTruthy();
+    expect(screen.getByText('任务仍在停止。')).toBeTruthy();
     expect(connecting).toHaveBeenCalledTimes(1);
     expect(adapter.createSession).not.toHaveBeenCalled();
   });
@@ -4248,6 +4248,49 @@ it('replaces commands with session search and opens a result outside the loaded 
 });
 
 describe('explicit runtime reopen owner', () => {
+  it('leaves a closing session immediately and preserves history while the server owns settlement', async () => {
+    const adapter = new FakeAdapter();
+    const accepted = deferred<{ status: 'closing' }>();
+    adapter.closeSession.mockImplementation(() => accepted.promise);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const original = adapter.lastConnection!;
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
+    fireEvent.click(screen.getByRole('button', { name: /停止并关闭会话/ }));
+    expect(adapter.closeSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
+    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(adapter.sessions.some(session => session.id === initialSession.id)).toBe(true);
+    expect(adapter.deleteSession).not.toHaveBeenCalled();
+    expect(original.closed).toBe(false);
+    await act(async () => accepted.resolve({ status: 'closing' }));
+    await waitFor(() => expect(original.closed).toBe(true));
+    expect(adapter.connectCalls).toHaveLength(1);
+    expect(adapter.sessions.some(session => session.id === initialSession.id)).toBe(true);
+  });
+
+  it('does not detach a newly selected session when an older close request finishes', async () => {
+    const adapter = new FakeAdapter();
+    const other = { ...initialSession, id: 'session:other', title: '其他会话' };
+    adapter.sessions.push(other);
+    const accepted = deferred<{ status: 'closing' }>();
+    adapter.closeSession.mockImplementation(() => accepted.promise);
+    renderWorkbench(<PulsaraApp adapter={adapter} />);
+    await screen.findByRole('heading', { name: '准备发布' });
+    const original = adapter.lastConnection!;
+    fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
+    fireEvent.click(screen.getByRole('button', { name: /停止并关闭会话/ }));
+    fireEvent.click(screen.getByRole('button', { name: /其他会话/ }));
+    await screen.findByRole('heading', { name: '其他会话' });
+    const current = adapter.lastConnection!;
+    expect(current).not.toBe(original);
+    await act(async () => accepted.resolve({ status: 'closing' }));
+    await waitFor(() => expect(original.closed).toBe(true));
+    expect(current.closed).toBe(false);
+    expect(screen.getByLabelText('发送给 Pulsara')).toBeTruthy();
+  });
+
   it('submits before closing the controller and owns reconnect after a slow server detach', async () => {
     const adapter = new FakeAdapter();
     const connect = adapter.connect.bind(adapter);

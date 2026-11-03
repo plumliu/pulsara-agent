@@ -74,9 +74,21 @@ class KernelSessionIO:
         if not 1 <= maximum_concurrency <= STAGE2_LIMITS.foreground_io_hard_concurrency:
             raise ValueError("foreground I/O concurrency is outside its hard bound")
         self._semaphore = asyncio.Semaphore(maximum_concurrency)
-        self._active: set[asyncio.Task[object]] = set()
+        self._active: dict[asyncio.Task[object], float] = {}
         self._closing = False
         self._lock = asyncio.Lock()
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closing and not self._active
+
+    @property
+    def physical_operation_deadline(self) -> float | None:
+        return min(self._active.values(), default=None)
+
+    def stop_admission(self) -> None:
+        """Seal this event-loop-owned lane while admitted physical work settles."""
+        self._closing = True
 
     async def run(
         self,
@@ -109,7 +121,7 @@ class KernelSessionIO:
                     ),
                     name=f"kernel-physical-io:{getattr(operation, '__name__', 'operation')}",
                 )
-                self._active.add(task)
+                self._active[task] = deadline_monotonic
                 task.add_done_callback(self._retire)
             remaining = deadline_monotonic - monotonic()
             if remaining <= 0:
@@ -201,7 +213,7 @@ class KernelSessionIO:
                         f"{getattr(operation, '__name__', 'operation')}"
                     ),
                 )
-                self._active.add(task)
+                self._active[task] = deadline_monotonic
                 task.add_done_callback(self._retire)
             timed_out = False
             caller_cancelled = False
@@ -261,7 +273,7 @@ class KernelSessionIO:
             raise
 
     def _retire(self, task: asyncio.Task[object]) -> None:
-        self._active.discard(task)
+        self._active.pop(task, None)
         self._semaphore.release()
         # Retrieve errors from callers that detached on cancellation/deadline.
         if not task.cancelled():

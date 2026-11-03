@@ -197,10 +197,10 @@ export class PythonRuntime {
       }
     });
   }
-  async stop(): Promise<void> {
+  async stop(options: {workbenchExit?: boolean} = {}): Promise<void> {
     await this.preparation;
     const child = this.child;
-    if (child) this.send(child, {type:'shutdown'}, true);
+    if (child) this.send(child, {type:options.workbenchExit ? 'shutdown-workbench' : 'shutdown'}, true);
     const result = await this.exit;
     const settledStartupFailure = result?.cleanStartupSettlement && result.code === 1 && result.signal === null;
     if (result?.startSent && !settledStartupFailure && (result.code !== 0 || result.failure || result.settlementFailure || (this.wsl && !result.stopped))) {

@@ -321,7 +321,6 @@ class McpServerDeclaration:
     server_id: str
     display_name: str
     enabled: bool
-    required: bool
     transport: McpTransportConfig
     auth: McpAuthConfig
     exposure_policy: McpExposurePolicy
@@ -385,7 +384,6 @@ class McpServerConfig:
     server_id: str
     display_name: str
     enabled: bool
-    required: bool
     transport: McpTransportConfig
     auth: McpAuthConfig
     exposure_policy: McpExposurePolicy
@@ -419,7 +417,6 @@ class McpServerConfig:
             server_id=self.server_id,
             display_name=self.display_name,
             enabled=self.enabled,
-            required=self.required,
             transport=self.transport,
             auth=self.auth,
             exposure=self.exposure_policy,
@@ -635,7 +632,6 @@ def freeze_mcp_server_config(
     server_id: str,
     display_name: str,
     enabled: bool,
-    required: bool,
     transport: McpTransportConfig,
     auth: McpAuthConfig,
     exposure_policy: McpExposurePolicy,
@@ -656,7 +652,6 @@ def freeze_mcp_server_config(
         server_id=server_id,
         display_name=display_name,
         enabled=enabled,
-        required=required,
         transport=transport,
         auth=auth,
         exposure=exposure_policy,
@@ -675,7 +670,6 @@ def freeze_mcp_server_config(
         server_id,
         display_name,
         enabled,
-        required,
         transport,
         auth,
         exposure_policy,
@@ -710,7 +704,6 @@ def _parse_server(
         server_id=declaration.server_id,
         display_name=declaration.display_name,
         enabled=declaration.enabled,
-        required=declaration.required,
         transport=declaration.transport,
         auth=declaration.auth,
         exposure_policy=declaration.exposure_policy,
@@ -748,7 +741,6 @@ def _parse_server_declaration(
             "exposure_policy",
             "per_tool_timeout_ms",
             "public_headers",
-            "required",
             "scope_policy",
             "stateless_http_max_in_flight",
             "supports_parallel_tool_calls",
@@ -890,7 +882,6 @@ def _parse_server_declaration(
     )
     display_name = _string(raw.get("display_name") or server_id, "MCP display name")
     enabled = _boolean(raw.get("enabled", True), "MCP enabled")
-    required = _boolean(raw.get("required", False), "MCP required")
     scope_policy = McpScopePolicy(
         _string(raw.get("scope_policy", "ROOT_ONLY"), "MCP scope policy").upper()
     )
@@ -911,7 +902,6 @@ def _parse_server_declaration(
         server_id=server_id,
         display_name=display_name,
         enabled=enabled,
-        required=required,
         transport=transport,
         auth=auth,
         exposure_policy=exposure,
@@ -1177,7 +1167,6 @@ def _derive_config_fingerprints(
     server_id: str,
     display_name: str,
     enabled: bool,
-    required: bool,
     transport: McpTransportConfig,
     auth: McpAuthConfig,
     exposure: McpExposurePolicy,
@@ -1196,7 +1185,6 @@ def _derive_config_fingerprints(
         "server_id": server_id,
         "display_name": display_name,
         "enabled": enabled,
-        "required": required,
         "scope_policy": scope_policy.value,
         "exposure": {
             "include_tool_names": exposure.include_tool_names,

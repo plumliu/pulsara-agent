@@ -23,6 +23,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import StrEnum
+from functools import wraps
 from pathlib import Path
 from time import monotonic
 from typing import Awaitable, Callable, Literal, Mapping
@@ -586,11 +587,34 @@ class KernelCompositionUnavailable(ValueError):
 class HostSessionCloseState(StrEnum):
     TASK_INSTALLED = "TASK_INSTALLED"
     CLOSED = "CLOSED"
+    CLOSED_SETTLEMENT_UNCONFIRMED = "CLOSED_SETTLEMENT_UNCONFIRMED"
     CLOSE_FAILED_QUARANTINED = "CLOSE_FAILED_QUARANTINED"
+
+
+class KernelSessionSettlementUnconfirmed(RuntimeError):
+    """Physical work stopped, but necessary canonical settlement is unconfirmed."""
 
 
 class KernelHostCoreClosing(RuntimeError):
     """A new Host session was rejected after process shutdown won admission."""
+
+
+class SessionControlRejected(RuntimeError):
+    """A current kernel lifecycle operation owns this canonical session."""
+
+    def __init__(self, public_code: str, message: str) -> None:
+        super().__init__(message)
+        self.public_code = public_code
+
+
+@dataclass(slots=True)
+class KernelSessionOpenAttempt:
+    session_ids: frozenset[str]
+    task: asyncio.Task[KernelHostSession] | asyncio.Task[object] | None = None
+    scheduled: bool = False
+    configuration: tuple[HostWorkspaceInput, EffectivePermissionPolicy, str | None, frozenset[str]] | None = None
+    candidate_session: KernelHostSession | None = None
+    io_owner: KernelSessionIO | None = None
 
 
 @dataclass(slots=True)
@@ -602,6 +626,17 @@ class HostSessionCloseAttempt:
     deadline_monotonic: float
     task: asyncio.Task[None]
     state: HostSessionCloseState = HostSessionCloseState.TASK_INSTALLED
+
+
+@dataclass(slots=True)
+class _CoreResourceInitialization:
+    """Candidates belong to this one operation until publication or cleanup."""
+    deadline_monotonic: float
+    task: asyncio.Task[ConversationKernelRepository] | None = None
+    access: VerifiedPostgresAccessLease | None = None
+    history: HistoryProjectionMaintainer | None = None
+    io: KernelSessionIO | None = None
+    cleanup_complete: bool = False
 
 
 class KernelHostSession:
@@ -637,7 +672,7 @@ class KernelHostSession:
         | None = None,
         local_mcp_configs: tuple[McpServerConfig, ...] = (),
         mcp_configs: tuple[McpServerConfig, ...] = (),
-        scheduled_tasks=None,
+        scheduled_tasks,
         control_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._model_runtime = model_runtime
@@ -710,6 +745,7 @@ class KernelHostSession:
         self._cell_output_wake = asyncio.Event()
         self._hook_diagnostics = LoggingHookDiagnosticAdapter()
         self._scheduled_tasks = scheduled_tasks
+        self._capability_refresh_wake = asyncio.Event()
         self._hook_context = HookContextOwner(self._hook_diagnostics)
         self._hook_root_scope = HookDispatchScopeRef(
             self,
@@ -758,6 +794,7 @@ class KernelHostSession:
                 workspace_id=workspace.workspace_key,
             ),
             scheduled_tasks=scheduled_tasks,
+            memory_domain_id=workspace.memory_domain.memory_domain_id,
             session_content_query=SessionContentQuery(repository, session_id=session_id,
                                   memory_domain_id=workspace.memory_domain.memory_domain_id),
             deadline_factory=self._deadlines,
@@ -831,6 +868,8 @@ class KernelHostSession:
             workspace_root=workspace.workspace_root,
             configs=mcp_configs,
             credential_boundary=credential_boundary,
+            configuration_change=self._capability_refresh_wake,
+            adopt_configuration=self._adopt_capabilities_for_execution,
         )
         self._tools.bind_mcp_supervisor(self._mcp_supervisor)
         from pulsara_agent.code_mode.host import CodeModeHost
@@ -885,7 +924,7 @@ class KernelHostSession:
             tools=self._tools,
             live_bus=self.live_bus,
             workspace_gate=self.workspace_gate,
-            before_provider_preparation=self._adopt_capabilities_if_requested,
+            before_provider_preparation=self._adopt_capabilities_for_execution,
             capability_change_reader=self.freeze_capability_change,
             capability_change_installed=self.consume_capability_change,
             root_control_preparation_barrier=(
@@ -971,23 +1010,38 @@ class KernelHostSession:
         self._close_async_lock = asyncio.Lock()
         self._closing = False
         self._closed = False
+        self._physical_close_complete = False
+        self._context_preview_owner_task: asyncio.Task[object] | None = None
+        self._context_preview_capability_state = None
+        self._necessary_settlement_error: BaseException | None = None
         self._writer_renewal_failure: Exception | None = None
         self._queue_wake = asyncio.Event()
         self._renewal_task = asyncio.create_task(
             self._renew_writer(), name=f"kernel-writer-renew:{session_id}"
         )
+        self._delivery_task: asyncio.Task[None] | None = None
+        self._code_mode.set_output_ready_callback(self._cell_output_wake.set)
+        self._cell_output_task: asyncio.Task[None] | None = None
+
+    def activate_execution(self) -> None:
+        """Core calls this only after complete assembly and route registration."""
+        self._require_open()
+        if self._delivery_task is not None:
+            raise RuntimeError("Host execution is already active")
         self._delivery_task = asyncio.create_task(
             self._prompt_delivery_loop(),
-            name=f"kernel-prompt-delivery:{session_id}",
+            name=f"kernel-prompt-delivery:{self.session_id}",
+        )
+        self._cell_output_task = asyncio.create_task(
+            self._cell_output_delivery_loop(),
+            name=f"kernel-cell-output-delivery:{self.session_id}",
         )
         if self.root_session_id is None:
             self._memory_embedding_maintainer.start()
-        self._code_mode.set_output_ready_callback(self._cell_output_wake.set)
-        self._cell_output_task = asyncio.create_task(
-            self._cell_output_delivery_loop(),
-            name=f"kernel-cell-output-delivery:{session_id}",
-        )
         self._queue_wake.set()
+
+    def mcp_readiness_progress(self) -> dict[str, object] | None:
+        return self._mcp_supervisor.readiness_progress()
 
     async def _agent_admission_facts(self, context, requests) -> dict[str, object]:
         if self.root_session_id is not None or context.session_id != self.session_id:
@@ -1246,6 +1300,7 @@ class KernelHostSession:
         async with self._lock:
             self._require_open()
             self._capability_refresh_requested_revision += 1
+            self._capability_refresh_wake.set()
             revision = self._capability_refresh_requested_revision
             if change is not None:
                 self._capability_notification_revision = revision
@@ -1255,6 +1310,10 @@ class KernelHostSession:
         """Read current adopted owners, never a history of management actions."""
         from pulsara_agent.hooks.presentation import hook_model_enabled
         from pulsara_agent.primitives.context import freeze_json
+
+        if (self._context_preview_owner_task is asyncio.current_task()
+                and self._context_preview_capability_state is not None):
+            return self._context_preview_capability_state
 
         inspection = self.inspect_capability_catalog()
         skills = inspection.skill_catalog
@@ -1311,7 +1370,13 @@ class KernelHostSession:
     def capability_refresh_attention(self) -> str | None:
         return self._capability_refresh_attention
 
-    async def _adopt_capabilities_if_requested(self, *, outcome_sink: dict[str, object] | None = None) -> bool:
+    async def _adopt_capabilities_for_execution(self) -> bool:
+        return await self._adopt_capabilities_if_requested(propagate_failure=True)
+
+    async def _adopt_capabilities_if_requested(
+        self, *, outcome_sink: dict[str, object] | None = None,
+        propagate_failure: bool = False,
+    ) -> bool:
         """Adopt marked user/directory sources before the next provider preparation."""
 
         async with self._lock:
@@ -1324,6 +1389,8 @@ class KernelHostSession:
         except asyncio.CancelledError:
             raise
         except Exception:
+            if propagate_failure:
+                raise
             attention = "PROJECT_CAPABILITY_ADOPTION_FAILED"
         else:
             if outcome_sink is not None:
@@ -1609,128 +1676,136 @@ class KernelHostSession:
         replay. During execution only inspect the installed request. New-turn
         memory/hook sources and the unsent draft are not part of this preview.
         """
-        from pulsara_agent.conversation_kernel.direct_model import (
-            KernelModelTargetPreparationRequest,
-        )
-        from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
-        from pulsara_agent.primitives.model_call import ModelCallPurpose
-
         async with self._lock:
             self._require_open()
-            binding = await self.model_call_binding()
-            if binding is None:
-                return {"state": "unavailable", "connection_id": None}
-            scope = ProviderInputContinuityScope(
-                self.session_id, self._session_scope_kind
+            self._context_preview_owner_task = asyncio.current_task()
+            try:
+                # Accepted semantic previews keep their exact adopted facts
+                # while close stops live transports independently.
+                self._context_preview_capability_state = self._freeze_effective_capability_state()
+                return await self._read_context_usage_admitted()
+            finally:
+                self._context_preview_capability_state = None
+                self._context_preview_owner_task = None
+
+    async def _read_context_usage_admitted(self) -> dict[str, object]:
+        from pulsara_agent.conversation_kernel.direct_model import KernelModelTargetPreparationRequest
+        from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
+        from pulsara_agent.primitives.model_call import ModelCallPurpose
+        binding = await self.model_call_binding()
+        if binding is None:
+            return {"state": "unavailable", "connection_id": None}
+        scope = ProviderInputContinuityScope(
+            self.session_id, self._session_scope_kind
+        )
+        cohort = self._input_continuity.current_cohort(scope)
+        turn_id = self._active_turn_id
+        compacting = self._compaction.is_fenced(
+            scope_kind=self._session_scope_kind,
+        )
+        busy = self._active_task is not None or compacting
+        if not busy:
+            turn_id = await self._io.run(
+                self.repository.read_latest_terminal_scope_turn_id,
+                self._lease.guard,
+                scope_kind=ConversationScopeKind.ROOT,
+                deadline_monotonic=self._canonical_deadline(),
             )
-            cohort = self._input_continuity.current_cohort(scope)
-            turn_id = self._active_turn_id
-            compacting = self._compaction.is_fenced(
-                scope_kind=self._session_scope_kind,
+        target = self._model.prepare_target(
+            KernelModelTargetPreparationRequest(
+                session_id=self.session_id,
+                turn_id=turn_id or "context-preview:empty",
+                model_call_index=1,
+                purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
+                maximum_input_tokens=self._runner._provider_dispatch._maximum_input_tokens_per_call,
+                binding=binding,
             )
-            busy = self._active_task is not None or compacting
-            if not busy:
-                turn_id = await self._io.run(
-                    self.repository.read_latest_terminal_scope_turn_id,
-                    self._lease.guard,
-                    scope_kind=ConversationScopeKind.ROOT,
-                    deadline_monotonic=self._canonical_deadline(),
+        )
+        target_fact = target.epoch_call_target.target_bundle.target_fact
+        switched = (
+            cohort is not None
+            and cohort.target_bundle != target.epoch_call_target.target_bundle
+        )
+        policy = self._compaction.policy
+        automatic = policy.enabled and (
+            switched
+            or (
+                policy.automatic_enabled
+                and self._compaction.automatic_allowed(
+                    scope_kind=self._session_scope_kind,
                 )
-            target = self._model.prepare_target(
-                KernelModelTargetPreparationRequest(
-                    session_id=self.session_id,
-                    turn_id=turn_id or "context-preview:empty",
-                    model_call_index=1,
-                    purpose=ModelCallPurpose.AGENT_MODEL_LOOP,
-                    maximum_input_tokens=self._runner._provider_dispatch._maximum_input_tokens_per_call,
-                    binding=binding,
+            )
+        )
+        payload: dict[str, object] = {
+            "state": "compacting" if compacting else "updating" if busy else "empty",
+            "connection_id": binding.connection_id.value,
+            "model_id": target_fact.model_id,
+            "input_tokens": None,
+            "input_budget_tokens": target.effective_input_budget_tokens,
+            "budget_source": None,
+            "model_switch_pending": switched,
+            "automatic_compaction_available": automatic,
+            "compaction_expected": False,
+            "compaction_trigger_tokens": int(
+                target.effective_input_budget_tokens
+                * policy.auto_trigger_ratio
+            ),
+        }
+        if busy:
+            if cohort is None or switched or compacting:
+                return payload
+            plan = cohort.view.wire_input_plan
+            quote = plan.quote
+            tokens, source = quote.budget_input_tokens, quote.budget_source
+            anchor = self._input_continuity.current_usage_anchor(scope)
+            if anchor is not None:
+                calibrated = anchor.budget_for(
+                    connection_id=binding.connection_id.value,
+                    target=target_fact,
+                    route_wire_profile_fingerprint=plan.route_wire_profile_fingerprint,
+                    materialization=plan.materialization,
+                    raw_input_tokens=quote.raw_final_wire_estimated_input_tokens,
                 )
-            )
-            target_fact = target.epoch_call_target.target_bundle.target_fact
-            switched = (
-                cohort is not None
-                and cohort.target_bundle != target.epoch_call_target.target_bundle
-            )
-            policy = self._compaction.policy
-            automatic = policy.enabled and (
-                switched
-                or (
-                    policy.automatic_enabled
-                    and self._compaction.automatic_allowed(
-                        scope_kind=self._session_scope_kind,
-                    )
-                )
-            )
-            payload: dict[str, object] = {
-                "state": "compacting" if compacting else "updating" if busy else "empty",
-                "connection_id": binding.connection_id.value,
-                "model_id": target_fact.model_id,
-                "input_tokens": None,
-                "input_budget_tokens": target.effective_input_budget_tokens,
-                "budget_source": None,
-                "model_switch_pending": switched,
-                "automatic_compaction_available": automatic,
-                "compaction_expected": False,
-                "compaction_trigger_tokens": int(
-                    target.effective_input_budget_tokens
-                    * policy.auto_trigger_ratio
+                if calibrated is not None:
+                    tokens, source = calibrated[0], "reported_input_anchor"
+            payload.update(
+                state="ready", input_tokens=tokens, budget_source=source,
+                input_budget_tokens=quote.effective_input_budget_tokens,
+                compaction_trigger_tokens=int(
+                    quote.effective_input_budget_tokens * policy.auto_trigger_ratio
                 ),
-            }
-            if busy:
-                if cohort is None or switched or compacting:
-                    return payload
-                plan = cohort.view.wire_input_plan
-                quote = plan.quote
-                tokens, source = quote.budget_input_tokens, quote.budget_source
-                anchor = self._input_continuity.current_usage_anchor(scope)
-                if anchor is not None:
-                    calibrated = anchor.budget_for(
-                        connection_id=binding.connection_id.value,
-                        target=target_fact,
-                        route_wire_profile_fingerprint=plan.route_wire_profile_fingerprint,
-                        materialization=plan.materialization,
-                        raw_input_tokens=quote.raw_final_wire_estimated_input_tokens,
-                    )
-                    if calibrated is not None:
-                        tokens, source = calibrated[0], "reported_input_anchor"
+            )
+        elif turn_id is not None:
+            projection = (
+                await self._runner._provider_dispatch.prepare_compaction_source(
+                    turn_id=turn_id,
+                    model_call_index=1,
+                    inherited_memory_use_policy=self._runner._root_memory_use_policy,
+                    deadline=self._canonical_deadline(),
+                    allow_terminal_compaction=True,
+                    prepared_target_override=target,
+                    destination_projection_source=(switched or cohort is None),
+                    read_only_context_preview=True,
+                )
+            )
+            try:
+                quote = projection.wire_quote
                 payload.update(
-                    state="ready", input_tokens=tokens, budget_source=source,
+                    state="ready",
+                    input_tokens=quote.budget_input_tokens,
                     input_budget_tokens=quote.effective_input_budget_tokens,
+                    budget_source=quote.budget_source,
                     compaction_trigger_tokens=int(
                         quote.effective_input_budget_tokens * policy.auto_trigger_ratio
                     ),
                 )
-            elif turn_id is not None:
-                projection = (
-                    await self._runner._provider_dispatch.prepare_compaction_source(
-                        turn_id=turn_id,
-                        model_call_index=1,
-                        inherited_memory_use_policy=self._runner._root_memory_use_policy,
-                        deadline=self._canonical_deadline(),
-                        allow_terminal_compaction=True,
-                        prepared_target_override=target,
-                        destination_projection_source=(switched or cohort is None),
-                        read_only_context_preview=True,
-                    )
-                )
-                try:
-                    quote = projection.wire_quote
-                    payload.update(
-                        state="ready",
-                        input_tokens=quote.budget_input_tokens,
-                        input_budget_tokens=quote.effective_input_budget_tokens,
-                        budget_source=quote.budget_source,
-                        compaction_trigger_tokens=int(
-                            quote.effective_input_budget_tokens * policy.auto_trigger_ratio
-                        ),
-                    )
-                finally:
-                    projection.close()
-            tokens = payload["input_tokens"]
-            payload["compaction_expected"] = (
-                tokens is not None and tokens >= payload["compaction_trigger_tokens"]
-            )
-            return payload
+            finally:
+                projection.close()
+        tokens = payload["input_tokens"]
+        payload["compaction_expected"] = (
+            tokens is not None and tokens >= payload["compaction_trigger_tokens"]
+        )
+        return payload
 
     def _model_identity(self, binding: ModelCallBinding) -> str:
         return self._model_runtime.connection(binding).target.model_id
@@ -6757,6 +6832,48 @@ class KernelHostSession:
             self._external_new_turn_settled.set()
             self._queue_wake.set()
 
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._physical_close_complete
+
+    @property
+    def necessary_settlement_complete(self) -> bool:
+        return self._physical_close_complete and self._necessary_settlement_error is None
+
+    @property
+    def local_children_stopped(self) -> bool:
+        return all(owner.local_children_stopped for owner in (
+            self._tools, self._code_mode, self._hooks, self._mcp_supervisor,
+        ))
+
+    def _request_close_cancellation(self) -> None:
+        if self._external_new_turn_cancellation_intent is not None:
+            self._external_new_turn_cancellation_intent.install_cause(
+                ForegroundCancellationCause.HOST_SESSION_CLOSE,
+            )
+        if self._active_task is not None and not self._active_task.done():
+            if self._active_cancellation_intent is None:
+                raise RuntimeError("active ROOT task lacks cancellation intent")
+            self._active_cancellation_intent.install_cause(
+                ForegroundCancellationCause.HOST_SESSION_CLOSE)
+        self._code_mode.mark_all_stopped()
+        if (self._active_task is not None and not self._active_task.done()
+                and self._active_task.cancelling() == 0):
+            self._active_task.cancel()
+
+    async def _stop_close_admission(self) -> None:
+        async with self._lock:
+            self._closing = True
+            self._tools.stop_local_process_admission()
+            self._request_close_cancellation()
+            self._presentation_notices.clear()
+            self._queued_prompt_hooks.clear()
+            self._tools.todo_owner.mark_closing(
+                scope_kind=self._session_scope_kind,
+            )
+            self._queue_wake.set()
+            self._cell_output_wake.set()
+
     async def aclose(
         self,
         *,
@@ -6764,68 +6881,66 @@ class KernelHostSession:
     ) -> None:
         async with self._close_async_lock:
             if self._closed:
+                if self._necessary_settlement_error is not None:
+                    raise KernelSessionSettlementUnconfirmed("Host canonical settlement is unconfirmed") from self._necessary_settlement_error
                 return
             deadline = (
                 self._deadlines.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE)
                 if deadline_monotonic is None
                 else deadline_monotonic
             )
-            async with self._lock:
-                self._closing = True
-                if self._external_new_turn_cancellation_intent is not None:
-                    self._external_new_turn_cancellation_intent.install_cause(
-                        ForegroundCancellationCause.HOST_SESSION_CLOSE,
-                    )
-                if self._active_task is not None and not self._active_task.done():
-                    if self._active_cancellation_intent is None:
-                        raise RuntimeError("active ROOT task lacks cancellation intent")
-                    self._active_cancellation_intent.install_cause(
-                        ForegroundCancellationCause.HOST_SESSION_CLOSE)
-                self._code_mode.mark_all_stopped()
-                if (self._active_task is not None and not self._active_task.done()
-                        and self._active_task.cancelling() == 0):
-                    self._active_task.cancel()
-                self._presentation_notices.clear()
-                self._queued_prompt_hooks.clear()
-                self._tools.todo_owner.mark_closing(
-                    scope_kind=self._session_scope_kind,
-                )
-                self._queue_wake.set()
-                self._cell_output_wake.set()
-            await self._code_mode.aclose()
+            self._closing = True
+            self._tools.stop_local_process_admission()
+            self._request_close_cancellation()
+            close_error: BaseException | None = None
+            settlement_error: BaseException | None = None
+            code_close_task = asyncio.create_task(self._code_mode.aclose(),
+                                                name=f"kernel-code-mode-close:{self.host_session_id}")
+            terminal_stop_task = asyncio.create_task(
+                self._tools.stop_terminal_physical_owners(timeout_seconds=max(0.001, deadline - monotonic())),
+                name=f"kernel-terminal-stop:{self.host_session_id}",
+            )
+            screenshot_stop_task = asyncio.create_task(
+                self._tools.stop_visualization_physical_owners(),
+                name=f"kernel-visualization-stop:{self.host_session_id}",
+            )
             self.workspace_gate.begin_close()
             # SessionEnd consumes the exact close-attempt carrier.  Freeze the
             # fixed workspace root for this attempt; the later terminal Hook
             # lane consumes the carrier without reopening any execution owner.
             session_end_cwd = self._tools.snapshot_workspace_root()
             self._hooks.begin_host_close(deadline_monotonic=deadline)
-            await self._ephemeral.aclose()
+            ephemeral_close_task = asyncio.create_task(self._ephemeral.aclose(),
+                                      name=f"kernel-ephemeral-close:{self.host_session_id}")
             self.extensions.stop_admission()
             self._mcp_supervisor.stop_admission()
             mcp_close_task = asyncio.create_task(
                 self._mcp_supervisor.aclose(),
                 name=f"kernel-mcp-close:{self.host_session_id}",
             )
-            close_error: BaseException | None = None
-            self._delivery_task.cancel()
+            await self._stop_close_admission()
+            if self._delivery_task is not None:
+                self._delivery_task.cancel()
             try:
-                if await _join_close_task(
+                if self._delivery_task is not None and await _join_close_task(
                     self._delivery_task, deadline_monotonic=deadline
                 ):
                     close_error = TimeoutError(
                         "prompt delivery settlement exited after close deadline"
                     )
             except BaseException as exc:
-                close_error = exc
+                close_error = close_error or exc
+                settlement_error = settlement_error or exc
             try:
-                if await _join_close_task(
+                if self._cell_output_task is not None and await _join_close_task(
                     self._cell_output_task, deadline_monotonic=deadline
                 ):
                     close_error = TimeoutError(
                         "Cell output delivery exited after close deadline"
                     )
             except BaseException as exc:
-                close_error = exc
+                close_error = close_error or exc
+                settlement_error = settlement_error or exc
             external_settlement = asyncio.create_task(
                 self._external_new_turn_settled.wait(),
                 name=f"kernel-external-settlement-close:{self.host_session_id}",
@@ -6839,13 +6954,11 @@ class KernelHostSession:
                     )
             except BaseException as exc:
                 close_error = close_error or exc
-            # A cancelled asyncio task cannot stop its Terminal worker thread.
-            # Terminate and physically join process owners first so
-            # the exact in-flight tool invocation can leave its bounded wait.
+            # Local process termination was requested before any database or
+            # auxiliary-provider join above could block this close operation.
             try:
-                await self._tools.stop_terminal_physical_owners(
-                    timeout_seconds=max(0.001, deadline - monotonic())
-                )
+                if await _join_close_task(terminal_stop_task, deadline_monotonic=deadline):
+                    close_error = close_error or TimeoutError("Terminal owner exited after close deadline")
             except BaseException as exc:
                 close_error = close_error or exc
             async with self._lock:
@@ -6865,8 +6978,13 @@ class KernelHostSession:
                         )
                 except BaseException as exc:
                     close_error = close_error or exc
+                    settlement_error = settlement_error or exc
             if task is not None:
-                await self._settle_active_root_task(task)
+                try:
+                    await self._settle_active_root_task(task)
+                except BaseException as exc:
+                    close_error = close_error or exc
+                    settlement_error = settlement_error or exc
             async with self._lock:
                 control_tasks = tuple(
                     attempt.task
@@ -6886,6 +7004,7 @@ class KernelHostSession:
                         )
                 except BaseException as exc:
                     close_error = close_error or exc
+                    settlement_error = settlement_error or exc
             async with self._lock:
                 for attempt in self._user_control_attempts.values():
                     control = attempt.outcome.user_control
@@ -6923,6 +7042,7 @@ class KernelHostSession:
             except BaseException as exc:
                 todo_closed = None
                 close_error = close_error or exc
+                settlement_error = settlement_error or exc
             self._tools.offer_todo_close(todo_closed)
             self._renewal_task.cancel()
             try:
@@ -6939,10 +7059,13 @@ class KernelHostSession:
                     await close_operation()
                 except BaseException as exc:
                     close_error = close_error or exc
+                    settlement_error = settlement_error or exc
             try:
                 await self._assistant_settlements.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
+                if not self._assistant_settlements.necessary_settlement_complete:
+                    settlement_error = settlement_error or exc
             try:
                 terminal_view = await self._hooks.fence_ordinary()
                 try:
@@ -6999,6 +7122,16 @@ class KernelHostSession:
             except BaseException as exc:
                 close_error = close_error or exc
             try:
+                if await _join_close_task(code_close_task, deadline_monotonic=deadline):
+                    close_error = close_error or TimeoutError("Code Mode exited after close deadline")
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
+                if await _join_close_task(screenshot_stop_task, deadline_monotonic=deadline):
+                    close_error = close_error or TimeoutError("Visualization owner exited after close deadline")
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
                 await self._tools.aclose(
                     timeout_seconds=max(0.001, deadline - monotonic())
                 )
@@ -7019,6 +7152,11 @@ class KernelHostSession:
             except BaseException as exc:
                 close_error = close_error or exc
             try:
+                if await _join_close_task(ephemeral_close_task, deadline_monotonic=deadline):
+                    close_error = close_error or TimeoutError("Ephemeral products exited after close deadline")
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
                 await self.extensions.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
@@ -7028,9 +7166,23 @@ class KernelHostSession:
                 await self._io.aclose(deadline_monotonic=deadline)
             except BaseException as exc:
                 close_error = close_error or exc
-            self._closed = True
+            self._physical_close_complete = all(owner.physical_close_complete for owner in (
+                self._code_mode, self._tools, self._mcp_supervisor, self._hooks,
+                self._ephemeral, self._memory_embedding_maintainer, self._memory_tools,
+                self.extensions, self._io,
+                self._compaction, self._plan_continuations, self._assistant_settlements,
+            ))
+            self._necessary_settlement_error = settlement_error
+            self._closed = self._physical_close_complete
             if close_error is not None:
-                raise close_error
+                logging.getLogger(__name__).warning(
+                    "Host close diagnostic: %s", self.host_session_id,
+                    exc_info=(type(close_error), close_error, close_error.__traceback__),
+                )
+            if not self._physical_close_complete:
+                raise close_error or RuntimeError("Host physical close is unconfirmed")
+            if settlement_error is not None:
+                raise KernelSessionSettlementUnconfirmed("Host canonical settlement is unconfirmed") from settlement_error
 
     async def _renew_writer(self) -> None:
         while True:
@@ -7376,6 +7528,34 @@ def _restore_workspace_directory(root: Path) -> bool:
     return True
 
 
+def _core_database_operation(operation=None, *, retain_result_on_cancel=False):
+    """Keep an accepted Core operation owned until its physical work settles."""
+    if operation is None:
+        return lambda method: _core_database_operation(method, retain_result_on_cancel=retain_result_on_cancel)
+    @wraps(operation)
+    async def admitted(self, *args, **kwargs):
+        current = asyncio.current_task()
+        if current in self._resource_operations or self._current_session_open_admitted():
+            return await operation(self, *args, **kwargs)
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Kernel Host core is closing")
+            task = asyncio.create_task(operation(self, *args, **kwargs),
+                                       name=f"kernel-core:{operation.__name__}")
+            self._resource_operations[task] = self._canonical_deadline()
+            task.add_done_callback(self._retire_resource_operation)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await _join_task_beyond_logical_deadline(task, deadline_monotonic=self._canonical_deadline())
+            if retain_result_on_cancel:
+                # Retirement already owns an exact committed result; its
+                # established API reports it after the physical join.
+                return task.result()
+            raise
+    return admitted
+
+
 class KernelHostCore:
     """Process owner for verified PostgreSQL and live Host sessions."""
 
@@ -7383,6 +7563,10 @@ class KernelHostCore:
         self,
         *,
         model_runtime: ModelRuntime,
+        memory_domain_id: str = "u_local",
+        permission_policy: EffectivePermissionPolicy | None = None,
+        active_skill_names: frozenset[str] = frozenset(),
+        trust_workspace_mcp_config: bool = False,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
         credential_boundary: ProcessCredentialBoundary | None = None,
@@ -7390,6 +7574,10 @@ class KernelHostCore:
         workspace_validator: Callable[[Path], None] | None = None,
     ) -> None:
         self._model_runtime = model_runtime
+        self._memory_domain_id = memory_domain_id
+        self._root_permission_policy = permission_policy or default_permission_policy()
+        self._root_active_skill_names = active_skill_names
+        self._trust_workspace_mcp_config = trust_workspace_mcp_config
         self._workspace_validator = workspace_validator
         self._deadlines = KernelExecutionDeadlineFactory(
             watchdog_policy or DEFAULT_KERNEL_WATCHDOG_POLICY
@@ -7397,6 +7585,8 @@ class KernelHostCore:
         self._image_validator = HostPromptImageValidator()
         self._access: VerifiedPostgresAccessLease | None = None
         self._repository: ConversationKernelRepository | None = None
+        self._resource_initialization: _CoreResourceInitialization | None = None
+        self._resource_operations: dict[asyncio.Task[object], float] = {}
         self._blob_store: PostgresCanonicalBlobStore | None = None
         self._blob_gc_io: KernelSessionIO | None = None
         self._blob_gc_task: asyncio.Task[None] | None = None
@@ -7405,7 +7595,7 @@ class KernelHostCore:
         self._agent_runtime = AgentSessionRuntime(self)
         self._suspended_agent_roots: set[str] = set()
         self._workspace_capability_revisions: dict[Path, int] = {}
-        self._open_attempts: dict[asyncio.Future[None], frozenset[str]] = {}
+        self._open_attempts: dict[asyncio.Future[None], KernelSessionOpenAttempt] = {}
         self._session_retirements: dict[str, KernelSessionRetirement] = {}
         self._close_attempts: dict[str, HostSessionCloseAttempt] = {}
         self._extension_routes: dict[str, tuple[str, KernelExtensionHost]] = {}
@@ -7419,7 +7609,8 @@ class KernelHostCore:
         )
         self._bundled_skill_binding = BundledSkillDistributionBindingOwner()
         self._credential_boundary = credential_boundary or ProcessCredentialBoundary()
-        self.scheduled_tasks = None
+        from pulsara_agent.scheduling.service import ScheduledTaskService
+        self._scheduled_tasks = ScheduledTaskService(self)
         self.mcp_management = LocalMcpManagementService(
             model_runtime.settings, credential_boundary=self._credential_boundary,
             open_browser=open_browser,
@@ -7451,6 +7642,7 @@ class KernelHostCore:
                 session_id,
                 workspace_input=workspace_input,
                 permission_policy=preset_to_policy(PermissionMode.BYPASS_PERMISSIONS),
+                active_skill_names=frozenset(),
             )
         finally:
             await self._settle_session_open(settlement)
@@ -7563,12 +7755,29 @@ class KernelHostCore:
             await self.finish_session_retirement(operation, quarantine=False)
 
     def _canonical_deadline(self) -> float:
-        return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+        current = asyncio.current_task()
+        deadline = self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
+        if current in self._resource_operations:
+            # Observe the actual existing operation boundary; do not turn
+            # a compound Core call into a new total-duration budget.
+            self._resource_operations[current] = deadline
+        return deadline
+
+    @property
+    def model_runtime(self) -> ModelRuntime:
+        return self._model_runtime
+
+    def _retire_resource_operation(self, task: asyncio.Task[object]) -> None:
+        self._resource_operations.pop(task, None)
+        if not task.cancelled():
+            task.exception()
 
     @property
     def has_database_resources(self) -> bool:
         """Whether database maintenance must close this core before deletion."""
-        return self._access is not None or self._repository is not None
+        return (self._access is not None or self._repository is not None
+                or (self._resource_initialization is not None
+                    and not self._resource_initialization.cleanup_complete))
 
     def _plugin_management(self) -> PluginManagementService:
         return PluginManagementService(credential_boundary=self._credential_boundary)
@@ -7656,6 +7865,10 @@ class KernelHostCore:
         cls,
         *,
         model_runtime: ModelRuntime,
+        memory_domain_id: str = "u_local",
+        permission_policy: EffectivePermissionPolicy | None = None,
+        active_skill_names: frozenset[str] = frozenset(),
+        trust_workspace_mcp_config: bool = False,
         authenticated_first_party_extension_ids: frozenset[str] = frozenset(),
         watchdog_policy: KernelExecutionWatchdogPolicy | None = None,
         credential_boundary: ProcessCredentialBoundary | None = None,
@@ -7664,6 +7877,10 @@ class KernelHostCore:
     ) -> "KernelHostCore":
         return cls(
             model_runtime=model_runtime,
+            memory_domain_id=memory_domain_id,
+            permission_policy=permission_policy,
+            active_skill_names=active_skill_names,
+            trust_workspace_mcp_config=trust_workspace_mcp_config,
             authenticated_first_party_extension_ids=(
                 authenticated_first_party_extension_ids
             ),
@@ -7673,12 +7890,75 @@ class KernelHostCore:
             workspace_validator=workspace_validator,
         )
 
+    async def start_scheduled_tasks(self) -> None:
+        """Admit the one timer after resource and model preparation is usable."""
+        async with self._lock:
+            if self._closing:
+                raise KernelHostCoreClosing("Kernel Host core is closing")
+            if self._repository is None:
+                return
+        # Saved custom models can be usable without a remote catalog. The
+        # runtime's actual resolution facts, rather than a UI loading flag,
+        # decide whether this process can prepare scheduled inputs.
+        try:
+            resolution = self._model_runtime.freeze_resolution_snapshot()
+        except ModelRuntimeUnavailable:
+            return
+        if not resolution.resolved:
+            return
+        await self.scheduled_tasks.start()
+
+    async def notify_scheduled_tasks_changed(self) -> None:
+        """Reconsider configured resources and wake the existing timer owner."""
+        await self.start_scheduled_tasks()
+        self.scheduled_tasks.wake()
+
+    @property
+    def root_permission_policy(self) -> EffectivePermissionPolicy:
+        return self._root_permission_policy
+
+    @property
+    def memory_domain_id(self) -> str:
+        return self._memory_domain_id
+
+    @property
+    def scheduled_tasks(self):
+        return self._scheduled_tasks
+
+    @property
+    def root_active_skill_names(self) -> frozenset[str]:
+        return self._root_active_skill_names
+
+    @property
+    def trust_workspace_mcp_config(self) -> bool:
+        return self._trust_workspace_mcp_config
+
     async def prepare_resources(self) -> None:
         """Verify and acquire cold database resources without reading a UI list."""
         await self._ensure_resources()
+        await self.start_scheduled_tasks()
 
     async def _ensure_resources(self) -> ConversationKernelRepository:
-        if self._repository is None:
+        async with self._lock:
+            if (self._closing and asyncio.current_task() not in self._resource_operations
+                    and not self._current_session_open_admitted()):
+                raise KernelHostCoreClosing("Kernel Host core is closing")
+            if self._repository is not None:
+                return self._repository
+            initialization = self._resource_initialization
+            task = initialization.task if initialization is not None else None
+            if task is None or (task.done() and initialization.cleanup_complete
+                                and (task.cancelled() or task.exception() is not None)):
+                initialization = _CoreResourceInitialization(self._canonical_deadline())
+                task = asyncio.create_task(self._initialize_resources(initialization), name="kernel-core-resources")
+                initialization.task = task
+                self._resource_initialization = initialization
+                task.add_done_callback(lambda completed: None if completed.cancelled() else completed.exception())
+        return await asyncio.shield(task)
+
+    async def _initialize_resources(self, initialization: _CoreResourceInitialization) -> ConversationKernelRepository:
+        access = history = io_owner = None
+        try:
             try:
                 postgres = self._model_runtime.settings.read().postgres
             except Exception as exc:
@@ -7687,38 +7967,62 @@ class KernelHostCore:
                 ) from exc
             if postgres is None:
                 raise KernelCompositionUnavailable("PostgreSQL is not configured")
-            self._event_loop = asyncio.get_running_loop()
-            self._access = await process_postgres_schema_verification_service().acquire(
+            access = await process_postgres_schema_verification_service().acquire(
                 postgres.runtime_dsn,
-                deadline_monotonic=self._canonical_deadline(),
+                deadline_monotonic=initialization.deadline_monotonic,
             )
-            try:
-                await asyncio.to_thread(
-                    require_stage2_runtime_privilege_boundary,
-                    self._access.connection_provider,
-                    deadline_monotonic=self._canonical_deadline(),
-                )
-            except BaseException:
-                self._access.release()
-                self._access = None
-                raise
-            self._repository = ConversationKernelRepository(
-                self._access.connection_provider,
+            initialization.access = access
+            initialization.deadline_monotonic = self._canonical_deadline()
+            await asyncio.to_thread(
+                require_stage2_runtime_privilege_boundary,
+                access.connection_provider,
+                deadline_monotonic=initialization.deadline_monotonic,
+            )
+            repository = ConversationKernelRepository(
+                access.connection_provider,
                 post_commit_tap=self._route_committed_events_from_thread,
             )
-            self._blob_store = PostgresCanonicalBlobStore(
-                self._access.connection_provider
+            blob_store = PostgresCanonicalBlobStore(
+                access.connection_provider
             )
-            self._history_maintenance = HistoryProjectionMaintainer(
-                self._access.connection_provider
+            history = HistoryProjectionMaintainer(
+                access.connection_provider
             )
-            self._blob_gc_io = KernelSessionIO(maximum_concurrency=1)
-            self._blob_gc_task = asyncio.create_task(
-                self._blob_gc_loop(), name="kernel-blob-orphan-gc"
-            )
-            self._agent_runtime.start()
-        return self._repository
+            initialization.history = history
+            io_owner = KernelSessionIO(maximum_concurrency=1)
+            initialization.io = io_owner
+            async with self._lock:
+                if self._closing:
+                    raise KernelHostCoreClosing("Kernel Host shutdown won resource initialization")
+                self._access = access
+                self._repository = repository
+                self._blob_store = blob_store
+                self._history_maintenance = history
+                self._blob_gc_io = io_owner
+                self._event_loop = asyncio.get_running_loop()
+                self._blob_gc_task = asyncio.create_task(
+                    self._blob_gc_loop(), name="kernel-blob-orphan-gc"
+                )
+                initialization.access = initialization.history = initialization.io = None
+                initialization.cleanup_complete = True
+            return repository
+        except BaseException:
+            for slot, owner in (("io", io_owner), ("history", history)):
+                if owner is not None:
+                    try:
+                        await owner.aclose(deadline_monotonic=self._canonical_deadline())
+                    except BaseException:
+                        logging.getLogger(__name__).exception("cold resource cleanup failed")
+                        if not owner.physical_close_complete:
+                            continue
+                    setattr(initialization, slot, None)
+            initialization.cleanup_complete = initialization.io is None and initialization.history is None
+            if access is not None and initialization.cleanup_complete:
+                access.release()
+                initialization.access = None
+            raise
 
+    @_core_database_operation
     async def fork_conversation(
         self,
         *,
@@ -7765,7 +8069,7 @@ class KernelHostCore:
         *,
         permission_policy: EffectivePermissionPolicy | None = None,
         system_prompt: str | None = None,
-        active_skill_names: frozenset[str] = frozenset(),
+        active_skill_names: frozenset[str] | None = None,
     ) -> KernelHostSession:
         return await self._open(
             workspace_input,
@@ -7783,9 +8087,10 @@ class KernelHostCore:
         workspace_input: HostWorkspaceInput,
         permission_policy: EffectivePermissionPolicy | None = None,
         system_prompt: str | None = None,
-        active_skill_names: frozenset[str] = frozenset(),
+        active_skill_names: frozenset[str] | None = None,
         restore_missing_workspace: bool = False,
         scheduled: bool = False,
+        operation: asyncio.Future[None] | None = None,
     ) -> KernelHostSession:
         return await self._open(
             workspace_input,
@@ -7796,7 +8101,91 @@ class KernelHostCore:
             session_start_source="resume",
             restore_missing_workspace=restore_missing_workspace,
             scheduled=scheduled,
+            operation=operation,
         )
+
+    async def resume_scheduled_session(self, session_id: str) -> KernelHostSession:
+        """Restore a selected ROOT through the same kernel open owner as the UI."""
+        async with self._lock:
+            self._require_session_control_available_locked(session_id)
+            pending = any(session_id in attempt.session_ids
+                          and (attempt.task is None or attempt.configuration is not None)
+                          for attempt in self._open_attempts.values())
+            live = next((item for item in self._sessions.values() if item.session_id == session_id), None)
+            if live is not None and live._memory_domain_id != self.memory_domain_id:
+                raise KeyError(session_id)
+            if not pending and live is not None and not live.writer_unavailable:
+                return live
+        summary = await self.read_resumable_session(
+            session_id, memory_domain_id=self.memory_domain_id,
+        )
+        if summary is None:
+            raise KeyError(session_id)
+        return await self.resume_session(
+            session_id,
+            workspace_input=HostWorkspaceInput(
+                workspace_kind=summary.workspace_kind,
+                workspace_root=summary.workspace_root,
+                display_label=(summary.workspace_label if summary.workspace_kind != "project" else None),
+                memory_domain_id=summary.memory_domain_id,
+                cleanup_workspace_root_on_close=False,
+                trust_workspace_mcp_config=self._trust_workspace_mcp_config,
+            ),
+            scheduled=True,
+        )
+
+    async def scheduled_management_host(self, session_id: str, *, memory_domain_id: str | None = None) -> KernelHostSession | None:
+        """Locate the canonical live writer without opening a session for management."""
+        async with self._lock:
+            self._require_session_control_available_locked(session_id)
+            if any(session_id in attempt.session_ids
+                   and (attempt.task is None or attempt.configuration is not None)
+                   for attempt in self._open_attempts.values()):
+                raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
+            live = next((item for item in self._sessions.values() if item.session_id == session_id), None)
+            if live is not None and live._memory_domain_id != (memory_domain_id or self.memory_domain_id):
+                raise KeyError(session_id)
+            return live
+
+    async def reserve_session_operation(self, session_id: str) -> asyncio.Future[None]:
+        """Fence kernel execution while a host-facing lifecycle operation settles."""
+        async with self._lock:
+            self._require_session_control_available_locked(session_id)
+            if any(session_id in attempt.session_ids
+                   and (attempt.task is None or attempt.configuration is not None)
+                   for attempt in self._open_attempts.values()):
+                raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在处理另一项操作。")
+            settlement = asyncio.get_running_loop().create_future()
+            self._open_attempts[settlement] = KernelSessionOpenAttempt(frozenset((session_id,)))
+            return settlement
+
+    async def release_session_operation(self, operation: asyncio.Future[None]) -> None:
+        await self._settle_session_open(operation)
+
+    def _require_session_control_available_locked(self, session_id: str) -> None:
+        if self._closing:
+            raise KernelHostCoreClosing("Kernel Host core is closing")
+        if session_id in self._session_retirements:
+            raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话正在删除。")
+        for attempt in self._close_attempts.values():
+            if attempt.session.session_id == session_id:
+                raise SessionControlRejected(
+                    "SESSION_RECOVERY_CLOSE_FAILED" if attempt.state is HostSessionCloseState.CLOSE_FAILED_QUARANTINED else "SESSION_CONTROL_BUSY",
+                    "旧会话仍在停止，请等待停止完成后再试。",
+                )
+
+    def _current_session_open_admitted(self) -> bool:
+        current = asyncio.current_task()
+        return any(attempt.task is current for attempt in self._open_attempts.values())
+
+    def _session_open_children_stopped(self) -> bool:
+        # Before construction, the final post-await closing check prevents any
+        # future spawn. After construction the existing open attempt retains
+        # the complete candidate until publication or physical cleanup.
+        return all(attempt.candidate_session is None
+                   or attempt.candidate_session.local_children_stopped
+                   for attempt in self._open_attempts.values()
+                   if attempt.configuration is not None)
 
     async def resume_most_recent_session(
         self,
@@ -7819,13 +8208,90 @@ class KernelHostCore:
         session_id: str,
         permission_policy: EffectivePermissionPolicy | None,
         system_prompt: str | None,
-        active_skill_names: frozenset[str],
+        active_skill_names: frozenset[str] | None,
         session_start_source: str,
         restore_missing_workspace: bool = False,
         scheduled: bool = False,
+        operation: asyncio.Future[None] | None = None,
     ) -> KernelHostSession:
-        settlement = await self._admit_session_open(session_id)
+        normalized_workspace = replace(workspace_input, workspace_root=(
+            str(Path(workspace_input.workspace_root).expanduser().absolute())
+            if workspace_input.workspace_root is not None else None
+        ))
+        effective_policy = permission_policy or self._root_permission_policy
+        effective_skills = self._root_active_skill_names if active_skill_names is None else active_skill_names
+        configuration = (normalized_workspace, effective_policy, system_prompt, effective_skills)
+        async with self._lock:
+            self._require_session_control_available_locked(session_id)
+            if operation is not None:
+                reserved = self._open_attempts.get(operation)
+                if reserved is None or reserved.session_ids != frozenset((session_id,)) or reserved.task is not None:
+                    raise RuntimeError("session operation is not current")
+            current = asyncio.current_task()
+            previous = next((item for item in self._sessions.values() if item.session_id == session_id), None)
+            pending = [attempt for token, attempt in self._open_attempts.items()
+                       if session_id in attempt.session_ids and token is not operation
+                       and attempt.task is not current
+                       and (previous is None or attempt.task is None or attempt.configuration is not None)]
+            if pending:
+                attempt = pending[0]
+                if attempt.task is None or (scheduled and not attempt.scheduled):
+                    raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话正在打开或恢复，请稍后再试。")
+                if attempt.configuration != configuration:
+                    raise ValueError("session open configuration conflicts with its current owner")
+                task = attempt.task
+            else:
+                if previous is not None and not previous.writer_unavailable:
+                    if previous._closing or previous._closed:
+                        raise SessionControlRejected("SESSION_CONTROL_BUSY", "会话仍在停止。")
+                    saved = previous.workspace
+                    if (normalized_workspace.memory_domain_id != previous._memory_domain_id
+                            or normalized_workspace.workspace_kind != saved.workspace_kind
+                            or normalized_workspace.workspace_root != str(saved.workspace_root)
+                            or normalized_workspace.trust_workspace_mcp_config != saved.trust_workspace_mcp_config):
+                        raise ValueError("session workspace conflicts with its current owner")
+                    if permission_policy is not None and mode_for_policy(permission_policy) != previous._launch_permission_mode:
+                        raise ValueError("session permission configuration conflicts with its current owner")
+                    if active_skill_names is not None and active_skill_names != previous._capabilities.configured_active_skill_names:
+                        raise ValueError("session skill configuration conflicts with its current owner")
+                    if system_prompt is not None and system_prompt != previous._context_sources._base:
+                        raise ValueError("session system configuration conflicts with its current owner")
+                    return previous
+                settlement = asyncio.get_running_loop().create_future()
+                task = asyncio.create_task(self._open_owner(
+                    settlement=settlement, previous=previous,
+                    workspace_input=workspace_input, session_id=session_id,
+                    permission_policy=effective_policy, system_prompt=system_prompt,
+                    active_skill_names=effective_skills,
+                    session_start_source=session_start_source,
+                    restore_missing_workspace=restore_missing_workspace, scheduled=scheduled,
+                ), name=f"kernel-session-open:{session_id}")
+                self._open_attempts[settlement] = KernelSessionOpenAttempt(
+                    frozenset((session_id,)), task=task, scheduled=scheduled, configuration=configuration,
+                )
+                task.add_done_callback(lambda completed: None if completed.cancelled() else completed.exception())
+        return await asyncio.shield(task)
+
+    async def _open_owner(
+        self, *, settlement: asyncio.Future[None], previous: KernelHostSession | None,
+        workspace_input: HostWorkspaceInput, session_id: str,
+        permission_policy: EffectivePermissionPolicy | None, system_prompt: str | None,
+        active_skill_names: frozenset[str], session_start_source: str,
+        restore_missing_workspace: bool, scheduled: bool,
+    ) -> KernelHostSession:
         try:
+            if previous is not None:
+                try:
+                    await self.close_session(previous.host_session_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise SessionControlRejected(
+                        "SESSION_RECOVERY_CLOSE_FAILED", "旧会话仍在停止，请等待停止完成后再试。",
+                    ) from exc
+                async with self._lock:
+                    if self._closing:
+                        raise KernelHostCoreClosing("Kernel Host core is closing")
             return await self._open_admitted(
                 workspace_input,
                 session_id=session_id,
@@ -7834,7 +8300,7 @@ class KernelHostCore:
                 active_skill_names=active_skill_names,
                 session_start_source=session_start_source,
                 restore_missing_workspace=restore_missing_workspace,
-            scheduled=scheduled,
+                scheduled=scheduled,
             )
         finally:
             await self._settle_session_open(settlement)
@@ -7846,7 +8312,9 @@ class KernelHostCore:
             if any(s in self._session_retirements for s in session_ids):
                 raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话正在删除。")
             settlement = asyncio.get_running_loop().create_future()
-            self._open_attempts[settlement] = frozenset(session_ids)
+            self._open_attempts[settlement] = KernelSessionOpenAttempt(
+                frozenset(session_ids), task=asyncio.current_task(),
+            )
             return settlement
 
     async def _settle_session_open(self, settlement: asyncio.Future[None]) -> None:
@@ -7885,6 +8353,11 @@ class KernelHostCore:
             while host_id in self._sessions:
                 host_id = random_id("host")
         io_owner = KernelSessionIO()
+        attempt = next((item for item in self._open_attempts.values()
+                        if item.task is asyncio.current_task() and item.configuration is not None), None)
+        if attempt is None:
+            raise RuntimeError("Session writer acquisition has no admitted open owner")
+        attempt.io_owner = io_owner
         writer_lease = None
         try:
             while True:
@@ -7946,6 +8419,12 @@ class KernelHostCore:
                 session.record_workspace_recreated(created_at)
             return session
         except BaseException:
+            candidate = next((attempt.candidate_session for attempt in self._open_attempts.values()
+                              if attempt.task is asyncio.current_task() and attempt.candidate_session is not None), None)
+            if candidate is not None:
+                # The same prepared/live close attempt now owns this writer
+                # and IO. Never release either behind an unjoined candidate.
+                raise
             if writer_lease is not None:
                 try:
                     await asyncio.to_thread(repository.release_host_writer, writer_lease.guard,
@@ -8039,14 +8518,24 @@ class KernelHostCore:
             # Keep the original acquisition fact for the cold-epoch bootstrap.
             writer_lease = replace(writer_lease, expires_at=renewed_lease.expires_at)
             require_workspace(workspace.workspace_root)
+            root_session_id = await io_owner.run(
+                repository.read_session_root_id,
+                session_id=session_id,
+                deadline_monotonic=self._canonical_deadline(),
+            )
+            # This is the last await before Session construction can install
+            # live owners. Closing wins here or observes the exact candidate
+            # below; no unregistered owner can appear after exit was admitted.
+            if self._closing:
+                raise KernelHostCoreClosing("Kernel Host shutdown won before session construction")
+            attempt = next((item for item in self._open_attempts.values()
+                            if item.task is asyncio.current_task() and item.configuration is not None), None)
+            if attempt is None:
+                raise RuntimeError("Session construction has no admitted open owner")
             session = KernelHostSession(
                 model_runtime=self._model_runtime,
                 agent_runtime=self._agent_runtime,
-                root_session_id=await io_owner.run(
-                    repository.read_session_root_id,
-                    session_id=session_id,
-                    deadline_monotonic=self._canonical_deadline(),
-                ),
+                root_session_id=root_session_id,
                 mcp_management=self.mcp_management,
                 capability_change_notifier=self.mark_capability_change,
                 workspace=workspace,
@@ -8076,13 +8565,17 @@ class KernelHostCore:
                 mcp_configs=mcp_configs,
                 scheduled_tasks=self.scheduled_tasks,
             )
+            attempt.candidate_session = session
             await session.start_mcp()
             await self._register_prepared_session(session, capability_baseline)
             return session
         except BaseException:
             if "session" in locals():
                 with suppress(BaseException):
-                    await session.aclose(deadline_monotonic=deadline)
+                    if self._sessions.get(host_id) is session:
+                        await self.close_session(host_id)
+                    else:
+                        await self.close_prepared_session(session)
             else:
                 with suppress(BaseException):
                     initial_plugin_view.close()
@@ -8109,6 +8602,7 @@ class KernelHostCore:
                 session.host_session_id,
                 session.extensions,
             )
+            session.activate_execution()
             changed = self._workspace_capability_revisions[root] > capability_baseline
         session._renewal_task.add_done_callback(
             lambda task: self._close_unavailable_writer(session, task)
@@ -8144,6 +8638,7 @@ class KernelHostCore:
 
         closing.add_done_callback(observed)
 
+    @_core_database_operation
     async def memory_management_projects(
         self, *, memory_domain_id, limit=40, cursor=None
     ):
@@ -8156,6 +8651,7 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    @_core_database_operation
     async def memory_management_catalog(
         self, *, memory_domain_id, selection, **filters
     ):
@@ -8168,6 +8664,7 @@ class KernelHostCore:
             **filters,
         )
 
+    @_core_database_operation
     async def memory_management_detail(
         self,
         *,
@@ -8188,6 +8685,7 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    @_core_database_operation
     async def memory_deletion_preview(
         self, *, memory_domain_id, selection, fact_id, additional=()
     ):
@@ -8201,6 +8699,7 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    @_core_database_operation
     async def memory_management_edit_statement(
         self, *, memory_domain_id, selection, fact_id, statement, expected_updated_at
     ):
@@ -8236,6 +8735,7 @@ class KernelHostCore:
             for session in self._sessions.values():
                 session._memory_embedding_maintainer.offer_wake()
 
+    @_core_database_operation
     async def execute_memory_deletion(
         self, *, memory_domain_id, selection, fact_id, additional, expected_records
     ):
@@ -8294,6 +8794,7 @@ class KernelHostCore:
                         raise
         return marked
 
+    @_core_database_operation
     async def list_resumable_sessions(
         self,
         *,
@@ -8316,6 +8817,7 @@ class KernelHostCore:
         )
         return [_kernel_session_summary(row) for row in rows]
 
+    @_core_database_operation
     async def list_resumable_sessions_across_workspaces(
         self,
         *,
@@ -8334,6 +8836,7 @@ class KernelHostCore:
         )
         return [_kernel_session_summary(row) for row in rows]
 
+    @_core_database_operation
     async def search_sessions(self, *, memory_domain_id: str, query: str, lifecycle: str = "ALL", cursor: str | None = None, limit: int = 20):
         from pulsara_agent.conversation_kernel.session_search import search_session_page
 
@@ -8349,6 +8852,7 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    @_core_database_operation
     async def rename_session(
         self, session_id: str, *, memory_domain_id: str, title: str
     ) -> str:
@@ -8361,6 +8865,7 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    @_core_database_operation
     async def read_resumable_session(
         self,
         session_id: str,
@@ -8383,6 +8888,7 @@ class KernelHostCore:
         )
         return None if row is None else _kernel_session_summary(row)
 
+    @_core_database_operation
     async def read_provider_call_usage_page(
         self,
         *,
@@ -8411,6 +8917,7 @@ class KernelHostCore:
             deadline_monotonic=self._canonical_deadline(),
         )
 
+    @_core_database_operation
     async def canonical_session_exists(self, session_id: str, memory_domain_id: str) -> bool:
         repository = await self._ensure_resources()
         return await asyncio.to_thread(
@@ -8418,6 +8925,7 @@ class KernelHostCore:
             memory_domain_id=memory_domain_id, deadline_monotonic=self._canonical_deadline(),
         )
 
+    @_core_database_operation
     async def idle_session_ids(self, memory_domain_id: str):
         repository = await self._ensure_resources()
         async with self._lock:
@@ -8426,11 +8934,13 @@ class KernelHostCore:
                                        local_session_ids=local_session_ids,
                                        deadline_monotonic=self._canonical_deadline())
 
+    @_core_database_operation
     async def read_session_lifecycle(self, session_id: str, memory_domain_id: str):
         repository = await self._ensure_resources()
         return await asyncio.to_thread(repository.read_session_lifecycle, session_id=session_id,
                                        memory_domain_id=memory_domain_id, deadline_monotonic=self._canonical_deadline())
 
+    @_core_database_operation
     async def prepare_session_archive(self, operation: KernelSessionRetirement):
         """Freeze existing Host admission before checking canonical idle; do not stop work."""
         from .repository_errors import SessionDeletionBusy, SessionWriterConflict
@@ -8461,6 +8971,7 @@ class KernelHostCore:
                 await session.abort_safe_runtime_reopen(gate)
             raise
 
+    @_core_database_operation(retain_result_on_cancel=True)
     async def commit_session_archive(self, operation: KernelSessionRetirement) -> str:
         if (operation.owner is not self or not operation.physical_full or operation.quarantined
             or self._session_retirements.get(operation.session_id) is not operation):
@@ -8475,6 +8986,7 @@ class KernelHostCore:
         await _join_task_beyond_logical_deadline(worker, deadline_monotonic=deadline)
         return worker.result()
 
+    @_core_database_operation
     async def unarchive_session(self, session_id: str, memory_domain_id: str):
         repository = await self._ensure_resources()
         deadline = self._canonical_deadline()
@@ -8491,12 +9003,12 @@ class KernelHostCore:
         async with self._lock:
             if self._closing or session_id in self._session_retirements:
                 raise SessionDeleteRejected("SESSION_DELETE_BUSY", "会话正在处理另一项操作。")
-            pending = tuple(f for f, ids in self._open_attempts.items() if session_id in ids)
+            pending = tuple(f for f, attempt in self._open_attempts.items() if session_id in attempt.session_ids)
             operation = KernelSessionRetirement(
                 session_id, memory_domain_id, self, asyncio.get_running_loop().create_future(),
             )
             self._session_retirements[session_id] = operation
-            self._open_attempts[operation.settlement] = frozenset((session_id,))
+            self._open_attempts[operation.settlement] = KernelSessionOpenAttempt(frozenset((session_id,)))
         if pending:
             await asyncio.gather(*(asyncio.shield(f) for f in pending))
         return operation
@@ -8515,6 +9027,7 @@ class KernelHostCore:
                 operation.closed_writer = session._lease.guard
         operation.physical_full = True
 
+    @_core_database_operation(retain_result_on_cancel=True)
     async def commit_session_deletion(
         self, operation: KernelSessionRetirement, *,
         required_lifecycle: Literal["ARCHIVED"] | None = None,
@@ -8551,34 +9064,80 @@ class KernelHostCore:
                 operation.settlement.set_result(None)
 
     async def close_session(self, host_session_id: str) -> None:
+        attempt = await self.request_close_session(host_session_id)
+        if attempt is not None:
+            # Cancellation detaches only this waiter from the installed owner.
+            await asyncio.shield(attempt.task)
+
+    def _install_session_close_locked(self, session: KernelHostSession) -> HostSessionCloseAttempt:
+        attempt = self._close_attempts.get(session.host_session_id)
+        if attempt is None:
+            deadline = self._deadlines.deadline(KernelWatchdogOwner.HOST_SESSION_CLOSE)
+            task = asyncio.create_task(self._close_session_owner(
+                host_session_id=session.host_session_id, session=session, deadline_monotonic=deadline,
+            ), name=f"kernel-host-close:{session.host_session_id}")
+            attempt = HostSessionCloseAttempt(session.host_session_id, session, deadline, task)
+            self._close_attempts[session.host_session_id] = attempt
+        # The event-loop-local admission flag does not wait behind an already
+        # accepted preview/database read holding the Session lock.
+        session._closing = True
+        return attempt
+
+    async def request_close_session(self, host_session_id: str) -> HostSessionCloseAttempt | None:
         async with self._lock:
-            session = self._sessions.get(host_session_id)
             attempt = self._close_attempts.get(host_session_id)
             if attempt is None:
+                session = self._sessions.get(host_session_id)
                 if session is None:
-                    return
-                deadline = self._deadlines.deadline(
-                    KernelWatchdogOwner.HOST_SESSION_CLOSE
-                )
-                task = asyncio.create_task(
-                    self._close_session_owner(
-                        host_session_id=host_session_id,
-                        session=session,
-                        deadline_monotonic=deadline,
-                    ),
-                    name=f"kernel-host-close:{host_session_id}",
-                )
-                attempt = HostSessionCloseAttempt(
-                    host_session_id=host_session_id,
-                    session=session,
-                    deadline_monotonic=deadline,
-                    task=task,
-                )
-                self._close_attempts[host_session_id] = attempt
-        # The Host owns the close operation.  Request/gateway cancellation
-        # detaches only this waiter; later callers and shutdown join the exact
-        # same physical close task.
+                    return None
+                attempt = self._install_session_close_locked(session)
+        return attempt
+
+    async def close_prepared_session(self, session: KernelHostSession) -> None:
+        """Keep a failed unpublished candidate in the existing close owner."""
+        async with self._lock:
+            if not any(attempt.candidate_session is session for attempt in self._open_attempts.values()):
+                raise RuntimeError("prepared Session lost its opening owner")
+            attempt = self._install_session_close_locked(session)
         await asyncio.shield(attempt.task)
+
+    def session_runtime_closing(self, session_id: str) -> bool:
+        return any(
+            attempt.session.session_id == session_id
+            and attempt.state in {HostSessionCloseState.TASK_INSTALLED,
+                                  HostSessionCloseState.CLOSE_FAILED_QUARANTINED}
+            for attempt in self._close_attempts.values()
+        )
+
+    @property
+    def workbench_exit_deadline(self) -> float | None:
+        deadlines = [attempt.deadline_monotonic for attempt in self._close_attempts.values()]
+        deadlines.extend(self._resource_operations.values())
+        deadlines.extend(attempt.io_owner.physical_operation_deadline
+                         for attempt in self._open_attempts.values()
+                         if attempt.io_owner is not None
+                         and attempt.io_owner.physical_operation_deadline is not None)
+        deadlines.extend(deadline for deadline in (
+            self.scheduled_tasks.physical_operation_deadline,
+            self._agent_runtime.physical_operation_deadline,
+            self._history_maintenance.physical_operation_deadline if self._history_maintenance is not None else None,
+            self._blob_gc_io.physical_operation_deadline if self._blob_gc_io is not None else None,
+        ) if deadline is not None)
+        initialization = self._resource_initialization
+        if initialization is not None and (not initialization.cleanup_complete
+                or (initialization.task is not None and not initialization.task.done())):
+            deadlines.append(initialization.deadline_monotonic)
+        return min(deadlines, default=None)
+
+    @property
+    def workbench_exit_ready(self) -> bool:
+        deadline = self.workbench_exit_deadline
+        settled_or_overdue = self._closed or (deadline is not None and monotonic() >= deadline)
+        return (self._closing and settled_or_overdue
+                and self._session_open_children_stopped()
+                and self._image_validator.local_children_stopped
+                and all(session.local_children_stopped for session in self._sessions.values())
+                and all(attempt.session.local_children_stopped for attempt in self._close_attempts.values()))
 
     async def _close_session_owner(
         self,
@@ -8587,25 +9146,45 @@ class KernelHostCore:
         session: KernelHostSession,
         deadline_monotonic: float,
     ) -> None:
+        close_error: BaseException | None = None
         if session.root_session_id is None:
             async with self._lock:
                 self._suspended_agent_roots.add(session.session_id)
-                children = tuple(child for child in self._sessions.values()
+                owned = dict(self._sessions)
+                owned.update((attempt.host_session_id, attempt.session) for attempt in self._close_attempts.values())
+                children = tuple(child for child in owned.values()
                     if child.root_session_id == session.session_id)
-            for child in children:
-                await self.close_session(child.host_session_id)
+            child_closes = tuple(asyncio.create_task(self.close_session(child.host_session_id)) for child in children)
+            if children:
+                terminal_stop = asyncio.create_task(session._tools.stop_terminal_physical_owners(
+                    timeout_seconds=max(0.001, deadline_monotonic - monotonic())))
+                await session._stop_close_admission()
+                outcomes = await asyncio.gather(*child_closes, return_exceptions=True)
+                try:
+                    await terminal_stop
+                except BaseException as error:
+                    close_error = error
+            else:
+                outcomes = ()
+            close_error = close_error or next((outcome for outcome in outcomes if isinstance(outcome, BaseException)), None)
+            if any(not child.physical_close_complete for child in children):
+                async with self._lock:
+                    self._close_attempts[host_session_id].state = HostSessionCloseState.CLOSE_FAILED_QUARANTINED
+                raise close_error or RuntimeError("Child Host physical close is unconfirmed")
         try:
             await session.aclose(
                 deadline_monotonic=deadline_monotonic,
             )
-            if session.root_session_id is not None:
-                await self._agent_runtime.release(session.session_id)
-        except BaseException:
-            async with self._lock:
-                attempt = self._close_attempts.get(host_session_id)
-                if attempt is not None:
-                    attempt.state = HostSessionCloseState.CLOSE_FAILED_QUARANTINED
-            raise
+        except BaseException as exc:
+            close_error = close_error or exc
+            if not session.physical_close_complete:
+                async with self._lock:
+                    attempt = self._close_attempts.get(host_session_id)
+                    if attempt is not None:
+                        attempt.state = HostSessionCloseState.CLOSE_FAILED_QUARANTINED
+                raise
+        if session.root_session_id is not None:
+            await self._agent_runtime.release(session.session_id)
         # Physical completion is independent of a best-effort exact lease
         # release. A failure here never turns full close into false uncertainty.
         try:
@@ -8621,7 +9200,8 @@ class KernelHostCore:
         async with self._lock:
             attempt = self._close_attempts.get(host_session_id)
             if attempt is not None:
-                attempt.state = HostSessionCloseState.CLOSED
+                attempt.state = (HostSessionCloseState.CLOSED if session.necessary_settlement_complete
+                                 else HostSessionCloseState.CLOSED_SETTLEMENT_UNCONFIRMED)
             if self._sessions.get(host_session_id) is session:
                 self._sessions.pop(host_session_id, None)
             route = self._extension_routes.get(session.session_id)
@@ -8633,6 +9213,10 @@ class KernelHostCore:
             # remain quarantined above; successful attempts retire immediately.
             if self._close_attempts.get(host_session_id) is attempt:
                 self._close_attempts.pop(host_session_id, None)
+        if close_error is not None:
+            if not session.necessary_settlement_complete or isinstance(close_error, KernelSessionSettlementUnconfirmed):
+                raise KernelSessionSettlementUnconfirmed("Host canonical settlement is unconfirmed") from close_error
+            logging.getLogger(__name__).warning("Closed Host diagnostic", exc_info=(type(close_error), close_error, close_error.__traceback__))
 
     async def shutdown(self) -> None:
         async with self._lock:
@@ -8665,89 +9249,101 @@ class KernelHostCore:
     async def _shutdown_owner(
         self, open_settlements: tuple[asyncio.Future[None], ...]
     ) -> None:
-        await self._agent_runtime.aclose()
+        close_error: BaseException | None = None
+
+        async def close(operation) -> None:
+            nonlocal close_error
+            try:
+                await operation()
+            except BaseException as error:
+                close_error = close_error or error
+                logging.getLogger(__name__).warning(
+                    "Core close diagnostic", exc_info=(type(error), error, error.__traceback__),
+                )
+
+        async with self._lock:
+            owned_sessions = dict(self._sessions)
+            owned_sessions.update((attempt.host_session_id, attempt.session) for attempt in self._close_attempts.values())
+            roots = {session.session_id for session in owned_sessions.values() if session.root_session_id is None}
+            session_ids = tuple(host_id for host_id, session in owned_sessions.items()
+                                if session.root_session_id is None or session.root_session_id not in roots)
+        # Install independent close owners before a shared IO join can block.
+        # ROOT owners keep their existing child-before-parent dependency order.
+        session_closes = tuple(asyncio.create_task(self.close_session(host_id),
+                               name=f"kernel-shutdown-session:{host_id}") for host_id in session_ids)
+        await close(self.scheduled_tasks.stop)
+        await close(self._agent_runtime.aclose)
+        await close(self._image_validator.aclose)
         if open_settlements:
-            await asyncio.gather(*open_settlements)
-        await self.mcp_management.aclose()
-        async with self._lock:
-            session_ids = tuple(self._sessions)
-        for host_session_id in session_ids:
-            await self.close_session(host_session_id)
-        if self._history_maintenance is not None:
-            history_close = asyncio.create_task(
-                self._history_maintenance.aclose(deadline_monotonic=self._canonical_deadline()),
-                name="kernel-history-maintenance-close",
-            )
-            history_deadline_expired, history_cancelled, history_error = await _join_task_beyond_logical_deadline(
-                history_close, deadline_monotonic=self._canonical_deadline(),
-            )
-            self._history_maintenance = None
-            # Physical search I/O is now terminal even if its close watchdog
-            # expired; finish provider/resource cleanup before surfacing it.
-        else:
-            history_cancelled = history_error = None
-            history_deadline_expired = False
-        await self._image_validator.aclose()
-        async with self._lock:
-            self._extension_routes.clear()
-        blob_close_deadline = self._deadlines.deadline(
-            KernelWatchdogOwner.BLOB_GC_CLOSE
+            await asyncio.gather(*open_settlements, return_exceptions=True)
+        operations = tuple(self._resource_operations)
+        if operations:
+            await asyncio.gather(*operations, return_exceptions=True)
+        initialization = self._resource_initialization
+        if initialization is not None and initialization.task is not None:
+            await asyncio.gather(initialization.task, return_exceptions=True)
+
+        outcomes = await asyncio.gather(
+            *session_closes, return_exceptions=True,
         )
-        blob_close_deadline_expired = False
-        blob_close_cancellation: asyncio.CancelledError | None = None
-        blob_close_error: BaseException | None = None
+        session_error = next((result for result in outcomes if isinstance(result, BaseException)), None)
+        close_error = close_error or session_error
+        sessions_stopped = (not self._sessions and all(attempt.session.physical_close_complete
+                            for attempt in self._close_attempts.values()))
+
+        if self._history_maintenance is not None:
+            owner = self._history_maintenance
+            await close(lambda: owner.aclose(deadline_monotonic=self._canonical_deadline()))
+            if owner.physical_close_complete:
+                self._history_maintenance = None
+        blob_deadline = self._deadlines.deadline(KernelWatchdogOwner.BLOB_GC_CLOSE)
         if self._blob_gc_task is not None:
             self._blob_gc_task.cancel()
-            (
-                task_deadline_expired,
-                task_cancellation,
-                task_error,
-            ) = await _join_task_beyond_logical_deadline(
-                self._blob_gc_task,
-                deadline_monotonic=blob_close_deadline,
-            )
-            blob_close_deadline_expired |= task_deadline_expired
-            blob_close_cancellation = task_cancellation
-            blob_close_error = task_error
+            expired, cancellation, error = await _join_task_beyond_logical_deadline(
+                self._blob_gc_task, deadline_monotonic=blob_deadline)
+            if error is not None:
+                logging.getLogger(__name__).warning(
+                    "Blob GC exited with a close diagnostic",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+            if expired:
+                logging.getLogger(__name__).warning("Blob GC physically exited after close deadline")
+            if cancellation is not None:
+                logging.getLogger(__name__).warning("Blob GC close waiter was cancelled after physical join")
             self._blob_gc_task = None
         if self._blob_gc_io is not None:
-            io_close_task = asyncio.create_task(
-                self._blob_gc_io.aclose(deadline_monotonic=blob_close_deadline),
-                name="kernel-blob-orphan-gc-io-close",
-            )
-            (
-                io_deadline_expired,
-                io_cancellation,
-                io_error,
-            ) = await _join_task_beyond_logical_deadline(
-                io_close_task,
-                deadline_monotonic=blob_close_deadline,
-            )
-            blob_close_deadline_expired |= io_deadline_expired
-            blob_close_cancellation = blob_close_cancellation or io_cancellation
-            blob_close_error = blob_close_error or io_error
-            self._blob_gc_io = None
-        self._blob_store = None
-        if self._access is not None:
-            self._access.release()
-            self._access = None
+            owner = self._blob_gc_io
+            await close(lambda: owner.aclose(deadline_monotonic=blob_deadline))
+            if owner.physical_close_complete:
+                self._blob_gc_io = None
+
+        # Unconfirmed physical work retains the resources it can still use.
+        # This does not prevent independent maintenance owners from stopping.
+        if sessions_stopped:
+            await close(self.scheduled_tasks.aclose)
+            await close(self.mcp_management.aclose)
+            await close(self._bundled_skill_binding.aclose)
+            self._extension_routes.clear()
+        initialization_clean = initialization is None or initialization.cleanup_complete
+        resources_stopped = (sessions_stopped and initialization_clean
+                             and self._agent_runtime.physical_close_complete
+                             and self.scheduled_tasks.physical_close_complete
+                             and self._image_validator.local_children_stopped
+                             and self._history_maintenance is None and self._blob_gc_io is None)
+        if resources_stopped:
+            self._blob_store = None
+            if self._access is not None:
+                self._access.release()
+                self._access = None
             self._repository = None
             self._event_loop = None
-        await self._bundled_skill_binding.aclose()
-        async with self._lock:
             self._closed = True
-        if history_error is not None:
-            raise history_error
-        if history_cancelled is not None:
-            raise history_cancelled
-        if history_deadline_expired:
-            raise TimeoutError("history maintenance physical owner exited after close deadline")
-        if blob_close_error is not None:
-            raise blob_close_error
-        if blob_close_cancellation is not None:
-            raise blob_close_cancellation
-        if blob_close_deadline_expired:
-            raise TimeoutError("blob GC physical owner exited after close deadline")
+        if not resources_stopped:
+            raise close_error or RuntimeError("Kernel physical close is unconfirmed")
+        if isinstance(session_error, KernelSessionSettlementUnconfirmed):
+            raise session_error
+        # Physically joined disposable maintenance and late-close diagnostics
+        # are logged above. They do not turn an exited Core into quarantine.
 
     def _route_committed_events_from_thread(
         self, events: tuple[StoredCommittedEvent, ...]

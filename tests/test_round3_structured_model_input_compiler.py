@@ -1,6 +1,7 @@
 """Round 3 structured model-input compiler product and architecture gates."""
 
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 from tests.support.images import bound_test_image
 from pulsara_agent.identity import derive_id
 
@@ -3305,7 +3306,7 @@ def test_round3_runtime_source_keeps_workspace_after_foreground_and_yielded_cd(
     yielded = tmp_path / "yielded cwd"
     foreground.mkdir()
     yielded.mkdir()
-    port = DirectKernelToolPort(
+    port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id="host:dugldp6ni2dxvuywv5a3utbnii",
         session_id="session:yb3rgzdbtfst4jirqaeox4wo6a",
@@ -3406,7 +3407,7 @@ def test_round3_tool_invocation_rejects_other_caller_access() -> None:
 def test_tool_runtime_dispatch_observation_requires_registry_current_borrow(
     tmp_path: Path,
 ) -> None:
-    port = DirectKernelToolPort(
+    port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id="host:yinyxklzunar54s7objjdbphcy",
         session_id="session:336wrfwkamrr3up6kjtsgvgcte",
@@ -3453,7 +3454,7 @@ def test_tool_runtime_dispatch_observation_requires_registry_current_borrow(
 def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -> None:
     async def scenario() -> None:
         ports = tuple(
-            DirectKernelToolPort(
+            DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
                 workspace_root=tmp_path,
                 host_owner_id=derive_id("host", "test-fixture", f"host:{name}"),
                 session_id="session:336wrfwkamrr3up6kjtsgvgcte",
@@ -3526,7 +3527,7 @@ def test_round3_tool_owner_rejects_foreign_host_surface_borrow(tmp_path: Path) -
 def test_round3_tool_surface_includes_member_process_and_schema_is_frozen(
     tmp_path: Path,
 ) -> None:
-    port = DirectKernelToolPort(
+    port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id="host:yinyxklzunar54s7objjdbphcy",
         session_id="session:336wrfwkamrr3up6kjtsgvgcte",

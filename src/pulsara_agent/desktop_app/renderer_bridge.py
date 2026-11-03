@@ -51,6 +51,7 @@ from pathlib import Path
 
 from pulsara_agent.primitives.context import thaw_json
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
+from pulsara_agent.conversation_kernel.host import SessionControlRejected
 
 
 _BROWSER_DETACH_SEAL = object()
@@ -228,6 +229,14 @@ class RendererBridge:
             raise ValueError("session_id is required")
         if not browser_instance_id:
             raise ValueError("browser_instance_id is required")
+        # A close owns the browser gate until physical detach settles. History
+        # has no attachment or execution admission, so it can remain readable
+        # while that same close owner is still joining work.
+        if await self.sessions.runtime_closing(session_id):
+            return {"view": "history", "session_id": session_id,
+                    "runtime_closing": True,
+                    "workspace_availability": await self.sessions.workspace_availability(session_id),
+                    "snapshot": protobuf_json(await self.sessions.history_snapshot(session_id))}
         async with self._session_gate(session_id):
             old: BrowserRuntimeConnection | None = None
             async with self._lock:
@@ -253,6 +262,14 @@ class RendererBridge:
 
             try:
                 handle = await self.sessions.resume_session(session_id)
+            except SessionControlRejected:
+                if not await self.sessions.runtime_closing(session_id):
+                    raise
+                await self._disconnect_session_under_gate(session_id)
+                return {"view": "history", "session_id": session_id,
+                        "runtime_closing": True,
+                        "workspace_availability": await self.sessions.workspace_availability(session_id),
+                        "snapshot": protobuf_json(await self.sessions.history_snapshot(session_id))}
             except WorkspaceUnavailable as exc:
                 # There is no Host/attachment to observe or take over. Expired
                 # browser roles cannot survive this cold, scoped read boundary.

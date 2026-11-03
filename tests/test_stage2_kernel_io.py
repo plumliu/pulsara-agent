@@ -75,7 +75,7 @@ def test_session_io_post_admission_deadline_joins_the_physical_thread() -> None:
         release.set()
         with pytest.raises(TimeoutError, match="physical I/O"):
             await caller
-        assert owner._active == set()
+        assert owner._active == {}
         await owner.aclose(deadline_monotonic=monotonic() + 1)
 
     asyncio.run(exercise())
@@ -103,7 +103,7 @@ def test_session_io_worker_error_cannot_replace_explicit_cancellation() -> None:
         release.set()
         with pytest.raises(asyncio.CancelledError):
             await caller
-        assert owner._active == set()
+        assert owner._active == {}
         await owner.aclose(deadline_monotonic=monotonic() + 1)
 
     asyncio.run(exercise())

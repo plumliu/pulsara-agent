@@ -3,6 +3,7 @@
 import asyncio
 from threading import Lock
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -119,7 +120,7 @@ def test_final_public_detail_is_scrubbed_after_retry_summary_is_composed():
     assert 'decision=unsafe_to_replay' in failed.public_detail
 
 
-@pytest.mark.parametrize('operation', ['stop', 'close'])
+@pytest.mark.parametrize('operation', ['stop', 'close', 'close_locked'])
 def test_provider_cancellation_precedes_blocked_cell_join(operation):
     from pulsara_agent.conversation_kernel.cancellation import ActiveTurnCancellationIntent
     from pulsara_agent.conversation_kernel.host import KernelHostSession
@@ -154,38 +155,56 @@ def test_provider_cancellation_precedes_blocked_cell_join(operation):
             _presentation_notices=[], _queued_prompt_hooks={},
             _queue_wake=asyncio.Event(), _cell_output_wake=asyncio.Event(),
             _session_scope_kind=ModelInputScopeKind.ROOT,
-            _tools=SimpleNamespace(todo_owner=SimpleNamespace(mark_closing=lambda **kwargs: None)),
+            host_session_id=random_id('host'),
+            _tools=SimpleNamespace(
+                todo_owner=SimpleNamespace(mark_closing=lambda **kwargs: None),
+                stop_local_process_admission=lambda: None,
+                stop_terminal_physical_owners=AsyncMock(),
+                stop_visualization_physical_owners=AsyncMock(),
+                snapshot_workspace_root=lambda: '.'),
+            workspace_gate=SimpleNamespace(begin_close=lambda: None),
+            _hooks=SimpleNamespace(begin_host_close=lambda **kwargs: None),
+            _ephemeral=SimpleNamespace(aclose=AsyncMock()),
+            extensions=SimpleNamespace(stop_admission=lambda: None),
+            _mcp_supervisor=SimpleNamespace(stop_admission=lambda: None, aclose=AsyncMock()),
+            _delivery_task=None, _cell_output_task=None,
+            _external_new_turn_settled=asyncio.Event(),
             _code_mode=SimpleNamespace(
                 mark_turn_stopped=lambda value: actions.append(('mark_turn', value)),
                 mark_all_stopped=lambda: actions.append('mark_all'),
                 stop_turn=cell_join, aclose=cell_join),
         )
-        if operation == 'stop':
-            host._existing_control_outcome_locked = lambda request: None
-            host._validate_new_control_request_locked = lambda request: None
-            host._retire_done_active_root_locked = lambda: None
-            pending = object()
-            host._pending_control_outcome = lambda request: pending
-            attempts = []
-            def install(request, outcome):
-                attempt = SimpleNamespace(request=request, outcome=outcome, task=None)
-                attempts.append(attempt)
-                return attempt
-            host._install_control_attempt_locked = install
-            host._execute_stop_turn_attempt = lambda attempt, owner: KernelHostSession._execute_stop_turn_attempt(host, attempt, owner)
-            result = await KernelHostSession.request_stop_turn(host,
-                command_id=random_id('command'), admission_deadline_ms=1000,
-                expected_session_id=random_id('session'), expected_host_session_id=random_id('host'),
-                target_turn_id=turn_id)
-            assert result is pending
-            # Acceptance itself cancels; a separately scheduled control owner
-            # need not run first to make Stop effective.
-            assert task.cancelling() == 1
-            owner = attempts[0].task
-            assert actions[0] == ('mark_turn', turn_id)
-        else:
-            owner = asyncio.create_task(KernelHostSession.aclose(host, deadline_monotonic=999999999999))
+        host._request_close_cancellation = lambda: KernelHostSession._request_close_cancellation(host)
+        host._stop_close_admission = lambda: KernelHostSession._stop_close_admission(host)
+        owner = None
         try:
+            if operation == 'stop':
+                host._existing_control_outcome_locked = lambda request: None
+                host._validate_new_control_request_locked = lambda request: None
+                host._retire_done_active_root_locked = lambda: None
+                pending = object()
+                host._pending_control_outcome = lambda request: pending
+                attempts = []
+                def install(request, outcome):
+                    attempt = SimpleNamespace(request=request, outcome=outcome, task=None)
+                    attempts.append(attempt)
+                    return attempt
+                host._install_control_attempt_locked = install
+                host._execute_stop_turn_attempt = lambda attempt, owner: KernelHostSession._execute_stop_turn_attempt(host, attempt, owner)
+                result = await KernelHostSession.request_stop_turn(host,
+                    command_id=random_id('command'), admission_deadline_ms=1000,
+                    expected_session_id=random_id('session'), expected_host_session_id=random_id('host'),
+                    target_turn_id=turn_id)
+                assert result is pending
+                # Acceptance itself cancels; a separately scheduled control owner
+                # need not run first to make Stop effective.
+                assert task.cancelling() == 1
+                owner = attempts[0].task
+                assert actions[0] == ('mark_turn', turn_id)
+            else:
+                if operation == 'close_locked':
+                    await host._lock.acquire()
+                owner = asyncio.create_task(KernelHostSession.aclose(host, deadline_monotonic=999999999999))
             await asyncio.wait_for(joining_cells.wait(), 1)
             await asyncio.wait_for(cancelled.wait(), 1)
             assert actions[0] == (('mark_turn', turn_id) if operation == 'stop' else 'mark_all')
@@ -193,7 +212,15 @@ def test_provider_cancellation_precedes_blocked_cell_join(operation):
             assert task.cancelling() == 1
             assert not owner.done() and not task.done()
         finally:
-            owner.cancel()
+            if owner is not None:
+                owner.cancel()
+            if operation == 'close_locked' and host._lock.locked():
+                host._lock.release()
+            if not task.done() and task.cancelling() == 0:
+                task.cancel()
             provider_settlement.set()
-            await asyncio.gather(owner, task, return_exceptions=True)
+            blocked_cell_join.set()
+            host._external_new_turn_settled.set()
+            pending = (task,) if owner is None else (owner, task)
+            await asyncio.gather(*pending, return_exceptions=True)
     asyncio.run(run())

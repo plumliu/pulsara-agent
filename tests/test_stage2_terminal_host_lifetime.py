@@ -1,6 +1,7 @@
 """Host lifetime, physical process ownership and shutdown coverage."""
 
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 from pulsara_agent.identity import random_id
 
@@ -218,7 +219,7 @@ def test_stage2_terminal_handle_is_same_host_only_and_close_kills_and_joins(
         owner = _name("host")
         session_id = _name("session")
         deadlines = _RecordingDeadlineFactory()
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=owner,
             session_id=session_id,
@@ -270,7 +271,7 @@ def test_host_scoped_writes_and_terminal_cwd_follow_exact_permission_snapshot(
         workspace.mkdir()
         outside.mkdir()
         session_id = _name("session")
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=workspace,
             host_owner_id=_name("host"),
             session_id=session_id,
@@ -338,14 +339,14 @@ def test_stage2_terminal_new_host_does_not_adopt_or_relaunch_old_process(
         new_owner = _name("host")
         old_session_id = _name("session")
         new_session_id = _name("session")
-        old = DirectKernelToolPort(
+        old = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=old_owner,
             session_id=old_session_id,
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
-        new = DirectKernelToolPort(
+        new = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=new_owner,
             session_id=new_session_id,
@@ -400,7 +401,7 @@ def test_tool_close_blocks_until_cancelled_physical_thread_exits(
                 )
 
         session_id = _name("session")
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id=_name("host"),
             session_id=session_id,
@@ -454,8 +455,14 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
 
         class BlockingSession:
             session_id = 'session:sq4icqul3fdtrhy5k5mhtdz5lq'
+            host_session_id = 'host:fnw4mc7b3olk5l3w34pyvmunhu'
             root_session_id = None
             _lease = SimpleNamespace(guard=object())
+            physical_close_complete = False
+            necessary_settlement_complete = True
+
+            async def _stop_close_admission(self):
+                pass
 
             async def aclose(
                 self,
@@ -467,11 +474,13 @@ def test_host_core_close_waiter_cancellation_joins_one_physical_owner() -> None:
                 calls += 1
                 started.set()
                 await release.wait()
+                self.physical_close_complete = True
 
         core = object.__new__(KernelHostCore)
         core._lock = asyncio.Lock()  # type: ignore[attr-defined]
         core._deadlines = KernelExecutionDeadlineFactory()  # type: ignore[attr-defined]
         core._close_attempts = {}  # type: ignore[attr-defined]
+        core._resource_operations = {}
         session = BlockingSession()
         core._sessions = {'host:fnw4mc7b3olk5l3w34pyvmunhu': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
@@ -521,8 +530,14 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
 
         class BlockingSession:
             session_id = 'session:tlvhlzyhaqgtzehsjkwyfvjuji'
+            host_session_id = 'host:67ai47ry4ikif6v6w7ef4cpyl4'
             root_session_id = None
             _lease = SimpleNamespace(guard=object())
+            physical_close_complete = False
+            necessary_settlement_complete = True
+
+            async def _stop_close_admission(self):
+                pass
 
             async def aclose(
                 self,
@@ -532,6 +547,7 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
                 received_deadlines.append(deadline_monotonic)
                 started.set()
                 await release.wait()
+                self.physical_close_complete = True
 
         core = object.__new__(KernelHostCore)
         core._lock = asyncio.Lock()  # type: ignore[attr-defined]
@@ -539,6 +555,7 @@ def test_round5_host_close_freezes_one_fresh_deadline_for_all_waiters() -> None:
             policy, clock=clock
         )
         core._close_attempts = {}  # type: ignore[attr-defined]
+        core._resource_operations = {}
         session = BlockingSession()
         core._sessions = {'host:67ai47ry4ikif6v6w7ef4cpyl4': session}  # type: ignore[attr-defined]
         core._extension_routes = {}  # type: ignore[attr-defined]
@@ -653,8 +670,14 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
     async def scenario() -> None:
         class FailingSession:
             session_id = 'session:sazovd3stvpuqithbe4s25br3u'
+            host_session_id = 'host:bam5ezzvqmifzdnm7w6o5l26iy'
             root_session_id = None
-            physically_terminal = False
+            physical_close_complete = False
+            necessary_settlement_complete = False
+            calls = 0
+
+            async def _stop_close_admission(self):
+                pass
 
             async def aclose(
                 self,
@@ -662,8 +685,8 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
                 deadline_monotonic: float,
             ) -> None:
                 del deadline_monotonic
-                self.physically_terminal = True
-                raise TimeoutError("physical owner exited after close deadline")
+                self.calls += 1
+                raise RuntimeError("physical owner remains active")
 
         core = object.__new__(KernelHostCore)
         core._lock = asyncio.Lock()  # type: ignore[attr-defined]
@@ -675,13 +698,49 @@ def test_host_core_close_failure_quarantines_the_unique_attempt() -> None:
         core._suspended_agent_roots = set()  # type: ignore[attr-defined]
         core._repository = SimpleNamespace(release_host_writer=lambda *args, **kwargs: None)
 
-        with pytest.raises(TimeoutError, match="physical owner"):
+        with pytest.raises(RuntimeError, match="physical owner"):
             await core.close_session('host:bam5ezzvqmifzdnm7w6o5l26iy')
         attempt = core._close_attempts['host:bam5ezzvqmifzdnm7w6o5l26iy']  # type: ignore[attr-defined]  # noqa: SLF001
         assert attempt.state is HostSessionCloseState.CLOSE_FAILED_QUARANTINED
-        assert session.physically_terminal
+        assert not session.physical_close_complete
         assert core._sessions == {'host:bam5ezzvqmifzdnm7w6o5l26iy': session}  # type: ignore[attr-defined]  # noqa: SLF001
-        with pytest.raises(TimeoutError, match="physical owner"):
+        with pytest.raises(RuntimeError, match="physical owner"):
             await core.close_session('host:bam5ezzvqmifzdnm7w6o5l26iy')
+        assert session.calls == 1
 
+    asyncio.run(scenario())
+
+
+def test_host_core_late_physically_joined_close_retires_the_attempt() -> None:
+    async def scenario() -> None:
+        released = []
+        class JoinedSession:
+            session_id = random_id("session")
+            host_session_id = random_id("host")
+            root_session_id = None
+            physical_close_complete = False
+            necessary_settlement_complete = True
+            _lease = SimpleNamespace(guard=object())
+
+            async def _stop_close_admission(self):
+                pass
+
+            async def aclose(self, *, deadline_monotonic):
+                self.physical_close_complete = True
+                raise TimeoutError("physical owner exited after close deadline")
+
+        core = object.__new__(KernelHostCore)
+        core._lock = asyncio.Lock()
+        core._deadlines = KernelExecutionDeadlineFactory()
+        core._resource_operations = {}
+        core._close_attempts = {}
+        session = JoinedSession()
+        core._sessions = {session.host_session_id: session}
+        core._extension_routes = {}
+        core._suspended_agent_roots = set()
+        core._repository = SimpleNamespace(release_host_writer=lambda guard, **kwargs: released.append(guard))
+        await core.close_session(session.host_session_id)
+        assert session.physical_close_complete and session.necessary_settlement_complete
+        assert not core._sessions and not core._close_attempts
+        assert released == [session._lease.guard]
     asyncio.run(scenario())

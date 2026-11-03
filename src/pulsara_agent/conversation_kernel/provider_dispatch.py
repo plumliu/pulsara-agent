@@ -1643,6 +1643,19 @@ class ProviderDispatchCoordinator:
     def _canonical_deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
 
+    async def wait_for_cold_epoch_readiness(self, *, scope_kind: ModelInputScopeKind) -> None:
+        """Wait before any actual-execution snapshot, borrow or compile deadline.
+
+        Installed/inherited roots and adopted compaction candidates retain their
+        frozen tools. Read-only projections never enter this execution seam.
+        """
+        scope = ProviderInputContinuityScope(
+            session_id=self._writer_lease.guard.session_id, scope_kind=scope_kind,
+        )
+        if self._continuity.current_view(scope) is not None:
+            return
+        await self._tools.wait_initial_mcp_readiness(conversation_scope_kind=scope_kind)
+
     def installed_source_target(
         self,
         *,

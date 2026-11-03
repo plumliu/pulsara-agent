@@ -699,6 +699,7 @@ class DirectKernelToolPort:
         host_owner_id: str,
         authorization_policy: ToolDispatchAuthorizationPolicy,
         session_id: str,
+        memory_domain_id: str = "u_local",
         live_bus: LiveAgentEventBus,
         result_source_reader: ToolOutputReadPort | None = None,
         image_reference_read_port: CanonicalImageReferenceReadPort | None = None,
@@ -706,7 +707,7 @@ class DirectKernelToolPort:
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
         user_home_resolution: UserHomeResolution | None = None,
         image_validator: HostPromptImageValidator | None = None,
-        scheduled_tasks=None,
+        scheduled_tasks,
         session_content_query=None,
         shared_terminal_owner: "DirectKernelToolPort | None" = None,
     ) -> None:
@@ -717,6 +718,7 @@ class DirectKernelToolPort:
         )
         self._host_owner_id = host_owner_id
         self._session_id = session_id
+        self._memory_domain_id = memory_domain_id
         self._workspace_root = root
         self._live_bus = live_bus
         self._physical_io = KernelSessionIO()
@@ -787,8 +789,9 @@ class DirectKernelToolPort:
         if session_content_query is not None:
             from pulsara_agent.ports.session_content import SESSION_QUERY_TOOL_NAMES
             tools = (*tools, *(_DirectCapabilityControlTool(name) for name in sorted(SESSION_QUERY_TOOL_NAMES)))
-        if scheduled_tasks is not None:
-            tools = (*tools, _DirectCapabilityControlTool("query_schedules"), _DirectCapabilityControlTool("manage_schedule"))
+        if scheduled_tasks is None:
+            raise TypeError("production tools require the kernel scheduled task service")
+        tools = (*tools, _DirectCapabilityControlTool("query_schedules"), _DirectCapabilityControlTool("manage_schedule"))
         self._tools = {tool.name: tool for tool in tools}
         self._authorization_policy = authorization_policy
         self._close_lock = Lock()
@@ -925,6 +928,12 @@ class DirectKernelToolPort:
             if self._closed:
                 raise RuntimeError("tool surface is closed")
             self._mcp_supervisor = supervisor
+
+    async def wait_initial_mcp_readiness(self, *, conversation_scope_kind: ModelInputScopeKind) -> None:
+        supervisor = self._mcp_supervisor
+        if supervisor is None:
+            raise RuntimeError("MCP supervisor is not bound")
+        await supervisor.wait_initial_readiness(conversation_scope_kind=conversation_scope_kind)
 
     def _require_builtin_composition_preparing_locked(self) -> None:
         if self._builtin_composition_state is not BuiltinCompositionState.PREPARING:
@@ -3362,6 +3371,7 @@ class DirectKernelToolPort:
                               else self._scheduled_tasks.invoke_manage)
                     value = await method(arguments,
                         default_session_id=self._session_id,
+                        memory_domain_id=self._memory_domain_id,
                         permission_mode=invocation_context.effective_permission_mode,
                         page_budget=page_budget)
                     return "SUCCESS", value
@@ -4246,6 +4256,30 @@ class DirectKernelToolPort:
             # roll back the already-installed process-local snapshot.
             pass
 
+    @property
+    def local_children_stopped(self) -> bool:
+        # Filesystem search owns rg inside the existing physical worker. That
+        # lane must be sealed and joined before process exit can prove no such
+        # local child remains; a cancelled logical waiter is insufficient.
+        return (self._terminal_physically_closed
+                and self._physical_io.physical_close_complete
+                and self._visualization_screenshots.local_children_stopped)
+
+    def stop_local_process_admission(self) -> None:
+        self._physical_io.stop_admission()
+        self._visualization_screenshots.stop_admission()
+
+    async def stop_visualization_physical_owners(self) -> None:
+        await self._visualization_screenshots.aclose()
+
+    @property
+    def physical_close_complete(self) -> bool:
+        with self._surface_lock:
+            return (self._physically_closed and self._terminal_physically_closed
+                    and not self._surface_borrows and not self._execution_borrows
+                    and self._visualization_screenshots.local_children_stopped
+                    and self._physical_io.physical_close_complete)
+
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
         if timeout_seconds <= 0:
             raise ValueError("tool close timeout must be positive")
@@ -4367,7 +4401,9 @@ class DirectKernelToolPort:
                 self._terminal.release_owner_and_join,
                 self._terminal_owner_id,
             )
+            self._terminal_physically_closed = True
             raise
+        self._terminal_physically_closed = True
 
     def _wait_for_surface_borrows(self, deadline_monotonic: float) -> bool:
         deadline_expired = False

@@ -242,7 +242,7 @@ def test_round9_3_one_view_feeds_skill_mcp_and_hook_native_owners(
         assert config.server_id == framed_plugin_mcp_server_id(
             "fixture-plugin", "local:server"
         )
-        assert config.required is False
+        assert not hasattr(config, "required")
         assert config.scope_policy.value == "ROOT_AND_SUBAGENTS"
         assert config.effect_policy.default_effect.value == "AUTO"
         transport = config.transport

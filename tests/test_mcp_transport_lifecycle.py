@@ -226,7 +226,7 @@ def test_shutdown_joins_replaced_connect_attempt_cleanup(tmp_path, replacement):
         app = web.Application()
         app.router.add_route("*", "/mcp", endpoint)
         async with _local_server(app) as base:
-            config = _parse_server("replacement", {"required": False, "transport": {
+            config = _parse_server("replacement", {"transport": {
                 "type": "streamable_http", "endpoint": base + "/mcp",
                 "allow_http_localhost": True,
             }})

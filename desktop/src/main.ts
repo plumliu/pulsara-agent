@@ -52,6 +52,7 @@ let starting: Promise<void> | undefined;
 let quitting = false;
 let quittingRequest = false;
 let resetting = false;
+let restarting = false;
 let databaseReady = false;
 let startupError = '';
 let startupFailure: unknown;
@@ -62,7 +63,7 @@ function configureRuntime(interopHelper?: string) {
     ? createWslPostgresOperations(resources, home, host, () => startupCancellation?.signal)
     : createPosixPostgresOperations(resources.postgresBin, home));
   runtime = new PythonRuntime(resources, home, event => {
-    if ((event.type === 'failed' || event.type === 'exited') && !starting && !quitting && !resetting) {
+    if ((event.type === 'failed' || event.type === 'exited') && !starting && !quitting && !resetting && !restarting) {
       startupError = event.error ?? '内核不可用';
       void showStartup(startupError).catch(error => console.error('Could not display startup status', error));
     }
@@ -176,8 +177,8 @@ function createWindow(session?: Electron.Session) {
     else void dialog.showMessageBox(window!, {message:'关闭 Pulsara', buttons:['最小化','退出'], defaultId:0,cancelId:0}).then(result => result.response ? void requestQuit() : window!.minimize());
   });
 }
-async function boot(fromReset = false) {
-  if (quitting || (resetting && !fromReset)) return;
+async function boot(fromMaintenance = false) {
+  if (quitting || ((resetting || restarting) && !fromMaintenance)) return;
   if (starting) return starting;
   starting = (async () => {
     if (windowsHost && !runtime) { await prepareWindows(); if (!runtime || quitting) return; }
@@ -255,7 +256,7 @@ async function ensureCli(replaceConflict = false) {
 }
 async function resetDatabase() {
   if (!runtime) throw new Error('请先完成 WSL 接入。');
-  if (starting || quitting || quittingRequest || resetting) throw new Error('请等待当前启动或关闭操作完成。');
+  if (starting || quitting || quittingRequest || resetting || restarting) throw new Error('请等待当前启动或关闭操作完成。');
   resetting = true;
   try {
     const choice = await dialog.showMessageBox(window!, {type:'warning',message:'重置 Pulsara 专用数据库？',detail:`将永久删除会话、记忆和定时任务，并重建当前版本数据库。工作目录文件和模型配置保留。\n\n${postgres.directory}`,buttons:['取消','重置数据库'],defaultId:0,cancelId:0});
@@ -268,6 +269,39 @@ async function resetDatabase() {
     await boot(true);
   } catch(error) {await showStartup(`数据库重置未完成：${error instanceof Error?error.message:String(error)}`);}
   finally {resetting=false;}
+}
+async function stopWorkbench() {
+  try { await runtime.stop({workbenchExit:true}); }
+  catch (error) {
+    // A reported settlement failure does not make a physically exited process
+    // live again. Keep the diagnostic; never turn it into a successful result.
+    if (runtime.running) throw error;
+    console.error('工作台已退出，收尾诊断：', error);
+  }
+  // In WSL, closing the Windows carrier alone does not prove Linux has exited.
+  // The original Linux lifetime lock remains the owner on every host.
+  await runtime.waitForPreviousOwner();
+}
+async function restartWorkbench() {
+  if (!runtime || starting || quitting || quittingRequest || resetting || restarting) throw new Error('请等待当前启动或关闭操作完成。');
+  restarting = true;
+  try {
+    const choice = await dialog.showMessageBox(window!, {type:'warning', message:'重启工作台？',
+      detail:'会中断其他正在运行的任务。已保存的会话、计划、设置和用户文件会保留。结果不明的操作不会自动重做；断开连接不能确认远端操作已取消。',
+      buttons:['取消','重启工作台'], defaultId:0, cancelId:0});
+    if (choice.response !== 1) return;
+    backendSession?.seal();
+    origin = undefined;
+    const [projection, kernel] = await Promise.allSettled([
+      showStartup('正在停止当前运行实例并重启工作台…', 'stopping'),
+      stopWorkbench(),
+    ]);
+    if (kernel.status === 'rejected') throw kernel.reason;
+    if (projection.status === 'rejected') throw projection.reason;
+    await boot(true);
+  } catch (error) {
+    await showStartup(`工作台重启未完成：${error instanceof Error ? error.message : String(error)}`);
+  } finally { restarting = false; }
 }
 async function requestQuit() {
   if (quittingRequest || quitting || resetting) return;
@@ -288,8 +322,14 @@ async function requestQuit() {
     }
     quitting = true;
     startupCancellation?.abort();
-    await showStartup('正在停止并结算当前工作，等待内核退出…', 'stopping');
-    await runtime.stop();
+    // Revoke renderer/backend admission immediately. Native projection cleanup
+    // may fail or remain pending; explicit application exit must still stop the
+    // actual runtime and may discard that projection after the runtime joins.
+    backendSession?.seal();
+    origin = undefined;
+    void showStartup('正在停止并结算当前工作，等待内核退出…', 'stopping')
+      .catch(error => console.error('退出时工作台界面清理未完成：', error));
+    await stopWorkbench();
     if (starting) await starting;
     if ((startupFailure as {postgresExecution?: string} | undefined)?.postgresExecution === 'unknown') throw startupFailure;
     // If startup never owned a ready kernel and reused a database, don't stop another owner's instance.
@@ -332,12 +372,13 @@ else {
       } catch { tray = undefined; }
     }
     Menu.setApplicationMenu(Menu.buildFromTemplate([
-      {label:'Pulsara',submenu:[{label:'关于 Pulsara',role:'about'},{label:'重置专用数据库…',click:()=>void resetDatabase().catch(error=>dialog.showErrorBox('重置失败',String(error)))},{type:'separator'},{label:'退出 Pulsara',accelerator:'CommandOrControl+Q',click:()=>void requestQuit()}]},
+      {label:'Pulsara',submenu:[{label:'关于 Pulsara',role:'about'},{label:'重启工作台…',click:()=>void restartWorkbench().catch(error=>console.error('工作台重启未完成：',error))},{label:'重置专用数据库…',click:()=>void resetDatabase().catch(error=>dialog.showErrorBox('重置失败',String(error)))},{type:'separator'},{label:'退出 Pulsara',accelerator:'CommandOrControl+Q',click:()=>void requestQuit()}]},
       {label:'文件',submenu:[{label:'关闭窗口',role:'close',accelerator:'CommandOrControl+W'}]},
       {role:'editMenu'}, {label:'显示',submenu:[{role:'reload'},{role:'togglefullscreen'},{role:'zoomIn'},{role:'zoomOut'},{role:'resetZoom'},{role:'toggleDevTools'}]}, {role:'windowMenu'},
     ]));
     handle('minimize',()=>window!.minimize(),true); handle('maximize',()=>window!.isMaximized()?window!.unmaximize():window!.maximize(),true);
     handle('close',()=>window!.close(),true); handle('quit',()=>requestQuit(),true);
+    handle('restart-workbench',()=>restartWorkbench());
     handle('retry',()=>boot(),true); handle('logs',()=>shell.openPath(windowsHost ? path.join(app.getPath('userData'),'logs') : path.join(home,'desktop')),true);
     if (windowsHost) {
       handle('wsl-discover', () => wslSetup!.discover(), true);

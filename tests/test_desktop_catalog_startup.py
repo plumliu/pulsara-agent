@@ -25,7 +25,7 @@ def _application(tmp_path, monkeypatch, client):
         permission_policy=default_permission_policy(), static_root=tmp_path,
     )
     monkeypatch.setattr(app.sessions, "prepare", AsyncMock())
-    monkeypatch.setattr(app.scheduled_tasks, "start", AsyncMock())
+    monkeypatch.setattr(app.core, "start_scheduled_tasks", AsyncMock())
     return app, snapshot
 
 
@@ -59,7 +59,7 @@ def test_initial_catalog_does_not_block_ready_and_settles_saved_model_status(tmp
             await asyncio.wait_for(entered.wait(), 1)
             assert app.ready
             assert app.database_state is DatabaseDataPlaneState.READY
-            app.scheduled_tasks.start.assert_not_awaited()
+            app.core.start_scheduled_tasks.assert_not_awaited()
             before = await _bootstrap(app)
             assert before["model_catalog_loading"] is True
             assert before["model_configurations"][0]["source"] == "models_dev"
@@ -69,7 +69,7 @@ def test_initial_catalog_does_not_block_ready_and_settles_saved_model_status(tmp
             after = await _bootstrap(app)
             assert after["model_catalog_loading"] is False
             assert after["model_configurations"][0]["status"] == ("unavailable" if failed else "ready")
-            app.scheduled_tasks.start.assert_awaited_once()
+            app.core.start_scheduled_tasks.assert_awaited_once()
             assert client.calls == 1
         finally:
             release.set()
@@ -98,13 +98,13 @@ def test_local_ready_still_waits_for_schema_preparation(tmp_path, monkeypatch):
             await asyncio.wait_for(prepared.wait(), 1)
             assert not start.done()
             assert not app.ready
-            app.scheduled_tasks.start.assert_not_awaited()
+            app.core.start_scheduled_tasks.assert_not_awaited()
             release.set()
             await asyncio.wait_for(start, 1)
             await asyncio.wait_for(app._initial_catalog_task, 1)
             assert app.ready
             assert app.database_state is DatabaseDataPlaneState.READY
-            assert app.scheduled_tasks.start.await_count >= 1
+            assert app.core.start_scheduled_tasks.await_count >= 1
         finally:
             release.set()
             await start
@@ -132,13 +132,14 @@ def test_shutdown_joins_cancelled_catalog_physical_cleanup(tmp_path, monkeypatch
         close = asyncio.create_task(app.aclose())
         try:
             await asyncio.wait_for(cleaning.wait(), 1)
+            assert app.core._closing
             assert not close.done()
             assert not app._initial_catalog_task.done()
-            app.scheduled_tasks.start.assert_not_awaited()
+            app.core.start_scheduled_tasks.assert_not_awaited()
             release_cleanup.set()
             await asyncio.wait_for(close, 1)
             assert app._initial_catalog_task.done()
-            app.scheduled_tasks.start.assert_not_awaited()
+            app.core.start_scheduled_tasks.assert_not_awaited()
         finally:
             release_cleanup.set()
             await close
@@ -159,11 +160,11 @@ def test_catalog_settlement_does_not_start_scheduler_until_database_ready(tmp_pa
             await asyncio.wait_for(app._initial_catalog_task, 1)
             assert app.database_state is DatabaseDataPlaneState.UNAVAILABLE
             assert not app.model_catalog_loading
-            app.scheduled_tasks.start.assert_not_awaited()
+            app.core.start_scheduled_tasks.assert_not_awaited()
             monkeypatch.setattr(app.sessions, "prepare", AsyncMock())
             await app.refresh_database_state()
             assert app.database_state is DatabaseDataPlaneState.READY
-            app.scheduled_tasks.start.assert_awaited_once()
+            app.core.start_scheduled_tasks.assert_awaited_once()
         finally:
             await app.aclose()
 
@@ -177,7 +178,7 @@ def test_unexpected_scheduler_failure_is_observed_and_close_still_joins(tmp_path
                 return snapshot
 
         app, snapshot = _application(tmp_path, monkeypatch, Client())
-        monkeypatch.setattr(app.scheduled_tasks, "start", AsyncMock(side_effect=RuntimeError("scheduler startup failed")))
+        monkeypatch.setattr(app.core, "start_scheduled_tasks", AsyncMock(side_effect=RuntimeError("scheduler startup failed")))
         await app.start()
         with pytest.raises(RuntimeError, match="scheduler startup failed"):
             await app._initial_catalog_task
@@ -215,7 +216,8 @@ def test_failed_initial_catalog_recovers_without_restart(tmp_path, monkeypatch):
             assert result["model_catalog_recovering"] is False
             assert result["model_catalog_error"] is None
             assert result["model_configurations"][0]["status"] == "ready"
-            app.scheduled_tasks.start.assert_awaited_once()
+            # Initial settlement and catalog recovery each notify the same Core.
+            assert app.core.start_scheduled_tasks.await_count == 2
         finally:
             await app.aclose()
 

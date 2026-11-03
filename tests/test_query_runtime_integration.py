@@ -1,5 +1,6 @@
 """Query dispatch uses live execution owners without acknowledging their output."""
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 import asyncio
 from types import SimpleNamespace
@@ -162,7 +163,7 @@ def test_process_query_dispatch_reuses_live_owner_without_consuming_logs(tmp_pat
 
     async def run():
         session_id, host_id = random_id("session"), random_id("host")
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path, host_owner_id=host_id, session_id=session_id,
             authorization_policy=SimpleNamespace(), live_bus=LiveAgentEventBus(),
         )

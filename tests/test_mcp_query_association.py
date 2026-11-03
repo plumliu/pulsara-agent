@@ -110,13 +110,14 @@ def test_retained_discovery_keeps_its_own_source_during_config_reconnect(tmp_pat
 
         service = preparation(tmp_path)
         config = saved_connection(service, enabled=True)
-        raw = {"enabled": True, "required": True,
+        raw = {"enabled": True,
                "transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"}}
         config = _parse_server("firecrawl", raw, runtime_source=config.runtime_source)
         supervisor = McpHostSupervisor(
             workspace_root=service.workspace_root, configs=(config,),
             credential_boundary=ProcessCredentialBoundary(), client_factory=_FakeMcpClient)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         try:
             page = await query(service, runtime, {"kind": "MCP_SERVER"})

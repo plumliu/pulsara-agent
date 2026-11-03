@@ -16,6 +16,7 @@ from tests.retrieval_fixtures import input_for
 from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.desktop_app import http_server as http_server_module
 from pulsara_agent.desktop_app import session_controller as session_controller_module
+from pulsara_agent.conversation_kernel.host import SessionControlRejected
 from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from pulsara_agent.desktop_app.http_server import LocalHttpServer
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
@@ -27,6 +28,32 @@ from pulsara_agent.capability.user_skill_config import (
     set_user_skill_enabled,
 )
 from tests.support.model_config import test_model_runtime
+
+
+def test_draining_rejects_data_get_without_entering_owners_and_keeps_health(tmp_path):
+    async def exercise():
+        (tmp_path / "index.html").write_text("Pulsara")
+        sessions = _Sessions()
+        sessions.list_sessions = AsyncMock(side_effect=AssertionError("data owner entered while draining"))
+        server = LocalHttpServer(
+            sessions=cast(LocalSessionController, sessions), bridge=cast(RendererBridge, _Bridge()),
+            static_root=tmp_path, requested_port=0, is_ready=lambda: False,
+            is_draining=lambda: True, **_model_server_dependencies(),
+        )
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                for path in ("/api/sessions", "/api/memories/projects", "/api/app/bootstrap"):
+                    async with client.get(server.origin + path) as response:
+                        assert response.status == 503
+                        assert (await response.json())["error"]["code"] == "APPLICATION_DRAINING"
+                async with client.get(server.origin + "/healthz") as response:
+                    assert response.status == 200
+                    assert (await response.json())["status"] == "draining"
+            sessions.list_sessions.assert_not_awaited()
+        finally:
+            await server.aclose()
+    asyncio.run(exercise())
 
 
 def test_context_usage_http_reads_the_selected_session_without_a_command(
@@ -118,6 +145,7 @@ class _Sessions:
         return {"candidates": []}
 
     def __init__(self) -> None:
+        self.core = SimpleNamespace(notify_scheduled_tasks_changed=AsyncMock())
         self.create_model_bindings: list[object] = []
         self.create_model_error: Exception | None = None
         self.reconnect_calls: list[tuple[str, str]] = []
@@ -1365,7 +1393,7 @@ async def _exercise_bare_loopback_origin(tmp_path: Path) -> None:
             assert len(sessions.create_model_bindings) == create_count
 
             sessions.create_model_error = (
-                session_controller_module.SessionControlRejected(
+                SessionControlRejected(
                     "MODEL_BINDING_INVALID", "model connection metadata is unavailable"
                 )
             )

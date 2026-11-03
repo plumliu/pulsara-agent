@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -330,7 +331,7 @@ def test_r15_real_rollback_returns_explicit_non_acceptance_and_allows_new_click(
         async def resume(_):
             return SimpleNamespace(session_id=host.session_id, host_session_id=host.host_session_id, session=host.session)
 
-        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, host_writer_unavailable=lambda _id: False), protocol_server=server)
+        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, runtime_closing=AsyncMock(return_value=False), host_writer_unavailable=lambda _id: False), protocol_server=server)
         await server.start()
         waiter = None
         try:
@@ -407,7 +408,7 @@ def test_r12_real_unix_bridge_takeover_while_original_decision_settles(
             )
 
         bridge = RendererBridge(
-            sessions=SimpleNamespace(resume_session=resume, host_writer_unavailable=lambda _id: False), protocol_server=server
+            sessions=SimpleNamespace(resume_session=resume, runtime_closing=AsyncMock(return_value=False), host_writer_unavailable=lambda _id: False), protocol_server=server
         )
         await server.start()
         waiter = None

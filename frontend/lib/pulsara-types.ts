@@ -72,7 +72,6 @@ export interface McpServerCapability {
   needsApproval: boolean;
   effective: boolean;
   status: McpServerStatus;
-  required: boolean;
   availableToSubagents: boolean;
   toolCount: number;
   discoveredToolCount: number;
@@ -164,7 +163,6 @@ export interface UserMcpServerCapability {
   name: string;
   enabled: boolean;
   status: McpServerStatus;
-  required: boolean;
   availableToSubagents: boolean;
   toolCount: number;
   resourceCount: number;

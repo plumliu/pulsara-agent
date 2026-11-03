@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 import asyncio
 import ast
@@ -117,7 +118,7 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority(
         "manage_process",
         "query_processes",
     }
-    tool_owner = DirectKernelToolPort(
+    tool_owner = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id='host:67u6fcd4rvw72ska4wdziwus4a',
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),

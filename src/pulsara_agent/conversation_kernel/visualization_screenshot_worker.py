@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sys
+import signal
+import traceback
+import asyncio
 import json
 import re
 from urllib.parse import urlsplit
@@ -10,12 +13,41 @@ from pathlib import Path
 from io import BytesIO
 from math import isfinite
 
-from playwright.sync_api import Page, sync_playwright
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from playwright.async_api import Page
 from pulsara_agent.llm.input import MAXIMUM_PROMPT_IMAGE_PIXELS
 
 
 _VIEWPORT_WIDTH = 1200
 _VIEWPORT_HEIGHT = 800
+_physical_cleanup_complete = True
+_stop_requested = False
+_main_task = None
+
+
+def _request_stop(_signum, _frame):
+    global _stop_requested
+    # Keep Playwright's driver alive so its supported browser.close() can use
+    # its own closeOrKill deadline and reap its separately detached Chromium.
+    _stop_requested = True
+    if _main_task is not None and not _main_task.cancelling():
+        _main_task.cancel()
+
+
+async def _sdk_join(operation):
+    # A cancelled launch waiter must not lose the SDK object whose physical
+    # launch is still in flight. Its existing launch/close deadline stays with
+    # the SDK; after it joins, the same object enters the normal finally lane.
+    task = asyncio.create_task(operation)
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            break
+    return task.result()
 
 
 def _usable_root_box(box: dict[str, float] | None) -> bool:
@@ -33,10 +65,10 @@ def _usable_root_box(box: dict[str, float] | None) -> bool:
     )
 
 
-def _render_svg(page: Page, source: str) -> bytes:
+async def _render_svg(page: Page, source: str) -> bytes:
     # Chromium owns XML, SVG length units and image decoding. Only the detached
     # document is inspected; SVG executes nowhere, even if it contains scripts.
-    dimensions = page.evaluate(
+    dimensions = await page.evaluate(
         """({source, pixelLimit}) => {
           const doc = new DOMParser().parseFromString(source, 'image/svg+xml');
           const svg = doc.documentElement;
@@ -67,24 +99,29 @@ def _render_svg(page: Page, source: str) -> bytes:
         }""",
         {"source": source, "pixelLimit": MAXIMUM_PROMPT_IMAGE_PIXELS},
     )
-    page.set_viewport_size({"width": dimensions["width"], "height": dimensions["height"]})
-    page.set_content(
+    await page.set_viewport_size({"width": dimensions["width"], "height": dimensions["height"]})
+    await page.set_content(
         """<!doctype html><meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'">
         <style>html,body{margin:0;overflow:hidden}img{display:block}</style><img alt="">"""
     )
-    page.locator("img").evaluate(
+    await page.locator("img").evaluate(
         """async (img, source) => {
           img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(source);
           await img.decode();
         }""",
         dimensions["source"],
     )
-    return page.screenshot(type="png", timeout=10_000)
+    return await page.screenshot(type="png", timeout=10_000)
 
 
-def main() -> None:
+async def main() -> None:
+    global _physical_cleanup_complete
     html = sys.stdin.buffer.read().decode("utf-8")
+    if not html:
+        raise ValueError("preview input is empty")
+    if _stop_requested:
+        raise SystemExit("preview stopped")
     resource_prefix = None
     if "--local-media" in sys.argv:
         value = json.loads(html)
@@ -107,10 +144,19 @@ def main() -> None:
         .read_text()
         .replace("export default ", "", 1)
     )
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+    from playwright.async_api import async_playwright
+    _physical_cleanup_complete = False
+    playwright = await _sdk_join(async_playwright().start())
+    browser = None
+    browser_closed = False
+    try:
+        if _stop_requested:
+            raise asyncio.CancelledError
+        browser = await _sdk_join(playwright.chromium.launch(headless=True))
         try:
-            context = browser.new_context(
+            if _stop_requested:
+                raise SystemExit("preview stopped")
+            context = await browser.new_context(
                 viewport={"width": _VIEWPORT_WIDTH, "height": _VIEWPORT_HEIGHT},
                 device_scale_factor=1,
                 color_scheme="light",
@@ -120,38 +166,39 @@ def main() -> None:
             )
             # Screenshots may load only images from this exact temporary mount;
             # video bytes, scripts and all other network requests stay blocked.
-            context.route("**/*", lambda route: route.continue_() if resource_prefix and route.request.url.startswith(resource_prefix) and route.request.resource_type == "image" else route.abort())
-            page = context.new_page()
+            await context.route("**/*", lambda route: route.continue_() if resource_prefix and route.request.url.startswith(resource_prefix) and route.request.resource_type == "image" else route.abort())
+            page = await context.new_page()
             page.set_default_timeout(10_000)
             if "--svg" in sys.argv:
-                sys.stdout.buffer.write(_render_svg(page, html))
+                sys.stdout.buffer.write(await _render_svg(page, html))
                 return
-            document = page.evaluate(
+            document = await page.evaluate(
                 "args => {" + shell + "; return visualizationShell(args); }",
                 {"html": html + "<style>" + Path(__file__).with_name("visualization_scrollbars.css").read_text() + "</style>", "bootstrap": environment, "mediaPrefix": resource_prefix},
             )
-            page.set_content(document, wait_until="load", timeout=10_000)
-            frame = page.locator("#content").element_handle().content_frame()
+            await page.set_content(document, wait_until="load", timeout=10_000)
+            element = await page.locator("#content").element_handle()
+            frame = await element.content_frame()
             if frame is None or frame.url != "about:srcdoc":
                 raise RuntimeError("HTML preview document is unavailable")
-            frame.wait_for_load_state("load", timeout=10_000)
-            frame.evaluate(
+            await frame.wait_for_load_state("load", timeout=10_000)
+            await frame.evaluate(
                 "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
             )
             selector = Path(__file__).with_name("visualization_root.js").read_text()
             # The shared selector includes comments before the export.
             selector = selector.replace("export default ", "", 1)
-            root_handle = frame.evaluate_handle(
+            root_handle = await frame.evaluate_handle(
                 "() => {" + selector + "; return visualizationRoot(); }"
             )
             root = root_handle.as_element()
-            if root is not None and _usable_root_box(root.bounding_box()):
-                screenshot = root.screenshot(type="png", timeout=10_000)
+            if root is not None and _usable_root_box(await root.bounding_box()):
+                screenshot = await root.screenshot(type="png", timeout=10_000)
             else:
-                screenshot = page.screenshot(
+                screenshot = await page.screenshot(
                     type="png", full_page=False, timeout=10_000
                 )
-            root_handle.dispose()
+            await root_handle.dispose()
             if "--thumbnail" in sys.argv:
                 from PIL import Image
 
@@ -163,8 +210,37 @@ def main() -> None:
                 screenshot = output.getvalue()
             sys.stdout.buffer.write(screenshot)
         finally:
-            browser.close()
+            await _sdk_join(browser.close())
+            browser_closed = True
+    finally:
+        await _sdk_join(playwright.stop())
+        _physical_cleanup_complete = browser is None or browser_closed
+
+
+async def _run():
+    global _main_task
+    loop = asyncio.get_running_loop()
+    _main_task = asyncio.create_task(main())
+    loop.add_signal_handler(signal.SIGTERM, _request_stop, None, None)
+    if _stop_requested:
+        _main_task.cancel()
+    try:
+        await _main_task
+    finally:
+        _main_task = None
+        loop.remove_signal_handler(signal.SIGTERM)
 
 
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGTERM, _request_stop)
+    # No SDK process can be launched before the parent consumes this byte and
+    # supplies the HTML. This closes the OS spawn/handler-installation race.
+    sys.stdout.buffer.write(b"\x00")
+    sys.stdout.buffer.flush()
+    try:
+        asyncio.run(_run())
+    except BaseException:
+        traceback.print_exc()
+        # 1 means rendering failed after SDK/browser physical cleanup; 2 keeps
+        # that ownership unconfirmed. Neither status fabricates a screenshot.
+        raise SystemExit(1 if _physical_cleanup_complete else 2)

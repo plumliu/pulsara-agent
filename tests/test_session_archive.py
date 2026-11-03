@@ -308,8 +308,9 @@ def test_archive_preflight_after_real_writer_takeover_preserves_new_owner_and_re
             prepare_safe_runtime_reopen=AsyncMock(return_value=gate),
             archive_has_terminal_work=lambda: False,
             abort_safe_runtime_reopen=AsyncMock(), commit_safe_runtime_reopen=AsyncMock())
-        core = SimpleNamespace(_lock=asyncio.Lock(), _sessions={"old":session},
-            _ensure_resources=AsyncMock(return_value=repo), _canonical_deadline=lambda:monotonic()+30)
+        core = KernelHostCore(model_runtime=model_runtime())
+        core._sessions = {"old": session}
+        core._ensure_resources = AsyncMock(return_value=repo)
         operation = KernelSessionRetirement(sid, "u_local", core, asyncio.get_running_loop().create_future())
         core._session_retirements = {sid:operation}
         with pytest.raises(SessionWriterConflict, match="writer changed"):

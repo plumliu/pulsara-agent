@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 from pulsara_agent.identity import random_id
 
@@ -873,7 +874,7 @@ def test_round4_runner_plan_barrier_prevents_earlier_sibling_dispatch(
     repository = _repository(stage2_migrated_postgres_database)
     lease = _lease(repository)
     live_bus = LiveAgentEventBus()
-    tools = DirectKernelToolPort(
+    tools = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id=_id("host"),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -975,7 +976,7 @@ def test_round4_rejected_plan_call_owns_batch_and_continues_without_dispatch(
     repository = _repository(stage2_migrated_postgres_database)
     lease = _lease(repository)
     live_bus = LiveAgentEventBus()
-    tools = DirectKernelToolPort(
+    tools = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id=_id("host"),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),

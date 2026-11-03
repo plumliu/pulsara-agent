@@ -22,6 +22,25 @@ from pulsara_agent.mcp_credentials import (
 from pulsara_agent.settings import LocalSettingsStore
 
 
+@pytest.mark.parametrize("old_value", [False, True])
+def test_service_required_is_rejected_and_current_config_has_no_service_flag(old_value, capsys):
+    from pulsara_agent.cli import _mcp_config_public, build_parser
+    from pulsara_agent.mcp_config import _parse_server, _parse_server_declaration
+
+    entry = {"transport": {"type": "stdio", "command": "mcp-fixture"}}
+    for parse in (_parse_server_declaration, _parse_server):
+        with pytest.raises(ValueError, match="unknown.*required"):
+            parse("docs", {**entry, "required": old_value})
+        assert not hasattr(parse("docs", entry), "required")
+    config = _parse_server("docs", entry)
+    assert "required" not in config_to_entry(config)
+    assert "required" not in _mcp_config_public(config)
+    with pytest.raises(SystemExit) as rejected:
+        build_parser().parse_args(["mcp", "add", "docs", "--stdio-command", "mcp-fixture", "--required"])
+    assert rejected.value.code == 2
+    assert "unrecognized arguments: --required" in capsys.readouterr().err
+
+
 def test_connection_reports_schema_limit_separately_from_authentication(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
     from pulsara_agent.conversation_kernel.mcp import sdk_facade, supervisor

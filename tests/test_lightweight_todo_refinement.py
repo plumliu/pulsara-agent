@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
 import asyncio
@@ -291,7 +292,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
 ) -> None:
     async def exercise() -> None:
         live_bus = LiveAgentEventBus()
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
@@ -417,7 +418,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
 
 def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
     async def exercise() -> None:
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
@@ -503,7 +504,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
 ) -> None:
     async def exercise() -> None:
         live_bus = LiveAgentEventBus()
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',

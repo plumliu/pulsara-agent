@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
@@ -396,7 +397,6 @@ def _config(
     tool_effect_overrides: dict[str, str] | None = None,
     catalog_refresh_interval_ms: int | str = "DISABLED",
     invalid_tool_policy: str = "FAIL_SERVER",
-    required: bool = True,
 ):
     config = tmp_path / "mcp.yaml"
     if endpoint is None:
@@ -432,7 +432,6 @@ def _config(
         "servers:\n"
         "  fixture:\n"
         f"    enabled: {'true' if enabled else 'false'}\n"
-        f"    required: {'true' if required else 'false'}\n"
         f"    scope_policy: {scope_policy}\n"
         "    supports_parallel_tool_calls: true\n"
         f"    catalog_refresh_interval_ms: {catalog_refresh_interval_ms}\n"
@@ -664,6 +663,7 @@ async def _installed_runtime(tmp_path: Path):
         configs=(_config(tmp_path),),
     )
     await supervisor.start()
+    await supervisor.wait_initial_readiness()
     runtime = supervisor.install_pending_at_safe_point()
     assert runtime is not None
     return supervisor, runtime
@@ -679,6 +679,7 @@ def test_round6_discovery_calls_only_negotiated_listing_capabilities(
             client_factory=_ToolsOnlyFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -707,6 +708,7 @@ def test_round9_discovery_retains_canonical_valid_wire_incompatible_mcp_tool(
             client_factory=_MixedSchemaFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -769,7 +771,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
             configs=(_config(tmp_path),),
             client_factory=_MixedSchemaFakeMcpClient,  # type: ignore[arg-type]
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:g5wosu2bcbheegwb23wgxr36s4',
             session_id=session_id,
@@ -779,6 +781,7 @@ def test_round9_meta_inspect_full_install_then_single_physical_use(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
 
         async def stream(request):
             if request.model_call_index == 1:
@@ -892,12 +895,10 @@ def test_round6_host_discovery_reservation_covers_client_open(
         "servers:\n"
         "  first:\n"
         "    enabled: true\n"
-        "    required: true\n"
         "    catalog_refresh_interval_ms: DISABLED\n"
         f"    transport: {transport}\n"
         "  second:\n"
         "    enabled: true\n"
-        "    required: true\n"
         "    catalog_refresh_interval_ms: DISABLED\n"
         f"    transport: {transport}\n",
         encoding="utf-8",
@@ -913,6 +914,7 @@ def test_round6_host_discovery_reservation_covers_client_open(
         )
         try:
             await supervisor.start()
+            await supervisor.wait_initial_readiness()
             assert _DiscoveryReservationFakeMcpClient.peak_open == 1
         finally:
             await supervisor.aclose()
@@ -930,6 +932,7 @@ def test_round6_long_remote_tool_name_has_bounded_settleable_identity(
             client_factory=_LongNameFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -989,6 +992,7 @@ def test_round6_advertised_resource_template_instance_is_readable(
             client_factory=_TemplateResourceFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         arguments = {'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://round6/users/alice"}}
@@ -1590,8 +1594,7 @@ def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
             "servers:\n"
             "  legacy:\n"
             "    enabled: true\n"
-            "    required: true\n"
-            "    scope_policy: ROOT_ONLY\n"
+                "    scope_policy: ROOT_ONLY\n"
             "    catalog_refresh_interval_ms: DISABLED\n"
             f"    transport: {transport}\n",
             encoding="utf-8",
@@ -1602,6 +1605,7 @@ def test_round6_stdio_legacy_initialize_normalizes_implicit_complete(
             configs=(config,),
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -1646,6 +1650,7 @@ def test_round6_runtime_only_reconnect_preserves_semantic_surface_until_safe_poi
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         second_config = _config(tmp_path, default_tool_timeout_ms=20_000)
@@ -1745,6 +1750,7 @@ def test_round9_old_draining_slot_failure_keeps_old_config_provenance(
             client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         old_slot = next(iter(first.candidates.values())).slot_lease._slot  # noqa: SLF001
@@ -1786,6 +1792,7 @@ def test_round9_semantic_config_reload_publishes_catalog_only_successor(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         successor = None
@@ -1826,6 +1833,7 @@ def test_round6_replacement_attempt_keeps_installed_catalog_status_stable(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         before = supervisor.catalog_snapshot()
@@ -1846,13 +1854,13 @@ def test_round6_replacement_attempt_keeps_installed_catalog_status_stable(
     asyncio.run(exercise())
 
 
-def test_round9_optional_mcp_failure_publishes_catalog_only_successor(
+def test_round9_mcp_failure_publishes_catalog_only_successor(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
             workspace_root=tmp_path,
-            configs=(_config(tmp_path, required=False),),
+            configs=(_config(tmp_path),),
             client_factory=_DelayedTerminalFailureFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
@@ -1891,7 +1899,7 @@ def test_round9_optional_mcp_failure_publishes_catalog_only_successor(
 
 
 @pytest.mark.parametrize("complete_discovery", [False, True])
-def test_optional_mcp_start_returns_before_discovery_and_keeps_cleanup_owned(
+def test_mcp_start_returns_before_discovery_and_keeps_cleanup_owned(
     tmp_path: Path, complete_discovery: bool,
 ) -> None:
     async def exercise() -> None:
@@ -1912,14 +1920,14 @@ def test_optional_mcp_start_returns_before_discovery_and_keeps_cleanup_owned(
 
         supervisor = McpHostSupervisor(
             workspace_root=tmp_path,
-            configs=(_config(tmp_path, required=False),),
+            configs=(_config(tmp_path),),
             client_factory=ControlledClient,
         )
         first = successor = None
         close = None
         try:
             # The timeout detects a test hang; the gate proves startup does not
-            # depend on optional network/discovery completion.
+            # depend on network/discovery completion.
             await asyncio.wait_for(supervisor.start(), 1)
             await asyncio.wait_for(opening.wait(), 1)
             connection = supervisor._tasks["fixture"]  # noqa: SLF001
@@ -1967,60 +1975,13 @@ def test_optional_mcp_start_returns_before_discovery_and_keeps_cleanup_owned(
     asyncio.run(exercise())
 
 
-def test_required_mcp_discovery_is_admitted_before_blocked_optional_peer(
-    tmp_path: Path,
-) -> None:
-    async def exercise() -> None:
-        order = []
-        optional_opening = asyncio.Event()
-        release_optional = asyncio.Event()
-
-        class ControlledClient(_FakeMcpClient):
-            async def open(self) -> None:
-                order.append(self.config.server_id)
-                if not self.config.required:
-                    optional_opening.set()
-                    await release_optional.wait()
-
-        optional = _config(tmp_path, required=False)
-        required = _parse_server("z_required", {
-            "required": True,
-            "transport": {"type": "stdio", "command": sys.executable},
-        })
-        supervisor = McpHostSupervisor(
-            workspace_root=tmp_path,
-            configs=(optional, required),
-            client_factory=ControlledClient,
-        )
-        runtime = None
-        try:
-            await asyncio.wait_for(supervisor.start(), 1)
-            await asyncio.wait_for(optional_opening.wait(), 1)
-            assert order == ["z_required", "fixture"]
-            assert not supervisor._tasks["fixture"].done()  # noqa: SLF001
-            runtime = supervisor.install_pending_at_safe_point()
-            assert runtime is not None
-            assert tuple(spec.server_id for spec in runtime.root_tool_specs) == ("z_required",)
-            assert {server.server_id: server.status for server in runtime.catalog_snapshot.servers} == {
-                "fixture": McpServerState.CONNECTING,
-                "z_required": McpServerState.READY,
-            }
-        finally:
-            release_optional.set()
-            if runtime is not None:
-                runtime.release()
-            await supervisor.aclose()
-
-    asyncio.run(exercise())
-
-
-def test_round9_late_optional_mcp_discovery_is_visible_without_surface_publication(
+def test_round9_late_mcp_discovery_is_visible_without_surface_publication(
     tmp_path: Path,
 ) -> None:
     async def exercise() -> None:
         supervisor = McpHostSupervisor(
             workspace_root=tmp_path,
-            configs=(_config(tmp_path, required=False),),
+            configs=(_config(tmp_path),),
             client_factory=_DelayedSuccessFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
@@ -2084,7 +2045,6 @@ def test_round9_mcp_catalog_variants_are_bounded_closed_degradations() -> None:
                 server_id="fixture",
                 display_name="Fixture",
                 status=McpServerState.READY,
-                required=False,
                 exposed_tool_count=1,
                 discovered_tool_count=1,
                 resource_count=1,
@@ -2177,6 +2137,7 @@ def test_round6_terminal_failure_retires_only_exact_pending_slot(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         installed = supervisor._installed["fixture"]  # noqa: SLF001
@@ -2218,6 +2179,7 @@ def test_round6_tool_failure_matrix_separates_exact_response_from_unknown(
             client_factory=client_factory,
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2310,6 +2272,7 @@ def test_mcp_call_failure_preserves_outcome_and_cancellation(
             client_factory=Client,
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2421,7 +2384,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
             configs=(_config(tmp_path, default_effect=default_effect),),
             client_factory=Client,
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:6qfxzwje2tb5inaqte4s5fu4yi',
             session_id=session_id,
@@ -2431,6 +2394,7 @@ def test_mcp_sse_failure_continues_batch_and_agent_loop(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
 
         async def stream(request):
             if dynamic and request.model_call_index == 1:
@@ -2560,6 +2524,7 @@ def test_mcp_standard_read_keeps_connection_failure_detail(
             client_factory=Client,
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         arguments = {'target': {"kind":'MCP_RESOURCE', "server_id":"fixture", 'uri':"fixture://slow/resource"}}
@@ -2605,6 +2570,7 @@ def test_round6_unsupported_input_required_preserves_external_effect_unknown(
             client_factory=_UnsupportedInputFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2641,7 +2607,7 @@ def test_round6_mcp_surface_over_128_tools_routes_whole_cohort_to_meta(
             configs=(_config(tmp_path),),
             client_factory=_LargeSurfaceFakeMcpClient,  # type: ignore[arg-type]
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:tglx27oivromnzgakjq4mgawke',
             session_id='session:qoeu2rwdadfcdaqzqa2zlzkk7e',
@@ -2651,6 +2617,7 @@ def test_round6_mcp_surface_over_128_tools_routes_whole_cohort_to_meta(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         try:
             port.prepare_tool_surface_safe_point()
             surface = prepare_test_direct_tool_surface(
@@ -2685,6 +2652,7 @@ def test_round6_standard_remote_read_has_one_bounded_operation_timeout(
             client_factory=_SlowStandardReadFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -2725,8 +2693,9 @@ def test_round6_unsupported_schema_dialect_never_installs_candidate(
             client_factory=_UnsupportedDialectFakeMcpClient,  # type: ignore[arg-type]
         )
         try:
-            with pytest.raises(RuntimeError, match="required MCP server failed"):
-                await supervisor.start()
+            await supervisor.start()
+            await supervisor.wait_initial_readiness()
+            assert supervisor.catalog_snapshot().servers[0].status is McpServerState.FAILED_TERMINAL
             assert supervisor.install_pending_at_safe_point() is not None
             assert supervisor.catalog_snapshot().servers[0].exposed_tool_count == 0
         finally:
@@ -2782,6 +2751,7 @@ def test_round6_dirty_candidate_cannot_publish_at_safe_point(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         candidate = supervisor._pending["fixture"]  # noqa: SLF001
         candidate.slot_lease._slot.mark_dirty()  # noqa: SLF001
         try:
@@ -2809,6 +2779,7 @@ def test_round6_list_changed_storm_coalesces_and_installs_fresh_lease(
             client_factory=_FakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         old_executor = next(iter(first.executors.values()))
@@ -2868,35 +2839,50 @@ def test_round6_list_changed_storm_coalesces_and_installs_fresh_lease(
     asyncio.run(exercise())
 
 
-def test_round6_required_startup_retries_transient_discovery(
+def test_round6_first_failure_releases_readiness_before_background_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def exercise() -> None:
-        _TransientFakeMcpClient.instances.clear()
-        _TransientFakeMcpClient.failures_remaining = 1
-        monkeypatch.setattr(
-            "pulsara_agent.conversation_kernel.mcp.supervisor.random.uniform",
-            lambda _low, _high: 0.001,
-        )
+        retry_started, release_retry = asyncio.Event(), asyncio.Event()
+        attempts = []
+        class Client(_FakeMcpClient):
+            async def open(self):
+                attempts.append(self)
+                if len(attempts) == 1:
+                    raise RuntimeError("first connection failed")
+                retry_started.set()
+                await release_retry.wait()
+
+        async def immediate_retry(owner, server_id, _delay):
+            await asyncio.sleep(0)
+            owner._start_connect(server_id)
+
+        monkeypatch.setattr(_McpHostSupervisor, "_retry_after", immediate_retry)
         supervisor = McpHostSupervisor(
-            workspace_root=tmp_path,
-            configs=(_config(tmp_path),),
-            client_factory=_TransientFakeMcpClient,  # type: ignore[arg-type]
-            required_startup_timeout_seconds=1,
-            connect_attempt_timeout_seconds=0.5,
+            workspace_root=tmp_path, configs=(_config(tmp_path),), client_factory=Client,
         )
-        await supervisor.start()
-        runtime = supervisor.install_pending_at_safe_point()
-        assert runtime is not None
+        runtime = None
         try:
-            assert len(_TransientFakeMcpClient.instances) == 2
-            assert supervisor.catalog_snapshot().servers[0].status.value == "READY"
+            await supervisor.start()
+            first = supervisor._tasks["fixture"]
+            await asyncio.wait_for(supervisor.wait_initial_readiness(), 1)
+            await asyncio.wait_for(retry_started.wait(), 1)
+            assert first.result().state is McpServerState.FAILED_RETRYABLE
+            assert len(attempts) == 2
+            assert supervisor.catalog_snapshot().servers[0].status is McpServerState.CONNECTING
+            assert not supervisor._tasks["fixture"].done()
+            release_retry.set()
+            await supervisor._tasks["fixture"]
+            runtime = supervisor.install_pending_at_safe_point()
+            assert runtime is not None
+            assert supervisor.catalog_snapshot().servers[0].status is McpServerState.READY
         finally:
-            runtime.release()
+            release_retry.set()
+            if runtime is not None:
+                runtime.release()
             await supervisor.aclose()
 
     asyncio.run(exercise())
-
 
 def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
     tmp_path: Path,
@@ -2906,7 +2892,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
             workspace_root=tmp_path,
             configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:um5edy62izvdyaqfp7sleqd3qm',
             session_id='session:vbyef3afwygcmgc6kb7o4cgo3u',
@@ -2916,6 +2902,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -3019,7 +3006,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
             workspace_root=tmp_path,
             configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:mpb7n43ja4kri63x6vzied3cmm',
             session_id='session:6zhufomqduz6x4wcaleyiq2f3m',
@@ -3029,6 +3016,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -3105,6 +3093,7 @@ def test_round6_permission_matrix_is_local_and_scope_surface_is_stable(
             configs=(_config(tmp_path, scope_policy="ROOT_ONLY"),),
         )
         await root_only.start()
+        await root_only.wait_initial_readiness()
         runtime = root_only.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -3214,7 +3203,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
             workspace_root=tmp_path,
             configs=(_config(tmp_path),),
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:kbav6xzxarmakf57sa6g65g65u',
             session_id=session_id,
@@ -3224,6 +3213,7 @@ def _exercise_postgres_mcp_effect_and_reconnect(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -3346,7 +3336,7 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
             configs=(_config(tmp_path),),
             client_factory=_LongNameFakeMcpClient,  # type: ignore[arg-type]
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:t6dujgbaxha6xlrwwmansdt3wi',
             session_id=session_id,
@@ -3356,6 +3346,7 @@ def test_round6_long_remote_name_exact_result_reaches_canonical_acceptance(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -3506,6 +3497,7 @@ def test_round6_schema_change_reconnect_requires_safe_point_rebase(
             client_factory=_SchemaChangingFakeMcpClient,  # type: ignore[arg-type]
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         first = supervisor.install_pending_at_safe_point()
         assert first is not None
         second = None
@@ -3549,7 +3541,7 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
             workspace_root=tmp_path,
             configs=(_config(tmp_path, tool_effect_overrides={"fixture_echo": "READ_ONLY"}),),
         )
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:j7jpfcc42ktkhqt7brnajmmyny',
             session_id='session:o46r5a6j53mt6ahctc5hserqky',
@@ -3559,6 +3551,7 @@ def test_round6_config_disable_rebuilds_surface_and_old_borrow_drains(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         old_surface = prepare_test_direct_tool_surface(
             port,
@@ -3684,7 +3677,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
             io_owner=KernelSessionIO(),
         )
         assert await coordinator.attach_controller('attachment:dqozinnq4ir4wm3cz5udiaqdoa')
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
             session_id='session:ykzttetwxf62cyq3xywg2kkiey',
@@ -3695,6 +3688,7 @@ def test_round6_config_disable_cancels_visible_uncommitted_confirmation(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -3893,7 +3887,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
             io_owner=KernelSessionIO(),
         )
         assert await coordinator.attach_controller('attachment:dqozinnq4ir4wm3cz5udiaqdoa')
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:umsmaqdnqz3cpmtzml56ydq7ei',
             session_id='session:qdz43qjn33wb5r7xkqjllmiqbm',
@@ -3904,6 +3898,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(
             port,
@@ -4258,6 +4253,7 @@ def test_round6_streamable_http_fixture(tmp_path: Path) -> None:
                 configs=(config,),
             )
             await supervisor.start()
+            await supervisor.wait_initial_readiness()
             runtime = supervisor.install_pending_at_safe_point()
             assert runtime is not None
             try:
@@ -4726,6 +4722,7 @@ def test_mcp_identity_frozen_for_success_error_and_cancelled_dispatch(tmp_path: 
             workspace_root=tmp_path, configs=(_config(tmp_path),), client_factory=Client,
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         assert runtime is not None
         try:
@@ -4806,7 +4803,9 @@ def test_mcp_supervisor_epoch_and_permits_are_owner_scoped(tmp_path: Path) -> No
         first = McpHostSupervisor(workspace_root=tmp_path, configs=(config,), client_factory=_TemplateResourceFakeMcpClient)
         second = McpHostSupervisor(workspace_root=tmp_path, configs=(config,), client_factory=_TemplateResourceFakeMcpClient)
         await first.start()
+        await first.wait_initial_readiness()
         await second.start()
+        await second.wait_initial_readiness()
         first_runtime = first.install_pending_at_safe_point()
         second_runtime = second.install_pending_at_safe_point()
         assert first_runtime is not None and second_runtime is not None

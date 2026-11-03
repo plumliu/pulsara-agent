@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 import asyncio
 import json
@@ -40,7 +41,7 @@ def test_source_write_cancel_after_publication_keeps_exact_single_outcome(
     source = BodyPort(session_id="session:yovkoffbw6sro643t4zfhazd24")
 
     async def run():
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id="host:m2lzworel4eoc2mmilyyzj7nxm",
             session_id="session:yovkoffbw6sro643t4zfhazd24",
@@ -94,7 +95,7 @@ def test_source_write_available_to_root_and_child_with_same_scoped_owner(tmp_pat
     source = BodyPort(session_id="session:yovkoffbw6sro643t4zfhazd24")
 
     async def run():
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id="host:m2lzworel4eoc2mmilyyzj7nxm",
             session_id="session:yovkoffbw6sro643t4zfhazd24",
@@ -168,7 +169,7 @@ def test_source_write_runtime_dispatch_delivery_and_prefix_continuity(
     )
 
     async def run():
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id="host:m2lzworel4eoc2mmilyyzj7nxm",
             session_id=session_id,

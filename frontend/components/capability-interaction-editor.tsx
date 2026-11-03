@@ -54,7 +54,7 @@ export function CapabilityInteractionEditor({form, onResolve}: {
     const server: UserMcpServerCapability = {
       id: String(target.server_id), name: String(config.display_name ?? target.server_id), config,
       currentIdentity: String(record(form.expected_current).expected_identity ?? ''), enabled: config.enabled !== false,
-      status: 'configured', required: false, availableToSubagents: Boolean(config.available_to_subagents),
+      status: 'configured', availableToSubagents: Boolean(config.available_to_subagents),
       toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0,
       instructions: '', hasFailure: false, tools: [],
       transport: {kind: transport.type === 'stdio' ? 'stdio' : 'http', summary: String(transport.endpoint ?? transport.command ?? '')},

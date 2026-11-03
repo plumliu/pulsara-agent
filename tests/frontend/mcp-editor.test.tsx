@@ -6,7 +6,7 @@ import type { UserMcpServerCapability } from '../../frontend/lib/pulsara-types';
 afterEach(cleanup);
 const binding = { owner: { kind: 'local', scope_key: 'user', server_id: 'docs', plugin_id: null }, name: 'bearer' };
 const server: UserMcpServerCapability = {
-  id: 'docs', name: '文档', enabled: true, status: 'configured', required: false,
+  id: 'docs', name: '文档', enabled: true, status: 'configured',
   availableToSubagents: false, toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0,
   instructions: '', hasFailure: false, transport: { kind: 'http', summary: 'https://example.org/mcp' }, tools: [], currentIdentity: 'current-docs',
   config: { display_name: '文档', enabled: true, transport: { type: 'streamable_http', endpoint: 'https://example.org/mcp' }, auth: { type: 'bearer', reference: { source: 'managed', binding } }, exposure_policy: { include_tool_names: ['search'] }, default_tool_timeout_ms: 45000 },
@@ -17,7 +17,7 @@ describe('MCP connection editor', () => {
     const save = vi.fn(async () => true);
     render(<McpEditor server={server} onSave={save} onClose={vi.fn()} />);
     fireEvent.click(screen.getByText('更多连接选项'));
-    for (const name of ['允许本机 HTTP 测试地址', '按无状态 HTTP 配置此服务', '将此服务标记为必需', '允许并行工具调用']) {
+    for (const name of ['允许本机 HTTP 测试地址', '按无状态 HTTP 配置此服务', '允许并行工具调用']) {
       const input = screen.getByLabelText(name) as HTMLInputElement;
       expect(input.checked).toBe(false);
       fireEvent.click(input.closest('label')!);
@@ -25,13 +25,15 @@ describe('MCP connection editor', () => {
     }
     expect(screen.getByLabelText('无状态请求并发数')).toBeTruthy();
     expect(screen.queryByLabelText('连接网络范围')).toBeNull();
+    expect(screen.queryByLabelText('将此服务标记为必需')).toBeNull();
     fireEvent.click(screen.getByRole('button', {name: '保存连接'}));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
       config: expect.objectContaining({
-        required: true, supports_parallel_tool_calls: true,
+        supports_parallel_tool_calls: true,
         transport: expect.objectContaining({allow_http_localhost: true, stateless_http_asserted: true}),
       }),
     })));
+    expect(save.mock.calls[0][0].config).not.toHaveProperty('required');
   });
 
   it('distinguishes an oversized tool definition from failed authorization', async () => {

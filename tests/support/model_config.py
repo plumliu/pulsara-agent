@@ -489,6 +489,12 @@ def acquire_bound_test_writer(repository, **kwargs):
     return lease
 
 
+def scheduled_task_service():
+    """Use the production scheduler owner in isolated tool-port unit tests."""
+    from pulsara_agent.conversation_kernel.host import KernelHostCore
+    return KernelHostCore.production(model_runtime=test_model_runtime()).scheduled_tasks
+
+
 test_model_limits.__test__ = False
 test_model_runtime.__test__ = False
 include_test_runtime_connections.__test__ = False

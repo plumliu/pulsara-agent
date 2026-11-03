@@ -94,6 +94,10 @@ class _Session:
         self.refresh_requests = 0
         self._renewal_task = SimpleNamespace(add_done_callback=lambda callback: None)
         self.extensions = object()
+        self.execution_active = False
+
+    def activate_execution(self):
+        self.execution_active = True
 
     def inspect_capability_catalog(self):
         return SimpleNamespace(mcp_configured_servers=())
@@ -797,6 +801,7 @@ def test_session_created_during_a_project_change_still_marks_lazy_refresh(
         release.set()
         await creating
         assert session.refresh_requests == 1
+        assert session.execution_active
 
     asyncio.run(exercise())
 
@@ -896,7 +901,7 @@ def test_live_session_refresh_is_lazy_until_the_next_turn_safe_point() -> None:
         session = SimpleNamespace(
             _lock=asyncio.Lock(),
             _queue_wake=asyncio.Event(),
-            _capability_refresh_requested_revision=0,
+            _capability_refresh_requested_revision=0, _capability_refresh_wake=asyncio.Event(),
             _capability_refresh_applied_revision=0,
             _capability_refresh_attention=None,
             _require_open=lambda: None,
@@ -924,7 +929,7 @@ def test_failed_project_capability_adoption_does_not_starve_the_queued_turn() ->
         session = SimpleNamespace(
             _lock=asyncio.Lock(),
             _queue_wake=asyncio.Event(),
-            _capability_refresh_requested_revision=0,
+            _capability_refresh_requested_revision=0, _capability_refresh_wake=asyncio.Event(),
             _capability_refresh_applied_revision=0,
             _capability_refresh_attention=None,
             _require_open=lambda: None,
@@ -990,7 +995,6 @@ def test_project_mcp_transition_keeps_one_editable_row(tmp_path: Path) -> None:
         server_id="time",
         display_name="Time",
         status=McpServerState.DISABLED,
-        required=False,
         exposed_tool_count=0,
         discovered_tool_count=0,
         resource_count=0,
@@ -1066,7 +1070,6 @@ def test_disabled_workspace_mcp_does_not_hide_the_effective_user_server(
         server_id="docs",
         display_name="User Docs",
         status=McpServerState.READY,
-        required=False,
         exposed_tool_count=2,
         discovered_tool_count=2,
         resource_count=0,

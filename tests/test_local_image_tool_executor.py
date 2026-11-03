@@ -1,6 +1,7 @@
 """Focused scheduling contracts for builtin view_image batches."""
 
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 from tests.support.images import bound_test_image
 from pulsara_agent.identity import derive_id
 
@@ -355,7 +356,7 @@ def test_view_image_uses_the_frozen_target_modality_tristate_before_read(
 ) -> None:
     async def scenario() -> None:
         validator = HostPromptImageValidator()
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:gnt4uwt66odkgmxsteq3xo44oi',
             session_id='session:7rzhir4ub5kes44wp2llo7kcxe',
@@ -446,7 +447,7 @@ def test_view_image_reference_uses_the_canonical_port_without_local_validation(
             return FrozenImageToolResourceIncrement(1, 1, 1, 1)
 
     async def scenario() -> None:
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:ls3zb3vy3674q3vwfhhiwkzgfu',
             session_id='session:k2pz6c4sr6wup4p3gce6i77yqe',
@@ -517,7 +518,7 @@ def test_view_image_reference_rejects_text_only_target_before_database_read(
             raise AssertionError("text-only target must not read the image")
 
     async def scenario() -> None:
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:7qyyxjcbupfxhnkzj2hq3kf5ma',
             session_id='session:wpnbbsygovmvaoy4bnzn2ao4n4',
@@ -745,7 +746,7 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
         if mode == 'preparation_deadline':
             from unittest.mock import AsyncMock
             monkeypatch.setattr(validator, 'freeze_local_image', AsyncMock(side_effect=TimeoutError('preparation deadline')))
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:hi4pnm7cfz5jwlcsfvvcx4rpjq', session_id='session:eghkqizzionnli27oxvk6kkcgu',
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id='host:hi4pnm7cfz5jwlcsfvvcx4rpjq', session_id='session:eghkqizzionnli27oxvk6kkcgu',
             live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy(), image_validator=validator)
         borrow, context = direct_tool_invocation_context(port, session_id='session:eghkqizzionnli27oxvk6kkcgu', tool_name='view_image',
             tool_call_id='call:html', attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm', turn_id='turn:4s6voic575fjaadstkw7z4cttq', assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy')
@@ -818,7 +819,7 @@ def test_svg_view_image_real_browser_preserves_complete_frame(tmp_path, dimensio
             '</svg>'
         )
         validator = HostPromptImageValidator()
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:hi4pnm7cfz5jwlcsfvvcx4rpjq', session_id='session:eghkqizzionnli27oxvk6kkcgu',
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id='host:hi4pnm7cfz5jwlcsfvvcx4rpjq', session_id='session:eghkqizzionnli27oxvk6kkcgu',
             live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy(), image_validator=validator)
         borrow, context = direct_tool_invocation_context(port, session_id='session:eghkqizzionnli27oxvk6kkcgu', tool_name='view_image',
             tool_call_id='call:svg', attempt_id='attempt:fxwn2ydacal2miwr3c4gega7wm', turn_id='turn:4s6voic575fjaadstkw7z4cttq', assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy')

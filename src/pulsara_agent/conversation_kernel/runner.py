@@ -1474,6 +1474,14 @@ class ConversationKernelRunner:
                     # No input/surface handle exists here. A transferred base
                     # keeps its frozen roots until the common suffix safe point.
                     await self._before_provider_preparation()
+                if successor_dispatch is None:
+                    # No handle or surface borrow exists yet. Network startup
+                    # is outside the short snapshot/compilation watchdog.
+                    await self._provider_dispatch.wait_for_cold_epoch_readiness(
+                        scope_kind=self._session_scope_kind,
+                    )
+                if intent.cause is not None:
+                    raise asyncio.CancelledError
                 model_call_count += 1
                 input_selection_in_progress = True
                 planning_deadline = self._planning_deadline()

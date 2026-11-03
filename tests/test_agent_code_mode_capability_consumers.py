@@ -1,4 +1,5 @@
 """Observable consumer, scope and current-Work contracts for the hard cut."""
+from tests.support.model_config import scheduled_task_service
 from dataclasses import replace
 
 import pytest
@@ -112,7 +113,7 @@ def test_native_and_code_mode_expose_same_profile_free_run_agent_schema(tmp_path
     from tests.support.round3 import prepare_test_direct_tool_surface
 
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="schema-host",
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id="schema-host",
             session_id="session:root", live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"run_agent"})))
@@ -166,13 +167,14 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
                         on_subscriptions_listen=ListenHandler(bus))
         async with _sdk_http(server) as endpoint:
             supervisor = McpHostSupervisor(workspace_root=tmp_path,
-                configs=(_parse_server("catalog", {"required": True, "catalog_refresh_interval_ms": "DISABLED",
+                configs=(_parse_server("catalog", {"catalog_refresh_interval_ms": "DISABLED",
                     "effect_policy": {"default_effect": "READ_ONLY"}, "transport": {"type": "streamable_http",
                     "endpoint": endpoint, "allow_http_localhost": True}}),),
                 credential_boundary=ProcessCredentialBoundary())
             first = second = None
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 first = supervisor.install_pending_at_safe_point()
                 # The actual Host MCP runtime is the authority; this cell has no provider epoch.
                 port = object.__new__(DirectKernelToolPort)

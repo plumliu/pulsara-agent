@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 from pulsara_agent.conversation_kernel.prompt_content import bind_prompt_images
 
 from pulsara_agent.identity import random_id
@@ -5414,7 +5415,7 @@ def test_mid_turn_compaction_preserves_active_plan_guidance_and_write_denial(
         )
     )
     live_bus = LiveAgentEventBus()
-    tools = DirectKernelToolPort(
+    tools = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id=_name("host"),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -8201,7 +8202,7 @@ def test_manage_capability_settles_through_real_attempt_and_model_followup(
             return "RELOADED"
 
     live_bus = LiveAgentEventBus()
-    tools = DirectKernelToolPort(
+    tools = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=service.workspace_root,
         host_owner_id="host:qvikojvw2x5443ozczauskeqrq",
         session_id=session_id,
@@ -8290,7 +8291,7 @@ def test_terminal_preflight_failure_returns_tool_result_and_model_finishes_turn(
         ]
     )
     live_bus = LiveAgentEventBus()
-    tools = DirectKernelToolPort(
+    tools = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=workspace,
         host_owner_id="host:cm55ctep4ovvaazbgmtwxh6ufq",
         session_id=session_id,
@@ -8363,7 +8364,7 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
         deadline_monotonic=monotonic() + 30,
     )
     live_bus = LiveAgentEventBus()
-    tools = DirectKernelToolPort(
+    tools = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id="host:yinyxklzunar54s7objjdbphcy",
         session_id=session_id,

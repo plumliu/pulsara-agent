@@ -1,4 +1,5 @@
 """Advisory Cell participants never consume output or block tool work."""
+from tests.support.model_config import scheduled_task_service
 
 import asyncio
 import pytest
@@ -313,7 +314,7 @@ def test_cell_observer_is_bound_for_both_composition_orders(tmp_path, code_first
 
     async def run():
         seen = []
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="host",
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id="host",
             session_id=random_id("session"), live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         code = CodeModeHost()
@@ -339,7 +340,7 @@ def test_cell_observer_missing_from_bound_subagent_is_not_silently_ignored(tmp_p
     from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
 
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="host",
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id="host",
             session_id=random_id("session"), live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         code = CodeModeHost()

@@ -176,7 +176,6 @@ const capabilitySnapshot: CapabilitySnapshot = {
       needsApproval: false,
       effective: true,
       status: 'ready',
-      required: false,
       availableToSubagents: true,
       toolCount: 1,
       discoveredToolCount: 1,
@@ -228,7 +227,6 @@ const userCapabilitySnapshot: UserCapabilitySnapshot = {
       name: '个人文档',
       enabled: true,
       status: 'ready',
-      required: false,
       availableToSubagents: true,
       toolCount: 1,
       resourceCount: 0,
@@ -696,6 +694,11 @@ class FakeAdapter implements RuntimeAdapter {
     void _sessionId;
     return { status: 'reopened' as const };
   }
+
+  closeSession = vi.fn(async (_sessionId: string) => {
+    void _sessionId;
+    return { status: 'closing' as const };
+  });
 
   listSessions = vi.fn(async () => this.sessions.map((session) => ({ ...session })));
 

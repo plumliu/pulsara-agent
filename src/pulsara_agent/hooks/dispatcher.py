@@ -481,6 +481,16 @@ class KernelHookDispatcher:
                 await self._lane.wait()
             return self._current_view
 
+    @property
+    def local_children_stopped(self) -> bool:
+        return self._executor.local_children_stopped
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return (self._closed and not self._ordinary_active
+                and all(task.done() for task in self._background_tasks)
+                and self._executor.physical_close_complete)
+
     async def aclose(self, *, deadline_monotonic: float | None = None) -> None:
         async with self._lane:
             self._ordinary_fenced = True

@@ -17,7 +17,7 @@ from typing import Awaitable, Callable
 from urllib.parse import unquote, urlsplit
 from urllib.request import getproxies
 
-from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.conversation_kernel.host import KernelHostCore, KernelHostCoreClosing
 from pulsara_agent.llm.model_catalog import (
     ModelCatalogOwner,
     ModelsDevCatalogClient,
@@ -37,7 +37,6 @@ from pulsara_agent.tool_permission import EffectivePermissionPolicy
 from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
 from pulsara_agent.desktop_app.http_server import LocalHttpServer
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
-from pulsara_agent.scheduling.service import ScheduledTaskService
 
 
 class DesktopApplicationState(StrEnum):
@@ -71,10 +70,10 @@ class DesktopApplication:
         self,
         *,
         settings: LocalSettingsStore | None = None,
-        memory_domain_id: str = "u_local",
-        trust_workspace_mcp_config: bool = False,
-        permission_policy: EffectivePermissionPolicy,
-        active_skill_names: frozenset[str] = frozenset(),
+        memory_domain_id: str | None = None,
+        trust_workspace_mcp_config: bool | None = None,
+        permission_policy: EffectivePermissionPolicy | None = None,
+        active_skill_names: frozenset[str] | None = None,
         port: int = 0,
         static_root: Path | None = None,
         catalog: ModelCatalogOwner | None = None,
@@ -86,15 +85,37 @@ class DesktopApplication:
     ) -> None:
         if not 0 <= port <= 65535:
             raise ValueError("desktop HTTP port is out of bounds")
-        self.settings = settings or LocalSettingsStore()
-        self.catalog = catalog or ModelCatalogOwner(ModelsDevCatalogClient())
+        # A supplied execution owner determines its dependencies. Identity is
+        # intentional: equal configuration documents are not the same owner.
+        if core is not None:
+            if model_runtime is not None and model_runtime is not core.model_runtime:
+                raise ValueError("Core and model_runtime must use the same owner")
+            model_runtime = core.model_runtime
+            if memory_domain_id is not None and memory_domain_id != core.memory_domain_id:
+                raise ValueError("Core and desktop must use the same memory domain")
+            memory_domain_id = core.memory_domain_id
+            if permission_policy is not None and permission_policy != core.root_permission_policy:
+                raise ValueError("Core and desktop must use the same permission policy")
+            if active_skill_names is not None and active_skill_names != core.root_active_skill_names:
+                raise ValueError("Core and desktop must use the same active skills")
+            if trust_workspace_mcp_config is not None and trust_workspace_mcp_config != core.trust_workspace_mcp_config:
+                raise ValueError("Core and desktop must use the same workspace MCP trust")
+        if memory_domain_id is None:
+            memory_domain_id = "u_local"
+        if model_runtime is not None:
+            if settings is not None and settings is not model_runtime.settings:
+                raise ValueError("Model runtime and settings must use the same owner")
+            if catalog is not None and catalog is not model_runtime.catalog:
+                raise ValueError("Model runtime and catalog must use the same owner")
+            settings = model_runtime.settings
+            catalog = model_runtime.catalog
+        self.settings = settings if settings is not None else LocalSettingsStore()
+        self.catalog = catalog if catalog is not None else ModelCatalogOwner(ModelsDevCatalogClient())
         self.catalog.diagnostic_scrubber = self._catalog_diagnostic_scrubber
-        self.model_runtime = model_runtime or ModelRuntime.production(
+        self.model_runtime = model_runtime if model_runtime is not None else ModelRuntime.production(
             settings=self.settings,
             catalog=self.catalog,
         )
-        self.permission_policy = permission_policy
-        self.active_skill_names = active_skill_names
         self.requested_port = port
         self.static_root = (static_root or packaged_static_root()).resolve()
         self.host = host
@@ -103,19 +124,24 @@ class DesktopApplication:
         if host is not None:
             from pulsara_agent.desktop_app.workspace_directories import WorkspaceDirectories
             self.workspace_directories = WorkspaceDirectories()
-        self.core = core or KernelHostCore.production(
+        self.core = core if core is not None else KernelHostCore.production(
             model_runtime=self.model_runtime, open_browser=open_browser,
+            memory_domain_id=memory_domain_id,
+            permission_policy=permission_policy,
+            active_skill_names=active_skill_names if active_skill_names is not None else frozenset(),
+            trust_workspace_mcp_config=bool(trust_workspace_mcp_config),
             workspace_validator=(lambda path: self.workspace_directories.select(str(path))) if self.workspace_directories is not None else None,
         )
+        self.permission_policy = self.core.root_permission_policy
+        self.active_skill_names = self.core.root_active_skill_names
         self.sessions = LocalSessionController(
             core=self.core,
             memory_domain_id=memory_domain_id,
-            trust_workspace_mcp_config=trust_workspace_mcp_config,
-            permission_policy=permission_policy,
-            active_skill_names=active_skill_names,
+            trust_workspace_mcp_config=self.core.trust_workspace_mcp_config,
+            permission_policy=self.permission_policy,
+            active_skill_names=self.active_skill_names,
         )
-        self.scheduled_tasks = ScheduledTaskService(self.sessions)
-        self.core.scheduled_tasks = self.scheduled_tasks
+        self.scheduled_tasks = self.core.scheduled_tasks
         self.protocol_server: TerminalKernelProtocolServer | None = None
         self.bridge: RendererBridge | None = None
         self.http: LocalHttpServer | None = None
@@ -153,6 +179,12 @@ class DesktopApplication:
             raise RuntimeError("Pulsara local HTTP listener is unavailable")
         return self.http.origin
 
+    @property
+    def workbench_exit_ready(self) -> bool:
+        return self.core.workbench_exit_ready and (
+            self.http is None or self.http.local_children_stopped
+        )
+
     async def start(self) -> None:
         async with self._start_lock:
             if self.state is not DesktopApplicationState.NEW:
@@ -172,6 +204,9 @@ class DesktopApplication:
                     session_provider=self.sessions.session_by_host_id,
                 )
                 await protocol_server.start()
+                if self.state is not DesktopApplicationState.STARTING or self._close_task is not None:
+                    await protocol_server.close()
+                    raise KernelHostCoreClosing("Desktop application is draining")
                 self.protocol_server = protocol_server
                 bridge = RendererBridge(
                     sessions=self.sessions, protocol_server=protocol_server
@@ -199,12 +234,17 @@ class DesktopApplication:
                     workspace_directories=self.workspace_directories,
                 )
                 await http.start()
+                if self.state is not DesktopApplicationState.STARTING or self._close_task is not None:
+                    await http.aclose()
+                    raise KernelHostCoreClosing("Desktop application is draining")
                 self.http = http
                 self._initial_catalog_task = asyncio.create_task(
                     self._refresh_initial_catalog(), name="desktop-initial-model-catalog",
                 )
                 self._initial_catalog_task.add_done_callback(self._observe_initial_catalog_completion)
                 await self.refresh_database_state()
+                if self.state is not DesktopApplicationState.STARTING or self._close_task is not None:
+                    raise KernelHostCoreClosing("Desktop application is draining")
                 self.state = DesktopApplicationState.READY
                 self._sdk_warmup_task = asyncio.create_task(
                     self._warm_sdk_imports(), name="desktop-sdk-warmup",
@@ -277,7 +317,10 @@ class DesktopApplication:
 
     async def refresh_model_catalog(self):
         try:
-            return await self.catalog.refresh()
+            result = await self.catalog.refresh()
+            async with self._database_lock:
+                await self._start_scheduler_if_prepared()
+            return result
         finally:
             # A manual attempt has already run; wake the retry owner to observe
             # its result and start a fresh delay, without issuing a second fetch.
@@ -293,6 +336,8 @@ class DesktopApplication:
                 return
             try:
                 await self.catalog.refresh()
+                async with self._database_lock:
+                    await self._start_scheduler_if_prepared()
             except Exception:
                 delay = min(delay * 2, 60.0)
 
@@ -318,7 +363,7 @@ class DesktopApplication:
             and self.database_state is DatabaseDataPlaneState.READY
             and not self.draining
         ):
-            await self.scheduled_tasks.start()
+            await self.core.notify_scheduled_tasks_changed()
 
     async def _close_initial_catalog(self) -> None:
         tasks = (self._initial_catalog_task, self._catalog_retry_task)
@@ -394,9 +439,7 @@ class DesktopApplication:
                         await self.bridge.aclose()
                     if self.protocol_server is not None:
                         await self.protocol_server.close()
-                    await self.scheduled_tasks.aclose()
-                    await self.sessions.aclose()
-                    await self.core.shutdown()
+                    await self._close_kernel()
                 work = asyncio.create_task(
                     asyncio.to_thread(
                         runner.reset, deadline_monotonic=monotonic() + 300.0
@@ -447,12 +490,32 @@ class DesktopApplication:
         if waiter_cancelled is not None:
             raise waiter_cancelled
 
+    async def _close_kernel(self, shutdown_task: asyncio.Task[None] | None = None) -> None:
+        # Core stops scheduling and execution admission immediately. Desktop's
+        # existing operation owners finish their bridge work and release the
+        # Core reservations that the same shutdown owner must join.
+        outcomes = await asyncio.gather(
+            asyncio.shield(shutdown_task) if shutdown_task is not None else self.core.shutdown(),
+            self.sessions.aclose(), return_exceptions=True,
+        )
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                raise outcome
+
     async def _close_owner(self) -> None:
         failed = self.state is DesktopApplicationState.FAILED
         if self.state is DesktopApplicationState.STOPPED:
             return
         if not failed:
             self.state = DesktopApplicationState.DRAINING
+        # Stop execution and owned child admission before joining catalog I/O,
+        # imports or the database maintenance lock. Each task still joins its
+        # original owner; the host observes their actual completion facts.
+        kernel_shutdown = asyncio.create_task(self.core.shutdown(), name="desktop-kernel-shutdown")
+        preview_close: asyncio.Task[None] | None = None
+        if self.http is not None:
+            self.http.stop_admission()
+            preview_close = asyncio.create_task(self.http.close_local_children(), name="desktop-preview-close")
         close_error: BaseException | None = None
 
         async def close(operation) -> None:
@@ -474,12 +537,13 @@ class DesktopApplication:
             if self.protocol_server is not None:
                 await close(self.protocol_server.close)
                 self.protocol_server = None
-            await close(self.scheduled_tasks.aclose)
-            await close(self.sessions.aclose)
-            await close(self.core.shutdown)
+            await close(lambda: self._close_kernel(kernel_shutdown))
+        if preview_close is not None:
+            await close(lambda: asyncio.shield(preview_close))
         if self.http is not None:
             await close(self.http.aclose)
-            self.http = None
+            if self.http.local_children_stopped:
+                self.http = None
         runtime_directory = self._runtime_directory
         self._runtime_directory = None
         if runtime_directory is not None:

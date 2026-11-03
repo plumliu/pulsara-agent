@@ -76,11 +76,15 @@ class MemoryEmbeddingMaintainer:
         task.cancel()
         expired = max(0.0, deadline_monotonic - monotonic())
         done, _ = await asyncio.wait((task,), timeout=expired)
+        await asyncio.gather(task, return_exceptions=True)
         if not done:
             raise TimeoutError(
                 "memory embedding maintainer exceeded Host close deadline"
             )
-        await asyncio.gather(task, return_exceptions=True)
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closing and (self._task is None or self._task.done())
 
     async def _run(self) -> None:
         while not self._closing:

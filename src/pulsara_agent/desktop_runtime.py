@@ -188,6 +188,7 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
     application = None
     server = None
     commands_task = None
+    application_start_task = None
     stop = asyncio.Event()
     host_emit = emit
     channel_closed = False
@@ -207,6 +208,7 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
     failed = False
     ready_announced = False
     shutdown_clean = True
+    workbench_exit_requested = False
     kernel_lock = None
     socket_path = diagnostics_path()
     loop = asyncio.get_running_loop()
@@ -254,6 +256,7 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
         return text
 
     async def commands():
+        nonlocal workbench_exit_requested
         while not stop.is_set():
             line = await reader.readline()
             if not line:
@@ -264,6 +267,11 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
                 raise ValueError("incomplete desktop host command")
             request = json.loads(line)
             if request == {"type": "shutdown"}:
+                request_stop()
+            elif request == {"type": "shutdown-workbench"}:
+                # Only the trusted native Quit/Restart action grants permission
+                # to discard this runtime; database reset uses full shutdown.
+                workbench_exit_requested = True
                 request_stop()
             elif (set(request) == {"type", "requestId"}
                   and request["type"] == "inspect-quit" and is_valid_id(request["requestId"], "request")):
@@ -342,23 +350,43 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
             tls_identity = create_desktop_tls_identity(require_pulsara_home() / "desktop")
             options = {"open_browser": open_oauth_browser, "host": host, "tls_identity": tls_identity}
         application = factory(settings=settings, permission_policy=preset_to_policy(DEFAULT_PERMISSION_MODE), **options)
-        await application.start()
-        if application.database_state != DatabaseDataPlaneState.READY:
-            raise RuntimeError(f"managed database is not ready: {application.database_state}")
-        socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # Electron's single-instance lock owns this path; stale socket only.
-        if socket_path.exists() or socket_path.is_symlink():
-            if not stat.S_ISSOCK(socket_path.lstat().st_mode):
-                raise RuntimeError("desktop diagnostic path is not a socket")
-            socket_path.unlink()
-        server = await asyncio.start_unix_server(diagnostic, path=socket_path)
-        os.chmod(socket_path, 0o600)
+        application_start_task = asyncio.create_task(
+            application.start(), name="desktop-application-start"
+        )
+        startup_stop = asyncio.create_task(stop.wait(), name="desktop-start-stop")
+        try:
+            await asyncio.wait(
+                (application_start_task, startup_stop), return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop.is_set():
+                # Detach only the startup waiter. Core retains its admitted
+                # initialization and data workers; the original application
+                # close below owns their physical settlement.
+                if not application_start_task.done():
+                    application_start_task.cancel()
+            else:
+                await application_start_task
+        finally:
+            startup_stop.cancel()
+            with suppress(asyncio.CancelledError):
+                await startup_stop
         if not stop.is_set():
-            reply = {"type": "ready", "origin": application.origin, "database_state": application.database_state.value}
-            if tls_identity is not None:
-                reply["certificatePem"] = tls_identity.certificate_pem
-            ready_announced = True
-            emit(reply)
+            if application.database_state != DatabaseDataPlaneState.READY:
+                raise RuntimeError(f"managed database is not ready: {application.database_state}")
+            socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # Electron's single-instance lock owns this path; stale socket only.
+            if socket_path.exists() or socket_path.is_symlink():
+                if not stat.S_ISSOCK(socket_path.lstat().st_mode):
+                    raise RuntimeError("desktop diagnostic path is not a socket")
+                socket_path.unlink()
+            server = await asyncio.start_unix_server(diagnostic, path=socket_path)
+            os.chmod(socket_path, 0o600)
+            if not stop.is_set():
+                reply = {"type": "ready", "origin": application.origin, "database_state": application.database_state.value}
+                if tls_identity is not None:
+                    reply["certificatePem"] = tls_identity.certificate_pem
+                ready_announced = True
+                emit(reply)
         await stop.wait()
         if commands_task.done():
             commands_task.result()
@@ -385,7 +413,54 @@ async def run_desktop_child(reader: asyncio.StreamReader, emit, *, application_f
         close_oauth_requests()
         if application is not None:
             try:
-                await application.aclose()
+                if workbench_exit_requested:
+                    close_task = asyncio.create_task(
+                        application.aclose(), name="desktop-workbench-close"
+                    )
+                    close_failure_reported = False
+                    while True:
+                        deadline = application.core.workbench_exit_deadline
+                        if close_task.done():
+                            close_error = (
+                                asyncio.CancelledError() if close_task.cancelled()
+                                else close_task.exception()
+                            )
+                            if close_error is None or deadline is None:
+                                await close_task
+                                break
+                            # A failed close that retained physical owners is
+                            # still this runtime's responsibility. Do not release
+                            # its lifetime lock and lose the original boundary.
+                            if not close_failure_reported:
+                                shutdown_clean = False
+                                failed = True
+                                print(error_text(close_error), file=sys.stderr)
+                                emit({"type": "failed", "phase": "shutdown",
+                                      "error": error_text(close_error)})
+                                close_failure_reported = True
+                        if application.workbench_exit_ready:
+                            # Core has completed necessary close, or an original
+                            # physical owner's watchdog has elapsed. In both
+                            # cases actual local child owners have all joined.
+                            # Exit only this runtime; retained earlier failures
+                            # describe any genuinely unconfirmed settlement.
+                            emit({"type": "failed", "phase": "shutdown",
+                                  "error": "未完成的临时收尾已丢弃，已确认数据保留；未确认的操作不自动重做。"})
+                            os._exit(1)
+                        # This samples physical owner completion, like the
+                        # existing process joins. It never creates an application
+                        # lifetime limit or a new shutdown deadline.
+                        remaining = 0.005 if deadline is None else deadline - monotonic()
+                        wait_seconds = remaining if remaining > 0 else 0.005
+                        if close_task.done():
+                            await asyncio.sleep(wait_seconds)
+                        else:
+                            await asyncio.wait((close_task,), timeout=wait_seconds)
+                else:
+                    await application.aclose()
+                if application_start_task is not None:
+                    with suppress(asyncio.CancelledError):
+                        await application_start_task
             except Exception as exc:
                 shutdown_clean = False
                 failed = True

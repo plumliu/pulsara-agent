@@ -1296,6 +1296,24 @@ class BoundedMcpSdkClient:
             )
         return effective_value
 
+    @property
+    def physical_close_complete(self) -> bool:
+        return (self._closed
+                and (self._owner_task is None or self._owner_task.done()))
+
+    @property
+    def local_children_stopped(self) -> bool:
+        transport = self._transport
+        if isinstance(transport, _BoundedStdioTransport):
+            # The leader's returncode does not prove that its process group or
+            # WSL scope exited. The original transport close joins both.
+            return (transport._close_task is not None and transport._close_task.done()
+                    and not transport._close_task.cancelled()
+                    and transport._close_task.exception() is None)
+        # HTTP owns no local subprocess. An unfinished stdio launch cannot
+        # prove there is no child until its actual client owner has exited.
+        return not isinstance(self.config.transport, StdioTransportConfig) or self.physical_close_complete
+
     async def aclose(self) -> None:
         self._session_stop.set()
         if self._owner_task is not None:

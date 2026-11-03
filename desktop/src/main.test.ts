@@ -23,6 +23,8 @@ function fixture(options: {
   platform?: 'darwin' | 'linux' | 'win32';
   packagedResources?: string;
   stopFailure?: Error;
+  stopStillRunning?: boolean;
+  confirmRestart?: boolean;
   wslSelected?: boolean;
   maintenance?: boolean;
   uninstallMode?: string;
@@ -30,6 +32,7 @@ function fixture(options: {
   initialized?: boolean;
   windowDestroyGate?: Promise<void>;
   sessionRetireFailure?: Error;
+  sessionRetireGate?: Promise<void>;
   backendReadyGate?: Promise<void>;
 } = {}) {
   const cover = deferred();
@@ -46,6 +49,7 @@ function fixture(options: {
   const failures: string[] = [];
   const handlers = new Map<string, (event: unknown, value?: unknown) => Promise<unknown>>();
   const dialogOptions: { defaultPath: string; properties: string[] }[] = [];
+  const confirmations: {message: string; detail: string}[] = [];
   const composition: {
     titleBarStyle?: string;
     titleBarOverlay?: {height: number; color: string; symbolColor: string};
@@ -149,12 +153,17 @@ function fixture(options: {
     async inspectQuit() { return { activeTasks: 0, scheduledTasks: 0 }; }
     async stop() {
       await this.preparation;
+      calls.push('kernel-stopped');
+      this.running = options.stopStillRunning ?? false;
       if (options.stopFailure) throw options.stopFailure;
     }
   }
   const electron = {
     app, BrowserWindow: Window,
-    dialog: { showErrorBox(_title: string, message: string) { failures.push(message); }, async showOpenDialog(parent: Window, input: typeof dialogOptions[number]) {
+    dialog: { showErrorBox(_title: string, message: string) { failures.push(message); }, async showMessageBox(_parent: Window, input: typeof confirmations[number]) {
+      confirmations.push(input);
+      return {response:options.confirmRestart ? 1 : 0};
+    }, async showOpenDialog(parent: Window, input: typeof dialogOptions[number]) {
       assert.equal(parent, Window.current);
       dialogOptions.push(input);
       return { canceled: options.canceled ?? false, filePaths: options.canceled ? [] : [options.chosenDirectory ?? '/tmp/chosen/项目 '] };
@@ -199,6 +208,7 @@ function fixture(options: {
       }, seal() { calls.push('tls-sealed'); }, async retire(settle: () => Promise<void>) {
         calls.push('tls-retire-attempt');
         if (options.sessionRetireFailure) throw options.sessionRetireFailure;
+        await options.sessionRetireGate;
         await settle(); calls.push('tls-retired');
       }};
     }},
@@ -220,7 +230,7 @@ function fixture(options: {
     process: { platform: options.platform ?? 'darwin', resourcesPath: options.packagedResources, env: {}, argv:options.uninstallMode ? ['Pulsara.exe',`--pulsara-uninstall=${options.uninstallMode}`] : options.maintenance ? ['Pulsara.exe','--pulsara-maintenance-check'] : [] },
     require(name: string) { return Object.hasOwn(modules, name) ? modules[name] : require(name); },
   });
-  return { composition, host, dialogOptions, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, destroying, handlers, calls, switches, failures, ready: ready! };
+  return { composition, host, dialogOptions, confirmations, trustedEvent: () => ({ sender: Window.current.webContents, senderFrame: Window.current.webContents.mainFrame }), cover, previous, database, spawned, preparingDatabase, stopping, destroying, handlers, calls, switches, failures, ready: ready! };
 }
 
 test('Windows requires environment confirmation before creating a kernel or preparing PostgreSQL', async () => {
@@ -272,7 +282,7 @@ test('Windows revalidates its saved target and pins a fresh window before workbe
   assert.ok(value.calls.indexOf('tls-installed') < value.calls.indexOf('navigate:https://127.0.0.1:12345/'));
   await value.handlers.get('desktop:quit')!(value.trustedEvent());
   assert.ok(value.calls.indexOf('tls-sealed') < value.calls.indexOf('tls-retired'));
-  assert.ok(value.calls.indexOf('tls-retired') < value.calls.indexOf('database-stopped'));
+  assert.ok(value.calls.indexOf('tls-sealed') < value.calls.indexOf('database-stopped'));
   assert.equal(value.calls.at(-1), 'exit:0');
 });
 
@@ -321,7 +331,7 @@ for (const initialized of [false, true]) {
   });
 }
 
-test('Windows quit during native window replacement joins retirement and never navigates the retiring session', async () => {
+test('Windows quit during native window replacement never navigates the retiring session', async () => {
   const gate = deferred();
   const value = fixture({platform:'win32', wslSelected:true, windowDestroyGate:gate.promise});
   value.previous.resolve(); value.database.resolve(); value.cover.resolve();
@@ -332,24 +342,36 @@ test('Windows quit during native window replacement joins retirement and never n
   gate.resolve();
   await Promise.all([value.ready, quit]);
   assert.equal(value.calls.some(call => call.startsWith('navigate:')), false);
-  assert.ok(value.calls.indexOf('tls-retired') < value.calls.indexOf('database-stopped'));
-  assert.equal(value.calls.at(-1), 'exit:0');
+  assert.ok(value.calls.indexOf('tls-sealed') < value.calls.indexOf('database-stopped'));
+  assert.ok(value.calls.includes('exit:0'));
 });
 
-test('Windows repeated Quit retains failed Session retirement and cannot stop PostgreSQL or exit cleanly', async () => {
+test('Windows explicit Quit stops the runtime despite failed disposable Session retirement', async () => {
   const failure = new Error('Session connections did not retire');
   const value = fixture({platform:'win32', wslSelected:true, sessionRetireFailure:failure});
   value.previous.resolve(); value.database.resolve(); value.cover.resolve();
   await value.ready;
   const startupMessages = value.failures.length;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    await value.handlers.get('desktop:quit')!(value.trustedEvent());
-    assert.equal(value.calls.includes('database-stopped'), false);
-    assert.equal(value.calls.includes('exit:0'), false);
-  }
-  assert.ok(value.calls.filter(call => call === 'tls-retire-attempt').length >= 2);
-  assert.equal(value.failures.length - startupMessages, 2);
-  assert.ok(value.failures.slice(startupMessages).every(message => message.includes(failure.message)));
+  await value.handlers.get('desktop:quit')!(value.trustedEvent());
+  assert.ok(value.calls.includes('tls-sealed'));
+  assert.ok(value.calls.includes('kernel-stopped'));
+  assert.ok(value.calls.includes('database-stopped'));
+  assert.ok(value.calls.includes('exit:0'));
+  assert.equal(value.calls.includes('tls-retired'), false);
+  assert.equal(value.failures.length, startupMessages);
+});
+
+test('Windows explicit Quit does not wait for a disposable Session projection to retire', async () => {
+  const retirement = deferred();
+  const value = fixture({platform:'win32', wslSelected:true, sessionRetireGate:retirement.promise});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  await value.handlers.get('desktop:quit')!(value.trustedEvent());
+  assert.ok(value.calls.indexOf('tls-sealed') < value.calls.indexOf('kernel-stopped'));
+  assert.ok(value.calls.indexOf('kernel-stopped') < value.calls.indexOf('database-stopped'));
+  assert.ok(value.calls.includes('exit:0'));
+  assert.equal(value.calls.includes('tls-retired'), false);
+  retirement.resolve();
 });
 
 for (const quitBeforeReachable of [false, true]) {
@@ -366,7 +388,7 @@ for (const quitBeforeReachable of [false, true]) {
       await value.ready;
       assert.ok(value.calls.includes('tls-readiness-aborted'));
       assert.equal(value.calls.some(call => call.startsWith('navigate:')), false);
-      assert.equal(value.calls.at(-1), 'exit:0');
+      assert.ok(value.calls.includes('exit:0'));
     } else {
       reachable.resolve();
       await value.ready;
@@ -451,22 +473,97 @@ test('quit during the old-owner wait settles the imported child without starting
 });
 
 for (const failed of [false, true]) {
-  test(`quit ${failed ? 'keeps PostgreSQL and reports an unclean runtime exit' : 'stops PostgreSQL after a clean runtime exit'}`, async () => {
+  test(`quit stops PostgreSQL after the runtime physically exits: ${failed ? 'unconfirmed settlement' : 'clean'}`, async () => {
     const stopFailure = failed ? new Error('kernel cleanup failed') : undefined;
     const value = fixture({stopFailure});
     value.previous.resolve(); value.database.resolve(); value.cover.resolve();
     await value.ready;
     await value.handlers.get('desktop:quit')!(value.trustedEvent());
-    assert.equal(value.calls.includes('database-stopped'), !failed);
-    assert.equal(value.calls.includes('exit:0'), !failed);
-    if (failed) {
-      assert.deepEqual(value.failures, ['退出尚未完成：kernel cleanup failed']);
-    } else {
-      assert.deepEqual(value.failures, []);
-      assert.deepEqual(value.calls.slice(-2), ['database-stopped', 'exit:0']);
-    }
+    assert.equal(value.calls.includes('database-stopped'), true);
+    assert.equal(value.calls.includes('exit:0'), true);
+    assert.deepEqual(value.failures, []);
+    assert.deepEqual(value.calls.slice(-2), ['database-stopped', 'exit:0']);
   });
 }
+
+test('quit retains PostgreSQL when runtime execution has not physically stopped', async () => {
+  const value = fixture({stopFailure:new Error('kernel still running'), stopStillRunning:true});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  await value.handlers.get('desktop:quit')!(value.trustedEvent());
+  assert.equal(value.calls.includes('database-stopped'), false);
+  assert.equal(value.calls.includes('exit:0'), false);
+  assert.deepEqual(value.failures, ['退出尚未完成：kernel still running']);
+});
+
+for (const confirmRestart of [false, true]) {
+  test(`workbench restart requires native confirmation and preserves the database: ${confirmRestart}`, async () => {
+    const value = fixture({confirmRestart});
+    value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+    await value.ready;
+    await value.handlers.get('desktop:restart-workbench')!(value.trustedEvent());
+    assert.equal(value.confirmations.length, 1);
+    assert.match(value.confirmations[0].detail, /会中断其他正在运行的任务/);
+    assert.match(value.confirmations[0].detail, /结果不明的操作不会自动重做/);
+    assert.equal(value.calls.filter(call => call === 'child-spawned').length, confirmRestart ? 2 : 1);
+    assert.equal(value.calls.includes('kernel-stopped'), confirmRestart);
+    assert.equal(value.calls.includes('database-stopped'), false);
+    assert.equal(value.calls.includes('exit:0'), false);
+    assert.deepEqual(value.failures, []);
+    if (confirmRestart) assert.ok(value.calls.indexOf('kernel-stopped') < value.calls.lastIndexOf('child-spawned'));
+  });
+}
+
+test('workbench restart rejects startup and foreign renderer requests', async () => {
+  const value = fixture({confirmRestart:true});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  assert.throws(() => value.handlers.get('desktop:restart-workbench')!({}), /无效的桌面请求来源/);
+  const event = value.trustedEvent();
+  event.senderFrame.url = 'https://untrusted.example/';
+  assert.throws(() => value.handlers.get('desktop:restart-workbench')!(event), /此页面不能调用桌面接口/);
+  assert.equal(value.confirmations.length, 0);
+  assert.equal(value.calls.includes('kernel-stopped'), false);
+});
+
+test('workbench restart cannot reopen while the previous runtime remains active', async () => {
+  const value = fixture({confirmRestart:true, stopStillRunning:true, stopFailure:new Error('kernel still running')});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  await value.handlers.get('desktop:restart-workbench')!(value.trustedEvent());
+  assert.equal(value.calls.filter(call => call === 'child-spawned').length, 1);
+  assert.equal(value.calls.includes('database-stopped'), false);
+  assert.deepEqual(value.failures, ['工作台重启未完成：kernel still running']);
+});
+
+test('Windows restart stops the runtime but does not replace an unretired backend Session', async () => {
+  const value = fixture({platform:'win32', wslSelected:true, confirmRestart:true,
+    sessionRetireFailure:new Error('Session connections did not retire')});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  // A failed retirement remains reachable, so repeated restart cannot create a
+  // second renderer/backend owner. Its error reporting may also fail retirement.
+  await assert.rejects(value.handlers.get('desktop:restart-workbench')!(value.trustedEvent()));
+  assert.ok(value.calls.includes('kernel-stopped'));
+  assert.equal(value.calls.filter(call => call === 'child-spawned').length, 1);
+  assert.equal(value.calls.includes('database-stopped'), false);
+});
+
+test('Windows explicit Quit remains available during restart projection retirement', async () => {
+  const retirement = deferred();
+  const value = fixture({platform:'win32', wslSelected:true, confirmRestart:true, sessionRetireGate:retirement.promise});
+  value.previous.resolve(); value.database.resolve(); value.cover.resolve();
+  await value.ready;
+  const restarting = value.handlers.get('desktop:restart-workbench')!(value.trustedEvent());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(value.calls.includes('kernel-stopped'));
+  assert.equal(value.calls.includes('tls-retired'), false);
+  await value.handlers.get('desktop:quit')!(value.trustedEvent());
+  assert.ok(value.calls.includes('exit:0'));
+  retirement.resolve();
+  await restarting;
+  assert.equal(value.calls.filter(call => call === 'child-spawned').length, 1);
+});
 
 for (const scenario of [
   { name: 'localized desktop', options: { desktop: '/tmp/home/桌面' }, expected: '/tmp/home/桌面' },

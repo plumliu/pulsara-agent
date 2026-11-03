@@ -304,6 +304,10 @@ class ContinuationAdmissionOwner:
             # whether another already-admitted attempt must also be joined.
             await asyncio.sleep(0)
 
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closing and all(attempt.task.done() for attempt in self._attempts.values())
+
     async def aclose(self) -> None:
         self._closing = True
         attempts = tuple(self._attempts.values())

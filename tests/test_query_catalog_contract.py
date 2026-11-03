@@ -1,4 +1,5 @@
 """Merged tool branches stay exact locally, portable on wire, and owner scoped."""
+from tests.support.model_config import scheduled_task_service
 from dataclasses import replace
 
 import asyncio
@@ -277,7 +278,7 @@ def test_native_subagent_query_binding_and_authorization_keep_management_closed(
         return None
 
     async def scenario():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="query-host",
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id="query-host",
             session_id=random_id("session"), live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.bind_subagent_port(SimpleNamespace(tool_names=AGENT_TOOLS,

@@ -13,7 +13,7 @@ export function PluginConnectionEditor({ plugin, connection, onClose, onSave, on
   const transport = record(connection.config.transport);
   const server: Omit<UserMcpServerCapability, 'currentIdentity'> = {
     id: connection.serverId, name: String(connection.config.display_name ?? connection.serverId), enabled: plugin.enabled,
-    status: plugin.enabled ? 'configured' : 'disabled', required: false, availableToSubagents: connection.config.scope_policy === 'ROOT_AND_SUBAGENTS',
+    status: plugin.enabled ? 'configured' : 'disabled', availableToSubagents: connection.config.scope_policy === 'ROOT_AND_SUBAGENTS',
     toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0, instructions: '', hasFailure: false,
     transport: { kind: transport.type === 'stdio' ? 'stdio' : 'http', summary: String(transport.command ?? transport.endpoint ?? '') },
     tools: [], config: connection.config,

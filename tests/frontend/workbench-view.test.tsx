@@ -501,6 +501,7 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     onCompact: vi.fn(async () => undefined),
     onRenameSession: vi.fn(),
     onReopenRuntime: vi.fn(),
+    onCloseSession: vi.fn(),
     runtimeReopenBusy: false,
     onReadInteraction: vi.fn(),
     onResolveInteraction: vi.fn(),
@@ -513,6 +514,42 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     ...overrides,
   };
 }
+
+it('shows MCP connection and discovery in the existing execution status while stop remains available', () => {
+  const onStop = vi.fn();
+  const input = props({ activeTurnId: 'waiting-turn', onStop, mcpReadiness: { waiting: true, servers: [
+    { server_id: 'one', display_name: 'Search', state: 'CONNECTING', failure: null },
+    { server_id: 'two', display_name: 'Files', state: 'DISCOVERING', failure: null },
+  ] } });
+  const view = render(<WorkbenchView {...input} />);
+  expect(screen.getByText('正在连接 MCP').closest('[aria-label="Pulsara 处理状态"]')).toBeTruthy();
+  expect(screen.getByText('Search · 连接中；Files · 读取目录')).toBeTruthy();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '停止本轮运行' }));
+  expect(onStop).toHaveBeenCalledOnce();
+  view.rerender(<WorkbenchView {...input} mcpReadiness={{ waiting: false, servers: [
+    { server_id: 'one', display_name: 'Search', state: 'FAILED_RETRYABLE', failure: 'timed out' },
+  ] }} />);
+  expect(screen.queryByText('正在连接 MCP')).toBeNull();
+  expect(screen.getByText('Search 连接失败，继续处理')).toBeTruthy();
+});
+
+it('keeps confirmed history readable while the old execution is stopping and offers the native restart action', () => {
+  const restartWorkbench = vi.fn(async () => {});
+  window.pulsaraDesktop = { restartWorkbench } as unknown as PulsaraDesktop;
+  try {
+    render(<WorkbenchView {...props({ runtimeClosing: true, historyOnly: true, canControl: false,
+      messages: [{ id: 'saved', role: 'assistant', assistantKind: 'terminal', status: 'completed', time: '', body: '已保存的回答' }],
+    })} />);
+    expect(screen.getByText('已保存的回答')).toBeTruthy();
+    expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
+    expect(screen.getByRole('status', { name: '' }).textContent).toContain('任务仍在停止');
+    expect(screen.queryByRole('button', { name: '在此窗口继续' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '重启工作台' }));
+    expect(restartWorkbench).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  } finally { delete window.pulsaraDesktop; }
+});
 
 it('reserves the open TODO above tall queues and follows editor growth and viewport changes', async () => {
   let viewportHeight = 800;

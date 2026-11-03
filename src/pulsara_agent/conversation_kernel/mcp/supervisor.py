@@ -12,7 +12,7 @@ from pathlib import Path
 import random
 import re
 from threading import RLock
-from typing import TYPE_CHECKING, Callable, Mapping
+from typing import TYPE_CHECKING, Awaitable, Callable, Mapping
 
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
@@ -1335,8 +1335,9 @@ class McpHostSupervisor:
         configs: tuple[McpServerConfig, ...],
         credential_boundary: ProcessCredentialBoundary,
         client_factory: type[BoundedMcpSdkClient] | None = None,
-        required_startup_timeout_seconds: float = 120.0,
         connect_attempt_timeout_seconds: float = DEFAULT_MCP_CONNECT_ATTEMPT_TIMEOUT_SECONDS,
+        configuration_change: asyncio.Event | None = None,
+        adopt_configuration: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         if len(configs) > MAXIMUM_CONFIGURED_MCP_SERVERS:
             raise ValueError("too many configured MCP servers")
@@ -1345,12 +1346,12 @@ class McpHostSupervisor:
         self._config_by_id = {item.server_id: item for item in self.configs}
         self._client_factory = client_factory
         self._credential_boundary = credential_boundary
-        if min(
-            required_startup_timeout_seconds,
-            connect_attempt_timeout_seconds,
-        ) <= 0:
-            raise ValueError("MCP startup watchdogs must be positive")
-        self._required_startup_timeout_seconds = required_startup_timeout_seconds
+        if (configuration_change is None) != (adopt_configuration is None):
+            raise ValueError("MCP configuration observation requires its adoption owner")
+        self._adoption_requested = configuration_change
+        self._adopt_configuration = adopt_configuration
+        if connect_attempt_timeout_seconds <= 0:
+            raise ValueError("MCP connection watchdog must be positive")
         self._connect_attempt_timeout_seconds = connect_attempt_timeout_seconds
         self._epoch = random_id("epoch")
         self._lock = RLock()
@@ -1391,25 +1392,37 @@ class McpHostSupervisor:
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
         self._capability_owner_authenticity = object()
+        self._configuration_changed = asyncio.Event()
+        # Only current execution observers live here; outcomes remain owned by
+        # the existing connection tasks, including a failed task being retried.
+        self._readiness_waits: dict[
+            asyncio.Task, tuple[tuple[McpServerConfig, asyncio.Task[_McpConnectOutcome]], ...]
+        ] = {}
 
     @property
     def owner_epoch(self) -> str:
         return self._epoch
 
-    async def start(self) -> None:
-        """Start every enabled peer; only required peers gate Host publication.
+    @property
+    def physical_close_complete(self) -> bool:
+        with self._lock:
+            return (self._close_task is not None and self._close_task.done()
+                    and not self._all_slots
+                    and all(task.done() for task in self._connection_tasks)
+                    and all(task.done() for task in self._slot_close_tasks))
 
-        Optional discovery stays owned by the supervisor and joins the ordinary
-        tool-surface safe point when ready. A slow optional peer must not delay
-        opening the conversation.
-        """
-        # Discovery retains one Host-wide memory reservation. Admit required
-        # peers first so an optional handshake cannot occupy that reservation
-        # ahead of the peers that gate opening the conversation.
-        enabled = tuple(sorted(
-            (item for item in self.configs if item.enabled),
-            key=lambda item: not item.required,
-        ))
+    @property
+    def local_children_stopped(self) -> bool:
+        with self._lock:
+            # Import/HTTP cleanup tasks own no local children. After the last
+            # import await, _connect checks this same fence and synchronously
+            # publishes its client slot before any possible stdio launch.
+            return (self._closed
+                    and all(slot.client.local_children_stopped for slot in self._all_slots))
+
+    async def start(self) -> None:
+        """Schedule enabled peers in config order without waiting for network IO."""
+        enabled = tuple(item for item in self.configs if item.enabled)
         for config in enabled:
             self._start_connect(config.server_id)
             if config.catalog_refresh_interval_ms is not None:
@@ -1417,36 +1430,98 @@ class McpHostSupervisor:
                     self._periodic_refresh(config.server_id),
                     name=f"mcp-periodic-refresh:{config.server_id}",
                 )
-        required = tuple(self._tasks[item.server_id] for item in enabled if item.required)
-        if required:
-            await self._wait_for_required_startup(
-                tuple(item.server_id for item in enabled if item.required)
-            )
 
-    async def _wait_for_required_startup(
-        self, server_ids: tuple[str, ...]
-    ) -> None:
-        deadline = asyncio.get_running_loop().time() + (
-            self._required_startup_timeout_seconds
-        )
-        while True:
-            with self._lock:
-                states = {server_id: self._state[server_id] for server_id in server_ids}
-            if all(state is McpServerState.READY for state in states.values()):
-                return
-            terminal = tuple(
-                server_id
-                for server_id, state in states.items()
-                if state in {McpServerState.FAILED_TERMINAL, McpServerState.DISABLED}
+    async def wait_initial_readiness(self, *, conversation_scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT) -> None:
+        """Observe the captured attempts once, never their automatic successors.
+
+        No input snapshot or surface borrow may be held by the caller. A
+        cancelled observer leaves connection/cleanup ownership with supervisor.
+        Config replacement releases that observer without waiting for old IO.
+        """
+        observer = asyncio.current_task()
+        assert observer is not None
+        with self._lock:
+            if self._closed:
+                raise asyncio.CancelledError
+            captured = tuple(
+                (config, self._tasks[config.server_id])
+                for config in self.configs
+                if config.enabled
+                and config.server_id in self._tasks
+                and not self._installed_semantic_surface_retained_locked(config.server_id)
+                and (conversation_scope_kind is ModelInputScopeKind.ROOT
+                     or config.scope_policy is McpScopePolicy.ROOT_AND_SUBAGENTS)
             )
-            if terminal:
-                raise RuntimeError(
-                    "required MCP server failed: " + ", ".join(terminal)
-                )
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError("required MCP startup deadline expired")
-            await asyncio.sleep(min(0.05, remaining))
+            self._readiness_waits[observer] = captured
+        try:
+            while True:
+                if self._adoption_requested is not None and self._adoption_requested.is_set():
+                    self._adoption_requested.clear()
+                    assert self._adopt_configuration is not None
+                    await self._adopt_configuration()
+                    if self._adoption_requested.is_set():
+                        continue
+                with self._lock:
+                    if self._closed:
+                        raise asyncio.CancelledError
+                    current = tuple(
+                        (config, task) for config, task in captured
+                        if (actual := self._config_by_id.get(config.server_id)) is not None
+                        and actual.enabled
+                        and actual.resolved_config_identity == config.resolved_config_identity
+                    )
+                    changed = self._configuration_changed
+                pending = set()
+                for _config, task in current:
+                    if task.done():
+                        # Expected connect/discovery failures are typed outcomes.
+                        # Unexpected cleanup/owner exceptions must still escape.
+                        task.result()
+                    else:
+                        pending.add(task)
+                if not pending:
+                    return
+                configuration_wait = asyncio.create_task(changed.wait())
+                adoption_wait = (None if self._adoption_requested is None else
+                                 asyncio.create_task(self._adoption_requested.wait()))
+                try:
+                    waits = (*pending, configuration_wait) if adoption_wait is None else (*pending, configuration_wait, adoption_wait)
+                    await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    configuration_wait.cancel()
+                    observers = [configuration_wait]
+                    if adoption_wait is not None:
+                        adoption_wait.cancel()
+                        observers.append(adoption_wait)
+                    await asyncio.gather(*observers, return_exceptions=True)
+        finally:
+            with self._lock:
+                self._readiness_waits.pop(observer, None)
+
+    def readiness_progress(self) -> dict[str, object] | None:
+        """Disposable current-execution progress; reads never start/wait work."""
+        with self._lock:
+            if not self._readiness_waits:
+                return None
+            servers = {}
+            for captured in self._readiness_waits.values():
+                for config, task in captured:
+                    actual = self._config_by_id.get(config.server_id)
+                    if (actual is None or not actual.enabled
+                            or actual.resolved_config_identity != config.resolved_config_identity):
+                        continue
+                    if task.done() and not task.cancelled() and task.exception() is None:
+                        outcome = task.result()
+                        state, failure = outcome.state, outcome.failure
+                    else:
+                        state, failure = self._live_state_locked(config, None)
+                    servers[config.server_id] = {"server_id": config.server_id,
+                        "display_name": config.display_name, "state": state.value,
+                        "failure": failure}
+            values = list(servers.values())
+            return {"servers": values, "waiting": any(item["state"] in {
+                McpServerState.CONNECTING.value, McpServerState.DISCOVERING.value,
+            } for item in values)}
 
     def reload_configs(
         self, configs: tuple[McpServerConfig, ...]
@@ -1467,6 +1542,8 @@ class McpHostSupervisor:
         with self._lock:
             if self._closed:
                 raise RuntimeError("MCP supervisor is closed")
+            self._configuration_changed.set()
+            self._configuration_changed = asyncio.Event()
             old = self._config_by_id
             changed_ids = {
                 server_id
@@ -1678,6 +1755,9 @@ class McpHostSupervisor:
         """Request a catalog-only successor for a visible state transition."""
 
         previous = (self._state.get(server_id), self._failure.get(server_id))
+        if (failure is None
+                and state in {McpServerState.CONNECTING, McpServerState.DISCOVERING}):
+            failure = self._failure.get(server_id)
         if resolved_config_identity is None:
             config = self._config_by_id.get(server_id)
             if config is None:
@@ -1750,38 +1830,40 @@ class McpHostSupervisor:
             # remote connection attempt. Start its budget only after admission;
             # keep the reservation through parsing and candidate publication.
             async with self._discovery_reservations:
-                # First-use import may await a physical worker. Reserve in the
-                # original required-first task order before that await, so a
-                # faster optional import cannot overtake a required handshake.
+                # Reserve in stable config order before first-use SDK imports.
                 factory = self._client_factory
                 if factory is None:
                     factory = await _prepare_sdk_client_factory()
-                client = factory(
-                    config,
-                    workspace_root=self.workspace_root,
-                    notification_callback=notification,
-                    credential_boundary=self._credential_boundary,
-                )
-                # Start serial while the handshake determines whether an HTTP
-                # peer installed session state. Only an operator assertion and
-                # a session-id-free transport open the bounded parallel lane.
-                mode = McpPhysicalConcurrencyKind.SERIAL_SESSION
-                maximum = 1
-                slot = McpConnectionSlot(
-                    server_id=server_id,
-                    supervisor_epoch=self._epoch,
-                    connection_generation=attempt_generation,
-                    runtime_config_fingerprint=config.runtime_config_fingerprint,
-                    client=client,
-                    concurrency_kind=mode,
-                    maximum_in_flight=maximum,
-                    host_lane=self._host_operation_lane,
-                    failure_reporter=self._report_slot_failure,
-                    physical_lifetime_anchor=attempt_anchor,
-                )
-                attempt_anchor = None
-                box["slot"] = slot
                 with self._lock:
+                    if (self._closed
+                            or self._attempt_generation.get(server_id) != attempt_generation
+                            or self._refresh_generation.get(server_id) != refresh_generation):
+                        raise RuntimeError("stale MCP connection attempt")
+                    # SDK construction has no IO. Keep the fence check and
+                    # slot publication synchronous, before open can launch a
+                    # local process or yield to another lifecycle observer.
+                    client = factory(
+                        config,
+                        workspace_root=self.workspace_root,
+                        notification_callback=notification,
+                        credential_boundary=self._credential_boundary,
+                    )
+                    # Start serial until the HTTP handshake proves whether
+                    # an asserted stateless peer installed session state.
+                    slot = McpConnectionSlot(
+                        server_id=server_id,
+                        supervisor_epoch=self._epoch,
+                        connection_generation=attempt_generation,
+                        runtime_config_fingerprint=config.runtime_config_fingerprint,
+                        client=client,
+                        concurrency_kind=McpPhysicalConcurrencyKind.SERIAL_SESSION,
+                        maximum_in_flight=1,
+                        host_lane=self._host_operation_lane,
+                        failure_reporter=self._report_slot_failure,
+                        physical_lifetime_anchor=attempt_anchor,
+                    )
+                    attempt_anchor = None
+                    box["slot"] = slot
                     self._all_slots.add(slot)
                 async with asyncio.timeout(self._connect_attempt_timeout_seconds):
                     await client.open()
@@ -2138,15 +2220,17 @@ class McpHostSupervisor:
         ):
             await asyncio.sleep(0.01)
         slot.begin_close()
-        await slot.client.aclose()
-        slot.close_physical_lifetime()
-        # Retired physical objects are not lifecycle history.  Only a proven
-        # successful physical close may drop the heavyweight slot/client graph;
-        # a close failure stays retained for Host shutdown diagnosis/join.
-        with self._lock:
-            self._all_slots.discard(slot)
-            if self._slots.get(slot.server_id) is slot:
-                self._slots.pop(slot.server_id, None)
+        closed = False
+        try:
+            await slot.client.aclose()
+            closed = True
+        finally:
+            if closed or slot.client.physical_close_complete:
+                slot.close_physical_lifetime()
+                with self._lock:
+                    self._all_slots.discard(slot)
+                    if self._slots.get(slot.server_id) is slot:
+                        self._slots.pop(slot.server_id, None)
 
     def install_pending_at_safe_point(self) -> McpInstalledRuntimeGeneration | None:
         """Atomically install all current candidates; performs no physical I/O."""
@@ -2799,7 +2883,6 @@ class McpHostSupervisor:
                     ),
                     display_name=config.display_name,
                     status=state,
-                    required=config.required,
                     exposed_tool_count=len(visible_tools),
                     discovered_tool_count=(
                         snapshot.discovered_tool_count if snapshot else 0
@@ -2850,7 +2933,7 @@ class McpHostSupervisor:
             if not task.done():
                 state = self._state[config.server_id]
                 return (McpServerState.DISCOVERING if state is McpServerState.DISCOVERING
-                        else McpServerState.CONNECTING), None
+                        else McpServerState.CONNECTING), self._failure.get(config.server_id)
             if task.cancelled():
                 return McpServerState.FAILED_RETRYABLE, "CancelledError"
             error = task.exception()
@@ -2929,6 +3012,7 @@ class McpHostSupervisor:
         with self._lock:
             if self._close_task is None:
                 self._closed = True
+                self._configuration_changed.set()
                 self._close_task = asyncio.create_task(
                     self._close(), name="mcp-supervisor-physical-close"
                 )
@@ -2989,7 +3073,8 @@ class McpHostSupervisor:
         for slot, result in zip(slots, close_results, strict=True):
             if isinstance(result, BaseException):
                 failures.append(result)
-                continue
+                if not slot.client.physical_close_complete:
+                    continue
             slot.close_physical_lifetime()
             with self._lock:
                 self._all_slots.discard(slot)
@@ -3001,13 +3086,16 @@ class McpHostSupervisor:
             )
             failures.extend(value for value in retired_results
                             if isinstance(value, BaseException))
+        with self._lock:
+            complete = not self._all_slots
+        if complete:
+            for anchor in config_anchors:
+                _close_physical_lifetime_anchor(anchor)
+            with self._lock:
+                self.configs = ()
+                self._config_by_id.clear()
         if failures:
             raise failures[0]
-        for anchor in config_anchors:
-            _close_physical_lifetime_anchor(anchor)
-        with self._lock:
-            self.configs = ()
-            self._config_by_id.clear()
 
 
 def _duplicate_physical_lifetime_anchor(anchor: object | None) -> object | None:

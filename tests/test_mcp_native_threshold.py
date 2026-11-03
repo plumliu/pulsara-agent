@@ -35,7 +35,7 @@ def test_recorded_entire_notion_catalog_is_native_with_builtins_and_real_sdk(
     fixture = Path(__file__).parent / "fixtures/notion_schema_replay_server.py"
     config_path = tmp_path / "mcp.yaml"
     config_path.write_text(
-        "servers:\n  notion:\n    required: true\n    enabled: true\n    catalog_refresh_interval_ms: DISABLED\n    transport: "
+        "servers:\n  notion:\n    enabled: true\n    catalog_refresh_interval_ms: DISABLED\n    transport: "
         + json.dumps(
             {
                 "type": "stdio",
@@ -105,7 +105,7 @@ def test_recorded_entire_notion_catalog_is_native_with_builtins_and_real_sdk(
             await session.reload_mcp_configs(
                 configs, deadline_monotonic=monotonic() + 30
             )
-            await session._mcp_supervisor._wait_for_required_startup(("notion",))
+            await session._mcp_supervisor.wait_initial_readiness()
             session._tools.prepare_tool_surface_safe_point()
             await asyncio.wait_for(
                 session.run_turn(

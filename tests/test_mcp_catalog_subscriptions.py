@@ -42,9 +42,8 @@ async def _sdk_http(server):
         sock.close()
 
 
-def _supervisor(tmp_path, endpoint, *, required=True):
+def _supervisor(tmp_path, endpoint):
     config = _parse_server("catalog", {
-        "required": required,
         "catalog_refresh_interval_ms": "DISABLED",
         "transport": {
             "type": "streamable_http", "endpoint": endpoint,
@@ -97,6 +96,7 @@ def test_modern_catalog_changes_relist_same_physical_session(tmp_path, surface):
             first = second = None
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 first = supervisor.install_pending_at_safe_point()
                 slot = first.slot_lease_by_server["catalog"]._slot
                 assert filters == [{f"{surface}_list_changed": True}]
@@ -160,6 +160,7 @@ def test_modern_subscription_end_reconnects_and_refetches(tmp_path, closure):
             supervisor = _supervisor(tmp_path, endpoint)
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 original = supervisor._slots["catalog"]
                 revision = 2
                 if closure == "lost":
@@ -196,7 +197,7 @@ def test_partial_subscription_ack_is_retryable_observation_failure(tmp_path):
         server = Server("partial-ack", on_list_tools=tools,
                         on_subscriptions_listen=subscriptions)
         async with _sdk_http(server) as endpoint:
-            supervisor = _supervisor(tmp_path, endpoint, required=False)
+            supervisor = _supervisor(tmp_path, endpoint)
             try:
                 await supervisor.start()
                 async with asyncio.timeout(5):

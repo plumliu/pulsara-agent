@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
-import type { ModelCallBindingPayload, RuntimeAdapter, RuntimeConnection, RuntimeProjection, SessionEphemeralResults } from './runtime-adapter';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import type { McpReadinessProgress, ModelCallBindingPayload, RuntimeAdapter, RuntimeConnection, RuntimeProjection, SessionEphemeralResults } from './runtime-adapter';
 
 type Context = { host: string; root: string; binding: string; queued: boolean; sequence: number; compacting: boolean; running: boolean };
 type Slot = { context: Context; result?: SessionEphemeralResults['suggestion']; blocked: boolean };
@@ -94,6 +94,9 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
   refreshSessions: () => Promise<unknown>;
 }) {
   useSyncExternalStore(cache.subscribe, cache.getVersion, cache.getVersion);
+  const [readiness, setReadiness] = useState<{
+    connection: RuntimeConnection; host: string; root: string | undefined; progress: McpReadinessProgress | null;
+  }>();
   useEffect(() => { if (!suggestionsEnabled) cache.invalidateAll(); }, [cache, suggestionsEnabled]);
   const titleLifetime = useMemo(() => ({ adapter, active: true }), [adapter]);
   const titleReads = useRef(new Map<string, { host: string; abort: AbortController; timer?: ReturnType<typeof setTimeout> }>());
@@ -176,12 +179,14 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
         const result = await adapter.ephemeralResults(sessionId, abort.signal);
         if (abort.signal.aborted || connection.current().hostSessionId !== host) return;
         if (result.session_id !== sessionId || result.host_session_id !== host) return;
+        setReadiness({ connection, host, root, progress: result.mcp_readiness ?? null });
         if (result.title.state === 'pending') observeTitle(sessionId, host);
         else if (result.title.state === 'adopted') void refreshTitle(sessionId, host);
         cache.observe(sessionId, connection.current(), stableBinding);
         if (suggestionsEnabled) cache.accept(sessionId, owner, result);
-        if (suggestionsEnabled && (result.suggestion.state === 'pending'
-          || (result.suggestion.state === 'awaiting_completion' && !connection.current().isRunning))) {
+        if (connection.current().isRunning || result.mcp_readiness?.waiting
+          || (suggestionsEnabled && (result.suggestion.state === 'pending'
+          || (result.suggestion.state === 'awaiting_completion' && !connection.current().isRunning)))) {
           timer = setTimeout(() => void read(), 650);
         }
       } catch { /* A missing ephemeral result never blocks the composer. */ }
@@ -193,6 +198,8 @@ export function useSessionEphemeralResults({ cache, adapter, connection, project
 
   return {
     suggestion: suggestionsEnabled && connection ? cache.text(connection.sessionId, projection, binding) : undefined,
+    mcpReadiness: visible && projection.isRunning && readiness && readiness.connection === connection
+      && readiness.host === host && readiness.root === root ? readiness.progress : undefined,
     observeTitle,
   };
 }

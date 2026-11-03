@@ -62,6 +62,44 @@ async def _vm_terminal(host, cell):
             await asyncio.sleep(.001)
 
 
+def test_close_joins_a_real_sidecar_spawn_before_handle_publication(monkeypatch):
+    async def run():
+        host = CodeModeHost()
+        spawned, release, closing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original_spawn = asyncio.create_subprocess_exec
+        original_mark = host.mark_all_stopped
+        processes = []
+
+        async def spawn(*args, **kwargs):
+            process = await original_spawn(*args, **kwargs)
+            processes.append(process)
+            spawned.set()
+            await release.wait()
+            return process
+
+        def mark():
+            original_mark()
+            closing.set()
+
+        monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+        monkeypatch.setattr(host, 'mark_all_stopped', mark)
+        startup = asyncio.create_task(host._ensure_started())
+        await spawned.wait()
+        close = asyncio.create_task(host.aclose())
+        await closing.wait()
+        assert processes[0].returncode is None
+        assert not close.done()
+        assert not host.local_children_stopped and not host.physical_close_complete
+        release.set()
+        with pytest.raises(CodeModeError, match='closed during startup'):
+            await startup
+        await close
+        assert processes[0].returncode is not None
+        assert host.local_children_stopped and host.physical_close_complete
+
+    asyncio.run(run())
+
+
 def test_real_quickjs_isolation_and_detached_tool_microtasks():
     async def run():
         host = CodeModeHost()
@@ -595,14 +633,61 @@ def test_real_sdk_heap_and_stack_limits_fail_the_cell(source):
     asyncio.run(run())
 
 
-def test_external_watchdog_can_terminate_noninterruptible_compile_segment():
+def test_external_watchdog_can_terminate_noninterruptible_compile_segment(tmp_path, monkeypatch):
     async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), segment_ms=5, watchdog_ms=20))
+        from pulsara_agent.code_mode import host as host_module
+
+        host = CodeModeHost(limits=replace(CodeModeLimits(), segment_ms=1000, watchdog_ms=1500))
+        production = host._script.parent
+        sdk = production.parent.parent / '_vendor/code_mode/quickjs-wasi/dist/index.js'
+        bootstrap = tmp_path / 'blocked-compile-worker.mjs'
+        # Interpose only the SDK's actual cell compilation entry. The real
+        # production worker and QuickJS initialization remain unchanged; this
+        # operation cannot reach an SDK interrupt callback or return on its own.
+        bootstrap.write_text(
+            "import { parentPort } from 'node:worker_threads';\n"
+            f"import {{ QuickJS }} from {json.dumps(sdk.resolve().as_uri())};\n"
+            "const evaluate = QuickJS.prototype.evalCode;\n"
+            "QuickJS.prototype.evalCode = function(source, filename, ...args) {\n"
+            "  if (filename === 'cell.js') {\n"
+            "    parentPort.postMessage({type:'test_compile_entered', filename});\n"
+            "    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n"
+            "    throw new Error('Compilation barrier unexpectedly released');\n"
+            "  }\n"
+            "  return evaluate.call(this, source, filename, ...args);\n"
+            "};\n"
+            f"await import({json.dumps((production / 'worker.mjs').resolve().as_uri())});\n",
+            encoding='utf-8',
+        )
+        sidecar = (production / 'sidecar.mjs').read_text(encoding='utf-8')
+        worker_url = "new URL('./worker.mjs', import.meta.url)"
+        assert sidecar.count(worker_url) == 1
+        host._script = tmp_path / 'sidecar.mjs'
+        host._script.write_text(sidecar.replace(worker_url,
+            f"new URL({json.dumps(bootstrap.as_uri())})"), encoding='utf-8')
+        entered, evidence = asyncio.Event(), []
+        decode = host_module.json.loads
+
+        def observed_decode(*args, **kwargs):
+            value = decode(*args, **kwargs)
+            if isinstance(value, dict) and value.get('type') == 'test_compile_entered':
+                evidence.append(value)
+                entered.set()
+            return value
+
+        monkeypatch.setattr(host_module.json, 'loads', observed_decode)
         try:
-            source = '0;' * 1900000
-            page, _ = await _finish(host, await _start(host, source))
+            cell_id = await _start(host, 'return 1;')
+            await asyncio.wait_for(entered.wait(), 5)
+            cell = host._test_cells[cell_id]
+            assert evidence == [{'type': 'test_compile_entered', 'filename': 'cell.js', 'cell_id': cell_id}]
+            assert not cell.terminal_event.is_set() and not cell.vm_released.is_set()
+            page, output = await _finish(host, cell_id)
             assert page.state == 'failed'
             assert page.error.get('code') == 'watchdog', page.error
+            assert not any(record['kind'] == 'return' for record in output)
+            await asyncio.wait_for(cell.vm_released.wait(), 5)
+            assert host._sidecar_failure is None and host._process.returncode is None
         finally:
             await host.aclose()
     asyncio.run(run())

@@ -1,6 +1,7 @@
 """PR05: exercise the production coordinator with explicit physical I/O barriers."""
 
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 from pulsara_agent.identity import derive_id
 
 import asyncio
@@ -566,13 +567,14 @@ def test_r07_r14_cancel_real_mcp_tool_waiter_joins_and_releases(
         owner, live, _ = make_owner(repository)
         await owner.attach_controller("controller:1")
         supervisor = McpHostSupervisor(workspace_root=tmp_path, configs=(_config(tmp_path),))
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:u7b6kknm42lxuopzrawwykdfbu',
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id='host:u7b6kknm42lxuopzrawwykdfbu',
             session_id='session:tdspn5k2oo6jafhz5tcbmngqga', live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.bind_interaction_port(owner)
         port.bind_mcp_supervisor(supervisor)
         _seal_mcp_test_port(port)
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         port.prepare_tool_surface_safe_point()
         surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.ROOT)
         effect = next(item for item in surface.model_surface.tool_specs if item.name.endswith("fixture_effect"))

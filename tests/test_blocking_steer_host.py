@@ -231,6 +231,7 @@ def test_real_stdio_mcp_supplement_waits_for_effect(tmp_path, monkeypatch, stage
     import sys
     from tempfile import TemporaryDirectory
     from types import SimpleNamespace
+    from unittest.mock import AsyncMock
     from pulsara_agent.desktop_app.renderer_bridge import RendererBridge
     from pulsara_agent.mcp_config import load_mcp_server_configs
 
@@ -248,7 +249,7 @@ if __name__ == "__main__":
     server.run()
 ''')
     config_path = tmp_path/'mcp.yaml'
-    config_path.write_text('servers:\n  fixture:\n    required: true\n    enabled: true\n    catalog_refresh_interval_ms: DISABLED\n    transport: '+json.dumps({
+    config_path.write_text('servers:\n  fixture:\n    enabled: true\n    catalog_refresh_interval_ms: DISABLED\n    transport: '+json.dumps({
         'type':'stdio', 'command':sys.executable, 'args':[str(server_file)],
     })+'\n')
     configs = load_mcp_server_configs(user_config_path=config_path)
@@ -309,7 +310,7 @@ if __name__ == "__main__":
         async def resume(_):
             return SimpleNamespace(session_id=session.session_id, host_session_id=session.host_session_id, session=session)
 
-        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, host_writer_unavailable=lambda _host: False), protocol_server=gateway)
+        bridge = RendererBridge(sessions=SimpleNamespace(resume_session=resume, runtime_closing=AsyncMock(return_value=False), host_writer_unavailable=lambda _host: False), protocol_server=gateway)
         try:
             await gateway.start()
             connection = await bridge.connect(session.session_id, browser_instance_id='00000000-0000-4000-8000-000000000001')
@@ -317,7 +318,7 @@ if __name__ == "__main__":
                 await session.run_turn(PromptContent.text('warm'), command_id=random_id('command'),
                     requested_permission_mode=PermissionMode.ASK_PERMISSIONS)
             await session.reload_mcp_configs(configs, deadline_monotonic=monotonic()+20)
-            await session._mcp_supervisor._wait_for_required_startup(('fixture',))
+            await session._mcp_supervisor.wait_initial_readiness()
             session._tools.prepare_tool_surface_safe_point()
             if blocked_lane:
                 slot = session._mcp_supervisor._slots['fixture']

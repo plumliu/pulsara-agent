@@ -777,7 +777,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     return sessions;
   }, [forgetSession, globalReads]);
 
-  const { suggestion, observeTitle } = useSessionEphemeralResults({
+  const { suggestion, mcpReadiness, observeTitle } = useSessionEphemeralResults({
     cache: suggestionCache, adapter, connection, projection,
     suggestionsEnabled: bootstrap?.local_settings.input_suggestions_enabled ?? true,
     binding: sessionList.find(session => session.id === activeSessionId)?.modelCallBinding,
@@ -1596,6 +1596,39 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const reconnect = () => {
     if (activeSessionId) void openRuntimeSession(activeSessionId, true);
     else window.location.reload();
+  };
+
+  const closeSession = () => {
+    const sessionId = activeSessionIdRef.current;
+    const previous = connectionRef.current;
+    if (!sessionId || !previous || !canControl) return;
+    // The server's existing close operation owns execution settlement. Leaving
+    // this page only retires its disposable readers and selection.
+    const closing = adapter.closeSession(sessionId);
+    connectionAttempt.current += 1;
+    capabilityAttempt.current += 1;
+    historyReadAbort.current.abort();
+    connectionRef.current = undefined;
+    activeSessionIdRef.current = '';
+    requestedSession.current = '';
+    saveSessionId('');
+    setConnection(undefined);
+    setActiveSessionId('');
+    setOpeningSessionId('');
+    setProjection(emptyProjection);
+    setCapabilities(undefined);
+    setCapabilityLoading(false);
+    setCapabilityError(undefined);
+    setRuntimeError(undefined);
+    setRuntimeFailure(undefined);
+    setActiveView('overview');
+    void closing.catch(error => {
+      notify('会话停止状态待确认', productMessage(error instanceof Error ? error.message : undefined,
+        '请稍后查看会话状态。'), 'warning');
+    }).finally(() => {
+      void previous.close().catch(() => {});
+      void readSessionList().catch(() => {});
+    });
   };
 
   const reopenRuntime = useCallback(async () => {
@@ -2821,6 +2854,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           todo={projection.todo}
           activePlanMode={projection.planMode}
           providerRetry={projection.providerRetry}
+          mcpReadiness={mcpReadiness}
           isRunning={projection.isRunning}
           activeTurnId={projection.activeTurnId}
           manualCompactionCommandId={projection.manualCompactionCommandId}
@@ -2856,6 +2890,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             && item.status !== 'rejected')}
           canControl={canControl}
           historyOnly={historyRef.current?.sessionId === activeSessionId}
+          runtimeClosing={historyRef.current?.sessionId === activeSessionId && historyRef.current.runtimeClosing}
           isObserver={isObserver}
           workspaceAvailability={workspaceAvailability}
           workspaceRecoveryBusy={workspaceRecoveryBusy}
@@ -2882,6 +2917,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             setActiveView('scheduled'); if (!window.matchMedia?.('(min-width: 1151px)').matches) setSidebarOpen(false);
           } : undefined}
           onReopenRuntime={() => void reopenRuntime()}
+          onCloseSession={closeSession}
           runtimeReopenBusy={runtimeReopenBusy}
           onReadInteraction={readInteraction}
           onResolveInteraction={resolveInteraction}

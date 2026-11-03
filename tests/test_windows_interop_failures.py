@@ -281,6 +281,10 @@ def test_supervisor_host_close_retains_failed_slot_and_repeats_error(tmp_path):
         class Client:
             calls = 0
 
+            @property
+            def physical_close_complete(self):
+                return False
+
             async def aclose(self):
                 self.calls += 1
                 raise failure
@@ -338,6 +342,10 @@ def test_supervisor_owns_failed_cleanup_before_slot_publication(tmp_path):
             def __init__(self, *args, **kwargs):
                 pass
 
+            @property
+            def physical_close_complete(self):
+                return False
+
             async def open(self):
                 raise RuntimeError("handshake failed after process creation")
 
@@ -347,7 +355,6 @@ def test_supervisor_owns_failed_cleanup_before_slot_publication(tmp_path):
         config = _parse_server(
             "unit",
             {
-                "required": False,
                 "transport": {"type": "stdio", "command": "/bin/false"},
             },
         )

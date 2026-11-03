@@ -6,6 +6,7 @@ from pulsara_agent.identity import derive_id, is_valid_id
 
 import asyncio
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import datetime, timezone as utc_timezone
 import logging
 
@@ -15,6 +16,7 @@ from pulsara_agent.scheduling.requests import schedule_target, validate_action, 
 from pulsara_agent.conversation_kernel.host import (
     PromptBlockedByHook,
     KernelHostCoreClosing,
+    SessionControlRejected,
 )
 from pulsara_agent.conversation_kernel.repository_errors import SessionWriterConflict
 from pulsara_agent.llm.input import PromptContent, LLMTextPart
@@ -76,55 +78,82 @@ def _require_model_result(page_budget, value):
 
 
 class ScheduledTaskService:
-    def __init__(self, sessions):
-        self.sessions = sessions
+    def __init__(self, core):
+        self._core = core
+        self._memory_domain: ContextVar[str | None] = ContextVar("scheduled_task_memory_domain", default=None)
         self._io = KernelSessionIO()
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
+        self._start_lock = asyncio.Lock()
+        self._stopped = False
         self._run_started_at = datetime.now(utc_timezone.utc)
         # Advisory details only. No durable run-result or execution recovery.
         self._prepare_errors: dict[str, tuple[int, str]] = {}
 
     async def start(self):
-        if self._task is None:
-            # Use the database clock shared by schedule admission. This cutoff
-            # stays fixed for the entire kernel run, including timer delays.
-            self._run_started_at, _due = await self._read("scheduled_next_time")
-            self._task = asyncio.create_task(self._loop(), name="scheduled-tasks")
-        self.wake()
+        async with self._start_lock:
+            if self._stopped:
+                raise KernelHostCoreClosing("Scheduled task service is stopping")
+            if self._task is None:
+                # Use the database clock shared by schedule admission. This cutoff
+                # stays fixed for the entire kernel run, including timer delays.
+                self._run_started_at, _due = await self._read("scheduled_next_time")
+                if self._stopped:
+                    raise KernelHostCoreClosing("Scheduled task service is stopping")
+                self._task = asyncio.create_task(self._loop(), name="scheduled-tasks")
+            self.wake()
 
     def wake(self):
         self._wake.set()
 
-    async def aclose(self):
-        task, self._task = self._task, None
+    @property
+    def physical_operation_deadline(self):
+        return self._io.physical_operation_deadline
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return (self._stopped and (self._task is None or self._task.done())
+                and self._io.physical_close_complete)
+
+    async def stop(self):
+        """Stop new timer deliveries and join admitted preparation before teardown."""
+        self._stopped = True
+        task = self._task
         if task is not None:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
-        await self._io.aclose(
-            deadline_monotonic=self.sessions.core._canonical_deadline()
-        )
+            if self._task is task:
+                self._task = None
+        # A concurrent start may still own the database-clock read. It must
+        # observe _stopped before publishing a loop, and finish before IO closes.
+        async with self._start_lock:
+            pass
+
+    async def aclose(self):
+        await self.stop()
+        await self._io.aclose(deadline_monotonic=self._core._canonical_deadline())
 
     async def _repository(self):
-        return await self.sessions.core._ensure_resources()
+        return await self._core._ensure_resources()
 
     async def _read(self, method, **kwargs):
         repo = await self._repository()
         return await self._io.run(
             getattr(repo, method),
-            memory_domain_id=self.sessions.memory_domain_id,
-            deadline_monotonic=self.sessions.core._canonical_deadline(),
+            memory_domain_id=self._memory_domain.get() or self._core.memory_domain_id,
+            deadline_monotonic=self._core._canonical_deadline(),
             **kwargs,
         )
 
     async def _manage(self, method, *, session_id, **kwargs):
         repo = await self._repository()
-        host = await self.sessions.scheduled_management_host(session_id)
+        domain = self._memory_domain.get() or self._core.memory_domain_id
+        host = await self._core.scheduled_management_host(session_id, memory_domain_id=domain)
         arguments = dict(
             session_id=session_id,
-            memory_domain_id=self.sessions.memory_domain_id,
-            deadline_monotonic=self.sessions.core._canonical_deadline(),
+            memory_domain_id=domain,
+            deadline_monotonic=self._core._canonical_deadline(),
             **kwargs,
         )
         if host is None:
@@ -178,7 +207,7 @@ class ScheduledTaskService:
             session_id=session_id,
             values=values,
             status=status,
-            model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
+            model_resolution_snapshot=self._core.model_runtime.freeze_resolution_snapshot(),
             **({"result_check": result_check} if result_check is not None else {}),
         )
         self.wake()
@@ -215,7 +244,7 @@ class ScheduledTaskService:
             task_id=task_id,
             expected_revision=expected_revision,
             replacement=replacement,
-            model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
+            model_resolution_snapshot=self._core.model_runtime.freeze_resolution_snapshot(),
             **({"result_check": result_check} if result_check is not None else {}),
         )
         self._prepare_errors.pop(task_id, None)
@@ -223,7 +252,15 @@ class ScheduledTaskService:
         self.wake()
         return {"paused": self._payload(paused), "active": self._payload(active)}
 
-    async def invoke_query(self, arguments, *, default_session_id, permission_mode, page_budget):
+    async def invoke_query(self, arguments, *, default_session_id, permission_mode, page_budget, memory_domain_id=None):
+        token = self._memory_domain.set(memory_domain_id)
+        try:
+            return await self._invoke_query(arguments, default_session_id=default_session_id,
+                permission_mode=permission_mode, page_budget=page_budget)
+        finally:
+            self._memory_domain.reset(token)
+
+    async def _invoke_query(self, arguments, *, default_session_id, permission_mode, page_budget):
         value = dict(validate_query(dict(arguments)))
         if "target" in value:
             return model_task_payload(await self.get(value["target"]["task_id"]))
@@ -248,7 +285,15 @@ class ScheduledTaskService:
                 return result
         raise ToolResultPageBoundary("The minimum schedule page does not fit this call's result allowance")
 
-    async def invoke_manage(self, arguments, *, default_session_id, permission_mode, page_budget):
+    async def invoke_manage(self, arguments, *, default_session_id, permission_mode, page_budget, memory_domain_id=None):
+        token = self._memory_domain.set(memory_domain_id)
+        try:
+            return await self._invoke_manage(arguments, default_session_id=default_session_id,
+                permission_mode=permission_mode, page_budget=page_budget)
+        finally:
+            self._memory_domain.reset(token)
+
+    async def _invoke_manage(self, arguments, *, default_session_id, permission_mode, page_budget):
         value = dict(validate_action(dict(arguments)))
         action = value.pop("action")
         if action == "create" and value.get("session") is None:
@@ -412,9 +457,9 @@ class ScheduledTaskService:
             trigger_source=ScheduledTriggerSource.RUN_ONCE,
             client_command_id=request["client_command_id"],
         )
-        host = (
-            await self.sessions.resume_session(a.session_id, scheduled=True)
-        ).session
+        if self._stopped:
+            raise KernelHostCoreClosing("Scheduled task service is stopping")
+        host = await self._core.resume_scheduled_session(a.session_id)
         outcome = await self._submit(host, a)
         if outcome.status == "REJECTED" and outcome.prompt_delivery is None:
             raise ScheduledTaskError(
@@ -437,8 +482,6 @@ class ScheduledTaskService:
         )
 
     async def _dispatch(self, row):
-        from pulsara_agent.desktop_app.session_controller import SessionControlRejected
-
         a = ScheduledAdmission(
             row["id"],
             row["session_id"],
@@ -459,9 +502,9 @@ class ScheduledTaskService:
             )
             if state != "PREPARE":
                 return
-            host = (
-                await self.sessions.resume_session(a.session_id, scheduled=True)
-            ).session
+            if self._stopped:
+                raise KernelHostCoreClosing("Scheduled task service is stopping")
+            host = await self._core.resume_scheduled_session(a.session_id)
             outcome = await self._submit(host, a)
             if outcome.status == "REJECTED" and outcome.public_code in {
                 "MODEL_CONFIGURATION_REQUIRED",
@@ -547,11 +590,9 @@ class ScheduledTaskService:
             rows = await self._read("scheduled_pending_sessions", cursor=cursor)
             for row in rows:
                 try:
-                    host = (
-                        await self.sessions.resume_session(
-                            row["session_id"], scheduled=True
-                        )
-                    ).session
+                    if self._stopped:
+                        return
+                    host = await self._core.resume_scheduled_session(row["session_id"])
                     host.wake_queued_inputs()
                 except asyncio.CancelledError:
                     raise
@@ -562,6 +603,9 @@ class ScheduledTaskService:
             cursor = rows[-1]["session_id"]
 
     async def _loop(self):
+        # Timer scans belong to the explicit user-level owner even if start was
+        # requested while an independent model invocation carried another domain.
+        self._memory_domain.set(None)
         while True:
             self._wake.clear()
             try:

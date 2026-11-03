@@ -372,6 +372,7 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
     start_mcp_entered = asyncio.Event()
     release_start_mcp = asyncio.Event()
     constructed_sessions: list[object] = []
+    released_writers: list[object] = []
     home_observations = 0
     resolve_user_home = kernel_host.resolve_user_home
 
@@ -409,26 +410,47 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
 
         @staticmethod
         def release_host_writer(guard, **kwargs):
-            return None
+            released_writers.append(guard)
 
     class BlockingSession:
         def __init__(self, **kwargs: object) -> None:
             self.session_id = str(kwargs["session_id"])
+            self.host_session_id = str(kwargs["host_session_id"])
+            self.root_session_id = kwargs["root_session_id"]
+            self._lease = kwargs["writer_lease"]
+            self._io = kwargs["io_owner"]
+            self._plugin_view = kwargs["initial_plugin_view"]
             self.workspace = kwargs["workspace"]
             self.extensions = object()
             self.closed = False
             self.binding = kwargs["bundled_skill_binding"]
             constructed_sessions.append(self)
 
+        @property
+        def physical_close_complete(self) -> bool:
+            return self.closed and self._io.physical_close_complete
+
+        @property
+        def necessary_settlement_complete(self) -> bool:
+            return self.physical_close_complete
+
+        @property
+        def local_children_stopped(self) -> bool:
+            return self.closed
+
         async def start_mcp(self) -> None:
             start_mcp_entered.set()
             await release_start_mcp.wait()
 
-        async def aclose(self, **_kwargs: object) -> None:
+        async def aclose(self, **kwargs: object) -> None:
+            await self._io.aclose(deadline_monotonic=kwargs["deadline_monotonic"])
+            self._plugin_view.close()
             self.closed = True
 
     async def fake_resources(_self: KernelHostCore) -> FakeRepository:
-        return FakeRepository()
+        if _self._repository is None:
+            _self._repository = FakeRepository()
+        return _self._repository
 
     monkeypatch.setattr(kernel_host, "LocalHookSourceProvider", FakeHookSourceProvider)
     monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
@@ -467,8 +489,11 @@ def test_shutdown_fences_and_joins_unregistered_session_open(
         session = constructed_sessions[0]
         assert isinstance(session, BlockingSession)
         assert session.closed
+        assert session.physical_close_complete
+        assert released_writers == [session._lease.guard]
         assert core._sessions == {}  # noqa: SLF001
         assert core._open_attempts == {}  # noqa: SLF001
+        assert core._close_attempts == {}  # noqa: SLF001
         assert not core._bundled_skill_binding.is_bound  # noqa: SLF001
         with pytest.raises(KernelHostCoreClosing):
             await core.open_session(

@@ -25,6 +25,13 @@ class VisualizationPreviews:
         # this is a physical execution bound, never a bound on the gallery size.
         self.slot = asyncio.Lock()
 
+    def stop_admission(self) -> None:
+        self.screenshots.stop_admission()
+
+    @property
+    def local_children_stopped(self) -> bool:
+        return self.screenshots.local_children_stopped
+
     async def read(self, connection_id: str, body: dict, *, cancelled: Callable[[], bool] = lambda: False) -> dict:
         return await self.read_canonical(body, read_content=lambda value: self.bridge.read_content(connection_id, value), cancelled=cancelled, connection_id=connection_id)
 

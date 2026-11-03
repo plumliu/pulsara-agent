@@ -14,7 +14,7 @@ afterEach(cleanup);
 
 const server: UserMcpServerCapability = {
   id: 'docs', name: '文档服务', config: {}, currentIdentity: 'docs-config', enabled: true,
-  status: 'configured', required: false, availableToSubagents: true,
+  status: 'configured', availableToSubagents: true,
   toolCount: 0, resourceCount: 0, resourceTemplateCount: 0, promptCount: 0,
   instructions: '', hasFailure: false, transport: { kind: 'http', summary: 'https://example.com/mcp' }, tools: [],
 };

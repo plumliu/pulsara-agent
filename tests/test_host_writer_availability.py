@@ -2,6 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -75,6 +76,9 @@ def test_renewal_done_callback_uses_the_original_close_attempt(close_failure):
         session = SimpleNamespace(
             host_session_id='host:writer-unavailable', session_id='session:writer-unavailable',
             writer_unavailable=True, aclose=close, _lease=SimpleNamespace(guard=object()), root_session_id=None,
+            _stop_close_admission=AsyncMock(),
+            physical_close_complete=close_failure is None,
+            necessary_settlement_complete=close_failure is None,
         )
         core = object.__new__(KernelHostCore)
         core._lock = asyncio.Lock()
@@ -160,8 +164,8 @@ def test_expired_writer_cannot_write_but_can_join_physical_close(
 
 @pytest.mark.postgres
 @pytest.mark.parametrize('operation', ['read', 'fence', 'dispatch'])
-def test_session_end_only_skips_the_exact_stale_guard_read(
-    isolated_migrated_postgres_database, tmp_path, monkeypatch, operation,
+def test_session_end_diagnostics_do_not_quarantine_physically_stopped_host(
+    isolated_migrated_postgres_database, tmp_path, monkeypatch, operation, caplog,
 ):
     from unittest.mock import AsyncMock, patch
     from tests.support.model_config import test_model_runtime
@@ -181,16 +185,102 @@ def test_session_end_only_skips_the_exact_stale_guard_read(
         else:
             target = patch.object(session._hooks, 'fence_ordinary' if operation == 'fence' else 'dispatch_terminal', AsyncMock(side_effect=failure))
         with target:
-            with pytest.raises(type(failure)) as first:
-                await core.close_session(session.host_session_id)
-        assert first.value is failure
-        assert session._closed
-        assert core._close_attempts[session.host_session_id].state is HostSessionCloseState.CLOSE_FAILED_QUARANTINED
-        with pytest.raises(type(failure)) as repeated:
             await core.close_session(session.host_session_id)
-        assert repeated.value is failure
-        with pytest.raises(type(failure)) as shutdown:
+        assert session._closed
+        assert session.physical_close_complete and session.necessary_settlement_complete
+        assert not core._close_attempts and session.host_session_id not in core._sessions
+        assert str(failure) in caplog.text
+        await core.close_session(session.host_session_id)
+        await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgres
+def test_necessary_settlement_failure_is_distinct_from_unstopped_execution(
+    isolated_migrated_postgres_database, tmp_path, monkeypatch,
+):
+    from tests.support.model_config import test_model_runtime
+    from pulsara_agent.workspace_identity import HostWorkspaceInput
+    from pulsara_agent.conversation_kernel.host import KernelSessionSettlementUnconfirmed
+
+    database = isolated_migrated_postgres_database
+    monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+
+    async def scenario():
+        core = KernelHostCore.production(model_runtime=test_model_runtime(postgres_dsn=database.runtime_dsn))
+        session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=workspace))
+        original = session._assistant_settlements.aclose
+        failure = OSError('canonical acknowledgement unavailable')
+
+        async def unconfirmed(**kwargs):
+            await original(**kwargs)
+            session._assistant_settlements._close_settlement_error = failure
+            raise failure
+
+        monkeypatch.setattr(session._assistant_settlements, 'aclose', unconfirmed)
+        with pytest.raises(KernelSessionSettlementUnconfirmed) as observed:
+            await core.close_session(session.host_session_id)
+        assert observed.value.__cause__.__cause__ is failure
+        assert session.physical_close_complete and not session.necessary_settlement_complete
+        assert not core.session_runtime_closing(session.session_id)
+        assert not core._close_attempts and session.host_session_id not in core._sessions
+        await core.shutdown()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.postgres
+def test_external_settlement_wait_does_not_delay_real_terminal_termination(
+    isolated_migrated_postgres_database, tmp_path, monkeypatch,
+):
+    import shlex
+    import sys
+    from tests.support.model_config import test_model_runtime
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.workspace_identity import HostWorkspaceInput
+    from pulsara_agent.terminal_process.environment import TerminalEnvConfig
+    from pulsara_agent.terminal_process.models import TerminalRequest, TerminalProcessOrigin
+
+    database = isolated_migrated_postgres_database
+    monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+
+    async def scenario():
+        core = KernelHostCore.production(model_runtime=test_model_runtime(postgres_dsn=database.runtime_dsn))
+        session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=workspace))
+        manager = session._tools._terminal
+        manager.environment_owner.config = TerminalEnvConfig(enable_shell_snapshot=False)
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(600)')}"
+        result = await asyncio.to_thread(manager.execute, TerminalRequest(command, yield_time_ms=0),
+            owner_host_session_id=session.host_session_id,
+            origin=TerminalProcessOrigin(random_id('turn'), 'ROOT'),
+            decision_attempt_id=random_id('terminal-decision'),
+            decision_deadline_monotonic=core._canonical_deadline())
+        assert result.process_id is not None
+        process = manager.process_registry._states[result.process_id]
+        assert process.process.poll() is None
+        session._external_new_turn_settled.clear()
+        terminal_stopped = asyncio.Event()
+        original_stop = session._tools.stop_terminal_physical_owners
+
+        async def stop(**kwargs):
+            await original_stop(**kwargs)
+            terminal_stopped.set()
+
+        monkeypatch.setattr(session._tools, 'stop_terminal_physical_owners', stop)
+        closing = asyncio.create_task(core.close_session(session.host_session_id))
+        try:
+            await asyncio.wait_for(terminal_stopped.wait(), 5)
+            assert process.physical_completion.is_set()
+            assert process.process.poll() is not None
+            assert not closing.done()
+        finally:
+            session._external_new_turn_settled.set()
+            await closing
             await core.shutdown()
-        assert shutdown.value is failure
 
     asyncio.run(scenario())

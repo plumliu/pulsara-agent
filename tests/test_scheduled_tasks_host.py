@@ -11,11 +11,10 @@ import pytest
 from psycopg.rows import dict_row
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.llm.input import FrozenPromptContent, PromptContent
-from pulsara_agent.scheduling.service import ScheduledTaskService
 from pulsara_agent.scheduling.contracts import ScheduledTriggerSource
 from pulsara_agent.tool_permission import default_permission_policy
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
-from pulsara_agent.desktop_app.session_controller import SessionControlRejected
+from pulsara_agent.conversation_kernel.host import SessionControlRejected
 from pulsara_agent.llm.model_connections import ModelCallBinding, ModelConnectionId
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
@@ -23,6 +22,252 @@ from tests.support.model_config import test_model_runtime, test_model_binding
 from tests.test_stage2_kernel_host_dogfood import _SteerModelPort, _DogfoodModelPort
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.mark.parametrize("desktop", [False, True])
+def test_complete_core_schedule_tools_execute_and_user_management_needs_no_ui_session(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch, desktop,
+):
+    async def scenario():
+        import pulsara_agent.conversation_kernel.host as host_module
+        from pulsara_agent.model_input.contracts import ModelInputScopeKind
+        from pulsara_agent.primitives.permission import PermissionMode
+        from pulsara_agent.tool_permission import preset_to_policy
+        from pulsara_agent.workspace_identity import HostWorkspaceInput
+        from tests.support.round3 import invoke_direct_tool
+
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(host_module.LocalMcpManagementService, "load_configs", lambda *a, **k: ())
+        root = tmp_path / "complete-core"
+        root.mkdir()
+        runtime = test_model_runtime(postgres_dsn=stage2_migrated_postgres_database.runtime_dsn)
+        policy = preset_to_policy(PermissionMode.BYPASS_PERMISSIONS)
+        domain = "schedule-desktop-user" if desktop else "schedule-direct-user"
+        core = KernelHostCore.production(model_runtime=runtime, permission_policy=policy, memory_domain_id=domain)
+        controller = LocalSessionController(core=core, permission_policy=policy, memory_domain_id=domain, active_skill_names=frozenset()) if desktop else None
+        other = KernelHostCore.production(model_runtime=runtime, memory_domain_id="another-user")
+        try:
+            if controller is None:
+                session = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=root, memory_domain_id=domain))
+            else:
+                session = (await controller.create_session(workspace_kind="project", workspace_path=str(root))).session
+            await session.update_model_call_binding(test_model_binding(runtime))
+            assert session._tools._scheduled_tasks is core.scheduled_tasks
+            bindings = session._tools.sealed_builtin_capability_snapshot(
+                conversation_scope_kind=ModelInputScopeKind.ROOT,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+            ).executor_bindings
+            names = {binding.tool_name for binding in bindings}
+            assert len(names) == 36
+            assert {"query_schedules", "manage_schedule"} <= names
+
+            async def invoke(name, arguments, target_session=None):
+                target_session = target_session or session
+                result = await invoke_direct_tool(target_session._tools, session_id=target_session.session_id,
+                    workspace_id=target_session.workspace.workspace_key, tool_name=name, arguments=arguments,
+                    tool_call_id=random_id("call"), attempt_id=random_id("attempt"),
+                    turn_id=random_id("turn"), assistant_entry_id=random_id("entry"))
+                assert result.state == "SUCCESS", result.public_value()
+                return result.public_value()
+
+            arguments = {"action": "create", "values": {
+                "name": "Core-owned report", "prompt": "Inspect current changes.", "timezone": "UTC",
+                "permission_mode": "ask-permissions", "schedule": {
+                    "contract": "scheduled-rule:v1", "kind": "interval", "seconds": 60,
+                    "anchor_at_utc": "2030-01-01T00:00:00Z",
+                },
+            }}
+            created = await invoke("manage_schedule", arguments)
+            page = await invoke("query_schedules", {})
+            assert [task["target"] for task in page["tasks"]] == [created["target"]]
+            task_id = created["target"]["task_id"]
+            # A legitimate explicit ROOT domain is carried by its immutable
+            # Host binding, never supplied as a model argument or inferred from
+            # the currently selected desktop session.
+            separate = await core.open_session(HostWorkspaceInput(workspace_kind="project",
+                workspace_root=root, memory_domain_id=f"{domain}-explicit-root"))
+            await separate.update_model_call_binding(test_model_binding(runtime))
+            separate_created = await invoke("manage_schedule", arguments, separate)
+            own_page, separate_page = await asyncio.gather(
+                invoke("query_schedules", {}), invoke("query_schedules", {}, separate))
+            assert [item["target"] for item in own_page["tasks"]] == [created["target"]]
+            assert [item["target"] for item in separate_page["tasks"]] == [separate_created["target"]]
+            await core.close_session(separate.host_session_id)
+            await core.close_session(session.host_session_id)
+            assert not core._sessions
+            listed = await core.scheduled_tasks.list()
+            assert [task["id"] for task in listed["tasks"]] == [task_id]
+            changed = await core.scheduled_tasks.mutate(task_id=task_id,
+                expected_revision=created["revision"], action="pause")
+            assert changed["status"] == "PAUSED"
+            assert not core._sessions
+            assert (await other.scheduled_tasks.list())["tasks"] == []
+        finally:
+            if controller is not None:
+                await controller.aclose()
+            await other.shutdown()
+            await core.shutdown()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("phase", ["initialize", "discovery"])
+@pytest.mark.parametrize("finish", ["ready", "stop", "close"])
+def test_canonical_scheduled_pending_restore_waits_before_actual_provider_and_prefix(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch, phase, finish,
+):
+    async def scenario():
+        from pulsara_agent.conversation_kernel import host as host_module
+        from pulsara_agent.conversation_kernel.host import KernelHostSession
+        from pulsara_agent.conversation_kernel.mcp import supervisor as mcp_module
+        from pulsara_agent.llm.adapters.openai.chat_completions import (
+            OpenAIChatCompletionsTransport, build_chat_completions_payload,
+        )
+        from pulsara_agent.primitives.model_call import ModelCallPurpose
+        from pulsara_agent.workspace_identity import HostWorkspaceInput
+        from tests.test_mcp_first_request_readiness import controlled_mcp_client, readiness_config
+
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+        runtime = test_model_runtime(wire_api="openai_chat_completions",
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn)
+        workspace_input = HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path,
+            memory_domain_id=f"scheduled-pending-{phase}-{finish}")
+        original_stream = OpenAIChatCompletionsTransport.stream
+        requests = []
+        provider_sent = asyncio.Event()
+        async def stream(adapter, *, call, context):
+            if call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
+                requests.append(build_chat_completions_payload(call=call, context=context))
+                provider_sent.set()
+            adapter._mock_chunks = [
+                {"choices": [{"index": 0, "delta": {"content": "SCHEDULE COMPLETED"}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ]
+            async for event in original_stream(adapter, call=call, context=context):
+                yield event
+        monkeypatch.setattr(OpenAIChatCompletionsTransport, "stream", stream)
+        with monkeypatch.context() as seed:
+            seed.setattr(host_module.LocalMcpManagementService, "load_configs", lambda *a, **k: ())
+            seed.setattr(KernelHostSession, "activate_execution", lambda self: None)
+            core = KernelHostCore.production(model_runtime=runtime, memory_domain_id=workspace_input.memory_domain_id)
+            session = await core.open_session(workspace_input)
+            session_id = session.session_id
+            await session.update_model_call_binding(test_model_binding(runtime))
+            task = await create(core.scheduled_tasks, session, once=True)
+            request = {"client_command_id": random_id("command"), "session_id": session_id,
+                "task_id": task["id"], "expected_revision": task["revision"],
+                "request_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat()}
+            accepted = await core.scheduled_tasks.run_now(request)
+            assert (await session.query_command(request["client_command_id"])).status == "PENDING"
+            assert not requests
+            await core.shutdown()
+
+        Client, entered, release = controlled_mcp_client(phase)
+        async def factory():
+            return Client
+        monkeypatch.setattr(mcp_module, "_prepare_sdk_client_factory", factory)
+        monkeypatch.setattr(host_module.LocalMcpManagementService, "load_configs",
+            lambda *a, **k: (readiness_config(),))
+        core = KernelHostCore.production(model_runtime=runtime, memory_domain_id=workspace_input.memory_domain_id)
+        try:
+            await core.scheduled_tasks.tick()
+            session = core._live_agent_session(session_id)
+            assert session is not None
+            assert core._sessions[session.host_session_id] is session
+            assert session._delivery_task is not None
+            await asyncio.wait_for(entered.wait(), 5)
+            async with asyncio.timeout(10):
+                while session.mcp_readiness_progress() is None:
+                    await asyncio.sleep(0)
+            assert session.mcp_readiness_progress()["waiting"] is True
+            scope = next(iter(session._input_continuity._slots))
+            assert session._input_continuity.current_view(scope) is None
+            assert requests == []
+            attempt = session._mcp_supervisor._tasks["fixture"]
+            if finish == "stop":
+                await session.request_stop_turn(command_id=random_id("command"),
+                    admission_deadline_ms=int(datetime.now(timezone.utc).timestamp() * 1000) + 30_000,
+                    expected_session_id=session.session_id, expected_host_session_id=session.host_session_id,
+                    target_turn_id=session.active_root_turn_id())
+                assert not attempt.done()
+            elif finish == "close":
+                await core.close_session(session.host_session_id)
+                assert attempt.done()
+            release.set()
+            if finish == "ready":
+                await asyncio.wait_for(provider_sent.wait(), 10)
+                async with asyncio.timeout(10):
+                    while (await session.query_command(request["client_command_id"])).status == "PENDING":
+                        await asyncio.sleep(0)
+                assert len(requests) == 1
+                assert any(tool["function"]["name"] == "mcp__fixture__fake_echo" for tool in requests[0]["tools"])
+                confirmed = await core.scheduled_tasks.run_now(request)
+                assert confirmed["queue_item_id"] == accepted["queue_item_id"]
+                assert confirmed["execution"]["status"] == "completed"
+                assert len(requests) == 1
+            else:
+                if not attempt.done():
+                    await asyncio.wait_for(attempt, 5)
+                assert requests == []
+                assert session._input_continuity.current_view(scope) is None
+        finally:
+            release.set()
+            await core.shutdown()
+    asyncio.run(scenario())
+
+
+def test_shutdown_during_last_open_io_cannot_construct_an_unregistered_session(
+    tmp_path, stage2_migrated_postgres_database, monkeypatch,
+):
+    async def scenario():
+        from threading import Event
+        from pulsara_agent.conversation_kernel import host as host_module
+        from pulsara_agent.workspace_identity import HostWorkspaceInput
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+        monkeypatch.setattr(host_module.LocalMcpManagementService, "load_configs", lambda *a, **k: ())
+        core = KernelHostCore.production(model_runtime=test_model_runtime(
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn))
+        entered, release = Event(), Event()
+        original_read = host_module.ConversationKernelRepository.read_session_root_id
+        constructed = []
+        original_construct = host_module.KernelHostSession.__init__
+        def read(*args, **kwargs):
+            entered.set()
+            assert release.wait(10), "test did not release final physical open read"
+            return original_read(*args, **kwargs)
+        def construct(session, **kwargs):
+            constructed.append(kwargs["host_session_id"])
+            return original_construct(session, **kwargs)
+        monkeypatch.setattr(host_module.ConversationKernelRepository, "read_session_root_id", read)
+        monkeypatch.setattr(host_module.KernelHostSession, "__init__", construct)
+        stopping = asyncio.Event()
+        original_stop = core.scheduled_tasks.stop
+        async def stop():
+            stopping.set()
+            await original_stop()
+        monkeypatch.setattr(core.scheduled_tasks, "stop", stop)
+        opening = asyncio.create_task(core.open_session(HostWorkspaceInput(
+            workspace_kind="project", workspace_root=tmp_path)))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            close = asyncio.create_task(core.shutdown())
+            await stopping.wait()
+            assert core._closing
+            attempt = next(item for item in core._open_attempts.values() if item.configuration is not None)
+            assert attempt.candidate_session is None
+            assert attempt.io_owner.physical_operation_deadline is not None
+            assert core._session_open_children_stopped()
+            assert not constructed
+            release.set()
+            with pytest.raises(host_module.KernelHostCoreClosing):
+                await opening
+            await close
+            assert not constructed and not core._sessions and not core._open_attempts
+            assert not core.has_database_resources
+        finally:
+            release.set()
+            await asyncio.gather(opening, return_exceptions=True)
+            await core.shutdown()
+    asyncio.run(scenario())
 
 
 async def settled(check):
@@ -48,8 +293,7 @@ async def setup(tmp_path, db, monkeypatch, port, *, runtime=None):
         permission_policy=default_permission_policy(),
         active_skill_names=frozenset(),
     )
-    service = ScheduledTaskService(sessions)
-    core.scheduled_tasks = service
+    service = core.scheduled_tasks
     handle = await sessions.create_session(
         workspace_kind="project", workspace_path=str(root)
     )
@@ -164,7 +408,7 @@ async def due(service, session, task, *, seconds_ago=1):
 
 async def queue(service, sid):
     def read(*, deadline_monotonic):
-        repo = service.sessions.core._repository
+        repo = service._core._repository
         with repo.connection_provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row,
@@ -301,7 +545,6 @@ def test_missing_workspace_auto_pauses_without_mkdir_manual_keeps_plan(
                 permission_policy=default_permission_policy(),
                 active_skill_names=frozenset(),
             )
-            service.sessions = sessions
             shutil.rmtree(root)
             await service.tick()
             paused = await service.get(task["id"])
@@ -381,22 +624,22 @@ def test_restart_wakes_removed_once_pending_from_timer_or_user(
                 permission_policy=default_permission_policy(),
                 active_skill_names=frozenset(),
             )
-            service = ScheduledTaskService(sessions)
-            core.scheduled_tasks = service
+            service = core.scheduled_tasks
             await service.tick()
 
             async def done():
                 rows = await queue(service, h.session_id)
-                handle = sessions._by_session.get(h.session_id)
+                host = core._live_agent_session(h.session_id)
                 return (
                     rows[-1]["status"] == "CONSUMED"
-                    and handle is not None
-                    and handle.session._active_task is None
+                    and host is not None
+                    and host._active_task is None
                 )
 
             await settled(done)
             rows = await queue(service, h.session_id)
             assert len(rows) == 1 and rows[-1]["input_origin"] == "SCHEDULED_TASK"
+            assert not sessions._by_session
             assert len(port.requests) == 1
             await service.tick()
             assert len(await queue(service, h.session_id)) == 1
@@ -1000,8 +1243,7 @@ def test_paused_once_expires_quietly_in_running_kernel_and_after_restart(
                 await core.shutdown()
                 core = KernelHostCore.production(model_runtime=runtime)
                 sessions = LocalSessionController(core=core, permission_policy=default_permission_policy(), active_skill_names=frozenset())
-                service = ScheduledTaskService(sessions)
-                core.scheduled_tasks = service
+                service = core.scheduled_tasks
                 await service.start()
             else:
                 service.wake()

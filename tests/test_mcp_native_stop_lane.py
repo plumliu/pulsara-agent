@@ -33,7 +33,7 @@ if __name__ == "__main__":
     server.run()
 ''')
     config_path = tmp_path / "mcp.yaml"
-    config_path.write_text('servers:\n  fixture:\n    required: true\n    enabled: true\n    catalog_refresh_interval_ms: DISABLED\n    transport: ' + json.dumps({
+    config_path.write_text('servers:\n  fixture:\n    enabled: true\n    catalog_refresh_interval_ms: DISABLED\n    transport: ' + json.dumps({
         "type": "stdio", "command": sys.executable, "args": [str(server_file)],
     }) + '\n')
     configs = load_mcp_server_configs(user_config_path=config_path)
@@ -52,7 +52,7 @@ if __name__ == "__main__":
         try:
             await session.attach_controller("browser:stop-test")
             await session.reload_mcp_configs(configs, deadline_monotonic=monotonic() + 20)
-            await session._mcp_supervisor._wait_for_required_startup(("fixture",))
+            await session._mcp_supervisor.wait_initial_readiness()
             session._tools.prepare_tool_surface_safe_point()
             slot = session._mcp_supervisor._slots["fixture"]
             server_capacity, host_capacity = slot._lane._value, slot._host_lane._value

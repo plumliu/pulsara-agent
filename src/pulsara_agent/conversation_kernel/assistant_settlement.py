@@ -127,6 +127,16 @@ class AssistantMessageSettlementOwner:
         self._lock = asyncio.Lock()
         self._attempts: dict[str, _Attempt] = {}
         self._closed = False
+        self._close_settlement_error: BaseException | None = None
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closed and all(item.task.done() for item in self._attempts.values())
+
+    @property
+    def necessary_settlement_complete(self) -> bool:
+        return (self._closed and self._close_settlement_error is None
+                and all(item.task.done() for item in self._attempts.values()))
 
     def prepare_replay_reservation(
         self,
@@ -232,6 +242,7 @@ class AssistantMessageSettlementOwner:
                 pass
             except BaseException as exc:
                 first_error = first_error or exc
+        self._close_settlement_error = first_error or cancellation
         if cancellation is not None:
             raise cancellation
         if deadline_expired:

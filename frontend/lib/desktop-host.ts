@@ -22,6 +22,7 @@ export interface PulsaraDesktop {
   minimize(): Promise<void>;
   toggleMaximize(): Promise<void>;
   closeWindow(): Promise<void>;
+  restartWorkbench(): Promise<void>;
   cliStatus(): Promise<CliStatus>;
   repairCli(replaceConflict: boolean): Promise<CliStatus>;
   chooseFiles(): Promise<string[]>;

@@ -663,6 +663,10 @@ def build_accepted_canonical_tool_result_settlement(
 class ToolSurfacePlanningPort(Protocol):
     def snapshot_workspace_root(self) -> Path: ...
 
+    async def wait_initial_mcp_readiness(
+        self, *, conversation_scope_kind: ModelInputScopeKind
+    ) -> None: ...
+
     def sealed_builtin_capability_snapshot(
         self,
         *,

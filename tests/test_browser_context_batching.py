@@ -102,7 +102,8 @@ def test_root_group_query_count_does_not_grow_with_the_exact_entry_set(repo, mon
         context(reader, lease.guard.session_id, answers, maximum_serialized_bytes=size - 1)
 
 
-def test_sparse_latest_entry_keeps_segment_mounts_lazy_after_many_legal_adoptions(repo):
+@pytest.mark.parametrize("sequential_scan", [False, True])
+def test_sparse_latest_entry_keeps_segment_mounts_lazy_after_many_legal_adoptions(repo, sequential_scan):
     lease = new_session(repo)
     session = lease.guard.session_id
     owner, _, _ = turn(repo, lease.guard, "long running ROOT", finish=False)
@@ -138,6 +139,12 @@ def test_sparse_latest_entry_keeps_segment_mounts_lazy_after_many_legal_adoption
     reader._browser_context_entry_rows(capture, session, [answer],
         int(value["cut_sequence"]), int(value["event_sequence_cut"]))
     with reader._connection(monotonic() + 30) as connection:
+        if sequential_scan:
+            # A small table may legitimately use an event scan and top-N sort
+            # instead of a backwards index scan. Exercise that legal plan while
+            # retaining the same selected boundary and lazy mount contract.
+            connection.execute("SET LOCAL enable_indexscan=off")
+            connection.execute("SET LOCAL enable_bitmapscan=off")
         plan = connection.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + capture.sql,
             capture.parameters).fetchone()["QUERY PLAN"][0]["Plan"]
     # The candidate events may be read once, but resolving their canonical
@@ -149,10 +156,17 @@ def test_sparse_latest_entry_keeps_segment_mounts_lazy_after_many_legal_adoption
 
     mounts = [node for node in nodes(plan) if node.get("Alias") == "mounted"]
     assert mounts, plan
-    assert all(node["Actual Loops"] == 1 for node in mounts), mounts
-    candidates = [node for node in nodes(plan) if node.get("Alias") == "ev"]
+    assert all(node["Actual Loops"] == 1 and node["Actual Rows"] == 1 for node in mounts), mounts
+    # Check work crossing the selection/mount boundary, not how many scalar
+    # event rows PostgreSQL reads to choose its single latest eligible event.
+    for name in ("selected_segments", "segment_mounts"):
+        boundary = [node for node in nodes(plan) if node.get("Subplan Name") == f"CTE {name}"]
+        assert len(boundary) == 1, plan
+        assert boundary[0]["Actual Loops"] == 1 and boundary[0]["Actual Rows"] == 1, boundary
+    candidates = [node for node in nodes(plan)
+        if node.get("Relation Name") == "agent_events" and node.get("Alias", "").startswith("ev")]
     assert candidates, plan
-    assert all(node["Actual Loops"] == 1 and node["Actual Rows"] == 1 for node in candidates), candidates
+    assert all(node["Actual Loops"] == 1 for node in candidates), candidates
 
 
 

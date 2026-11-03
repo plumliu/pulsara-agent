@@ -88,6 +88,16 @@ export interface ModelCallBindingPayload {
   reasoning: ReasoningSelectionPayload | null;
 }
 
+export interface McpReadinessProgress {
+  waiting: boolean;
+  servers: Array<{
+    server_id: string;
+    display_name: string;
+    state: 'CONNECTING' | 'DISCOVERING' | 'READY' | 'FAILED_RETRYABLE' | 'FAILED_TERMINAL';
+    failure: string | null;
+  }>;
+}
+
 export interface SessionEphemeralResults {
   session_id: string;
   host_session_id: string | null;
@@ -100,6 +110,7 @@ export interface SessionEphemeralResults {
     text: string | null;
   };
   title: { state: 'pending' | 'adopted' | 'absent' };
+  mcp_readiness?: McpReadinessProgress | null;
 }
 
 /** Disposable preview of the selected next-turn model, not admission authority. */
@@ -638,6 +649,7 @@ export interface RuntimeAdapter {
     status: 'reopened' | 'deferred';
     publicCode?: string;
   }>;
+  closeSession(sessionId: string): Promise<{ status: 'closing' }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
   openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader>;
   createAgentContentReader(rootSessionId: string, agentSessionId: string): AgentContentReader;
@@ -1463,6 +1475,12 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return { status: payload.status, publicCode: payload.public_code };
   }
 
+  async closeSession(sessionId: string): Promise<{ status: 'closing' }> {
+    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+      method: 'POST', body: JSON.stringify({}), keepalive: true,
+    });
+  }
+
   async inspectCapabilities(sessionId: string): Promise<CapabilitySnapshot> {
     const payload = await apiRequest<Record<string, unknown>>(
       `/api/sessions/${encodeURIComponent(sessionId)}/capabilities`,
@@ -1866,7 +1884,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
 
   async connect(sessionId: string, takeover = false): Promise<RuntimeConnection | CanonicalHistoryView> {
     const attempt = ++this.connectAttempt;
-    const payload = await apiRequest<ConnectPayload | {view: "history"; session_id: string; workspace_availability: WorkspaceAvailability; snapshot: {snapshot: {snapshot: ProtocolCanonicalSnapshot}}}>(
+    const payload = await apiRequest<ConnectPayload | {view: "history"; session_id: string; runtime_closing?: boolean; workspace_availability: WorkspaceAvailability; snapshot: {snapshot: {snapshot: ProtocolCanonicalSnapshot}}}>(
       `/api/sessions/${encodeURIComponent(sessionId)}/connections`,
       {
         method: 'POST',
@@ -1877,7 +1895,8 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       },
     );
     if ('view' in payload && payload.view === 'history') {
-      const history = new CanonicalHistoryView(payload.session_id, payload.workspace_availability, payload.snapshot.snapshot.snapshot);
+      const history = new CanonicalHistoryView(payload.session_id, payload.workspace_availability,
+        payload.snapshot.snapshot.snapshot, 'ROOT', undefined, undefined, payload.runtime_closing === true);
       await history.initialize();
       if (attempt === this.connectAttempt) this.chatConnection = undefined;
       return history;
@@ -2966,7 +2985,8 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
   private closed = false;
   constructor(readonly sessionId: string, readonly availability: WorkspaceAvailability,
               snapshot: ProtocolCanonicalSnapshot, private readonly scopeKind: 'ROOT' | 'SUBAGENT' = 'ROOT',
-              private readonly historyRoot?: string, private readonly queueRoot?: string) {
+              private readonly historyRoot?: string, private readonly queueRoot?: string,
+              readonly runtimeClosing = false) {
     super();
     this.installTail(snapshot);
     this.control = snapshot.control ?? {};
@@ -4537,7 +4557,6 @@ function projectCapabilitySnapshot(value: Record<string, unknown>): CapabilitySn
           needsApproval: Boolean(server.needs_approval),
           effective: Boolean(server.effective),
           status: mcpStatusByProtocol[String(server.status ?? '')] ?? 'failed',
-          required: Boolean(server.required),
           availableToSubagents: Boolean(server.available_to_subagents),
           toolCount: numeric(server.tool_count),
           discoveredToolCount: numeric(server.discovered_tool_count),
@@ -4644,7 +4663,6 @@ function projectUserCapabilitySnapshot(value: Record<string, unknown>): UserCapa
           name: String(server.name ?? server.id ?? 'MCP 服务'),
           enabled: Boolean(server.enabled),
           status: mcpStatusByProtocol[String(server.status ?? '')] ?? 'failed',
-          required: Boolean(server.required),
           availableToSubagents: Boolean(server.available_to_subagents),
           toolCount: numeric(server.tool_count),
           resourceCount: numeric(server.resource_count),

@@ -323,6 +323,10 @@ class SessionEphemeralProducts:
             "title": {"state": self._title_state},
         }
 
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closed and all(task.done() for task in self._tasks)
+
     async def aclose(self) -> None:
         self._closed = True
         self.invalidate()

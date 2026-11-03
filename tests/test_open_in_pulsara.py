@@ -1,3 +1,4 @@
+from tests.support.model_config import scheduled_task_service
 import asyncio
 import json
 
@@ -51,7 +52,7 @@ def test_presentation_control_is_not_partially_accepted_when_it_does_not_fit(tmp
 ])
 def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         ids = dict(session_id=SESSION_ID, tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
         borrow, context = direct_tool_invocation_context(port, **ids)
         try:
@@ -93,7 +94,7 @@ def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
 
 def test_root_surface_and_recovery(tmp_path):
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         try:
             prepared = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
             borrow = port.borrow_tool_surface(prepared)
@@ -129,7 +130,7 @@ def test_clean_import_order():
 def test_real_tool_rejects_removed_wrappers_without_aliases(tmp_path):
     async def run():
         task_id = 'task:6d7i5mg4ymfcckogzrqiser5km'
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         ids = dict(session_id=SESSION_ID, tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
         borrow, context = direct_tool_invocation_context(port, **ids)
         arguments = {'targets': [
@@ -252,7 +253,7 @@ def test_real_dispatch_resolves_objects_through_common_read_owners(tmp_path):
             return {"root_session_id": root if kwargs["session_id"] == agent else other}
         async def read(method, **kwargs):
             return method(**kwargs)
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id="host:aaaaaaaaaaaaaaaaaaaaaaaaaa", session_id=root, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id="host:aaaaaaaaaaaaaaaaaaaaaaaaaa", session_id=root, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         collaboration = CollaborationToolPort(repository=SimpleNamespace(read_agent_runtime_state=read_agent), root_session_id=root, session_id=root, runtime=SimpleNamespace(read_deadline=lambda: 123), admission_facts=lambda *_: {}, io=SimpleNamespace(run=read))
         port.bind_subagent_port(collaboration)
         def capture(identity):

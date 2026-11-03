@@ -1,6 +1,7 @@
 """Round 7 failure continuity, timing/freshness and provider-wire gates."""
 
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 from pulsara_agent.identity import random_id
 
@@ -316,7 +317,7 @@ def test_round7_custom_tool_cannot_promote_claimed_trusted_duration(
             )
 
     session_id = _id("session")
-    port = DirectKernelToolPort(
+    port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id=_id("host"),
         authorization_policy=DefaultToolDispatchAuthorizationPolicy(),

@@ -45,6 +45,7 @@ def test_public_guidance_distinguishes_schema_change_and_missing_connection_tool
             borrows = []
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 port.prepare_tool_surface_safe_point()
                 cold = production.prepare_test_direct_tool_surface(port)
                 borrows.append(port.borrow_tool_surface(cold))
@@ -181,6 +182,7 @@ def test_real_mcp_tool_query_preserves_package_named_schema_fields(tmp_path):
             borrow = None
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 port.prepare_tool_surface_safe_point()
                 surface = production.prepare_test_direct_tool_surface(port)
                 borrow = port.borrow_tool_surface(surface)

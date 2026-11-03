@@ -102,6 +102,7 @@ def test_dirty_catalog_is_unknown_even_while_connection_is_ready(tmp_path):
             port = _port(tmp_path, supervisor)
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 port.prepare_tool_surface_safe_point()
                 cold = prepare_test_direct_tool_surface(port).capability_exposure_plan
                 revision = 1
@@ -261,7 +262,6 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
             config = _parse_server(
                 "catalog",
                 {
-                    "required": True,
                     "catalog_refresh_interval_ms": "DISABLED",
                     "effect_policy": {"default_effect": "READ_ONLY"},
                     "transport": {
@@ -443,6 +443,7 @@ def test_native_evolution_and_meta_refresh_across_real_kernel_turns(
             )
             try:
                 await supervisor.start()
+                await supervisor.wait_initial_readiness()
                 phase_ends = []
                 for current_stage in range(6):
                     stage = current_stage

@@ -18,6 +18,29 @@ const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABL
 let historyOwnerFixture: Record<string, unknown> = {};
 afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOwnerFixture = {}; });
 
+it('submits explicit session close through the existing route without deleting the session', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'closing' }), { status: 202 }));
+  vi.stubGlobal('fetch', fetchMock);
+  expect(await new LocalHttpRuntimeAdapter().closeSession('session:close/a')).toEqual({ status: 'closing' });
+  expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/sessions/session%3Aclose%2Fa/close',
+    expect.objectContaining({ method: 'POST', body: '{}', keepalive: true }));
+});
+
+it('keeps an unconfirmed closing runtime as a read-only history view', async () => {
+  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    view: 'history', session_id: 'session-1', runtime_closing: true,
+    workspace_availability: connectedWorkspaceAvailability,
+    snapshot: { snapshot: { snapshot: { session_id: 'session-1', entries: [], control: {}, event_sequence_cut: '0' } } },
+  }), { status: 200 }));
+  vi.stubGlobal('fetch', fetchMock);
+  const view = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(view).toBeInstanceOf(CanonicalHistoryView);
+  expect((view as CanonicalHistoryView).runtimeClosing).toBe(true);
+  expect(view.current().isRunning).toBe(false);
+  expect(fetchMock).toHaveBeenCalledOnce();
+  await view.close();
+});
+
 it('reads frozen output through its original entry and copies line/character continuation', async () => {
   const requests: unknown[] = [];
   const positions = [{ line: 1, char_offset: 0 }, { line: 2, char_offset: 3 }];
@@ -1960,7 +1983,7 @@ describe('capability catalog adapter', () => {
       },
       mcp: {
         servers: [{
-          id: 'docs', name: '文档', status: 'READY', required: false,
+          id: 'docs', name: '文档', status: 'READY',
           available_to_subagents: true, tool_count: 1, discovered_tool_count: 1,
           resource_count: 2, resource_template_count: 3, prompt_count: 4,
           instructions: '优先读取目录', has_failure: false,

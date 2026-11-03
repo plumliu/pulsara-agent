@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 from pulsara_agent.identity import derive_id
 
@@ -1256,7 +1257,7 @@ def test_real_file_write_failure_can_be_inspected_without_replaying_write(
     )
 
     async def exercise():
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:zvmka3c6ohpt4g7m4peilmratm',
             session_id=session_id,

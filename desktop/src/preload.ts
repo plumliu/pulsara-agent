@@ -28,6 +28,7 @@ if (process.isMainFrame) contextBridge.exposeInMainWorld('pulsaraDesktop', {
   minimize: () => ipcRenderer.invoke('desktop:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('desktop:maximize'),
   closeWindow: () => ipcRenderer.invoke('desktop:close'),
+  restartWorkbench: () => ipcRenderer.invoke('desktop:restart-workbench'),
   cliStatus: () => ipcRenderer.invoke('desktop:cli-status'),
   repairCli: (replaceConflict: boolean) => ipcRenderer.invoke('desktop:repair-cli', replaceConflict),
   chooseFiles: () => ipcRenderer.invoke('desktop:choose-files'),

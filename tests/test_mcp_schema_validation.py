@@ -100,7 +100,10 @@ def _stdio_config(
 
 
 def _port(tmp_path, supervisor):
+    from tests.support.model_config import scheduled_task_service
+
     port = fixture.DirectKernelToolPort(
+        scheduled_tasks=scheduled_task_service(),
         workspace_root=tmp_path,
         host_owner_id="host:um5edy62izvdyaqfp7sleqd3qm",
         session_id="session:vbyef3afwygcmgc6kb7o4cgo3u",
@@ -143,6 +146,7 @@ def test_discovery_and_public_authorization_never_retrieve_schema(
         borrow = None
         try:
             await supervisor.start()
+            await supervisor.wait_initial_readiness()
             port.prepare_tool_surface_safe_point()
             surface = fixture.prepare_test_direct_tool_surface(port)
             borrow = port.borrow_tool_surface(surface)
@@ -213,6 +217,7 @@ def test_document_local_refs_reach_public_authorization(tmp_path):
         borrow = None
         try:
             await supervisor.start()
+            await supervisor.wait_initial_readiness()
             port.prepare_tool_surface_safe_point()
             surface = fixture.prepare_test_direct_tool_surface(port)
             borrow = port.borrow_tool_surface(surface)
@@ -290,11 +295,14 @@ def test_real_sdk_distinguishes_explicit_null_from_unset(
             ):
                 # The negotiated legacy SDK rejects non-object output schemas
                 # during listing, before any tool invocation is possible.
-                with pytest.raises(RuntimeError, match="required MCP server failed"):
-                    await supervisor.start()
+                await supervisor.start()
+                await supervisor.wait_initial_readiness()
+                assert supervisor._state["fixture"].value == "FAILED_TERMINAL"
+                assert not supervisor._pending
                 assert not calls.exists()
                 return
             await supervisor.start()
+            await supervisor.wait_initial_readiness()
             runtime = supervisor.install_pending_at_safe_point()
             executor = next(iter(runtime.executors.values()))
             permit = executor.admit(
@@ -359,6 +367,7 @@ def test_recursive_evaluation_stays_local_in_public_prepare_and_authorize(tmp_pa
         borrow = None
         try:
             await supervisor.start()
+            await supervisor.wait_initial_readiness()
             port.prepare_tool_surface_safe_point()
             surface = fixture.prepare_test_direct_tool_surface(port)
             borrow = port.borrow_tool_surface(surface)
@@ -421,6 +430,7 @@ def test_real_sdk_output_boundary_preserves_response_and_connection(tmp_path, re
             workspace_root=tmp_path, configs=(config,),
         )
         await supervisor.start()
+        await supervisor.wait_initial_readiness()
         runtime = supervisor.install_pending_at_safe_point()
         try:
             executor = next(iter(runtime.executors.values()))

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 import json
 import os
@@ -195,7 +196,7 @@ def test_hook_review_observes_full_sealed_builtin_owner_composition(tmp_path):
     from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
     from tests.support.round3 import prepare_test_direct_tool_surface
     async def exercise():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='review-host', session_id='session:zazc4gzsyde7brlnkyse2hjvpm', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id='review-host', session_id='session:zazc4gzsyde7brlnkyse2hjvpm', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         port.bind_subagent_port(SimpleNamespace(tool_names=('run_agent',)))
         port.bind_memory_port(SimpleNamespace(tool_names=('get_memory', 'remember')))
         try:

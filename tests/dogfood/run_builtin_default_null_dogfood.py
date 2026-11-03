@@ -22,7 +22,6 @@ from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.scheduling.service import ScheduledTaskService
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.tool_permission import default_permission_policy
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
@@ -86,8 +85,7 @@ async def run(args, report, saved, save):
                 permission_policy=default_permission_policy(),
                 active_skill_names=frozenset(),
             )
-            service = ScheduledTaskService(sessions)
-            core.scheduled_tasks = service
+            service = core.scheduled_tasks
             try:
                 handles = []
                 for name in ("reference", "source"):

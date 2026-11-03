@@ -229,7 +229,6 @@ def config_to_entry(config: McpServerConfig) -> dict[str, object]:
     return {
         "display_name": config.display_name,
         "enabled": config.enabled,
-        "required": config.required,
         "transport": wire,
         "auth": auth_to_entry(config.auth),
         "public_headers": dict(config.public_headers),

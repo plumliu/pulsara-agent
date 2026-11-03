@@ -101,6 +101,7 @@ class AgentSessionRuntime:
     @asynccontextmanager
     async def request_admission(self, root_session_id: str, requests):
         """Join the Core's existing admission/retirement gate for a batch."""
+        from pulsara_agent.conversation_kernel.host import KernelSessionOpenAttempt
         ids = frozenset((root_session_id, *(request.agent_id for request in requests)))
         while True:
             async with self.core._lock:
@@ -112,7 +113,9 @@ class AgentSessionRuntime:
                 })
                 if not retirements:
                     settlement = asyncio.get_running_loop().create_future()
-                    self.core._open_attempts[settlement] = ids
+                    self.core._open_attempts[settlement] = KernelSessionOpenAttempt(
+                        ids, task=asyncio.current_task(),
+                    )
                     break
             # A retirement that won first finishes before this new logical
             # admission checks current canonical existence and ownership.
@@ -236,6 +239,15 @@ class AgentSessionRuntime:
                 await self.core._retire_idle_agent(current, delete=True)
             elif idle_duration >= AGENT_UNLOAD_IDLE and live is not None:
                 await self.core._retire_idle_agent(current, delete=False)
+
+    @property
+    def physical_operation_deadline(self) -> float | None:
+        return self._io.physical_operation_deadline
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return (self._closing and (self._task is None or self._task.done())
+                and self._io.physical_close_complete)
 
     async def aclose(self) -> None:
         self._closing = True

@@ -149,7 +149,7 @@ def test_repeated_cancel_drains_preparation_and_closes_its_returned_handle(route
             with pytest.raises(asyncio.CancelledError):
                 await task
             assert events == ["successor"]
-            assert io._active == set()
+            assert io._active == {}
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)
@@ -183,7 +183,7 @@ def test_late_physical_preparation_retires_returned_handle_before_timeout():
             with pytest.raises(TimeoutError, match="physical I/O"):
                 await task
             assert events == ["late handle"]
-            assert io._active == set()
+            assert io._active == {}
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)

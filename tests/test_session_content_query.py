@@ -1,4 +1,5 @@
 """Saved conversation recovery preserves scope, original text and continuation."""
+from tests.support.model_config import scheduled_task_service
 from tests.support.tool_outputs import prepare_output
 
 from uuid import uuid4
@@ -997,7 +998,7 @@ def test_direct_query_uses_physical_owner_cancel_settlement_and_root_surface(tmp
     query = Query()
 
     async def run():
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path,
             host_owner_id='host:bri7pnkejy5ycd6bf5z6u6mq6e',
             session_id='session:tonl7moeh47xjefxa32vgqmvkq',

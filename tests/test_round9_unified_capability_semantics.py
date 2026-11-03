@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.support.model_config import scheduled_task_service
 
 from dataclasses import fields, replace
 import ast
@@ -93,7 +94,7 @@ def test_remember_is_main_only_in_frozen_and_model_surfaces(tmp_path):
     from pulsara_agent.primitives.permission import PermissionMode
 
     async def exercise():
-        port = DirectKernelToolPort(
+        port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(),
             workspace_root=tmp_path, host_owner_id='host:jx2n72tacopn3if4goyyza5ztm',
             session_id='session:2wae56asyel532v3i7tvactdee', live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
@@ -833,7 +834,6 @@ def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
             server_id=f"server-{index}",
             display_name=f"Server {index}",
             status=McpServerState.READY,
-            required=False,
             exposed_tool_count=0,
             discovered_tool_count=0,
             resource_count=0,
@@ -951,7 +951,6 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
                 server_id="server",
                 display_name="Server",
                 status=McpServerState.READY,
-                required=False,
                 exposed_tool_count=0,
                 discovered_tool_count=0,
                 resource_count=2,

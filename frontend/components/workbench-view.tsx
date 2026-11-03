@@ -101,6 +101,7 @@ import type {
   ToolOutputPage,
   CanonicalPromptImagePart,
   EditablePromptContent,
+  McpReadinessProgress,
 } from '../lib/runtime-adapter';
 import type { Message, PermissionMode, ReasoningBlock, RuntimeStatus, SessionSummary, SkillCapability, TodoRun, ToolTrace, Workspace } from '../lib/pulsara-types';
 import { permissionLabels, permissionModeOrder, messageSourceEntryId, messageViewKey } from '../lib/pulsara-types';
@@ -182,6 +183,7 @@ interface WorkbenchViewProps {
   todo?: TodoRun;
   activePlanMode: boolean;
   providerRetry?: import('../lib/runtime-adapter').ProviderRetry | null;
+  mcpReadiness?: McpReadinessProgress | null;
   isRunning: boolean;
   activeTurnId?: string;
   manualCompactionCommandId?: string;
@@ -210,6 +212,7 @@ interface WorkbenchViewProps {
   toolDecisionPending?: boolean;
   canControl: boolean;
   historyOnly?: boolean;
+  runtimeClosing?: boolean;
   isObserver: boolean;
   workspaceAvailability?: import('../lib/runtime-adapter').WorkspaceAvailability;
   workspaceRecoveryBusy?: boolean;
@@ -235,6 +238,7 @@ interface WorkbenchViewProps {
   onRenameSession: () => void;
   onOpenScheduledTask?: () => void;
   onReopenRuntime: () => void;
+  onCloseSession: () => void;
   runtimeReopenBusy: boolean;
   onReadInteraction: (
     interaction: RuntimeInteractionSummary,
@@ -2436,6 +2440,7 @@ export function WorkbenchView({
   activePlanMode,
   isRunning,
   providerRetry,
+  mcpReadiness,
   activeTurnId,
   manualCompactionCommandId,
   inspectorOpen,
@@ -2460,6 +2465,7 @@ export function WorkbenchView({
   toolDecisionPending = false,
   canControl,
   historyOnly = false,
+  runtimeClosing = false,
   isObserver,
   workspaceAvailability,
   workspaceRecoveryBusy = false,
@@ -2481,6 +2487,7 @@ export function WorkbenchView({
   onRenameSession,
   onOpenScheduledTask,
   onReopenRuntime,
+  onCloseSession,
   runtimeReopenBusy,
   onReadInteraction,
   onResolveInteraction,
@@ -2522,8 +2529,8 @@ export function WorkbenchView({
   const [compacting, setCompacting] = useState(false);
   const compactionBusy = compacting || contextCompactionInProgress;
   const directoryReadOnly = workspaceAvailability?.outcome === 'MISSING' || workspaceAvailability?.outcome === 'UNAVAILABLE';
-  const readOnlyDock = isObserver || directoryReadOnly || historyOnly;
-  const sessionStatusLabel = isObserver ? '观察中'
+  const readOnlyDock = isObserver || directoryReadOnly || historyOnly || runtimeClosing;
+  const sessionStatusLabel = runtimeClosing ? '任务仍在停止' : isObserver ? '观察中'
     : workspaceAvailability?.outcome === 'MISSING' ? '目录丢失'
     : workspaceAvailability?.outcome === 'UNAVAILABLE' ? '目录不可用'
     : session.status === 'running' ? '进行中'
@@ -3023,6 +3030,10 @@ export function WorkbenchView({
                 <RotateCcw size={15} />
                 <span><strong>重新加载会话</strong><small>从数据库重新组装上下文</small></span>
               </button>
+              <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onCloseSession(); }}>
+                <Square size={15} />
+                <span><strong>停止并关闭会话</strong></span>
+              </button>
             </div>}
           </div>
           {canControl && (
@@ -3051,7 +3062,11 @@ export function WorkbenchView({
             <div className={`runtime-banner runtime-banner--${runtimeStatus}`}>
               <span role="status">{runtimeStatus === 'starting' ? '正在连接本地服务…' : runtimeStatus === 'reconnecting' ? '连接中断，正在恢复会话…' : '连接恢复未完成'}</span>
               {(runtimeStatus === 'offline' || runtimeStatus === 'failed') && !runtimeRecoveryBlocked && <button onClick={onReconnect}>重新连接</button>}
-              {runtimeRecoveryBlocked && <span>旧会话关闭失败，请查看技术详情与日志，并重新打开 Pulsara。</span>}
+              {runtimeRecoveryBlocked && <span>任务仍在停止。</span>}
+              {runtimeRecoveryBlocked && desktopHost() && <button onClick={() => {
+                void desktopHost()!.restartWorkbench().catch(error => onNotify('工作台未能重启',
+                  error instanceof Error ? error.message : '请重新打开 Pulsara。', 'warning'));
+              }}>重启工作台</button>}
               {(runtimeErrorDetails || runtimeError) && <details className="runtime-error-details"><summary>技术详情</summary><pre>{runtimeErrorDetails || runtimeError}</pre></details>}
             </div>
           )}
@@ -3092,8 +3107,16 @@ export function WorkbenchView({
             <article className="assistant-turn assistant-turn--operational assistant-turn--run-start" aria-label="Pulsara 处理状态">
               <AssistantHeading message={{ id: 'pending-preparation', role: 'assistant', time: '', body: '' }} response={false} />
               <div className="assistant-progress" role="status"><i aria-hidden="true" />
-                {preparingSubmission ? '准备开始…' : '正在处理…'}
+                {mcpReadiness?.waiting ? '正在连接 MCP' : preparingSubmission ? '准备开始…' : '正在处理…'}
               </div>
+              {mcpReadiness?.waiting && <div className="assistant-progress" role="status">
+                {mcpReadiness.servers.filter(server => server.state === 'CONNECTING' || server.state === 'DISCOVERING')
+                  .map(server => `${server.display_name} · ${server.state === 'DISCOVERING' ? '读取目录' : '连接中'}`).join('；')}
+              </div>}
+              {mcpReadiness?.servers.some(server => server.state === 'FAILED_RETRYABLE' || server.state === 'FAILED_TERMINAL') && <div className="assistant-progress" role="status">
+                {mcpReadiness.servers.filter(server => server.state === 'FAILED_RETRYABLE' || server.state === 'FAILED_TERMINAL')
+                  .map(server => `${server.display_name} 连接失败，继续处理`).join('；')}
+              </div>}
             </article>
           )}
           {atLatestHistory && pendingSteers.map(item => (
@@ -3321,8 +3344,15 @@ export function WorkbenchView({
       </div> : (
         <div className="observer-wrap composer-wrap" ref={composerWrapRef}>
           {composerQueue}
-          <WorkspaceRecoveryDock isObserver={isObserver} availability={workspaceAvailability} busy={workspaceRecoveryBusy} error={workspaceRecoveryError}
-            onTakeControl={onTakeControl} onRestore={onRestoreWorkspace} onRecheck={onRecheckWorkspace} onNotify={onNotify} />
+          {runtimeClosing ? <div className="observer-dock readonly-dock">
+            <span className="observer-dock__icon"><Square size={15} /></span>
+            <strong role="status">任务仍在停止</strong>
+            {desktopHost() && <button type="button" onClick={() => {
+              void desktopHost()!.restartWorkbench().catch(error => onNotify('工作台未能重启',
+                error instanceof Error ? error.message : '请重新打开 Pulsara。', 'warning'));
+            }}>重启工作台</button>}
+          </div> : <WorkspaceRecoveryDock isObserver={isObserver} availability={workspaceAvailability} busy={workspaceRecoveryBusy} error={workspaceRecoveryError}
+            onTakeControl={onTakeControl} onRestore={onRestoreWorkspace} onRecheck={onRecheckWorkspace} onNotify={onNotify} />}
         </div>
       )}
     </section>

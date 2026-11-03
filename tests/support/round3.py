@@ -915,6 +915,9 @@ def static_canonical_compile_facts(
 
 
 class StructuredToolPort:
+    async def wait_initial_mcp_readiness(self, *, conversation_scope_kind) -> None:
+        """This deterministic test port has no network-owned capabilities."""
+
     def __init__(
         self,
         delegate: object,
@@ -1217,6 +1220,9 @@ class StructuredToolPort:
 
 class _EmptyTestMcpCapabilityOwner:
     """Zero-server MCP owner used only to complete real-port test composition."""
+
+    async def wait_initial_readiness(self, *, conversation_scope_kind) -> None:
+        """There are no configured attempts to await in this test owner."""
 
     def __init__(self) -> None:
         self._authority = object()

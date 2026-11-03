@@ -460,6 +460,12 @@ class HostCompactionRuntimeOwner:
         key = self.scope_key(scope_kind)
         self._auto_failures.pop(key, None)
 
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closing and all(task.done() for task in (
+            self._active_tasks | self._owned_tasks | self._settlement_tasks
+        ))
+
     async def aclose(self) -> None:
         async with self._state_lock:
             self._closing = True

@@ -95,9 +95,9 @@ from pulsara_agent.desktop_app.user_avatar import UserAvatarHttp
 from pulsara_agent.desktop_app.session_controller import (
     LocalSessionController,
     OldHostCloseQuarantined,
-    SessionControlRejected,
     SessionWorkspaceKind,
 )
+from pulsara_agent.conversation_kernel.host import SessionControlRejected
 from pulsara_agent.settings import (
     LocalPostgresConfig,
     LocalSettings,
@@ -397,6 +397,17 @@ class LocalHttpServer:
     def origin(self) -> str:
         return f"{'https' if self._ssl_context is not None else 'http'}://{LOOPBACK_HOST}:{self.port}"
 
+    def stop_admission(self) -> None:
+        self._visualization_previews.stop_admission()
+
+    @property
+    def local_children_stopped(self) -> bool:
+        return self._visualization_previews.local_children_stopped
+
+    async def close_local_children(self) -> None:
+        self.stop_admission()
+        await self._visualization_previews.aclose()
+
     async def start(self) -> None:
         if self._runner is not None:
             raise RuntimeError("local HTTP server already started")
@@ -433,7 +444,7 @@ class LocalHttpServer:
         runner = self._runner
         self._runner = None
         self._site = None
-        await self._visualization_previews.aclose()
+        await self.close_local_children()
         if runner is not None:
             await runner.cleanup()
 
@@ -929,7 +940,12 @@ class LocalHttpServer:
                     "请求没有发往当前的 Pulsara 本地地址。",
                     status=421,
                 )
-        if request.path.startswith("/api/") and request.path != "/api/healthz":
+        if request.path.startswith("/api/"):
+            if self._is_draining():
+                raise HttpPublicError(
+                    "APPLICATION_DRAINING", "Pulsara 正在关闭。",
+                    status=503, retryable=True,
+                )
             if (
                 request.path.startswith(
                     ("/api/sessions", "/api/connections", "/api/memories", "/api/scheduled-tasks")
@@ -959,13 +975,6 @@ class LocalHttpServer:
                         "CROSS_SITE_REQUEST_REJECTED",
                         "不允许从其他网站发起请求。",
                         status=403,
-                    )
-                if self._is_draining():
-                    raise HttpPublicError(
-                        "APPLICATION_DRAINING",
-                        "Pulsara 正在关闭。",
-                        status=503,
-                        retryable=True,
                     )
         if request.path.startswith("/api/local-settings/postgres"):
             async with self._postgres_operation_lock:
@@ -1052,6 +1061,7 @@ class LocalHttpServer:
                 # This create request has not exposed its allocated ID or key binding.
                 # Published/edit requests never enter this retry path.
                 continue
+        await self.sessions.core.notify_scheduled_tasks_changed()
         return web.json_response(
             {
                 "model_configuration": self._single_connection_summary(resolved.config),
@@ -1066,6 +1076,7 @@ class LocalHttpServer:
     async def _delete_model_configuration(self, request: web.Request) -> web.Response:
         connection_id = ModelConnectionId(request.match_info["connection_id"])
         settings, deleted = await self.settings.delete_model_connection(connection_id)
+        await self.sessions.core.notify_scheduled_tasks_changed()
         return web.json_response(
             {
                 "model_configuration_id": connection_id.value,
@@ -1124,6 +1135,7 @@ class LocalHttpServer:
             await self.settings.update_model_connection(connection=resolved.config, api_key=api_key)
         except ValueError as exc:
             raise HttpPublicError("MODEL_CONFIGURATION_EDIT_INVALID", str(exc), status=400) from exc
+        await self.sessions.core.notify_scheduled_tasks_changed()
         return web.json_response({
             "model_configuration": self._single_connection_summary(resolved.config),
             "wire_shape_warning": _wire_shape_warning(
@@ -2315,7 +2327,8 @@ class LocalHttpServer:
             if suffix not in independent and not suffix.startswith("history/") and not sidebar_read:
                 await self.bridge.require_chat_controller(
                     request.headers.get("X-Pulsara-Connection-Id", ""),
-                    int(request.headers.get("X-Pulsara-Connection-Generation", "0")), session_id=session_id)
+                    int(request.headers.get("X-Pulsara-Connection-Generation", "0")), session_id=session_id,
+                    require_directory=suffix != "close")
         connection_id = request.match_info.get("connection_id")
         if connection_id:
             action = request.path.rsplit("/", 1)[-1]
@@ -2512,60 +2525,11 @@ class LocalHttpServer:
         session_id = request.match_info["session_id"]
         if body:
             raise ValueError("runtime close accepts an empty object")
-        operation = await self.sessions.prepare_raw_close(session_id)
-        if operation is not None:
-            detach = await self.bridge.detach_session_for_raw_close(operation)
-            if isinstance(detach, BridgeDetachNotStarted):
-                await self.sessions.abort_prepared_raw_close(
-                    session_id, operation=operation
-                )
-                raise HttpPublicError(
-                    "SESSION_CLOSE_BUSY", detach.reason, status=409, retryable=True
-                )
-            if isinstance(detach, BridgeDetachFailed):
-                await self.bridge.quarantine_detach_failure(
-                    detach.token, error=detach.error
-                )
-                await self.sessions.quarantine_raw_close(
-                    operation, public_code="SESSION_CLOSE_QUARANTINED"
-                )
-                raise HttpPublicError(
-                    "SESSION_CLOSE_QUARANTINED",
-                    "会话关闭结果不确定，请重启 Pulsara 后再继续。",
-                    status=409,
-                )
-            assert isinstance(detach, BridgeDetachFull)
-            close_full = False
-            try:
-                await self.sessions.settle_raw_close(session_id, operation=operation)
-                close_full = True
-            except BaseException:
-                await self.bridge.settle_raw_close_detach(
-                    detach.token, close_full=False
-                )
-                raise
-            settlement = await self.bridge.settle_raw_close_detach(
-                detach.token, close_full=close_full
-            )
-            if isinstance(settlement, BridgeSettlementFailed):
-                await self.sessions.quarantine_raw_close(
-                    operation, public_code="SESSION_CLOSE_QUARANTINED"
-                )
-                raise HttpPublicError(
-                    "SESSION_CLOSE_QUARANTINED",
-                    "会话关闭结果不确定，请重启 Pulsara 后再继续。",
-                    status=409,
-                )
-            await self.sessions.finalize_raw_close(
-                operation,
-                bridge_settlement=settlement,
-                bridge_owner=self.bridge,
-            )
-        return web.json_response(
-            {
-                "status": "closed",
-            }
-        )
+        try:
+            status = await self.sessions.request_raw_close(session_id, bridge=self.bridge)
+        except SessionControlRejected as exc:
+            raise HttpPublicError(exc.public_code, str(exc), status=409, retryable=True) from exc
+        return web.json_response({"status": status}, status=202 if status == "closing" else 200)
 
     async def _runtime_reopen_session(self, request: web.Request) -> web.Response:
         raw = await request.read()
@@ -2670,6 +2634,9 @@ class LocalHttpServer:
                     bridge_settlement=bridge_settlement,
                     bridge_owner=self.bridge,
                 )
+                if observation is None:
+                    return {"status": "deferred", "public_code": "RUNTIME_CLOSED_SETTLEMENT_UNCONFIRMED",
+                            "detail": "运行时已停止，但执行结果未能确认。"}
                 try:
                     handle = await self.sessions.resume_session(
                         session_id,

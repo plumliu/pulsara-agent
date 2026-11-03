@@ -74,7 +74,7 @@ function Demo() {
       if(running)setQueue(previous=>[...previous,{sourceKind:'command',queueItemId:randomIdentity('queue'),commandId:randomIdentity('command'),sequence:String(previous.length+1),status:'pending',deliveryMode:'new-turn',content:{parts:[{type:'text',text:promptContentTextProjection(content)}]},permission:'read-only'}]);
       else setSent(previous=>[...previous,{id:randomIdentity('entry'),role:'user',time:'',body:promptContentTextProjection(content)}]);
       return true;
-    },onStop:()=>{setRunning(false);setStreaming(false);},onCompact:async()=>{},onRenameSession:noop,onReopenRuntime:reset,runtimeReopenBusy:false,
+    },onStop:()=>{setRunning(false);setStreaming(false);},onCompact:async()=>{},onRenameSession:noop,onReopenRuntime:reset,onCloseSession:noop,runtimeReopenBusy:false,
     onReadInteraction:async()=>{throw Error('此演示没有交互卡片');},onResolveInteraction:async()=>false,
     outputOwnerKey:`demo-${version}`,onReadToolOutput:async()=>{throw Error('此演示使用本地工具正文');},onReadPromptImage:async()=>new Uint8Array(),promptDraftStore:store,
     onNotify:(title,message)=>setNotice(`${title}：${message}`),onPermissionChange:noop,

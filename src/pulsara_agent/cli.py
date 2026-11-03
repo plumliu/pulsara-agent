@@ -172,7 +172,6 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--arg", action="append", default=[])
     add.add_argument("--allow-http-localhost", action="store_true")
     add.add_argument("--stateless-http-asserted", action="store_true")
-    add.add_argument("--required", action="store_true")
     add.add_argument("--disabled", action="store_true")
     add.add_argument(
         "--tool-visibility",
@@ -1540,7 +1539,6 @@ async def _mcp_command(
             }
         entry = {
             "enabled": not args.disabled,
-            "required": args.required,
             "transport": transport,
             "scope_policy": args.tool_visibility,
             "effect_policy": {"default_effect": args.effect},
@@ -1808,7 +1806,6 @@ def _mcp_config_public(config: McpServerConfig) -> dict[str, object]:
         "server_id": config.server_id,
         "display_name": config.display_name,
         "enabled": config.enabled,
-        "required": config.required,
         "transport": transport_kind,
         "scope_policy": config.scope_policy.value,
         "effect_policy": config.effect_policy.default_effect.value,

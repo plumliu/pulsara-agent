@@ -1223,6 +1223,10 @@ class KernelMemoryToolPort:
             },
         )
 
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closed and all(task.done() for task in self._remote_tasks)
+
     async def aclose(self) -> None:
         self._closed = True
         tasks = tuple(self._remote_tasks)

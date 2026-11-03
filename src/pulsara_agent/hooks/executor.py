@@ -266,7 +266,7 @@ class HookCommandExecutor:
         host_close_signal: asyncio.Event | None,
     ) -> HookCommandExecution:
         async with self._lock:
-            if self._closed:
+            if self._closed or monotonic() >= effective_deadline:
                 attempt.joined.set()
                 return _failure(request, scrub, "HOOK_CANCELLED")
             self._attempts.add(attempt)
@@ -519,6 +519,19 @@ class HookCommandExecutor:
                 *cancel_tasks,
                 return_exceptions=True,
             )
+
+    @property
+    def local_children_stopped(self) -> bool:
+        # Every terminal close Hook carries this same inherited deadline.
+        # Once it expired even a later canonical-read completion cannot start
+        # a new child; execute() rejects before process admission.
+        sealed = self._closed or (self._host_close_deadline is not None
+                                  and monotonic() >= self._host_close_deadline)
+        return sealed and all(attempt.joined.is_set() for attempt in self._attempts)
+
+    @property
+    def physical_close_complete(self) -> bool:
+        return self._closed and all(attempt.joined.is_set() for attempt in self._attempts)
 
     async def aclose(self, *, deadline_monotonic: float | None = None) -> None:
         async with self._lock:

@@ -11,16 +11,11 @@ from threading import Event
 from threading import Thread
 from time import monotonic
 from time import sleep
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import httpx2
 from openai import APITimeoutError
 import pytest
 
-from pulsara_agent.capability.bundled_skills import (
-    BundledSkillDistributionBindingOwner,
-)
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelExecutionDeadlineFactory,
     KernelExecutionWatchdogPolicy,
@@ -458,34 +453,17 @@ def test_round5_io_close_reports_timeout_only_after_physical_thread_exit() -> No
     asyncio.run(scenario())
 
 
-def _bare_host_core_with_blocked_blob_gc(
-    *, close_seconds: float
+def _host_core_with_blocked_blob_gc(
+    *, close_seconds: float, failure: Exception | None = None,
 ) -> tuple[KernelHostCore, asyncio.Event, asyncio.Event]:
-    core = object.__new__(KernelHostCore)
-    core._agent_runtime = SimpleNamespace(aclose=AsyncMock())
-    core.mcp_management = SimpleNamespace(aclose=AsyncMock())
-    core._image_validator = SimpleNamespace(aclose=AsyncMock())  # noqa: SLF001
-    core._deadlines = KernelExecutionDeadlineFactory(  # noqa: SLF001
-        KernelExecutionWatchdogPolicy(blob_gc_close_seconds=close_seconds)
+    from tests.support.model_config import test_model_runtime
+
+    core = KernelHostCore.production(
+        model_runtime=test_model_runtime(),
+        watchdog_policy=KernelExecutionWatchdogPolicy(blob_gc_close_seconds=close_seconds),
     )
-    core._sessions = {}  # noqa: SLF001
-    core._open_attempts = set()  # noqa: SLF001
-    core._close_attempts = {}  # noqa: SLF001
-    core._extension_routes = {}  # noqa: SLF001
-    core._jobs = None  # noqa: SLF001
-    core._lock = asyncio.Lock()  # noqa: SLF001
-    core._closing = False  # noqa: SLF001
-    core._closed = False  # noqa: SLF001
-    core._shutdown_task = None  # noqa: SLF001
-    core._blob_gc_io = KernelSessionIO(maximum_concurrency=1)  # noqa: SLF001
-    core._blob_store = object()  # noqa: SLF001
-    core._access = None  # noqa: SLF001
-    core._repository = None  # noqa: SLF001
-    core._history_maintenance = None  # noqa: SLF001
-    core._event_loop = asyncio.get_running_loop()  # noqa: SLF001
-    core._bundled_skill_binding = (  # noqa: SLF001
-        BundledSkillDistributionBindingOwner()
-    )
+    core._blob_gc_io = KernelSessionIO(maximum_concurrency=1)
+    core._blob_store = object()
     cancelled = asyncio.Event()
     release = asyncio.Event()
 
@@ -495,49 +473,93 @@ def _bare_host_core_with_blocked_blob_gc(
         except asyncio.CancelledError:
             cancelled.set()
             await release.wait()
+            if failure is not None:
+                raise failure
 
-    core._blob_gc_task = asyncio.create_task(blocked_gc())  # noqa: SLF001
+    core._blob_gc_task = asyncio.create_task(blocked_gc())
     return core, cancelled, release
 
 
-def test_round5_blob_gc_timeout_reports_only_after_exact_task_and_io_join() -> None:
+@pytest.mark.parametrize("failure", [None, OSError("GC maintenance cleanup failed")])
+def test_round5_blob_gc_late_close_logs_only_after_exact_task_and_io_join(monkeypatch, caplog, failure) -> None:
     async def scenario() -> None:
-        core, cancelled, release = _bare_host_core_with_blocked_blob_gc(
-            close_seconds=0.02
+        core, cancelled, release = _host_core_with_blocked_blob_gc(close_seconds=0.02, failure=failure)
+        # This existing watchdog is already overdue. Physical completion still
+        # requires both original owners; elapsed wall time cannot release them.
+        core._deadlines = KernelExecutionDeadlineFactory(
+            KernelExecutionWatchdogPolicy(blob_gc_close_seconds=0.02), clock=lambda: 10.0,
         )
-        gc_task = core._blob_gc_task  # noqa: SLF001
-        shutdown = asyncio.create_task(core.shutdown())
-        await asyncio.wait_for(cancelled.wait(), timeout=1)
-        await asyncio.sleep(0.04)
-        assert not shutdown.done()
-        assert gc_task is not None and not gc_task.done()
-        release.set()
-        with pytest.raises(TimeoutError, match="after close deadline"):
+        gc_task = core._blob_gc_task
+        io_owner = core._blob_gc_io
+        io_entered, release_io = Event(), Event()
+        io_close_entered = asyncio.Event()
+        original_close_io = io_owner.aclose
+
+        def physical(*, deadline_monotonic):
+            io_entered.set()
+            assert release_io.wait(5)
+            return "physically-terminal"
+
+        async def close_io(**kwargs):
+            io_close_entered.set()
+            await original_close_io(**kwargs)
+
+        monkeypatch.setattr(io_owner, "aclose", close_io)
+        operation = asyncio.create_task(io_owner.run(physical, deadline_monotonic=monotonic() + 5))
+        shutdown = None
+        try:
+            assert await asyncio.to_thread(io_entered.wait, 1)
+            shutdown = asyncio.create_task(core.shutdown())
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+            assert not shutdown.done()
+            assert gc_task is not None and not gc_task.done()
+            assert not io_owner.physical_close_complete
+            release.set()
+            await asyncio.wait_for(io_close_entered.wait(), timeout=1)
+            assert gc_task.done() and not shutdown.done()
+            assert not io_owner.physical_close_complete
+            release_io.set()
+            assert await operation == "physically-terminal"
             await shutdown
-        assert gc_task.done()
-        assert core._blob_gc_task is None  # noqa: SLF001
-        assert core._blob_gc_io is None  # noqa: SLF001
+            assert io_owner.physical_close_complete
+            assert core._blob_gc_task is None and core._blob_gc_io is None
+            assert core._closed
+            assert "Blob GC physically exited after close deadline" in caplog.text
+            if failure is not None:
+                assert str(failure) in caplog.text
+        finally:
+            release.set()
+            release_io.set()
+            pending = (operation,) if shutdown is None else (operation, shutdown)
+            await asyncio.gather(*pending, return_exceptions=True)
+            await core.shutdown()
 
     asyncio.run(scenario())
 
 
 def test_round5_blob_gc_shutdown_cancellation_detaches_only_after_join() -> None:
     async def scenario() -> None:
-        core, cancelled, release = _bare_host_core_with_blocked_blob_gc(
-            close_seconds=1.0
-        )
-        gc_task = core._blob_gc_task  # noqa: SLF001
+        core, cancelled, release = _host_core_with_blocked_blob_gc(close_seconds=1.0)
+        gc_task = core._blob_gc_task
+        io_owner = core._blob_gc_io
         shutdown = asyncio.create_task(core.shutdown())
-        await asyncio.wait_for(cancelled.wait(), timeout=1)
-        shutdown.cancel()
-        await asyncio.sleep(0)
-        assert not shutdown.done()
-        release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await shutdown
-        assert gc_task is not None and gc_task.done()
-        assert core._blob_gc_task is None  # noqa: SLF001
-        assert core._blob_gc_io is None  # noqa: SLF001
+        try:
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+            shutdown.cancel()
+            await asyncio.sleep(0)
+            assert not shutdown.done()
+            assert gc_task is not None and not gc_task.done()
+            assert not io_owner.physical_close_complete
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await shutdown
+            assert gc_task.done() and io_owner.physical_close_complete
+            assert core._blob_gc_task is None and core._blob_gc_io is None
+            assert core._closed
+        finally:
+            release.set()
+            await asyncio.gather(shutdown, return_exceptions=True)
+            await core.shutdown()
 
     asyncio.run(scenario())
 
