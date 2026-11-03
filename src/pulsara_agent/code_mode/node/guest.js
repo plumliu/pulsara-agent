@@ -159,7 +159,9 @@
       const error = new NativeError(value.message);
       error.name='ToolError';error.code=value.code;error.state=value.state;
       error.result=value.result;error.result_id=value.result_id;
-      error.result_entry_id=value.result_entry_id;error.artifact=value.artifact;
+      error.result_entry_id=value.result_entry_id;error.read=value.read;error.output_available=value.output_available;error.required_facts=value.required_facts;
+      error.source_coverage=value.source_coverage;error.source_coverage_reason=value.source_coverage_reason;
+      error.output_unavailability_reason=value.output_unavailability_reason;
       return error;
     },
     diagnose: value => {
@@ -168,17 +170,24 @@
         if(value.stack !== undefined) result.stack=NativeString(value.stack);
         if(value.name === 'ToolError') {
           result.code=value.code;result.state=value.state;result.result=value.result;
-          result.artifact=value.artifact;result.result_id=value.result_id;
+          result.read=value.read;result.output_available=value.output_available;result.required_facts=value.required_facts;
+          result.source_coverage=value.source_coverage;result.source_coverage_reason=value.source_coverage_reason;
+          result.output_unavailability_reason=value.output_unavailability_reason;result.result_id=value.result_id;
           result.result_entry_id=value.result_entry_id;
         }
         const encoded = stringify(result);
         if(encoded.length <= diagnosticChars) return encoded;
         const trimmed = {name:apply(slice,result.name,[0,80]),
           message:apply(slice,result.message,[0,diagnosticChars]),diagnostic_truncated:true};
-        each(['code','state','result_id','result_entry_id','artifact'], field => {
+        each(['code','state','result_id','result_entry_id','read','output_available','source_coverage','source_coverage_reason','output_unavailability_reason','required_facts'], field => {
           if(result[field] !== undefined) trimmed[field]=result[field];
         });
-        const compact = stringify(trimmed);
+        let compact = stringify(trimmed);
+        if(compact.length <= diagnosticChars + 1024) return compact;
+        // Keep the accepted result's reading route when its business facts
+        // exceed this existing diagnostic allowance. The source owns the facts.
+        delete trimmed.required_facts;
+        compact = stringify(trimmed);
         if(compact.length <= diagnosticChars + 1024) return compact;
         return stringify({name:trimmed.name,message:trimmed.message,diagnostic_truncated:true});
       }

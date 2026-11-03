@@ -16,10 +16,12 @@ from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel.mcp.contracts import McpServerState
 from pulsara_agent.conversation_kernel.mcp.supervisor import McpHostSupervisor, McpSnapshotStale
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.desktop_app import session_controller as controller_module
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
+from pulsara_agent.plugins.contracts import (
+    PluginInspectionDisposition, PluginInspectionOutcome,
+)
 from tests.test_mcp_catalog_subscriptions import _sdk_http
 from tests.test_mcp_scheduling_isolation import _invoke, _until
 
@@ -41,15 +43,16 @@ def _session(supervisor):
     return session
 
 
-def _controller(service, monkeypatch):
-    monkeypatch.setattr(controller_module, "_inspect_user_skills", lambda: {})
-    monkeypatch.setattr(controller_module, "_user_plugins_payload", lambda *_: {})
+def _controller(service):
     controller = object.__new__(LocalSessionController)
     controller._lock = asyncio.Lock()
     controller._operations = {}
     controller._by_session = {}
     controller.core = SimpleNamespace(
-        mcp_management=service, inspect_user_plugins=AsyncMock(return_value=object()),
+        mcp_management=service,
+        inspect_user_plugins=AsyncMock(return_value=PluginInspectionOutcome(
+            PluginInspectionDisposition.COMPLETE, (), (), (),
+        )),
     )
     return controller
 
@@ -96,7 +99,7 @@ def test_failed_reconnect_is_not_ready_and_other_working_owner_still_wins(tmp_pa
                 configs=service.load_configs(), credential_boundary=service.credential_boundary,
                 connect_attempt_timeout_seconds=0.25,
             ) for _ in range(2)]
-            controller = _controller(service, monkeypatch)
+            controller = _controller(service)
             runtimes = []
             try:
                 for supervisor in supervisors:
@@ -188,7 +191,7 @@ def test_subscription_relist_fences_management_tools_without_changing_provider_c
                 workspace_root=tmp_path,
                 configs=service.load_configs(), credential_boundary=service.credential_boundary,
             )
-            controller = _controller(service, monkeypatch)
+            controller = _controller(service)
             runtime = None
             try:
                 await supervisor.start()
@@ -246,7 +249,7 @@ def test_replaced_connect_task_cannot_supply_status_for_new_config(tmp_path, mon
                 configs=service.load_configs(), credential_boundary=service.credential_boundary,
                 connect_attempt_timeout_seconds=5,
             )
-            controller = _controller(service, monkeypatch)
+            controller = _controller(service)
             runtime = None
             try:
                 await supervisor.start()

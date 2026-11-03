@@ -103,14 +103,11 @@ from pulsara_agent.model_input.continuity import (
     FULL_HISTORY_CONTEXT_BASE_IDENTITY,
     PROVIDER_MESSAGE_LOWERING_CONTRACT,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputArtifactUnavailabilityReason,
-    ToolResultDisplayKind,
-)
+from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
 from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
+    freeze_tool_json_object,
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -2236,11 +2233,11 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                        i.kind AS plan_interaction_kind,
                        i.status AS plan_interaction_status,
                        r.session_id AS result_session_id, r.id AS result_id,
-                       r.result_state, r.result_entry_id,
-                       r.output_artifact_disposition, r.output_artifact_id,
-                       r.output_source_coverage, r.output_display_kind,
+                       r.result_state, r.result_entry_id, r.result_facts,
+                       r.output_omitted, r.output_unavailability_reason,
+                       r.output_body_digest,
+                       r.output_source_coverage,
                        r.output_source_coverage_reason,
-                       r.output_artifact_unavailability_reason,
                        r.result_origin_kind, r.observed_at,
                        r.observation_duration_microseconds,
                        r.observation_origin_kind,
@@ -2721,17 +2718,14 @@ def _tool_result_metadata(
         fact_fingerprint=tool_observation_timing_fingerprint(provisional_timing),
     )
     return ProviderToolResultContextMetadata(
+        session_id=str(row["result_session_id"]),
         result_id=str(row["result_id"]),
+        result_entry_id=str(row["result_entry_id"]),
         result_state=str(row["result_state"]),
-        display_kind=ToolResultDisplayKind(str(row["output_display_kind"])),
-        artifact_disposition=ToolOutputArtifactDisposition(
-            str(row["output_artifact_disposition"])
-        ),
-        artifact_id=(
-            None
-            if row["output_artifact_id"] is None
-            else str(row["output_artifact_id"])
-        ),
+        required_facts=freeze_tool_json_object(row["result_facts"]),
+        output_omitted=bool(row["output_omitted"]),
+        output_available=(row["output_body_digest"] is not None
+                          and row["output_unavailability_reason"] is None),
         source_coverage=ToolOutputSourceCoverage(str(row["output_source_coverage"])),
         source_coverage_reason=(
             None
@@ -2740,11 +2734,11 @@ def _tool_result_metadata(
                 str(row["output_source_coverage_reason"])
             )
         ),
-        artifact_unavailability_reason=(
+        output_unavailability_reason=(
             None
-            if row["output_artifact_unavailability_reason"] is None
-            else ToolOutputArtifactUnavailabilityReason(
-                str(row["output_artifact_unavailability_reason"])
+            if row["output_unavailability_reason"] is None
+            else ToolOutputUnavailableReason(
+                str(row["output_unavailability_reason"])
             )
         ),
         model_visible_memory_fact_ids=tuple(

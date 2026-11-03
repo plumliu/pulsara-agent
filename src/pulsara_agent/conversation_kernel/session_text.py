@@ -45,13 +45,16 @@ def prompt_history_text(parts, *, image_references: bool | None):
         elif isinstance(part, LLMTextPart):
             text = part.text
         elif isinstance(part, PromptAnnotationPart):
-            text = part.comment or ""
+            prefix = "历史引用（被引用的原文）：\n" + part.quote + "\n历史用户批注：\n"
+            text = prefix + (part.comment or "")
         else:
             raise TypeError("unknown canonical prompt part")
         if shown:
             offset += 1
         if is_image:
             bounds.append((offset, offset + len(text)))
+        elif isinstance(part, PromptAnnotationPart):
+            segments.append((offset + len(prefix), part.comment or ""))
         else:
             segments.append((offset, text))
         shown.append(text)

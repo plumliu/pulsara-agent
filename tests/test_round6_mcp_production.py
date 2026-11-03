@@ -2,6 +2,7 @@ from __future__ import annotations
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from tests.support.model_config import frozen_test_prompt
 import asyncio
@@ -2938,7 +2939,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
             target = {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": dynamic.name}
             inspected = await port._query_capabilities_result(
                 tool_name="query_capabilities", arguments={"target": target},
-                invocation_context=SimpleNamespace(surface_borrow=borrow),
+                invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))),
             )
             assert inspected.state == "SUCCESS"
             detail = json.loads(inspected.content)
@@ -2949,13 +2950,13 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
             assert "tool_ref" not in detail
             rejected = await port._query_capabilities_result(
                 tool_name="query_capabilities", arguments={"target": {**target, "tool_name": "fixture_echo"}},
-                invocation_context=SimpleNamespace(surface_borrow=borrow),
+                invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))),
             )
             assert rejected.state == "APPLICATION_ERROR"
             assert b"MCP_TOOL_NOT_FOUND" in rejected.content
             old_input = await port._query_capabilities_result(
                 tool_name="query_capabilities", arguments={"server_id": "fixture", "tool_name": dynamic.name},
-                invocation_context=SimpleNamespace(surface_borrow=borrow),
+                invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))),
             )
             assert old_input.state == "APPLICATION_ERROR" and b"INVALID_ARGUMENTS" in old_input.content
             authorization = await port.authorize(
@@ -2976,6 +2977,7 @@ def test_round6_direct_kernel_surface_executes_exact_mcp_generation(
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:surface",
                 attempt_id='attempt:p6lbqwaoo356qvim3is7ntneem',
+                page_budget=ToolResultPageBudget(tool_call_id="call:surface"),
                 result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.ROOT.value,
                 host_owner_epoch=1,
@@ -3973,6 +3975,7 @@ def test_round6_mcp_confirmation_admits_before_publish_and_drains_dirty(
                 assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
                 tool_call_id="call:confirmation",
                 attempt_id=allowed.accepted_attempt_id,
+                page_budget=ToolResultPageBudget(tool_call_id="call:confirmation"),
                 result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
                 conversation_scope_kind=ModelInputScopeKind.ROOT.value,
                 host_owner_epoch=1,

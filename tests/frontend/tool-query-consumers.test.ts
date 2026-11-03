@@ -3,7 +3,7 @@ import { builtinToolSummary } from '../../frontend/lib/builtin-tool-summary';
 import type { ToolTrace } from '../../frontend/lib/pulsara-types';
 
 function trace(toolName: string, args: unknown, result: unknown): ToolTrace {
-  return { id: 'query', kind: 'artifact', toolName, title: toolName, subtitle: '',
+  return { id: 'query', kind: 'tool', toolName, title: toolName, subtitle: '',
     status: 'completed', resultState: 'SUCCESS', argumentsJson: JSON.stringify(args),
     resultText: JSON.stringify(result) };
 }

@@ -1,3 +1,6 @@
+
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
 import asyncio
 import json
 
@@ -31,14 +34,14 @@ def test_direct_call_is_consumed_once_and_uses_canonical_local_owner(tmp_path):
         assert not service.mcp.path(
             LocalMcpTarget("docs", service.workspace_root)
         ).exists()
-        result = await call.execute()
+        result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED"
         assert (
             service.mcp.inspect(LocalMcpTarget("docs", service.workspace_root))
             is not None
         )
         with pytest.raises(RuntimeError):
-            await call.execute()
+            await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         with pytest.raises(RuntimeError):
             call.form("again")
         await service.mcp.aclose()
@@ -53,7 +56,7 @@ def test_form_validation_does_not_write_and_executes_user_candidate(tmp_path):
         call = CapabilityManagementCall(service, await service.prepare(args))
         form = call.form("需要用户配置")
         with pytest.raises(RuntimeError):
-            await call.execute()
+            await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         with pytest.raises(ValueError):
             await form.prepare_submission({"server_id": "foreign"})
         config = {
@@ -66,7 +69,7 @@ def test_form_validation_does_not_write_and_executes_user_candidate(tmp_path):
         assert not service.mcp.user_config_path.exists()
         accepted = AcceptedCapabilityFormSubmission(values)
         call.accept(accepted)
-        outcome = await call.execute()
+        outcome = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert outcome["current"]["config_path"] == str(service.mcp.user_config_path)
         assert "config" not in outcome["current"]
         assert service.mcp.inspect(LocalMcpTarget("docs")).transport.endpoint == "https://user.example.org/mcp"
@@ -122,7 +125,7 @@ def test_plugin_enable_always_uses_user_review_then_guarded_existing_owner(tmp_p
         )
         direct = CapabilityManagementCall(service, prepared)
         with pytest.raises(ValueError, match="user input"):
-            await direct.execute()
+            await direct.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         call = CapabilityManagementCall(service, prepared)
         form = call.form("review")
         from pulsara_agent.primitives.context import thaw_json
@@ -134,7 +137,7 @@ def test_plugin_enable_always_uses_user_review_then_guarded_existing_owner(tmp_p
             await form.prepare_submission({})
         values = await form.prepare_submission({"enable_review_accepted": True})
         call.accept(AcceptedCapabilityFormSubmission(values))
-        outcome = await call.execute()
+        outcome = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert outcome["status"] == "APPLIED", outcome
         assert outcome["current"]["operation_status"] == "ENABLED"
         await service.mcp.aclose()
@@ -166,7 +169,7 @@ def test_plugin_install_returns_published_identity_for_followup_management(tmp_p
                 call = CapabilityManagementCall(
                     service, await service.prepare({**args, "replace": replace})
                 )
-                result = await call.execute()
+                result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
                 assert result["status"] == "APPLIED", result
                 assert result["current"]["operation_status"] == (
                     "REPLACED" if replace else "INSTALLED"
@@ -177,7 +180,7 @@ def test_plugin_install_returns_published_identity_for_followup_management(tmp_p
 
             conflict = await CapabilityManagementCall(
                 service, await service.prepare(args)
-            ).execute()
+            ).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
             assert conflict["status"] == "CONFLICT", conflict
             assert "target" not in conflict
 
@@ -189,7 +192,7 @@ def test_plugin_install_returns_published_identity_for_followup_management(tmp_p
                         "target": result["target"],
                     }
                 ),
-            ).execute()
+            ).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
             assert remove["status"] == "APPLIED", remove
             assert remove["current"]["operation_status"] == "REMOVED"
         finally:
@@ -223,7 +226,7 @@ def test_model_oauth_completion_carries_exact_owner_only_after_settlement(tmp_pa
         }))
         form = call.form("authorize")
         call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
-        work = asyncio.create_task(call.execute())
+        work = asyncio.create_task(call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))
         await entered.wait()
         assert not work.done()
         release.set()
@@ -261,7 +264,7 @@ def test_oauth_cell_stop_detaches_only_conversation_wait_and_shared_sdk_flow_com
             form = call.form("authorize")
             call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
             redirected = asyncio.Event()
-            work = asyncio.create_task(call.execute(cell_cancel_event=redirected))
+            work = asyncio.create_task(call.execute(cell_cancel_event=redirected, page_budget=ToolResultPageBudget(_new_management_call_id("call"))))
             callback = None
             try:
                 async with asyncio.timeout(10):

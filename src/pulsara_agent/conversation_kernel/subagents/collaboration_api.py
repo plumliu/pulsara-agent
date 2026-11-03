@@ -28,8 +28,35 @@ from pulsara_agent.conversation_kernel.tool_contracts import KernelToolResult
 from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
 
 TERMINAL = frozenset({"completed", "stopped"})
+
+
+def _query_call(target):
+    return {"tool": "query_agents", "arguments": {"target": target}}
+
+
+def _require_fits(context, value, *, include_read=False):
+    if not context.page_budget.fits(canonical_json_bytes(value).decode("utf-8"), include_read=include_read):
+        raise ToolResultPageBoundary("The minimum agent result does not fit this call's result allowance")
+
+
+def _admission_receipt(request):
+    target = work_target(request.work_id)
+    return {"agent": agent_target(request.agent_id), "work": target,
+            "status": "queued", "inspect": _query_call(target)}
+
+
+def _fit_page(rows, *, limit, build, budget):
+    """Keep whole source records; the cursor advances only past delivered rows."""
+    for count in range(min(len(rows), limit), -1, -1):
+        if rows and count == 0:
+            break
+        value = build(rows[:count], len(rows) > count)
+        if budget.fits(canonical_json_bytes(value).decode("utf-8")):
+            return value
+    raise ToolResultPageBoundary("The minimum agent page does not fit this call's result allowance")
 
 
 class CollaborationToolPort:
@@ -124,24 +151,15 @@ class CollaborationToolPort:
         # not retain a database connection across a wait.
         return await self.io.run(method, **kwargs)
 
-    async def _work(self, work_id: str) -> dict:
-        row = await self._read(
-            self.repository.query_agent_work,
-            root_session_id=self.root_session_id,
-            work_id=work_id,
-            deadline_monotonic=self.runtime.read_deadline(),
-        )
-        if row is None:
-            raise ValueError("WORK does not exist in this collaboration")
-        return self._public_work(row)
-
     async def _work_status(self, work_id: str) -> dict:
         row = await self._read(self.repository.read_agent_work_graph_facts,
             root_session_id=self.root_session_id, work_id=work_id,
             deadline_monotonic=self.runtime.read_deadline())
         if row is None:
             raise ValueError("WORK does not exist in this collaboration")
-        return self._public_work(row)
+        value = self._public_work(row)
+        value["inspect"] = _query_call(value["target"])
+        return value
 
     async def read_cell_work_page(self, *, source_exec_attempt_id, cursor, limit):
         return await self._read(self.repository.list_cell_agent_works,
@@ -188,19 +206,20 @@ class CollaborationToolPort:
             )
         return result
 
-    async def _agent_rows(self, agent_id: str, *, cursor=None, limit=20):
-        # The repository checks ownership even when no work rows are returned.
-        rows = await self._read(
-            self.repository.list_agent_works,
-            root_session_id=self.root_session_id,
-            agent_id=agent_id,
-            cursor=cursor,
-            limit=limit,
-            deadline_monotonic=self.runtime.read_deadline(),
-        )
-        if rows is None:
+    @staticmethod
+    def _work_summary(row: Mapping) -> dict:
+        value = CollaborationToolPort._public_work({
+            key: row[key] for key in ("work_id", "agent_id", "status", "terminal_reason", "failed_dependency")
+            if key in row
+        })
+        value["inspect"] = _query_call(value["target"])
+        return value
+
+    async def _require_agent(self, agent_id: str):
+        row = await self._read(self.repository.read_agent_runtime_state,
+            session_id=agent_id, deadline_monotonic=self.runtime.read_deadline())
+        if row is None or row["root_session_id"] != self.root_session_id:
             raise ValueError("AGENT does not exist in this collaboration")
-        return rows
 
     async def _run(self, requests, context):
         facts = await self._facts(context, requests)
@@ -274,13 +293,19 @@ class CollaborationToolPort:
         ):
             raise ValueError("operation requires a live Code Mode invocation")
         outcome = None
+        page_complete = False
+        required_facts = {}
         if tool_name == "run_agent":
-            rows, outcome = await self._run((prepared_request(arguments),), context)
+            request = prepared_request(arguments)
+            _require_fits(context, _admission_receipt(request))
+            rows, outcome = await self._run((request,), context)
             result = rows[0]
         elif tool_name == "run_agent.batch":
             members = parse_batch_members(arguments)
+            _require_fits(context, {key: _admission_receipt(request) for key, request in members})
             rows, outcome = await self._run(tuple(r for _, r in members), context)
-            result = {key: row for (key, _), row in zip(members, rows, strict=True)}
+            result = {key: {**row, "inspect": _query_call(row["work"])}
+                      for (key, _), row in zip(members, rows, strict=True)}
         elif tool_name == "query_agents" and "target" not in arguments:
             limit = arguments.get("max_items", 50)
             rows = await self._read(
@@ -291,14 +316,14 @@ class CollaborationToolPort:
                 limit=limit + 1,
                 deadline_monotonic=self.runtime.read_deadline(),
             )
-            selected = rows[:limit]
-            result = {
-                "root": agent_target("ROOT"),
-                "agents": [self._public_agent(row) for row in selected],
-                "next_cursor": self._agent_cursor(selected[-1])
-                if len(rows) > limit
-                else None,
-            }
+            def build(selected, more):
+                return {"root": agent_target("ROOT"),
+                    "agents": [self._public_agent(row) for row in selected],
+                    "next": {"tool": "query_agents", "arguments": {
+                        "cursor": self._agent_cursor(selected[-1]), "max_items": limit}}
+                    if more else None}
+            result = _fit_page(rows, limit=limit, build=build, budget=context.page_budget)
+            page_complete = True
         elif tool_name == "query_agents":
             target = arguments["target"]
             if target["kind"] == "WORK":
@@ -325,21 +350,22 @@ class CollaborationToolPort:
                     limit=limit + 1,
                     deadline_monotonic=self.runtime.read_deadline(),
                 )
-                selected = rows[:limit]
                 self._observe_cell(context, ((identity, None, "query"),))
-                result = {
-                    "agent": agent_target(identity),
-                    "works": [self._public_work(row) for row in selected],
-                    "next_cursor": self._work_cursor(selected[-1])
-                    if len(rows) > limit
-                    else None,
-                }
+                def build(selected, more):
+                    return {"agent": agent_target(identity),
+                        "works": [self._work_summary(row) for row in selected],
+                        "next": {"tool": "query_agents", "arguments": {
+                            "target": target, "cursor": self._work_cursor(selected[-1]), "max_items": limit}}
+                        if more else None}
+                result = _fit_page(rows, limit=limit, build=build, budget=context.page_budget)
+                page_complete = True
         elif tool_name == "send_agent_message":
             identity = target_id(arguments["target"], "AGENT", allow_root=True)
             identity = self.root_session_id if identity == "ROOT" else identity
             if identity != self.root_session_id:
-                await self._agent_rows(identity, limit=1)
+                await self._require_agent(identity)
                 self._observe_cell(context, ((identity, None, "message"),))
+            _require_fits(context, {"recipient": agent_target(identity), "delivery": "not_started"})
             result = await self.runtime.send_agent_steer(
                 agent_id=identity, message=arguments["message"], source_context=context
             )
@@ -349,10 +375,32 @@ class CollaborationToolPort:
             result = await self._wait_agents(arguments, context)
         else:
             result = await self._wait_works(arguments, context)
+        if tool_name == "run_agent":
+            result = {**result, "inspect": _query_call(result["work"])}
+            required_facts = result
+            page_complete = True
+        elif tool_name == "send_agent_message":
+            required_facts = {key: result[key] for key in ("recipient", "work", "delivery")}
+            page_complete = True
+        elif tool_name == "run_agent.batch":
+            required_facts = result
+            page_complete = True
+        elif tool_name == "query_agents" and arguments.get("target", {}).get("kind") == "WORK":
+            required_facts = {key: result[key] for key in ("target", "agent", "status", "terminal_reason")}
+        elif tool_name == "stop_agent":
+            required_facts = {key: result[key] for key in ("target", "stop_requested", "stopped", "affected_count", "status_counts")}
+        elif tool_name in {"wait_agent", "wait_agent.works"}:
+            required_facts = {"state": result["state"],
+                **{key + "_count": len(result[key]) for key in
+                   ("bindings", "works", "pending_targets", "message_sources", "unavailable_targets") if key in result}}
+        if page_complete and tool_name == "query_agents" and not context.page_budget.fits(canonical_json_bytes(result).decode("utf-8")):
+            raise ToolResultPageBoundary("The complete agent result does not fit this call's result allowance")
         return KernelToolResult(
             state="SUCCESS",
             content=canonical_json_bytes(result),
             public_format=ToolOutputSourceFormatHint.JSON,
+            page_complete=page_complete,
+            required_facts=required_facts,
             physical_timing="ON_TIME" if outcome is None else outcome.timing.value,
             caller_cancelled_while_running=False
             if outcome is None
@@ -385,24 +433,30 @@ class CollaborationToolPort:
                 if row["current_work_id"] is None
                 else work_target(row["current_work_id"])
             )
+        result["inspect"] = _query_call(result["agent"])
         return result
 
     async def _stop(self, target, context):
         if target["kind"] == "WORK":
-            work = await self._work(target_id(target, "WORK"))
+            work = await self._work_status(target_id(target, "WORK"))
             identity, work_id = work["agent"]["agent_id"], work["target"]["work_id"]
             self._observe_cell(context, ((identity, work_id, "stop"),))
             if work["status"] in TERMINAL:
                 return {
                     "target": target,
                     "stopped": False,
-                    "works": [work],
+                    "stop_requested": False,
+                    "affected_count": 0,
+                    "status_counts": {work["status"]: 1},
+                    "works": [self._work_summary({"work_id": work["target"]["work_id"],
+                        "agent_id": identity, **work})],
                     "message": "Work already ended; no stop was performed.",
                 }, None
         else:
             identity, work_id = target_id(target, "AGENT"), None
-            await self._agent_rows(identity, limit=1)
+            await self._require_agent(identity)
             self._observe_cell(context, ((identity, None, "stop"),))
+        _require_fits(context, {"target": target, "stop_requested": True, "stopped": False}, include_read=True)
         facts = await self._facts(context)
         guard = facts["root_guard"]
         outcome = await self.io.run_tool_invocation(
@@ -423,13 +477,17 @@ class CollaborationToolPort:
                 await self.runtime.stop_active_work(
                     agent_id=identity, work_id=row["work_id"]
                 )
-        actual = [await self._work(row["work_id"]) for row in rows]
+        actual = [await self._work_status(row["work_id"]) for row in rows]
+        counts = {state: sum(work["status"] == state for work in actual)
+                  for state in {work["status"] for work in actual}}
         return {
             "target": target,
             "stop_requested": bool(actual),
             "stopped": bool(actual)
             and all(work["status"] == "stopped" for work in actual),
             "works": actual,
+            "affected_count": len(actual),
+            "status_counts": counts,
             "message": "Stop requested; outcomes reflect actual settlement."
             if actual
             else "Agent has no unfinished work.",

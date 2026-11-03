@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 from pulsara_agent.identity import random_id
 
 from concurrent.futures import ThreadPoolExecutor
@@ -61,7 +63,6 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
-    StructuredModelInputLimits,
 )
 from pulsara_agent.model_input.lowering import (
     image_referenced_content,
@@ -70,10 +71,6 @@ from pulsara_agent.model_input.lowering import (
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
-)
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.support.model_config import test_model_binding, test_model_runtime
@@ -214,8 +211,6 @@ def test_direct_image_owner_confirms_and_reader_lowers_exact_typed_content(
     assert snapshot.items[0].content == content.parts
     lowered = lower_canonical_item(
         snapshot.items[0],
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     assert lowered.fixed_message is not None
     assert lowered.fixed_message.content == image_referenced_content(content.parts)
@@ -424,13 +419,11 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
                 codec=PROMPT_BODY_CODEC,
             ),
             canonical_prompt=prompt,
-            artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-            artifact_id=None,
-            artifact_blob_descriptor=None,
+            output_body=None,
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            display_kind=ToolResultDisplayKind.COMPLETE,
+            output_omitted=False,
             source_coverage_reason=None,
-            artifact_unavailability_reason=None,
+            output_unavailability_reason=None,
             observed_at=datetime.now(timezone.utc),
             observation_duration_microseconds=1,
             observation_origin_kind=ToolObservationOrigin.BUILTIN,
@@ -511,7 +504,7 @@ def test_typed_tool_results_commit_confirm_reuse_and_rollback_atomically(
     page = SessionContentQuery(repository, session_id=lease.guard.session_id, memory_domain_id=state["memory_domain_id"]).invoke(
         "read_session_content", {"target": {"kind": "SESSION_ENTRY", "entry_id": entry["id"]}, "include_tools": True, "limit": 1},
         current_range=SessionContentRange(state["latest_entry_sequence"]),
-        tool_call_id="call:history", deadline_monotonic=monotonic() + 30,
+        tool_call_id="call:history", page_budget=ToolResultPageBudget(tool_call_id="call:history"), deadline_monotonic=monotonic() + 30,
     )
     assert shared_image.image_ref in page["items"][0]["text"]
     assert page["items"][0]["tool_name"] == "view_image"

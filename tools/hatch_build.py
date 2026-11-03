@@ -147,6 +147,10 @@ class CustomBuildHook(BuildHookInterface):
                 raise ValueError("Code Mode Node differs from the mise pin")
             if not (code_mode / "identity-core.mjs").is_file():
                 raise ValueError("Missing Code Mode shared identity core")
+            if (code_mode / "identity-core.mjs").read_bytes() != (
+                root / "desktop/src/identity-core.mjs"
+            ).read_bytes():
+                raise ValueError("Prepared Code Mode identity core differs from its source")
             sdk = code_mode / "quickjs-wasi"
             if json.loads((sdk / "package.json").read_text())["version"] != "3.6.2":
                 raise ValueError("Code Mode SDK differs from the fixed release")

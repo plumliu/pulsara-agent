@@ -4,7 +4,6 @@ from pulsara_agent.identity import derive_id
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from itertools import product
 from types import SimpleNamespace
 
 import pytest
@@ -30,23 +29,11 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     ModelInputScopeKind,
     ProviderToolCall,
-    STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
 )
 from pulsara_agent.model_input.lowering import (
-    _omitted_tool_result_body,
     _tool_result_message,
-    _tool_result_variants,
     ordinary_tool_result_minimum_upper,
-)
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputArtifactUnavailabilityReason,
-    ToolResultDisplayKind,
-)
-from pulsara_agent.ports.tool_execution import (
-    ToolOutputSourceCoverage,
-    ToolOutputSourceCoverageReason,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
 from pulsara_agent.primitives.tool_observation import (
@@ -90,138 +77,41 @@ def _charge(messages, api):
         o for o in ToolObservationOrigin if o is not ToolObservationOrigin.PLAN_CONTROL
     ),
 )
-def test_minimum_upper_bounds_real_omitted_normal_and_late_metadata(api, origin):
-    call_id = 'call:\\"\x01汉'
-    upper = _charge(
-        (
-            _tool_result_closure_message(call_id),
-            ordinary_tool_result_minimum_upper(call_id),
-        ),
-        api,
-    )
-    base = _tool_result("body", sequence=3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
-    duration_values = (
-        (None,)
-        if origin is ToolObservationOrigin.POLICY
-        else (None, MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS)
-    )
-    provenances = (
-        (),
-        ("\\" * 4094,),
-        ('"' * 4094,),
-        ("\x01" * 1364,),
-        ("汉" * 2728,),
-        tuple(f"id:{i}" for i in range(50)),
-    )
-    artifact_cases = (
-        (ToolOutputArtifactDisposition.NOT_REQUIRED, None, None),
-        (
-            ToolOutputArtifactDisposition.AVAILABLE,
-            'artifact:uoos2whccxrk6enuwziavscou4',
-            None,
-        ),
-        (
-            ToolOutputArtifactDisposition.INCOMPLETE,
-            'artifact:uoos2whccxrk6enuwziavscou4',
-            None,
-        ),
-        *(
-            (ToolOutputArtifactDisposition.UNAVAILABLE, None, reason)
-            for reason in ToolOutputArtifactUnavailabilityReason
-        ),
-    )
-    coverage_cases = (
-        (ToolOutputSourceCoverage.COMPLETE, None),
-        *(
-            (ToolOutputSourceCoverage.RETAINED_SNAPSHOT, reason)
-            for reason in ToolOutputSourceCoverageReason
-        ),
-    )
-    # Exercise every closed metadata branch; vary timing/header extrema separately
-    # to avoid duplicating a transport or timing conformance suite.
-    cases = [
-        (*artifact, *coverage, (), None, None)
-        for artifact, coverage in product(artifact_cases, coverage_cases)
-    ]
-    cases += [
-        (
-            ToolOutputArtifactDisposition.INCOMPLETE,
-            'artifact:uoos2whccxrk6enuwziavscou4',
-            None,
-            ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
-            ToolOutputSourceCoverageReason.TERMINAL_SANITIZER_UNAVAILABLE,
-            ids,
-            duration,
-            reported,
-        )
-        for ids, duration, reported in product(
-            provenances, duration_values, duration_values
-        )
-    ]
-    for (
-        artifact,
-        artifact_id,
-        unavailable,
-        coverage,
-        reason,
-        ids,
-        duration,
-        reported,
-    ) in cases:
-        timing = freeze_tool_observation_timing_fact(
-            session_id='session:uol64i4tlakqmd3ow6kdvbdqpy',
-            turn_id="turn:" + "a" * 26,
-            observed_at=datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc),
-            observation_duration_microseconds=duration,
-            tool_reported_duration_microseconds=reported,
-            observation_origin=origin,
-        )
-        for state in (
-            "SUCCESS",
-            "APPLICATION_ERROR",
-            "SYSTEM_ERROR",
-            "CANCELLED",
-            "INVALID_ARGUMENTS",
-            "PERMISSION_DENIED",
-            "TOOL_UNAVAILABLE",
-            "CANCELLED_BEFORE_DISPATCH",
-        ):
-            item = replace(
-                base,
-                tool_call_id=call_id,
-                tool_result_context=replace(
-                    base.tool_result_context,
-                    result_state=state,
-                    artifact_disposition=artifact,
-                    artifact_id=artifact_id,
-                    artifact_unavailability_reason=unavailable,
-                    source_coverage=coverage,
-                    source_coverage_reason=reason,
-                    display_kind=ToolResultDisplayKind.HEAD_TAIL,
-                    model_visible_memory_fact_ids=ids,
-                    timing=timing,
-                ),
-            )
-            for kind in (
-                FrozenProviderInputItemKind.TOOL_RESULT,
-                FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
-            ):
-                actual = _tool_result_message(
-                    replace(item, item_kind=kind), _omitted_tool_result_body(item)
-                )
-                messages = (
-                    (actual,)
-                    if kind is FrozenProviderInputItemKind.TOOL_RESULT
-                    else (_tool_result_closure_message(call_id), actual)
-                )
-                charge = _charge(messages, api)
-                assert charge[0] <= upper[0]
-                assert charge[1] <= upper[1]
+def test_minimum_upper_bounds_known_receipt_normal_and_late_carriers(api, origin):
+    call_id = derive_id("call", "minimum-receipt-test")
+    body = canonical_json_bytes({"status":"CANCELLED_BEFORE_DISPATCH",
+        "read":{"tool":"read_file","arguments":{"target":{"kind":"SESSION_ENTRY",
+        "session_id":derive_id("session","minimum-receipt"),
+        "entry_id":derive_id("entry","minimum-receipt")}}},
+        "message_preview":'escapes\\"汉'}).decode()
+    base = _tool_result(body, sequence=3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
+    durations = (None,) if origin is ToolObservationOrigin.POLICY else (None, MAXIMUM_TOOL_OBSERVATION_DURATION_MICROSECONDS)
+    for ids in ((), ("\\" * 4094,), ('"' * 4094,), tuple(f"id:{i}" for i in range(50))):
+        upper = _charge((_tool_result_closure_message(call_id),
+            ordinary_tool_result_minimum_upper(call_id, body=body,
+                model_visible_memory_fact_ids=ids)),api)
+        for duration in durations:
+            for reported in durations:
+                timing = freeze_tool_observation_timing_fact(
+                    session_id=derive_id("session","minimum-receipt"),
+                    turn_id=derive_id("turn","minimum-receipt"),
+                    observed_at=datetime(9999,12,31,23,59,59,999999,tzinfo=timezone.utc),
+                    observation_duration_microseconds=duration,
+                    tool_reported_duration_microseconds=reported, observation_origin=origin)
+                for state in ("SUCCESS","SYSTEM_ERROR","CANCELLED_BEFORE_DISPATCH","PERMISSION_DENIED"):
+                    item = replace(base, tool_call_id=call_id, tool_result_context=replace(
+                        base.tool_result_context,result_state=state,
+                        model_visible_memory_fact_ids=ids,timing=timing))
+                    for kind in (FrozenProviderInputItemKind.TOOL_RESULT,FrozenProviderInputItemKind.LATE_TOOL_OUTCOME):
+                        actual = _tool_result_message(replace(item,item_kind=kind),body)
+                        messages = (actual,) if kind is FrozenProviderInputItemKind.TOOL_RESULT else (_tool_result_closure_message(call_id),actual)
+                        charged = _charge(messages,api)
+                        assert charged[0] <= upper[0] and charged[1] <= upper[1]
 
 
-def _results(body, *, provenance=(), full=False, plan=False):
+def _results(body, *, provenance=(), plan=False):
     args = freeze_json({"target": {"kind": "PATH", "path": "example.txt"}})
-    tool_name = "read_artifact" if full else "read_file"
+    tool_name = "ask_plan_question" if plan else "read_file"
     assistant = FrozenProviderInputItem(
         FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
         'entry:yym6qf3l4xz6437gradtmhjrke',
@@ -233,7 +123,6 @@ def _results(body, *, provenance=(), full=False, plan=False):
     result = _tool_result(body, sequence=3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
     metadata = replace(
         result.tool_result_context,
-        artifact_id='artifact:uoos2whccxrk6enuwziavscou4' + "0" * 64,
         model_visible_memory_fact_ids=provenance,
     )
     if plan:
@@ -264,64 +153,27 @@ def _results(body, *, provenance=(), full=False, plan=False):
 @pytest.mark.parametrize("api", _WIRE_APIS)
 @pytest.mark.parametrize("cold", (False, True))
 @pytest.mark.parametrize("provenance", ((), ("\\" * 4094,)))
-def test_actual_wire_feedback_degrades_only_uninstalled_ordinary_results(
-    api, cold, provenance
-):
-    # JSON uses /4 in v3; keep the existing escaped body above admission.
-    items = _results("\\" * 8000, provenance=provenance)
-    coordinator, candidate, view, _ = _prepare_case(
-        api,
-        _skill_source(1),
-        cold=cold,
-        budget=11000 if provenance else 8000,
-        tool_items=items,
-        tool_names=("read_file", "read_artifact"),
-    )
+def test_actual_wire_feedback_never_rewrites_a_frozen_tool_projection(api,cold,provenance):
+    items = _results("\\" * 8000,provenance=provenance)
+    coordinator,candidate,view,_ = _prepare_case(api,_skill_source(1),cold=cold,
+        budget=11000 if provenance else 8000,tool_items=items,tool_names=("read_file",))
     original = candidate.append_result.compiled_input
-    assert (
-        original.tool_result_decisions[0].selected_mode
-        is ToolResultProviderRenderMode.FULL
-    )
-    measurement = coordinator._model.freeze_wire_measurement(
-        call=candidate.call,
-        compile_binding=candidate.compile_binding,
-        native_projection_set=candidate.native_projection_set,
-        semantic_input=candidate.semantic_input,
-        replay_hydration=None,
-        tool_choice=None,
-    )
-    assert (
-        measurement.quote.raw_final_wire_estimated_input_tokens
-        > measurement.quote.effective_input_budget_tokens
-    )
+    assert original.tool_result_decisions[0].selected_mode is ToolResultProviderRenderMode.FULL
+    measurement = coordinator._model.freeze_wire_measurement(call=candidate.call,
+        compile_binding=candidate.compile_binding,native_projection_set=candidate.native_projection_set,
+        semantic_input=candidate.semantic_input,replay_hydration=None,tool_choice=None)
+    assert measurement.quote.raw_final_wire_estimated_input_tokens > measurement.quote.effective_input_budget_tokens
     measurement.discard_materialization_to_quote()
-    decision = _measure(coordinator, candidate)
-    assert decision.wire_input_plan is not None
-    selected = decision.candidate.semantic_input.tool_result_decisions[0].selected_mode
-    assert selected is not ToolResultProviderRenderMode.FULL
-    if provenance:
-        variants = _tool_result_variants(
-            items[1], artifact_read_available=True, limits=STRUCTURED_MODEL_INPUT_LIMITS
-        )
-        assert [v.mode for v in variants] == [
-            ToolResultProviderRenderMode.FULL,
-            ToolResultProviderRenderMode.OMITTED_BODY,
-        ]
-        assert selected is ToolResultProviderRenderMode.OMITTED_BODY
+    decision = _measure(coordinator,candidate)
+    assert decision.candidate.semantic_input.tool_result_decisions[0].selected_mode is ToolResultProviderRenderMode.FULL
+    assert decision.wire_input_plan is None
     if view is not None:
-        materialization = decision.wire_input_plan.materialization
-        before = view.wire_input_plan.materialization
-        assert materialization.root_policy_value == before.root_policy_value
-        assert materialization.tool_items == before.tool_items
-        assert (
-            materialization.ordered_input_items[: len(before.ordered_input_items)]
-            == before.ordered_input_items
-        )
+        assert candidate.semantic_input.messages[:len(view.messages)] == view.messages
 
 
 @pytest.mark.parametrize("api", _WIRE_APIS)
-@pytest.mark.parametrize("full,plan", ((True, False), (False, True)))
-def test_final_wire_feedback_excludes_full_and_plan_results(api, full, plan):
+@pytest.mark.parametrize("plan", (False, True))
+def test_final_wire_feedback_preserves_frozen_and_plan_results(api, plan):
     body = (
         '{"status":"success","plan_control":"QUESTION_ANSWERED","answer_kind":"FREE_TEXT","answer":"'
         + "\\\\" * 8000
@@ -329,14 +181,14 @@ def test_final_wire_feedback_excludes_full_and_plan_results(api, full, plan):
         if plan
         else "\\" * 8000
     )
-    items = _results(body, full=full, plan=plan)
+    items = _results(body, plan=plan)
     coordinator, candidate, _, _ = _prepare_case(
         api,
         _skill_source(1),
         cold=True,
         budget=8000,
         tool_items=items,
-        tool_names=("read_file", "read_artifact"),
+        tool_names=("read_file",),
     )
     decision = _measure(coordinator, candidate)
     assert (
@@ -420,20 +272,29 @@ def test_pre_effect_wire_minimum_keeps_canonical_and_epoch_maxima(monkeypatch, a
 @pytest.mark.parametrize(
     "name,args",
     (
-        ("read_artifact", {}),
-        ("export_artifact", {}),
+        ("read_file", {}),
         ("query_capabilities", {}),
         ("query_capabilities", {"target": {"kind": "MCP_TOOL"}}),
         ("ask_plan_question", {}),
     ),
 )
-def test_pre_effect_full_and_plan_keep_existing_carriers(monkeypatch, api, name, args):
+def test_pre_effect_text_reserves_small_receipts_and_plan_keeps_atomic_carrier(monkeypatch, api, name, args):
     call = CompletedToolCallBlock('block:b6jcz3ejkiu6yivknhzowsm5eu', "call:1", name, freeze_json(args))
-    _, _, seen = _runner_quote(monkeypatch, [call], api)
+    _, quote, seen = _runner_quote(monkeypatch, [call], api)
+    if name == "ask_plan_question":
+        assert len(seen) == 1
+        assert quote.result_page_budgets == ()
+        assert _charge(tuple(seen), api)[1] > 10_000
+    else:
+        assert len(seen) == 2
+        assert tuple(b.tool_call_id for b in quote.result_page_budgets) == (call.tool_call_id,)
+        assert _charge(tuple(seen), api)[1] < 1_000
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("budget,admitted", ((32000, True), (16000, False)))
+@pytest.mark.parametrize(
+    "budget,admitted", ((32000, True), (16000, True), (None, False))
+)
 def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
     stage2_migrated_postgres_database, budget, admitted
 ):
@@ -464,50 +325,83 @@ def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
 
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    calls = sum(
-        (
-            _named_tool_stream(
-                tool_name="exec_process",
-                tool_call_id=f"call:{i}",
-                arguments={"command": "true"},
+    def new_case(configured_budget):
+        session_id = _name("session")
+        lease = _acquire_bound_host_writer(
+            repository,
+            session_id=session_id,
+            workspace_id=_name("workspace"),
+            writer_owner_id=_name("host"),
+            lease_seconds=30,
+            deadline_monotonic=monotonic() + 30,
+        )
+        calls = sum(
+            (
+                _named_tool_stream(
+                    tool_name="exec_process",
+                    tool_call_id=f"call:{i}",
+                    arguments={"command": "true"},
+                )
+                for i in range(3)
+            ),
+            [],
+        )
+        model = _ScriptedModel([calls, _text_stream("finished")])
+        runtime = test_model_runtime(
+            model_id="test-pro",
+            wire_api=_WIRE_APIS[0],
+            limits=test_model_limits(
+                total_context_tokens=256000,
+                max_input_tokens=configured_budget,
+                max_output_tokens=1000,
+                default_output_tokens=1000,
+                input_safety_margin_tokens=0,
+            ),
+        )
+        model._model_runtime = runtime
+        model._preparer = DirectKernelModelPort(model_runtime=runtime)
+        tools = _AssertingTool(provider, session_id)
+        runner = ConversationKernelRunner(
+            model_resolution_snapshot_provider=runtime.freeze_resolution_snapshot,
+            repository=repository,
+            writer_lease=lease,
+            model=model,
+            tools=StructuredToolPort(tools),
+            live_bus=LiveAgentEventBus(maximum_events=4096),
+            context_source_collector=StaticContextSourceCollector(),
+        )
+        return session_id, model, tools, runner
+
+    session_id, model, tools, runner = new_case(budget or 32000)
+    if budget is None:
+        measured = {}
+
+        def measure_minimum(quote, *, effective_input_budget_tokens):
+            minimum = quote.followup_wire.budget_input_tokens
+            measured["minimum"] = minimum
+            measured["reserve"] = 32000 - effective_input_budget_tokens
+            raise OutputResourceInterruption("MEASURE_MINIMUM_BEFORE_EFFECTS", quote)
+
+        runner._require_post_response_resources = measure_minimum
+        with pytest.raises(OutputResourceInterruption, match="MEASURE_MINIMUM"):
+            asyncio.run(
+                runner.run_turn(frozen_test_prompt("Use three tools then finish."))
             )
-            for i in range(3)
-        ),
-        [],
-    )
-    model = _ScriptedModel([calls, _text_stream("finished")])
-    runtime = test_model_runtime(
-        model_id="test-pro",
-        wire_api=_WIRE_APIS[0],
-        limits=test_model_limits(
-            total_context_tokens=256000,
-            max_input_tokens=budget,
-            max_output_tokens=1000,
-            default_output_tokens=1000,
-            input_safety_margin_tokens=0,
-        ),
-    )
-    model._model_runtime = runtime
-    model._preparer = DirectKernelModelPort(model_runtime=runtime)
-    tools = _AssertingTool(provider, session_id)
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=runtime.freeze_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(tools),
-        live_bus=LiveAgentEventBus(maximum_events=4096),
-        context_source_collector=StaticContextSourceCollector(),
-    )
+        assert tools.invocations == []
+        # A fresh, otherwise identical session uses the real owner quote rather
+        # than freezing an incidental prompt/schema size into the reject case.
+        budget = measured["minimum"] - 1 + measured["reserve"]
+        session_id, model, tools, runner = new_case(budget)
+        real_require = runner._require_post_response_resources
+
+        def require_below_measured_minimum(quote, *, effective_input_budget_tokens):
+            assert effective_input_budget_tokens == measured["minimum"] - 1
+            assert quote.followup_wire.budget_input_tokens == measured["minimum"]
+            return real_require(
+                quote, effective_input_budget_tokens=effective_input_budget_tokens
+            )
+
+        runner._require_post_response_resources = require_below_measured_minimum
     if admitted:
         old_carriers = tuple(
             message
@@ -569,7 +463,7 @@ def test_wire_floor_scan_deadline_releases_measurement_and_runs_off_loop(monkeyp
         cold=True,
         budget=8000,
         tool_items=_results("\\" * 8000),
-        tool_names=("read_file", "read_artifact"),
+        tool_names=("read_file",),
     )
     lowered = []
     real_lower = module.lower_canonical_item
@@ -626,7 +520,9 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
     from pulsara_agent.conversation_kernel.direct_model import (
         quote_provider_followup_wire_resources,
     )
-    from pulsara_agent.llm.input import FrozenPromptContent, LLMMessage
+    from pulsara_agent.llm.input import (
+        FrozenPromptContent, LLMMessage, frozen_tool_result_public_text,
+    )
     from pulsara_agent.llm.provider_replay import (
         build_prepared_durable_provider_assistant_replay,
     )
@@ -710,6 +606,23 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
         assert owner.provider_replay is replay
         assert owner.base_wire == quote.followup_wire
         carriers, increments = [], []
+        text_body = canonical_json_bytes({"lines": ['escapes\\"汉'] * 200, "next": None}).decode()
+        text_provenance = ("memory:quoted-source",)
+        assert quote.result_page_budgets[0].fits(
+            text_body, model_visible_memory_fact_ids=text_provenance
+        )
+        text_suffix = owner.result_suffix(
+            tool_call_id=calls[0].tool_call_id, body=text_body,
+            model_visible_memory_fact_ids=text_provenance,
+        )
+        text_quote = quote_provider_followup_wire_resources(
+            request=request, actual_assistant_message=owner.assistant,
+            provider_replay=replay, bounded_suffix_messages=text_suffix,
+        )
+        text_tokens = text_quote.budget_input_tokens - owner.base_wire.budget_input_tokens
+        text_wire = text_quote.final_wire_utf8_bytes - owner.base_wire.final_wire_utf8_bytes
+        suffix = list(text_suffix)
+        positions = dict(owner.result_message_indexes)
         for i, allowance in enumerate(allowances):
             source = parse_view_image_source({"target": {"kind": "PATH", "path": f"/tmp/{i}.png"}})
             image = bound_test_image("image/png", b"x" * (100 + i), 1, 1)
@@ -720,6 +633,10 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
             assert increment.wire_bytes <= allowance.wire_bytes
             assert increment.input_tokens <= allowance.input_tokens
             increments.append(increment)
+            suffix[positions[allowance.tool_call_id]] = owner.result_suffix(
+                tool_call_id=allowance.tool_call_id,
+                body=frozen_tool_result_public_text(content),
+            )[positions[allowance.tool_call_id]]
             carriers.append(
                 tool_image_attachment_message(
                     ((allowance.tool_call_id, source, image),)
@@ -729,7 +646,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
             request=request,
             actual_assistant_message=owner.assistant,
             provider_replay=replay,
-            bounded_suffix_messages=(*owner.base_suffix_messages, *carriers),
+            bounded_suffix_messages=(*suffix, *carriers),
         )
         assert (
             combined.raw_final_wire_estimated_input_tokens
@@ -738,7 +655,12 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
         assert (
             combined.raw_final_wire_estimated_input_tokens
             == owner.base_wire.raw_final_wire_estimated_input_tokens
+            + text_tokens
             + sum(i.input_tokens for i in increments)
+        )
+        assert combined.final_wire_utf8_bytes == (
+            owner.base_wire.final_wire_utf8_bytes + text_wire
+            + sum(i.wire_bytes for i in increments)
         )
         projection = thaw_json(
             request.wire_input_plan.materialization.context_bearing_projection
@@ -748,7 +670,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
             native_value,
             *(
                 item
-                for message in (*owner.base_suffix_messages, *carriers)
+                for message in (*suffix, *carriers)
                 for item in _wire(message, api)
             ),
         ]
@@ -764,10 +686,14 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
             > without_replay.final_wire_utf8_bytes + 20000
         )
         assert thaw_json(replay.ordered_items[0]) == native_value
-        assert (
-            sum(a.input_tokens for a in allowances)
-            == request.wire_input_plan.quote.effective_input_budget_tokens
-            - owner.base_wire.raw_final_wire_estimated_input_tokens
+        remaining = (request.wire_input_plan.quote.effective_input_budget_tokens
+                     - owner.base_wire.budget_input_tokens)
+        quotient, remainder = divmod(remaining, len(calls))
+        # The first call's text page owns its share; image success includes its
+        # receipt replacement and attachment in each of the other two shares.
+        assert tuple(a.input_tokens for a in allowances) == tuple(
+            quotient + (1 if ordinal < remainder else 0) for ordinal in (1, 2)
         )
+        assert sum(a.input_tokens for a in allowances) + quotient + (remainder > 0) == remaining
     finally:
         request.surface_borrow.close()

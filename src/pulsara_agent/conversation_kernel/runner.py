@@ -14,6 +14,7 @@ from pulsara_agent.identity import random_id
 import asyncio
 from dataclasses import dataclass, field as dataclass_field, replace
 from datetime import datetime, timezone
+from functools import partial
 from hashlib import sha256
 import json
 from time import monotonic
@@ -94,6 +95,7 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
     LLMToolCall,
     MessageRole,
+    frozen_tool_result_public_text,
 )
 from pulsara_agent.model_input.lowering import (
     image_reference_id_part,
@@ -152,9 +154,9 @@ from pulsara_agent.conversation_kernel.memory.contracts import (
 from pulsara_agent.conversation_kernel.mcp.contracts import (
     MAXIMUM_MCP_CATALOG_FULL_BYTES,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import (
+from pulsara_agent.conversation_kernel.tool_outputs import (
     CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
-    ToolOutputArtifactProcessor,
+    ToolOutputProcessor,
 )
 from pulsara_agent.conversation_kernel.tool_contracts import (
     FrozenImageToolResourceAllowance,
@@ -285,11 +287,10 @@ from pulsara_agent.hooks.dispatcher import KernelHookDispatcher
 from pulsara_agent.hooks.matcher import event_matcher_subject
 from pulsara_agent.primitives.tool_result_projection import (
     ToolResultLogicalMessageKind,
-    ToolResultDeliveryRequirement,
-    classify_tool_result_delivery,
     conservative_tool_result_logical_message,
     provider_neutral_message_logical_bytes,
 )
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
 _MODEL_SWITCH_CONTEXT_REDUCTION_NOTICE = (
@@ -330,6 +331,9 @@ class FrozenPostResponseResourceQuote:
     image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (
         dataclass_field(default=(), repr=False)
     )
+    result_page_budgets: tuple[ToolResultPageBudget, ...] = dataclass_field(
+        default=(), repr=False
+    )
 
     def __post_init__(self) -> None:
         values = (
@@ -363,6 +367,10 @@ class FrozenPostResponseResourceQuote:
             self.image_call_allowances
         ):
             raise ValueError("post-response image allowances are not ordered")
+        if len({item.tool_call_id for item in self.result_page_budgets}) != len(
+            self.result_page_budgets
+        ):
+            raise ValueError("post-response result budgets contain duplicate calls")
 
 
 class OutputResourceInterruption(RuntimeError):
@@ -392,7 +400,7 @@ class _CollectedModelResponse:
 
 
 @dataclass(frozen=True, slots=True)
-class _ImageToolResourceQuoteOwner:
+class _ToolResultResourceQuoteOwner:
     request: KernelModelExecutionRequest = dataclass_field(repr=False)
     assistant: LLMMessage = dataclass_field(repr=False)
     provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
@@ -400,9 +408,63 @@ class _ImageToolResourceQuoteOwner:
     )
     base_suffix_messages: tuple[LLMMessage, ...] = dataclass_field(repr=False)
     base_wire: ProviderFollowupWireResourceQuote = dataclass_field(repr=False)
+    result_message_indexes: tuple[tuple[str, int], ...] = dataclass_field(repr=False)
     usage_anchor: ProviderInputUsageAnchor | None = dataclass_field(
         default=None, repr=False
     )
+
+    def result_suffix(
+        self, *, tool_call_id: str, body: str,
+        model_visible_memory_fact_ids: tuple[str, ...] = (),
+    ) -> tuple[LLMMessage, ...]:
+        index = next((position for call_id, position in self.result_message_indexes
+                      if call_id == tool_call_id), None)
+        if index is None:
+            raise ValueError("result quote does not own this response call")
+        messages = list(self.base_suffix_messages)
+        messages[index] = ordinary_tool_result_minimum_upper(
+            tool_call_id, body=body,
+            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
+        )
+        return tuple(messages)
+
+    def _quote_suffix(
+        self, messages: tuple[LLMMessage, ...]
+    ) -> ProviderFollowupWireResourceQuote:
+        quoted = quote_provider_followup_wire_resources(
+            request=self.request,
+            actual_assistant_message=self.assistant,
+            provider_replay=self.provider_replay,
+            bounded_suffix_messages=messages,
+            usage_anchor=self.usage_anchor,
+        )
+        # Both suffixes extend the identical installed prefix.  The existing
+        # usage owner must therefore apply the same affine anchor correction.
+        if (quoted.budget_input_tokens - quoted.raw_final_wire_estimated_input_tokens
+                != self.base_wire.budget_input_tokens
+                - self.base_wire.raw_final_wire_estimated_input_tokens):
+            raise ValueError("result quote changed its provider usage anchor")
+        return quoted
+
+    def accepts_result_body(
+        self, body: str, model_visible_memory_fact_ids: tuple[str, ...], *,
+        tool_call_id: str, wire_bytes: int, input_tokens: int,
+    ) -> bool:
+        quoted = self._quote_suffix(self.result_suffix(
+            tool_call_id=tool_call_id, body=body,
+            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
+        ))
+        # This replaces one existing result carrier; it is not an appended
+        # second body. D1 estimates each lowered wire item independently, and
+        # the provider wire owner preserves that item partition on replacement.
+        # Thus disjoint call-slot increments compose exactly, including JSON
+        # separators; image success uses the same slot as its text receipt.
+        return (
+            quoted.final_wire_utf8_bytes - self.base_wire.final_wire_utf8_bytes
+            <= wire_bytes
+            and quoted.budget_input_tokens - self.base_wire.budget_input_tokens
+            <= input_tokens
+        )
 
     def quote(
         self,
@@ -415,13 +477,9 @@ class _ImageToolResourceQuoteOwner:
         if len(images) != 1:
             raise ValueError("image Tool quote requires one validated image")
         carrier = tool_image_attachment_message(((tool_call_id, source, images[0]),))
-        quoted = quote_provider_followup_wire_resources(
-            request=self.request,
-            actual_assistant_message=self.assistant,
-            provider_replay=self.provider_replay,
-            bounded_suffix_messages=(*self.base_suffix_messages, carrier),
-            usage_anchor=self.usage_anchor,
-        )
+        quoted = self._quote_suffix((*self.result_suffix(
+            tool_call_id=tool_call_id, body=frozen_tool_result_public_text(content)
+        ), carrier))
         return FrozenImageToolResourceIncrement(
             canonical_bytes=freeze_canonical_prompt(
                 content
@@ -448,6 +506,9 @@ _MCP_ONLY_CAPABILITY_ACTIONS = frozenset(
     }
 )
 _LONGEST_TOOL_RESULT_STATE = "CANCELLED_BEFORE_DISPATCH"
+_MINIMUM_TOOL_RESULT_BODY = canonical_json_bytes(
+    {"status": _LONGEST_TOOL_RESULT_STATE}
+).decode("utf-8")
 _LONGEST_TOOL_CLOSURE = (
     ProviderToolResultClosureKind.INTERRUPTED_MAY_HAVE_PARTIALLY_EXECUTED
 )
@@ -937,7 +998,7 @@ class ConversationKernelRunner:
         continuity_owner: HostProviderInputContinuityOwner | None = None,
         extensions: KernelExtensionHost | None = None,
         workspace_id: str | None = None,
-        tool_output_processor: ToolOutputArtifactProcessor | None = None,
+        tool_output_processor: ToolOutputProcessor | None = None,
         plan_interactions: KernelPlanInteractionCoordinator | None = None,
         automatic_plan_continuation: AutomaticPlanContinuationPort | None = None,
         launch_permission_mode: PermissionMode = DEFAULT_PERMISSION_MODE,
@@ -995,7 +1056,7 @@ class ConversationKernelRunner:
         )
         self._tool_output_processor = (
             tool_output_processor
-            or ToolOutputArtifactProcessor(repository.connection_provider)
+            or ToolOutputProcessor(repository.connection_provider)
         )
         self._launch_permission_mode = launch_permission_mode
         self._io = io_owner or KernelSessionIO()
@@ -2177,6 +2238,7 @@ class ConversationKernelRunner:
                     surface_borrow=batch_borrow,
                     hook_scope=self._hook_scope,
                     image_call_allowances=output_quote.image_call_allowances,
+                    result_page_budgets=output_quote.result_page_budgets,
                 )
                 tool_call_count += batch.tool_call_count
                 completed_tool_batch = True
@@ -2613,6 +2675,7 @@ class ConversationKernelRunner:
         logical_followup = 0
         followup_items = 0
         suffix_messages: list[LLMMessage] = []
+        result_message_indexes: list[tuple[str, int]] = []
         for call in calls:
             quote = (
                 _plan_result_followup_upper(call)
@@ -2622,29 +2685,23 @@ class ConversationKernelRunner:
             canonical_followup += quote[0]
             logical_followup += quote[1]
             followup_items += quote[2]
-            # Physical canonical/epoch maxima above remain independent of the
-            # smallest legal provider display. Predict possible successful FULL
-            # delivery with the same classifier used by the canonical reader.
-            arguments = thaw_json(call.arguments)
-            delivery = classify_tool_result_delivery(
-                tool_name=call.tool_name,
-                result_state="SUCCESS",
-                public_arguments=arguments,
-                has_image_attachment=False,
-            )
-            suffix_messages.extend(
-                quote[3]
-                if plan_batch
-                or delivery.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
-                else (
+            # Retain physical canonical/epoch maxima, but reserve only a known
+            # small receipt on the provider wire. Domain owners admit their
+            # actual required facts against their allocated page budget.
+            if plan_batch:
+                suffix_messages.extend(quote[3])
+            else:
+                result_message_indexes.append((call.tool_call_id, len(suffix_messages) + 1))
+                suffix_messages.extend((
                     _tool_result_closure_message(call.tool_call_id),
-                    ordinary_tool_result_minimum_upper(call.tool_call_id),
-                )
-            )
+                    ordinary_tool_result_minimum_upper(
+                        call.tool_call_id, body=_MINIMUM_TOOL_RESULT_BODY
+                    ),
+                ))
 
         image_calls: list[tuple[int, CompletedToolCallBlock, str]] = []
         for call_ordinal, call in enumerate(calls):
-            if call.tool_name != "view_image":
+            if plan_batch or call.tool_name != "view_image":
                 continue
             try:
                 binding = request.prepared_call.tool_surface.binding(call.tool_name)
@@ -2827,9 +2884,10 @@ class ConversationKernelRunner:
             else None
         )
         allowances: tuple[FrozenImageToolResourceAllowance, ...] = ()
-        if image_calls:
+        page_budgets: tuple[ToolResultPageBudget, ...] = ()
+        if calls and not plan_batch:
             if wire is None:
-                raise ValueError("image response calls require a follow-up wire quote")
+                raise ValueError("response calls require a follow-up wire quote")
             remaining = (
                 MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
                 - (
@@ -2845,29 +2903,44 @@ class ConversationKernelRunner:
             )
             if min(remaining) < 0:
                 remaining = tuple(max(0, value) for value in remaining)
-            count = len(image_calls)
-            quote_owner = _ImageToolResourceQuoteOwner(
+            quote_owner = _ToolResultResourceQuoteOwner(
                 request=request,
                 assistant=assistant,
                 provider_replay=collected.provider_replay,
                 base_suffix_messages=tuple(suffix_messages),
                 base_wire=wire,
+                result_message_indexes=tuple(result_message_indexes),
                 usage_anchor=usage_anchor,
             )
 
-            def share(total: int, index: int) -> int:
+            def share(total: int, index: int, count: int) -> int:
                 quotient, remainder = divmod(total, count)
                 return quotient + (1 if index < remainder else 0)
 
+            # Every call owns one disjoint wire/token share. An image's
+            # success receipt and attachment are quoted together; its error
+            # receipt instead uses the text predicate, never both at once.
+            page_budgets = tuple(
+                ToolResultPageBudget(
+                    tool_call_id=call.tool_call_id,
+                    accepts_provider_body=partial(
+                        quote_owner.accepts_result_body,
+                        tool_call_id=call.tool_call_id,
+                        wire_bytes=share(remaining[2], index, len(calls)),
+                        input_tokens=share(remaining[3], index, len(calls)),
+                    ),
+                )
+                for index, call in enumerate(calls)
+            )
             allowances = tuple(
                 FrozenImageToolResourceAllowance(
                     call_ordinal=call_ordinal,
                     tool_call_id=call.tool_call_id,
                     executor_binding_fingerprint=binding_fingerprint,
-                    canonical_bytes=share(remaining[0], index),
-                    logical_bytes=share(remaining[1], index),
-                    wire_bytes=share(remaining[2], index),
-                    input_tokens=share(remaining[3], index),
+                    canonical_bytes=share(remaining[0], index, len(image_calls)),
+                    logical_bytes=share(remaining[1], index, len(image_calls)),
+                    wire_bytes=share(remaining[2], call_ordinal, len(calls)),
+                    input_tokens=share(remaining[3], call_ordinal, len(calls)),
                     quote_owner=quote_owner,
                 )
                 for index, (call_ordinal, call, binding_fingerprint) in enumerate(
@@ -2894,6 +2967,7 @@ class ConversationKernelRunner:
             item_upper_after=(len(canonical_input.items) + 1 + followup_items),
             followup_wire=wire,
             image_call_allowances=allowances,
+            result_page_budgets=page_budgets,
         )
 
     @staticmethod

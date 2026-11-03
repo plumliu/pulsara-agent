@@ -1,3 +1,9 @@
+
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
+
+from pulsara_agent.identity import derive_id as _capability_page_id
+
 import json
 from pathlib import Path
 from time import monotonic
@@ -22,6 +28,9 @@ from pulsara_agent.process_credential_boundary import (
     ProcessCredentialBoundary,
     ProcessCredentialScrubSet,
 )
+
+
+_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
 
 
 def fixture(tmp_path, manifest, source_format="codex"):
@@ -386,7 +395,7 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
         async def query(arguments, *, inspect=False):
             return await CapabilitySourceQuery(
                 service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT
-            ).execute(arguments)
+            , fits_result=_CAPABILITY_PAGE_BUDGET.fits).execute(arguments)
 
         listed = await query({"kind": "SKILL", "source_kind": "PLUGIN"})
         row = next(item for item in listed["items"] if item["name"] == "example")
@@ -410,7 +419,7 @@ def test_external_install_uses_native_disabled_instance_and_preserves_source(tmp
                 await form.prepare_submission({"enable_review_accepted": True})
             )
         )
-        assert (await enable.execute())["status"] == "APPLIED"
+        assert (await enable.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
         view = EnabledPluginViewOwner(
             store=service.plugins._store(),
             credential_boundary=service.plugins._credential_boundary,

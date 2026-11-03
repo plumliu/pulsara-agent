@@ -190,7 +190,7 @@ def test_archive_terminal_admission(kind):
         ),
     )
     assert KernelHostSession.archive_has_terminal_work(
-        SimpleNamespace(_tools=tools)
+        SimpleNamespace(_tools=tools, root_session_id=None)
     ) is (kind != "idle")
 
 

@@ -9,7 +9,6 @@ from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import build_prepared_tool_result_acceptance
 from pulsara_agent.identity import random_id
-from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition, ToolResultDisplayKind
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from tests.test_conversation_fork import new_session, repo as repo, rows as read_rows, turn
@@ -42,10 +41,9 @@ def _tool_outcome(repo, lease):
         result_entry_id=result_entry_id, turn_id=attempt["turn_id"],
         assistant_entry_id=attempt["assistant_entry_id"], tool_call_id=attempt["tool_call_id"], attempt_id=attempt_id,
         result_state="SUCCESS", canonical_preview_content=InlineContent.from_bytes(b"outcome"),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED, artifact_id=None,
-        artifact_blob_descriptor=None, source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE, source_coverage_reason=None,
-        artifact_unavailability_reason=None, observed_at=datetime.now(timezone.utc),
+        output_body=InlineContent.from_bytes(b"outcome"), source_coverage=ToolOutputSourceCoverage.COMPLETE,
+        output_omitted=False, source_coverage_reason=None,
+        output_unavailability_reason=None, observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None, observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
         trusted_tool_reported_duration_microseconds=None, actor_id="terminal",
     )

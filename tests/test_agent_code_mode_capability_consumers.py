@@ -184,7 +184,10 @@ def test_code_cell_inspect_executes_actual_mcp_without_provider_install_and_reje
                     access=SimpleNamespace(surface_generation=1, conversation_scope_kind=ModelInputScopeKind.ROOT,
                                            session_id="session:root"),
                     model_surface=SimpleNamespace(tool_specs=())))
-                context = SimpleNamespace(surface_borrow=borrow, result_entry_id="entry:first")
+                from pulsara_agent.identity import random_id
+                from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+                context = SimpleNamespace(surface_borrow=borrow, result_entry_id="entry:first",
+                    page_budget=ToolResultPageBudget(tool_call_id=random_id("call")))
                 target = {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": "mcp__catalog__probe"}
                 result = port._inspect_mcp_tool_result(target=target, invocation_context=context)
                 body = json.loads(result.content)

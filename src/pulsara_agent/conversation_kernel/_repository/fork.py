@@ -365,6 +365,7 @@ class _ForkOperations:
                         for key, value in result.items()
                     }
                     values.pop("entry_sequence")
+                    values["result_facts"] = Jsonb(values["result_facts"])
                     values.update(
                         id=derive_id("result", "fork", child_session_id, str(result["id"])),
                         session_id=child_session_id,

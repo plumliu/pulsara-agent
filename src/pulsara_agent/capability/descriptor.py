@@ -10,7 +10,6 @@ from pulsara_agent.primitives.tool_result import (
     CapabilityResultRenderContractFact,
     capability_result_render_contract_identity_payload,
 )
-from pulsara_agent.ports.artifact import ToolArtifactMode
 from pulsara_agent.ports.tool_execution import (
     FrozenToolJsonDict,
     freeze_tool_json_object,
@@ -62,7 +61,6 @@ class BuiltinToolDescriptor:
     permission_category: str = "general"
     approval_policy_hint: str | None = None
     advertise_policy: BuiltinToolAdvertisePolicy = BuiltinToolAdvertisePolicy.DIRECT
-    artifact_mode: ToolArtifactMode = ToolArtifactMode.DEFAULT
     max_inline_chars: int | None = None
     timeout_ms: int | None = None
     availability: BuiltinToolAvailability = BuiltinToolAvailability.AVAILABLE
@@ -100,7 +98,6 @@ class BuiltinToolDescriptor:
                 )
             ),
             "advertise_policy": self.advertise_policy.value,
-            "artifact_mode": self.artifact_mode.value,
             "availability": self.availability.value,
             "health_message": self.health_message,
         }
@@ -128,7 +125,6 @@ class BuiltinToolDescriptor:
             ),
             "approval_policy_hint": self.approval_policy_hint,
             "advertise_policy": self.advertise_policy.value,
-            "artifact_mode": self.artifact_mode.value,
             "max_inline_chars": self.max_inline_chars,
             "timeout_ms": self.timeout_ms,
             "availability": self.availability.value,

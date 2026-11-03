@@ -22,11 +22,11 @@ from time import monotonic
 from typing import Callable, Iterator
 
 from pulsara_agent.ports.tool_execution import (
-    ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
     ToolOutputSourceFormatHint,
 )
+from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
 
 
 TERMINAL_RETAINED_OUTPUT_HARD_BYTES = 16 * 1024 * 1024
@@ -554,19 +554,27 @@ class TerminalOutputOwner:
                 self._inflight_reads -= 1
                 self._condition.notify_all()
 
-    def snapshot_with_artifact_candidate(
+    def capture_cursor(self) -> str:
+        """Freeze a stream position without copying or consuming retained text."""
+
+        with self._lock:
+            if self._reads_closed:
+                raise KeyError(self.process_id)
+            return encode_terminal_output_cursor(self._cursor(self._through))
+
+    def snapshot_with_body_candidate(
         self,
         *,
         maximum_chars: int,
         since_cursor: str | None = None,
-    ) -> tuple[TerminalOutputSnapshot, ToolOutputArtifactCandidate]:
-        """Freeze one public response and its exact artifact source range.
+    ) -> tuple[TerminalOutputSnapshot, ToolOutputBodyCandidate]:
+        """Freeze one tail and its complete public source range in one cut.
 
-        Cursor reads select a new logical tool observation.  The artifact body
+        Cursor reads select a new logical tool observation.  The saved body
         must therefore be the complete bytes selected by that cursor cut, not
         the process's entire retained ring.  Both carriers are frozen under
         one output lock so bytes appended after the cut cannot rewrite the
-        authoritative Round 1 End.
+        accepted observation.
         """
 
         with self._lock:
@@ -574,10 +582,18 @@ class TerminalOutputOwner:
                 raise KeyError(self.process_id)
             self._inflight_reads += 1
             try:
-                snapshot = self._snapshot_locked(
-                    maximum_chars=maximum_chars, since_cursor=since_cursor
+                disposition, gap, raw = self._range_locked(since_cursor)
+                text = raw.decode("utf-8")
+                snapshot = self._snapshot_from_range_locked(
+                    maximum_chars=maximum_chars,
+                    since_cursor=since_cursor,
+                    disposition=disposition,
+                    gap=gap,
+                    text=text,
                 )
-                candidate = self._artifact_candidate_locked(since_cursor=since_cursor)
+                candidate = self._body_candidate_from_range_locked(
+                    disposition=disposition, gap=gap, text=text
+                )
                 return snapshot, candidate
             finally:
                 self._inflight_reads -= 1
@@ -587,9 +603,26 @@ class TerminalOutputOwner:
     def _snapshot_locked(
         self, *, maximum_chars: int, since_cursor: str | None
     ) -> TerminalOutputSnapshot:
+        disposition, gap, raw = self._range_locked(since_cursor)
+        return self._snapshot_from_range_locked(
+            maximum_chars=maximum_chars,
+            since_cursor=since_cursor,
+            disposition=disposition,
+            gap=gap,
+            text=raw.decode("utf-8"),
+        )
+
+    def _snapshot_from_range_locked(
+        self,
+        *,
+        maximum_chars: int,
+        since_cursor: str | None,
+        disposition: TerminalOutputReadDisposition,
+        gap: bool,
+        text: str,
+    ) -> TerminalOutputSnapshot:
         if maximum_chars <= 0:
             raise ValueError("terminal output response bound must be positive")
-        disposition, gap, raw = self._range_locked(since_cursor)
         range_start = self._retained_from
         if (
             since_cursor is not None
@@ -598,7 +631,6 @@ class TerminalOutputOwner:
             range_start = decode_terminal_output_cursor(
                 since_cursor
             ).sanitized_utf8_offset
-        text = raw.decode("utf-8")
         visible, response_truncated = _tail_by_chars(text, maximum_chars)
         return TerminalOutputSnapshot(
             process_id=self.process_id,
@@ -628,9 +660,8 @@ class TerminalOutputOwner:
     ) -> tuple[TerminalOutputReadDisposition, bool, bytes]:
         disposition = TerminalOutputReadDisposition.CURRENT_SNAPSHOT
         gap = self._retained_from > 0
-        raw = bytes(self._retained)
         if since_cursor is None:
-            return disposition, gap, raw
+            return disposition, gap, bytes(self._retained)
         cursor = decode_terminal_output_cursor(since_cursor)
         if (
             cursor.owner_epoch != self.owner_epoch
@@ -640,12 +671,12 @@ class TerminalOutputOwner:
         ):
             raise InvalidTerminalOutputCursor()
         if cursor.sanitized_utf8_offset < self._retained_from:
-            return TerminalOutputReadDisposition.GAP, True, raw
+            return TerminalOutputReadDisposition.GAP, True, bytes(self._retained)
         relative = cursor.sanitized_utf8_offset - self._retained_from
         return (
             TerminalOutputReadDisposition.EXACT_DELTA,
             False,
-            bytes(self._retained[relative:]),
+            bytes(memoryview(self._retained)[relative:]),
         )
 
     def _source_coverage_locked(self) -> TerminalOutputSourceCoverage:
@@ -655,21 +686,28 @@ class TerminalOutputOwner:
             return TerminalOutputSourceCoverage.RETAINED_SNAPSHOT
         return TerminalOutputSourceCoverage.COMPLETE
 
-    def artifact_candidate(
+    def body_candidate(
         self, *, since_cursor: str | None = None
-    ) -> ToolOutputArtifactCandidate:
+    ) -> ToolOutputBodyCandidate:
         with self._lock:
-            return self._artifact_candidate_locked(since_cursor=since_cursor)
+            if self._reads_closed:
+                raise KeyError(self.process_id)
+            disposition, gap, raw = self._range_locked(since_cursor)
+            return self._body_candidate_from_range_locked(
+                disposition=disposition, gap=gap, text=raw.decode("utf-8")
+            )
 
-    def _artifact_candidate_locked(
-        self, *, since_cursor: str | None
-    ) -> ToolOutputArtifactCandidate:
-        disposition, gap, raw = self._range_locked(since_cursor)
-        text = raw.decode("utf-8")
+    def _body_candidate_from_range_locked(
+        self,
+        *,
+        disposition: TerminalOutputReadDisposition,
+        gap: bool,
+        text: str,
+    ) -> ToolOutputBodyCandidate:
         # A cursor that is still retained selects an exact new range even if
         # older, unrelated process output was previously evicted.  GAP and a
         # sanitizer failure can prove only the retained public snapshot and
-        # must never claim COMPLETE artifact coverage.
+        # must never claim COMPLETE body coverage.
         incomplete = (
             gap or disposition is TerminalOutputReadDisposition.GAP or self._unavailable
         )
@@ -680,8 +718,7 @@ class TerminalOutputOwner:
             )
         elif incomplete:
             coverage_reason = ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP
-        return ToolOutputArtifactCandidate(
-            role="OUTPUT",
+        return ToolOutputBodyCandidate(
             text=text,
             source_coverage=(
                 ToolOutputSourceCoverage.RETAINED_SNAPSHOT
@@ -689,8 +726,7 @@ class TerminalOutputOwner:
                 else ToolOutputSourceCoverage.COMPLETE
             ),
             source_coverage_reason=coverage_reason,
-            original_utf8_bytes=None if incomplete else len(raw),
-            source_format_hint=ToolOutputSourceFormatHint.JSON,
+            source_format=ToolOutputSourceFormatHint.TEXT,
         )
 
     def wait_for_revision(self, revision: int, timeout_seconds: float | None) -> int:

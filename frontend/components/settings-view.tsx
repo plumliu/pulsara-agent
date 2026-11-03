@@ -551,8 +551,8 @@ export function SettingsView({ initialSection, highlightHome, theme, bootstrap, 
         {loading && <div className="settings-loading"><LoaderCircle size={15} />正在读取本机设置…</div>}
         {section === 'general' && <><section className="settings-group"><header><Palette size={16} /><div><h2>外观</h2><p>控制 Pulsara 在本机的呈现方式。</p></div></header>
           <SettingRow icon={theme === 'light' ? Sun : Moon} title="主题" detail="切换明暗外观"><div className="theme-picker"><button className={theme === 'light' ? 'is-active' : ''} onClick={() => onThemeChange('light')}><Sun size={12} /> 浅色</button><button className={theme === 'dark' ? 'is-active' : ''} onClick={() => onThemeChange('dark')}><Moon size={12} /> 深色</button></div></SettingRow>
-          <SettingRow icon={SlidersHorizontal} title="显示内置工具原始结果" detail="显示原始文本、长结果预览和分页读取入口。">
-            <button type="button" role="switch" className="settings-switch" aria-label="显示内置工具原始结果" aria-checked={showBuiltinToolResults} onClick={() => onToolResultDisplayChange(!showBuiltinToolResults)}><span /></button>
+          <SettingRow icon={SlidersHorizontal} title="显示内置工具结果详情" detail="显示本次展示内容，并提供完整输出的读取入口。">
+            <button type="button" role="switch" className="settings-switch" aria-label="显示内置工具结果详情" aria-checked={showBuiltinToolResults} onClick={() => onToolResultDisplayChange(!showBuiltinToolResults)}><span /></button>
           </SettingRow>
           <AvatarSetting onNotify={onNotify} />
         </section>

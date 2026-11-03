@@ -498,7 +498,7 @@ def test_k2_public_host_reports_image_validation_reason_before_hook_or_command(
     assert persisted == (0, 0)
 
 
-def test_k2_root_install_prepares_ordered_image_gap_without_a_child(
+def test_k2_root_install_freezes_ordered_image_gap_for_agent_invocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage2_migrated_postgres_database,
@@ -510,23 +510,21 @@ def test_k2_root_install_prepares_ordered_image_gap_without_a_child(
     Image.new("RGB", (7, 5), (11, 23, 41)).save(payload, "PNG")
     image_bytes = payload.getvalue()
     model = _DogfoodModelPort()
-    prepared_parent_subjects = []
-    original_parent_subject = (
-        provider_dispatch._prepare_subagent_parent_context_call_subject
-    )
+    invocation_snapshots = []
+    original_snapshot = provider_dispatch._prepare_agent_invocation_snapshot
 
-    def capture_parent_subject(*, dispatch, compiled_input):
-        subject = original_parent_subject(
+    def capture_snapshot(*, dispatch, compiled_input):
+        snapshot = original_snapshot(
             dispatch=dispatch,
             compiled_input=compiled_input,
         )
-        prepared_parent_subjects.append(subject)
-        return subject
+        invocation_snapshots.append(snapshot)
+        return snapshot
 
     monkeypatch.setattr(
         provider_dispatch,
-        "_prepare_subagent_parent_context_call_subject",
-        capture_parent_subject,
+        "_prepare_agent_invocation_snapshot",
+        capture_snapshot,
     )
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(
@@ -565,14 +563,11 @@ def test_k2_root_install_prepares_ordered_image_gap_without_a_child(
             await core.shutdown()
 
     asyncio.run(scenario())
-    assert len(prepared_parent_subjects) == 1
-    assert len(prepared_parent_subjects[0].ordered_eligible_units) == 1
+    assert len(invocation_snapshots) == 1
     expected_reference = image_reference_part(
         bound_test_image("image/png", image_bytes, 7, 5, workspace_id=derive_id("workspace", "project", tmp_path.resolve().as_posix()))
     ).text
-    assert prepared_parent_subjects[0].ordered_eligible_units[
-        0
-    ].ordered_public_items == (
+    assert invocation_snapshots[0].initial_context_units == (
         f"USER: before{expected_reference}"
         "[image part 2 omitted from parent context; visual content unavailable]after",
     )
@@ -675,6 +670,9 @@ def test_k3_queued_root_resource_failure_interrupts_consumed_request(
 ) -> None:
     import pulsara_agent.conversation_kernel.host as kernel_host
     import pulsara_agent.conversation_kernel.provider_dispatch as provider_dispatch
+    from pulsara_agent.model_input.contracts import (
+        ModelInputCompileFailureKind, StructuredModelInputCompileError,
+    )
 
     model = _SteerModelPort()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
@@ -724,6 +722,14 @@ def test_k3_queued_root_resource_failure_interrupts_consumed_request(
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=tmp_path)
         )
+        queued_tasks = []
+        original_queued_admission = session._run_queued_root_admission
+
+        async def capture_queued_admission(candidate, intent):
+            queued_tasks.append(asyncio.current_task())
+            return await original_queued_admission(candidate, intent)
+
+        monkeypatch.setattr(session, "_run_queued_root_admission", capture_queued_admission)
         try:
             await session.update_model_call_binding(test_model_binding(runtime))
             running = asyncio.create_task(
@@ -773,6 +779,10 @@ def test_k3_queued_root_resource_failure_interrupts_consumed_request(
                 outcome.public_code
                 == "PROVIDER_INPUT_RESOURCE_EXHAUSTED"
             )
+            assert len(queued_tasks) == 1
+            with pytest.raises(StructuredModelInputCompileError) as rejected:
+                await asyncio.shield(queued_tasks[0])
+            assert rejected.value.kind is ModelInputCompileFailureKind.SOURCE_PHYSICAL_BOUND_EXCEEDED
             return session.session_id, queue_item_id
         finally:
             await core.close_session(

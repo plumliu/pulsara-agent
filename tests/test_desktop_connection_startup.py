@@ -105,6 +105,7 @@ def test_live_control_changes_during_canonical_read_remain_in_the_same_observer_
             current_compaction_projection=lambda: (False, None, None, None),
             root_compaction_in_progress=lambda: False,
             host_session_id="host:test", active_root_turn_id=lambda: None,
+            active_manual_compaction_command_id=lambda: None,
             control_admission_deadline_ms=lambda: 0,
         )
         state = SimpleNamespace(host_session=host, live_control_subscriber_id="")
@@ -121,8 +122,12 @@ def test_live_control_changes_during_canonical_read_remain_in_the_same_observer_
             async def require(self, field, request, expected):
                 nonlocal opened
                 if self.observer:
-                    frame = server._live_control_snapshot(state, request)
-                    baseline_ready.set()
+                    try:
+                        frame = server._live_control_snapshot(state, request)
+                    finally:
+                        # Let startup surface the original baseline failure,
+                        # rather than leaving the canonical side blocked here.
+                        baseline_ready.set()
                     return frame
                 await baseline_ready.wait()
                 opened = owner.install_interaction(CurrentInteractionView(

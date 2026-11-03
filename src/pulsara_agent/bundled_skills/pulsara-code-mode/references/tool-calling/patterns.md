@@ -8,7 +8,7 @@ For complete scenarios with inputs and result handling, see
 `tools.read_file(args)` and native `read_file` are two entry points to the same
 operation, with the same argument contract and workspace state. This also lets
 you start a terminal process natively and follow its process target in JS, or
-read a script-produced artifact with a native tool. Consult each tool definition
+read a formally published script-output entry with native read_file. Consult each tool definition
 for its fields. JavaScript adds variables, conditions, loops, and Promise
 composition; it does not add a common response wrapper or a separate workspace.
 
@@ -18,7 +18,6 @@ The JS subset is:
 | --- | --- |
 | Files | `read_file`, `write_file`, `edit_file`, `find_files`, `search_content` |
 | Processes | `exec_process`, `query_processes`, `manage_process` |
-| Artifacts | `read_artifact`, `export_artifact` |
 | Conversation history | `search_sessions`, `search_session_content`, `read_session_content` |
 | Capability discovery | `query_capabilities` |
 | MCP | `use_new_mcp_tool`, `read_mcp_resource`, and direct MCP tools in the script's initial directory |
@@ -43,12 +42,12 @@ const excerpts = await Promise.all(paths.map(async path => ({
 console.log(excerpts.map(item => ({
   path: item.path,
   content: item.file.content,
-  truncated: item.file.truncated
+  next: item.file.next
 })));
 ```
 
 Result fields can feed later calls: file edits may use the read result's
-`content_revision`, and paged results provide continuation fields. A result can also become an agent's `instruction` or an active agent's
+`content_revision`, and paged results provide complete next calls. A result can also become an agent's `instruction` or an active agent's
 message, using a string or `JSON.stringify(value)`.
 
 `Promise.allSettled` is useful when each independent outcome matters even if

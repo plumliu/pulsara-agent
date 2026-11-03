@@ -49,7 +49,7 @@ _ATTACHED_FIELDS: Final = frozenset(
         "subagent_capacity",
         "code_mode_cells",
         "read_content",
-        "read_tool_artifact",
+        "read_tool_output",
         "list_background_processes",
         "read_background_process_log",
         "heartbeat",

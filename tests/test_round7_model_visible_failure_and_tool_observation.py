@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from time import monotonic
-from types import SimpleNamespace
 
 import pytest
 
@@ -21,7 +20,6 @@ from pulsara_agent.conversation_kernel.cancellation import (
     ForegroundCancellationCause,
 )
 from pulsara_agent.conversation_kernel.context_sources import (
-    ContextSourceRegistry,
     _render_previous_turn_outcome,
 )
 from pulsara_agent.conversation_kernel.contracts import InlineContent
@@ -36,32 +34,14 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     build_prepared_tool_result_acceptance,
 )
-from pulsara_agent.conversation_kernel.runner import KernelRunResult
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.conversation_kernel.vocabulary import (
-    APPEND_GUARDS,
-    COMMITTED_EVENT_DESCRIPTORS,
-    SUBJECT_SLOTS,
-    CommittedEventType,
-    LiveEventType,
-)
-from pulsara_agent.model_input.compiler import COMPILER_CONTRACT_VERSION
 from pulsara_agent.llm.input import LLMTextPart, text_part_values
-from pulsara_agent.model_input.continuity import (
-    PROVIDER_MESSAGE_LOWERING_CONTRACT,
-    SourceObservationLifecycle,
-    SourceObservationPresence,
-    decode_runtime_observation,
-    encode_runtime_observation,
-)
 from pulsara_agent.model_input.contracts import (
     AcceptedAssistantDisposition,
     CanonicalInputOriginKind,
-    ContextSourceKind,
-    ContextTrustClass,
     FrozenPreviousTurnOutcomeCompileFact,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
@@ -69,16 +49,11 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     PreviousTurnOutcomeKind,
     ProviderToolResultContextMetadata,
-    StructuredModelInputLimits,
     previous_turn_outcome_fingerprint,
 )
 from pulsara_agent.model_input.lowering import (
     decode_tool_result_observation,
     lower_canonical_item,
-)
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.ports.tool_execution import (
@@ -205,12 +180,13 @@ def _tool_result_item(body: str) -> FrozenProviderInputItem:
         tool_result_context=ProviderToolResultContextMetadata(
             result_id="result:pvg3icg6wn2puqqgiuggdo2ej4",
             result_state="SUCCESS",
-            display_kind=ToolResultDisplayKind.COMPLETE,
-            artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-            artifact_id=None,
+            session_id="session:336wrfwkamrr3up6kjtsgvgcte",
+            result_entry_id="entry:zvmjajlmix3vyoeoy2zhz6xd2a",
+            output_omitted=False,
+            output_available=True,
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             source_coverage_reason=None,
-            artifact_unavailability_reason=None,
+            output_unavailability_reason=None,
             model_visible_memory_fact_ids=(),
             timing=_timing(reported=10_000),
         ),
@@ -246,8 +222,6 @@ def test_round7_tool_body_cannot_escape_or_forge_runtime_timing() -> None:
     )
     lowered = lower_canonical_item(
         _tool_result_item(malicious),
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     rendered = text_part_values(lowered.tool_result_variants[0].message.content)[0]
     payload = decode_tool_result_observation(rendered)
@@ -262,8 +236,6 @@ def test_round7_external_tool_body_schema_version_remains_literal_content() -> N
     body = '{"schema_version":"external.api.v7","value":1}'
     lowered = lower_canonical_item(
         _tool_result_item(body),
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     rendered = text_part_values(lowered.tool_result_variants[0].message.content)[0]
     payload = decode_tool_result_observation(rendered)
@@ -310,7 +282,7 @@ def test_round7_plan_continuation_is_closed_json_not_delimiter_text() -> None:
         input_origin=CanonicalInputOriginKind.PLAN_CONTINUATION,
     )
     lowered = lower_canonical_item(
-        item, artifact_read_available=False, limits=StructuredModelInputLimits()
+        item
     )
     assert lowered.fixed_message is not None
     rendered = text_part_values(lowered.fixed_message.content)[0]
@@ -511,7 +483,7 @@ def test_round7_late_result_changes_only_a_covering_cut(
         parent_content=InlineContent.from_bytes(b"two calls"),
         blocks=(
             AssistantToolCallBlock(
-                _id("block"), no_attempt_call, "read_artifact", freeze_json({})
+                _id("block"), no_attempt_call, "read_file", freeze_json({})
             ),
             AssistantToolCallBlock(
                 _id("block"), attempted_call, "exec_process", freeze_json({})
@@ -572,13 +544,11 @@ def test_round7_late_result_changes_only_a_covering_cut(
         attempt_id=attempt_id,
         result_state="SUCCESS",
         canonical_preview_content=InlineContent.from_bytes(b"late exact"),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
+        output_body=InlineContent.from_bytes(b"late exact"),
+        output_omitted=False,
         source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
         source_coverage_reason=None,
-        artifact_unavailability_reason=None,
+        output_unavailability_reason=None,
         observed_at=observed_at,
         observation_duration_microseconds=55_000,
         observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,

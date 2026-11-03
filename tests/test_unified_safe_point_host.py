@@ -1,6 +1,8 @@
 """Host-level FIFO delivery across a real, non-preempted tool batch."""
 from __future__ import annotations
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 import asyncio
 from time import monotonic
 from types import SimpleNamespace
@@ -100,7 +102,7 @@ def test_mixed_inputs_wait_for_real_batch_then_arrive_in_fifo_order(
                 content=PromptContent.text('FIFO_HUMAN_STEER'), target_turn_id=turn_id)
             assert steer.status == 'PENDING'
             message = await core._send_agent_message(root.session_id, 'FIFO_AGENT_MESSAGE',
-                SimpleNamespace(session_id=child_id, work_id=work_id))
+                SimpleNamespace(session_id=child_id, work_id=work_id, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
             assert message['delivery'] == 'queued'
             model.child_release.set()
 

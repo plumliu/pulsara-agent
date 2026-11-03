@@ -3,7 +3,7 @@ import type { ToolTrace } from '../../frontend/lib/pulsara-types';
 import { builtinToolSummary } from '../../frontend/lib/builtin-tool-summary';
 
 function trace(name: string, result: unknown, args: unknown = {}, extra: Partial<ToolTrace> = {}): ToolTrace {
-  return { id: 'call', kind: 'artifact', toolName: name, title: name, subtitle: '已完成',
+  return { id: 'call', kind: 'tool', toolName: name, title: name, subtitle: '已完成',
     status: 'completed', resultState: 'SUCCESS', argumentsJson: JSON.stringify(args),
     resultText: JSON.stringify(result), ...extra };
 }
@@ -11,16 +11,22 @@ function trace(name: string, result: unknown, args: unknown = {}, extra: Partial
 // One real result shape per non-MCP builtin, from builtin_catalog and its owner.
 // Assertions protect product meaning, especially acknowledgements of unfinished work.
 describe('builtin tool summaries', () => {
+  it('uses accepted control facts when the displayed text does not carry lifecycle metadata', () => {
+    const value = trace('exec_process', 'native log preview', {}, {
+      resultFacts: { status: 'running', exit_code: -1, yielded_to_background: true },
+    });
+    expect(builtinToolSummary(value)?.subtitle).toContain('命令仍在后台运行');
+  });
   it.each([
-    ['read_file', { path: 'src/main.py', total_lines: 42, truncated: true }, {}, '读取文件', '共 42 行，本次仅返回部分内容'],
+    ['read_file', {target: {kind:'PATH',path:'src/main.py'}, total_lines:42, next:{tool:'read_file',arguments:{}}}, {}, '读取文件', '共 42 行，本次仅返回部分内容'],
     ['view_image', {}, { target: {kind: 'IMAGE_REF', image_ref: 'opaque-private-ref'} }, '查看图片', '对话中已保存的图片'],
-    ['search_content', { total_count: 3, matches: [], truncated: false }, { pattern: 'TODO', path: 'src' }, '搜索内容', '找到 3 行匹配'],
-    ['find_files', {total_count: 4, targets: [{kind: 'PATH', path:'src/a.py'}], truncated: true}, {glob: '*.py', target:{kind:'PATH', path: 'src'}}, '查找文件', '找到 4 个文件，本次仅返回部分结果'],
-    ['search_content', {total_count: 8, counts: {'z.py': 2}, truncated: false}, {pattern: 'TODO', output_mode: 'count', offset: 3}, '搜索内容', '找到 8 行匹配，本次仅返回部分结果'],
-    ['search_content', {total_count: 3, output_mode: 'files_only', targets: [{kind:'PATH', path:'z.py'}], truncated: false}, {pattern: 'TODO', output_mode: 'files_only', offset: 2}, '搜索内容', '找到 3 个包含匹配的文件，本次仅返回部分结果'],
+    ['search_content', {matches: [{line:1},{line:2},{line:3}], next:null}, {pattern:'TODO',target:{kind:'PATH',path:'src'}}, '搜索内容', '本次找到 3 行匹配'],
+    ['find_files', {targets:[{kind:'PATH',path:'src/a.py'}],next:{tool:'find_files',arguments:{}}}, {glob: '*.py', target:{kind:'PATH', path: 'src'}}, '查找文件', '本次找到 1 个文件，可继续搜索'],
+    ['search_content', {counts:[{target:{kind:'PATH',path:'z.py'},count:2}],next:null}, {pattern:'TODO',output_mode:'count'}, '搜索内容', '本次列出 1 个文件的匹配行数'],
+    ['search_content', {output_mode:'files_only',targets:[{kind:'PATH',path:'z.py'}],next:null}, {pattern:'TODO',output_mode:'files_only'}, '搜索内容', '本次找到 1 个文件'],
     ['edit_file', { path: 'main.py', diff: 'RAW DIFF' }, {}, '修改文件', '已修改文件'],
     ['write_file', { bytes_written: 123, path: 'new.txt' }, {}, '写入文件', '已写入 123 字节'],
-    ['read_artifact', { returned_chars: 300, has_more: true, source_coverage: 'RETAINED_SNAPSHOT', text: 'RAW OUTPUT' }, {}, '读取完整输出', '已读取 300 个字符，还有后续内容 · 仅保留了部分原始输出'],
+    ['read_file', {content: 'RAW OUTPUT', next: {tool: 'read_file', arguments: {target: {kind: 'SESSION_ENTRY', entry_id: 'private-id'}}}, source_coverage: 'RETAINED_SNAPSHOT'}, {target: {kind: 'SESSION_ENTRY', entry_id: 'private-id'}}, '读取内容', '已读取保留的输出，还有后续内容 · 仅保留了部分原始输出'],
     ['exec_process', { status: 'running', exit_code: -1, yielded_to_background: true, output: 'RAW STDOUT' }, {}, '运行命令', '命令仍在后台运行'],
     ['manage_process', { status: 'success', exit_code: 0, output: 'RAW OUTPUT' }, { action: 'poll' }, '查看命令状态', '命令执行完成'],
     ['todo', { status: 'UPDATED', counts: { total: 5, completed: 2 } }, {}, '更新工作清单', '2/5 项已完成'],

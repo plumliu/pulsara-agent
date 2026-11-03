@@ -1192,6 +1192,18 @@ def test_round4_question_revise_approve_and_one_cut_materialization(
         deadline_monotonic=monotonic() + 30,
     )
     assert answered.workflow_revision == 3
+    from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
+    answer_body = PostgresToolOutputReadPort(
+        repository.connection_provider, session_id=lease.guard.session_id,
+        workspace_id=workspace_id,
+    ).read_body({"kind": "SESSION_ENTRY", "entry_id": answer_entry_id})
+    expected_answer = {
+        "status": "success", "plan_control": "QUESTION_ANSWERED",
+        "answer": {"kind": "OPTION", "ordinal": 0, "label": "A"},
+    }
+    assert json.loads(answer_body.content) == expected_answer
+    assert dict(answer_body.required_facts) == expected_answer
+    assert b"interaction_id" not in answer_body.content
 
     first_plan = "1. inspect\n2. implement 🙂\n3. verify"
     draft_batch = _commit_plan_batch(

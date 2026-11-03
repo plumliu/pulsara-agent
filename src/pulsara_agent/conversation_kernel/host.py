@@ -219,8 +219,8 @@ from pulsara_agent.conversation_kernel.todo_runtime import (
     PreparedTodoRootRunActivation,
     build_root_activation,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import (
-    PostgresToolArtifactReadPort,
+from pulsara_agent.conversation_kernel.tool_outputs import (
+    PostgresToolOutputReadPort,
 )
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
@@ -747,7 +747,7 @@ class KernelHostSession:
             session_id=session_id,
             live_bus=self.live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
-            artifact_read_port=PostgresToolArtifactReadPort(
+            result_source_reader=PostgresToolOutputReadPort(
                 repository.connection_provider,
                 session_id=session_id,
                 workspace_id=workspace.workspace_key,
@@ -5924,6 +5924,8 @@ class KernelHostSession:
                 command=process_info.command,
                 cwd=process_info.cwd,
                 origin_turn_id=process_info.origin.turn_id,
+                origin_conversation_scope_kind=process_info.origin.conversation_scope_kind,
+                origin_session_id=process_info.origin.session_id,
                 target_root_turn_id=target_turn_id,
                 process=UserControlProcessFact(
                     process.disposition,
@@ -7454,7 +7456,17 @@ class KernelHostCore:
             await self._settle_session_open(settlement)
 
     async def _send_agent_message(self, agent_id: str, message: str, context) -> dict[str, object]:
+        from pulsara_agent.primitives.context import canonical_json_bytes
+        from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
+
         recipient = {"kind": "AGENT", "agent_id": agent_id}
+        def accepted_receipt(work_id):
+            return {"recipient": recipient,
+                "work": None if work_id is None else {"kind": "WORK", "work_id": work_id},
+                "delivery": "queued", "message": "Message accepted by the active turn."}
+        def check_receipt(work_id):
+            if not context.page_budget.fits(canonical_json_bytes(accepted_receipt(work_id)).decode("utf-8")):
+                raise ToolResultPageBoundary("The agent message receipt does not fit this call's result allowance")
         live = self._live_agent_session(agent_id)
         if live is None:
             repository = await self._ensure_resources()
@@ -7481,16 +7493,14 @@ class KernelHostCore:
             source_work_id=getattr(context, "work_id", None), text=message,
             occurred_at=datetime.now(timezone.utc), actor_id=context.session_id,
             deadline_monotonic=live._canonical_deadline(),
+            result_check=check_receipt,
         )
         if accepted is None:
             return {"recipient": recipient, "work": None, "delivery": "inactive",
                     "message": "Message was not accepted: the recipient turn ended."}
         live.wake_queued_inputs()
         await self._agent_runtime.notify_changed()
-        work_id = accepted.get("work_id")
-        return {"recipient": recipient,
-                "work": None if work_id is None else {"kind": "WORK", "work_id": work_id},
-                "delivery": "queued", "message": "Message accepted by the active turn."}
+        return accepted_receipt(accepted.get("work_id"))
 
 
     async def _stop_agent_active_work(self, agent_id: str, work_id: str | None = None) -> None:

@@ -53,7 +53,7 @@ import type {
   BackgroundProcessPage,
   ModelConfigurationSummary,
   CommandReceipt,
-  ToolArtifactPage,
+  ToolOutputPage,
   CanonicalPromptImagePart,
   UserControlCommandRef,
   UserControlQueryResult,
@@ -75,7 +75,7 @@ interface InspectorPanelProps {
   onReadVisualization?: import("./inline-visualization").ReadVisualization;
   onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
   onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
-  onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
+  onReadToolOutput: (resultEntryId: string, position: ToolOutputPage['position']) => Promise<ToolOutputPage>;
   backgroundOwnerKey: string;
   backgroundHostSessionId?: string;
   backgroundControlAdmissionDeadlineMs?: number;

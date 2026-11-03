@@ -66,7 +66,7 @@ class WaitControlModel(_DetachedDraftModel):
                         + ']}); console.log("UNREACHABLE_AFTER_STOP");'
                     )
                     events = _tool_call(
-                        "exec_cell", random_id("call"), {"code": code, "yield_time_ms": 0}
+                        "exec_cell", random_id("call"), {"code": code}
                     )
                 elif step == 0:
                     events = _tool_call(
@@ -193,19 +193,18 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                 await asyncio.wait_for(control, 10)
                 cell = root.code_mode_cells()[0]
                 assert cell["pending_calls"] == 1
-                await root._code_mode.stop(cell["cell_id"])
+                owned = root._code_mode._cells[cell["cell_id"]]
+                stopped = await root._code_mode.stop(cell["cell_id"])
+                assert stopped["state"] == "terminated"
 
                 async def observation_settled():
-                    return root.code_mode_cells()[0]["pending_calls"] == 0
+                    return owned.pending_calls == 0
 
                 await eventually(observation_settled)
-                page = await root._code_mode.observe(cell["cell_id"], 0)
-                assert page.state == "terminated"
-                assert not any(
-                    "UNREACHABLE_AFTER_STOP" in record.get("text", "")
-                    for record in page.output
-                )
-                await root._code_mode.acknowledge(page)
+                assert owned.state == "terminated" and not owned.output
+                from tests.test_agent_code_mode_execution import _formal_cell_rows
+                assert not any("UNREACHABLE_AFTER_STOP" in record.get("text", "")
+                               for _, record in await asyncio.to_thread(_formal_cell_rows, root))
             else:
                 model.other_send.set()
                 await asyncio.wait_for(model.other_message_done.wait(), 10)

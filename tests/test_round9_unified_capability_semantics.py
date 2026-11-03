@@ -9,6 +9,7 @@ import pytest
 
 from pulsara_agent.mcp_config import LocalConfiguredMcpRuntimeSource
 from pulsara_agent.identity import derive_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from pulsara_agent.capability.contracts import (
     CapabilityKind,
@@ -864,11 +865,11 @@ def test_round9_mcp_directory_offset_pages_preserve_catalog_join() -> None:
     plan = _directory_plan(routes)
     rows, _, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
     assert diagnostics == []
-    first = render_page(rows, {"limit": 1})
-    assert len(first["items"]) == 1 and first["next_offset"] == 1
-    second = render_page(rows, {"limit": 1, "offset": first["next_offset"]})
+    first = render_page(rows, {"limit": 1}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
+    assert len(first["items"]) == 1 and first["next"]["arguments"]["offset"] == 1
+    second = render_page(rows, first["next"]["arguments"], fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
     assert second["items"][0]["target"]["runtime_server_id"] == derive_id("mcp-server", "runtime-target", "server-1")
-    assert render_page(rows, {"offset": 99})["next_offset"] is None
+    assert render_page(rows, {"offset": 99}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)["next"] is None
     with pytest.raises(CapabilityQueryError):
         parse_query({"cursor": "old-shape"})
     child_plan = _directory_plan(replace(routes, joined_catalog_semantic_fingerprint=catalog.for_scope(ModelInputScopeKind.SUBAGENT).semantic_fingerprint, projection_fingerprint=context_fingerprint("mcp-route-projection:v1", {"routes": (), "catalog": catalog.for_scope(ModelInputScopeKind.SUBAGENT).semantic_fingerprint})))
@@ -980,19 +981,19 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
     rows, details, diagnostics = runtime_rows(runtime, plan, ModelInputScopeKind.ROOT)
     assert diagnostics == []
     resources = [item for item in rows if item["kind"] == "MCP_RESOURCE"]
-    first = render_page(resources, {"limit": 1})
+    first = render_page(resources, {"limit": 1}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
     assert first["items"][0]["target"]["uri"] == "fixture://resource/0"
-    assert first["next_offset"] == 1
-    second = render_page(resources, {"limit": 1, "offset": first["next_offset"]})
+    assert first["next"]["arguments"]["offset"] == 1
+    second = render_page(resources, first["next"]["arguments"], fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
     assert second["items"][0]["target"]["uri"] == "fixture://resource/1"
     assert details[("MCP_RESOURCE", "server", "fixture://resource/0")]["uri"] == "fixture://resource/0"
     prompts = [item for item in rows if item["kind"] == "MCP_PROMPT"]
-    first_prompt = render_page(prompts, {"limit": 1})
+    first_prompt = render_page(prompts, {"limit": 1}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)
     prompt_target = {"kind": "MCP_PROMPT", "server_id": "server", "name": "prompt-0"}
     assert first_prompt["items"][0]["target"] == prompt_target
     assert first_prompt["items"][0]["description"] == "Build a component"
     assert "arguments" not in first_prompt["items"][0]
-    assert render_page(prompts, {"limit": 1, "offset": first_prompt["next_offset"]})["items"][0]["target"]["name"] == "prompt-1"
+    assert render_page(prompts, first_prompt["next"]["arguments"], fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)["items"][0]["target"]["name"] == "prompt-1"
     assert details[("MCP_PROMPT", "server", "prompt-0")] == {
         "target": prompt_target, "source": None, "server_id": "server",
         "name": "prompt-0", "description": "Build a component",
@@ -1001,7 +1002,7 @@ def test_round9_mcp_item_directory_projects_metadata_and_offset_pages() -> None:
     assert details[("MCP_SERVER", "server")]["prompt_count"] == 2
     assert parse_query({"kind": "MCP_PROMPT"}) == {"kind": "MCP_PROMPT"}
     assert parse_query({"target": prompt_target}) == {"target": prompt_target}
-    assert render_page(resources, {"offset": 99})["items"] == []
+    assert render_page(resources, {"offset": 99}, fits_result=ToolResultPageBudget(derive_id("call", "capability-semantics-page")).fits)["items"] == []
     with pytest.raises(CapabilityQueryError):
         parse_query({"kind": "MCP_RESOURCE", "cursor": "old-shape"})
 

@@ -1,7 +1,11 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SandboxedHtmlPreview } from '../../frontend/components/sandboxed-html-preview';
-afterEach(cleanup);
+beforeEach(() => {
+  // jsdom has no visibility observer; these cases exercise navigation policy.
+  vi.stubGlobal('IntersectionObserver', class { observe() {} disconnect() {} unobserve() {} });
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 it('requires a trusted click for a document-forged external navigation without browser activation', () => {
   const navigate=vi.fn();
   const view=render(<SandboxedHtmlPreview source={{url:'/api/file-previews/token/resources/index.html'}} title="Preview" onNavigation={navigate}/>);

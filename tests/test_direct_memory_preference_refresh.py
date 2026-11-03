@@ -23,7 +23,6 @@ def test_same_turn_preference_refresh_detects_change_empty_and_cold_epoch() -> N
     scope = ProviderInputContinuityScope(
         session_id='session:awdeh7sbcwwn6qhvkkvcdbilnq',
         scope_kind=ModelInputScopeKind.ROOT,
-        scope_subagent_task_id=None,
     )
     empty = build_memory_context_source(
         kind=ContextSourceKind.MEMORY_RESPONSE_PREFERENCE_HEAD,

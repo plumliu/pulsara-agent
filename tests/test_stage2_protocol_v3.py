@@ -373,11 +373,12 @@ def test_pr02_protocol_carries_exact_result_queue_and_prompt_delivery_identity()
         "assistant_entry_id",
         "tool_call_id",
         "result_state",
-        "artifact_disposition",
+        "output_body_available",
         "source_coverage",
-        "display_kind",
+        "output_omitted",
         "source_coverage_reason",
-        "artifact_unavailability_reason",
+        "output_unavailability_reason",
+        "result_facts_json",
     } <= set(tool_result)
 
     entry = wire.CanonicalEntry.DESCRIPTOR.fields_by_name
@@ -402,8 +403,8 @@ def test_pr02_protocol_carries_exact_result_queue_and_prompt_delivery_identity()
     read_content = wire.ReadContentRequest.DESCRIPTOR
     assert read_content.oneofs_by_name["target"].fields[0].name == "entry_id"
     assert read_content.oneofs_by_name["target"].fields[1].name == "queue_item_id"
-    assert "read_tool_artifact" in wire.ClientFrame.DESCRIPTOR.fields_by_name
-    assert "tool_artifact" in wire.ServerFrame.DESCRIPTOR.fields_by_name
+    assert "read_tool_output" in wire.ClientFrame.DESCRIPTOR.fields_by_name
+    assert "tool_output" in wire.ServerFrame.DESCRIPTOR.fields_by_name
 
 
 def test_pr02_read_content_reports_an_exact_queue_transition_separately_from_missing() -> None:

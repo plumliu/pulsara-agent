@@ -36,7 +36,7 @@ pytestmark = pytest.mark.postgres
 
 @pytest.fixture(scope="module")
 def notice_database():
-    # Explicit integration fixture; production settings contain no database DSN.
+    # This integration module owns a disposable migrated test database.
     database = create_migrated_postgres_test_database()
     try:
         yield verified_postgres_provider(database.runtime_dsn)

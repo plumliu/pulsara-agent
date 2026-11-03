@@ -17,6 +17,8 @@ from typing import Callable, Mapping
 from types import MappingProxyType
 
 from pulsara_agent.identity import random_id, require_id
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object, encode_tool_public_json
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from .contracts import (
     CellParticipationReference, CellState, CodeModeError, CodeModeInvocation, CodeModeInvoke, CodeModeLimits,
@@ -355,7 +357,8 @@ class CodeModeHost:
     async def start(self, *, source: str, source_exec_attempt_id: str, turn_id: str,
                     snapshot: object, tool_catalog: Mapping[str, object], invoke: CodeModeInvoke,
                     prepare_batch: CodeModePrepareBatch | None = None,
-                    on_cell_closed: Callable[[str], None] | None = None) -> str:
+                    on_cell_closed: Callable[[str], None] | None = None,
+                    page_budget: ToolResultPageBudget | None = None) -> str:
         if type(source) is not str or len(source.encode("utf-8")) > self.limits.value_bytes:
             raise CodeModeError("source_boundary", "Code Mode source exceeds the single-source UTF-8 boundary")
         if prepare_batch is None:
@@ -364,8 +367,11 @@ class CodeModeHost:
         # Freeze the complete exact schemas; dispatch still checks live capability facts.
         catalog_json = json.dumps(dict(tool_catalog), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         catalog = json.loads(catalog_json)
-        await self._ensure_started()
         cell_id = random_id("cell")
+        if page_budget is not None and not page_budget.fits(encode_tool_public_json(
+                {"accepted": True, "target": cell_target(cell_id)}).decode("utf-8")):
+            raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell admission receipt cannot fit the result budget")
+        await self._ensure_started()
         cell = _Cell(cell_id, turn_id, source_exec_attempt_id, snapshot, catalog, invoke,
                      prepare_batch, asyncio.get_running_loop().create_future(),
                      on_cell_closed=on_cell_closed)
@@ -439,9 +445,15 @@ class CodeModeHost:
                         if cell.state not in _TERMINAL:
                             # Preserve accepted business effects, reject only the transport.
                             transport = CodeModeToolResult(state=result.state, error_code=error.code,
-                                error_message=str(error), artifact=result.artifact,
+                                error_message=str(error), read=result.read,
+                                result_id=result.result_id, result_entry_id=result.result_entry_id,
+                                output_available=result.output_available,
+                                source_coverage=result.source_coverage,
+                                source_coverage_reason=result.source_coverage_reason,
+                                output_unavailability_reason=result.output_unavailability_reason,
+                                required_facts=result.required_facts,
                                 value={"result_id": result.result_id, "result_entry_id": result.result_entry_id,
-                                       "coverage": "PREVIEW", "reason": error.code})
+                                       "reason": error.code})
                             await self._deliver(cell, pending, transport)
                 if not pending.delivered and pending.sequence is not None:
                     await self._late_result(cell, pending, result)
@@ -469,11 +481,16 @@ class CodeModeHost:
         else:
             value = {"code": result.error_code, "message": result.error_message or "Tool failed",
                      "state": result.state, "result": result.value,
-                     "artifact": dict(result.artifact) if result.artifact else None,
+                     "read": dict(result.read) if result.read else None,
+                     "output_available": result.output_available,
+                     "source_coverage": result.source_coverage,
+                     "source_coverage_reason": result.source_coverage_reason,
+                     "output_unavailability_reason": result.output_unavailability_reason,
+                     "required_facts": thaw_tool_json_object(result.required_facts),
                      "result_id": result.result_id, "result_entry_id": result.result_entry_id}
         encoded = _json(value)
         if len(encoded.encode("utf-8")) > self.limits.value_bytes:
-            raise CodeModeError("value_boundary", "Accepted tool result exceeds the bridge value boundary; use its original result or artifact")
+            raise CodeModeError("value_boundary", "Accepted tool result exceeds the bridge value boundary; read its accepted result body")
         pending.handshake = asyncio.get_running_loop().create_future()
         await self._send({"type": "result", "cell_id": cell.cell_id,
                           "request_id": pending.request_id, "json": encoded,
@@ -532,7 +549,9 @@ class CodeModeHost:
         pointer = {"sequence": pending.sequence, "tool_name": pending.tool_name,
                    "state": result.state, "result_id": result.result_id,
                    "result_entry_id": result.result_entry_id,
-                   "artifact": dict(result.artifact) if result.artifact else None}
+                   "read": dict(result.read) if result.read else None,
+                   "output_available": result.output_available, "source_coverage": result.source_coverage,
+                   "required_facts": thaw_tool_json_object(result.required_facts)}
         size = _bytes(pointer) + 256
         if result.read_undelivered is None:
             try:
@@ -543,7 +562,7 @@ class CodeModeHost:
         if size > charge and not await self._retain_data(cell, size - charge):
             # Pending-call admission already reserved its small canonical locator.
             # Never retain the raw value when additional data cannot be admitted.
-            retained = replace(retained, value=None, artifact=None)
+            retained = replace(retained, value=None)
             self._record_error(cell, {"name": "ResourceError", "code": "data_boundary",
                           "message": "Accepted late result exceeds the cell data boundary",
                           "result_id": result.result_id, "result_entry_id": result.result_entry_id})
@@ -690,31 +709,6 @@ class CodeModeHost:
                 "has_more": len(cells) > len(selected),
                 "next_cursor": selected[-1].cell_id if len(cells) > len(selected) else None}
 
-    def query_cells(self, *, cursor: str | None = None, max_items: int = 50,
-                    maximum_page_bytes: int | None = None) -> dict[str, object]:
-        """Adapt the shared inventory to the model-result byte boundary."""
-        page_bytes = self.limits.page_bytes if maximum_page_bytes is None else maximum_page_bytes
-        if type(page_bytes) is not int or not 0 < page_bytes <= self.limits.page_bytes:
-            raise CodeModeError("invalid_arguments", "Cell query page must fit the existing model result boundary")
-        page = self.list_cell_snapshots(cursor=cursor, max_items=max_items)
-        rows = page["cells"]
-        selected: list[dict[str, object]] = []
-        response: dict[str, object] = {"cells": selected, "has_more": False, "next_cursor": None}
-        for index, row in enumerate(rows):
-            has_more = index + 1 < len(rows) or page["has_more"]
-            trial = {"cells": [*selected, row], "has_more": has_more,
-                     "next_cursor": row["target"]["cell_id"] if has_more else None}
-            if len(_json(trial).encode("utf-8")) > page_bytes:
-                if not selected:
-                    raise CodeModeError("output_resource_error", "A Cell inventory row exceeds the model result boundary")
-                break
-            selected.append(row)
-            response = {"cells": selected, "has_more": has_more,
-                        "next_cursor": row["target"]["cell_id"] if has_more else None}
-        if len(_json(response).encode("utf-8")) > page_bytes:
-            raise CodeModeError("output_resource_error", "Cell inventory envelope exceeds the model result boundary")
-        return response
-
     def pending_output_cells(self) -> tuple[str, ...]:
         return tuple(cell.cell_id for cell in self._cells.values() if cell.output)
 
@@ -742,7 +736,12 @@ class CodeModeHost:
             result = item.result
             assert result is not None
             body = (await result.read_undelivered() if result.read_undelivered else
-                    {"result": result.value, "artifact": dict(result.artifact) if result.artifact else None,
+                    {"result": result.value, "read": dict(result.read) if result.read else None,
+                     "output_available": result.output_available,
+                     "source_coverage": result.source_coverage,
+                     "source_coverage_reason": result.source_coverage_reason,
+                     "output_unavailability_reason": result.output_unavailability_reason,
+                     "required_facts": thaw_tool_json_object(result.required_facts),
                      "result_id": result.result_id, "result_entry_id": result.result_entry_id})
             record = {"kind": "tool_result", "sequence": item.sequence,
                       "tool_name": item.tool_name, "state": result.state, **body}
@@ -846,7 +845,15 @@ class CodeModeHost:
         for cell in tuple(self._cells.values()):
             self._mark_cell_stopped(cell)
 
-    async def _stop_cell(self, cell: _Cell) -> dict[str, object]:
+    async def _stop_cell(self, cell: _Cell, *, page_budget: ToolResultPageBudget | None = None) -> dict[str, object]:
+        # Cancellation can race normal completion or failure. Quote every real
+        # terminal receipt before fencing; pending_calls remains UI-only here.
+        states = (cell.state,) if cell.state in _TERMINAL else sorted(_TERMINAL)
+        if page_budget is not None:
+            for state in states:
+                receipt = {"target": cell_target(cell.cell_id), "state": state}
+                if not page_budget.fits(encode_tool_public_json(receipt).decode("utf-8")):
+                    raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell stop receipt cannot fit the result budget")
         self._mark_cell_stopped(cell)
         released, cell.discarded_output_charge = cell.discarded_output_charge, 0
         if released:
@@ -862,10 +869,10 @@ class CodeModeHost:
             self._wake_output()
         return value
 
-    async def stop(self, cell_id: str) -> dict[str, object]:
+    async def stop(self, cell_id: str, *, page_budget: ToolResultPageBudget | None = None) -> dict[str, object]:
         if self._closed:
             raise CodeModeError("unavailable", "Code Mode Host is closed")
-        return await self._stop_cell(self._cell(cell_id))
+        return await self._stop_cell(self._cell(cell_id), page_budget=page_budget)
 
     async def stop_turn(self, turn_id: str) -> None:
         self.mark_turn_stopped(turn_id)

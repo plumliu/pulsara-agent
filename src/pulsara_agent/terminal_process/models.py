@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from pulsara_agent.ports.tool_execution import ToolOutputArtifactCandidate
+from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
 from pulsara_agent.terminal_process.output import (
     TerminalOutputReadDisposition,
     TerminalOutputSourceCoverage,
@@ -95,7 +95,7 @@ class TerminalResult:
     error: str | None = None
     reason: TerminalFailureReason | None = None
     process_id: str | None = None
-    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
+    output_body_candidate: ToolOutputBodyCandidate | None = None
     output_disposition: TerminalOutputReadDisposition = (
         TerminalOutputReadDisposition.CURRENT_SNAPSHOT
     )
@@ -161,7 +161,7 @@ class TerminalProcessLog:
     process: TerminalProcessInfo
     output: str
     truncated: bool
-    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
+    output_body_candidate: ToolOutputBodyCandidate | None = None
     output_disposition: TerminalOutputReadDisposition = (
         TerminalOutputReadDisposition.CURRENT_SNAPSHOT
     )

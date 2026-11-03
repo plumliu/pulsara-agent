@@ -30,7 +30,6 @@ IdentityKind = Literal[
     "replay",
     "attempt",
     "result",
-    "artifact",
     "call",
     "batch",
     "task",

@@ -309,12 +309,12 @@ def test_exit_resource_admission_failure_does_not_publish_partial_exit(
             monkeypatch=monkeypatch,
         )
 
-        async def reject(_candidate):
+        def reject(_quote, **_):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_EXCEEDS_INPUT_BUDGET
             )
 
-        monkeypatch.setattr(session._runner, "prepare_plan_continuation_input", reject)
+        monkeypatch.setattr(session._runner, "_require_post_response_resources", reject)
         try:
             await session.enter_plan(
                 command_id=random_id("command"),

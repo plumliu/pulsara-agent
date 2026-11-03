@@ -53,7 +53,9 @@ def test_large_code_read_grants_shared_native_edit_only_after_actual_delivery(tm
     (tmp_path / 'source.txt').write_text('\n'.join('x' * 80 for _ in range(600)))
     result = _read(tmp_path, deferred=True)
     payload = json.loads(result.output)
-    assert len(result.output.encode()) > 40_000
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+    assert result.page_complete and payload["next"] is not None
+    assert ToolResultPageBudget("read").fits(result.output)
     assert result.status is ToolResultState.SUCCESS
     denied = _edit(tmp_path, payload['content_revision'], 'after-delivery')
     assert json.loads(denied.output)['error'] == 'READ_OBSERVATION_REQUIRED'
@@ -106,7 +108,6 @@ def _canonical_code_calls(database, *, code_result_body=b'private-code-physical-
     from pulsara_agent.llm.input import FrozenPromptContent
     from pulsara_agent.conversation_kernel.repository import AssistantToolCallBlock, build_prepared_tool_result_acceptance
     from pulsara_agent.conversation_kernel.tool_invocations import current_tool_invocation
-    from pulsara_agent.ports.artifact import ToolOutputArtifactDisposition, ToolResultDisplayKind
     from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
     from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
     from tests.test_stage2_conversation_kernel_postgres import _repository, _start_root_turn, _assistant_permission_fingerprint
@@ -158,10 +159,9 @@ def _canonical_code_calls(database, *, code_result_body=b'private-code-physical-
                     result_id=result_id, result_entry_id=entry_id, turn_id=turn_id, assistant_entry_id=None,
                     tool_call_id=call_id, attempt_id=attempt_id, result_state='SUCCESS',
                     canonical_preview_content=InlineContent.from_bytes(code_result_body),
-                    artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED, artifact_id=None,
-                    artifact_blob_descriptor=None, source_coverage=ToolOutputSourceCoverage.COMPLETE,
-                    display_kind=ToolResultDisplayKind.COMPLETE, source_coverage_reason=None,
-                    artifact_unavailability_reason=None, observed_at=datetime.now(timezone.utc),
+                    output_body=InlineContent.from_bytes(code_result_body), output_unavailability_reason=None,
+                    source_coverage=ToolOutputSourceCoverage.COMPLETE, output_omitted=False,
+                    source_coverage_reason=None, observed_at=datetime.now(timezone.utc),
                     observation_duration_microseconds=10, observation_origin_kind=ToolObservationOrigin.BUILTIN,
                     trusted_tool_reported_duration_microseconds=None, actor_id='read_file')
                 accepted = repository.accept_tool_result(lease.guard, candidate=candidate, deadline_monotonic=deadline)
@@ -185,6 +185,28 @@ def test_code_call_rejections_and_late_results_share_actual_source_without_assis
         assert len(rows) == 2 and all(row[0] is None for row in rows)
         assert rows[0][1] is None and rows[1][1] is not None
         assert tuple(row[2] for row in rows) == results
+
+
+def _formal_cell_rows(session):
+    from time import monotonic
+    from psycopg.rows import dict_row
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    from pulsara_agent.conversation_kernel._repository.prompts import _cell_body_in_connection
+    from pulsara_agent.ports.terminal_observation import CellOutputContent
+    with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
+        rows = connection.execute("SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s "
+            "AND input_origin='CELL_OUTPUT' ORDER BY queue_sequence",(session.session_id,)).fetchall()
+        return [(row,dict(CellOutputContent.from_bytes(_cell_body_in_connection(connection,row)).record)) for row in rows]
+
+
+async def _settled_formal_records(session, *, expected=None):
+    async with asyncio.timeout(15):
+        while True:
+            rows = await asyncio.to_thread(_formal_cell_rows, session)
+            if not session._code_mode.snapshot_cell_index() and (expected is None or len(rows) >= expected):
+                return [record for _,record in rows]
+            await asyncio.sleep(.005)
 
 
 @pytest.mark.postgres
@@ -235,28 +257,18 @@ return {finished:true};
         nonlocal cell_id
         index = len(model.requests)
         tool_messages = [m for m in request.compiled_input.messages if m.role is MessageRole.TOOL_RESULT]
-        # Internal CODE calls never become unmatched provider tool messages.
         for message in tool_messages:
             body = str(decode_tool_result_observation(text_part_values(message.content)[0])['body'])
             assert 'after-source-final' not in body
         if index == 1:
-            payloads = _tool_call('exec_cell', random_id('call'), {'code':code,'yield_time_ms':0})
-        elif index == 2:
-            body = str(decode_tool_result_observation(text_part_values(tool_messages[-1].content)[0])['body'])
-            observation = json.loads(body)
-            cell_id = observation['target']['cell_id']
-            bodies.append(observation)
-            payloads = _text('first-final','FIRST_SOURCE_FINAL')
-        elif index == 3:
-            payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
+            payloads = _tool_call('exec_cell', random_id('call'), {'code':code})
         else:
-            body = str(decode_tool_result_observation(text_part_values(tool_messages[-1].content)[0])['body'])
-            observation = json.loads(body)
-            bodies.append(observation)
-            if observation['state'] in ('running','queued') or observation['has_more']:
-                payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
-            else:
-                payloads = _text('second-final','SECOND_FINAL')
+            if index == 2:
+                observation = json.loads(str(decode_tool_result_observation(text_part_values(tool_messages[-1].content)[0])['body']))
+                cell_id = observation['target']['cell_id']
+                bodies.append(observation)
+                assert observation['accepted'] and 'output' not in observation
+            payloads = _text(random_id('block'),'FIRST_SOURCE_FINAL' if index == 2 else 'FORMAL_INPUT_OBSERVED')
         for payload in payloads:
             yield payload
     model = CallbackScriptedKernelModel(stream)
@@ -270,13 +282,12 @@ return {finished:true};
             await session.update_model_call_binding(test_model_binding(runtime))
             first = await session.run_turn(PromptContent.text('launch the background script'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert first.final_text == 'FIRST_SOURCE_FINAL'
-            second = await session.run_turn(PromptContent.text('observe the script'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            assert second.final_text == 'SECOND_FINAL'
-            assert bodies[-1]['state'] == 'completed'
+            records = await _settled_formal_records(session, expected=3)
             assert (tmp_path / 'source.txt').read_text().startswith('after-source-final\n')
-            texts = [record.get('text','') for body in bodies for record in body['output']]
+            texts = [record.get('text','') for record in records]
             assert json.dumps({'order':['fast','slow']},separators=(',',':')) in texts
             assert any('INVALID_ARGUMENTS' in text for text in texts)
+            assert records[-1] == {'kind':'return','text':'{"finished":true}'}
             assert len(post_diagnostics) == 1 and post_diagnostics[0]['tool_name'] == 'edit_file'
         finally:
             await core.shutdown()
@@ -284,91 +295,93 @@ return {finished:true};
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize('mode', ['stop', 'archive', 'terminal_artifact', 'unicode'])
-def test_real_host_stop_settles_effect_and_large_output_pages_keep_artifact(mode, tmp_path, monkeypatch, stage2_migrated_postgres_database):
+@pytest.mark.parametrize('mode', ['stop', 'large_record', 'terminal_body', 'unicode'])
+def test_real_host_stop_and_frozen_large_outputs_use_canonical_owners(mode, tmp_path, monkeypatch, stage2_migrated_postgres_database):
     from time import monotonic
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
+    from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
     from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
     from pulsara_agent.model_input.lowering import decode_tool_result_observation
     from pulsara_agent.primitives.permission import PermissionMode
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_runtime, test_model_binding
     from tests.support.round3 import CallbackScriptedKernelModel
     from tests.support.model_stream import _tool_call, _text
     import pulsara_agent.conversation_kernel.host as kernel_host
-    bodies = []
-    cell_id = None
-    stopped = False
     code = ('await tools.exec_process({command:"printf started > launched; sleep 0.3; printf late-result",yield_time_ms:1000}); console.log("unreachable");'
-            if mode == 'stop' else 'console.log("x".repeat(50000)); console.log("tail-record");')
+        if mode == 'stop' else 'console.log("x".repeat(50000)); console.log("tail-record");')
     if mode == 'unicode':
         code = 'console.log("\\ud800"); return "\\ud800";'
-    if mode == 'terminal_artifact':
+    if mode == 'terminal_body':
         command = "head -c 50000 /dev/zero | tr '\\0' x"
-        code = 'const result = await tools.exec_process(' + json.dumps({'command':command,'yield_time_ms':1000,'max_output_chars':512}) + '); console.log({artifact:result.output_artifact});'
-
+        code = 'const result=await tools.exec_process(' + json.dumps({'command':command,'yield_time_ms':1000,'max_output_chars':512}) + ');console.log({length:result.output.length,exit_code:result.exit_code});'
+    accepted_cell = None
     async def stream(request):
-        nonlocal cell_id, stopped
+        nonlocal accepted_cell
         index = len(model.requests)
         if index == 1:
-            payloads = _tool_call('exec_cell', random_id('call'), {'code':code,'yield_time_ms':0 if mode == 'stop' else 1000})
-        else:
+            payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
+        elif index == 2:
             message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
             body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
-            bodies.append(body)
-            cell_id = body['target']['cell_id']
-            if mode == 'stop' and not stopped:
-                deadline = monotonic() + 5
-                while not (tmp_path / 'launched').exists():
-                    if monotonic() > deadline:
-                        raise AssertionError('physical terminal effect did not begin')
-                    await asyncio.sleep(0.01)
-                stopped = True
-                payloads = _tool_call('manage_cell', random_id('call'), {'action':'stop','target':{'kind':'CELL','cell_id':cell_id}})
-            elif body.get('has_more') or body.get('pending_calls') or body['state'] in ('running','queued'):
-                payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
+            assert body['accepted'] and 'output' not in body
+            accepted_cell = body['target']
+            if mode == 'stop':
+                async with asyncio.timeout(5):
+                    while not (tmp_path/'launched').exists():
+                        await asyncio.sleep(.005)
+                payloads = _tool_call('manage_cell',random_id('call'),{'action':'stop','target':accepted_cell})
             else:
-                payloads = _text('final','OBSERVED')
+                payloads = _text(random_id('block'),'OBSERVED')
+        else:
+            if mode == 'stop' and index == 3:
+                message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
+                body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
+                assert body['state'] == 'terminated' and 'output' not in body
+            payloads = _text(random_id('block'),'OBSERVED')
         for payload in payloads:
             yield payload
     model = CallbackScriptedKernelModel(stream)
-    monkeypatch.setattr(kernel_host, 'DirectKernelModelPort', lambda **_: model)
-    monkeypatch.setattr(kernel_host.LocalMcpManagementService, 'load_configs', lambda *_a, **_kw: ())
-    runtime = test_model_runtime(model_id='test-pro', wire_api='openai_chat_completions', postgres_dsn=stage2_migrated_postgres_database.runtime_dsn)
+    monkeypatch.setattr(kernel_host,'DirectKernelModelPort',lambda **_:model)
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService,'load_configs',lambda *_a,**_kw:())
+    runtime = test_model_runtime(model_id='test-pro',wire_api='openai_chat_completions',postgres_dsn=stage2_migrated_postgres_database.runtime_dsn)
     async def scenario():
         core = KernelHostCore.production(model_runtime=runtime)
-        session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=tmp_path))
+        session = await core.open_session(HostWorkspaceInput(workspace_kind='project',workspace_root=tmp_path))
         try:
             await session.update_model_call_binding(test_model_binding(runtime))
-            result = await session.run_turn(PromptContent.text('run the script'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            result = await session.run_turn(PromptContent.text('run script'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert result.final_text == 'OBSERVED'
-            records = [record for body in bodies for record in body.get('output', ())]
+            records = await _settled_formal_records(session)
             if mode == 'stop':
-                assert bodies[-1]['state'] == 'terminated'
-                late = [record for record in records if record['kind'] == 'tool_result']
-                assert len(late) == 1 and late[0]['state'] == 'SUCCESS'
-                assert late[0]['sequence'] == 1 and late[0]['result_entry_id']
-                assert 'late-result' in late[0]['result']
-                assert all(record.get('text') != 'unreachable' for record in records)
-                assert (tmp_path / 'launched').read_text() == 'started'
+                assert not records and (tmp_path/'launched').read_text() == 'started'
             elif mode == 'unicode':
                 assert records == [{'kind':'log','text':'\ud800'},{'kind':'return','text':'\ud800'}]
-            elif mode == 'terminal_artifact':
-                record = next(record for record in records if record.get('kind') == 'log')
-                artifact = json.loads(record['text'])['artifact']
-                assert artifact['disposition'] == 'AVAILABLE'
-                assert artifact['source_coverage'] == 'COMPLETE'
-                port = session._tools._tools['read_artifact'].artifact_read_port
-                content = await asyncio.to_thread(port.read_body, artifact['target']['artifact_id'])
-                assert content.content == b'x' * 50000
+            elif mode == 'terminal_body':
+                assert records == [{'kind':'log','text':'{"length":50000,"exit_code":0}'}]
+                with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                        deadline_monotonic=monotonic()+10) as connection:
+                    rows = connection.execute("SELECT r.result_entry_id FROM pulsara_v3.tool_results r "
+                        "JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id "
+                        "WHERE r.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='exec_process'",(session.session_id,)).fetchall()
+                assert len(rows) == 1
+                reader = PostgresToolOutputReadPort(session.repository.connection_provider,
+                    session_id=session.session_id,workspace_id=session.workspace.workspace_key)
+                assert reader.read_body({'kind':'SESSION_ENTRY','entry_id':rows[0][0]}).content == b'x'*50000
             else:
-                archived = next(record['output_artifact'] for record in records if 'output_artifact' in record)
-                port = session._tools._tools['read_artifact'].artifact_read_port
-                content = await asyncio.to_thread(port.read_body, archived['target']['artifact_id'])
-                assert json.loads(content.content) == {'kind':'log','text':'x'*50000}
-                assert records[-1] == {'kind':'log','text':'tail-record'}
-                assert any(body.get('has_more') for body in bodies)
+                assert records == [{'kind':'log','text':'x'*50000},{'kind':'log','text':'tail-record'}]
+                rows = await asyncio.to_thread(_formal_cell_rows,session)
+                async with asyncio.timeout(5):
+                    while rows[0][0]['consumed_entry_id'] is None:
+                        await asyncio.sleep(.005)
+                        rows = await asyncio.to_thread(_formal_cell_rows,session)
+                reader = PostgresToolOutputReadPort(session.repository.connection_provider,
+                    session_id=session.session_id,workspace_id=session.workspace.workspace_key)
+                from pulsara_agent.ports.terminal_observation import CellOutputContent
+                saved = reader.read_body({'kind':'SESSION_ENTRY','entry_id':rows[0][0]['consumed_entry_id']})
+                assert CellOutputContent.from_bytes(saved.content).record == records[0]
         finally:
             await core.shutdown()
     asyncio.run(scenario())
@@ -457,37 +470,29 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
     (tmp_path/'source.txt').write_text('native-value\n')
     cells, observations = [], []
     native_seen = False
-    remaining = ['B','A']
     async def stream(request):
         nonlocal native_seen
         index = len(model.requests)
         messages = [m for m in request.compiled_input.messages if m.role is MessageRole.TOOL_RESULT]
         if index == 1:
             payloads = ()
-            for label, duration in (('A',0.4),('B',0.05)):
-                code = 'await tools.exec_process(' + json.dumps({'command':f'sleep {duration}; printf {label} >> order.txt','yield_time_ms':1000}) + '); return ' + json.dumps(label) + ';'
-                payloads += _tool_call('exec_cell', random_id('call'), {'code':code,'yield_time_ms':0})
+            for label,duration in (('A',0.4),('B',0.05)):
+                code = 'await tools.exec_process(' + json.dumps({'command':f'sleep {duration}; printf {label} >> order.txt','yield_time_ms':1000}) + ');return ' + json.dumps(label) + ';'
+                payloads += _tool_call('exec_cell',random_id('call'),{'code':code})
         elif index == 2:
             assert len(messages) == 2
             for message in messages:
                 observed = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
+                assert observed['accepted']
                 cells.append(observed['target']['cell_id'])
                 observations.append(observed)
-            payloads = _tool_call('read_file', random_id('call'), {'target':{'kind':'PATH','path':'source.txt'}})
+            payloads = _tool_call('read_file',random_id('call'),{'target':{'kind':'PATH','path':'source.txt'}})
         else:
-            body = json.loads(str(decode_tool_result_observation(text_part_values(messages[-1].content)[0])['body']))
             if index == 3:
+                body = json.loads(str(decode_tool_result_observation(text_part_values(messages[-1].content)[0])['body']))
                 assert body['content'].endswith('native-value')
                 native_seen = True
-            else:
-                observations.append(body)
-                if body['state'] == 'completed' and not body['has_more']:
-                    remaining.pop(0)
-            if remaining:
-                cell = cells[1] if remaining[0] == 'B' else cells[0]
-                payloads = _tool_call('manage_cell', random_id('call'), {'action':'wait','target':{'kind':'CELL','cell_id':cell},'yield_time_ms':1000})
-            else:
-                payloads = _text('done','BOTH_CELLS_SETTLED')
+            payloads = _text(random_id('block'),'BOTH_CELLS_SETTLED')
         for payload in payloads:
             yield payload
     model = CallbackScriptedKernelModel(stream)
@@ -502,8 +507,9 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
             result = await session.run_turn(PromptContent.text('start two scripts'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert result.final_text == 'BOTH_CELLS_SETTLED'
             assert native_seen and len(set(cells)) == 2
+            records = await _settled_formal_records(session, expected=2)
             assert (tmp_path/'order.txt').read_text() == 'BA'
-            returned = [record['text'] for page in observations for record in page['output'] if record['kind'] == 'return']
+            returned = [record['text'] for record in records if record['kind'] == 'return']
             assert sorted(returned) == ['A','B']
         finally:
             await core.shutdown()
@@ -557,23 +563,22 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_post_tool',fail_one_member)
     monkeypatch.setattr(ToolBatchExecutor,'_offer_operational_best_effort',observe_diagnostic)
     async def stream(request):
-        nonlocal root_calls, cell_id
+        nonlocal root_calls,cell_id
         if request.session_id != root_session_id:
             payloads = _text(random_id('block'),'CHILD_COMPLETED')
         else:
             root_calls += 1
             if root_calls == 1:
                 code = 'try { const admitted=await tools.run_agent.batch({first:{instruction:"first work"},second:{instruction:"second work"}});console.log(admitted); } catch(error) { console.log({rejected:error.code}); }'
-                payloads = _tool_call('exec_cell',random_id('call'),{'code':code,'yield_time_ms':1000})
+                payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
             else:
-                message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
-                page = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
-                pages.append(page)
-                cell_id = page['target']['cell_id']
-                if page['state'] in ('running','queued') or page.get('pending_calls') or page['has_more']:
-                    payloads = _tool_call('manage_cell',random_id('call'),{'action':'wait','target':{'kind':'CELL','cell_id':cell_id},'yield_time_ms':1000})
-                else:
-                    payloads = _text('root-final','BATCH_ACCEPTED')
+                if root_calls == 2:
+                    message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
+                    page = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])['body']))
+                    assert page['accepted']
+                    pages.append(page)
+                    cell_id = page['target']['cell_id']
+                payloads = _text(random_id('block'),'BATCH_ACCEPTED')
         for payload in payloads:
             yield payload
     model = CallbackScriptedKernelModel(stream)
@@ -589,8 +594,8 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
             await session.update_model_call_binding(test_model_binding(runtime))
             result = await session.run_turn(PromptContent.text('admit a batch'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert result.final_text == 'BATCH_ACCEPTED'
-            assert pages[-1]['state'] == 'completed'
-            batch = json.loads(next(record['text'] for page in pages for record in page['output'] if record['kind']=='log'))
+            records = await _settled_formal_records(session, expected=1)
+            batch = json.loads(next(record['text'] for record in records if record['kind']=='log'))
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,deadline_monotonic=monotonic()+10) as connection:
                 rows = connection.execute("SELECT r.result_state,r.attempt_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent.batch'",(root_session_id,)).fetchall()
                 assert len(rows) == 1

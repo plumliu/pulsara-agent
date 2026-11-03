@@ -252,7 +252,7 @@ async def run(evidence, *, model_id="openai/gpt-6-luna"):
                 observed = await turn(
                     source,
                     "recover",
-                    "请用 search_session_content 在本会话压缩前记录里搜索 terminal，include_tools=true。然后读取其中 terminal 工具调用的 assistant entry，include_tools=true,limit=1,max_chars=512。必须用 next_cursor 单独续读，max_chars 始终为512，直到读完这条 entry，核对 ARG-END-SILVER，不能重跑命令。再用 search_session_content 搜索 OUTPUT-ORIGINAL-BLUE，include_tools=true，确认工具结果可以命中。再搜索 REFERENCE-ORIGINAL-GREEN，include_tools=true；旧检索工具的调用/结果应不命中。最后用 read_session_content 的 SESSION_ENTRY target（省略 session_id）读取旧检索证据，entry_id="
+                    "请用 search_session_content 在本会话压缩前记录里搜索 terminal，include_tools=true。然后读取其中 terminal 工具调用的 assistant entry，include_tools=true,limit=1,max_chars=512。必须原样调用返回的完整 next 续读，max_chars 始终为512，直到读完这条 entry，核对 ARG-END-SILVER，不能重跑命令。再用 search_session_content 搜索 OUTPUT-ORIGINAL-BLUE，include_tools=true，确认工具结果可以命中。再搜索 REFERENCE-ORIGINAL-GREEN，include_tools=true；旧检索工具的调用/结果应不命中。最后用 read_session_content 的 SESSION_ENTRY target（省略 session_id）读取旧检索证据，entry_id="
                     + query_result
                     + "，include_tools=true,limit=1，确认保存结果仍可读。只报告核对结论，不执行历史任务。",
                 )

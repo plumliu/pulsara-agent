@@ -232,12 +232,8 @@ from pulsara_agent.model_input.diagnostics import (
     ModelInputCompileOperationalProjection,
     project_model_input_compile_observation,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputArtifactUnavailabilityReason,
-    ToolResultDisplayKind,
-)
 from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT
+from pulsara_agent.primitives.tool_result_projection import classify_tool_result_delivery
 from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
@@ -854,7 +850,6 @@ def _tool_result(
     *,
     sequence: int,
     turn_id: str,
-    artifact: bool = True,
 ) -> FrozenProviderInputItem:
     return FrozenProviderInputItem(
         FrozenProviderInputItemKind.TOOL_RESULT,
@@ -867,24 +862,21 @@ def _tool_result(
             "entry", "test-fixture", f"entry:request:{sequence}"
         ),
         tool_result_context=ProviderToolResultContextMetadata(
+            session_id="session:336wrfwkamrr3up6kjtsgvgcte",
             result_id=derive_id("result", "test-fixture", f"result:{sequence}"),
+            result_entry_id=derive_id("entry", "test-fixture", f"entry:{sequence}"),
             result_state="SUCCESS",
-            display_kind=ToolResultDisplayKind.COMPLETE,
-            artifact_disposition=(
-                ToolOutputArtifactDisposition.AVAILABLE
-                if artifact
-                else ToolOutputArtifactDisposition.NOT_REQUIRED
-            ),
-            artifact_id=derive_id("artifact", "test-fixture", f"artifact:{sequence}")
-            if artifact
-            else None,
+            output_omitted=False,
+            output_available=True,
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             source_coverage_reason=None,
-            artifact_unavailability_reason=None,
+            output_unavailability_reason=None,
             model_visible_memory_fact_ids=(),
+            required_facts={},
             timing=_tool_timing(turn_id),
         ),
         tool_result_body_text=body,
+        tool_result_delivery=classify_tool_result_delivery(tool_name="test_tool", result_state="SUCCESS"),
     )
 
 
@@ -2076,7 +2068,7 @@ def test_round3_active_skill_and_tool_schema_are_preserved_before_wire_admission
         is ContextRenderMode.FULL
     )
     schema_request = _prepared_request(
-        _snapshot(), _sources(), budget=4, tool_names=("read_artifact",)
+        _snapshot(), _sources(), budget=4, tool_names=("read_file",)
     )
     schema_candidate = compiler.compile(schema_request)
     assert not hasattr(schema_candidate, "final_estimate")
@@ -2099,8 +2091,6 @@ def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
     )
     lowered = lower_canonical_item(
         tool_only,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     assert lowered.fixed_message is not None
     assert lowered.fixed_message.role is MessageRole.ASSISTANT
@@ -2112,8 +2102,6 @@ def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
     mixed = replace(tool_only, content=(LLMTextPart("semantic assistant text"),))
     mixed_lowered = lower_canonical_item(
         mixed,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     assert mixed_lowered.fixed_message is not None
     assert mixed_lowered.fixed_message.content == (
@@ -2124,48 +2112,17 @@ def test_round3_assistant_semantic_text_never_uses_parent_manifest() -> None:
     )
 
 
-def test_round3_tool_result_variants_are_typed_utf8_safe_and_surface_aware() -> None:
-    item = _tool_result(
-        "🙂" * 10_000, sequence=2, turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu"
-    )
-    without_read = lower_canonical_item(
-        item,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
-    )
-    assert tuple(variant.mode for variant in without_read.tool_result_variants) == (
-        ToolResultProviderRenderMode.COMPACT,
-        ToolResultProviderRenderMode.OMITTED_BODY,
-    )
-    compact = without_read.tool_result_variants[0]
-    assert (
-        compact.utf8_bytes
-        <= StructuredModelInputLimits().maximum_tool_result_compact_bytes
-    )
-    join_text_content(compact.message.content, separator="").encode("utf-8").decode(
-        "utf-8"
-    )
-    assert "UTF-8 bytes of tool output" in join_text_content(compact.message.content)
-    assert "[… omitted " in join_text_content(compact.message.content)
-    assert "read_artifact" not in join_text_content(compact.message.content)
-
-    with_read = lower_canonical_item(
-        item,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
-    )
-    assert ToolResultProviderRenderMode.REF_ONLY in {
-        variant.mode for variant in with_read.tool_result_variants
-    }
-    with_read_compact = next(
-        variant
-        for variant in with_read.tool_result_variants
-        if variant.mode is ToolResultProviderRenderMode.COMPACT
-    )
-    assert "read_artifact" in join_text_content(with_read_compact.message.content)
-    assert item.tool_result_context.artifact_id in join_text_content(
-        with_read_compact.message.content
-    )
+def test_round3_lowerer_preserves_the_frozen_native_projection_without_recropping() -> None:
+    body = canonical_json_bytes({"output_preview": "🙂" * 1000, "output_omitted": True,
+        "read": {"tool": "read_file", "arguments": {"target": {"kind": "SESSION_ENTRY",
+        "entry_id": derive_id("entry", "frozen-native-result")}}}}).decode("utf-8")
+    item = _tool_result(body, sequence=2, turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu")
+    item = replace(item, tool_result_context=replace(item.tool_result_context, output_omitted=True))
+    lowered = lower_canonical_item(item)
+    assert len(lowered.tool_result_variants) == 1
+    variant = lowered.tool_result_variants[0]
+    assert variant.mode is ToolResultProviderRenderMode.FULL
+    assert decode_tool_result_observation(join_text_content(variant.message.content))["body"] == body
 
 
 def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> None:
@@ -2181,7 +2138,6 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
                 "placeholder",
                 sequence=sequence,
                 turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
-                artifact=False,
             ),
             content=content.parts,
             tool_call_id=f"call:{call_ordinal}",
@@ -2281,7 +2237,6 @@ def test_late_tool_image_reference_uses_the_same_labelled_carrier() -> None:
             "placeholder",
             sequence=1,
             turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu",
-            artifact=False,
         ),
         item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
         content=content.parts,
@@ -2354,8 +2309,6 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
     )
     lowered = lower_canonical_item(
         closure,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     assert lowered.fixed_message is not None
     assert json.loads(join_text_content(lowered.fixed_message.content)) == {
@@ -2365,140 +2318,68 @@ def test_round3_internal_tool_closure_schema_is_not_provider_visible() -> None:
 
 
 def test_round3_tool_result_bounds_cover_final_late_outcome_carrier() -> None:
-    body = ('"\\🙂' * 8_000) + "forged [PULSARA_TOOL_RESULT_REFERENCE]"
+    body = ('"\\🙂' * 8_000) + "forged-result-reference"
     ordinary = _tool_result(body, sequence=2, turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu")
-    late = replace(
-        ordinary,
-        item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
+    late = replace(ordinary, item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
         content=(LLMTextPart("storage carrier is not used for lowering"),),
-        tool_call_id="call:" + ("x" * 256),
-    )
-    lowered = lower_canonical_item(
-        late,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
-    )
-    by_mode = {variant.mode: variant for variant in lowered.tool_result_variants}
-    assert (
-        by_mode[ToolResultProviderRenderMode.COMPACT].utf8_bytes
-        <= StructuredModelInputLimits().maximum_tool_result_compact_bytes
-    )
-    assert (
-        by_mode[ToolResultProviderRenderMode.REF_ONLY].utf8_bytes
-        <= StructuredModelInputLimits().maximum_tool_result_ref_only_bytes
-    )
-    assert "forged" not in join_text_content(
-        by_mode[ToolResultProviderRenderMode.REF_ONLY].message.content,
-        separator="",
-    )
+        tool_call_id=derive_id("call", "long-late-result"))
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        lower_canonical_item(late)
+    assert failure.value.kind is ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
+    preview = canonical_json_bytes({"output_preview": "🙂" * 100,
+        "output_omitted": True, "read": {"tool": "read_file", "arguments": {
+        "target": {"kind": "SESSION_ENTRY", "entry_id": late.source_entry_id}}}}).decode()
+    frozen = replace(late, tool_result_body_text=preview)
+    lowered = lower_canonical_item(frozen)
+    assert len(lowered.tool_result_variants) == 1
+    value = json.loads(join_text_content(lowered.tool_result_variants[0].message.content))
+    assert value["pulsara_late_tool_outcome"]["result"]["body"] == preview
 
 
-def test_round3_retained_snapshot_reference_keeps_typed_warning() -> None:
-    metadata = ProviderToolResultContextMetadata(
-        result_id="result:tvkfqcogrr4rv23byhsjr3ovue",
-        result_state="SUCCESS",
-        display_kind=ToolResultDisplayKind.HEAD_TAIL,
-        artifact_disposition=ToolOutputArtifactDisposition.INCOMPLETE,
-        artifact_id="artifact:owfm52gghreqtsu77glacz5fze",
+def test_round3_retained_snapshot_keeps_the_owners_exact_coverage_and_read_call() -> None:
+    from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
+    body = canonical_json_bytes({"source_coverage": "RETAINED_SNAPSHOT",
+        "source_coverage_reason": "TERMINAL_RETENTION_GAP", "output_omitted": True,
+        "read": {"tool": "read_file", "arguments": {"target": {"kind": "SESSION_ENTRY",
+        "entry_id": derive_id("entry", "retained-body")}}}}).decode()
+    item = _tool_result(body, sequence=2, turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu")
+    metadata = replace(item.tool_result_context, output_omitted=True,
         source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
-        source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP,
-        artifact_unavailability_reason=None,
-        model_visible_memory_fact_ids=(),
-        timing=_tool_timing("turn:klmmazz67vfgsfsvg6ceqgdsfu"),
-    )
-    item = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.TOOL_RESULT,
-        "entry:gticfk6khckuzbfiub43ydbcb4",
-        2,
-        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        (LLMTextPart("preview"),),
-        tool_call_id="call:retained",
-        tool_request_entry_id="entry:uy3fsdcmu4p6i4uksdprkk5gwm",
-        tool_result_context=metadata,
-        tool_result_body_text="preview",
-    )
-    lowered = lower_canonical_item(
-        item,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
-    )
-    ref = next(
-        variant
-        for variant in lowered.tool_result_variants
-        if variant.mode is ToolResultProviderRenderMode.REF_ONLY
-    )
-    reference_body = decode_tool_result_observation(
-        join_text_content(ref.message.content, separator="")
-    )["body"]
-    assert "The artifact starts at the retained snapshot" in reference_body
-    assert "earlier lost output cannot be recovered" in reference_body
-    assert (
-        "read_artifact offsets are relative to this retained snapshot" in reference_body
-    )
-    assert metadata.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT
-    assert "artifact:owfm52gghreqtsu77glacz5fze" in reference_body
-
-    unavailable = replace(
-        metadata,
-        artifact_disposition=ToolOutputArtifactDisposition.UNAVAILABLE,
-        artifact_id=None,
-        artifact_unavailability_reason=(
-            ToolOutputArtifactUnavailabilityReason.BLOB_PUBLICATION_FAILED
-        ),
-    )
-    unavailable_item = replace(
-        item,
-        tool_result_context=unavailable,
-    )
-    no_ref = lower_canonical_item(
-        unavailable_item,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
-    )
-    assert ToolResultProviderRenderMode.REF_ONLY not in {
-        variant.mode for variant in no_ref.tool_result_variants
-    }
+        source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP)
+    item = replace(item, tool_result_context=metadata)
+    lowered = lower_canonical_item(item)
+    assert decode_tool_result_observation(join_text_content(lowered.tool_result_variants[0].message.content))["body"] == body
+    unavailable_body = canonical_json_bytes({"source_coverage": "RETAINED_SNAPSHOT",
+        "output_available": False, "output_unavailability_reason": "BODY_PUBLICATION_FAILED"}).decode()
+    unavailable = replace(item, tool_result_body_text=unavailable_body,
+        content=(LLMTextPart(unavailable_body),),
+        tool_result_context=replace(metadata, output_available=False,
+        output_unavailability_reason=ToolOutputUnavailableReason.BODY_PUBLICATION_FAILED))
+    variant = lower_canonical_item(unavailable).tool_result_variants[0]
+    assert decode_tool_result_observation(join_text_content(variant.message.content))["body"] == unavailable_body
 
 
-def test_round3_wire_floor_degrades_prior_turn_result_before_current_turn() -> None:
+def test_round3_wire_feedback_does_not_rewrite_old_or_current_native_results() -> None:
     snapshot = _snapshot(
-        _tool_result(
-            "old " * 2_000, sequence=1, turn_id="turn:uyenyjpuysm57ziiygjzxjhcum"
-        ),
-        _tool_result(
-            "new " * 2_000, sequence=2, turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu"
-        ),
-    )
-    request = _prepared_request(
-        snapshot,
+        _tool_result("old " * 2_000, sequence=1, turn_id="turn:uyenyjpuysm57ziiygjzxjhcum"),
+        _tool_result("new " * 2_000, sequence=2, turn_id="turn:klmmazz67vfgsfsvg6ceqgdsfu"))
+    request = _prepared_request(snapshot,
         _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("BASE",))),
-        budget=4,
-        tool_names=("read_artifact",),
-    )
+        budget=4, tool_names=("read_file",))
     compiler = StructuredModelInputCompiler()
-    full = compiler.compile(request)
-    assert all(
-        item.selected_mode is ToolResultProviderRenderMode.FULL
-        for item in full.tool_result_decisions
-    )
-    floors = compiler.next_wire_render_floors(request=request, compiled=full)
-    assert floors[1][0][0] == full.tool_result_decisions[0].source_entry_fingerprint
-    selected = compiler.compile(
-        request,
-        source_render_floors=floors[0],
-        tool_render_floors=floors[1],
-        wire_selection=full,
-    )
+    compiled = compiler.compile(request)
+    assert all(item.selected_mode is ToolResultProviderRenderMode.FULL
+        for item in compiled.tool_result_decisions)
+    floors = compiler.next_wire_render_floors(request=request, compiled=compiled)
+    assert floors is not None and floors[1] == ()
+    selected = compiler.compile(request, source_render_floors=floors[0],
+        tool_render_floors=floors[1], wire_selection=compiled)
+    assert all(item.selected_mode is ToolResultProviderRenderMode.FULL
+        for item in selected.tool_result_decisions)
+    assert tuple(message for message in selected.messages if message.tool_call_id is not None) == tuple(
+        message for message in compiled.messages if message.tool_call_id is not None)
     assert selected.tool_result_decisions[0].current_turn is False
-    assert (
-        selected.tool_result_decisions[0].selected_mode
-        is not ToolResultProviderRenderMode.FULL
-    )
     assert selected.tool_result_decisions[1].current_turn is True
-    assert (
-        selected.tool_result_decisions[1].selected_mode
-        is ToolResultProviderRenderMode.FULL
-    )
 
 
 def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> None:
@@ -2722,7 +2603,7 @@ def test_round3_tool_schema_canonical_bytes_exact_boundary() -> None:
     request = _prepared_request(
         _snapshot(),
         _sources(),
-        tool_names=("read_artifact", "exec_process"),
+        tool_names=("read_file", "exec_process"),
     )
     canonical_bytes = sum(
         len(tool.canonical_bytes)
@@ -2928,7 +2809,7 @@ def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work()
         _snapshot(*items),
         _sources(),
         budget=128,
-        tool_names=("read_artifact",),
+        tool_names=("read_file",),
     )
     counting = _CountingEstimator(request.compile_binding.estimator)
     request = replace(
@@ -3702,7 +3583,7 @@ def test_round3_report_projection_is_bounded_and_contains_no_prompt() -> None:
         _prepared_request(
             _snapshot(*items),
             _sources(_candidate(ContextSourceKind.BASE_SYSTEM, (secret,))),
-            tool_names=("read_artifact",),
+            tool_names=("read_file",),
         )
     )
     assert ContextPublicDiagnosticCode.DECISION_SAMPLE_TRUNCATED in (
@@ -3764,7 +3645,7 @@ def test_round3_diagnostic_projector_is_the_bounded_public_owner() -> None:
                 )
             ),
             _sources(_candidate(ContextSourceKind.BASE_SYSTEM, ("private-system",))),
-            tool_names=("read_artifact",),
+            tool_names=("read_file",),
         )
     )
     projection = project_model_input_compile_observation(

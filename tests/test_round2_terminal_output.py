@@ -108,13 +108,13 @@ def test_round2_output_cursor_exact_delta_and_invalid_owner() -> None:
         owner.snapshot(maximum_chars=512, since_cursor="not-a-cursor")
 
 
-def test_round2_cursor_snapshot_and_artifact_share_the_exact_selected_range() -> None:
+def test_round2_cursor_snapshot_and_body_share_the_exact_selected_range() -> None:
     owner = TerminalOutputOwner(owner_epoch='host:zjsm3f2owadqv4iq7jxzofo2ne', process_id='process:s7nqc7t2naosfs4kxvxdcmftdu')
     owner.append_raw(b"old-output ")
     cursor = owner.snapshot(maximum_chars=512).output_cursor
     owner.append_raw("new-output 🙂\n".encode())
 
-    snapshot, candidate = owner.snapshot_with_artifact_candidate(
+    snapshot, candidate = owner.snapshot_with_body_candidate(
         maximum_chars=512,
         since_cursor=cursor,
     )
@@ -153,10 +153,10 @@ def test_terminal_cursor_rejection_returns_actionable_tool_error(foreign: bool) 
     assert body["error"] == "INVALID_CURSOR"
     assert cursor not in body["message"]
     assert "ValueError" not in result.output
-    assert result.output_artifact_candidate is None
+    assert result.output_body_candidate is None
 
 
-def test_round2_sanitizer_failure_cannot_claim_complete_artifact(
+def test_round2_sanitizer_failure_cannot_claim_complete_body(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     owner = TerminalOutputOwner(
@@ -169,7 +169,7 @@ def test_round2_sanitizer_failure_cannot_claim_complete_artifact(
 
     monkeypatch.setattr(owner._sanitizer, "feed", fail_feed)  # noqa: SLF001
     assert owner.append_raw(b"must-not-become-public") == b""
-    snapshot, candidate = owner.snapshot_with_artifact_candidate(maximum_chars=512)
+    snapshot, candidate = owner.snapshot_with_body_candidate(maximum_chars=512)
 
     assert snapshot.disposition is TerminalOutputReadDisposition.UNAVAILABLE
     assert snapshot.source_coverage is TerminalOutputSourceCoverage.UNAVAILABLE
@@ -177,7 +177,7 @@ def test_round2_sanitizer_failure_cannot_claim_complete_artifact(
     assert candidate.source_coverage_reason is (
         ToolOutputSourceCoverageReason.TERMINAL_SANITIZER_UNAVAILABLE
     )
-    assert candidate.original_utf8_bytes is None
+    assert candidate.source_format.value == "TEXT"
 
 
 def test_round2_retention_gap_is_orthogonal_to_response_bound() -> None:
@@ -193,8 +193,8 @@ def test_round2_retention_gap_is_orthogonal_to_response_bound() -> None:
     assert public.truncated_by_response_bound is True
     # The end cursor is for future output, not pagination of a truncated tail.
     assert owner.snapshot(maximum_chars=8, since_cursor=public.output_cursor).text == ""
-    assert owner.artifact_candidate().text.endswith(public.text)
-    assert len(owner.artifact_candidate().text) > len(public.text)
+    assert owner.body_candidate().text.endswith(public.text)
+    assert len(owner.body_candidate().text) > len(public.text)
 
 
 def test_round2_output_metadata_stays_bounded_after_many_tiny_segments() -> None:
@@ -593,7 +593,6 @@ def test_round2_pty_close_stdin_sends_eot_and_produces_real_eof(
     assert yielded is True
     registry.close_stdin(
         state.process_id,
-        max_output_chars=512,
         owner_host_session_id=owner,
     )
     assert state.stdin_closed is True
@@ -668,17 +667,17 @@ def test_round2_terminal_live_handoff_overflow_is_typed_gap_not_process_failure(
     asyncio.run(scenario())
 
 
-def test_round2_exact_retention_boundary_and_artifact_coverage() -> None:
+def test_round2_exact_retention_boundary_and_body_coverage() -> None:
     owner = TerminalOutputOwner(
         owner_epoch='host:tdahjz2mljqvyap65p7pzvbayi',
         process_id='process:74j7y3ougqqtlyst7kqeuluboa',
     )
     owner.append_raw(b"a" * (16 * 1024 * 1024))
-    complete = owner.artifact_candidate()
+    complete = owner.body_candidate()
     assert owner.retained_utf8_bytes == 16 * 1024 * 1024
     assert complete.source_coverage.value == "COMPLETE"
     owner.append_raw("🙂".encode())
-    retained = owner.artifact_candidate()
+    retained = owner.body_candidate()
     assert owner.retained_utf8_bytes <= 16 * 1024 * 1024
     assert retained.source_coverage.value == "RETAINED_SNAPSHOT"
     assert retained.source_coverage_reason is not None
@@ -708,7 +707,7 @@ def test_round2_concurrent_append_and_snapshot_preserve_exact_utf8_stream() -> N
     final = owner.snapshot(maximum_chars=32_000)
     assert final.through_offset == len(chunk) * 4_000
     assert observed_offsets == sorted(observed_offsets)
-    assert owner.artifact_candidate().text.count("line🙂\n") == 4_000
+    assert owner.body_candidate().text.count("line🙂\n") == 4_000
 
 
 @pytest.mark.parametrize("fault_stage", ("subscribe", "reader", "timer"))

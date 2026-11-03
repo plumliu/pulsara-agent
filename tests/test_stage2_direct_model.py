@@ -474,9 +474,9 @@ def _prepared_execution(
     tool_names: tuple[str, ...] = ("read_file",),
     scope_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
     canonical_items: tuple[FrozenProviderInputItem, ...] = (),
+    session_id: str = "session:336wrfwkamrr3up6kjtsgvgcte",
+    turn_id: str = "turn:klmmazz67vfgsfsvg6ceqgdsfu",
 ) -> tuple[KernelModelExecutionRequest, StructuredToolPort]:
-    session_id = "session:336wrfwkamrr3up6kjtsgvgcte"
-    turn_id = "turn:klmmazz67vfgsfsvg6ceqgdsfu"
     revision_id = "binding:2vbfj7ycdmvjuwmj3feeoqytyi"
     sequence = max(
         (item.source_entry_sequence or 0 for item in canonical_items), default=0
@@ -611,7 +611,8 @@ def _continuity_candidate(request: KernelModelExecutionRequest, owner=None):
         session_id=request.session_id,
         scope_kind=identity.conversation_scope_kind,
     )
-    owner = owner or new_test_provider_input_continuity_owner(request.session_id)
+    owner = owner or new_test_provider_input_continuity_owner(request.session_id,
+        session_kind=identity.conversation_scope_kind)
     frontier = ProcessLocalCanonicalFrontier(
         latest_context_binding_revision_id=identity.context_binding_revision_id,
         context_base_semantic_identity=FULL_HISTORY_CONTEXT_BASE_IDENTITY,

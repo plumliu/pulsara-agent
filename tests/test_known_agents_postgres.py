@@ -12,8 +12,8 @@ from pulsara_agent.identity import random_id
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_agent_requests_persistence import deadline, finish, now, request, start
 from tests.test_agent_requests_persistence import source as source_fixture
+from tests.test_agent_requests_persistence import source as source
 
-pytest_plugins = ["tests.test_agent_requests_persistence"]
 pytestmark = pytest.mark.postgres
 
 

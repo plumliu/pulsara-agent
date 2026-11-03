@@ -45,14 +45,11 @@ from pulsara_agent.llm.model_connections import (
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputArtifactUnavailabilityReason,
-    ToolResultDisplayKind,
-)
+from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
 from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
+    FrozenToolJsonDict, freeze_tool_json_object, thaw_tool_json_object,
 )
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
@@ -423,13 +420,11 @@ class PreparedToolResultAcceptance:
     result_state: str
     canonical_preview_content: InlineContent
     canonical_prompt: FrozenCanonicalPrompt | None
-    artifact_disposition: ToolOutputArtifactDisposition
-    artifact_id: str | None
-    artifact_blob_descriptor: BlobContent | None
+    output_body: CanonicalContent | None
+    output_unavailability_reason: ToolOutputUnavailableReason | None
     source_coverage: ToolOutputSourceCoverage
-    display_kind: ToolResultDisplayKind
+    output_omitted: bool
     source_coverage_reason: ToolOutputSourceCoverageReason | None
-    artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None
     observed_at: datetime
     observation_duration_microseconds: int | None
     observation_origin_kind: ToolObservationOrigin
@@ -438,10 +433,12 @@ class PreparedToolResultAcceptance:
     tool_result_occurrence: CommittedEventDraft
     side_branch: ToolResultSideBranch
     model_visible_memory_fact_ids: tuple[str, ...] = ()
+    required_facts: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
     candidate_fingerprint: str = field(init=False)
     invocation_source: ToolInvocationSource | None = field(default_factory=current_tool_invocation.get)
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
         if not all(
             (
                 self.session_id,
@@ -486,18 +483,13 @@ class PreparedToolResultAcceptance:
             self.attempt_id is not None and self.result_state not in attempted_states
         ):
             raise ValueError("prepared tool result attempt/state union is invalid")
-        available = self.artifact_disposition in {
-            ToolOutputArtifactDisposition.AVAILABLE,
-            ToolOutputArtifactDisposition.INCOMPLETE,
-        }
-        if available != (
-            self.artifact_id is not None and self.artifact_blob_descriptor is not None
-        ):
-            raise ValueError("prepared tool result artifact edge is inconsistent")
-        if (self.artifact_disposition is ToolOutputArtifactDisposition.UNAVAILABLE) != (
-            self.artifact_unavailability_reason is not None
-        ):
-            raise ValueError("prepared tool result unavailability is inconsistent")
+        deferred_body = isinstance(self.side_branch, PreparedMemoryMutationSideBranch) or self.canonical_prompt is not None
+        if not deferred_body and (self.output_body is None) != (self.output_unavailability_reason is not None):
+            raise ValueError("prepared result body availability is inconsistent")
+        if self.output_body is not None and self.output_unavailability_reason is not None:
+            raise ValueError("available result body cannot carry unavailability")
+        if type(self.output_omitted) is not bool:
+            raise TypeError("prepared output_omitted must be a boolean")
         if (self.source_coverage is ToolOutputSourceCoverage.COMPLETE) != (
             self.source_coverage_reason is None
         ):
@@ -544,22 +536,9 @@ class PreparedToolResultAcceptance:
             ToolObservationOrigin.PLAN_CONTROL,
         }:
             raise ValueError("prepared physical result has a nonphysical origin")
-        if self.artifact_disposition is ToolOutputArtifactDisposition.NOT_REQUIRED:
-            if self.source_coverage is not ToolOutputSourceCoverage.COMPLETE:
-                raise ValueError("not-required artifact must own complete source")
-        elif self.artifact_disposition is ToolOutputArtifactDisposition.AVAILABLE:
-            if self.source_coverage is not ToolOutputSourceCoverage.COMPLETE:
-                raise ValueError("available artifact must own complete source")
-        elif self.artifact_disposition is ToolOutputArtifactDisposition.INCOMPLETE:
-            if self.source_coverage is not ToolOutputSourceCoverage.RETAINED_SNAPSHOT:
-                raise ValueError("incomplete artifact must be a retained snapshot")
-        blob = self.artifact_blob_descriptor
-        if blob is not None and (
-            blob.media_type != "text/plain"
-            or blob.codec != "utf-8"
-            or blob.size > 16 << 20
-        ):
-            raise ValueError("prepared primary artifact descriptor is invalid")
+        body = self.output_body
+        if body is not None and (body.codec != "utf-8" or body.size > STAGE2_LIMITS.canonical_blob_hard_bytes):
+            raise ValueError("prepared output body descriptor is invalid")
         expected_event_id = derive_id("event", "accepted", self.session_id, "TOOL_RESULT_ACCEPTED", "ENTRY", self.result_entry_id, "")
         occurrence = self.tool_result_occurrence
         if (
@@ -1367,7 +1346,7 @@ def _event_manifest(event: CommittedEventDraft) -> dict[str, object]:
 def _prepared_tool_result_manifest(
     candidate: PreparedToolResultAcceptance,
 ) -> dict[str, object]:
-    blob = candidate.artifact_blob_descriptor
+    body = candidate.output_body
     side = candidate.side_branch
     side_payload: dict[str, object]
     if isinstance(side, NoToolResultSideBranch):
@@ -1408,21 +1387,11 @@ def _prepared_tool_result_manifest(
                 )
             }
         ),
-        "artifact_disposition": candidate.artifact_disposition.value,
-        "artifact_id": candidate.artifact_id,
-        "artifact_blob_descriptor": None if blob is None else _content_manifest(blob),
+        "output_body": None if body is None else _content_manifest(body),
+        "output_unavailability_reason": None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value,
         "source_coverage": candidate.source_coverage.value,
-        "display_kind": candidate.display_kind.value,
-        "source_coverage_reason": (
-            None
-            if candidate.source_coverage_reason is None
-            else candidate.source_coverage_reason.value
-        ),
-        "artifact_unavailability_reason": (
-            None
-            if candidate.artifact_unavailability_reason is None
-            else candidate.artifact_unavailability_reason.value
-        ),
+        "source_coverage_reason": None if candidate.source_coverage_reason is None else candidate.source_coverage_reason.value,
+        "output_omitted": candidate.output_omitted,
         "observed_at": canonical_utc_timestamp(candidate.observed_at),
         "observation_duration_microseconds": (
             candidate.observation_duration_microseconds
@@ -1433,6 +1402,7 @@ def _prepared_tool_result_manifest(
         ),
         "actor_id": candidate.actor_id,
         "model_visible_memory_fact_ids": candidate.model_visible_memory_fact_ids,
+        "required_facts": thaw_tool_json_object(candidate.required_facts),
         "tool_result_occurrence": _event_manifest(candidate.tool_result_occurrence),
         "side_branch": side_payload,
     }
@@ -1450,13 +1420,11 @@ def build_prepared_tool_result_acceptance(
     attempt_id: str | None,
     result_state: str,
     canonical_preview_content: InlineContent,
-    artifact_disposition: ToolOutputArtifactDisposition,
-    artifact_id: str | None,
-    artifact_blob_descriptor: BlobContent | None,
+    output_body: CanonicalContent | None,
+    output_unavailability_reason: ToolOutputUnavailableReason | None,
     source_coverage: ToolOutputSourceCoverage,
-    display_kind: ToolResultDisplayKind,
+    output_omitted: bool,
     source_coverage_reason: ToolOutputSourceCoverageReason | None,
-    artifact_unavailability_reason: (ToolOutputArtifactUnavailabilityReason | None),
     observed_at: datetime,
     observation_duration_microseconds: int | None,
     observation_origin_kind: ToolObservationOrigin,
@@ -1465,6 +1433,7 @@ def build_prepared_tool_result_acceptance(
     canonical_prompt: FrozenCanonicalPrompt | None = None,
     memory_mutation: PreparedMemoryMutation | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
+    required_facts: Mapping[str, object] | None = None,
 ) -> PreparedToolResultAcceptance:
     """Freeze every semantic field before the first canonical write."""
 
@@ -1494,14 +1463,13 @@ def build_prepared_tool_result_acceptance(
         attempt_id=attempt_id,
         result_state=result_state,
         canonical_preview_content=canonical_preview_content,
+        required_facts=freeze_tool_json_object(required_facts or {}),
         canonical_prompt=canonical_prompt,
-        artifact_disposition=artifact_disposition,
-        artifact_id=artifact_id,
-        artifact_blob_descriptor=artifact_blob_descriptor,
+        output_body=output_body,
+        output_unavailability_reason=output_unavailability_reason,
         source_coverage=source_coverage,
-        display_kind=display_kind,
+        output_omitted=output_omitted,
         source_coverage_reason=source_coverage_reason,
-        artifact_unavailability_reason=artifact_unavailability_reason,
         observed_at=observed_at,
         observation_duration_microseconds=observation_duration_microseconds,
         observation_origin_kind=observation_origin_kind,

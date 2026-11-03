@@ -8,10 +8,11 @@ from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
 from pulsara_agent.identity import random_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.ports.tool_execution import encode_tool_public_json
 from pulsara_agent.primitives.tool_observation import MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-from pulsara_agent.primitives.tool_result_projection import conservative_artifact_page_logical_utf8_bytes
+from pulsara_agent.primitives.tool_result_projection import conservative_tool_result_page_logical_utf8_bytes
 
 
 def _runtime(host, read_source):
@@ -25,9 +26,12 @@ def _runtime(host, read_source):
         prepared=SimpleNamespace(access=SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)),
         execution_binding=lambda name: SimpleNamespace(tool_name=name, execution_policy=BuiltinExecutionPolicyRef(name, "test-bound-catalog")),
     )
+    call_id, result_entry_id = random_id("call"), random_id("entry")
     context = SimpleNamespace(
         session_id=port._session_id, turn_id=random_id("turn"),
-        assistant_entry_id=random_id("entry"), tool_call_id="query_test", attempt_id=random_id("attempt"),
+        assistant_entry_id=random_id("entry"), tool_call_id=call_id, attempt_id=random_id("attempt"),
+        result_entry_id=result_entry_id,
+        page_budget=ToolResultPageBudget(call_id, result_target={"kind": "SESSION_ENTRY", "session_id": port._session_id, "entry_id": result_entry_id}),
         attempt_permission_snapshot_fingerprint="permission", permission_snapshot_fingerprint="permission",
         conversation_scope_kind="ROOT", surface_borrow=borrow, cell_cancel_event=None, code_cell_id=None,
     )
@@ -69,24 +73,28 @@ def test_cell_source_query_dispatch_pages_unicode_without_taking_output_owner():
             assert inventory["cells"][0]["target"] == target
             assert inventory["cells"][0]["has_unread_output"] is True
             parts, offset = [], 0
+            arguments = {"target": target, "max_chars": 32000}
             while True:
-                result = await _dispatch(port, context, "query_cells", {
-                    "target": target, "offset_chars": offset, "max_chars": 32000,
-                })
+                result = await _dispatch(port, context, "query_cells", arguments)
                 assert result.state == "SUCCESS" and result.process_local_settlement is None
                 value = result.public_value()
                 assert value["cell"]["target"] == target
                 assert value["cell"]["has_unread_output"] is True
-                assert len(encode_tool_public_json(value)) + conservative_artifact_page_logical_utf8_bytes(
-                    tool_call_id=context.tool_call_id, body="", model_visible_memory_ids=(),
+                assert result.page_complete is True
+                assert conservative_tool_result_page_logical_utf8_bytes(
+                    tool_call_id=context.tool_call_id,
+                    body=encode_tool_public_json(value).decode(), model_visible_memory_ids=(),
                 ) <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
                 page = value["source"]
                 parts.append(page["text"])
                 assert page["returned_chars"] == len(page["text"])
-                if not page["has_more"]:
+                assert "has_more" not in page and "next_offset_chars" not in page
+                if value["next"] is None:
                     break
-                assert page["next_offset_chars"] > offset
-                offset = page["next_offset_chars"]
+                assert value["next"]["tool"] == "query_cells"
+                arguments = value["next"]["arguments"]
+                assert arguments["offset_chars"] > offset
+                offset = arguments["offset_chars"]
             assert "".join(parts) == frozen_source
             assert reads and all(values == {"session_id": context.session_id, "attempt_id": source_attempt}
                                  for values in reads)

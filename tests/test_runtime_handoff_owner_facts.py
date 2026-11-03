@@ -62,7 +62,7 @@ def test_cell_handoff_filters_complete_pending_without_consuming_or_retaining():
         } == before
         # User controls retain all current cells, including internal cleanup.
         assert {row["cell_id"] for row in host.snapshot_cell_index()} == set(host._cells)
-        assert {row["target"]["cell_id"] for row in host.query_cells()["cells"]} == set(host._cells)
+        assert {row["target"]["cell_id"] for row in host.list_cell_snapshots()["cells"]} == set(host._cells)
         assert cleanup.cell_id not in {row["target"]["cell_id"] for row in facts}
         assert vm_cleanup.cell_id not in {row["target"]["cell_id"] for row in facts}
 

@@ -1,5 +1,5 @@
 """Normalize advisory display requests; view owners perform actual reads/navigation."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Awaitable, Callable
 import json
 import re
@@ -11,6 +11,7 @@ from pulsara_agent.identity import require_id
 from pulsara_agent.conversation_kernel.presentation_targets import PresentationReadUnavailable, ResolvedPresentationObject
 from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
 
@@ -95,4 +96,13 @@ class OpenInPulsaraTool(WorkspaceTool):
         body = {"targets": targets}
         if errors:
             body["errors"] = errors
-        return self._result(call, status=ToolResultState.SUCCESS, output=json.dumps(body, ensure_ascii=False))
+        output = json.dumps(body, ensure_ascii=False)
+        budget = call.page_budget or ToolResultPageBudget(tool_call_id=call.id)
+        if not budget.fits(output):
+            # Display happens only after this complete control payload is
+            # accepted. A partial result must never silently lose tab requests.
+            return replace(self._result(call, status=ToolResultState.ERROR, output=json.dumps({
+                "error": "PRESENTATION_RESULT_TOO_LARGE",
+                "message": "No display requests were accepted. Split targets into smaller calls.",
+            })), page_complete=True)
+        return replace(self._result(call, status=ToolResultState.SUCCESS, output=output), page_complete=True)

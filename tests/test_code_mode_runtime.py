@@ -634,6 +634,147 @@ def test_delivery_owner_commits_before_guest_promise_continuation():
     asyncio.run(run())
 
 
+def test_oversized_accepted_value_is_catchable_and_reads_the_original_body_once():
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.ports.tool_output import tool_output_read_call
+
+    async def run():
+        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=2048))
+        session, entry = random_id("session"), random_id("entry")
+        read = tool_output_read_call(session, entry)
+        effects, deliveries, reads = [], [], []
+
+        async def invoke(call):
+            if "target" in call.arguments:
+                reads.append(call.arguments)
+                return CodeModeToolResult(value="exact frozen body")
+            effects.append(call.sequence)
+            async def delivered():
+                deliveries.append("full-value-delivered")
+            return CodeModeToolResult(value="x" * 8192, state="SUCCESS", result_id=random_id("result"),
+                result_entry_id=entry, read=read, output_available=True,
+                source_coverage="RETAINED_SNAPSHOT", source_coverage_reason="TERMINAL_RETENTION_GAP",
+                required_facts={"exit_code":23}, delivery_succeeded=delivered)
+
+        try:
+            cell = await _start(host, '''
+              try { await tools.read_file({effect:true}); }
+              catch(e) {
+                console.log(e.code,e.state,e.output_available,e.source_coverage,e.source_coverage_reason,e.required_facts.exit_code);
+                console.log(await tools.read_file(e.read.arguments));
+              }
+            ''', invoke)
+            page, output = await _finish(host, cell)
+            assert page.state == "completed", page.error
+            assert [record["text"] for record in output] == [
+                "value_boundary SUCCESS true RETAINED_SNAPSHOT TERMINAL_RETENTION_GAP 23", "exact frozen body"]
+            assert len(effects) == 1 and not deliveries
+            assert reads == [read["arguments"]]
+            assert not any(record["kind"] == "tool_result" for record in output)
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_cell_admission_budget_failure_precedes_vm_or_business_execution():
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
+    async def run():
+        host = CodeModeHost()
+        denied = ToolResultPageBudget("test-call", accepts_provider_body=lambda *_: False)
+        try:
+            with pytest.raises(CodeModeError, match="admission receipt"):
+                await _start(host, "console.log('must not run');", page_budget=denied)
+            assert not host._cells and host._process is None
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_uncaught_bridge_boundary_keeps_original_read_route_when_diagnostic_is_shortened():
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.ports.tool_output import tool_output_read_call
+
+    async def run():
+        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=65536))
+        read = tool_output_read_call(random_id("session"), random_id("entry"))
+        async def invoke(_):
+            return CodeModeToolResult(value="x" * 131072, result_id=random_id("result"),
+                result_entry_id=read["arguments"]["target"]["entry_id"], read=read,
+                output_available=True, required_facts={"details":"汉" * 2000})
+        try:
+            page, output = await _finish(host, await _start(host, "await tools.read_file({});", invoke))
+            assert page.state == "failed" and not output
+            assert page.error["code"] == "value_boundary" and page.error["state"] == "SUCCESS"
+            assert page.error["read"] == read and page.error["output_available"]
+            assert page.error["diagnostic_truncated"]
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_cell_stop_budget_failure_does_not_fence_the_running_script():
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
+    async def run():
+        host = CodeModeHost()
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def invoke(_):
+            entered.set()
+            await release.wait()
+            return CodeModeToolResult(value={})
+        try:
+            cell = await _start(host, "await tools.read_file({});console.log('still running');", invoke)
+            await entered.wait()
+            denied = ToolResultPageBudget("test-call", accepts_provider_body=lambda *_: False)
+            with pytest.raises(CodeModeError, match="stop receipt"):
+                await host.stop(cell, page_budget=denied)
+            assert not host._cells[cell].explicitly_stopped and not host._cells[cell].cancelled.is_set()
+            release.set()
+            page, output = await _finish(host, cell)
+            assert page.state == "completed"
+            assert output == [{"kind": "log", "text": "still running"}]
+        finally:
+            release.set()
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("refused_state", ["completed", "failed", "terminated"])
+def test_cell_stop_quotes_each_possible_terminal_receipt_before_fencing(refused_state):
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
+    async def run():
+        host = CodeModeHost()
+        entered, release = asyncio.Event(), asyncio.Event()
+        quoted = []
+        async def invoke(_):
+            entered.set()
+            await release.wait()
+            return CodeModeToolResult(value={})
+        def quote(body, _):
+            value = json.loads(body)
+            quoted.append(value)
+            return value["state"] != refused_state
+        try:
+            cell = await _start(host, "await tools.read_file({});", invoke)
+            await entered.wait()
+            with pytest.raises(CodeModeError, match="stop receipt"):
+                await host.stop(cell, page_budget=ToolResultPageBudget("test-call", accepts_provider_body=quote))
+            states = ["completed", "failed", "terminated"]
+            assert [value["state"] for value in quoted] == states[:states.index(refused_state) + 1]
+            assert all(value == {"target": {"kind": "CELL", "cell_id": cell}, "state": value["state"]}
+                       for value in quoted)
+            assert not host._cells[cell].explicitly_stopped
+            release.set()
+            page, _ = await _finish(host, cell)
+            assert page.state == "completed"
+        finally:
+            release.set()
+            await host.aclose()
+    asyncio.run(run())
+
+
 def test_parallel_calls_settle_by_completion_without_slow_call_blocking_fast_call():
     async def run():
         host = CodeModeHost()

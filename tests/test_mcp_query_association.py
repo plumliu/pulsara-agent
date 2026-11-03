@@ -1,3 +1,7 @@
+
+from pulsara_agent.identity import derive_id as _capability_page_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 from pulsara_agent.identity import derive_id
 """Query association uses frozen Host provenance, independently of discovery."""
 
@@ -23,6 +27,9 @@ from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.plugins.mcp_adapter import framed_plugin_mcp_server_id
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
 from tests.test_capability_management_preparation import preparation, install_plugin
+
+
+_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
 
 
 def saved_connection(service, *, scope="USER", enabled=False, subagents=False):
@@ -58,7 +65,7 @@ async def query(service, runtime, arguments, *, scope=ModelInputScopeKind.ROOT):
                 for server_id in runtime.candidates
             )))),
     )
-    return await CapabilitySourceQuery(service, runtime=runtime, plan=plan, scope=scope).execute(arguments)
+    return await CapabilitySourceQuery(service, runtime=runtime, plan=plan, scope=scope, fits_result=_CAPABILITY_PAGE_BUDGET.fits).execute(arguments)
 
 
 @pytest.mark.parametrize("scope", ["USER", "WORKSPACE"])
@@ -76,7 +83,7 @@ def test_undiscovered_local_connection_is_one_model_visible_item(tmp_path, scope
             assert not runtime.candidates and not runtime.root_tool_specs
             page = await query(service, runtime, {"kind": "MCP_SERVER", "limit": 1})
             assert page["total_count"] == page["returned_count"] == 1
-            assert page["next_offset"] is None
+            assert page["next"] is None
             row, = page["items"]
             assert row["target"] == {"kind": "MCP_CONNECTION", "scope": scope,
                                      "source_kind": "LOCAL", "server_id": "firecrawl"}

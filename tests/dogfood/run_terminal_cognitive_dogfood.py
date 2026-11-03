@@ -77,7 +77,7 @@ async def run(args, report):
                 "interaction": f"Start {repl!r} with yield_time_ms=100. Send hello without a newline using write, then submit world to finish the line. Obtain ANSWER:helloworld, then submit quit. Use the advertised defaults for write/submit, except use yield_time_ms=0 for write if that option exists. Report the exact answer and which calls were needed to observe it.",
                 "pty": f"Start {repl!r} with tty=true and yield_time_ms=100. Submit delayed and obtain ANSWER:delayed, not merely the echoed input. Then submit quit. Use the advertised submit defaults. Report the answer.",
                 "long": 'Start the exact command "sleep 1.2; printf LONG_DONE" with yield_time_ms=0. Follow the returned process until it finishes and report its output and exit code.',
-                "truncation": f"Run {python} -c \"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\" with max_output_chars=512. Recover the exact MIDDLE marker from the omitted output using read_artifact; do not rerun the command.",
+                "truncation": f"Run {python} -c \"print('A'*9000); print('MIDDLE_7319'); print('B'*9000)\" with max_output_chars=512. Follow the returned read_file call for the original SESSION_ENTRY and its next calls to recover the exact MIDDLE marker from the saved output; do not rerun the command.",
                 "capacity": 'Start eight separate "sleep 120" terminal commands with yield_time_ms=0. Then attempt one additional "printf SHOULD_NOT_START" command. Report whether it was admitted and the exact failure reason if blocked. Use query_processes, then kill the eight sleep processes you started, using their exact IDs. Do not start replacements.',
                 "submit_then_wait": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=0, then call wait with timeout_seconds=1. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
                 "submit_window": f"Start {repl!r} with yield_time_ms=100. Submit compare with yield_time_ms=1000. Read ANSWER:compare, then submit quit with yield_time_ms=1000. Perform this sequence exactly for the timing comparison.",
@@ -91,7 +91,7 @@ async def run(args, report):
                         workspace_root=workspace,
                         trust_workspace_mcp_config=False,
                     ),
-                    system_prompt="Carry out the requested terminal experiment exactly. Use only exec_process, query_processes, manage_process and read_artifact. Keep final answers brief. Never inspect credentials or environment values other than COGNITIVE_FLAG.",
+                    system_prompt="Carry out the requested terminal experiment exactly. Use only exec_process, query_processes, manage_process and read_file. Keep final answers brief. Never inspect credentials or environment values other than COGNITIVE_FLAG.",
                 )
                 await session.update_model_call_binding(_binding(runtime, connection))
                 print("Provider owner ready", flush=True)

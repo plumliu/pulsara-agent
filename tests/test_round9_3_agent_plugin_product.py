@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
+
 from inspect import signature
 import asyncio
 import json
@@ -449,7 +452,7 @@ def test_model_omitted_guard_freezes_raw_id_while_form_withholds_it(tmp_path):
         assert public["expected_current"]["expected_package_install_id"] == {"visibility": "WITHHELD"}
         assert package[10:20] not in json.dumps(public)
         form_call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
-        assert (await form_call.execute())["status"] == "APPLIED"
+        assert (await form_call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
         explicit = await service.prepare({**intent, "expected_package_install_id": package})
         assert thaw_json(explicit.expected_current)["expected_package_install_id"] == package
         with pytest.raises(McpManagementConflict):

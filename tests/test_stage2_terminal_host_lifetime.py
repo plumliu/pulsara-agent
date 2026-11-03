@@ -40,12 +40,10 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
 from pulsara_agent.conversation_kernel.tool_runtime import (
     DirectKernelToolPort,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import (
+from pulsara_agent.conversation_kernel.tool_outputs import (
     CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
-    ToolOutputArtifactProcessor,
+    ToolOutputProcessor,
 )
-from pulsara_agent.conversation_kernel.contracts import BlobContent
-from pulsara_agent.ports.artifact import ToolResultDisplayKind
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
@@ -60,8 +58,6 @@ from pulsara_agent.primitives.run_permission import (
 from pulsara_agent.ports.tool_execution import (
     ToolCall,
     ToolExecutionResult,
-    ToolOutputArtifactCandidate,
-    ToolOutputSourceCoverage,
 )
 from tests.support.round3 import authorize_direct_tool, invoke_direct_tool
 
@@ -153,35 +149,24 @@ class _RecordingDeadlineFactory(KernelExecutionDeadlineFactory):
 
 
 def test_tool_result_preview_is_utf8_safe_and_obeys_final_hard_cap() -> None:
-    class Publisher:
-        def publish(self, **kwargs: object) -> BlobContent:
-            content = bytes(kwargs["content"])
-            return BlobContent(
-                "blob:test",
-                "sha256:" + __import__("hashlib").sha256(content).hexdigest(),
-                len(content),
-                "text/plain",
-                "utf-8",
-            )
-
-    processor = ToolOutputArtifactProcessor(object(), publisher=Publisher())  # type: ignore[arg-type]
+    from pulsara_agent.conversation_kernel.tool_result_display import project_native_tool_result
+    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+    from tests.support.tool_outputs import RecordingOutputPublisher
+    processor = ToolOutputProcessor(object(), publisher=RecordingOutputPublisher())
     text = "🙂" * 20_000
-    prepared = processor.prepare(
-        session_id='session:6ej3oydnee24zzis2etyixxioi',
-        workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
-        result_entry_id='entry:yizmduice57hcs52bz2usckgc4',
-        public_output=text,
-        candidate=ToolOutputArtifactCandidate(
-            role="OUTPUT",
-            text=text,
-            source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            original_utf8_bytes=len(text.encode("utf-8")),
-        ),
-        artifact_inline_result=False,
-        deadline_monotonic=float("inf"),
-    )
-    assert prepared.display_kind is ToolResultDisplayKind.HEAD_TAIL
+    session_id,entry_id = _name("session"),_name("entry")
+    body = processor.materialize_body(session_id=session_id,workspace_id=_name("workspace"),
+        result_entry_id=entry_id,public_output=text,output_body_candidate=None,
+        public_format=ToolOutputSourceFormatHint.TEXT,deadline_monotonic=float("inf"))
+    budget = ToolResultPageBudget(_name("call"), result_target={"kind":"SESSION_ENTRY","session_id":session_id,"entry_id":entry_id})
+    native,omitted = project_native_tool_result(public_output=text,native_output=None,page_complete=False,
+        required_facts={},output_available=True,output_unavailability_reason=None,page_budget=budget)
+    prepared = processor.prepare(body=body,native_output=native,output_omitted=omitted)
+    assert omitted and prepared.output_body.size == len(text.encode())
     assert prepared.canonical_preview.size <= CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES
+    assert budget.fits(native)
+    assert json.loads(native)["read"] == budget.read
     prepared.canonical_preview.canonical_bytes.decode("utf-8")
 
 

@@ -160,7 +160,7 @@ def test_input_observation_waits_past_echo_and_preserves_text_and_newlines(
     assert submitted.status is ToolResultState.SUCCESS
     assert payload["status"] == "running"
     assert "ANSWER:héllo\n" in payload["output"]
-    assert "READY\n" in payload["output"]  # Retained snapshot, not a new reply claim.
+    assert "READY\n" not in payload["output"]
     before = monotonic()
     ended = follow(terminal, "submit", pid, data="quit", yield_time_ms=1000)
     assert monotonic() - before < 0.8
@@ -178,7 +178,7 @@ def test_reading_failed_process_is_a_successful_observation(terminal, action):
     assert data["status"] == "error" and data["exit_code"] == 7
     assert data["output"] == "FAILURE_OUTPUT"
     assert data["error"] is None
-    assert observed.output_artifact_candidate.text == "FAILURE_OUTPUT"
+    assert observed.output_body_candidate.text == "FAILURE_OUTPUT"
 
 
 def test_capacity_failure_is_unstarted_and_kill_is_successful_control(terminal):
@@ -196,6 +196,20 @@ def test_capacity_failure_is_unstarted_and_kill_is_successful_control(terminal):
     assert killed.status is ToolResultState.SUCCESS
     assert json.loads(killed.output)["status"] == "killed"
     assert start(terminal, "printf CAPACITY_RELEASED").status is ToolResultState.SUCCESS
+
+
+def test_actual_small_command_keeps_full_js_value_and_one_native_tail(terminal):
+    expected = "x" * 6_000 + "\n"
+    result = start(
+        terminal, program("print('x' * 6000)"), max_output_chars=512,
+    )
+    assert result.status is ToolResultState.SUCCESS
+    assert json.loads(result.output)["output"] == expected
+    assert result.output_body_candidate.text == expected
+    native = json.loads(result.native_output)
+    assert native["output_preview"] == expected[-512:]
+    assert "output" not in native
+    assert native["exit_code"] == 0
 
 
 def test_cancellation_after_input_preserves_exact_result_and_does_not_resend(terminal):

@@ -736,26 +736,22 @@ CREATE TABLE pulsara_v3.tool_results (
         'POLICY', 'PLAN_CONTROL', 'CUSTOM_OR_UNKNOWN'
     )),
     tool_reported_duration_microseconds bigint,
-    output_artifact_disposition text NOT NULL DEFAULT 'NOT_REQUIRED'
-        CHECK (output_artifact_disposition IN (
-            'NOT_REQUIRED', 'AVAILABLE', 'INCOMPLETE', 'UNAVAILABLE'
-        )),
-    output_artifact_id text CHECK (output_artifact_id ~ '^artifact:[a-z2-7]{25}[aeimquy4]$'),
-    output_artifact_blob_id text,
+    output_body_inline_content bytea,
+    output_body_blob_id text,
+    output_body_digest text CHECK (output_body_digest ~ '^sha256:[0-9a-f]{64}$'),
+    output_body_size bigint CHECK (output_body_size >= 0 AND output_body_size <= 16777216),
+    output_body_media_type text,
+    output_body_codec text CHECK (output_body_codec = 'utf-8'),
+    output_unavailability_reason text CHECK (output_unavailability_reason IN (
+        'BODY_TOO_LARGE','BODY_PUBLICATION_FAILED','BODY_PUBLICATION_UNCONFIRMED'
+    )),
     output_source_coverage text NOT NULL DEFAULT 'COMPLETE'
-        CHECK (output_source_coverage IN ('COMPLETE', 'RETAINED_SNAPSHOT')),
-    output_display_kind text NOT NULL DEFAULT 'COMPLETE'
-        CHECK (output_display_kind IN ('COMPLETE', 'HEAD_TAIL')),
-    output_source_coverage_reason text
-        CHECK (output_source_coverage_reason IN (
-            'TERMINAL_RETENTION_GAP', 'TERMINAL_SANITIZER_UNAVAILABLE'
-        )),
-    output_artifact_unavailability_reason text
-        CHECK (output_artifact_unavailability_reason IN (
-            'ARTIFACT_CONTENT_TOO_LARGE',
-            'BLOB_PUBLICATION_FAILED',
-            'BLOB_PUBLICATION_UNCONFIRMED'
-        )),
+        CHECK (output_source_coverage IN ('COMPLETE','RETAINED_SNAPSHOT')),
+    output_source_coverage_reason text CHECK (output_source_coverage_reason IN (
+        'TERMINAL_RETENTION_GAP','TERMINAL_SANITIZER_UNAVAILABLE'
+    )),
+    output_omitted boolean NOT NULL DEFAULT false,
+    result_facts jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(result_facts)='object'),
     model_visible_memory_fact_ids text[] NOT NULL DEFAULT '{}'::text[] CHECK (
         cardinality(model_visible_memory_fact_ids) <= 50
         AND octet_length(array_to_json(model_visible_memory_fact_ids)::text) <= 8192
@@ -777,7 +773,7 @@ CREATE TABLE pulsara_v3.tool_results (
         ) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY (session_id, result_entry_id)
         REFERENCES pulsara_v3.transcript_entries (session_id, id) ON DELETE NO ACTION DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY (output_artifact_blob_id, workspace_id)
+    FOREIGN KEY (output_body_blob_id, workspace_id)
         REFERENCES pulsara_v3.blobs (id, workspace_id) ON DELETE RESTRICT,
     CHECK (
         (result_record_kind = 'IMPORTED_HISTORY'
@@ -847,35 +843,25 @@ CREATE TABLE pulsara_v3.tool_results (
         (output_source_coverage = 'COMPLETE'
             AND output_source_coverage_reason IS NULL) OR
         (output_source_coverage = 'RETAINED_SNAPSHOT'
+            AND output_source_coverage_reason IS NOT NULL
             AND output_source_coverage_reason IN (
                 'TERMINAL_RETENTION_GAP', 'TERMINAL_SANITIZER_UNAVAILABLE'
             ))
     ),
     CHECK (
-        (output_artifact_disposition = 'NOT_REQUIRED'
-            AND output_artifact_id IS NULL
-            AND output_artifact_blob_id IS NULL
-            AND output_artifact_unavailability_reason IS NULL
-            AND output_source_coverage = 'COMPLETE') OR
-        (output_artifact_disposition = 'AVAILABLE'
-            AND output_artifact_id IS NOT NULL
-            AND output_artifact_blob_id IS NOT NULL
-            AND output_artifact_unavailability_reason IS NULL
-            AND output_source_coverage = 'COMPLETE') OR
-        (output_artifact_disposition = 'INCOMPLETE'
-            AND output_artifact_id IS NOT NULL
-            AND output_artifact_blob_id IS NOT NULL
-            AND output_artifact_unavailability_reason IS NULL
-            AND output_source_coverage = 'RETAINED_SNAPSHOT') OR
-        (output_artifact_disposition = 'UNAVAILABLE'
-            AND output_artifact_id IS NULL
-            AND output_artifact_blob_id IS NULL
-            AND output_artifact_unavailability_reason IS NOT NULL)
+        (output_body_digest IS NULL AND output_body_inline_content IS NULL
+            AND output_body_blob_id IS NULL AND output_body_size IS NULL
+            AND output_body_media_type IS NULL AND output_body_codec IS NULL)
+        OR
+        (output_body_digest IS NOT NULL AND output_body_size IS NOT NULL
+            AND output_body_media_type IS NOT NULL AND output_body_codec IS NOT NULL
+            AND output_unavailability_reason IS NULL
+            AND ((output_body_inline_content IS NOT NULL AND output_body_blob_id IS NULL
+                    AND octet_length(output_body_inline_content)=output_body_size
+                    AND output_body_size <= 65536)
+                OR (output_body_inline_content IS NULL AND output_body_blob_id IS NOT NULL)))
     )
 );
-CREATE UNIQUE INDEX uq_pulsara_v3_tool_result_output_artifact_id
-    ON pulsara_v3.tool_results (session_id, output_artifact_id)
-    WHERE output_artifact_id IS NOT NULL;
 
 CREATE TABLE pulsara_v3.imported_tool_call_closures (
     session_id text NOT NULL,

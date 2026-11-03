@@ -2,6 +2,7 @@
 from pulsara_agent.identity import derive_id
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import replace
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
     from pulsara_agent.llm.adapters.openai.chat_completions import OpenAIChatCompletionsTransport
     from pulsara_agent.llm.input import PromptContent
     from pulsara_agent.llm.model_connections import ModelConnectionId
+    from pulsara_agent.primitives.model_call import ModelCallPurpose
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import (
         include_test_runtime_connections, test_model_binding, test_model_limits, test_model_runtime,
@@ -36,12 +38,19 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
     monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'product-home'))
     monkeypatch.setattr(host_module.LocalMcpManagementService, 'load_configs', lambda *_args, **_kwargs: ())
     requests = []
+    preview_active = ContextVar('context_preview_active', default=False)
+    preview_calls = []
+    preview_usage_writes = []
     pause = {}
     original_stream = OpenAIChatCompletionsTransport.stream
 
     async def stream(adapter, *, call, context):
-        requests.append(context.provider_wire_input_plan)
-        if pause:
+        if preview_active.get():
+            preview_calls.append(call.fact)
+        assert not preview_active.get(), 'UI preview opened a provider call'
+        if call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
+            requests.append(call.fact)
+        if pause and call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
             pause['started'].set()
             await pause['release'].wait()
         adapter._mock_chunks = [
@@ -58,6 +67,15 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
         core = KernelHostCore.production(model_runtime=runtime)
         session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=tmp_path))
         try:
+            record_usage = type(session.repository).record_provider_call_usage
+
+            def observed_usage(owner, observation, **kwargs):
+                if preview_active.get():
+                    preview_usage_writes.append(observation)
+                return record_usage(owner, observation, **kwargs)
+
+            monkeypatch.setattr(type(session.repository), 'record_provider_call_usage', observed_usage)
+
             async def read_preview():
                 # Expose an available memory port whose activation would fail.
                 # Neither same-model nor destination preview may enter it.
@@ -71,7 +89,14 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
                     patch.setattr(type(session._runner._provider_dispatch._tools), 'prepare_tool_surface_safe_point', unexpected)
                     # Test watchdog: a Host callback must not strand the preview
                     # while reacquiring the lock already owned by this read.
-                    return await asyncio.wait_for(session.read_context_usage(), timeout=30)
+                    token = preview_active.set(True)
+                    try:
+                        value = await asyncio.wait_for(session.read_context_usage(), timeout=30)
+                        assert not preview_calls, 'UI preview opened a provider call'
+                        assert not preview_usage_writes, 'UI preview wrote provider usage'
+                        return value
+                    finally:
+                        preview_active.reset(token)
 
             await session.update_model_call_binding(test_model_binding(runtime))
             slots_before = dict(session._input_continuity._slots)
@@ -114,7 +139,11 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             assert len(requests) == 1
             assert session._input_continuity.current_cohort(scope) is cohort
             assert session._input_continuity.current_usage_anchor(scope) is anchor
-            assert len((await core.read_provider_call_usage_page(session_id=session.session_id)).usages) == 1
+            usages = (await core.read_provider_call_usage_page(session_id=session.session_id)).usages
+            # Title and suggestion calls run independently of the main loop.
+            root_call_ids = {request.resolved_model_call_id for request in requests}
+            assert [usage['resolved_model_call_id'] for usage in usages
+                    if usage['resolved_model_call_id'] in root_call_ids] == [requests[0].resolved_model_call_id]
             session._compaction.policy = replace(session._compaction.policy, enabled=True)
             await session.update_model_call_binding(test_model_binding(runtime))
             pause.update(started=asyncio.Event(), release=asyncio.Event())
@@ -142,7 +171,8 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             await session.update_model_call_binding(test_model_binding(runtime))
             await session.request_capability_refresh(change('preview-notice'))
             await session._adopt_capabilities_if_requested()
-            pending = session._pending_capability_change
+            pending = await session.freeze_capability_change()
+            assert pending is not None
             installed = session._input_continuity.current_cohort(scope)
             dispatch = session._runner._provider_dispatch
             prepare = dispatch.prepare_compaction_source
@@ -157,7 +187,7 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
             assert (await read_preview())['state'] == 'ready'
             assert projections[-1].sources.capability_change == pending
             assert len(_notices(projections[-1].projection.projected_input)) == 1
-            assert session._pending_capability_change is pending
+            assert session._capability_notification_revision == pending.revision
             assert session._input_continuity.current_cohort(scope) is installed
             assert len(requests) == 2
 
@@ -192,7 +222,7 @@ def test_host_context_preview_is_model_specific_and_does_not_open_or_install(
                 result, _ = await asyncio.wait_for(asyncio.gather(preview, close), timeout=30)
                 assert result['state'] == 'ready'
                 assert session._closed
-                assert session._pending_capability_change is pending
+                assert session._capability_notification_revision == pending.revision
                 assert len(requests) == 2
             finally:
                 release.set()

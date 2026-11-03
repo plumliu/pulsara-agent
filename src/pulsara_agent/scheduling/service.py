@@ -29,6 +29,8 @@ from pulsara_agent.scheduling.contracts import (
     next_occurrence,
 )
 from pulsara_agent.workspace_identity import WorkspaceUnavailable
+from pulsara_agent.primitives.context import canonical_json_bytes
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
 
 _LOG = logging.getLogger(__name__)
 
@@ -49,6 +51,28 @@ def model_task_payload(payload: dict) -> dict:
         "session": {"kind": "SESSION", "session_id": payload["session_id"]},
         **{key: value for key, value in payload.items() if key not in {"id", "session_id"}},
     }
+
+
+def model_task_summary(payload: dict) -> dict:
+    value = model_task_payload(task_payload(payload))
+    result = {key: value[key] for key in (
+        "target", "session", "revision", "status", "schedule", "timezone", "permission_mode", "next_run_at"
+    ) if key in value}
+    result["inspect"] = {"tool": "query_schedules", "arguments": {"target": result["target"]}}
+    return result
+
+
+def model_management_receipt(action, payload):
+    if action == "switch":
+        return {"action": action, **{key: model_task_summary(payload[key]) for key in ("paused", "active")}}
+    if action == "delete":
+        return {"action": action, "target": schedule_target(payload["id"]), "deleted": True}
+    return {"action": action, **model_task_summary(payload)}
+
+
+def _require_model_result(page_budget, value):
+    if not page_budget.fits(canonical_json_bytes(value).decode("utf-8")):
+        raise ToolResultPageBoundary("The minimum schedule result does not fit this call's result allowance")
 
 
 class ScheduledTaskService:
@@ -131,9 +155,10 @@ class ScheduledTaskService:
                 payload["prepare_error"] = "时间规则已超出可表示范围，请修改规则。"
         return payload
 
-    async def list(self, *, cursor=None, status=None, session_id=None):
+    async def list(self, *, cursor=None, status=None, session_id=None, model_summary=False):
         rows, cursor = await self._read(
-            "list_scheduled_tasks", cursor=cursor, status=status, session_id=session_id
+            "list_scheduled_tasks", cursor=cursor, status=status, session_id=session_id,
+            **({"model_summary": True} if model_summary else {})
         )
         return {"tasks": [self._payload(row) for row in rows], "next_cursor": cursor}
 
@@ -147,18 +172,19 @@ class ScheduledTaskService:
             raise KeyError(task_id)
         return self._payload(row)
 
-    async def create(self, *, session_id, values, status=None):
+    async def create(self, *, session_id, values, status=None, result_check=None):
         row = await self._manage(
             "create_scheduled_task",
             session_id=session_id,
             values=values,
             status=status,
             model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
+            **({"result_check": result_check} if result_check is not None else {}),
         )
         self.wake()
         return self._payload(row)
 
-    async def mutate(self, *, task_id, expected_revision, action, values=None):
+    async def mutate(self, *, task_id, expected_revision, action, values=None, result_check=None):
         row = await self.get(task_id)
         result = await self._manage(
             "mutate_scheduled_task",
@@ -167,12 +193,13 @@ class ScheduledTaskService:
             expected_revision=expected_revision,
             action=action,
             values=values,
+            **({"result_check": result_check} if result_check is not None else {}),
         )
         self._prepare_errors.pop(task_id, None)
         self.wake()
         return None if result is None else self._payload(result)
 
-    async def switch(self, *, task_id, expected_revision, replacement):
+    async def switch(self, *, task_id, expected_revision, replacement, result_check=None):
         validate_action(
             dict(
                 action="switch",
@@ -189,13 +216,14 @@ class ScheduledTaskService:
             expected_revision=expected_revision,
             replacement=replacement,
             model_resolution_snapshot=self.sessions.core._model_runtime.freeze_resolution_snapshot(),
+            **({"result_check": result_check} if result_check is not None else {}),
         )
         self._prepare_errors.pop(task_id, None)
         self._prepare_errors.pop(active["id"], None)
         self.wake()
         return {"paused": self._payload(paused), "active": self._payload(active)}
 
-    async def invoke_query(self, arguments, *, default_session_id, permission_mode):
+    async def invoke_query(self, arguments, *, default_session_id, permission_mode, page_budget):
         value = dict(validate_query(dict(arguments)))
         if "target" in value:
             return model_task_payload(await self.get(value["target"]["task_id"]))
@@ -204,13 +232,23 @@ class ScheduledTaskService:
         value["session_id"] = (
             default_session_id if session is None else session["session_id"]
         )
-        page = await self.list(**value)
-        return {
-            "tasks": [model_task_payload(task) for task in page["tasks"]],
-            "next_cursor": page["next_cursor"],
-        }
+        page = await self.list(**value, model_summary=True)
+        tasks = page["tasks"]
+        for count in range(len(tasks), -1, -1):
+            if tasks and count == 0:
+                break
+            selected = tasks[:count]
+            more = count < len(tasks) or page["next_cursor"] is not None
+            result = {"tasks": [model_task_summary(task) for task in selected],
+                "next": {"tool": "query_schedules", "arguments": {
+                    "session": {"kind": "SESSION", "session_id": value["session_id"]},
+                    **({"status": value["status"]} if "status" in value else {}),
+                    "cursor": selected[-1]["id"]}} if more else None}
+            if page_budget.fits(canonical_json_bytes(result).decode("utf-8")):
+                return result
+        raise ToolResultPageBoundary("The minimum schedule page does not fit this call's result allowance")
 
-    async def invoke_manage(self, arguments, *, default_session_id, permission_mode):
+    async def invoke_manage(self, arguments, *, default_session_id, permission_mode, page_budget):
         value = dict(validate_action(dict(arguments)))
         action = value.pop("action")
         if action == "create" and value.get("session") is None:
@@ -239,14 +277,16 @@ class ScheduledTaskService:
             value["session_id"] = value.pop("session")["session_id"]
         if "target" in value:
             value["task_id"] = value.pop("target")["task_id"]
+        def result_check(payload):
+            _require_model_result(page_budget, model_management_receipt(action, payload))
         if action == "create":
-            result = await self.create(**value)
+            result = await self.create(**value, result_check=result_check)
         elif action == "switch":
-            result = await self.switch(**value)
-            return {key: model_task_payload(result[key]) for key in ("paused", "active")}
+            result = await self.switch(**value, result_check=result_check)
+            return model_management_receipt(action, result)
         else:
-            result = await self.mutate(action=action, **value)
-        return None if result is None else model_task_payload(result)
+            result = await self.mutate(action=action, **value, result_check=result_check)
+        return model_management_receipt(action, {"id": value["task_id"]} if action == "delete" else result)
 
     async def preview(self, *, schedule, timezone):
         rule = validate_rule(schedule, timezone)

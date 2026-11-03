@@ -139,6 +139,7 @@ from tests.support.model_config import test_model_runtime
 
 def new_test_provider_input_continuity_owner(
     session_id: str = "session:336wrfwkamrr3up6kjtsgvgcte",
+    *, session_kind: ModelInputScopeKind = ModelInputScopeKind.ROOT,
 ) -> HostProviderInputContinuityOwner:
     """Build a unit-test Host owner from an exact synthetic session genesis."""
 
@@ -153,6 +154,7 @@ def new_test_provider_input_continuity_owner(
     )
     return HostProviderInputContinuityOwner(
         root_lease_source=_issue_root_bootstrap_lease_source(writer_lease),
+        session_kind=session_kind,
     )
 
 
@@ -1486,6 +1488,8 @@ def direct_tool_invocation_context(
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION,
         )
         borrow.execution_binding(tool_name)
+        from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+        result_entry_id = derive_id("entry", "test-fixture", f"result:{attempt_id}")
         return borrow, KernelToolInvocationContext(
             session_id=session_id,
             workspace_id=workspace_id,
@@ -1493,7 +1497,7 @@ def direct_tool_invocation_context(
             assistant_entry_id=assistant_entry_id,
             tool_call_id=tool_call_id,
             attempt_id=attempt_id,
-            result_entry_id=derive_id("result", "test-fixture", f"result:{attempt_id}"),
+            result_entry_id=result_entry_id,
             conversation_scope_kind=conversation_scope_kind.value,
             host_owner_epoch=1,
             authorization_reference="test:authorized",
@@ -1501,6 +1505,8 @@ def direct_tool_invocation_context(
             permission_snapshot_fingerprint=permission.snapshot_fingerprint,
             attempt_permission_snapshot_fingerprint=(permission.snapshot_fingerprint),
             surface_borrow=borrow,
+            page_budget=ToolResultPageBudget(tool_call_id=tool_call_id,
+                result_target={"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": result_entry_id}),
             memory_context=memory_context or _enabled_memory_context(),
         )
     except BaseException:

@@ -43,28 +43,33 @@ def test_relative_glob_and_exact_basename(tree, pattern, expected):
 def test_all_content_modes_pages_and_odd_names(tree):
     tool = SearchContentTool(tree)
     first = invoke(tool, pattern='needle', limit=1)
-    assert first['total_count'] == 14
-    assert first['matches'] == [{"target": {"kind": "PATH", "path": 'A.py'}, 'line': 1, 'content': 'needle needle'}]
-    assert first['_hint'].endswith('offset=1.')
-    second = invoke(tool, pattern='needle', limit=1, offset=1)
+    assert 'total_count' not in first and first['status'] == 'ok'
+    assert first['matches'][0]['target'] == {"kind": "PATH", "path": 'A.py'}
+    assert first['matches'][0]['line'] == 1 and first['matches'][0]['excerpt'] == 'needle needle'
+    assert first['matches'][0]['excerpt_partial'] is False
+    assert first['next']['tool'] == tool.name
+    second = invoke(tool, **first['next']['arguments'])
     assert second['matches'][0]['line'] == 2
     files = invoke(tool, pattern='needle', output_mode='files_only')
     assert [item["path"] for item in files["targets"]] == sorted(['A.py', 'z.py', 'src/a.py', 'src/deep/a.py', 'colon:name.py', 'new\nline.py', 'other.txt'])
-    counts = invoke(tool, pattern='needle', output_mode='count', limit=1, offset=2)
-    assert counts['total_count'] == 14
-    assert {item["target"]["path"]: item["count"] for item in counts["counts"]} == {'new\nline.py': 2}
-    assert counts['truncated'] and counts['_hint'].endswith('offset=3.')
-    final = invoke(tool, pattern='needle', output_mode='count', offset=6)
-    assert {item["target"]["path"]: item["count"] for item in final["counts"]} == {'z.py': 2} and not final['truncated']
-    assert {item["target"]["path"]: item["count"] for item in invoke(tool, pattern='needle', output_mode='count', offset=100)["counts"]} == {}
-    assert 'target' not in counts
+    counts = invoke(tool, pattern='needle', output_mode='count', limit=1)
+    counts = invoke(tool, **counts['next']['arguments'])
+    counts = invoke(tool, **counts['next']['arguments'])
+    assert counts['counts'] == [{'target': {'kind': 'PATH', 'path': 'new\nline.py'}, 'count': 2}]
+    collected = list(counts['counts'])
+    while counts['next'] is not None:
+        counts = invoke(tool, **counts['next']['arguments'])
+        collected.extend(counts['counts'])
+    assert {item['target']['path'] for item in collected} == {'new\nline.py', 'other.txt', 'src/a.py', 'src/deep/a.py', 'z.py'}
+    assert sum(item['count'] for item in collected) == 10
+    assert counts['next'] is None and 'total_count' not in counts
 
 
 def test_single_file_filter_leading_option_and_invalid_regex(tree):
     tool = SearchContentTool(tree)
-    assert invoke(tool, pattern='-needle', target={"kind":"PATH","path":'colon:name.py'})['total_count'] == 1
+    assert len(invoke(tool, pattern='-needle', target={"kind":"PATH","path":'colon:name.py'})['matches']) == 1
     assert invoke(tool, pattern='needle', target={"kind":"PATH","path":'colon:name.py'}, file_glob='other.py')['matches'] == []
-    assert invoke(tool, pattern='needle', target={"kind":"PATH","path":'src'}, file_glob='*.py')['total_count'] == 4
+    assert len(invoke(tool, pattern='needle', target={"kind":"PATH","path":'src'}, file_glob='*.py')['matches']) == 4
     assert [item["path"] for item in invoke(FindFilesTool(tree), glob='*.py', target={"kind":"PATH","path":'colon:name.py'})["targets"]] == ['colon:name.py']
     with pytest.raises(RuntimeError, match='regex'):
         invoke(tool, pattern='(', file_glob='no-match')
@@ -108,7 +113,8 @@ def test_private_backend_config_ignore_hidden_binary_symlink(tree, monkeypatch):
     assert files == ['A.py', 'colon:name.py', 'new\nline.py', 'src/a.py', 'src/deep/a.py']
     tool = SearchContentTool(tree)
     for mode in ['content', 'files_only', 'count']:
-        assert invoke(tool, pattern='needle', output_mode=mode)['total_count'] == (6 if mode == 'files_only' else 12)
+        result = invoke(tool, pattern='needle', output_mode=mode)
+        assert (len(result['targets']) if mode == 'files_only' else sum(item['count'] for item in result['counts']) if mode == 'count' else len(result['matches'])) == (6 if mode == 'files_only' else 12)
     with pytest.raises(RuntimeError):
         invoke(tool, pattern='(?=needle)')
 
@@ -137,9 +143,16 @@ def test_closed_aliases_and_repeat_state_pages(tree):
     assert tool_matcher_subject('search_content').candidates == ('search_content', 'Grep')
     assert tool_matcher_subject('find_files').candidates == ('find_files', 'Glob')
     assert tool_matcher_subject('read_file').candidates == ('read_file', 'Read')
-    for offset in range(5):
-        assert [item["path"] for item in invoke(FindFilesTool(tree), glob='*.py', offset=offset, limit=1)["targets"]]
-        assert invoke(SearchContentTool(tree), pattern='needle', offset=offset, limit=1)['matches']
+    for tool, arguments, key in [(FindFilesTool(tree), {'glob': '*.py', 'limit': 1}, 'targets'),
+                                  (SearchContentTool(tree), {'pattern': 'needle', 'limit': 1}, 'matches')]:
+        pages = []
+        while True:
+            page = invoke(tool, **arguments)
+            pages.extend(page[key])
+            if page['next'] is None:
+                break
+            arguments = page['next']['arguments']
+        assert len(pages) == (6 if key == 'targets' else 14)
 
 
 @pytest.mark.parametrize('condition', ['missing', 'nonexecutable', 'wrong-version', 'not-an-executable'])
@@ -183,7 +196,7 @@ def test_hook_review_observes_full_sealed_builtin_owner_composition(tmp_path):
     from tests.support.round3 import prepare_test_direct_tool_surface
     async def exercise():
         port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='review-host', session_id='session:zazc4gzsyde7brlnkyse2hjvpm', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
-        port.bind_subagent_port(SimpleNamespace(tool_names=('spawn_agent',)))
+        port.bind_subagent_port(SimpleNamespace(tool_names=('run_agent',)))
         port.bind_memory_port(SimpleNamespace(tool_names=('get_memory', 'remember')))
         try:
             prepare_test_direct_tool_surface(port)
@@ -192,8 +205,8 @@ def test_hook_review_observes_full_sealed_builtin_owner_composition(tmp_path):
                 catalog_snapshot=SimpleNamespace(servers=(SimpleNamespace(tool_surface_semantic_fingerprint=None),)))
             subjects, complete = port.observe_hook_review_tools()
             names = {subject.canonical_subject for subject in subjects}
-            assert {'spawn_agent', 'get_memory', 'remember', 'find_files', 'search_content', 'mcp__actual__read'} <= names
-            assert 'Agent' in next(subject.candidates for subject in subjects if subject.canonical_subject == 'spawn_agent')
+            assert {'run_agent', 'get_memory', 'remember', 'find_files', 'search_content', 'mcp__actual__read'} <= names
+            assert 'Agent' in next(subject.candidates for subject in subjects if subject.canonical_subject == 'run_agent')
             assert complete is False
         finally:
             await port.aclose()

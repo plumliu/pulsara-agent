@@ -146,7 +146,7 @@ def test_tool_result_source_roundtrip_keeps_imported_group_separate_from_executi
 ):
     from dataclasses import replace
     from pulsara_agent.primitives.tool_result_projection import (
-        _maximum_artifact_page_timing,
+        _maximum_tool_result_page_timing,
         _minimum_full_projection_timing,
         render_provider_tool_result_logical_message,
         decode_provider_tool_result_observation,
@@ -157,7 +157,7 @@ def test_tool_result_source_roundtrip_keeps_imported_group_separate_from_executi
         provider_visible_turn_ref,
     )
 
-    maximum = _maximum_artifact_page_timing()
+    maximum = _maximum_tool_result_page_timing()
     provisional = object.__new__(type(maximum))
     for name in maximum.__dataclass_fields__:
         object.__setattr__(provisional, name, getattr(maximum, name))
@@ -304,3 +304,10 @@ def test_terminal_random_collision_retries_before_publication_and_keeps_sibling(
         )
     finally:
         registry.release_owner("round5:host", timeout_seconds=2)
+
+
+def test_removed_artifact_kind_is_not_an_identity():
+    with pytest.raises(ValueError, match="unknown"):
+        random_id("artifact")
+    with pytest.raises(ValueError):
+        require_id("artifact:" + "a" * 26, "artifact")

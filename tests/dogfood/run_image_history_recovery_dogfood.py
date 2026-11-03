@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 from pulsara_agent.identity import random_id
 
 import argparse
@@ -49,6 +51,10 @@ from pulsara_agent.workspace_identity import HostWorkspaceInput
 from pulsara_agent.ports.session_content import SessionContentRange
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.dogfood.credentials import secret_scrubber
+
+
+def _cursor(page):
+    return None if page["next"] is None else page["next"]["arguments"]["cursor"]
 
 
 class SummaryGate:
@@ -384,20 +390,22 @@ async def run(args, report, saved):
                 {},
                 current_range=SessionContentRange(snapshot["source_through_sequence"]),
                 tool_call_id="call:recovery-probe",
+                page_budget=ToolResultPageBudget(tool_call_id="call:recovery-probe"),
                 deadline_monotonic=monotonic() + 30,
             )
             pages = [page]
             while (
                 fixtures[1]["image_ref"] not in json.dumps(pages)
-                and page["next_cursor"]
+                and _cursor(page)
             ):
                 page = query.invoke(
                     "read_session_content",
-                    {"cursor": page["next_cursor"]},
+                    {"cursor": _cursor(page)},
                     current_range=SessionContentRange(
                         snapshot["source_through_sequence"]
                     ),
                     tool_call_id="call:recovery-probe",
+                    page_budget=ToolResultPageBudget(tool_call_id="call:recovery-probe"),
                     deadline_monotonic=monotonic() + 30,
                 )
                 pages.append(page)

@@ -18,7 +18,6 @@ from pulsara_agent.conversation_kernel.repository import ConversationKernelConfl
 
 import codecs
 import json
-from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -88,6 +87,25 @@ def browser_history_uint64(value: object, label: str) -> int:
     if not 0 <= result <= (1 << 64) - 1:
         raise ValueError(f"{label} must be an exact uint64")
     return result
+
+
+def browser_tool_output_request(body: Mapping[str, object]) -> wire.ReadToolOutputRequest:
+    """Build the same exact text request for live and cold browser readers."""
+    if set(body) - {"result_entry_id", "position", "max_chars"}:
+        raise ValueError("unknown tool output request fields")
+    entry_id = body.get("result_entry_id")
+    if not is_valid_id(entry_id, "entry"):
+        raise ValueError("tool output requires a canonical entry ID")
+    position = body.get("position", {"line": 1, "char_offset": 0})
+    if not isinstance(position, Mapping) or set(position) - {"line", "char_offset"}:
+        raise ValueError("tool output position must contain line and char_offset")
+    line = browser_history_uint64(position.get("line", 1), "output line")
+    column = browser_history_uint64(position.get("char_offset", 0), "output column")
+    maximum = browser_history_uint64(body.get("max_chars", 32_000), "output page size")
+    if line < 1 or not 1 <= maximum <= 32_000:
+        raise ValueError("tool output page is outside its browser resource boundary")
+    return wire.ReadToolOutputRequest(result_entry_id=entry_id,
+        position=wire.ToolOutputTextPosition(line=line, char_offset=column), max_chars=maximum)
 
 
 def _browser_wire(message: Message) -> dict[str, object]:
@@ -219,7 +237,7 @@ class CanonicalProtocolReader:
             # The repeatable-read transaction fixes every control field except
             # the unresolved attempts admitted by the growing entry window.
             # Read the session-wide sections once, then update only that slice.
-            empty_snapshot = self._snapshot_value(session=session, session_id=session_id,
+            snapshot = self._snapshot_value(session=session, session_id=session_id,
                 cut=cut, entries=(), control=wire.CanonicalControl(), has_older=bool(rows), notices=())
             control = self._control(
                 connection,
@@ -228,17 +246,9 @@ class CanonicalProtocolReader:
                 maximum_items=maximum_control_items,
                 entry_sequence_floor=cut + 1,
                 maximum_serialized_bytes=max(0, maximum_serialized_bytes
-                    - empty_snapshot.ByteSize() - _SNAPSHOT_FINGERPRINT_WIRE_BYTES - 8),
+                    - snapshot.ByteSize() - _SNAPSHOT_FINGERPRINT_WIRE_BYTES - 8),
             )
-            snapshot = self._snapshot_value(
-                session=session,
-                session_id=session_id,
-                cut=cut,
-                entries=(),
-                control=control,
-                has_older=bool(rows),
-                notices=(),
-            )
+            snapshot.control.CopyFrom(control)
             if snapshot.ByteSize() + _SNAPSHOT_FINGERPRINT_WIRE_BYTES > maximum_serialized_bytes:
                 raise CanonicalProtocolResourceExhausted(
                     "canonical control cannot fit snapshot"
@@ -1445,31 +1455,12 @@ class CanonicalProtocolReader:
                 )
             return dict(row)
 
-    def resolve_tool_artifact_reference(
-        self,
-        *,
-        session_id: str,
-        result_entry_id: str,
-        deadline_monotonic: float,
-        read_connection=None,
-    ) -> Mapping[str, object]:
-        """Resolve one browser-visible result entry to its canonical artifact edge."""
-        with (nullcontext(read_connection) if read_connection is not None else self._connection(deadline_monotonic)) as connection:
-            self._session(connection, session_id)
-            row = connection.execute(
-                """
-                SELECT workspace_id, output_artifact_id,
-                       output_artifact_disposition, output_source_coverage,
-                       output_display_kind, output_source_coverage_reason,
-                       output_artifact_unavailability_reason
-                FROM pulsara_v3.tool_results
-                WHERE session_id = %s AND result_entry_id = %s
-                """,
-                (session_id, result_entry_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(result_entry_id)
-            return dict(row)
+    def tool_output_workspace(
+        self, *, session_id: str, deadline_monotonic: float,
+    ) -> str:
+        """Resolve the already authorized browser session's workspace."""
+        with self._connection(deadline_monotonic) as connection:
+            return str(self._session(connection, session_id)["workspace_id"])
 
     def _resolve_reasoning_content(
         self,
@@ -1546,7 +1537,7 @@ class CanonicalProtocolReader:
         """
         if not rows:
             return
-        session_scope = _session_scope(connection, str(rows[0]["session_id"]))
+        session_scope = str(relations[str(rows[0]["id"])]["session_scope"])
         eligible = {
             str(row["id"]) for row in rows
             if row["entry_kind"] in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}
@@ -1722,12 +1713,13 @@ class CanonicalProtocolReader:
             raise ValueError("entry relation set crosses canonical sessions")
         values = connection.execute(
             """SELECT e.id AS relation_entry_id,
+                      CASE WHEN session.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS session_scope,
                       result.id AS tool_result_id, result.attempt_id, result.tool_call_entry_id, result.tool_call_id,
                       invocation.id AS invocation_id, invocation.source_kind, invocation.source_exec_attempt_id,
                       invocation.call_sequence, invocation.tool_name, invocation.original_arguments,
-                      result.result_state, result.output_artifact_disposition, result.output_source_coverage,
-                      result.output_display_kind, result.output_source_coverage_reason,
-                      result.output_artifact_unavailability_reason,
+                      result.result_state, result.result_facts, (result.output_body_inline_content IS NOT NULL OR result.output_body_blob_id IS NOT NULL) AS output_body_available, result.output_source_coverage,
+                      result.output_omitted, result.output_source_coverage_reason,
+                      result.output_unavailability_reason,
                       queue.id AS queue_item_id, queue.command_id, queue.delivery_mode, queue.source_session_id, queue.source_work_id,
                       queue.source_turn_id, queue.source_tool_attempt_id,
                       revision.command_id AS revision_command_id,
@@ -1746,6 +1738,7 @@ class CanonicalProtocolReader:
                         WHERE e.entry_kind='ASSISTANT_MESSAGE'
                           AND replay.session_id=e.session_id AND replay.assistant_entry_id=e.id) AS has_replay
                FROM pulsara_v3.transcript_entries e
+               JOIN pulsara_v3.sessions session ON session.id=e.session_id
                LEFT JOIN pulsara_v3.turns t ON e.entry_owner_kind='EXECUTED_TURN' AND t.session_id=e.session_id AND t.id=e.turn_id
                LEFT JOIN pulsara_v3.imported_history_groups g ON e.entry_owner_kind='IMPORTED_HISTORY'
                  AND g.session_id=e.session_id AND g.id=e.imported_history_group_id
@@ -1777,11 +1770,13 @@ class CanonicalProtocolReader:
     def _entry(self, connection: Any, row: Mapping[str, object], *, relations=None, assistant_parts=None, session_scope=None) -> wire.CanonicalEntry:
         from pulsara_agent.conversation_kernel.fork_history import read_fork_anchor
         from pulsara_agent.conversation_kernel.reader import historical_source_attribution
-        session_scope = session_scope or _session_scope(connection, str(row["session_id"]))
         stored_row = row
         row = historical_source_attribution(row)
         entry_id = str(row["id"])
         related = None if relations is None else relations[entry_id]
+        if session_scope is None:
+            session_scope = (str(related["session_scope"]) if related is not None
+                             else _session_scope(connection, str(row["session_id"])))
         root_assistant = row["entry_kind"] == "ASSISTANT_MESSAGE"
         combined_assistant = row["entry_kind"] in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"} and not root_assistant
         replay = None
@@ -1858,10 +1853,10 @@ class CanonicalProtocolReader:
                 tool_result = connection.execute(
                     """SELECT result.attempt_id, result.tool_call_entry_id, result.tool_call_id, result.result_state,
                               invocation.id AS invocation_id, invocation.source_kind, invocation.source_exec_attempt_id,
-                              invocation.call_sequence, invocation.tool_name, invocation.original_arguments,
-                              output_artifact_disposition, output_source_coverage,
-                              output_display_kind, output_source_coverage_reason,
-                              output_artifact_unavailability_reason
+                              invocation.call_sequence, invocation.tool_name, invocation.original_arguments, result.result_facts,
+                              (output_body_inline_content IS NOT NULL OR output_body_blob_id IS NOT NULL) AS output_body_available, output_source_coverage,
+                              output_omitted, output_source_coverage_reason,
+                              output_unavailability_reason
                        FROM pulsara_v3.tool_results result
                        JOIN pulsara_v3.tool_invocations invocation
                          ON invocation.session_id=result.session_id AND invocation.id=result.invocation_id
@@ -1881,11 +1876,12 @@ class CanonicalProtocolReader:
                 original_arguments_json=(json.dumps(tool_result["original_arguments"], ensure_ascii=False) if tool_result["original_arguments"] is not None else ""),
                 tool_call_id=str(tool_result["tool_call_id"]),
                 result_state=str(tool_result["result_state"]),
-                artifact_disposition=str(tool_result["output_artifact_disposition"]),
+                result_facts_json=json.dumps(tool_result["result_facts"], ensure_ascii=False, separators=(",", ":")),
+                output_body_available=bool(tool_result["output_body_available"]),
                 source_coverage=str(tool_result["output_source_coverage"]),
-                display_kind=str(tool_result["output_display_kind"]),
+                output_omitted=bool(tool_result["output_omitted"]),
                 source_coverage_reason=str(tool_result["output_source_coverage_reason"] or ""),
-                artifact_unavailability_reason=str(tool_result["output_artifact_unavailability_reason"] or ""),
+                output_unavailability_reason=str(tool_result["output_unavailability_reason"] or ""),
             ))
         if (
             row["entry_owner_kind"] == "EXECUTED_TURN"

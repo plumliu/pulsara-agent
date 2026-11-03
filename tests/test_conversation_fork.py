@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from tests.support.tool_outputs import prepare_output
 from tests.support.images import bound_test_image
 
 from pulsara_agent.identity import random_id
@@ -40,7 +42,6 @@ from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     CompactionSnapshotCarrier,
     FrozenProviderInputItemKind,
-    StructuredModelInputLimits,
     provider_input_item_text,
 )
 from pulsara_agent.model_input.lowering import lower_canonical_item
@@ -391,8 +392,6 @@ def test_historical_snapshot_ignores_future_idle_compaction_and_retains_exact_re
     ]
     snapshot_projection = lower_canonical_item(
         actual.items[0],
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     assert snapshot_projection.fixed_message is not None
     assert "C2 future summary" not in join_text_content(
@@ -559,17 +558,18 @@ def test_fork_atomic_rollback_and_sealed_prefix(repo, monkeypatch):
 
 
 @pytest.mark.parametrize("late", [False, True])
-def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late):
-    from tests.test_round1_tool_output_artifact import _install_tool_call
-    from pulsara_agent.conversation_kernel.tool_artifacts import (
-        ToolOutputArtifactProcessor,
-        PostgresToolArtifactReadPort,
+def test_fork_tool_body_and_late_closure_are_history_only(repo, late):
+    from tests.support.tool_outputs import _install_tool_call
+    from pulsara_agent.conversation_kernel.tool_outputs import (
+        ToolOutputProcessor,
+        PostgresToolOutputReadPort,
     )
     from pulsara_agent.conversation_kernel.repository import (
         build_prepared_tool_result_acceptance,
         ConversationKernelConflict,
     )
     from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
+    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
     from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
 
     workspace = identity("workspace")
@@ -589,14 +589,16 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
     notice_before = protocol_reader.snapshot(session_id=lease.guard.session_id,
         maximum_entries=256, maximum_control_items=128, deadline_monotonic=monotonic()+30).interruption_notices
     result_id = identity("entry")
-    source = "large historical artifact\n" * 4000
-    projection = ToolOutputArtifactProcessor(repo.connection_provider).prepare(
+    source = "large historical output\n" * 4000
+    projection = prepare_output(ToolOutputProcessor(repo.connection_provider),
         session_id=lease.guard.session_id,
         workspace_id=workspace,
         result_entry_id=result_id,
         public_output=source,
-        candidate=None,
-        artifact_inline_result=False,
+        native_output="saved output preview",
+        output_body_candidate=None,
+        output_omitted=True,
+        public_format=ToolOutputSourceFormatHint.TEXT,
         deadline_monotonic=monotonic() + 30,
     )
     candidate = build_prepared_tool_result_acceptance(
@@ -610,13 +612,12 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
         attempt_id=attempt,
         result_state="SUCCESS",
         canonical_preview_content=projection.canonical_preview,
-        artifact_disposition=projection.artifact_disposition,
-        artifact_id=projection.artifact_id,
-        artifact_blob_descriptor=projection.artifact_blob,
+        output_body=projection.output_body,
         source_coverage=projection.source_coverage,
-        display_kind=projection.display_kind,
+        output_omitted=projection.output_omitted,
         source_coverage_reason=projection.source_coverage_reason,
-        artifact_unavailability_reason=projection.artifact_unavailability_reason,
+        output_unavailability_reason=projection.output_unavailability_reason,
+        required_facts={"exit_code": 0, "status": "exited"},
         actor_id="terminal",
         observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
@@ -655,10 +656,8 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
         and imported["attempt_id"] is None
         and imported["permission_snapshot_fingerprint"] is None
     )
-    assert (
-        imported["output_artifact_id"] == projection.artifact_id
-        and imported["output_artifact_blob_id"] == projection.artifact_blob.blob_id
-    )
+    assert imported["output_body_blob_id"] == projection.output_body.blob_id
+    assert imported["result_facts"] == {"exit_code": 0, "status": "exited"}
     closure = rows(
         repo,
         "SELECT * FROM pulsara_v3.imported_tool_call_closures WHERE session_id=%s",
@@ -715,10 +714,10 @@ def test_fork_tool_result_artifact_and_late_closure_are_history_only(repo, late)
     PostgresCanonicalBlobStore(repo.connection_provider).delete_orphans(
         grace_seconds=1, maximum_items=100, deadline_monotonic=monotonic() + 30
     )
-    view = PostgresToolArtifactReadPort(
+    view = PostgresToolOutputReadPort(
         repo.connection_provider, session_id=child, workspace_id=workspace
-    ).read_text(projection.artifact_id, offset_chars=0, max_chars=1000)
-    assert view.text == source[:1000]
+    ).read_body({"kind": "SESSION_ENTRY", "entry_id": imported["result_entry_id"]})
+    assert view.content.decode() == source
     nested = fork(
         repo,
         child,
@@ -1468,8 +1467,6 @@ def test_image_snapshot_adoption_and_fork_keep_child_readable_after_old_owner_de
     assert isinstance(snapshot_item.content, CompactionSnapshotCarrier)
     lowered = lower_canonical_item(
         snapshot_item,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     assert lowered.fixed_message is not None
     assert tuple(

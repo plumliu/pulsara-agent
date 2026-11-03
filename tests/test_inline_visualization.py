@@ -36,7 +36,6 @@ from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
-    StructuredModelInputLimits,
     provider_input_item_text,
 )
 from pulsara_agent.model_input.lowering import (
@@ -169,8 +168,6 @@ def test_human_metadata_shaped_json_keeps_its_typed_prompt_parts() -> None:
 
     lowered = lower_canonical_item(
         item,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
 
     assert item.input_origin is CanonicalInputOriginKind.HUMAN_MESSAGE

@@ -2,11 +2,15 @@
 
 from dataclasses import dataclass
 
+from pulsara_agent.identity import ID_PAYLOAD_PATTERN
+
 
 SESSION_QUERY_TOOL_NAMES = frozenset(
     {"search_sessions", "search_session_content", "read_session_content"}
 )
 SESSION_QUERY_MAX_ITEMS = 50  # Existing cold-search page budget, never corpus size.
+SESSION_READ_DEFAULT_CHARS = 20_000
+SESSION_READ_MAX_CHARS = 32_000
 
 
 def session_target_schema():
@@ -14,7 +18,11 @@ def session_target_schema():
         "type": "object",
         "properties": {
             "kind": {"const": "SESSION"},
-            "session_id": {"type": "string", "minLength": 1, "description": "Exact session ID."},
+            "session_id": {
+                "type": "string", "minLength": 34, "maxLength": 34,
+                "pattern": rf"^session:{ID_PAYLOAD_PATTERN}$",
+                "description": "Exact session ID.",
+            },
         },
         "required": ["kind", "session_id"],
         "additionalProperties": False,
@@ -27,11 +35,13 @@ def session_entry_target_schema():
         "properties": {
             "kind": {"const": "SESSION_ENTRY"},
             "session_id": {
-                "type": "string", "minLength": 1,
+                "type": "string", "minLength": 34, "maxLength": 34,
+                "pattern": rf"^session:{ID_PAYLOAD_PATTERN}$",
                 "description": "Exact session ID; omit for this conversation.",
             },
             "entry_id": {
-                "type": "string", "minLength": 1,
+                "type": "string", "minLength": 32, "maxLength": 32,
+                "pattern": rf"^entry:{ID_PAYLOAD_PATTERN}$",
                 "description": "Exact entry ID in the selected session.",
             },
         },
@@ -65,7 +75,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
         "cursor": {
             "type": "string",
             "minLength": 1,
-            "description": "Exact next_cursor returned by this tool.",
+            "description": "Exact cursor from this tool's returned next.arguments.",
         },
         "limit": {
             "type": "integer",

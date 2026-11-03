@@ -3,6 +3,8 @@
 Single-entry equality exercises the public batch/single contract, not a frozen
 old implementation. Independent expected fields below pin display/UTF-8 meaning.
 """
+from tests.support.tool_outputs import prepare_output
+
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -25,7 +27,7 @@ from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     build_prepared_tool_result_acceptance,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import ToolOutputArtifactProcessor
+from pulsara_agent.conversation_kernel.tool_outputs import ToolOutputProcessor
 from pulsara_agent.conversation_kernel.visualization import (
     FrozenVisualizationOccurrence,
     VisualizationOccurrenceState,
@@ -38,10 +40,11 @@ from pulsara_agent.llm.input import (
     PromptAnnotationSource,
 )
 from pulsara_agent.ports.tool_execution import (
-    ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
+    ToolOutputSourceFormatHint,
 )
+from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_conversation_fork import (
@@ -59,7 +62,7 @@ from tests.test_kernel_image_input_k2_postgres import (
     _image,
     _workspace,
 )
-from tests.test_round1_tool_output_artifact import _install_tool_call
+from tests.support.tool_outputs import _install_tool_call
 
 pytestmark = pytest.mark.postgres
 
@@ -229,26 +232,27 @@ def _tool_fixture(repo):
     workspace = identity("workspace")
     lease, owner, request, call, attempt = _install_tool_call(repo, workspace)
     result_entry = identity("entry")
-    artifact = "artifact-only Ω🛠"
-    projection = ToolOutputArtifactProcessor(repo.connection_provider).prepare(
+    body = "body-only Ω🛠"
+    projection = prepare_output(ToolOutputProcessor(repo.connection_provider),
         session_id=lease.guard.session_id, workspace_id=workspace,
-        result_entry_id=result_entry, public_output="preview café",
-        candidate=ToolOutputArtifactCandidate(role="OUTPUT", text=artifact,
+        result_entry_id=result_entry, public_output=body, native_output="preview café",
+        output_body_candidate=ToolOutputBodyCandidate(text=body,
+            source_format=ToolOutputSourceFormatHint.TEXT,
             source_coverage=ToolOutputSourceCoverage.RETAINED_SNAPSHOT,
             source_coverage_reason=ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP),
-        artifact_inline_result=False, deadline_monotonic=monotonic() + 30,
+        output_omitted=True, public_format=ToolOutputSourceFormatHint.TEXT,
+        deadline_monotonic=monotonic() + 30,
     )
-    assert projection.artifact_blob is not None and projection.artifact_disposition == "INCOMPLETE"
+    assert projection.output_body is not None
     acceptance = build_prepared_tool_result_acceptance(
         guard=lease.guard, workspace_id=workspace, result_id=identity("result"),
         result_entry_id=result_entry, turn_id=owner, assistant_entry_id=request,
         tool_call_id=call, attempt_id=attempt, result_state="SUCCESS",
         canonical_preview_content=projection.canonical_preview,
-        artifact_disposition=projection.artifact_disposition,
-        artifact_id=projection.artifact_id, artifact_blob_descriptor=projection.artifact_blob,
-        source_coverage=projection.source_coverage, display_kind=projection.display_kind,
+        output_body=projection.output_body,
+        source_coverage=projection.source_coverage, output_omitted=projection.output_omitted,
         source_coverage_reason=projection.source_coverage_reason,
-        artifact_unavailability_reason=projection.artifact_unavailability_reason,
+        output_unavailability_reason=projection.output_unavailability_reason,
         actor_id="tool:test", observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
@@ -257,25 +261,24 @@ def _tool_fixture(repo):
     repo.accept_tool_result(lease.guard, candidate=acceptance, deadline_monotonic=monotonic() + 30)
     answer, cut = append(repo, lease.guard, owner, "final TEXT 🪐", complete=True)
     q1 = rows(repo, "SELECT id FROM pulsara_v3.transcript_entries WHERE session_id=%s AND entry_kind='USER_MESSAGE'", (lease.guard.session_id,))[0]["id"]
-    return lease, q1, result_entry, answer, cut, artifact
+    return lease, q1, result_entry, answer, cut, body
 
 
-@pytest.mark.parametrize("corrupt", ["preview", "artifact", "TEXT"])
+@pytest.mark.parametrize("corrupt", ["body", "TEXT"])
 def test_tool_and_text_failures_do_not_cross_mode_qualification(
     repo, stage2_migrated_postgres_database, corrupt,
 ):
-    lease, q1, result_entry, answer, cut, artifact = _tool_fixture(repo)
+    lease, q1, result_entry, answer, cut, body = _tool_fixture(repo)
     with snapshot(repo) as connection:
         valid = build_history_group(connection, lease.guard.session_id, q1, covered_entry_sequence=cut)
     assert isinstance(valid, HistoryBuildSuccess)
-    assert artifact in valid.documents[("QA", True)]["body"]
-    assert artifact not in valid.documents[("QA", False)]["body"]
+    assert body in valid.documents[("QA", True)]["body"]
+    assert body not in valid.documents[("QA", False)]["body"]
+    assert "preview café" not in valid.documents[("QA", True)]["body"]
     assert "exec_process\n" in valid.documents[("QA", True)]["body"]
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
-        if corrupt == "preview":
-            changed = connection.execute("UPDATE pulsara_v3.transcript_entries SET inline_content=%s || substring(inline_content FROM 2) WHERE id=%s", (b"x", result_entry))
-        elif corrupt == "artifact":
-            changed = connection.execute("UPDATE pulsara_v3.blobs SET body=%s || substring(body FROM 2) WHERE id=(SELECT output_artifact_blob_id FROM pulsara_v3.tool_results WHERE result_entry_id=%s)", (b"x", result_entry))
+        if corrupt == "body":
+            changed = connection.execute("UPDATE pulsara_v3.tool_results SET output_body_inline_content=%s || substring(output_body_inline_content FROM 2) WHERE result_entry_id=%s", (b"x", result_entry))
         else:
             changed = connection.execute("UPDATE pulsara_v3.assistant_message_blocks SET inline_content=%s || substring(inline_content FROM 2) WHERE assistant_entry_id=%s AND block_kind='TEXT'", (b"x", answer))
         assert changed.rowcount == 1
@@ -287,6 +290,26 @@ def test_tool_and_text_failures_do_not_cross_mode_qualification(
         without_tools = build_history_document(connection, lease.guard.session_id, q1,
             covered_entry_sequence=cut, variant="QA", include_tools=False)
         assert without_tools == (None if corrupt == "TEXT" else valid.documents[("QA", False)])
+        connection.rollback()
+
+
+def test_tool_history_uses_owned_body_independently_of_native_preview(
+    repo, stage2_migrated_postgres_database,
+):
+    lease, q1, result_entry, _, cut, body = _tool_fixture(repo)
+    with snapshot(repo) as connection:
+        expected = build_history_group(connection, lease.guard.session_id, q1,
+                                       covered_entry_sequence=cut)
+    with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
+        changed = connection.execute(
+            "UPDATE pulsara_v3.transcript_entries SET inline_content=%s || substring(inline_content FROM 2) WHERE id=%s",
+            (b"x", result_entry),
+        )
+        assert changed.rowcount == 1
+        actual = build_history_group(connection, lease.guard.session_id, q1,
+                                     covered_entry_sequence=cut)
+        assert actual == expected
+        assert body in actual.documents[("QA", True)]["body"]
         connection.rollback()
 
 

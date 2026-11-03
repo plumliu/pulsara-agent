@@ -35,11 +35,7 @@ from pulsara_agent.llm.input import (
     join_text_content,
     llm_content_identity_value,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputArtifactUnavailabilityReason,
-    ToolResultDisplayKind,
-)
+from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
 from pulsara_agent.ports.tool_execution import (
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
@@ -173,9 +169,6 @@ class ContextRenderMode(StrEnum):
 
 class ToolResultProviderRenderMode(StrEnum):
     FULL = "FULL"
-    COMPACT = "COMPACT"
-    REF_ONLY = "REF_ONLY"
-    OMITTED_BODY = "OMITTED_BODY"
 
 
 class ContextPublicDiagnosticCode(StrEnum):
@@ -689,16 +682,18 @@ class ProviderToolCall:
 
 @dataclass(frozen=True, slots=True)
 class ProviderToolResultContextMetadata:
+    session_id: str
     result_id: str
+    result_entry_id: str
     result_state: str
-    display_kind: ToolResultDisplayKind
-    artifact_disposition: ToolOutputArtifactDisposition
-    artifact_id: str | None
+    output_omitted: bool
+    output_available: bool
     source_coverage: ToolOutputSourceCoverage
     source_coverage_reason: ToolOutputSourceCoverageReason | None
-    artifact_unavailability_reason: ToolOutputArtifactUnavailabilityReason | None
+    output_unavailability_reason: ToolOutputUnavailableReason | None
     model_visible_memory_fact_ids: tuple[str, ...]
     timing: FrozenToolObservationTimingFact
+    required_facts: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.result_id:
@@ -714,20 +709,18 @@ class ProviderToolResultContextMetadata:
             "CANCELLED_BEFORE_DISPATCH",
         }:
             raise ValueError("tool result state is not closed")
-        available = self.artifact_disposition in {
-            ToolOutputArtifactDisposition.AVAILABLE,
-            ToolOutputArtifactDisposition.INCOMPLETE,
-        }
-        if available != (self.artifact_id is not None):
-            raise ValueError("tool result artifact identity is inconsistent")
+        from pulsara_agent.ports.tool_execution import freeze_tool_json_object
+        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
+        if not self.session_id or not self.result_entry_id:
+            raise ValueError("tool result source identity is incomplete")
+        if not isinstance(self.output_omitted, bool) or not isinstance(self.output_available, bool):
+            raise TypeError("tool result body facts must be boolean")
+        if self.output_available and self.output_unavailability_reason is not None:
+            raise ValueError("available tool output cannot have an unavailability reason")
         if (self.source_coverage is ToolOutputSourceCoverage.COMPLETE) != (
             self.source_coverage_reason is None
         ):
             raise ValueError("tool result source coverage is inconsistent")
-        if (self.artifact_disposition is ToolOutputArtifactDisposition.UNAVAILABLE) != (
-            self.artifact_unavailability_reason is not None
-        ):
-            raise ValueError("tool result unavailability is inconsistent")
         if not isinstance(self.timing, FrozenToolObservationTimingFact):
             raise TypeError("tool result timing must be a frozen canonical fact")
         if (
@@ -2004,21 +1997,21 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
             if item.tool_result_context is None
             else {
                 "result_state": item.tool_result_context.result_state,
-                "display_kind": item.tool_result_context.display_kind.value,
-                "artifact_disposition": (
-                    item.tool_result_context.artifact_disposition.value
-                ),
-                "artifact_id": item.tool_result_context.artifact_id,
+                "session_id": item.tool_result_context.session_id,
+                "result_entry_id": item.tool_result_context.result_entry_id,
+                "output_omitted": item.tool_result_context.output_omitted,
+                "output_available": item.tool_result_context.output_available,
+                "required_facts": item.tool_result_context.required_facts,
                 "source_coverage": item.tool_result_context.source_coverage.value,
                 "source_coverage_reason": (
                     None
                     if item.tool_result_context.source_coverage_reason is None
                     else item.tool_result_context.source_coverage_reason.value
                 ),
-                "artifact_unavailability_reason": (
+                "output_unavailability_reason": (
                     None
-                    if item.tool_result_context.artifact_unavailability_reason is None
-                    else item.tool_result_context.artifact_unavailability_reason.value
+                    if item.tool_result_context.output_unavailability_reason is None
+                    else item.tool_result_context.output_unavailability_reason.value
                 ),
                 "model_visible_memory_fact_ids": (
                     item.tool_result_context.model_visible_memory_fact_ids

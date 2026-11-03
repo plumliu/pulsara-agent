@@ -1,5 +1,7 @@
 """Both Agent kinds read the same session-owned canonical history."""
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 import pytest
 
 from pulsara_agent.conversation_kernel.blob import PostgresCanonicalBlobStore
@@ -114,6 +116,7 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
         {"target": {"kind": "SESSION", "session_id": first.agent_id}},
         current_range=SessionContentRange(0),
         tool_call_id=random_id("call"),
+        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
         deadline_monotonic=deadline(),
     )
     assert "First final stays in this Agent history." in str(received)
@@ -127,6 +130,7 @@ def test_reused_agent_reads_ordinary_history_and_exact_group_cut(source):
         },
         current_range=SessionContentRange(0),
         tool_call_id=random_id("call"),
+        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
         deadline_monotonic=deadline(),
     )
     assert first.agent_id in str(found)
@@ -209,6 +213,7 @@ def test_code_results_are_visible_to_ui_but_filtered_before_provider_budget_sear
         {"include_tools": True},
         current_range=SessionContentRange(cut.provider_input_through_sequence),
         tool_call_id=random_id("call"),
+        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
         deadline_monotonic=deadline(),
     )
     assert marker not in str(result)
@@ -220,6 +225,7 @@ def test_code_results_are_visible_to_ui_but_filtered_before_provider_budget_sear
         {"query": marker, "include_tools": True},
         current_range=SessionContentRange(cut.provider_input_through_sequence),
         tool_call_id=random_id("call"),
+        page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
         deadline_monotonic=deadline(),
     )
     assert searched["items"] == []

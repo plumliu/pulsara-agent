@@ -115,7 +115,6 @@ from pulsara_agent.model_input.contracts import (
     ModelInputScopeKind,
     ProviderToolCall,
     ProviderToolResultContextMetadata,
-    STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
     canonical_model_input_identity_fingerprint,
     canonical_model_input_snapshot_fingerprint,
@@ -136,11 +135,8 @@ from pulsara_agent.model_input.provider_replay import (
     FrozenCanonicalProviderDispatchRead,
     freeze_provider_replay_manifest_cut,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputSourceCoverage,
-    ToolResultDisplayKind,
-)
+
+from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import (
     canonical_json_bytes,
     context_fingerprint,
@@ -488,12 +484,14 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
             tool_result_context=ProviderToolResultContextMetadata(
                 result_id=derive_id("result", "test-fixture", f"result:{entry_id}"),
                 result_state="SUCCESS",
-                display_kind=ToolResultDisplayKind.COMPLETE,
-                artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-                artifact_id=None,
+                session_id=derive_id("session", "compaction-test"),
+                result_entry_id=entry_id,
+                output_omitted=False,
+                output_available=True,
+                required_facts={},
                 source_coverage=ToolOutputSourceCoverage.COMPLETE,
                 source_coverage_reason=None,
-                artifact_unavailability_reason=None,
+                output_unavailability_reason=None,
                 model_visible_memory_fact_ids=(),
                 timing=timing,
             ),
@@ -2287,6 +2285,7 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
 def test_round5b_retained_skill_proves_older_full_from_installed_message(
     tmp_path,
 ) -> None:
+    from dataclasses import replace
     timing_values = {
         "source_turn_ref": "turn:klmmazz67vfgsfsvg6ceqgdsfu",
         "observed_at_utc": "2026-08-21T01:02:03.000000Z",
@@ -2316,12 +2315,14 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
         tool_result_context=ProviderToolResultContextMetadata(
             result_id="result:srq6zeb76vfd3te2ocypgokzby",
             result_state="SUCCESS",
-            display_kind=ToolResultDisplayKind.COMPLETE,
-            artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-            artifact_id=None,
+            session_id=derive_id("session", "compaction-test"),
+            result_entry_id="entry:fgbpydhlta3t4jtrmeidxygpai",
+            output_omitted=False,
+            output_available=True,
+            required_facts={},
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
             source_coverage_reason=None,
-            artifact_unavailability_reason=None,
+            output_unavailability_reason=None,
             model_visible_memory_fact_ids=(),
             timing=timing,
         ),
@@ -2329,8 +2330,6 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
     )
     lowered = lower_canonical_item(
         item,
-        artifact_read_available=True,
-        limits=STRUCTURED_MODEL_INPUT_LIMITS,
     )
     full = next(
         variant.message
@@ -2426,11 +2425,10 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
             "content_revision": "revision:" + "a" * 52,
             "access_scope": "external_absolute",
             "workspace_relative": False,
-            "offset": 1,
-            "limit": 200,
+            "position": {"line": 1, "char_offset": 0},
             "total_lines": len(document.splitlines()),
             "file_size": len(document.encode("utf-8")),
-            "truncated": False,
+            "next": None,
             "content": numbered,
         },
         sort_keys=True,
@@ -2456,8 +2454,20 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
         == "Retained body"
     )
 
+    # Frozen result reads and later text fragments never become PATH activation
+    # evidence, even if their content happens to contain an entire Skill body.
+    for changed in (
+        {"target": {"kind": "SESSION_ENTRY", "entry_id": exact_item.source_entry_id}},
+        {"position": {"line": 1, "char_offset": 1}},
+        {"next": {"tool": "read_file", "arguments": {"target": {"kind": "PATH", "path": location}}}},
+    ):
+        changed_body = json.dumps({**json.loads(exact_body), **changed})
+        changed_item = replace(exact_item, content=(LLMTextPart(changed_body),),
+                               tool_result_body_text=changed_body)
+        assert _exact_historical_read(changed_item, catalog_row=row,
+                                      root_policy=SimpleNamespace(roots=())) is None
+
     # Exercise the real producer contract, including its required content_revision.
-    from dataclasses import replace
     from pulsara_agent.tools.builtins.filesystem import ReadFileTool
     from pulsara_agent.ports.tool_execution import ToolCall
 
@@ -2593,12 +2603,14 @@ def test_round5b_tool_groups_pair_reused_call_ids_with_exact_request() -> None:
             tool_result_context=ProviderToolResultContextMetadata(
                 result_id=derive_id("result", "test-fixture", f"result:{entry_id}"),
                 result_state="SUCCESS",
-                display_kind=ToolResultDisplayKind.COMPLETE,
-                artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-                artifact_id=None,
+                session_id=derive_id("session", "compaction-test"),
+                result_entry_id=entry_id,
+                output_omitted=False,
+                output_available=True,
+                required_facts={},
                 source_coverage=ToolOutputSourceCoverage.COMPLETE,
                 source_coverage_reason=None,
-                artifact_unavailability_reason=None,
+                output_unavailability_reason=None,
                 model_visible_memory_fact_ids=(),
                 timing=timing,
             ),

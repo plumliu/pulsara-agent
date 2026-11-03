@@ -2073,6 +2073,7 @@ class ProviderDispatchCoordinator:
             )
         borrow: ProcessLocalToolSurfaceBorrow | None = None
         hook_context_reservation: HookContextReservation | None = None
+        memory_sources_task: asyncio.Task[CollectedContextSources] | None = None
 
         planning: FrozenProviderInputAppendPlanningInput | None = None
         try:
@@ -2775,6 +2776,23 @@ class ProviderDispatchCoordinator:
                     raise
             cold_semantic: PreparedColdEpochSemanticAssembly | None = None
             replay_target = provider_replay_target(prepared_call)
+            if preference_source is not None and trigger_disposition is not None:
+                # Recall reads the already frozen canonical facts. It does not
+                # depend on the base semantic compilation or its optional
+                # memory allocation, so this dispatch owns both in parallel.
+                memory_sources_task = asyncio.create_task(
+                    self._memory_support.apply_sources(
+                        sources,
+                        activation_subject=activation_subject,
+                        activation_text=activation_text,
+                        include_recall=True,
+                        canonical_facts=base_facts,
+                        frozen_preference=preference_source,
+                        trigger_disposition=trigger_disposition,
+                        write_hint=write_hint,
+                    ),
+                    name="provider-memory-sources",
+                )
             if cold_seed is not None:
                 cold_semantic = await self._io.run(
                     self._cold_epoch_assembler.prepare_semantic,
@@ -2824,16 +2842,8 @@ class ProviderDispatchCoordinator:
                         new_epoch=cold_seed is not None,
                     )
                 )
-                final_sources = await self._memory_support.apply_sources(
-                    sources,
-                    activation_subject=activation_subject,
-                    activation_text=activation_text,
-                    include_recall=True,
-                    canonical_facts=base_facts,
-                    frozen_preference=preference_source,
-                    trigger_disposition=trigger_disposition,
-                    write_hint=write_hint,
-                )
+                assert memory_sources_task is not None
+                final_sources = await memory_sources_task
                 final_request = replace(
                     compile_request,
                     sources=final_sources,
@@ -2970,6 +2980,17 @@ class ProviderDispatchCoordinator:
                 _hook_context_reservation=hook_context_reservation,
             )
         except BaseException:
+            if memory_sources_task is not None:
+                memory_sources_task.cancel()
+                while not memory_sources_task.done():
+                    try:
+                        await asyncio.shield(memory_sources_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        break
+                if not memory_sources_task.cancelled():
+                    memory_sources_task.exception()
             if planning is not None:
                 self._continuity.abort_planning(planning)
             if handle is not None:

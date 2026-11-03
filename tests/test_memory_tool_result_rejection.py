@@ -17,6 +17,8 @@ from pulsara_agent.memory.scope import (
 from pulsara_agent.retrieval.config import EmbeddingBackendConfig
 from pulsara_agent.settings import LocalSettingsStore
 from pulsara_agent.memory.targets import memory_target
+from pulsara_agent.identity import random_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
 @pytest.mark.parametrize(
@@ -117,6 +119,7 @@ def test_returned_memory_target_is_reused_for_read_basis_and_relation(tmp_path):
         context = SimpleNamespace(
             session_id=port._session_id, conversation_scope_kind="ROOT",
             memory_context=memory.FrozenModelCallMemoryContext(),
+            page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
         )
         try:
             result = await port.invoke(tool_name="get_memory", arguments={"target": memory_target(fact_id)}, invocation_context=context)

@@ -16,7 +16,7 @@ const search = await tools.search_content({
   output_mode: "content",
   limit: 5
 });
-console.log({ total_count: search.total_count, truncated: search.truncated });
+console.log({ completeness: search.completeness, next: search.next });
 
 const excerpts = await Promise.all(search.matches.map(async match => ({
   target: match.target,
@@ -72,35 +72,27 @@ check. `exec_cell` returns its accepted CELL immediately while this loop continu
 The selected output arrives actively; no second terminal command or log-fetching
 wait is needed.
 
-## 3. Inspect a long log and keep its complete available archive
+## 3. Read and save an accepted result body
 
-**Situation:** The check above produced a long result with `output_artifact`.
-ROOT might want a readable excerpt and a file containing the available archive.
-This block can follow the previous code while `check` is still in scope. For a
-separate `exec_cell`, copy the actual artifact target from the earlier output instead.
+**Situation:** A native result or a bridge-boundary error supplied a `read` call.
+Use its actual value below as `savedRead`; copy it from the earlier result rather
+than inventing an entry ID. The source remains the original accepted entry.
 
 ```js
-const artifact = check.output_artifact;
-if (artifact?.target) {
-  const page = await tools.read_artifact({
-    target: artifact.target,
-    max_chars: 4000
-  });
-  console.log(page);
-  console.log(await tools.export_artifact({
-    target: artifact.target,
-    path: "output/parser-test-log.txt"
-  }));
-} else {
-  console.log("This result has no readable output artifact.");
-}
+const page = await tools.read_file(savedRead.arguments);
+console.log(page);
+console.log(await tools.write_file({
+  target: { kind: "PATH", path: "output/parser-test-log.txt" },
+  source: savedRead.arguments.target
+}));
 ```
 
-**How it works:** The first call reads one page for inspection. The second exports
-the available artifact as a UTF-8 file; it does not export only that first page.
-Choose a new destination path, since export does not overwrite an existing file.
+**How it works:** The read returns one complete text page. The write copies the
+whole frozen body directly in the host; it does not save only that first page or
+send the body through JavaScript. Choose a new destination because existing files
+are never overwritten. Saving can be done without reading a page first.
 
-**Read the result:** The page's `has_more` and `next_offset_chars` let you continue
-reading with `offset_chars`. The export reports its real file target and coverage.
-Neither the page nor the file implies that output outside the artifact's stated
-coverage is available. See [Results and errors](results-and-errors.md).
+**Read the result:** Copy the page's complete `next` call to continue reading.
+The created file and read pages preserve the source coverage. They cannot recover
+content absent from the original result. Reading or saving does not repeat the
+command or remote action. See [Results and errors](results-and-errors.md).

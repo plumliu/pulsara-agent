@@ -1,6 +1,7 @@
 """Explicit Windows/WSL integration matrix; run with the built helper/fixture."""
 
 import asyncio
+import array
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
@@ -8,7 +9,9 @@ import os
 from pathlib import Path
 import subprocess
 import signal
+import socket
 import sys
+from tempfile import TemporaryDirectory
 from threading import Event
 from time import monotonic
 import time
@@ -18,6 +21,7 @@ import pytest
 from pulsara_agent.identity import derive_id
 from pulsara_agent.terminal_process import manager as M
 from pulsara_agent.windows_interop import configure_interop
+from pulsara_agent.windows_interop.relay import InteropRelay
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -90,6 +94,55 @@ def child():
     return os.environ["PULSARA_TEST_INTEROP_CHILD"]
 
 
+def test_linux_anchor_descriptor_binding_keeps_exact_peer_and_socket():
+    async def scenario(directory):
+        async def echo(reader, writer):
+            try:
+                writer.write(await reader.readexactly(4))
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        upstream_path = directory / "up"
+        upstream = await asyncio.start_unix_server(echo, path=str(upstream_path))
+        relay = InteropRelay(directory)
+        binding = relay.start()
+        sender = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        descriptor = os.open(upstream_path, os.O_PATH | os.O_CLOEXEC)
+        try:
+            sender.connect(str(relay.control_path))
+            sender.sendmsg(
+                [b"F"],
+                [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [descriptor]))],
+            )
+            await asyncio.wait_for(binding, 2)
+            assert relay.peer_identity[0] == os.getpid()
+            assert relay.peer_pidfd is not None
+            assert relay.descriptor is not None
+            assert not os.get_inheritable(relay.descriptor)
+            reader, writer = await asyncio.open_unix_connection(str(relay.path))
+            writer.write(b"\x00\xff\x80\x01")
+            await writer.drain()
+            assert await reader.readexactly(4) == b"\x00\xff\x80\x01"
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.wait_for(relay.seal(cancel=False), 2)
+            assert not relay.tasks and not relay.writers
+            assert relay.path.exists()
+        finally:
+            await relay.seal(cancel=True)
+            relay.close_descriptors()
+            sender.close()
+            os.close(descriptor)
+            upstream.close()
+            await upstream.wait_closed()
+        assert relay.path.exists()
+
+    with TemporaryDirectory(prefix="pr", dir="/tmp") as directory:
+        asyncio.run(scenario(Path(directory)))
+
+
 def launch(registry, tmp_path, argv, *, tty=False, owner=None):
     owner = owner or derive_id("host", "interop-integration", "owner")
     registry.activate_owner(owner)
@@ -136,7 +189,6 @@ def test_cancel_after_linux_root_exits(tmp_path, child, tty):
         assert M._status(state) is M.TerminalStatus.RUNNING
         result = registry.terminate_if_running(
             state.process_id,
-            max_output_chars=1000,
             owner_host_session_id=owner,
             join_timeout_seconds=10,
         )
@@ -178,7 +230,6 @@ def test_same_registry_ab_isolation(tmp_path, child):
         a.process.wait(timeout=5)
         registry.terminate_if_running(
             a.process_id,
-            max_output_chars=1000,
             owner_host_session_id=owner,
             join_timeout_seconds=10,
         )
@@ -364,7 +415,6 @@ def test_all_eight_slots_are_physical_and_reusable_after_join(tmp_path, child):
             launch(registry, tmp_path, ["/bin/true"], owner=owner)
         registry.terminate_if_running(
             states[0].process_id,
-            max_output_chars=1000,
             owner_host_session_id=owner,
             join_timeout_seconds=10,
         )
@@ -495,7 +545,6 @@ def test_real_owner_cancel_settles_inflight_relay(tmp_path, child, monkeypatch, 
         assert entered.wait(10)
         registry.terminate_if_running(
             state.process_id,
-            max_output_chars=1000,
             owner_host_session_id=owner,
             join_timeout_seconds=15,
         )

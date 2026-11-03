@@ -72,9 +72,9 @@ from pulsara_agent.model_input.contracts import (
     ContextSourceKind,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
+from pulsara_agent.identity import random_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.ports.tool_execution import (
-    ToolOutputArtifactCandidate,
-    ToolOutputSourceCoverage,
     ToolOutputSourceFormatHint,
 )
 from pulsara_agent.retrieval.config import (
@@ -98,7 +98,6 @@ if TYPE_CHECKING:
 MEMORY_READ_TOOL_NAMES = frozenset({"search_memory", "get_memory"})
 MEMORY_WRITE_TOOL_NAMES = frozenset({"remember", "mark_memory_relation"})
 MEMORY_TOOL_NAMES = MEMORY_READ_TOOL_NAMES | MEMORY_WRITE_TOOL_NAMES
-MAXIMUM_MEMORY_TOOL_OUTPUT_BYTES = 16 * 1024 * 1024
 MEMORY_POINT_READ_TIMEOUT_SECONDS = 10.0
 MEMORY_SEARCH_TIMEOUT_SECONDS = 20.0
 MEMORY_AUTO_EMBED_TIMEOUT_SECONDS = 3.0
@@ -264,9 +263,11 @@ class KernelMemoryToolPort:
             if tool_name == "mark_memory_relation":
                 return self._mark_memory_relation(arguments, invocation_context)
             if tool_name == "search_memory":
-                return await self._search(arguments)
+                return await self._search(arguments, invocation_context)
             if tool_name == "get_memory":
-                return await self._get(arguments)
+                return await self._get(arguments, invocation_context)
+        except ToolResultPageBoundary:
+            raise
         except (TypeError, ValueError) as exc:
             # invoke runs after a canonical attempt has been admitted. A bad
             # basis is a known application rejection, not a preflight
@@ -318,6 +319,7 @@ class KernelMemoryToolPort:
             basis_refs=basis_refs,
             related=(),
             retrieval_summary=freeze_json({"disposition": "NOT_STARTED"}),
+            page_budget=_memory_page_budget(context),
         )
         related, retrieval_summary = await self._related_for_remember(
             admitted.statement, context_id=context_id
@@ -343,6 +345,7 @@ class KernelMemoryToolPort:
             source_memory_id=parse_memory_target(arguments.get("source")),
             target_memory_id=parse_memory_target(arguments.get("target")),
             relation_kind=MemoryRelationKind(str(arguments.get("relation_kind") or "")),
+            page_budget=_memory_page_budget(context),
         )
         return KernelToolResult(
             state="SUCCESS", content=b"{}", memory_mutation=mutation
@@ -434,7 +437,6 @@ class KernelMemoryToolPort:
                 memory_id=item.fact_id,
                 kind=MemoryFactKind(item.fact_kind),
                 context_id=item.context_id,
-                statement=item.statement,
                 recorded_at=item.recorded_at,
             )
             for item in ranked.facts[:3]
@@ -479,7 +481,10 @@ class KernelMemoryToolPort:
             )
         return tuple(refs)
 
-    async def _search(self, arguments: Mapping[str, object]) -> KernelToolResult:
+    async def _search(
+        self, arguments: Mapping[str, object], context: KernelToolInvocationContext | None = None
+    ) -> KernelToolResult:
+        page_budget = _memory_page_budget(context)
         total_deadline = self._deadlines.deadline(
             KernelWatchdogOwner.MEMORY_EXPLICIT_RECALL_TOTAL
         )
@@ -535,14 +540,19 @@ class KernelMemoryToolPort:
                 deadline_monotonic=total_deadline,
             )
             relation_enrichment = "COMPLETE"
+            if len(relations) >= 64:
+                relation_enrichment = "PARTIAL"
         except Exception:
             # The ranked canonical facts are still useful advisory results.
             # A failed optional warning join cannot negate them.
             relations = ()
             relation_enrichment = "UNAVAILABLE"
+        original_relation_count = len(relations)
         relations, ids = _bounded_memory_relations(
             tuple(item.fact_id for item in result.facts), relations
         )
+        if len(relations) != original_relation_count:
+            relation_enrichment = "PARTIAL"
         memories = [
             {
                 "target": memory_target(item.fact_id),
@@ -555,9 +565,7 @@ class KernelMemoryToolPort:
             }
             for item in result.facts
         ]
-        return _json_result(
-            "SUCCESS",
-            {
+        payload = {
                 "requested_filters": {
                     "kind": requested_kind,
                 },
@@ -576,11 +584,22 @@ class KernelMemoryToolPort:
                 ],
                 "advisory": True,
                 "may_be_stale_or_incomplete": True,
-            },
+            }
+        native_payload = _memory_search_display(payload, page_budget, ids)
+        return _json_result(
+            "SUCCESS", payload,
             model_visible_memory_fact_ids=ids,
+            native_payload=native_payload,
+            required_facts={key: native_payload[key] for key in (
+                "requested_filters", "retrieval_summary", "advisory", "may_be_stale_or_incomplete"
+            )},
         )
 
-    async def _get(self, arguments: Mapping[str, object]) -> KernelToolResult:
+    async def _get(
+        self, arguments: Mapping[str, object], context: KernelToolInvocationContext | None = None
+    ) -> KernelToolResult:
+        if context is not None:
+            _memory_page_budget(context)
         if set(arguments) != {"target"}:
             raise ValueError("get_memory requires target")
         memory_id = parse_memory_target(arguments.get("target"))
@@ -620,6 +639,7 @@ class KernelMemoryToolPort:
                 }
                 for relation in relations
             ],
+            "relation_check": "PARTIAL" if len(relations) >= 100 else "COMPLETE",
             "advisory": True,
             "may_be_stale_or_incomplete": True,
         }
@@ -629,7 +649,9 @@ class KernelMemoryToolPort:
                 "note": "The user edited this memory's text. Existing relations were not re-evaluated.",
             }
         return _json_result(
-            "SUCCESS", payload, model_visible_memory_fact_ids=(item.fact_id,)
+            "SUCCESS", payload, model_visible_memory_fact_ids=(item.fact_id,),
+            required_facts={key: value for key, value in payload.items()
+                            if key not in {"statement", "relations"}},
         )
 
     def embedding_connection(self):
@@ -1112,9 +1134,13 @@ class KernelMemoryToolPort:
             sorted((item.fact_id, item.fact_semantic_digest) for item in filtered_facts)
         )
         presentation = filtered_facts
+        relation_check = "PARTIAL" if len(relations) >= 64 else "COMPLETE"
+        original_relation_count = len(relations)
         relations, exposed_ids = _bounded_memory_relations(
             tuple(item.fact_id for item in presentation), relations
         )
+        if len(relations) != original_relation_count:
+            relation_check = "PARTIAL"
         warning_identity = tuple(
             sorted(
                 (relation.source_fact_id, relation.target_fact_id)
@@ -1158,7 +1184,7 @@ class KernelMemoryToolPort:
         )
 
         def render(items, *, references=False):
-            payload = {"advisory": True}
+            payload = {"advisory": True, "relation_check": relation_check}
             if references:
                 if ref_items:
                     payload["memory_refs"] = list(ref_items)
@@ -1489,7 +1515,7 @@ def _retrieval_summary(
     else:
         ranking = "UNAVAILABLE"
 
-    if relation_check not in {"COMPLETE", "UNAVAILABLE"}:
+    if relation_check not in {"COMPLETE", "PARTIAL", "UNAVAILABLE"}:
         raise ValueError("memory relation check disposition is invalid")
     return {
         "status": status,
@@ -1521,11 +1547,83 @@ def _bounded_memory_relations(fact_ids, relations):
     return tuple(selected), tuple(exposed)
 
 
+def _memory_page_budget(context: KernelToolInvocationContext | None) -> ToolResultPageBudget:
+    if context is None:
+        return ToolResultPageBudget(tool_call_id=random_id("call"))
+    budget = getattr(context, "page_budget", None)
+    if budget is None:
+        raise ToolResultPageBoundary("memory invocation has no allocated result budget")
+    return budget
+
+
+def _memory_search_display(payload, budget, visible_ids):
+    """Keep the selected top-k fixed; only its native presentation may shrink."""
+
+    def fits(value, *, include_read=True):
+        return budget.fits(
+            canonical_json_bytes(value).decode("utf-8"),
+            model_visible_memory_fact_ids=visible_ids,
+            include_read=include_read,
+        )
+
+    if fits(payload, include_read=False):
+        return payload
+    memories = payload["memories"]
+    warnings = payload["relation_warnings"]
+
+    def build(count, chars, warning_count):
+        items = []
+        for item in memories[:count]:
+            statement = item["statement"]
+            items.append({
+                **{key: value for key, value in item.items() if key != "statement"},
+                "statement_excerpt": statement[:chars],
+                "statement_truncated": len(statement) > chars,
+                "inspect": {"tool": "get_memory", "arguments": {"target": item["target"]}},
+            })
+        value = {
+            **payload,
+            "memories": items,
+            "displayed_memories": count,
+            "omitted_memories": len(memories) - count,
+            "relation_warnings": warnings[:warning_count],
+            "omitted_relation_warnings": len(warnings) - warning_count,
+        }
+        if warning_count < len(warnings):
+            value["retrieval_summary"] = {**payload["retrieval_summary"], "relation_check": "PARTIAL"}
+        return value
+
+    minimum_count = 1 if memories else 0
+    for count in range(len(memories), minimum_count - 1, -1):
+        winner = build(count, 0, 0)
+        if fits(winner):
+            break
+    else:
+        raise ToolResultPageBoundary("one memory reference and result metadata cannot fit the result budget")
+    warning_count = 0
+    for index in range(1, len(warnings) + 1):
+        candidate = build(count, 0, index)
+        if not fits(candidate):
+            break
+        warning_count, winner = index, candidate
+    low, high = 0, max((len(item["statement"]) for item in memories[:count]), default=0)
+    while low <= high:
+        chars = (low + high) // 2
+        candidate = build(count, chars, warning_count)
+        if fits(candidate):
+            winner, low = candidate, chars + 1
+        else:
+            high = chars - 1
+    return winner
+
+
 def _json_result(
     state: str,
     payload: Mapping[str, object],
     *,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
+    native_payload: Mapping[str, object] | None = None,
+    required_facts: Mapping[str, object] | None = None,
 ) -> KernelToolResult:
     encoded = json.dumps(
         payload,
@@ -1533,26 +1631,12 @@ def _json_result(
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    if len(encoded) > MAXIMUM_MEMORY_TOOL_OUTPUT_BYTES:
-        return KernelToolResult(
-            state="SYSTEM_ERROR",
-            content=b'{"error":"memory tool output exceeded its bound"}',
-        )
-    text = encoded.decode("utf-8")
     return KernelToolResult(
         state=state,
         content=encoded,
-        output_artifact_candidate=ToolOutputArtifactCandidate(
-            role="OUTPUT",
-            text=text,
-            source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            original_utf8_bytes=len(encoded),
-            # This is a closed memory payload rather than the legacy
-            # ``{"output": ...}`` envelope understood by the generic JSON
-            # preview renderer.  Archive exact bytes and let Round 1 perform
-            # deterministic text head/tail display.
-            source_format_hint=ToolOutputSourceFormatHint.TEXT,
-        ),
+        native_output=None if native_payload is None else canonical_json_bytes(native_payload),
+        required_facts=required_facts or {},
+        public_format=ToolOutputSourceFormatHint.JSON,
         model_visible_memory_fact_ids=model_visible_memory_fact_ids,
     )
 

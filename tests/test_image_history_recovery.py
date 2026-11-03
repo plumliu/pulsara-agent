@@ -1,5 +1,9 @@
 """Image history views use canonical metadata, atomic pages and existing authority."""
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
+
+import json
+
 from time import monotonic
 
 import pytest
@@ -43,6 +47,10 @@ from tests.test_kernel_image_input_k2_postgres import (
 )
 
 
+def _cursor(page):
+    return None if page["next"] is None else page["next"]["arguments"]["cursor"]
+
+
 @pytest.mark.postgres
 def test_canonical_image_history_atomic_pages_search_and_cross_session(
     stage2_migrated_postgres_database, monkeypatch
@@ -59,7 +67,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
     ]
     entries = []
     for content in originals:
-        intent, _, _ = _direct_intent(repo, lease, runtime, content)
+        intent, _ = _direct_intent(repo, lease, runtime, content)
         final(repo, lease.guard, intent.turn_id, "saved answer needle-answer")
         entries.append(intent.entry_id)
     session = rows(
@@ -76,6 +84,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
             arguments,
             current_range=scope,
             tool_call_id="call:history",
+            page_budget=ToolResultPageBudget(tool_call_id="call:history"),
             deadline_monotonic=monotonic() + 30,
         )
 
@@ -101,7 +110,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
         max_chars=len("needle-left\n") + len(placeholder) - 1,
     )
     assert page["items"][0]["text"] == "needle-left\n"
-    cursor = page["next_cursor"]
+    cursor = _cursor(page)
     chunks = [page["items"][0]["text"]]
     while cursor:
         page = read(cursor=cursor, limit=1, max_chars=len(placeholder))
@@ -110,14 +119,13 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
         chunk = page["items"][0]["text"]
         assert not ('"kind":"IMAGE_REF"' in chunk and placeholder not in chunk)
         chunks.append(chunk)
-        cursor = page["next_cursor"]
+        cursor = _cursor(page)
     assert "".join(chunks) == f"needle-left\n{placeholder}\n右侧\n{placeholder}"
-    with pytest.raises(SessionQueryError, match="Increase max_chars") as exc:
+    with pytest.raises(ToolResultPageBoundary, match="Increase max_chars"):
         read(target={"kind": "SESSION_ENTRY", "entry_id": entries[1]}, limit=1, max_chars=len(placeholder) - 1)
-    assert exc.value.code == "RESULT_BUDGET_EXCEEDED"
     first = read(target={"kind": "SESSION_ENTRY", "entry_id": entries[1]}, limit=1, max_chars=len(placeholder))
     assert first["items"][0]["text"] == placeholder
-    old = _decode(first["next_cursor"], "read_session_content")
+    old = _decode(_cursor(first), "read_session_content")
     old["operation"] = "read_session_content.v2"
     with pytest.raises(SessionQueryError) as exc:
         read(cursor=_encode(old))
@@ -133,6 +141,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
             {"target": {"kind": "SESSION", "session_id": session["id"]}},
             current_range=SessionContentRange(0),
             tool_call_id="call:h",
+            page_budget=ToolResultPageBudget(tool_call_id="call:h"),
             deadline_monotonic=monotonic() + 30,
         )["items"]
         == []
@@ -164,6 +173,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
         {"query": "needle-left"},
         current_range=scope,
         tool_call_id="call:h",
+        page_budget=ToolResultPageBudget(tool_call_id="call:h"),
         deadline_monotonic=monotonic() + 30,
     )
     assert hits["items"] and HISTORICAL_IMAGE_MARKER in str(hits)
@@ -175,6 +185,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
                 {"query": term},
                 current_range=scope,
                 tool_call_id="call:h",
+                page_budget=ToolResultPageBudget(tool_call_id="call:h"),
                 deadline_monotonic=monotonic() + 30,
             )["items"]
             == []
@@ -191,6 +202,7 @@ def test_canonical_image_history_atomic_pages_search_and_cross_session(
         {"target": {"kind": "SESSION_ENTRY", "session_id": session["id"], "entry_id": entries[1]}, "limit": 1},
         current_range=SessionContentRange(0),
         tool_call_id="call:h",
+        page_budget=ToolResultPageBudget(tool_call_id="call:h"),
         deadline_monotonic=monotonic() + 30,
     )
     assert "不属于当前工作区的图片读取范围" in str(page)
@@ -203,12 +215,12 @@ def test_annotation_near_body_quota_remains_searchable_with_image(
 ):
     repo = _repository(stage2_migrated_postgres_database)
     lease, runtime, _ = _bound_session(repo)
-    source_intent, _, _ = _direct_intent(
+    source_intent, _ = _direct_intent(
         repo, lease, runtime, FrozenPromptContent((LLMTextPart("source"),))
     )
     quote = "a" * 4056
     source_entry = final(repo, lease.guard, source_intent.turn_id, quote)
-    intent, _, _ = _direct_intent(
+    intent, _ = _direct_intent(
         repo,
         lease,
         runtime,
@@ -236,6 +248,7 @@ def test_annotation_near_body_quota_remains_searchable_with_image(
         {"query": "needle"},
         current_range=SessionContentRange(session["latest_entry_sequence"]),
         tool_call_id="call:h",
+        page_budget=ToolResultPageBudget(tool_call_id="call:h"),
         deadline_monotonic=monotonic() + 30,
     )
     annotation = next(
@@ -333,15 +346,14 @@ def test_search_and_recall_charge_image_packaging_at_final_admission(oversized):
         'session:336wrfwkamrr3up6kjtsgvgcte', 'entry:ik465kijafixxa6kpdisy6g4vu', "", 1, document, selected, 1, "QA", False
     )
     assert (
-        _fits({"items": [candidate.projection()], "next_cursor": None}, "call:h")
+        _fits({"items": [candidate.projection()], "next": None}, "call:h")
         is not oversized
     )
     assert (_rerank_document_projection(candidate) is not None) is not oversized
 
 
-def test_image_marker_is_atomic_when_result_packaging_budget_binds(monkeypatch):
+def test_image_marker_is_atomic_when_result_packaging_budget_binds():
     from types import SimpleNamespace
-    from pulsara_agent.conversation_kernel import session_content
 
     marker = image_omission_part(_image(workspace_id="workspace:" + "a" * 26)).text
     text = "前\n" + marker + "\n后"
@@ -350,13 +362,8 @@ def test_image_marker_is_atomic_when_result_packaging_budget_binds(monkeypatch):
         _document=lambda *args: (item, text, (), ((2, 2 + len(marker)),))
     )
     # Simulate the existing final JSON/wrapper limit cutting through a marker.
-    monkeypatch.setattr(
-        session_content,
-        "_fits",
-        lambda payload, call: (
-            sum(len(x["text"]) for x in payload["items"]) <= len(marker)
-        ),
-    )
+    budget = ToolResultPageBudget(tool_call_id="call:test", accepts_provider_body=
+        lambda body, _ids: sum(len(x["text"]) for x in json.loads(body)["items"]) <= len(marker))
     page = SessionContentQuery._read_page(
         reader,
         None,
@@ -371,20 +378,17 @@ def test_image_marker_is_atomic_when_result_packaging_budget_binds(monkeypatch):
         monotonic() + 30,
         False,
         "workspace:" + "a" * 26,
+        budget,
     )
     assert page == {
         "items": [{**item, "text": "前\n", "partial": True}],
-        "next_cursor": (1, 2),
+        "next": {"tool": "read_session_content", "arguments": {
+            "cursor": (1, 2), "limit": 1, "max_chars": len(text)}},
     }
     reader._document = lambda *args: (item, marker, (), ((0, len(marker)),))
-    monkeypatch.setattr(
-        session_content,
-        "_fits",
-        lambda payload, call: (
-            sum(len(x["text"]) for x in payload["items"]) < len(marker)
-        ),
-    )
-    with pytest.raises(SessionQueryError) as exc:
+    budget = ToolResultPageBudget(tool_call_id="call:test", accepts_provider_body=
+        lambda body, _ids: sum(len(x["text"]) for x in json.loads(body)["items"]) < len(marker))
+    with pytest.raises(ToolResultPageBoundary):
         SessionContentQuery._read_page(
             reader,
             None,
@@ -399,5 +403,5 @@ def test_image_marker_is_atomic_when_result_packaging_budget_binds(monkeypatch):
             monotonic() + 30,
             False,
             "workspace:" + "a" * 26,
+            budget,
         )
-    assert exc.value.code == "RESULT_BUDGET_EXCEEDED"

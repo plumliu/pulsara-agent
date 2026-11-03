@@ -338,7 +338,7 @@ export interface ToolTrace {
   attemptId?: string;
   programCalls?: ToolTrace[];
   id: string;
-  kind: 'terminal' | 'read' | 'edit' | 'search' | 'artifact' | 'mcp';
+  kind: 'terminal' | 'read' | 'edit' | 'search' | 'tool' | 'mcp';
   toolName?: string;
   title: string;
   subtitle: string;
@@ -350,11 +350,12 @@ export interface ToolTrace {
   resultEntryId?: string;
   resultState?: string;
   resultSummary?: string;
+  resultFacts?: Record<string, unknown>;
   associationPending?: boolean;
-  artifact?: {
-    disposition: 'NOT_REQUIRED' | 'AVAILABLE' | 'INCOMPLETE' | 'UNAVAILABLE';
+  outputBody?: {
+    available: boolean;
+    omitted: boolean;
     sourceCoverage: 'COMPLETE' | 'RETAINED_SNAPSHOT';
-    displayKind: 'COMPLETE' | 'HEAD_TAIL';
     sourceCoverageReason?: string;
     unavailabilityReason?: string;
   };

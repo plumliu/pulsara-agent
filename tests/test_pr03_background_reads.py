@@ -83,7 +83,6 @@ def test_pr03_background_inventory_uses_adoption_and_retained_log_cursor(
     assert background.output.inflight_read_count == 0
     registry.terminate_if_running(
         background.process_id,
-        max_output_chars=512,
         owner_host_session_id=owner,
     )
     assert [

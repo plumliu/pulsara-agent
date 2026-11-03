@@ -54,10 +54,6 @@ from pulsara_agent.conversation_kernel.repository import (
     ConversationKernelRepository,
     build_prepared_tool_result_acceptance,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
-)
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.conversation_kernel.safe_point import (
     ProviderSafePointCoordinator,
@@ -535,13 +531,11 @@ def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
         attempt_id=attempt_id,
         result_state="SUCCESS",
         canonical_preview_content=InlineContent.from_bytes(b"late-success"),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
+        output_body=InlineContent.from_bytes(b"late-success"),
         source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
+        output_omitted=False,
         source_coverage_reason=None,
-        artifact_unavailability_reason=None,
+        output_unavailability_reason=None,
         observed_at=occurred_at,
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
@@ -637,7 +631,7 @@ def test_reader_lowers_no_attempt_as_interrupted_before_dispatch(
     assert materialized.late_outcomes == ()
 
 
-def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows(
+def test_reader_preserves_saved_output_page_full_requirement_from_exact_rows(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -651,7 +645,7 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    turn_id = _start_turn(repository, lease, b"read an artifact page")
+    turn_id = _start_turn(repository, lease, b"read a saved output page")
     cut = repository.prepare_provider_input_cut(
         lease.guard,
         turn_id=turn_id,
@@ -663,20 +657,18 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
         lease.guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"artifact request"),
+        parent_content=InlineContent.from_bytes(b"saved output request"),
         blocks=(
             AssistantToolCallBlock(
                 block_id=_id("block"),
                 tool_call_id=call_id,
-                tool_name="read_artifact",
+                tool_name="read_file",
                 arguments=freeze_json(
                     {
                         "target": {
-                            "kind": "ARTIFACT",
-                            "artifact_id": "artifact:3uxyc2nlsokzkts3xmlji4zimy",
+                            "kind": "SESSION_ENTRY",
+                            "entry_id": _id("entry"),
                         },
-                        "offset_chars": 0,
-                        "max_chars": 20_000,
                     }
                 ),
             ),
@@ -715,15 +707,13 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
         attempt_id=attempt_id,
         result_state="SUCCESS",
         canonical_preview_content=InlineContent.from_bytes(
-            b'{"has_more":true,"text":"page"}'
+            b'{"text":"page","next":null}'
         ),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
+        output_body=InlineContent.from_bytes(b'{"text":"page","next":null}'),
         source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
+        output_omitted=False,
         source_coverage_reason=None,
-        artifact_unavailability_reason=None,
+        output_unavailability_reason=None,
         observed_at=observed_at,
         observation_duration_microseconds=1,
         observation_origin_kind=ToolObservationOrigin.BUILTIN,
@@ -753,7 +743,7 @@ def test_round7_1_reader_rebuilds_artifact_page_full_requirement_from_exact_rows
         ToolResultDeliveryRequirement.FULL_REQUIRED
     )
     assert (
-        page.tool_result_delivery.reason is ToolResultFullDeliveryReason.ARTIFACT_PAGE
+        page.tool_result_delivery.reason is ToolResultFullDeliveryReason.RESULT_PROJECTION
     )
 
 

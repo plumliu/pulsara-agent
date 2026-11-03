@@ -28,16 +28,26 @@ async def surface(tmp_path, monkeypatch):
     async def workspace_availability(session_id):
         assert session_id == 'session:tpsqggcbte7fwanzpf642ljwli'
         return {"path": str(root), "outcome": "AVAILABLE"}
+
+    def host_writer_unavailable(host_session_id):
+        assert host_session_id == 'host:wwcxgflwxmmjovez6gxjhmeqmi'
+        return False
+
     sessions = SimpleNamespace(workspace_availability=workspace_availability,
+                               host_writer_unavailable=host_writer_unavailable,
                                _lock=asyncio.Lock(), _operations={})
     bridge = RendererBridge(sessions=sessions, protocol_server=object())
     owner = SimpleNamespace(
-        session_id='session:tpsqggcbte7fwanzpf642ljwli', role="controller", generation=7, is_open=True
+        session_id='session:tpsqggcbte7fwanzpf642ljwli',
+        host_session_id='host:wwcxgflwxmmjovez6gxjhmeqmi',
+        role="controller", generation=7, is_open=True
     )
     bridge._connections["owner"] = owner
     bridge._controller_by_session['session:tpsqggcbte7fwanzpf642ljwli'] = "owner"
     bridge._connections["observer"] = SimpleNamespace(
-        session_id='session:tpsqggcbte7fwanzpf642ljwli', role="observer", generation=8, is_open=True
+        session_id='session:tpsqggcbte7fwanzpf642ljwli',
+        host_session_id='host:wwcxgflwxmmjovez6gxjhmeqmi',
+        role="observer", generation=8, is_open=True
     )
     server = LocalHttpServer(
         sessions=SimpleNamespace(),
@@ -138,6 +148,42 @@ def test_controller_generation_origin_and_takeover_are_checked(tmp_path, monkeyp
             response = await task
             assert response.status == 409
             assert not imports.exists() or not list(imports.iterdir())
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("blocked", "code"),
+    [
+        ("writer", "SESSION_WRITER_UNAVAILABLE"),
+        ("workspace", "WORKSPACE_UNAVAILABLE"),
+        ("operation", "SESSION_CONTROL_BUSY"),
+    ],
+)
+def test_import_requires_current_writer_workspace_and_idle_session(
+    tmp_path, monkeypatch, blocked, code
+):
+    async def run():
+        async with surface(tmp_path, monkeypatch) as (server, client, bridge, imports):
+            sessions = bridge.sessions
+            if blocked == "writer":
+                monkeypatch.setattr(sessions, "host_writer_unavailable", lambda _: True)
+            elif blocked == "workspace":
+                async def unavailable(session_id):
+                    assert session_id == 'session:tpsqggcbte7fwanzpf642ljwli'
+                    return {"path": str(tmp_path / "missing"), "outcome": "MISSING"}
+
+                monkeypatch.setattr(sessions, "workspace_availability", unavailable)
+            else:
+                sessions._operations['session:tpsqggcbte7fwanzpf642ljwli'] = object()
+            response = await client.post(
+                server.origin + "/api/connections/owner/import-file",
+                data=b"must not publish",
+                headers=file_headers("blocked.pdf"),
+            )
+            assert response.status == 409
+            assert (await response.json())["error"]["code"] == code
+            assert not imports.exists()
 
     asyncio.run(run())
 

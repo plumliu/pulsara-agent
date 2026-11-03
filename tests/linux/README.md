@@ -52,6 +52,13 @@ fixtures, and drops those databases after use. No host PostgreSQL port
 or saved production configuration is used. The cleanup command removes the
 container database volume.
 
+Manual PostgreSQL test runtimes also need PostgreSQL's SQL-only
+[`intagg` contrib](https://www.postgresql.org/docs/17/intagg.html)
+(`intagg.control` and `intagg--1.1.sql` in the isolated runtime's
+`share/extension`) for unrelated-extension preservation checks; prepare it
+alongside pgvector/pg_search and supply the admin/runtime DSNs through the
+existing [database fixture owner](../support/postgres_database.py).
+
 Use `DOCKER_DEFAULT_PLATFORM=linux/amd64` or `linux/arm64` to select an
 architecture; emulated tests do not replace the native CI matrix.
 

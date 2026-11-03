@@ -63,6 +63,7 @@ from pulsara_agent.ports.user_control_feedback import (
     USER_CONTROL_FEEDBACK_MEDIA_TYPE,
     project_user_control_feedback_for_provider,
 )
+from pulsara_agent.ports.tool_execution import freeze_tool_json_object
 
 if TYPE_CHECKING:
     from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
@@ -111,7 +112,6 @@ class FrozenForkHistoricalMaterial:
     visualizations: tuple[Mapping[str, object], ...]
     required_tool_closures: tuple[Mapping[str, object], ...]
     replay_fragments: tuple[tuple[str, ProviderAssistantReplayFragment], ...]
-    referenced_artifact_blobs: tuple[Mapping[str, object], ...]
 
 
 def _deadline(deadline: float) -> None:
@@ -132,7 +132,8 @@ def read_fork_anchor(
     for this entry by the caller's current canonical read transaction.
     """
     row = connection.execute(
-        """SELECT e.*, t.status AS executed_status, t.final_entry_id AS executed_final,
+        """SELECT e.*, session.root_session_id,
+                  t.status AS executed_status, t.final_entry_id AS executed_final,
                   t.model_call_binding AS executed_model,
                   r.base_kind AS executed_base, r.context_snapshot_id AS executed_snapshot,
                   r.source_through_sequence AS executed_floor,
@@ -141,6 +142,7 @@ def read_fork_anchor(
                   genesis.base_kind AS genesis_base, genesis.context_snapshot_id AS genesis_snapshot,
                   genesis.source_through_sequence AS genesis_floor
            FROM pulsara_v3.transcript_entries AS e
+           JOIN pulsara_v3.sessions AS session ON session.id=e.session_id
            LEFT JOIN pulsara_v3.turns AS t ON e.entry_owner_kind = 'EXECUTED_TURN'
              AND t.session_id = e.session_id AND t.id = e.turn_id
            LEFT JOIN pulsara_v3.turn_context_binding_revisions AS r
@@ -153,10 +155,7 @@ def read_fork_anchor(
     ).fetchone()
     if row is None or row["entry_kind"] != "ASSISTANT_MESSAGE":
         return None
-    session = connection.execute(
-        "SELECT root_session_id FROM pulsara_v3.sessions WHERE id=%s", (session_id,)
-    ).fetchone()
-    if session is None or session["root_session_id"] is not None:
+    if row["root_session_id"] is not None:
         return None
     executed = row["entry_owner_kind"] == "EXECUTED_TURN"
     prefix = "executed" if executed else "genesis"
@@ -408,7 +407,6 @@ def read_fork_historical_material(
     visualizations = []
     results = []
     replays = []
-    artifacts = {}
     groups = {}
     block_bodies = {}
     blocks_by_entry = {}
@@ -653,6 +651,7 @@ def read_fork_historical_material(
                 "Fork result falls outside its effective range"
             )
         safe = dict(raw)
+        safe["result_facts"] = freeze_tool_json_object(raw["result_facts"])
         for key, value in safe.items():
             if isinstance(value, list):
                 safe[key] = tuple(value)
@@ -665,18 +664,17 @@ def read_fork_historical_material(
         ):
             safe.pop(key)
         results.append(MappingProxyType(safe))
-        blob_id = raw["output_artifact_blob_id"]
+        blob_id = raw["output_body_blob_id"]
         if blob_id is not None:
-            artifact = connection.execute(
+            body_blob = connection.execute(
                 "SELECT id, workspace_id, logical_digest, logical_size, media_type, codec "
                 "FROM pulsara_v3.blobs WHERE id = %s AND workspace_id = %s",
                 (blob_id, session["workspace_id"]),
             ).fetchone()
-            if artifact is None:
+            if body_blob is None:
                 raise ConversationKernelConflict(
-                    "Fork artifact does not exact-join its workspace"
+                    "Fork output body does not exact-join its workspace"
                 )
-            artifacts[str(blob_id)] = MappingProxyType(dict(artifact))
     tool_state = reader._load_tool_state(
         connection,
         source_session_id,
@@ -845,5 +843,4 @@ def read_fork_historical_material(
         visualizations=tuple(visualizations),
         required_tool_closures=tuple(closures),
         replay_fragments=tuple(replays),
-        referenced_artifact_blobs=tuple(artifacts.values()),
     )

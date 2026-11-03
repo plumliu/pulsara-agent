@@ -28,6 +28,7 @@ def test_progress_follows_root_fence_in_snapshot_and_observation(role: int, trig
             current_todo_snapshots=lambda: (), active_root_turn_id=lambda: None, active_manual_compaction_command_id=lambda: None,
             control_admission_deadline_ms=lambda: 10000, take_presentation_notices=lambda _: (),
             current_compaction_projection=owner.current_projection,
+            provider_retry_observation=lambda: None,
         )
         host.root_compaction_in_progress = lambda: KernelHostSession.root_compaction_in_progress(host)
         observer, epoch, revision = host.live_bus.subscribe()

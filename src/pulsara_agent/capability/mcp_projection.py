@@ -11,7 +11,7 @@ from pulsara_agent.primitives.context import (
     context_fingerprint,
 )
 from pulsara_agent.primitives.tool_result_projection import (
-    conservative_artifact_page_logical_utf8_bytes,
+    conservative_tool_result_page_logical_utf8_bytes,
 )
 
 
@@ -94,7 +94,7 @@ def render_inspected_new_mcp_tool_provider_result(
 def conservative_mcp_inspection_logical_utf8_bytes(
     values: McpInspectionDescriptorValues,
 ) -> int:
-    return conservative_artifact_page_logical_utf8_bytes(
+    return conservative_tool_result_page_logical_utf8_bytes(
         tool_call_id=_CONSERVATIVE_INSPECT_TOOL_CALL_ID,
         body=render_inspected_new_mcp_tool_provider_result(
             values,

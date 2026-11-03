@@ -18,7 +18,7 @@ def _terminal_turn(session, turn_id):
     return next(row for row in snapshot(session)[0] if row["id"] == turn_id)
 
 
-def test_automatic_plan_handoff_preserves_stop_cause_before_physical_cancel(
+def test_automatic_plan_handoff_stops_successor_before_cell_join(
     tmp_path: Path, monkeypatch, stage2_migrated_postgres_database,
 ):
     async def scenario():
@@ -32,6 +32,13 @@ def test_automatic_plan_handoff_preserves_stop_cause_before_physical_cancel(
         cancel_entered, cancel_release = asyncio.Event(), asyncio.Event()
         original_finish = session._finish_root_chain
         original_stop = session._code_mode.stop_turn
+        original_mark = session._code_mode.mark_turn_stopped
+        stop_fences = []
+
+        def capture_stop_fence(turn_id):
+            stop_fences.append((turn_id, session._active_task.cancelling(),
+                                session._active_cancellation_intent.cause))
+            original_mark(turn_id)
 
         async def held_handoff(result, cancellation_intent):
             if result.continuation_turn_id is not None:
@@ -46,6 +53,7 @@ def test_automatic_plan_handoff_preserves_stop_cause_before_physical_cancel(
 
         monkeypatch.setattr(session, "_finish_root_chain", held_handoff)
         monkeypatch.setattr(session._code_mode, "stop_turn", held_physical_cancel)
+        monkeypatch.setattr(session._code_mode, "mark_turn_stopped", capture_stop_fence)
         running = asyncio.create_task(session.run_turn(PromptContent.text("Enter Plan.")))
         try:
             await asyncio.wait_for(handoff_entered.wait(), 10)
@@ -61,7 +69,10 @@ def test_automatic_plan_handoff_preserves_stop_cause_before_physical_cancel(
             )
             assert outcome.status == "PENDING"
             await asyncio.wait_for(cancel_entered.wait(), 10)
-            assert session._active_task.cancelling() == 0
+            assert stop_fences[0][0] == pending.origin_turn_id
+            assert stop_fences[0][1] == 0
+            assert stop_fences[0][2].value == "USER_REQUEST"
+            assert session._active_task.cancelling() > 0
             assert session._active_cancellation_intent.cause.value == "USER_REQUEST"
             handoff_release.set()
 

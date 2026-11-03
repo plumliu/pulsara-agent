@@ -1,4 +1,8 @@
 """User-owned MCP templates share real SDK connections, never model tool dispatch."""
+
+from pulsara_agent.identity import derive_id as _capability_page_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -12,6 +16,9 @@ from pulsara_agent.conversation_kernel.mcp.supervisor import user_prompt_text
 from pulsara_agent.identity import derive_id
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from tests.test_mcp_rpc_errors_and_pagination import _runtime
+
+_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
+
 
 TARGET = {"kind": "MCP_PROMPT", "server_id": "probe", "name": "first"}
 
@@ -52,7 +59,7 @@ def test_real_sdk_user_listing_read_and_missing_target(tmp_path, scope_policy):
                 plan = SimpleNamespace(mcp_catalog_route_projection=SimpleNamespace(routes=()))
 
                 def owner():
-                    return CapabilitySourceQuery(None, runtime=runtime, plan=plan, scope=scope, code_direct_specs=())
+                    return CapabilitySourceQuery(None, runtime=runtime, plan=plan, scope=scope, code_direct_specs=(), fits_result=_CAPABILITY_PAGE_BUDGET.fits)
 
                 page = await owner().execute(parse_query({"kind": "MCP_PROMPT", "limit": 1}))
                 if scope is ModelInputScopeKind.SUBAGENT and scope_policy == "ROOT_ONLY":
@@ -68,7 +75,7 @@ def test_real_sdk_user_listing_read_and_missing_target(tmp_path, scope_policy):
                 server = {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "runtime-target", "probe")}
                 server_detail = await owner().execute(parse_query({"target": server}))
                 assert server_detail["prompt_count"] == 1
-                assert server_detail["prompt_listing"] == {"kind": "MCP_PROMPT", "parent": server}
+                assert server_detail["prompt_listing"] == {"tool": "query_capabilities", "arguments": {"kind": "MCP_PROMPT", "parent": server}}
             requests = json.loads((tmp_path / "requests.json").read_text())
             assert all(request["method"] != "prompts/get" for request in requests)
             page = supervisor.list_user_prompts(query="fi", limit=1)

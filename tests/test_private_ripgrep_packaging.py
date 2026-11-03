@@ -46,6 +46,15 @@ def test_offline_wheel_editable_sdist_require_preparation_and_package_platform_r
         assert failed.returncode != 0
         assert 'prepare_ripgrep.py explicitly' in failed.stderr
     shutil.copytree(ROOT / 'src/pulsara_agent/_vendor', source / 'src/pulsara_agent/_vendor')
+    prepared_identity = source / 'src/pulsara_agent/_vendor/code_mode/identity-core.mjs'
+    prepared_identity.write_text('outdated prepared identity vocabulary')
+    stale = subprocess.run(
+        [sys.executable, '-c', "from hatchling.build import build_editable; build_editable('editable')"],
+        cwd=source, capture_output=True, text=True,
+    )
+    assert stale.returncode != 0
+    assert 'prepare_code_mode.py explicitly' in stale.stderr
+    prepared_identity.write_bytes(identity_source.read_bytes())
     # Editable setup precedes renderer generation in the production task graph.
     editable = subprocess.run(
         [sys.executable, '-c', "from hatchling.build import build_editable; print(build_editable('editable'))"],

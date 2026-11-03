@@ -37,7 +37,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItemKind,
     CanonicalInputOriginKind,
     FrozenRetainedHistoricalRequest,
-    StructuredModelInputLimits,
 )
 from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
@@ -83,9 +82,7 @@ def test_codec_provider_intent_and_protocol_roundtrip():
         content=content.parts,
     )
     assert (
-        lower_canonical_item(
-            item, artifact_read_available=False, limits=StructuredModelInputLimits()
-        ).fixed_message.content
+        lower_canonical_item(item).fixed_message.content
         == parts
     )
     retained = FrozenRetainedHistoricalRequest(

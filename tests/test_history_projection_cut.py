@@ -1,4 +1,6 @@
 """Fixed-prefix construction, typed failures and shared variant work."""
+from tests.support.tool_outputs import prepare_output
+
 from collections import Counter
 from datetime import datetime, timezone
 from time import monotonic
@@ -274,17 +276,19 @@ def test_bad_tool_result_fails_group_but_not_requested_no_tools(
     repo, stage2_migrated_postgres_database
 ):
     from pulsara_agent.conversation_kernel.repository import build_prepared_tool_result_acceptance
-    from pulsara_agent.conversation_kernel.tool_artifacts import ToolOutputArtifactProcessor
+    from pulsara_agent.conversation_kernel.tool_outputs import ToolOutputProcessor
     from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-    from tests.test_round1_tool_output_artifact import _install_tool_call
+    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
+    from tests.support.tool_outputs import _install_tool_call
 
     workspace = identity("workspace")
     lease, owner, request, call, attempt = _install_tool_call(repo, workspace)
     entry_id = identity("entry")
-    projection = ToolOutputArtifactProcessor(repo.connection_provider).prepare(
+    projection = prepare_output(ToolOutputProcessor(repo.connection_provider),
         session_id=lease.guard.session_id, workspace_id=workspace,
         result_entry_id=entry_id, public_output="tool result 中文🧰",
-        candidate=None, artifact_inline_result=False,
+        native_output="tool result 中文🧰", output_body_candidate=None,
+        output_omitted=False, public_format=ToolOutputSourceFormatHint.TEXT,
         deadline_monotonic=monotonic() + 30,
     )
     candidate = build_prepared_tool_result_acceptance(
@@ -292,11 +296,10 @@ def test_bad_tool_result_fails_group_but_not_requested_no_tools(
         result_id=identity("result"), result_entry_id=entry_id, turn_id=owner,
         assistant_entry_id=request, tool_call_id=call, attempt_id=attempt,
         result_state="SUCCESS", canonical_preview_content=projection.canonical_preview,
-        artifact_disposition=projection.artifact_disposition,
-        artifact_id=projection.artifact_id, artifact_blob_descriptor=projection.artifact_blob,
-        source_coverage=projection.source_coverage, display_kind=projection.display_kind,
+        output_body=projection.output_body,
+        source_coverage=projection.source_coverage, output_omitted=projection.output_omitted,
         source_coverage_reason=projection.source_coverage_reason,
-        artifact_unavailability_reason=projection.artifact_unavailability_reason,
+        output_unavailability_reason=projection.output_unavailability_reason,
         actor_id="tool:test", observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
         observation_origin_kind=ToolObservationOrigin.TERMINAL_PROCESS,
@@ -310,7 +313,7 @@ def test_bad_tool_result_fails_group_but_not_requested_no_tools(
     expected = group(repo, lease.guard.session_id, q1, cut).documents[("QA", False)]
     with psycopg.connect(stage2_migrated_postgres_database.admin_dsn, row_factory=dict_row) as connection:
         connection.execute(
-            "UPDATE pulsara_v3.transcript_entries SET inline_content=%s || substring(inline_content FROM 2) WHERE id=%s",
+            "UPDATE pulsara_v3.tool_results SET output_body_inline_content=%s || substring(output_body_inline_content FROM 2) WHERE result_entry_id=%s",
             (b"x", entry_id),
         )
         result = build_history_group(

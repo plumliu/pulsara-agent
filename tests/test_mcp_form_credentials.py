@@ -1,5 +1,8 @@
 """Public capability forms share the canonical credential destination rule."""
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
+
 import asyncio
 
 import pytest
@@ -128,7 +131,7 @@ def test_public_form_applies_new_secrets_but_requires_confirmation_for_retained_
                 service.mcp.settings.resolve_mcp_secret(binding) for binding in bindings
             ) == ("old-0", "old-1")
             call.accept(AcceptedCapabilityFormSubmission(values))
-            assert (await call.execute())["status"] == "APPLIED"
+            assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
             assert tuple(
                 service.mcp.settings.resolve_mcp_secret(binding) for binding in bindings
             ) == (

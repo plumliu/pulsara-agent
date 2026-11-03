@@ -10,7 +10,7 @@ object alone can produce an empty object.
 
 Ordinary successful tools resolve their public JSON value or text. Tool failures
 reject with a `ToolError`, carrying `code`, `message`, and available result or
-artifact details. For example, a script can expose these details for ROOT to
+saved-body details. For example, a script can expose these details for ROOT to
 interpret:
 
 ```js
@@ -34,7 +34,7 @@ functions or `undefined`; batch parameter functions are the specific exception
 described in [Coordination](../agent-orchestration/coordination.md). Non-finite
 numbers, BigInt, cycles, and integers outside JavaScript's safe integer range
 cannot cross the tool boundary. For an unsafe-number response, use the provided
-raw-text or artifact route instead of rounding it.
+exact saved-body read route instead of rounding it.
 
 ## Preserve the tool's actual coverage
 
@@ -42,15 +42,24 @@ A JS result has the full public value for that call, including its own paginatio
 or truncation. It is not necessarily the whole file, history, or process output.
 Use the tool's actual cursor, offset, or target to read further when needed.
 
-Terminal results can include `output_artifact` for a readable archive. Use its
-actual ARTIFACT target with `read_artifact`; check its disposition and coverage.
-An artifact marked complete covers the reported selection, which may be less
-than the process's entire lifetime.
+Source pages provide a complete `next` call or null. Copy it to continue the
+source. It does not read omitted text from an earlier result. A saved result's
+`read` call uses `read_file` with its exact SESSION_ENTRY target; its own `next`
+continues that frozen body. A complete body covers the reported selection, which
+may be less than a process lifetime or an entire remote dataset.
 
 Each log is actively delivered as its own input; ROOT does not use `exec_cell`
-or `manage_cell.wait` to fetch output pages. Large records retain full content
-through the existing content/artifact owner. Read any supplied exact content
-entry or artifact when ROOT needs the full body.
+or `manage_cell.wait` to fetch output pages. Large formally published records
+retain their body under the original entry. Use the supplied read call when ROOT
+needs more text, or use its target as `write_file.source` to save the whole body.
+Only a real output omission needs a read call; a complete displayed page needs no
+second body read.
+
+A tool value that exceeds the bridge boundary rejects with `value_boundary` while
+preserving the real business state and result IDs. Inspect `error.read`, body
+availability and coverage. Read or save that accepted body; do not repeat a write
+or remote action to recover its response. JavaScript cannot access content an
+upstream source never returned.
 
 A Cell that fails unexpectedly reports a combined diagnostic preserving its
 specific cause. Tools already accepted but not delivered to JS still settle and

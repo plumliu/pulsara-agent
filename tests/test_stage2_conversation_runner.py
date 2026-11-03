@@ -111,9 +111,7 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
     KernelToolResult,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import (
-    PostgresToolArtifactReadPort,
-)
+from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
 from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
@@ -167,11 +165,8 @@ from pulsara_agent.ports.provider_stream import (
     ProviderPhysicalCompletionStatus,
     ProviderStreamTerminal,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
-)
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
+from pulsara_agent.model_input.lowering import decode_tool_result_observation
 from pulsara_agent.ports.user_control_feedback import (
     ProcessControlFeedbackContent,
     UserControlFeedbackInstallationAttempt,
@@ -240,7 +235,7 @@ def _turn_permission_fingerprint(
     return str(row[0])
 
 
-def _seed_artifact_result_with_memory_provenance(
+def _seed_result_page_with_memory_provenance(
     repository: ConversationKernelRepository,
     *,
     lease: object,
@@ -259,7 +254,7 @@ def _seed_artifact_result_with_memory_provenance(
         permission_snapshot_id=_name("permission"),
         requested_permission_mode=DEFAULT_PERMISSION_MODE,
         model_call_binding=test_model_binding(test_model_runtime()),
-        content=FrozenPromptContent.text("read an artifact page"),
+        content=FrozenPromptContent.text("read a saved result page"),
         occurred_at=datetime.now(timezone.utc),
         deadline_monotonic=monotonic() + 30,
     )
@@ -274,14 +269,14 @@ def _seed_artifact_result_with_memory_provenance(
         guard,
         cut=cut,
         entry_id=assistant_entry_id,
-        parent_content=InlineContent.from_bytes(b"artifact_read"),
+        parent_content=InlineContent.from_bytes(b"read_file"),
         blocks=(
             AssistantToolCallBlock(
                 block_id=_name("block"),
                 tool_call_id=tool_call_id,
-                tool_name="read_artifact",
+                tool_name="read_file",
                 arguments=freeze_json(
-                    {"target": {"kind": "ARTIFACT", "artifact_id": _name("artifact")}}
+                    {"target": {"kind": "SESSION_ENTRY", "entry_id": _name("entry")}}
                 ),
             ),
         ),
@@ -324,13 +319,11 @@ def _seed_artifact_result_with_memory_provenance(
         canonical_preview_content=InlineContent.from_bytes(
             b'{"status":"success","text":"bounded page"}'
         ),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
+        output_body=InlineContent.from_bytes(b'{"status":"success","text":"bounded page"}'),
+        output_unavailability_reason=None,
         source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
+        output_omitted=False,
         source_coverage_reason=None,
-        artifact_unavailability_reason=None,
         model_visible_memory_fact_ids=memory_ids,
         observed_at=observed_at,
         observation_duration_microseconds=1,
@@ -1855,7 +1848,8 @@ def test_k3_user_control_feedback_is_measured_before_atomic_publication(
             command="python worker.py",
             cwd="/tmp",
             origin_turn_id=turn_id,
-            origin_subagent_task_id=None,
+            origin_conversation_scope_kind="ROOT",
+            origin_session_id=session_id,
             target_root_turn_id=turn_id,
             process=UserControlProcessFact(
                 "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
@@ -1976,7 +1970,8 @@ def test_k3_user_control_feedback_resource_failure_precedes_publication(
                         command="python worker.py",
                         cwd="/tmp",
                         origin_turn_id=turn_id,
-                        origin_subagent_task_id=None,
+                        origin_conversation_scope_kind="ROOT",
+                        origin_session_id=session_id,
                         target_root_turn_id=turn_id,
                         process=UserControlProcessFact(
                             "TERMINATION_COMPLETED",
@@ -2099,7 +2094,8 @@ def test_k3_active_feedback_compacts_before_atomic_publication(
             command="python worker.py",
             cwd="/tmp",
             origin_turn_id=turn_id,
-            origin_subagent_task_id=None,
+            origin_conversation_scope_kind="ROOT",
+            origin_session_id=session_id,
             target_root_turn_id=turn_id,
             process=UserControlProcessFact(
                 "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
@@ -7834,7 +7830,7 @@ def test_round7_1_full_required_budget_boundary_has_zero_provider_open(
         ).fetchone() == ("INTERRUPTED", "PROVIDER_INPUT_RESOURCE_EXHAUSTED")
 
 
-def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_open(
+def test_real_result_page_with_fifty_memory_ids_fails_typed_before_open(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -7853,7 +7849,7 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
         derive_id("memory", "test-fixture", f"memory:{index:064x}")
         for index in range(50)
     )
-    result_id = _seed_artifact_result_with_memory_provenance(
+    result_id = _seed_result_page_with_memory_provenance(
         repository,
         lease=lease,
         workspace_id=workspace_id,
@@ -7876,7 +7872,7 @@ def test_round7_1_real_artifact_result_with_fifty_memory_ids_fails_typed_before_
         asyncio.run(
             runner.run_turn(
                 frozen_test_prompt(
-                    "new turn cannot fit the required full artifact page"
+                    "new turn cannot fit the required full result page"
                 ),
                 command_id=command_id,
             )
@@ -8427,13 +8423,13 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
     ) as connection:
-        artifact = connection.execute(
-            "SELECT output_artifact_disposition, output_display_kind "
+        output = connection.execute(
+            "SELECT output_body_digest IS NOT NULL, output_omitted "
             "FROM pulsara_v3.tool_results "
             "WHERE session_id = %s AND result_entry_id = %s",
             (session_id, tool_result["id"]),
         ).fetchone()
-    assert artifact == ("NOT_REQUIRED", "COMPLETE")
+    assert output == (True, False)
 
 
 def test_stage2_live_bus_overflow_is_nonblocking_and_returns_gap() -> None:
@@ -9709,7 +9705,7 @@ def test_stage2_cancellation_does_not_turn_a_live_tool_into_system_error(
         ).fetchone() == (0,)
 
 
-def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
+def test_provider_rematerialization_uses_one_preview_and_original_scoped_body(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -9747,23 +9743,21 @@ def test_round1_provider_rematerialization_uses_preview_and_scoped_artifact(
         lane=PostgresConnectionLane.INSPECTOR,
         deadline_monotonic=monotonic() + 10,
     ) as connection:
-        artifact_id = connection.execute(
+        result_entry_id = connection.execute(
             """
-            SELECT output_artifact_id
+            SELECT result_entry_id
             FROM pulsara_v3.tool_results
             WHERE session_id = %s
             """,
             (session_id,),
         ).fetchone()[0]
-    read_port = PostgresToolArtifactReadPort(
+    read_port = PostgresToolOutputReadPort(
         provider,
         session_id=session_id,
         workspace_id=workspace_id,
     )
-    page = read_port.read_text(
-        artifact_id,
-        offset_chars=0,
-        max_chars=32_000,
-    )
-    assert page.text == "z" * 32_000
-    assert page.has_more
+    body = read_port.read_body({"kind":"SESSION_ENTRY","entry_id":result_entry_id})
+    assert body.content == b"z" * (70 << 10)
+    assert body.source_coverage is ToolOutputSourceCoverage.COMPLETE
+    display = json.loads(decode_tool_result_observation(preview)["body"])
+    assert display["read"]["arguments"]["target"]["entry_id"] == result_entry_id

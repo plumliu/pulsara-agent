@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.steer import (
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.model_input.contracts import CanonicalInputOriginKind
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.scheduling.contracts import (
     ScheduledAdmission,
     ScheduledTriggerSource,
@@ -266,20 +267,22 @@ def test_tool_null_scope_preserves_filtered_pages_and_service_all_sessions(
                 arguments,
                 default_session_id=lease.guard.session_id,
                 permission_mode=DEFAULT_PERMISSION_MODE,
+                page_budget=ToolResultPageBudget(tool_call_id="schedule-page"),
             )
             ids.extend(row["target"]["task_id"] for row in page["tasks"])
             assert all(
                 row["session"]["session_id"] == lease.guard.session_id for row in page["tasks"]
             )
-            if page["next_cursor"] is None:
+            if page["next"] is None:
                 break
-            arguments = {**arguments, "cursor": page["next_cursor"]}
+            arguments = page["next"]["arguments"]
         assert ids == sorted(row["id"] for row in current)
         assert active["id"] not in ids and other["id"] not in ids
         selected = await service.invoke_query(
             {"session": {"kind": "SESSION", "session_id": other_lease.guard.session_id}},
             default_session_id=lease.guard.session_id,
             permission_mode=DEFAULT_PERMISSION_MODE,
+            page_budget=ToolResultPageBudget(tool_call_id="schedule-other-page"),
         )
         assert [row["target"]["task_id"] for row in selected["tasks"]] == [other["id"]]
         all_ids = []

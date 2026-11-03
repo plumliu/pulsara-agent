@@ -7,8 +7,8 @@ import pytest
 
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from tests.test_agent_requests_persistence import deadline, request
+from tests.test_agent_requests_persistence import source as source
 
-pytest_plugins = ["tests.test_agent_requests_persistence"]
 pytestmark = pytest.mark.postgres
 
 

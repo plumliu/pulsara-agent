@@ -73,8 +73,8 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
             "resource_count": server.resource_count if candidate is not None else None,
             "resource_template_count": server.resource_template_count if candidate is not None else None,
             "prompt_count": server.prompt_count if candidate is not None else None,
-            "tool_listing": {"kind": "MCP_TOOL", "parent": target},
-            "prompt_listing": {"kind": "MCP_PROMPT", "parent": target},
+            "tool_listing": {"tool": "query_capabilities", "arguments": {"kind": "MCP_TOOL", "parent": target}},
+            "prompt_listing": {"tool": "query_capabilities", "arguments": {"kind": "MCP_PROMPT", "parent": target}},
             "diagnostics": [],
         }
         if server.stable_failure_category:

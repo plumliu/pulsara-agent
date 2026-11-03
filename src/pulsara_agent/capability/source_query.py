@@ -6,19 +6,13 @@ module owns only selection shapes and one response page; targets are not permits
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
 from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 from pulsara_agent.primitives.context import canonical_json_bytes
-from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    conservative_artifact_page_logical_utf8_bytes,
-)
 
 KINDS = (
     "SKILL",
@@ -198,18 +192,10 @@ def query_error(code, message):
     return {"status": code, "message": message}
 
 
-def fits_result(value):
-    return (
-        conservative_artifact_page_logical_utf8_bytes(
-            tool_call_id="call_" + "x" * 123,
-            body=canonical_json_bytes(value).decode("utf-8"),
-            model_visible_memory_ids=(),
-        )
-        <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-    )
-
-
-def render_page(rows, arguments, *, diagnostics=(), completeness="COMPLETE"):
+def render_page(
+    rows, arguments, *, fits_result: Callable[[str], bool],
+    diagnostics=(), completeness="COMPLETE",
+):
     # Sort by existing case-sensitive identity, with no snapshot/cursor registry.
     def key(row):
         source = row.get("source") or {}
@@ -229,12 +215,24 @@ def render_page(rows, arguments, *, diagnostics=(), completeness="COMPLETE"):
             "items": ordered[offset:end],
             "returned_count": count,
             "total_count": len(ordered),
-            "truncated": end < len(ordered),
-            "next_offset": end if end < len(ordered) else None,
+            "next": {
+                "tool": "query_capabilities",
+                "arguments": {**arguments, "offset": end, "limit": limit},
+            } if end < len(ordered) else None,
             "completeness": completeness,
             "diagnostics": list(diagnostics),
         }
-        if fits_result(value):
+        fits = fits_result(canonical_json_bytes(value).decode("utf-8"))
+        if not fits and count == 1 and "description" in value["items"][0]:
+            # Directory descriptions are expandable metadata. Preserve the
+            # exact identity and provide its complete inspect action instead
+            # of making one long description hide an actionable capability.
+            row = dict(value["items"][0])
+            row.pop("description")
+            row["description_omitted"] = True
+            value["items"] = [row]
+            fits = fits_result(canonical_json_bytes(value).decode("utf-8"))
+        if fits:
             if count == 0 and offset < len(ordered):
                 raise CapabilityQueryError(
                     "CAPABILITY_ROW_OVERBOUND",

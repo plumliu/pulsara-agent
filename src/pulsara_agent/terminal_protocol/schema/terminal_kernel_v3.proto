@@ -176,14 +176,15 @@ message CanonicalToolResult {
   uint64 call_sequence = 12;
   string tool_name = 13;
   string original_arguments_json = 14;
+  string result_facts_json = 16;
   string assistant_entry_id = 1;
   string tool_call_id = 2;
   string result_state = 3;
-  string artifact_disposition = 4;
+  bool output_body_available = 4;
   string source_coverage = 5;
-  string display_kind = 6;
+  bool output_omitted = 6;
   string source_coverage_reason = 7;
-  string artifact_unavailability_reason = 8;
+  string output_unavailability_reason = 8;
 }
 
 message CanonicalInputSource {
@@ -1119,29 +1120,28 @@ message ReadContentRequest {
   optional uint32 reasoning_ordinal = 12;
 }
 
-message ReadToolArtifactRequest {
+message ToolOutputTextPosition {
+  uint64 line = 1;
+  uint64 char_offset = 2;
+}
+
+message ReadToolOutputRequest {
   string request_id = 1;
   string attachment_id = 2;
   uint64 attachment_generation = 3;
   string result_entry_id = 4;
-  uint64 offset_chars = 5;
+  ToolOutputTextPosition position = 5;
   uint32 max_chars = 6;
 }
 
-message ToolArtifactTextChunk {
+message ToolOutputTextChunk {
   string request_id = 1;
   string result_entry_id = 2;
-  string artifact_disposition = 3;
-  string source_coverage = 4;
-  string display_kind = 5;
-  string source_coverage_reason = 6;
-  string artifact_unavailability_reason = 7;
-  string text = 8;
-  uint64 offset_chars = 9;
-  uint64 returned_chars = 10;
-  uint64 total_chars = 11;
-  bool has_more = 12;
-  uint64 next_offset_chars = 13;
+  string source_coverage = 3;
+  string source_coverage_reason = 4;
+  string text = 5;
+  ToolOutputTextPosition position = 6;
+  ToolOutputTextPosition next = 7;
 }
 
 message ListBackgroundProcessesRequest {
@@ -1273,7 +1273,7 @@ message ClientFrame {
     ResolvePlanInteractionRequest resolve_plan_interaction = 11;
     ReadPlanQuestionContentRequest read_plan_question = 12;
     ReadPlanDraftTextChunkRequest read_plan_draft = 13;
-    ReadToolArtifactRequest read_tool_artifact = 14;
+    ReadToolOutputRequest read_tool_output = 14;
     ListBackgroundProcessesRequest list_background_processes = 15;
     ReadBackgroundProcessLogRequest read_background_process_log = 16;
     SubagentCapacityRequest subagent_capacity = 17;
@@ -1302,7 +1302,7 @@ message ServerFrame {
     ResolvePlanInteractionResponse resolve_plan_interaction = 11;
     PlanQuestionContent plan_question = 12;
     PlanDraftTextChunk plan_draft = 13;
-    ToolArtifactTextChunk tool_artifact = 14;
+    ToolOutputTextChunk tool_output = 14;
     BackgroundProcessPage background_processes = 15;
     BackgroundProcessLog background_process_log = 16;
     SubagentCapacityResponse subagent_capacity = 17;

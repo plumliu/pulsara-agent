@@ -17,11 +17,13 @@ from pulsara_agent.conversation_kernel.session_text import (
     decode_saved_text,
     prompt_history_text,
 )
+from pulsara_agent.conversation_kernel.tool_outputs import read_tool_output_content
 from pulsara_agent.llm.input import (
     LLMTextPart,
     PromptAnnotationPart,
     HISTORICAL_IMAGE_MARKER,
 )
+from pulsara_agent.primitives.context import canonical_json_bytes
 
 
 class _AssistantHistoryBatch:
@@ -132,6 +134,7 @@ def canonical_history_message(
     kind = entry["entry_kind"]
     atomic_ranges = []
     body_ranges = None
+    result_metadata = {}
     if kind in {"USER_MESSAGE", "USER_STEER"}:
         if entry["scheduled_input"] is not None:
             return None
@@ -194,10 +197,19 @@ def canonical_history_message(
             if not include_tools:
                 return None
             fact = connection.execute(
-                "SELECT r.*,COALESCE(i.tool_name,a.tool_name) AS tool_name,i.source_kind FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.id=r.invocation_id LEFT JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id AND a.assistant_entry_id=r.tool_call_entry_id AND a.tool_call_id=r.tool_call_id AND a.block_kind='TOOL_CALL' WHERE r.session_id=%s AND r.result_entry_id=%s",
+                """SELECT r.*,CASE WHEN r.result_record_kind='IMPORTED_HISTORY'
+                  OR i.source_kind='MODEL_TOOL_CALL' THEN a.tool_name ELSE i.tool_name END AS tool_name,
+                  CASE r.result_record_kind WHEN 'IMPORTED_HISTORY'
+                  THEN 'MODEL_TOOL_CALL' ELSE i.source_kind END AS source_kind
+                FROM pulsara_v3.tool_results r LEFT JOIN pulsara_v3.tool_invocations i
+                  ON i.session_id=r.session_id AND i.id=r.invocation_id
+                LEFT JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id
+                  AND a.assistant_entry_id=r.tool_call_entry_id AND a.tool_call_id=r.tool_call_id
+                  AND a.block_kind='TOOL_CALL'
+                WHERE r.session_id=%s AND r.result_entry_id=%s""",
                 (entry["session_id"], entry["id"]),
             ).fetchone()
-            if fact is None:
+            if fact is None or fact["tool_name"] is None or fact["source_kind"] is None:
                 raise RuntimeError("saved tool result canonical edge is missing")
             if fact["source_kind"] != "MODEL_TOOL_CALL":
                 return None
@@ -207,6 +219,14 @@ def canonical_history_message(
                 "read_session_content",
             }:
                 return None
+            result_metadata["result_state"] = fact["result_state"]
+            if fact["result_facts"]:
+                result_metadata["result_facts"] = fact["result_facts"]
+            if fact["output_source_coverage"] != "COMPLETE":
+                result_metadata["source_coverage"] = fact["output_source_coverage"]
+                result_metadata["source_coverage_reason"] = fact["output_source_coverage_reason"]
+            if fact["output_unavailability_reason"] is not None:
+                result_metadata["output_unavailability_reason"] = fact["output_unavailability_reason"]
             if entry["content_media_type"] == PROMPT_BODY_MEDIA_TYPE:
                 parts = validate_canonical_prompt_owner_metadata(
                     connection, row=entry, transcript_entry_id=entry["id"]
@@ -214,41 +234,20 @@ def canonical_history_message(
                 text, source_segments, image_bounds = prompt_history_text(
                     parts, image_references=None
                 )
-            else:
-                body = entry["inline_content"]
-                if body is None:
-                    blob = connection.execute(
-                        "SELECT body FROM pulsara_v3.blobs WHERE id=%s AND workspace_id=%s",
-                        (entry["blob_id"], entry["workspace_id"]),
-                    ).fetchone()
-                    body = None if blob is None else blob["body"]
-                text = decode_saved_text(
-                    {
-                        "kind": "tool",
-                        "content": body,
-                        "size": entry["content_size"],
-                        "digest": entry["content_digest"],
-                        "media_type": entry["content_media_type"],
-                    }
-                )
+            elif fact["output_unavailability_reason"] is None:
+                text = read_tool_output_content(connection, fact).decode("utf-8")
                 source_segments, image_bounds = ((0, text),), ()
-            if fact["output_artifact_disposition"] in {"AVAILABLE", "INCOMPLETE"}:
-                blob = connection.execute(
-                    "SELECT body,logical_size,logical_digest FROM pulsara_v3.blobs WHERE id=%s AND workspace_id=%s",
-                    (fact["output_artifact_blob_id"], entry["workspace_id"]),
-                ).fetchone()
-                if blob is None:
-                    raise RuntimeError("saved tool artifact is missing")
-                artifact = decode_saved_text(
-                    {
-                        "kind": "tool",
-                        "content": blob["body"],
-                        "size": blob["logical_size"],
-                        "digest": blob["logical_digest"],
-                    }
+            else:
+                text = "[Saved tool output is unavailable.]"
+                source_segments, image_bounds = (), ()
+            if fact["result_facts"]:
+                facts = canonical_json_bytes(fact["result_facts"]).decode("utf-8")
+                prefix = "Tool result facts:\n" + facts + "\nTool output:\n"
+                source_segments = ((len("Tool result facts:\n"), facts),) + tuple(
+                    (len(prefix) + at, value) for at, value in source_segments
                 )
-                source_segments += ((len(text) + 1, artifact),)
-                text += "\n" + artifact
+                image_bounds = tuple((len(prefix) + a, len(prefix) + b) for a, b in image_bounds)
+                text = prefix + text
             role, label, shown = "tool", "工具结果", [fact["tool_name"] + "\n" + text]
             prefix_size = len(fact["tool_name"]) + 1
             segments = ((0, fact["tool_name"]),) + tuple(
@@ -342,6 +341,7 @@ def canonical_history_message(
         "label": label,
         "at": entry["accepted_at"].isoformat(),
         "text": "\n".join(shown),
+        **result_metadata,
         "annotated": annotated,
         "fields": fields,
         "body_ranges": body_ranges

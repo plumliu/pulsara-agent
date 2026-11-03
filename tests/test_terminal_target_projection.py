@@ -11,7 +11,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     FrozenRetainedHistoricalRequest,
-    StructuredModelInputLimits,
 )
 from pulsara_agent.model_input.lowering import (
     lower_canonical_item,
@@ -35,13 +34,14 @@ def ident(kind):
 
 
 @pytest.mark.parametrize("kind", ("log", "error", "tool_result"))
-def test_cell_normal_and_retained_paths_share_exact_typed_source(kind):
+@pytest.mark.parametrize("text", ("ok", "\ud800", "\udfff", "汉\ud800🙂"))
+def test_cell_normal_and_retained_paths_share_exact_typed_source(kind, text):
     fact = CellOutputContent(
         cell_id=ident("cell"),
         source_turn_id=ident("turn"),
         source_exec_attempt_id=ident("attempt"),
         record_sequence=1,
-        record={"kind": kind, "text": "ok"},
+        record={"kind": kind, "text": text},
     )
     body = fact.canonical_bytes()
     parts = (LLMTextPart(body.decode()),)
@@ -50,9 +50,7 @@ def test_cell_normal_and_retained_paths_share_exact_typed_source(kind):
         ident("entry"), 1, ident("turn"), parts,
         input_origin=CanonicalInputOriginKind.CELL_OUTPUT,
     )
-    normal = lower_canonical_item(
-        item, artifact_read_available=False, limits=StructuredModelInputLimits(),
-    ).fixed_message
+    normal = lower_canonical_item(item).fixed_message
     retained = FrozenRetainedHistoricalRequest(
         item.item_kind, CanonicalInputOriginKind.CELL_OUTPUT, FrozenPromptContent(parts),
     )
@@ -62,7 +60,8 @@ def test_cell_normal_and_retained_paths_share_exact_typed_source(kind):
     assert projected == fact.canonical_mapping()
     assert projected["cell_id"] == fact.cell_id
     assert projected["source_exec_attempt_id"] == fact.source_exec_attempt_id
-    assert projected["record"] == {"kind": kind, "text": "ok"}
+    assert projected["record"] == {"kind": kind, "text": text}
+    assert normal.content[0].text.encode("utf-8") == b'{"pulsara_terminal_observation":' + body + b'}'
     assert fact.canonical_bytes() == body
 
 
@@ -75,7 +74,8 @@ def test_human_stop_feedback_projects_targets_without_changing_native_control():
         command="sleep 10",
         cwd="/tmp",
         origin_turn_id=ident("turn"),
-        origin_subagent_task_id=None,
+        origin_conversation_scope_kind="ROOT",
+        origin_session_id=ident("session"),
         target_root_turn_id=ident("turn"),
         process=UserControlProcessFact(
             "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False

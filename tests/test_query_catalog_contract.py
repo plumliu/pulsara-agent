@@ -50,7 +50,7 @@ PROCESS = target("PROCESS", "process_id", "process")
 CELL = target("CELL", "cell_id", "cell")
 SCHEDULE = target("SCHEDULE", "task_id", "schedule")
 MCP = {"kind": "MCP_TOOL", "server_id": "fixture", "tool_name": "read"}
-ARTIFACT = target("ARTIFACT", "artifact_id", "artifact")
+ENTRY = {"kind": "SESSION_ENTRY", "entry_id": derive_id("entry", "query-catalog-test", "saved-result")}
 MEMORY = target("MEMORY", "memory_id", "memory")
 SCHEDULE_VALUES = {
     "name": "readout", "prompt": "Summarize the current status.",
@@ -93,8 +93,8 @@ LEGAL = [
                          "replacement": {"kind": "existing", "target": {"kind": "SCHEDULE", "task_id": derive_id("schedule", "query-catalog-test", "replacement")}, "expected_revision": 1}}),
     ("manage_schedule", {"action": "switch", "target": SCHEDULE, "expected_revision": 1,
                          "replacement": {"kind": "create", "values": SCHEDULE_VALUES}}),
-    ("read_artifact", {"target": ARTIFACT}),
-    ("export_artifact", {"target": ARTIFACT, "path": "saved-output.txt"}),
+    ("read_file", {"target": ENTRY}),
+    ("write_file", {"target": {"kind": "PATH", "path": "saved-output.txt"}, "source": ENTRY}),
     ("get_memory", {"target": MEMORY}),
     ("search_memory", {"query": "project preferences"}),
 ]
@@ -153,7 +153,7 @@ def test_merged_branches_reject_cross_branch_fields(name, arguments):
     ("manage_cell", {"action": "wait"}, True),
     ("manage_cell", {"action": "stop"}, False),
     ("manage_schedule", {"action": "pause"}, False),
-    ("read_artifact", {}, True), ("export_artifact", {}, False),
+    ("read_file", {"target": ENTRY}, True), ("write_file", {"target": {"kind": "PATH", "path": "saved.txt"}, "source": ENTRY}, False),
 ])
 def test_permission_classifier_follows_selected_action(name, arguments, read_only):
     classification = DefaultBuiltinToolCallClassifier().classify_builtin(ToolCall("test", name, arguments))
@@ -166,7 +166,7 @@ def test_permission_classifier_follows_selected_action(name, arguments, read_onl
     ("manage_schedule", {"action": "delete", "target": SCHEDULE}, False),
     ("manage_process", {"action": "poll", "target": PROCESS}, True),
     ("manage_process", {"action": "write", "target": PROCESS, "data": "x"}, False),
-    ("export_artifact", {}, False),
+    ("write_file", {"target": {"kind": "PATH", "path": "saved.txt"}, "source": ENTRY}, False),
     ("query_agents", {}, False),
 ])
 def test_read_only_permission_gate_uses_new_catalog(name, arguments, allowed, tmp_path):
@@ -208,7 +208,7 @@ def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners():
     prepared = _prepared_catalog()
     directory = CodeModeToolDirectory.freeze(prepared)
     names = {spec.name for spec in directory.tool_specs}
-    assert {"query_capabilities", "query_agents", "exec_process", "query_processes", "manage_process", "read_artifact", "export_artifact"} <= names
+    assert {"query_capabilities", "query_agents", "exec_process", "query_processes", "manage_process", "read_file", "write_file"} <= names
     assert not names & {"exec_cell", "query_cells", "manage_cell", "query_monitors", "manage_monitor", "query_schedules", "manage_schedule", "search_memory", "get_memory"}
     for name in names:
         assert directory.binding(name) is prepared.binding(name)
@@ -235,22 +235,20 @@ def test_old_public_names_have_no_catalog_or_classifier_path(name):
 
 
 @pytest.mark.parametrize("name,arguments,reason", [
-    ("exec_cell", {}, ToolResultFullDeliveryReason.CODE_MODE_OUTPUT_PAGE),
-    ("manage_cell", {"action": "wait"}, ToolResultFullDeliveryReason.CODE_MODE_OUTPUT_PAGE),
-    ("manage_cell", {"action": "stop"}, ToolResultFullDeliveryReason.CODE_MODE_OUTPUT_PAGE),
-    ("query_cells", {}, ToolResultFullDeliveryReason.CELL_QUERY_PAGE),
-    ("query_cells", {"target": CELL}, ToolResultFullDeliveryReason.CELL_QUERY_PAGE),
-    ("query_capabilities", {}, ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE),
-    ("query_capabilities", {"target": MCP}, ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA),
-    ("query_capabilities", {"target": {"kind": "SKILL", "skill_path": "/fixture/SKILL.md"}}, None),
-    ("read_artifact", {}, ToolResultFullDeliveryReason.ARTIFACT_PAGE),
-    ("export_artifact", {}, ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION),
+    ("exec_cell", {}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
+    ("manage_cell", {"action": "wait"}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
+    ("manage_cell", {"action": "stop"}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
+    ("query_cells", {}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
+    ("query_cells", {"target": CELL}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
+    ("query_capabilities", {}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
+    ("query_capabilities", {"target": MCP}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
+    ("query_capabilities", {"target": {"kind": "SKILL", "skill_path": "/fixture/SKILL.md"}}, ToolResultFullDeliveryReason.RESULT_PROJECTION),
 ])
 def test_full_delivery_depends_on_new_query_and_management_branch(name, arguments, reason):
     delivery = classify_tool_result_delivery(tool_name=name, result_state="SUCCESS", public_arguments=arguments)
     assert delivery.reason is reason
-    assert delivery.requirement is (ToolResultDeliveryRequirement.FULL_REQUIRED if reason else ToolResultDeliveryRequirement.BEST_AVAILABLE)
-    assert classify_tool_result_delivery(tool_name=name, result_state="ERROR", public_arguments=arguments).requirement is ToolResultDeliveryRequirement.BEST_AVAILABLE
+    assert delivery.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
+    assert classify_tool_result_delivery(tool_name=name, result_state="SYSTEM_ERROR", public_arguments=arguments).requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
 
 
 def test_terminal_result_contracts_match_executor_shapes():

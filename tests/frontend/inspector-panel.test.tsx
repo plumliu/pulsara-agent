@@ -139,7 +139,7 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
     capabilityBusy: undefined,
     error: undefined,
     onRetry: vi.fn(),
-    onReadToolArtifact: vi.fn(),
+    onReadToolOutput: vi.fn(),
     onReadPromptImage: vi.fn(),
     backgroundOwnerKey: 'session-one:host-one',
     backgroundHostSessionId: 'host-one',

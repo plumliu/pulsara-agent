@@ -10,7 +10,7 @@ import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 const reader = {
   readHistory: vi.fn(), hydrateEntries: vi.fn(), readLatestHistory: vi.fn(),
   readProcessEnd: vi.fn(), retainHistory: vi.fn(), locateEntry: vi.fn(),
-  readToolArtifact: vi.fn(), readPromptImage: vi.fn(), readVisualizationContent: vi.fn(),
+  readToolOutput: vi.fn(), readPromptImage: vi.fn(), readVisualizationContent: vi.fn(),
   readVisualizationThumbnail: vi.fn(),
 } as unknown as AgentConversationReader;
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });

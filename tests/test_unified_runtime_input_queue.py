@@ -26,10 +26,6 @@ from pulsara_agent.conversation_kernel.steer import (
 )
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.ports.terminal_observation import CellOutputContent
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
-)
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.context import freeze_json
@@ -167,13 +163,11 @@ def source(isolated_migrated_postgres_database):
         attempt_id=attempt,
         result_state="SUCCESS",
         canonical_preview_content=InlineContent.from_bytes(b'{"accepted":true}'),
-        artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-        artifact_id=None,
-        artifact_blob_descriptor=None,
+        output_body=InlineContent.from_bytes(b'{"accepted":true}'),
         source_coverage=ToolOutputSourceCoverage.COMPLETE,
-        display_kind=ToolResultDisplayKind.COMPLETE,
+        output_omitted=False,
         source_coverage_reason=None,
-        artifact_unavailability_reason=None,
+        output_unavailability_reason=None,
         observed_at=now(),
         observation_duration_microseconds=1,
         observation_origin_kind=ToolObservationOrigin.BUILTIN,

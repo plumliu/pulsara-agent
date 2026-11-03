@@ -30,6 +30,7 @@ from pulsara_agent.memory.scope import (
     FrozenMemoryReadContextBinding,
 )
 from pulsara_agent.primitives.context import thaw_json
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.retrieval.embedding.validation import freeze_v1_embedding_vector
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 
@@ -58,6 +59,14 @@ def _body(value: dict[str, object]) -> str:
 
 def _fact_id(session_id: str, result_id: str) -> str:
     return derive_id("memory", "remember", session_id, result_id)
+
+
+def _require_memory_receipt_budget(candidate, write, body, visible_ids):
+    # Direct repository callers have no provider reservation; production writes
+    # carry their actual invocation quote from the memory port.
+    budget = write.page_budget or ToolResultPageBudget(tool_call_id=candidate.tool_call_id)
+    if not budget.fits(body, model_visible_memory_fact_ids=visible_ids):
+        raise ToolResultPageBoundary("complete memory write receipt cannot fit the result budget")
 
 
 class _MemoryOperations(_MemoryManagementOperations):
@@ -161,6 +170,15 @@ class _MemoryOperations(_MemoryManagementOperations):
             return self._settle_memory_relation(
                 connection, candidate=candidate, write=mutation
             )
+        except ToolResultPageBoundary:
+            # Receipt quotes are checked only before a new memory write, or
+            # after ON CONFLICT inserted nothing. This is a known no-change
+            # result, not an ambiguous commit that may retry the mutation.
+            return DirectMemoryOutcome(
+                "APPLICATION_ERROR",
+                _body({"error": "RESULT_BUDGET_EXCEEDED", "memory_changed": False, "advisory": True}),
+                (),
+            )
         except _MemoryInputRejected as exc:
             return DirectMemoryOutcome(
                 "APPLICATION_ERROR",
@@ -221,22 +239,25 @@ class _MemoryOperations(_MemoryManagementOperations):
                 "target": memory_target(item.memory_id),
                 "kind": item.kind.value,
                 "context_id": item.context_id,
-                "statement": item.statement,
                 "recorded_at": item.recorded_at,
+                "inspect": {"tool": "get_memory", "arguments": {"target": memory_target(item.memory_id)}},
             }
             for item in write.related
         ][:3]
         # Reject an oversized final body before the first fact/relationship write.
-        _body(
-            {
-                "status": "ALREADY_PRESENT",
+        for status in ("SAVED", "ALREADY_PRESENT"):
+            body = _body({
+                "status": status,
                 "target": memory_target(new_id),
                 "related_memories": related_preview,
                 "retrieval_summary": thaw_json(write.retrieval_summary),
                 "advisory": True,
                 "relationship_labels_not_inferred": True,
-            }
-        )
+            })
+            _require_memory_receipt_budget(
+                candidate, write, body,
+                tuple(dict.fromkeys((new_id, *(item["target"]["memory_id"] for item in related_preview)))),
+            )
         while monotonic() < deadline_monotonic:
             inserted = connection.execute(
                 """
@@ -285,6 +306,20 @@ class _MemoryOperations(_MemoryManagementOperations):
                 break
         else:
             raise TimeoutError("memory uniqueness arbitration exceeded writer deadline")
+        related = [item for item in related_preview if item["target"]["memory_id"] != memory_id]
+        body = _body({
+            "status": status,
+            "target": memory_target(memory_id),
+            "related_memories": related,
+            "retrieval_summary": thaw_json(write.retrieval_summary),
+            "advisory": True,
+            "relationship_labels_not_inferred": True,
+        })
+        ids = tuple(dict.fromkeys((memory_id, *(item["target"]["memory_id"] for item in related))))
+        if status == "ALREADY_PRESENT":
+            # A conflict inserted no fact. Quote the actual winner identity,
+            # whose token cost need not equal the newly allocated identity.
+            _require_memory_receipt_budget(candidate, write, body, ids)
         if status == "SAVED":
             relation_rows = tuple(
                 (
@@ -331,20 +366,6 @@ class _MemoryOperations(_MemoryManagementOperations):
                         accepted_at,
                     ),
                 )
-        related = [item for item in related_preview if item["target"]["memory_id"] != memory_id]
-        body = _body(
-            {
-                "status": status,
-                "target": memory_target(memory_id),
-                "related_memories": related,
-                "retrieval_summary": thaw_json(write.retrieval_summary),
-                "advisory": True,
-                "relationship_labels_not_inferred": True,
-            }
-        )
-        ids = tuple(
-            dict.fromkeys((memory_id, *(item["target"]["memory_id"] for item in related)))
-        )
         return DirectMemoryOutcome("SUCCESS", body, ids)
 
     def _settle_memory_relation(
@@ -442,9 +463,7 @@ class _MemoryOperations(_MemoryManagementOperations):
                 target is None or str(target["lifecycle"]) != "SUPERSEDED"
             ):
                 raise ConversationKernelConflict("existing supersede lifecycle drifted")
-            return DirectMemoryOutcome(
-                "SUCCESS",
-                _body(
+            body = _body(
                     {
                         "status": "ALREADY_PRESENT",
                         "relation_id": str(existing["id"]),
@@ -453,9 +472,9 @@ class _MemoryOperations(_MemoryManagementOperations):
                         "relation_kind": kind.value,
                         "advisory": True,
                     }
-                ),
-                (source_id, target_id),
             )
+            _require_memory_receipt_budget(candidate, write, body, (source_id, target_id))
+            return DirectMemoryOutcome("SUCCESS", body, (source_id, target_id))
         if str(source["lifecycle"]) != "ACTIVE" or str(target["lifecycle"]) != "ACTIVE":
             raise _MemoryInputRejected(
                 "new relation requires active same-context memories"
@@ -474,6 +493,12 @@ class _MemoryOperations(_MemoryManagementOperations):
                 "advisory": True,
             }
         )
+        for status in ("SAVED", "ALREADY_PRESENT"):
+            candidate_body = json.dumps(
+                {**json.loads(result_body), "status": status},
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )
+            _require_memory_receipt_budget(candidate, write, candidate_body, (source_id, target_id))
         connection.execute(
             """
             INSERT INTO pulsara_v3.memory_relations (

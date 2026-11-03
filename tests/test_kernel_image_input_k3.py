@@ -63,7 +63,7 @@ from pulsara_agent.conversation_kernel.host import KernelHostSession
 from pulsara_agent.conversation_kernel._repository.contracts import (
     PLAN_CONTROL_RESULT_INLINE_HARD_BYTES,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import (
+from pulsara_agent.conversation_kernel.tool_outputs import (
     CANONICAL_TOOL_RESULT_PREVIEW_HARD_BYTES,
 )
 from pulsara_agent.llm.adapters.openai.chat_completions import (
@@ -1220,7 +1220,6 @@ def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes
             "plain",
             sequence=7,
             turn_id="turn:hei4tpo3ncy7wcxg6s4x3caeae",
-            artifact=False,
         ),
         content=content.parts,
         tool_result_body_text=frozen_tool_result_public_text(content),

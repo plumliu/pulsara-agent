@@ -12,19 +12,14 @@ from pulsara_agent.identity import content_revision, REVISION_PATTERN, ID_PAYLOA
 import difflib
 import errno
 import base64
-import json
 import os
 import re
-import subprocess
 import tempfile
 import threading
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from wcmatch import glob
-
-from pulsara_agent.ripgrep import private_ripgrep
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -33,31 +28,37 @@ from pulsara_agent.local_source_binding import (
     open_or_create_absolute_directory_nofollow,
 )
 from pulsara_agent.message import ToolResultState
-from pulsara_agent.ports.tool_execution import ToolCall, ToolExecutionResult
-from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
+from pulsara_agent.ports.tool_execution import (
+    ToolCall, ToolExecutionResult, ToolOutputSourceCoverage, ToolOutputSourceFormatHint,
+)
+from pulsara_agent.ports.tool_output import (
+    ToolOutputBodyCandidate,
+    ToolOutputContentError,
+    ToolOutputReadPort,
+)
+from pulsara_agent.primitives.text_paging import (
+    TextPosition, line_starts, paginate_text,
+)
+from pulsara_agent.primitives.tool_result_budget import (
+    ToolResultPageBudget, ToolResultPageBoundary,
+)
+from pulsara_agent.tools.builtins.filesystem_contracts import (
+    DEFAULT_READ_LINES, MAX_READ_LINES,
 )
 from pulsara_agent.tools.builtins.schemas import (
-    int_arg,
     json_text,
     str_arg,
 )
 from pulsara_agent.tools.builtins.workspace import WorkspaceTool, WritePathScope
 
 
-MAX_READ_LINES = 2_000
-DEFAULT_READ_LINES = 2_000
-MAX_READ_CHARS = 100_000
-DEFAULT_SEARCH_LIMIT = 50
-MAX_SEARCH_LIMIT = 1_000
 UTF8_BOM = "\ufeff"
 UTF8_BOM_BYTES = b"\xef\xbb\xbf"
 CONTENT_REVISION_PATTERN = re.compile(REVISION_PATTERN)
 IMAGE_REFERENCE_PATTERN = re.compile("image:" + ID_PAYLOAD_PATTERN)
 CHANGED_WINDOW_CONTEXT_LINES = 3
-# Changed windows precede the diff in the result. Keeping their complete JSON
-# below this budget ensures the existing 8,000-character head/tail projection
-# does not expose a partial line while granting that line edit eligibility.
+# Keep changed-window previews near their established display size; the actual
+# complete native carrier is additionally quoted before replacing the file.
 MAX_CHANGED_WINDOWS_JSON_CHARS = 3_500
 BLOCKED_DEVICE_PATHS = {
     "/dev/null",
@@ -115,8 +116,6 @@ class _WorkspaceFileState:
     lock: threading.Lock = field(default_factory=threading.Lock)
     path_locks: dict[Path, threading.Lock] = field(default_factory=dict)
     observations: dict[Path, "_FileObservationSlot"] = field(default_factory=dict)
-    last_lookup_key: tuple | None = None
-    consecutive_lookup_count: int = 0
 
     def lock_for_path(self, path: Path) -> threading.Lock:
         with self.lock:
@@ -139,11 +138,37 @@ class _WorkspaceFileState:
             self.observations[path] = _FileObservationSlot(
                 content_revision=revision,
                 seen_line_intervals=intervals,
+                seen_line_fragments=(current.seen_line_fragments
+                    if current is not None and current.content_revision == revision else ()),
             )
 
     def observation(self, path: Path) -> "_FileObservationSlot | None":
         with self.lock:
             return self.observations.get(path)
+
+    def observe_fragments(
+        self, path: Path, revision: str,
+        fragments: tuple[tuple[int, int, int, int], ...],
+    ) -> None:
+        """Only promote a line once its actually delivered characters cover it."""
+        with self.lock:
+            old = self.observations.get(path)
+            same = old is not None and old.content_revision == revision
+            seen = list(old.seen_line_intervals if same else ())
+            partial = dict(old.seen_line_fragments if same else ())
+            for line, start, end, length in fragments:
+                if any(first <= line <= last for first, last in seen):
+                    continue
+                delivered = ((start, end - 1),) if end > start else ()
+                intervals = _merge_intervals((*partial.get(line, ()), *delivered))
+                if length == 0 or any(a == 0 and b >= length - 1 for a, b in intervals):
+                    seen.append((line, line))
+                    partial.pop(line, None)
+                else:
+                    partial[line] = intervals
+            self.observations[path] = _FileObservationSlot(
+                revision, _merge_intervals(tuple(seen)), tuple(sorted(partial.items()))
+            )
 
     def clear_observation(self, path: Path) -> None:
         with self.lock:
@@ -154,6 +179,7 @@ class _WorkspaceFileState:
 class _FileObservationSlot:
     content_revision: str
     seen_line_intervals: tuple[tuple[int, int], ...]
+    seen_line_fragments: tuple[tuple[int, tuple[tuple[int, int], ...]], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,9 +342,46 @@ def _state_for_workspace(workspace_root: Path) -> _WorkspaceFileState:
         return state
 
 
+def _page_budget(call: ToolCall) -> ToolResultPageBudget:
+    # Production calls receive their actual provider allowance from the runtime.
+    # Direct low-level tests and internal calls use the same physical Q owner.
+    return call.page_budget or ToolResultPageBudget(tool_call_id=call.id)
+
+
+def _read_continuation(arguments: Mapping[str, object], *, path: bool) -> TextPosition:
+    value = arguments.get("continuation")
+    if value is None:
+        if "continuation" in arguments:
+            raise ValueError("continuation cannot be null")
+        return TextPosition(_search_integer(arguments, "offset", 1, 1))
+    required = {"line", "char_offset", "content_revision"} if path else {"line", "char_offset"}
+    if not isinstance(value, Mapping) or set(value) != required or "offset" in arguments:
+        raise ValueError("Invalid text continuation")
+    if path and (not isinstance(value["content_revision"], str)
+                 or CONTENT_REVISION_PATTERN.fullmatch(value["content_revision"]) is None):
+        raise ValueError("Invalid continuation content_revision")
+    return TextPosition(value["line"], value["char_offset"])
+
+
+def _complete_page_result(tool: WorkspaceTool, call: ToolCall, payload: Mapping[str, object],
+                          *, metadata: dict[str, Any] | None = None,
+                          memory_ids: tuple[str, ...] = ()) -> ToolExecutionResult:
+    result = tool._result(call, status=ToolResultState.SUCCESS,
+                          output=json_text(payload), metadata=metadata)
+    return replace(result, page_complete=True, model_visible_memory_fact_ids=memory_ids)
+
+
+def _text_boundary(tool: WorkspaceTool, call: ToolCall, target: Mapping[str, object],
+                   error: Exception) -> ToolExecutionResult:
+    return tool._result(call, status=ToolResultState.ERROR,
+                        output=json_text({"status": "resource_boundary", "error": "TEXT_PAGE_NOT_INLINEABLE",
+                                          "target": dict(target), "message": str(error)}))
+
+
 @dataclass(slots=True)
 class ReadFileTool(WorkspaceTool):
     name: str = "read_file"
+    result_source_reader: ToolOutputReadPort | None = None
 
     def read_code_mode_source(self, raw_path: str, *, maximum_bytes: int) -> str:
         """Resolve source through the file owner, without granting edit observation."""
@@ -332,123 +395,70 @@ class ReadFileTool(WorkspaceTool):
             return content.decode("utf-8")
 
     def execute(self, call: ToolCall) -> ToolExecutionResult:
-        if set(call.arguments) - {"target", "offset", "limit"}:
+        target = call.arguments.get("target")
+        if isinstance(target, Mapping) and target.get("kind") == "SESSION_ENTRY":
+            return self._read_result_body(call, target)
+        if set(call.arguments) - {"target", "offset", "limit", "continuation"}:
             raise ValueError("Unknown read_file arguments")
+        position = _read_continuation(call.arguments, path=True)
+        limit = _search_integer(call.arguments, "limit", DEFAULT_READ_LINES, 1, MAX_READ_LINES)
         path = self._resolve_read_path(path_target_arg(call.arguments))
-        access_scope = _path_access_scope(
-            path, self.workspace_root, self._resolved_user_home()
-        )
-        workspace_relative = access_scope == "workspace"
-        offset = _normalize_offset(int_arg(call.arguments, "offset", 1))
-        limit = _normalize_limit(
-            int_arg(call.arguments, "limit", DEFAULT_READ_LINES), MAX_READ_LINES
-        )
+        target = file_target(_relpath(path, self.workspace_root))
+        access_scope = _path_access_scope(path, self.workspace_root, self._resolved_user_home())
         state = _state_for_workspace(self.workspace_root)
         path_lock = state.lock_for_path(path)
         try:
             with path_lock:
                 raw_bytes, layout = _read_existing_text(path)
                 revision = _content_revision(raw_bytes)
+                continuation = call.arguments.get("continuation")
+                if continuation is not None and continuation["content_revision"] != revision:
+                    raise _FileApplicationError("CONTENT_REVISION_MISMATCH", "The file changed during this read.",
+                                                hint="Start a fresh read_file call for the required current range.",
+                                                details={"current_revision": revision})
                 previous_observation = state.observation(path)
-                total_lines = len(layout.lines)
-                start_index = min(offset - 1, total_lines)
-                end_index = min(start_index + limit, total_lines)
-                selected = layout.lines[start_index:end_index]
-                content = "\n".join(
-                    f"{line_number}|{line}"
-                    for line_number, line in enumerate(selected, start=offset)
-                )
-                if len(content) > MAX_READ_CHARS:
-                    return self._result(
-                        call,
-                        status=ToolResultState.ERROR,
-                        output=json_text(
-                            {
-                                "error": "READ_OUTPUT_TOO_LARGE",
-                                "message": (
-                                    f"Read produced {len(content):,} characters, exceeding "
-                                    f"the safety limit of {MAX_READ_CHARS:,}."
-                                ),
-                                "target": file_target(_relpath(path, self.workspace_root)),
-                                "access_scope": access_scope,
-                                "workspace_relative": workspace_relative,
-                                "total_lines": total_lines,
-                                "_hint": "Retry read_file with a smaller limit.",
-                            }
-                        ),
-                        metadata={
-                            "path": str(path),
-                            "chars": len(content),
-                            "access_scope": access_scope,
-                            "workspace_relative": workspace_relative,
-                        },
-                    )
+                # PATH presentation keeps the established N|text format. The
+                # source revision still covers every original byte and newline.
+                text = "\n".join(layout.lines) + ("\n" if layout.lines else "")
+                budget = _page_budget(call)
 
-                truncated = end_index < total_lines
-                with state.lock:
-                    _track_lookup(state, ("read", path, offset, limit))
-                    consecutive = state.consecutive_lookup_count
+                def payload(content: str, next_position: TextPosition | None) -> dict[str, object]:
+                    if next_position is None or next_position.char_offset == 0:
+                        content = content.removesuffix("\n")
+                    next_call = None
+                    if next_position is not None:
+                        cursor = {**next_position.public_value(), "content_revision": revision}
+                        next_call = {"tool": self.name, "arguments": {
+                            "target": target, "limit": limit, "continuation": cursor}}
+                    return {"status": "ok", "target": target, "content_revision": revision,
+                            "access_scope": access_scope, "workspace_relative": access_scope == "workspace",
+                            "position": position.public_value(), "total_lines": len(layout.lines),
+                            "file_size": len(raw_bytes), "content": content, "next": next_call,
+                            **({"had_utf8_bom": True} if layout.had_bom else {})}
 
-                payload: dict[str, Any] = {
-                    "status": "ok",
-                    "target": file_target(_relpath(path, self.workspace_root)),
-                    "content_revision": revision,
-                    "access_scope": access_scope,
-                    "workspace_relative": workspace_relative,
-                    "offset": offset,
-                    "limit": limit,
-                    "total_lines": total_lines,
-                    "file_size": len(raw_bytes),
-                    "truncated": truncated,
-                    "content": content,
-                }
-                if layout.had_bom:
-                    payload["had_utf8_bom"] = True
-                if truncated:
-                    payload["_hint"] = (
-                        f"More lines are available. Continue with offset={end_index + 1}."
-                    )
-                if consecutive >= 3:
-                    payload["_warning"] = (
-                        f"You have read this exact file region {consecutive} times "
-                        "consecutively. Use the information you already have."
-                    )
-                output = json_text(payload)
-                fully_visible = (
-                    len(output.encode("utf-8"))
-                    <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
-                )
-                intervals = (
-                    ((start_index + 1, end_index),)
-                    if (fully_visible or call.defer_file_observation) and end_index > start_index
-                    else ()
-                )
-                if not fully_visible and not call.defer_file_observation:
-                    payload["_warning"] = (
-                        "This read exceeds the complete provider-visible ToolResult "
-                        "bound, so none of its lines authorize edit_file. Re-read the "
-                        "required range with a smaller limit."
-                    )
-                    output = json_text(payload)
+                page = paginate_text(text, position=position, max_lines=limit, line_labels=True,
+                                     fits=lambda content, next_position: budget.fits(json_text(payload(content, next_position))))
+                starts = line_starts(text)
+                fragments = []
+                for index, line in enumerate(layout.lines):
+                    begin = starts[index]
+                    end = begin + len(line)
+                    if page.start_offset <= end and page.end_offset > begin:
+                        fragments.append((index + 1, max(0, page.start_offset - begin),
+                                          min(len(line), page.end_offset - begin), len(line)))
+                frozen_fragments = tuple(fragments)
                 if not call.defer_file_observation:
-                    state.observe(path, revision, intervals)
+                    state.observe_fragments(path, revision, frozen_fragments)
+                result = _complete_page_result(self, call, payload(page.text, page.next_position),
+                    metadata={"path": str(path), "access_scope": access_scope,
+                              "workspace_relative": access_scope == "workspace"})
         except _FileApplicationError as exc:
             return _application_error_result(self, call, path, exc)
-        result = self._result(
-            call,
-            status=ToolResultState.SUCCESS,
-            output=output,
-            metadata={
-                "path": str(path),
-                "truncated": truncated,
-                "lines": len(selected),
-                "access_scope": access_scope,
-                "workspace_relative": workspace_relative,
-            },
-        )
+        except ToolResultPageBoundary as exc:
+            return _text_boundary(self, call, target, exc)
         if call.defer_file_observation:
             def delivered() -> None:
-                # A delayed old read cannot replace newer shared observations.
+                # An old delayed delivery cannot overwrite a newer revision.
                 with path_lock:
                     try:
                         current_bytes, _ = _read_existing_text(path)
@@ -458,207 +468,50 @@ class ReadFileTool(WorkspaceTool):
                     if (_content_revision(current_bytes) == revision
                         and (observed is previous_observation
                              or (observed is not None and observed.content_revision == revision))):
-                        state.observe(path, revision, intervals)
-            from dataclasses import replace
+                        state.observe_fragments(path, revision, frozen_fragments)
             result = replace(result, delivery_succeeded=delivered)
         return result
+
+    def _read_result_body(self, call: ToolCall, target: Mapping[str, object]) -> ToolExecutionResult:
+        if set(call.arguments) - {"target", "continuation"}:
+            raise ValueError("Saved-result reads accept target and continuation only")
+        position = _read_continuation(call.arguments, path=False)
+        if self.result_source_reader is None:
+            raise RuntimeError("read_file result source owner is not bound")
+        try:
+            view = self.result_source_reader.read_body(target)
+            text = view.content.decode("utf-8")
+            budget = _page_budget(call)
+            def payload(content: str, next_position: TextPosition | None) -> dict[str, object]:
+                next_call = None if next_position is None else {"tool": self.name, "arguments": {
+                    "target": dict(view.target), "continuation": next_position.public_value()}}
+                return {"status": "ok", "target": dict(view.target), "position": position.public_value(),
+                        "result_facts": dict(view.required_facts),
+                        "media_type": view.media_type, "codec": view.codec,
+                        "source_coverage": view.source_coverage.value,
+                        "source_coverage_reason": (None if view.source_coverage_reason is None
+                                                   else view.source_coverage_reason.value),
+                        "content": content, "next": next_call}
+            page = paginate_text(text, position=position,
+                fits=lambda content, next_position: budget.fits(json_text(payload(content, next_position)),
+                    model_visible_memory_fact_ids=view.model_visible_memory_fact_ids))
+            return _complete_page_result(self, call, payload(page.text, page.next_position),
+                                         memory_ids=view.model_visible_memory_fact_ids)
+        except KeyError:
+            return self._result(call, status=ToolResultState.ERROR,
+                                output=json_text({"status": "not_found", "target": dict(target)}))
+        except ToolOutputContentError as exc:
+            return self._result(call, status=ToolResultState.ERROR,
+                                output=json_text({"status": "content_error", "target": dict(target), "error": str(exc)}))
+        except ToolResultPageBoundary as exc:
+            return _text_boundary(self, call, target, exc)
 
 
 @dataclass(slots=True)
 class _SearchTool(WorkspaceTool):
     def execute(self, call: ToolCall) -> ToolExecutionResult:
-        content_search = self.name == "search_content"
-        expression_name = "pattern" if content_search else "glob"
-        allowed = {expression_name, "target", "limit", "offset"}
-        if content_search:
-            allowed.update({"file_glob", "output_mode"})
-        if set(call.arguments) - allowed:
-            raise ValueError(
-                "Unknown search arguments: "
-                + ", ".join(sorted(set(call.arguments) - allowed))
-            )
-        expression = _search_string(call.arguments, expression_name)
-        raw_path = path_target_arg(call.arguments, default=".")
-        limit = _search_integer(
-            call.arguments, "limit", DEFAULT_SEARCH_LIMIT, 1, MAX_SEARCH_LIMIT
-        )
-        offset = _search_integer(call.arguments, "offset", 0, 0)
-        mode = (
-            _search_string(call.arguments, "output_mode", "content")
-            if content_search
-            else None
-        )
-        if mode is not None and mode not in {"content", "files_only", "count"}:
-            raise ValueError("unsupported output_mode")
-        pattern = (
-            _search_string(call.arguments, "file_glob")
-            if "file_glob" in call.arguments
-            else (None if content_search else expression)
-        )
-        matcher = (
-            glob.compile(
-                pattern,
-                flags=glob.GLOBSTAR
-                | glob.MATCHBASE
-                | glob.FORCEUNIX
-                | glob.CASE
-                | glob.DOTMATCH,
-            )
-            if pattern is not None
-            else None
-        )
-        path = self._resolve_read_path(raw_path)
-        user_home = self._resolved_user_home()
-        access_scope = _path_access_scope(path, self.workspace_root, user_home)
-        workspace_relative = access_scope == "workspace"
-        if not path.exists():
-            return _application_error_result(
-                self,
-                call,
-                path,
-                _FileApplicationError(
-                    "FILE_NOT_FOUND",
-                    "The requested search path does not exist.",
-                    hint="Check the path and choose an existing file or directory.",
-                ),
-            )
-        if _is_broad_search_root(path, self.workspace_root, user_home):
-            return _application_error_result(
-                self,
-                call,
-                path,
-                _FileApplicationError(
-                    "SEARCH_ROOT_TOO_BROAD",
-                    "This search root outside the workspace is too broad.",
-                    hint="Choose a specific file or subdirectory.",
-                ),
-            )
-        state = _state_for_workspace(self.workspace_root)
-        key = (self.name, expression, path, pattern, limit, offset, mode)
-        with state.lock:
-            _track_lookup(state, key)
-            consecutive = state.consecutive_lookup_count
-        if consecutive >= 4:
-            return self._result(
-                call,
-                status=ToolResultState.ERROR,
-                output=json_text(
-                    {
-                        "error": "Repeated search blocked: this exact search has already been returned.",
-                        "access_scope": access_scope,
-                        "workspace_relative": workspace_relative,
-                        "already_searched": consecutive,
-                    }
-                ),
-                metadata={"path": str(path)},
-            )
-        base = path.parent if path.is_file() else path
-
-        def selected(file: Path) -> bool:
-            return matcher is None or matcher.match(file.relative_to(base).as_posix())
-
-        command = [str(private_ripgrep()), "--no-config", "--color", "never"]
-        if not content_search:
-            command.extend(["--files", "--null"])
-        elif mode == "content":
-            command.append("--json")
-        else:
-            command.extend(
-                ["--with-filename", "--null", "-l" if mode == "files_only" else "-c"]
-            )
-        if content_search:
-            command.extend(["-e", expression])
-        command.extend(["--", str(path)])
-        completed = subprocess.run(
-            command,
-            cwd=self.workspace_root,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
-        if completed.returncode not in {0, 1}:
-            raise RuntimeError(
-                (completed.stderr or completed.stdout)
-                .decode("utf-8", "replace")
-                .strip()
-            )
-        payload: dict[str, Any] = {
-            "status": "ok",
-            "access_scope": access_scope,
-            "workspace_relative": workspace_relative,
-        }
-        if content_search:
-            payload["output_mode"] = mode
-        if not content_search or mode == "files_only":
-            files = [
-                Path(os.fsdecode(item))
-                for item in completed.stdout.split(b"\0")
-                if item
-            ]
-            entries = sorted(
-                _relpath(file, self.workspace_root) for file in files if selected(file)
-            )
-            page = entries[offset : offset + limit]
-            payload.update(targets=[file_target(file) for file in page], total_count=len(entries))
-        elif mode == "count":
-            counts: dict[str, int] = {}
-            remaining = completed.stdout
-            while remaining:
-                filename, separator, rest = remaining.partition(b"\0")
-                count, newline, remaining = rest.partition(b"\n")
-                if not separator or not newline:
-                    raise ValueError("Malformed ripgrep count output")
-                file = Path(os.fsdecode(filename))
-                if selected(file):
-                    counts[_relpath(file, self.workspace_root)] = int(count)
-            entries = sorted(counts)
-            page = entries[offset : offset + limit]
-            payload.update(
-                counts=[{"target": file_target(file), "count": counts[file]} for file in page],
-                total_count=sum(counts.values()),
-            )
-        else:
-            entries = []
-            for record in completed.stdout.splitlines():
-                event = json.loads(record)
-                if event["type"] != "match":
-                    continue
-                data = event["data"]
-                file = Path(os.fsdecode(_rg_json_bytes(data["path"])))
-                if selected(file):
-                    entries.append(
-                        {
-                            "path": _relpath(file, self.workspace_root),
-                            "line": data["line_number"],
-                            "content": _rg_json_bytes(data["lines"])
-                            .decode("utf-8", "replace")
-                            .rstrip("\r\n")[:500],
-                        }
-                    )
-            entries.sort(key=lambda item: (item["path"], item["line"]))
-            page = entries[offset : offset + limit]
-            payload.update(matches=[{"target": file_target(item["path"]), "line": item["line"], "content": item["content"]} for item in page], total_count=len(entries))
-        payload["truncated"] = offset + len(page) < len(entries)
-        if payload["truncated"]:
-            payload["_hint"] = (
-                f"Results truncated. Continue with offset={offset + len(page)}."
-            )
-        if consecutive >= 3:
-            payload["_warning"] = (
-                f"You have run this exact search {consecutive} times consecutively. Use the information you already have."
-            )
-        return self._result(
-            call,
-            status=ToolResultState.SUCCESS,
-            output=json_text(payload),
-            metadata={
-                "path": str(path),
-                expression_name: expression,
-                "total_count": payload["total_count"],
-                "access_scope": access_scope,
-                "workspace_relative": workspace_relative,
-            },
-        )
+        from pulsara_agent.tools.builtins.filesystem_search import execute_search
+        return execute_search(self, call)
 
 
 def _search_string(
@@ -688,11 +541,12 @@ def _search_integer(
 
 
 def _rg_json_bytes(value: dict[str, str]) -> bytes:
-    return (
-        value["text"].encode("utf-8")
-        if "text" in value
-        else base64.b64decode(value["bytes"], validate=True)
-    )
+    if not isinstance(value, Mapping) or set(value) not in ({"text"}, {"bytes"}):
+        raise ValueError("ripgrep data must contain exactly one of text or bytes")
+    field = "text" if "text" in value else "bytes"
+    if not isinstance(value[field], str):
+        raise ValueError("ripgrep text and bytes values must be strings")
+    return value[field].encode("utf-8") if field == "text" else base64.b64decode(value[field], validate=True)
 
 
 @dataclass(slots=True)
@@ -765,6 +619,28 @@ class EditFileTool(WorkspaceTool):
                     _text_with_original_bom(staged_layout),
                     _relpath(path, self.workspace_root),
                 )
+                budget = _page_budget(call)
+                required = {"status": "ok", "target": file_target(_relpath(path, self.workspace_root)),
+                    "base_revision": base_revision, "content_revision": new_revision,
+                    "operations_applied": operations_applied,
+                    "files_modified": [_relpath(path, self.workspace_root)]}
+                payload = {**required, "changed_windows": changed_windows,
+                           "changed_windows_truncated": windows_truncated, "diff": diff}
+                native_payload = payload
+                if not budget.fits(json_text(payload)):
+                    native_payload = {**required, "changed_windows": changed_windows,
+                                      "changed_windows_truncated": windows_truncated}
+                    while changed_windows and not budget.fits(json_text(native_payload), include_read=budget.read is not None):
+                        changed_windows = changed_windows[:-1]
+                        seen_intervals = seen_intervals[:-1]
+                        windows_truncated = True
+                        native_payload = {**required, "changed_windows": changed_windows,
+                                          "changed_windows_truncated": True}
+                    if not budget.fits(json_text(native_payload), include_read=budget.read is not None):
+                        return _text_boundary(self, call, required["target"],
+                            ToolResultPageBoundary("The edit receipt does not fit. The file was not changed."))
+                    payload = {**required, "changed_windows": changed_windows,
+                               "changed_windows_truncated": windows_truncated, "diff": diff}
                 latest_bytes, _latest_layout = _read_existing_text(path)
                 if latest_bytes != before_bytes:
                     latest_revision = _content_revision(latest_bytes)
@@ -780,33 +656,37 @@ class EditFileTool(WorkspaceTool):
                     raise RuntimeError(
                         "post-write verification failed; the file may already be modified"
                     )
-                state.observe(path, new_revision, seen_intervals)
+                if not call.defer_file_observation:
+                    state.observe(path, new_revision, seen_intervals)
         except _FileApplicationError as exc:
             return _application_error_result(self, call, path, exc)
 
-        return self._result(
+        result = self._result(
             call,
             status=ToolResultState.SUCCESS,
-            output=json_text(
-                {
-                    "status": "ok",
-                    "target": file_target(_relpath(path, self.workspace_root)),
-                    "base_revision": base_revision,
-                    "content_revision": new_revision,
-                    "operations_applied": operations_applied,
-                    "changed_windows": changed_windows,
-                    "changed_windows_truncated": windows_truncated,
-                    "diff": diff,
-                    "files_modified": [_relpath(path, self.workspace_root)],
-                }
-            ),
+            output=json_text(payload),
             metadata={"path": str(path), "operations_applied": operations_applied},
         )
+        result = replace(result, native_output=json_text(native_payload), required_facts=required,
+            output_body_candidate=(ToolOutputBodyCandidate(diff, ToolOutputSourceFormatHint.TEXT,
+                ToolOutputSourceCoverage.COMPLETE) if diff else None))
+        if call.defer_file_observation:
+            def delivered() -> None:
+                with path_lock:
+                    try:
+                        current, _ = _read_existing_text(path)
+                    except _FileApplicationError:
+                        return
+                    if _content_revision(current) == new_revision:
+                        state.observe(path, new_revision, seen_intervals)
+            result = replace(result, delivery_succeeded=delivered)
+        return result
 
 
 @dataclass(slots=True)
 class WriteFileTool(WorkspaceTool):
     name: str = "write_file"
+    result_source_reader: ToolOutputReadPort | None = None
 
     def execute(
         self,
@@ -814,20 +694,51 @@ class WriteFileTool(WorkspaceTool):
         *,
         write_scope: WritePathScope = WritePathScope.WORKSPACE,
     ) -> ToolExecutionResult:
-        if set(call.arguments) != {"target", "content"}:
-            raise ValueError("write_file requires target and content only")
+        if set(call.arguments) not in ({"target", "content"}, {"target", "source"}):
+            raise ValueError("write_file requires target and exactly one of content or source")
         raw_path = path_target_arg(call.arguments)
         path = self._resolve_path(raw_path, write_scope=write_scope)
         requested_leaf = _requested_leaf_path(raw_path, self.workspace_root)
-        if "content" not in call.arguments:
-            raise ValueError("content is required")
-        content = str_arg(call.arguments, "content")
-        if content is None:
-            raise ValueError("content must be a string")
+        if "source" in call.arguments:
+            if self.result_source_reader is None:
+                raise RuntimeError("write_file result source owner is not bound")
+            source = call.arguments["source"]
+            if not isinstance(source, Mapping) or source.get("kind") != "SESSION_ENTRY":
+                raise ValueError("source must be a SESSION_ENTRY target")
+            try:
+                source_body = self.result_source_reader.read_body(source)
+                raw_bytes = source_body.content
+            except KeyError:
+                return self._result(call, status=ToolResultState.ERROR,
+                                    output=json_text({"status": "not_found", "target": dict(source)}))
+            except ToolOutputContentError as exc:
+                return self._result(call, status=ToolResultState.ERROR,
+                                    output=json_text({"status": "content_error", "target": dict(source), "error": str(exc)}))
+        else:
+            content = str_arg(call.arguments, "content")
+            if content is None:
+                raise ValueError("content must be a string")
+            try:
+                raw_bytes = _validate_new_text_content(path, content)
+            except _FileApplicationError as exc:
+                return _application_error_result(self, call, path, exc)
+        revision = _content_revision(raw_bytes)
+        payload: dict[str, Any] = {
+            "status": "ok", "target": file_target(_relpath(path, self.workspace_root)),
+            "content_revision": revision, "bytes_written": len(raw_bytes),
+            "files_modified": [_relpath(path, self.workspace_root)],
+        }
+        if "source" in call.arguments:
+            payload.update(source=dict(source_body.target),
+                source_coverage=source_body.source_coverage.value,
+                source_coverage_reason=(None if source_body.source_coverage_reason is None
+                                        else source_body.source_coverage_reason.value))
+        if not _page_budget(call).fits(json_text(payload)):
+            return _text_boundary(self, call, payload["target"],
+                                  ToolResultPageBoundary("The file creation receipt does not fit. No file was created."))
         state = _state_for_workspace(self.workspace_root)
         path_lock = state.lock_for_path(path)
         try:
-            raw_bytes = _validate_new_text_content(path, content)
             with path_lock:
                 if requested_leaf.is_symlink() or path.exists() or path.is_symlink():
                     raise _FileApplicationError(
@@ -868,20 +779,9 @@ class WriteFileTool(WorkspaceTool):
         except _FileApplicationError as exc:
             return _application_error_result(self, call, path, exc)
 
-        revision = _content_revision(verified_bytes)
-        payload: dict[str, Any] = {
-            "status": "ok",
-            "target": file_target(_relpath(path, self.workspace_root)),
-            "content_revision": revision,
-            "bytes_written": len(verified_bytes),
-            "files_modified": [_relpath(path, self.workspace_root)],
-        }
-        return self._result(
-            call,
-            status=ToolResultState.SUCCESS,
-            output=json_text(payload),
-            metadata={"path": str(path), "bytes": len(verified_bytes)},
-        )
+        return replace(_complete_page_result(self, call, payload,
+            metadata={"path": str(path), "bytes": len(verified_bytes)}),
+            required_facts={key: payload[key] for key in ("status", "target", "content_revision", "bytes_written")})
 
 
 def _content_revision(raw_bytes: bytes) -> str:
@@ -911,12 +811,16 @@ def _application_error_result(
         "_hint": error.hint,
     }
     payload.update(error.details)
-    return tool._result(
+    result = tool._result(
         call,
         status=ToolResultState.ERROR,
         output=json_text(payload),
         metadata={"path": str(path), "error_code": error.code},
     )
+    if call.name in {"write_file", "edit_file"}:
+        result = replace(result, required_facts={
+            "error": error.code, "target": payload["target"], "message": error.message})
+    return result
 
 
 def _read_existing_text(path: Path) -> tuple[bytes, _TextLayout]:
@@ -1377,22 +1281,6 @@ def _text_with_original_bom(layout: _TextLayout) -> str:
     return (UTF8_BOM if layout.had_bom else "") + layout.text
 
 
-def _normalize_offset(value: int) -> int:
-    return max(1, value)
-
-
-def _normalize_limit(value: int, maximum: int) -> int:
-    return max(1, min(value, maximum))
-
-
-def _track_lookup(state: _WorkspaceFileState, key: tuple) -> None:
-    if state.last_lookup_key == key:
-        state.consecutive_lookup_count += 1
-    else:
-        state.last_lookup_key = key
-        state.consecutive_lookup_count = 1
-
-
 def _is_blocked_device(path: Path) -> bool:
     raw = str(path)
     if raw in BLOCKED_DEVICE_PATHS:
@@ -1515,7 +1403,7 @@ def _atomic_replace_bytes(path: Path, content: bytes) -> None:
 
 
 def _atomic_create_bytes(path: Path, content: bytes) -> None:
-    # Artifact export and write_file share this byte-preserving publication.
+    # Both write_file content inputs use this byte-preserving publication.
     # Bind the already permission-resolved parent, rather than re-following
     # mutable path components when creating, linking, verifying or cleaning up.
     parent_fd: int | None = None

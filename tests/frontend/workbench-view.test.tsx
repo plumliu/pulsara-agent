@@ -8,7 +8,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import type { ComponentProps } from 'react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { QueuedPrompt, QueuedPromptAction, ToolArtifactPage } from '../../frontend/lib/runtime-adapter';
+import type { QueuedPrompt, QueuedPromptAction, ToolOutputPage } from '../../frontend/lib/runtime-adapter';
 import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { promptContentTextProjection } from '../../frontend/lib/prompt-content';
 import { ConversationMessages, WorkbenchView } from '../../frontend/components/workbench-view';
@@ -53,11 +53,11 @@ describe('visualization occurrence layout', () => {
       status:'completed' as const,time:'13:04',body:'```pulsara-viz\nchart.html\n```',
       visualizations:[{ordinal:0,state:'READY' as const,contentDigest:`sha256:${'a'.repeat(64)}`,contentSize:15}]}];
     const notify = vi.fn(), readTool = vi.fn();
-    const view = render(<ConversationMessages messages={messages} artifactOwnerKey="session-one"
-      onReadToolArtifact={readTool} onNotify={notify} onReadVisualization={first}/>);
+    const view = render(<ConversationMessages messages={messages} outputOwnerKey="session-one"
+      onReadToolOutput={readTool} onNotify={notify} onReadVisualization={first}/>);
     await screen.findByText('已保存的可视化暂时无法读取。');
-    view.rerender(<ConversationMessages messages={messages} artifactOwnerKey="session-one"
-      onReadToolArtifact={readTool} onNotify={notify} onReadVisualization={latest}/>);
+    view.rerender(<ConversationMessages messages={messages} outputOwnerKey="session-one"
+      onReadToolOutput={readTool} onNotify={notify} onReadVisualization={latest}/>);
     // The existing gallery owner restarts its read when its reader changes.
     await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
     expect(first).toHaveBeenCalledTimes(1);
@@ -74,7 +74,7 @@ describe('visualization occurrence layout', () => {
     const view = render(<ConversationMessages canFork={true}
       messages={[{ id: 'chart-answer', role: 'assistant', assistantKind: 'terminal', status: 'completed',
         time: '13:04', body: '图表如下。\n\n```pulsara-viz\nfirst.html\nsecond.html\n```\n\n图表之后的说明。', visualizations }]}
-      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
+      outputOwnerKey="session-one" onReadToolOutput={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
     expect(screen.getAllByRole('region', { name: '可视化图集' })).toHaveLength(1);
     await waitFor(() => expect(view.container.querySelector('iframe')).toBeTruthy());
     expect(read).toHaveBeenCalledOnce();
@@ -102,7 +102,7 @@ describe('visualization occurrence layout', () => {
         time: '13:04', body: '只有文字说明。', visualizations: [{
           ordinal: 0, state: 'READY', contentDigest: `sha256:${'a'.repeat(64)}`, contentSize: 14,
         }] }]}
-      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
+      outputOwnerKey="session-one" onReadToolOutput={vi.fn()} onNotify={vi.fn()} onReadVisualization={read} />);
     expect(screen.getByText('只有文字说明。')).toBeTruthy();
     expect(screen.queryByRole('region', { name: '可视化图集' })).toBeNull();
     expect(view.container.querySelector('iframe')).toBeNull();
@@ -504,8 +504,8 @@ function props(overrides: Partial<ComponentProps<typeof WorkbenchView>> = {}): C
     runtimeReopenBusy: false,
     onReadInteraction: vi.fn(),
     onResolveInteraction: vi.fn(),
-    artifactOwnerKey: 'session-one:host-one:entry-result',
-    onReadToolArtifact: vi.fn(),
+    outputOwnerKey: 'session-one:host-one:entry-result',
+    onReadToolOutput: vi.fn(),
     onReadPromptImage: vi.fn(async () => new Uint8Array()),
     promptDraftStore,
     onNotify: vi.fn(),
@@ -955,15 +955,15 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.getByText('此窗口仅供查看')).toBeTruthy();
   });
 
-  it('hides builtin raw previews and artifact pages by default, retaining diffs, commands, and terminal output', async () => {
-    const readArtifact = vi.fn(async () => ({ resultEntryId: 'result', text: 'retained output',
-      offsetChars: 0, returnedChars: 15, totalChars: 15, hasMore: false }));
-    const viewProps = props({ isRunning: true, onReadToolArtifact: readArtifact, messages: [{
+  it('hides builtin raw previews and output pages by default, retaining diffs, commands, and terminal output', async () => {
+    const readOutput = vi.fn(async () => ({ resultEntryId: 'result', text: 'retained output',
+      position: { line: 1, charOffset: 0 },  }));
+    const viewProps = props({ isRunning: true, onReadToolOutput: readOutput, messages: [{
       id: 'assistant', role: 'assistant', time: '现在', body: '', status: 'running', traces: [{
         id: 'edit', kind: 'edit', toolName: 'edit_file', title: '更新文件', subtitle: 'file',
         status: 'completed', resultText: JSON.stringify({ diff: '-old\n+new', secret: 'raw body' }),
         resultSummary: 'raw body', resultEntryId: 'result',
-        artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' },
+        outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
       }, {
         id: 'terminal', kind: 'terminal', toolName: 'exec_process', title: '运行命令', subtitle: 'pwd',
         status: 'completed', command: 'pwd', resultText: 'raw stdout', resultSummary: 'raw stdout',
@@ -983,12 +983,12 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.getByRole('region', { name: '命令输出' }).textContent).toContain('raw stdout');
     expect(screen.queryByRole('button', { name: '展开工具详情：read_file' })).toBeNull();
     expect(screen.queryByText('raw body')).toBeNull();
-    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具展示结果' })).toBeNull();
     expect(screen.queryByRole('button', { name: '查看完整输出' })).toBeNull();
-    expect(readArtifact).not.toHaveBeenCalled();
+    expect(readOutput).not.toHaveBeenCalled();
 
     view.rerender(display(true));
-    expect(screen.getAllByRole('region', { name: '工具原始结果' })).toHaveLength(2);
+    expect(screen.getAllByRole('region', { name: '工具展示结果' })).toHaveLength(2);
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
     expect(await screen.findByText('retained output')).toBeTruthy();
     view.rerender(display(false));
@@ -1003,7 +1003,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
       messages: [{
         id: 'assistant-relation', role: 'assistant', time: '现在', body: '', status: 'completed',
         traces: [{
-          id: 'relation', kind: 'artifact', toolName: 'mark_memory_relation',
+          id: 'relation', kind: 'tool', toolName: 'mark_memory_relation',
           title: '使用工具', subtitle: '已完成', status: 'completed', resultState: 'SUCCESS',
           argumentsJson: JSON.stringify({ relation_kind: 'SUPERSEDES', source_memory_id: 'private-source', target_memory_id: 'private-target' }),
           resultText: JSON.stringify({ status: 'SAVED', relation_kind: 'SUPERSEDES', relation_id: 'private-relation' }),
@@ -1069,7 +1069,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(output.textContent).not.toContain('terminal_process_action');
     expect(screen.queryByLabelText('命令仍在执行')).toBeNull();
     expect(screen.queryByText('已转到后台运行')).toBeNull();
-    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具展示结果' })).toBeNull();
 
     const backgroundEnvelope = JSON.stringify({
       status: 'running', terminal_process_action: 'start', output: 'first\nsecond',
@@ -1081,18 +1081,18 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(backgroundNotice.closest('[aria-label="命令输出"]')).toBeTruthy();
   });
 
-  it('keeps exact raw text/copy, exact edit diff, and paginates the retained artifact', async () => {
+  it('keeps exact raw text/copy, exact edit diff, and paginates the retained output', async () => {
     const raw = '{"diff":"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new","literal":"N| 不清洗"}';
     const writeText = vi.fn(async () => undefined);
     stubClipboard(writeText);
-    const pages: ToolArtifactPage[] = [{
-      resultEntryId: 'entry-result', text: 'artifact-page-one', offsetChars: 0,
-      returnedChars: 17, totalChars: 34, nextOffsetChars: 17, hasMore: true,
+    const pages: ToolOutputPage[] = [{
+      resultEntryId: 'entry-result', text: 'output-page-one', position: { line: 1, charOffset: 0 },
+      next: { line: 1, charOffset: 17 },
     }, {
-      resultEntryId: 'entry-result', text: 'artifact-page-two', offsetChars: 17,
-      returnedChars: 17, totalChars: 34, hasMore: false,
+      resultEntryId: 'entry-result', text: 'output-page-two', position: { line: 1, charOffset: 17 },
+
     }];
-    const readArtifact = vi.fn(async (_entryId: string, offset: number) => pages[offset === 0 ? 0 : 1]!);
+    const readOutput = vi.fn(async (_entryId: string, position: ToolOutputPage['position']) => pages[position.charOffset === 0 ? 0 : 1]!);
     renderWithRawResults(<WorkbenchView {...props({
       isRunning: false,
       messages: [{
@@ -1100,33 +1100,35 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
         traces: [{
           id: 'trace-edit', kind: 'edit', toolName: 'edit_file', title: '更新文件', subtitle: '已完成',
           status: 'completed', meta: '操作完成', resultText: raw, resultEntryId: 'entry-result',
-          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' },
+          outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
         }],
       }],
-      onReadToolArtifact: readArtifact,
+      onReadToolOutput: readOutput,
     })} />);
 
     fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：edit_file' }));
-    const rawRegion = screen.getByRole('region', { name: '工具原始结果' });
+    const rawRegion = screen.getByRole('region', { name: '工具展示结果' });
     expect(within(rawRegion).getByText(raw).textContent).toBe(raw);
     expect(screen.getByLabelText('文件差异').textContent).toBe('--- a/file\n+++ b/file\n@@ -1 +1 @@\n-old\n+new');
-    fireEvent.click(within(rawRegion).getByRole('button', { name: '复制工具原始结果' }));
+    fireEvent.click(within(rawRegion).getByRole('button', { name: '复制工具展示结果' }));
     expect(writeText).toHaveBeenCalledWith(raw);
 
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
-    expect(await screen.findByText('artifact-page-one')).toBeTruthy();
-    expect(readArtifact).toHaveBeenCalledWith('entry-result', 0);
+    expect(await screen.findByText('output-page-one')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '复制当前工具输出页' }));
+    expect(writeText).toHaveBeenLastCalledWith('output-page-one');
+    expect(readOutput).toHaveBeenCalledWith('entry-result', { line: 1, charOffset: 0 });
     fireEvent.click(screen.getByRole('button', { name: '读取下一页' }));
-    expect(await screen.findByText('artifact-page-two')).toBeTruthy();
-    expect(readArtifact).toHaveBeenCalledWith('entry-result', 17);
+    expect(await screen.findByText('output-page-two')).toBeTruthy();
+    expect(readOutput).toHaveBeenCalledWith('entry-result', { line: 1, charOffset: 17 });
     expect(screen.getByRole('status', { name: '完整输出读取状态' }).textContent).toContain('已到末页');
   });
 
-  it('does not apply an artifact page after the whole tool card is collapsed', async () => {
-    let resolve!: (page: ToolArtifactPage) => void;
-    const pending = new Promise<ToolArtifactPage>((accept) => { resolve = accept; });
-    const readArtifact = vi.fn(async () => pending);
+  it('does not apply an output page after the whole tool card is collapsed', async () => {
+    let resolve!: (page: ToolOutputPage) => void;
+    const pending = new Promise<ToolOutputPage>((accept) => { resolve = accept; });
+    const readOutput = vi.fn(async () => pending);
     render(<WorkbenchView {...props({
       isRunning: false,
       messages: [{
@@ -1134,23 +1136,23 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
         traces: [{
           id: 'trace-tool', kind: 'mcp', toolName: 'mcp__example__unknown', title: '未知工具', subtitle: '已完成',
           status: 'completed', resultText: '{"value":true}', resultEntryId: 'entry-result',
-          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' },
+          outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: true },
         }],
       }],
-      onReadToolArtifact: readArtifact,
+      onReadToolOutput: readOutput,
     })} />);
     fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__example__unknown' }));
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
     fireEvent.click(screen.getByRole('button', { name: '收起工具详情：mcp__example__unknown' }));
     resolve({
-      resultEntryId: 'entry-result', text: 'late-artifact-page', offsetChars: 0,
-      returnedChars: 18, totalChars: 18, hasMore: false,
+      resultEntryId: 'entry-result', text: 'late-output-page', position: { line: 1, charOffset: 0 },
+
     });
     await Promise.resolve();
     fireEvent.click(screen.getByRole('button', { name: '展开工具详情：mcp__example__unknown' }));
-    await waitFor(() => expect(readArtifact).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText('late-artifact-page')).toBeNull();
+    await waitFor(() => expect(readOutput).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('late-output-page')).toBeNull();
   });
 
   it('shows a large tool image only when expanded, without Figure links or raw details', () => {
@@ -1179,7 +1181,7 @@ describe('WorkbenchView PR03 control and raw-result contract', () => {
     expect(screen.getByRole('region', { name: '工具读取的图片' })).toBeTruthy();
     expect(screen.getByRole('button', { name: '放大图片' }).className).toBe('tool-image-preview');
     expect(screen.queryByText(/Figure/)).toBeNull();
-    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具展示结果' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: '收起工具详情：view_image' }));
     expect(screen.queryByRole('region', { name: '工具读取的图片' })).toBeNull();
   });
@@ -1200,7 +1202,7 @@ describe('completed reply process disclosure', () => {
         { id: 'final-two', turnId: 'history-two', role: 'assistant', assistantKind: 'terminal', entryOwnerKind: 'IMPORTED_HISTORY',
           rootFinal: true, forkEligible: true, time: '09:38', body: '分叉锚点回复', status: 'completed' },
       ]}
-      artifactOwnerKey="fork-session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
+      outputOwnerKey="fork-session" onReadToolOutput={vi.fn()} onNotify={vi.fn()}
     />);
 
     expect(screen.getAllByText('处理过程')).toHaveLength(2);
@@ -1238,7 +1240,7 @@ describe('completed reply process disclosure', () => {
       assistantKind: 'live' as const, time: '', body: '', status: 'running' as const,
       reasoning: [{ id: `${id}-reason`, kind: 'full' as const, body: `思考 ${id}`, active: true }] });
     const base = { activeTurnId: 'turn-one', isRunning: true,
-      artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(),
+      outputOwnerKey: 'session-one', onReadToolOutput: vi.fn(), onNotify: vi.fn(),
       history: { hasOlder: false, loading: false, windows: [{ id: 'tail',
         firstEntryId: 'progress', lastEntryId: 'progress', hasOlder: false, hasNewer: false, loading: false }] } };
     const view = render(<ConversationMessages {...base} messages={[committed, draft('thinking-one')]} />);
@@ -1268,7 +1270,7 @@ describe('completed reply process disclosure', () => {
       messages={[{ ...progress, historyGroupId: 'root-process', historyWindowId: 'older' }]}
       history={{ atLatest: false, hasOlder: false, loading: false, windows: [{ id: 'older',
         firstEntryId: 'progress', lastEntryId: 'progress', hasOlder: false, hasNewer: true, loading: false }] }}
-      artifactOwnerKey="session-one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} />);
+      outputOwnerKey="session-one" onReadToolOutput={vi.fn()} onNotify={vi.fn()} />);
     expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
     expect(screen.getByText('后面还有消息')).toBeTruthy();
     expect(screen.queryByText('后续记录尚未加载')).toBeNull();
@@ -1311,8 +1313,8 @@ describe('completed reply process disclosure', () => {
     const draft = { ...final, id: 'draft-answer', assistantKind: 'live' as const,
       status: 'running' as const, rootFinal: false, forkEligible: false,
       body: '正在输出第一段。', reasoning: [{ id: 'draft-reasoning', kind: 'full' as const, body: '核对过来源。' }] };
-    const base = { activeTurnId: 'turn-one', isRunning: true, artifactOwnerKey: 'session-one',
-      onReadToolArtifact: vi.fn(), onNotify: vi.fn(), onReadProcessEnd: readProcess };
+    const base = { activeTurnId: 'turn-one', isRunning: true, outputOwnerKey: 'session-one',
+      onReadToolOutput: vi.fn(), onNotify: vi.fn(), onReadProcessEnd: readProcess };
     const display = (body: string) => <ConversationMessages {...base} messages={[progress, { ...draft, body }]} />;
     const view = render(display(draft.body));
     const answer = screen.getByText(draft.body).closest('[data-view-role="final"]');
@@ -1332,8 +1334,8 @@ describe('completed reply process disclosure', () => {
   it('returns a live preface to the process once that response announces a tool call', () => {
     const draft = { ...final, id: 'draft-preface', assistantKind: 'live' as const,
       status: 'running' as const, rootFinal: false, forkEligible: false, body: '我再核对一个来源。' };
-    const base = { activeTurnId: 'turn-one', isRunning: true, artifactOwnerKey: 'session-one',
-      onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+    const base = { activeTurnId: 'turn-one', isRunning: true, outputOwnerKey: 'session-one',
+      onReadToolOutput: vi.fn(), onNotify: vi.fn() };
     const view = render(<ConversationMessages {...base} messages={[progress, draft]} />);
     expect(screen.getByText(draft.body).closest('.conversation-run__drawer')).toBeNull();
     view.rerender(<ConversationMessages {...base} messages={[progress, { ...draft, traces: [progress.traces[0]] }]} />);
@@ -1381,8 +1383,8 @@ describe('completed reply process disclosure', () => {
 
   it('keeps compaction inside its process and opens it for an explicit history location', () => {
     const common = {
-      messages: [{ ...progress, historyGroupId: 'before-adoption' }, { ...steer, historyGroupId: 'before-adoption' }, { ...final, historyGroupId: 'after-adoption' }], artifactOwnerKey: 'session-one',
-      onReadToolArtifact: vi.fn(), onNotify: vi.fn(), history: { hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 3, displayAfterEntryId: 'steer' }] },
+      messages: [{ ...progress, historyGroupId: 'before-adoption' }, { ...steer, historyGroupId: 'before-adoption' }, { ...final, historyGroupId: 'after-adoption' }], outputOwnerKey: 'session-one',
+      onReadToolOutput: vi.fn(), onNotify: vi.fn(), history: { hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 3, displayAfterEntryId: 'steer' }] },
     };
     const view = renderWithRawResults(<ConversationMessages {...common} />);
     expect(hiddenProgress()).toBe(true);
@@ -1758,7 +1760,7 @@ describe('ROOT context compaction progress', () => {
   });
 
   it('replaces live progress with only the adopted canonical boundary', () => {
-    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages: [{ id: 'q', role: 'user' as const, time: '', body: '问题' }] };
+    const base = { outputOwnerKey: 'session-one', onReadToolOutput: vi.fn(), onNotify: vi.fn(), messages: [{ id: 'q', role: 'user' as const, time: '', body: '问题' }] };
     const view = render(<ConversationMessages {...base} contextCompactionInProgress />);
     expect(screen.getByRole('status', { name: '上下文正在压缩' })).toBeTruthy();
     view.rerender(<ConversationMessages {...base} history={{ hasOlder: false, loading: false, windows: [], compactions: [{ eventId: 'adoption', adoptedAfterEntrySequence: 1, displayAfterEntryId: 'q' }] }} />);
@@ -1771,7 +1773,7 @@ describe('ROOT context compaction progress', () => {
   });
 
   it('removes failed or cancelled progress without creating a completed boundary', () => {
-    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages: [] };
+    const base = { outputOwnerKey: 'session-one', onReadToolOutput: vi.fn(), onNotify: vi.fn(), messages: [] };
     const view = render(<ConversationMessages {...base} contextCompactionInProgress />);
     view.rerender(<ConversationMessages {...base} />);
     expect(screen.queryByRole('status', { name: '上下文正在压缩' })).toBeNull();
@@ -1822,7 +1824,7 @@ describe('bounded history reading and DOM locations', () => {
     const read = vi.fn(async () => {});
     const messages = [{ ...answer('middle'), assistantKind: 'tool-request' as const, rootFinal: false,
       body: '中间步骤', historyEarlierUnloaded: true }, answer('answer')];
-    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn(), messages, onLoadHistory: read };
+    const base = { outputOwnerKey: 'session-one', onReadToolOutput: vi.fn(), onNotify: vi.fn(), messages, onLoadHistory: read };
     const view = render(<ConversationMessages {...base} history={history} />);
     expect(screen.queryByText('本轮较早过程尚未加载')).toBeNull();
     view.rerender(<ConversationMessages {...base} history={{ ...history, loading: true, windows: [{ ...history.windows[0], loading: true }] }} />);
@@ -1856,7 +1858,7 @@ describe('bounded history reading and DOM locations', () => {
 
   it('keeps the real group disclosure identity when an earlier part of the same turn is prepended', () => {
     const process = { ...answer('middle'), assistantKind: 'tool-request' as const, rootFinal: false, body: '中间步骤', historyEarlierUnloaded: true };
-    const base = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+    const base = { outputOwnerKey: 'session-one', onReadToolOutput: vi.fn(), onNotify: vi.fn() };
     const view = render(<ConversationMessages {...base} messages={[process, answer('answer')]} />);
     expect(screen.queryByText('中间步骤')).toBeNull();
     expect(screen.queryByText('本轮较早过程尚未加载')).toBeNull();
@@ -2010,7 +2012,7 @@ describe('independent interruption timeline rows', () => {
       { id: 'after', role: 'user' as const, body: '之后ROOT', time: '', entrySequence: 30, historyWindowId: 'after-window' },
     ];
     const view = render(<ConversationMessages messages={messages} interruptionNotices={[notice]}
-      artifactOwnerKey="one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}
+      outputOwnerKey="one" onReadToolOutput={vi.fn()} onNotify={vi.fn()}
       history={{ hasOlder: false, loading: false, windows: [
         { ...window, id: 'before-window', entryIds: ['before'], firstEntryId: 'before', lastEntryId: 'before', hasOlder: false },
         window,
@@ -2080,7 +2082,7 @@ describe('independent history context errors', () => {
 
   it('keeps a window error in its existing retry region without duplicating a global error', () => {
     render(<ConversationMessages messages={[{ id: 'answer', role: 'user', time: '', body: '正文' }]}
-      artifactOwnerKey="one" onReadToolArtifact={vi.fn()} onNotify={vi.fn()} onLoadHistory={vi.fn(async () => {})}
+      outputOwnerKey="one" onReadToolOutput={vi.fn()} onNotify={vi.fn()} onLoadHistory={vi.fn(async () => {})}
       history={{ hasOlder: false, loading: false, error: '此页上下文读取失败', windows: [{
         id: 'tail', firstEntryId: 'answer', lastEntryId: 'answer', entryIds: ['answer'],
         hasOlder: false, hasNewer: false, loading: false, error: '此页上下文读取失败',
@@ -2128,7 +2130,7 @@ describe('source location disclosure demand', () => {
 
   it('still expands the process for an exact tool-result alias and preserves that choice when locating the final body', () => {
     const base = { messages: [{ ...process, contentState: 'ready' as const }, { ...final, reasoningContentState: 'ready' as const }],
-      artifactOwnerKey: 'one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+      outputOwnerKey: 'one', onReadToolOutput: vi.fn(), onNotify: vi.fn() };
     const view = render(<ConversationMessages {...base} focusedEntry={{ sessionId: 'one', entryId: 'tool-result' }} />);
     expect(screen.getByRole('button', { name: '收起处理过程' })).toBeTruthy();
     expect(view.container.querySelector('[data-result-entry="tool-result"]')).toBeTruthy();
@@ -2138,14 +2140,14 @@ describe('source location disclosure demand', () => {
 });
 
 it('keeps the same expanded tool card when its committed result arrives and rejects an old result read', async () => {
-  let resolveOld!: (page: ToolArtifactPage) => void;
-  const read = vi.fn(() => new Promise<ToolArtifactPage>(resolve => { resolveOld = resolve; }));
+  let resolveOld!: (page: ToolOutputPage) => void;
+  const read = vi.fn(() => new Promise<ToolOutputPage>(resolve => { resolveOld = resolve; }));
   const display = (resultEntryId?: string) => <WorkbenchView {...props({
-    activeTurnId: 'turn-one', onReadToolArtifact: read, messages: [{
+    activeTurnId: 'turn-one', onReadToolOutput: read, messages: [{
       id: 'tool-request', turnId: 'turn-one', role: 'assistant', time: '', body: '', assistantKind: 'tool-request',
       traces: [{ id: 'call', kind: 'mcp', toolName: 'mcp__demo__read', title: '读取', subtitle: '',
         status: resultEntryId ? 'completed' : 'running', resultEntryId, resultText: resultEntryId ?? 'streamed output',
-        artifact: resultEntryId ? { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'HEAD_TAIL' } : undefined,
+        outputBody: resultEntryId ? { available: true, sourceCoverage: 'COMPLETE', omitted: true } : undefined,
       }],
     }],
   })} />;
@@ -2157,10 +2159,10 @@ it('keeps the same expanded tool card when its committed result arrives and reje
   fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
   view.rerender(display('result-two'));
   await act(async () => resolveOld({ resultEntryId: 'result-one', text: 'stale result page',
-    offsetChars: 0, returnedChars: 17, totalChars: 17, hasMore: false }));
+    position: { line: 1, charOffset: 0 },  }));
   expect(screen.queryByText('stale result page')).toBeNull();
   expect(screen.getByRole('button', { name: '收起工具详情：mcp__demo__read' })).toBe(button);
-  expect(screen.getByRole('region', { name: '工具原始结果' }).textContent).toContain('result-two');
+  expect(screen.getByRole('region', { name: '工具展示结果' }).textContent).toContain('result-two');
 });
 
 it('keeps a streamed final visible until exact canonical grouping and body reads finish', async () => {
@@ -2544,7 +2546,7 @@ it('keeps old-band bottom distinct from latest and leaves the old band in place 
 it('keeps forward loading and retry at the bottom edge only', async () => {
   const load = vi.fn(async () => {});
   const window = {id:'old',entryIds:['old'],hasOlder:true,hasNewer:true,loading:true,boundaryDirection:'newer' as const};
-  const base = {messages:[{id:'old',role:'user' as const,body:'旧位置',time:''}],artifactOwnerKey:'session',onReadToolArtifact:vi.fn(),onNotify:vi.fn(),onLoadHistory:load};
+  const base = {messages:[{id:'old',role:'user' as const,body:'旧位置',time:''}],outputOwnerKey:'session',onReadToolOutput:vi.fn(),onNotify:vi.fn(),onLoadHistory:load};
   const view = render(<ConversationMessages {...base} history={{hasOlder:true,loading:true,windows:[window]}} />);
   expect(screen.getAllByText('正在加载…')).toHaveLength(1);
   expect(within(screen.getByRole('region',{name:'后续消息'})).getByRole('status')).toBeTruthy();
@@ -2575,7 +2577,7 @@ describe('long turn process reading', () => {
     assistantKind: 'terminal', time: '', body: `过程 ${n}`, entrySequence: n,
   });
   const final = { ...step(1001), id: 'long-final', rootFinal: true, body: '长任务最终答案' };
-  const common = { artifactOwnerKey: 'session-one', onReadToolArtifact: vi.fn(), onNotify: vi.fn() };
+  const common = { outputOwnerKey: 'session-one', onReadToolOutput: vi.fn(), onNotify: vi.fn() };
 
   it('keeps a thousand-step turn across several compactions in one fold, with no hidden per-entry shells', () => {
     const messages = [...Array.from({ length: 1000 }, (_, i) => step(i + 1)), final];
@@ -3052,7 +3054,7 @@ it('reverses a process drawer without remounting steps or hiding interleaved use
     { id: 'drawer-steer', role: 'user', userKind: 'steer', turnId: 'drawer-turn', time: '', body: '用户补充要求' },
     { id: 'drawer-last', role: 'assistant', assistantKind: 'progress', turnId: 'drawer-turn', time: '', body: '最后一段处理过程' },
     { id: 'drawer-answer', role: 'assistant', assistantKind: 'terminal', turnId: 'drawer-turn', rootFinal: true, time: '', body: '抽屉测试答案' },
-  ]} onNotify={vi.fn()} onReadToolArtifact={vi.fn()} />);
+  ]} onNotify={vi.fn()} onReadToolOutput={vi.fn()} />);
   fireEvent.click(screen.getByRole('button', { name: '展开处理过程' }));
   const step = screen.getByText('最后一段处理过程');
   const drawers = [...view.container.querySelectorAll('.conversation-run__drawer')];
@@ -3356,7 +3358,7 @@ it('stacks mixed steers when collapsed and restores their original slots through
   ]),
   {id:'stack:answer',turnId:'stack:turn',role:'assistant',assistantKind:'terminal',rootFinal:true,time:'',body:'整理结果'},
  ];
- const view=render(<ConversationMessages messages={messages} artifactOwnerKey="stack:session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}/>);
+ const view=render(<ConversationMessages messages={messages} outputOwnerKey="stack:session" onReadToolOutput={vi.fn()} onNotify={vi.fn()}/>);
  const run=view.container.querySelector('.conversation-run')!;
  expect(run.querySelectorAll('.user-steer')).toHaveLength(1);
  expect(screen.getByText('代理补充').closest('[data-steer-stack-depth]')?.getAttribute('data-steer-stack-depth')).toBe('3');
@@ -3379,7 +3381,7 @@ it('stacks mixed steers when collapsed and restores their original slots through
 it('keeps one foreground steer with at most two back cards as live steers arrive', async () => {
  const progress: Message={id:'stack:progress',turnId:'stack:turn',role:'assistant',assistantKind:'progress',time:'',body:'处理中'};
  const steers: Message[]=Array.from({length:51},(_,index)=>({id:`stack:steer:${index}`,turnId:'stack:turn',role:'user',userKind:'steer',time:'',body:`补充 ${index}`}));
- const options={artifactOwnerKey:'stack:session',onReadToolArtifact:vi.fn(),onNotify:vi.fn(),activeTurnId:'stack:turn',isRunning:true};
+ const options={outputOwnerKey:'stack:session',onReadToolOutput:vi.fn(),onNotify:vi.fn(),activeTurnId:'stack:turn',isRunning:true};
  const view=render(<ConversationMessages {...options} messages={[progress,steers[0]]}/>);
  fireEvent.click(screen.getByRole('button',{name:'收起处理过程'}));
  await waitFor(()=>expect(screen.queryByText('处理中')).toBeNull());
@@ -3402,10 +3404,10 @@ it('keeps one foreground steer with at most two back cards as live steers arrive
 
 it('keeps a Cell steer inside the same process as a bounded Markdown bubble',()=>{
  const messages:import('../../frontend/lib/pulsara-types').Message[]=[{id:'input',turnId:'turn:a',role:'user',userKind:'prompt',body:'task',time:''},
- {id:'step',turnId:'turn:a',role:'assistant',assistantKind:'tool-request',body:'',time:'',traces:[{id:'tool',kind:'artifact',title:'工具',subtitle:'已完成',status:'completed'}]},
+ {id:'step',turnId:'turn:a',role:'assistant',assistantKind:'tool-request',body:'',time:'',traces:[{id:'tool',kind:'tool',title:'工具',subtitle:'已完成',status:'completed'}]},
  {id:'cell-steer',turnId:'turn:a',role:'user',userKind:'steer',inputOrigin:'CELL_OUTPUT',body:'## Result\n**selected output** /unknown @file',time:'',cellOutput:{cellId:'cell:a',sourceTurnId:'turn:source',sourceExecAttemptId:'attempt:a',recordSequence:1,kind:'log'},inputSource:{identityKind:'queue',queueItemId:'cell-q',sourceKind:'cell',sourceExecAttemptId:'attempt:a',deliveryMode:'steer'}},
  {id:'answer',turnId:'turn:a',role:'assistant',assistantKind:'terminal',body:'Answer',time:''}];
- const view=render(<ConversationMessages messages={messages} artifactOwnerKey="session:a" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}/>);
+ const view=render(<ConversationMessages messages={messages} outputOwnerKey="session:a" onReadToolOutput={vi.fn()} onNotify={vi.fn()}/>);
  expect(view.container.querySelectorAll('.conversation-run')).toHaveLength(1);
  const material=screen.getByRole('article',{name:'cell日志(cell:a)'});
  expect(material.querySelector('details')).toBeNull();
@@ -3428,7 +3430,7 @@ it.each(['agent','cell','scheduled'] as const)('opens the correct source for ove
    :kind==='cell'?{identityKind:'queue',queueItemId:'queue:cell',sourceKind:'cell',sourceExecAttemptId:'attempt:source',deliveryMode:'steer'}
    :{identityKind:'queue',queueItemId:'queue:timer',sourceKind:'system',deliveryMode:'steer'}};
  const onShow=vi.fn();
- const view=render(<DesktopWorkspaceProvider sessionId="root:session" onShow={onShow}><Probe/><ConversationMessages messages={[message]} artifactOwnerKey="root:session" onReadToolArtifact={vi.fn()} onNotify={vi.fn()}/></DesktopWorkspaceProvider>);
+ const view=render(<DesktopWorkspaceProvider sessionId="root:session" onShow={onShow}><Probe/><ConversationMessages messages={[message]} outputOwnerKey="root:session" onReadToolOutput={vi.fn()} onNotify={vi.fn()}/></DesktopWorkspaceProvider>);
  expect(view.container.querySelector('.user-message .user-steer__preview')).toBeTruthy();
  expect(screen.queryByText('补充材料')).toBeNull();
  if(kind==='scheduled'){
@@ -3468,7 +3470,7 @@ it('keeps a detached live view out of canonical history targets', () => {
   const hydrate = vi.fn(async () => {});
   const message: Message = {id:'view:aaaaaaaaaaaaaaaaaaaaaaaaaa',viewSource:{kind:'detached-result',id:'view:aaaaaaaaaaaaaaaaaaaaaaaaaa'},
     role:'assistant',assistantKind:'tool-request',turnId:'turn:active',time:'',body:'',status:'running',contentState:'unloaded',
-    traces:[{id:'view:aaaaaaaaaaaaaaaaaaaaaaaaaa',kind:'artifact',title:'操作结果',subtitle:'调用信息尚未加载',status:'running',resultText:'已收到'}]};
+    traces:[{id:'view:aaaaaaaaaaaaaaaaaaaaaaaaaa',kind:'tool',title:'操作结果',subtitle:'调用信息尚未加载',status:'running',resultText:'已收到'}]};
   const view=render(<WorkbenchView {...props({isRunning:true,activeTurnId:'turn:active',messages:[message],onHydrateEntries:hydrate})}/>);
   expect(view.container.querySelector('[data-source-entry="view:aaaaaaaaaaaaaaaaaaaaaaaaaa"]')).toBeNull();
   expect(hydrate).not.toHaveBeenCalled();

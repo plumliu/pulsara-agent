@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 
+from pulsara_agent.identity import require_id
+
 
 USER_CONTROL_FEEDBACK_MEDIA_TYPE = (
     "application/vnd.pulsara.user-control-feedback+json"
@@ -30,13 +32,14 @@ class ProcessControlFeedbackContent:
     command: str
     cwd: str
     origin_turn_id: str
-    origin_subagent_task_id: str | None
+    origin_conversation_scope_kind: str
+    origin_session_id: str
     target_root_turn_id: str
     process: UserControlProcessFact
     public_code: str
     public_detail: str
     kind: str = "process_control"
-    schema_version: str = "user_control_feedback.v2"
+    schema_version: str = "user_control_feedback.v3"
     source: str = "USER_CONTROL"
     new_control_attempt: bool = True
     other_work_stopped: bool = False
@@ -44,7 +47,7 @@ class ProcessControlFeedbackContent:
     def __post_init__(self) -> None:
         if (
             self.kind != "process_control"
-            or self.schema_version != "user_control_feedback.v2"
+            or self.schema_version != "user_control_feedback.v3"
             or self.source != "USER_CONTROL"
             or self.new_control_attempt is not True
             or self.other_work_stopped is not False
@@ -59,14 +62,16 @@ class ProcessControlFeedbackContent:
                 self.command,
                 self.cwd,
                 self.origin_turn_id,
+                self.origin_session_id,
                 self.target_root_turn_id,
                 self.public_code,
                 self.public_detail,
             )
         ):
             raise ValueError("user control feedback is incomplete")
-        if self.origin_subagent_task_id is not None and not self.origin_subagent_task_id:
-            raise ValueError("user control feedback subagent origin is invalid")
+        if not isinstance(self.origin_conversation_scope_kind, str) or self.origin_conversation_scope_kind not in {"ROOT", "SUBAGENT"}:
+            raise ValueError("user control feedback origin scope is invalid")
+        require_id(self.origin_session_id, "session")
         _validate_process_mapping(
             {
                 "disposition": self.process.disposition,
@@ -88,7 +93,8 @@ class ProcessControlFeedbackContent:
             "command": self.command,
             "cwd": self.cwd,
             "origin_turn_id": self.origin_turn_id,
-            "origin_subagent_task_id": self.origin_subagent_task_id,
+            "origin_conversation_scope_kind": self.origin_conversation_scope_kind,
+            "origin_session_id": self.origin_session_id,
             "target_root_turn_id": self.target_root_turn_id,
             "process": {
                 "disposition": self.process.disposition,
@@ -191,7 +197,7 @@ __all__ = [
 
 
 def project_user_control_feedback_for_provider(content: bytes) -> str:
-    """Validate stored v2 content and lower it to one attributed user fact."""
+    """Validate the closed content shape and project one attributed user fact."""
 
     try:
         value = json.loads(content.decode("utf-8"))
@@ -232,11 +238,12 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
         "public_detail",
         "new_control_attempt",
         "other_work_stopped",
-        "origin_subagent_task_id",
+        "origin_conversation_scope_kind",
+        "origin_session_id",
     }
     if set(value) != fields or (
         value.get("kind") != "process_control"
-        or value.get("schema_version") != "user_control_feedback.v2"
+        or value.get("schema_version") != "user_control_feedback.v3"
         or value.get("source") != "USER_CONTROL"
         or value.get("new_control_attempt") is not True
         or value.get("other_work_stopped") is not False
@@ -250,23 +257,25 @@ def project_user_control_feedback_for_provider(content: bytes) -> str:
         "command",
         "cwd",
         "origin_turn_id",
+        "origin_session_id",
         "target_root_turn_id",
         "public_code",
         "public_detail",
     ):
         if not isinstance(value.get(field), str) or not value[field]:
             raise ValueError(f"user control feedback {field} is invalid")
-    origin_subagent_task_id = value["origin_subagent_task_id"]
-    if origin_subagent_task_id is not None and (
-        not isinstance(origin_subagent_task_id, str) or not origin_subagent_task_id
-    ):
-        raise ValueError("user control feedback subagent origin is invalid")
+    if not isinstance(value["origin_conversation_scope_kind"], str) or value["origin_conversation_scope_kind"] not in {"ROOT", "SUBAGENT"}:
+        raise ValueError("user control feedback origin scope is invalid")
+    require_id(value["origin_session_id"], "session")
     _validate_process_mapping(value["process"])
     provider_value = {field: value[field] for field in (
         "command", "cwd", "process", "public_code", "public_detail",
     )}
     provider_value["target"] = {"kind": "PROCESS", "process_id": value["process_id"]}
-    provider_value["origin"] = "ROOT" if origin_subagent_task_id is None else {"subagent_task_id": origin_subagent_task_id}
+    provider_value["origin"] = (
+        "ROOT" if value["origin_conversation_scope_kind"] == "ROOT"
+        else {"kind": "AGENT", "agent_id": value["origin_session_id"]}
+    )
     return json.dumps(
         {
             "pulsara_user_control_feedback": provider_value,

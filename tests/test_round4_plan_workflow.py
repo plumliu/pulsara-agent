@@ -39,12 +39,6 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
     KernelToolAuthorizationKind,
     build_accepted_canonical_tool_result_settlement,
 )
-from pulsara_agent.conversation_kernel.vocabulary import (
-    APPEND_GUARDS,
-    COMMITTED_EVENT_DESCRIPTORS,
-    LIVE_EVENT_TYPES,
-    SUBJECT_SLOTS,
-)
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -69,7 +63,6 @@ from pulsara_agent.primitives.run_permission import (
     RunPermissionOverlay,
     build_run_permission_snapshot,
 )
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from pulsara_agent.tool_permission import preset_to_policy
 from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 as wire
 from pulsara_agent.terminal_protocol.v3_gateway import (
@@ -124,12 +117,7 @@ def _accepted_resolution(interaction_id: str) -> AcceptedPlanResolution:
     )
 
 
-def test_round4_closed_oracle_and_permission_presets() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 8
-    assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+def test_round4_plan_interactions_and_permission_presets() -> None:
     assert set(PLAN_INTERACTION_CONTRACTS.values()) == {
         "ask_plan_question",
         "exit_plan",

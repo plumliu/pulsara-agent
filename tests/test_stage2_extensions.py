@@ -283,7 +283,6 @@ def test_redacted_live_extension_never_receives_tool_argument_text() -> None:
                     delta=secret,
                 ),
                 scope_kind="ROOT",
-                scope_subagent_task_id=None,
                 channel_kind=LiveChannelKind.MODEL_OUTPUT,
                 channel_tool_call_id=None,
                 channel_attempt_id=None,

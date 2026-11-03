@@ -54,6 +54,12 @@ _TASK_PROJECTION = """SELECT t.*, s.title AS session_title, q.id AS pending_queu
                     WHERE x.session_id=t.session_id AND x.scheduled_task_id=t.id ORDER BY x.queue_sequence DESC LIMIT 1) latest ON true
 """
 
+# Model inventory never hydrates prompt/name bodies. HTTP and scheduler reads
+# retain the original projection and their independent source-page contract.
+_MODEL_TASK_PROJECTION = _TASK_PROJECTION.replace("t.*", ", ".join(
+    "t." + key for key in ("id", "session_id", "revision", "status", "schedule", "timezone",
+                          "permission_mode", "next_run_at", "updated_at")))
+
 
 class _ExpiredPausedOnce(Exception):
     """Commit lifecycle deletion before returning the ordinary missing target."""
@@ -129,6 +135,7 @@ class _ScheduledTaskOperations:
         status=None,
         due_only=False,
         session_id=None,
+        model_summary=False,
         deadline_monotonic,
     ):
         if status is not None and status not in ("ACTIVE", "PAUSED"):
@@ -141,7 +148,7 @@ class _ScheduledTaskOperations:
             with c.cursor(name="scheduled_task_page", row_factory=dict_row) as page:
                 page.itersize = 1
                 page.execute(
-                    _TASK_PROJECTION
+                    (_MODEL_TASK_PROJECTION if model_summary else _TASK_PROJECTION)
                     + """                WHERE s.memory_domain_id=%s AND s.lifecycle='OPEN' AND (%s::text IS NULL OR t.id>%s)
                 AND (%s::text IS NULL OR t.status=%s)
                 AND (%s::text IS NULL OR t.session_id=%s)
@@ -260,6 +267,7 @@ class _ScheduledTaskOperations:
         values,
         status=None,
         model_resolution_snapshot,
+        result_check=None,
         deadline_monotonic,
     ):
         status = creation_status(status)
@@ -287,6 +295,9 @@ class _ScheduledTaskOperations:
                 )
             while monotonic() < deadline_monotonic:
                 task_id = random_id("schedule")
+                if result_check is not None:
+                    result_check({"id": task_id, "session_id": session_id, **values,
+                        "status": status, "revision": 1, "next_run_at": due if status == "ACTIVE" else None})
                 created = c.execute(
                     """INSERT INTO pulsara_v3.scheduled_tasks
                     (id, session_id, name, prompt, schedule, timezone, permission_mode, status, next_run_at, revision)
@@ -318,6 +329,7 @@ class _ScheduledTaskOperations:
         replacement,
         model_resolution_snapshot,
         cancelled_candidates=None,
+        result_check=None,
         deadline_monotonic,
     ):
         """The session writer owns both plans and cancellation in one transaction."""
@@ -382,6 +394,15 @@ class _ScheduledTaskOperations:
                 raise ScheduledTaskError(
                     "TIME_RANGE_EXHAUSTED", "没有可用的未来触发时点。"
                 )
+            new_task_id = random_id("schedule") if replacement["kind"] == "create" else None
+            projected_paused = {**source, "status": "PAUSED", "revision": source["revision"] + 1, "next_run_at": None}
+            def check_switch(candidate_id):
+                if result_check is not None:
+                    active = {"id": candidate_id, "session_id": session_id, **values,
+                        "revision": 1 if replacement["kind"] == "create" else destination["revision"] + 1,
+                        "status": "ACTIVE", "next_run_at": due}
+                    result_check({"paused": projected_paused, "active": active})
+            check_switch(new_task_id if new_task_id is not None else destination["id"])
             self._cancel_scheduled_pending_in_connection(
                 c, guard, source, cancelled_candidates
             )
@@ -396,7 +417,6 @@ class _ScheduledTaskOperations:
                 ).fetchone()
             else:
                 while monotonic() < deadline_monotonic:
-                    new_task_id = random_id("schedule")
                     active = c.execute(
                         """INSERT INTO pulsara_v3.scheduled_tasks
                         (id,session_id,name,prompt,schedule,timezone,permission_mode,status,next_run_at,revision)
@@ -414,6 +434,8 @@ class _ScheduledTaskOperations:
                     ).fetchone()
                     if active is not None:
                         break
+                    new_task_id = random_id("schedule")
+                    check_switch(new_task_id)
                 else:
                     raise TimeoutError("schedule allocation deadline expired")
             return paused, active
@@ -473,6 +495,7 @@ class _ScheduledTaskOperations:
         action,
         values=None,
         cancelled_candidates=None,
+        result_check=None,
         deadline_monotonic,
     ):
         with self._scheduled_transaction(
@@ -501,8 +524,13 @@ class _ScheduledTaskOperations:
             status, due = t["status"], t["next_run_at"]
             if action in ("pause", "delete"):
                 if action == "delete":
+                    if result_check is not None:
+                        result_check(t)
                     self._delete_scheduled_task_in_connection(c, guard, t, cancelled_candidates)
                     return None
+                if result_check is not None:
+                    result_check({**t, "status": "PAUSED", "next_run_at": None,
+                        "revision": t["revision"] + (1 if status == "ACTIVE" else 0)})
                 self._cancel_scheduled_pending_in_connection(
                     c, guard, t, cancelled_candidates
                 )
@@ -544,9 +572,13 @@ class _ScheduledTaskOperations:
             else:
                 raise ScheduledTaskError("INVALID_ACTION", "任务操作无效。")
             if new == old and status == t["status"] and due == t["next_run_at"]:
+                if result_check is not None:
+                    result_check(t)
                 return t
             if status == "ACTIVE" and t["status"] != "ACTIVE":
                 self._assert_single_active_task(c, session_id, task_id)
+            if result_check is not None:
+                result_check({**t, **new, "status": status, "next_run_at": due, "revision": t["revision"] + 1})
             return c.execute(
                 """UPDATE pulsara_v3.scheduled_tasks SET name=%s,prompt=%s,schedule=%s,timezone=%s,permission_mode=%s,
                  status=%s,next_run_at=%s,revision=revision+1,updated_at=clock_timestamp() WHERE id=%s RETURNING *""",

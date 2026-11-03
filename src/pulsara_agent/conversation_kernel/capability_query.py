@@ -69,7 +69,8 @@ def transport_summary(transport):
 
 
 class CapabilitySourceQuery:
-    def __init__(self, service, *, runtime, plan, scope, code_direct_specs=None):
+    def __init__(self, service, *, runtime, plan, scope, fits_result, code_direct_specs=None):
+        self.fits_result = fits_result
         self.code_direct_specs = code_direct_specs
         self.service, self.runtime, self.plan, self.scope = (
             service,
@@ -1053,6 +1054,7 @@ class CapabilitySourceQuery:
             return render_page(
                 public["rows"],
                 arguments,
+                fits_result=self.fits_result,
                 diagnostics=public["diagnostics"],
                 completeness="PARTIAL" if self.diagnostics else "COMPLETE",
             )
@@ -1252,10 +1254,15 @@ def _public_query_detail(value, scrub):
         children["connection"] = public_transport(value["connection"], scrub)
     if "components" in value:
         children["components"] = {name: public_record(component, scrub) for name, component in value["components"].items()}
-    if "tool_listing" in value:
-        children["tool_listing"] = public_record(value["tool_listing"], scrub, fixed=("kind",), children={
-            "parent": public_target(value["tool_listing"]["parent"], scrub),
-        })
+    for name in ("tool_listing", "prompt_listing"):
+        if name in value:
+            listing = value[name]
+            arguments = listing["arguments"]
+            children[name] = public_record(listing, scrub, fixed=("tool",), children={
+                "arguments": public_record(arguments, scrub, fixed=("kind",), children={
+                    "parent": public_target(arguments["parent"], scrub),
+                }),
+            })
     if "arguments" in value:
         children["arguments"] = [public_record(item, scrub) for item in value["arguments"]]
     if "definitions" in value:

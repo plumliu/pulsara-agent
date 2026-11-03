@@ -1,38 +1,45 @@
 """Standard Unix API assertions at the opaque relay ownership boundary."""
 
-import array
 import asyncio
 import os
 from pathlib import Path
 import socket
+from tempfile import TemporaryDirectory
 
 import pytest
 
 from pulsara_agent.windows_interop.relay import InteropRelay
 
 
-async def bind_relay(tmp_path: Path, handler):
-    upstream_path = tmp_path / "up"
+@pytest.fixture
+def relay_directory():
+    # AF_UNIX pathname limits apply to the complete pytest temporary path too.
+    with TemporaryDirectory(prefix="pr", dir="/tmp") as directory:
+        yield Path(directory)
+
+
+async def bind_relay(directory: Path, handler, monkeypatch):
+    """Exercise byte ownership after binding; Linux anchor auth is integration."""
+    upstream_path = directory / "up"
     upstream = await asyncio.start_unix_server(handler, path=str(upstream_path))
-    relay = InteropRelay(tmp_path)
-    binding = relay.start()
-    sender = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    descriptor = os.open(upstream_path, os.O_PATH | os.O_CLOEXEC)
-    try:
-        sender.connect(str(relay.control_path))
-        sender.sendmsg(
-            [b"F"],
-            [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [descriptor]))],
-        )
-        await binding
-    finally:
-        sender.close()
-        os.close(descriptor)
+    relay = InteropRelay(directory)
+    relay.descriptor = os.dup(upstream.sockets[0].fileno())
+    original_open = asyncio.open_unix_connection
+
+    async def open_owned_descriptor(path, *args, **kwargs):
+        # Adapt only the Linux descriptor-path OS boundary. Both sides still
+        # use real Unix sockets, writers, backpressure, and relay coroutines.
+        if path == f"/proc/self/fd/{relay.descriptor}":
+            path = str(upstream_path)
+        return await original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "open_unix_connection", open_owned_descriptor)
+    relay.server = await asyncio.start_unix_server(relay._connected, path=str(relay.path))
     return relay, upstream
 
 
 def test_opaque_bytes_normal_seal_waits_existing_connection_and_preserves_path(
-    tmp_path,
+    relay_directory, monkeypatch,
 ):
     async def scenario():
         arrived = asyncio.Event()
@@ -47,7 +54,7 @@ def test_opaque_bytes_normal_seal_waits_existing_connection_and_preserves_path(
                 writer.close()
                 await writer.wait_closed()
 
-        relay, upstream = await bind_relay(tmp_path, echo)
+        relay, upstream = await bind_relay(relay_directory, echo, monkeypatch)
         reader, writer = await asyncio.open_unix_connection(str(relay.path))
         payload = bytes(range(256)) * 4
         writer.write(payload)
@@ -76,7 +83,7 @@ def test_opaque_bytes_normal_seal_waits_existing_connection_and_preserves_path(
 
 
 def test_cancel_during_upstream_open_cannot_forward_after_settlement(
-    tmp_path, monkeypatch
+    relay_directory, monkeypatch
 ):
     async def scenario():
         received = bytearray()
@@ -91,7 +98,7 @@ def test_cancel_during_upstream_open_cannot_forward_after_settlement(
                 writer.close()
                 await writer.wait_closed()
 
-        relay, upstream = await bind_relay(tmp_path, capture)
+        relay, upstream = await bind_relay(relay_directory, capture, monkeypatch)
 
         async def gated(path, *args, **kwargs):
             if str(path).startswith("/proc/self/fd/"):
@@ -118,13 +125,15 @@ def test_cancel_during_upstream_open_cannot_forward_after_settlement(
     asyncio.run(scenario())
 
 
-def test_cancel_collects_registered_writer_before_connection_coroutine_starts(tmp_path):
+def test_cancel_collects_registered_writer_before_connection_coroutine_starts(
+    relay_directory, monkeypatch,
+):
     async def scenario():
         async def unused(reader, writer):
             writer.close()
             await writer.wait_closed()
 
-        relay, upstream = await bind_relay(tmp_path, unused)
+        relay, upstream = await bind_relay(relay_directory, unused, monkeypatch)
         left, right = socket.socketpair()
         reader, writer = await asyncio.open_connection(sock=left)
         try:

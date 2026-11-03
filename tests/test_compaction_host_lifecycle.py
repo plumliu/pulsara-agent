@@ -1,6 +1,8 @@
 """Host admission and stop remain independent of first provider preparation."""
 from __future__ import annotations
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 import asyncio
 from threading import Event
 from time import monotonic
@@ -445,7 +447,7 @@ def test_subagent_capacity_and_exact_message_target_survive_first_preparation_st
             w1 = works[0]["work_id"]
             assert works[0]["status"] == "running"
             sent = await core._send_agent_message(model.agent_id, "W1_ONLY_MESSAGE",
-                SimpleNamespace(session_id=root.session_id, work_id=None))
+                SimpleNamespace(session_id=root.session_id, work_id=None, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
             assert sent["delivery"] == "queued"
             assert sent["work"]["work_id"] == w1
             await root.run_turn(PromptContent.text("Queue W2"), command_id=random_id("command"),

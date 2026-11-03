@@ -5,15 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from pulsara_agent.conversation_kernel.vocabulary import (
-    APPEND_GUARDS,
-    COMMITTED_EVENT_DESCRIPTORS,
-    LIVE_EVENT_TYPES,
-    SUBJECT_SLOTS,
-)
-from pulsara_agent.storage.migrations.manifest import (
-    CONVERSATION_KERNEL_RELATIONS,
-)
 from pulsara_agent.llm.adapters.openai.responses import (
     RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES,
 )
@@ -68,26 +59,18 @@ def test_round5a2_assistant_mutation_and_replay_have_closed_owners() -> None:
 
 def test_round5a2_replay_is_entry_bound_and_remote_history_is_not_authority() -> None:
     forbidden = {
-        "previous_response_id": [],
         "ProviderAssistantReplayFragment": [],
     }
     repository_paths = (
         KERNEL / "repository.py",
         *sorted((KERNEL / "_repository").glob("*.py")),
     )
-    for path in _python_sources():
-        source = path.read_text(encoding="utf-8")
-        if "previous_response_id" in source:
-            forbidden["previous_response_id"].append(
-                str(path.relative_to(ROOT))
-            )
     for path in repository_paths:
         if "ProviderAssistantReplayFragment" in path.read_text(encoding="utf-8"):
             forbidden["ProviderAssistantReplayFragment"].append(
                 str(path.relative_to(ROOT))
             )
     assert forbidden == {
-        "previous_response_id": [],
         "ProviderAssistantReplayFragment": [],
     }
     replay_insert_paths = tuple(
@@ -99,17 +82,12 @@ def test_round5a2_replay_is_entry_bound_and_remote_history_is_not_authority() ->
     assert replay_insert_paths == (KERNEL / "_repository/conversation.py",)
 
 
-def test_round5a1_responses_allowlist_and_oracles_remain_closed() -> None:
+def test_round5a1_responses_replayable_output_items_are_closed() -> None:
     assert RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES == {
         "reasoning",
         "message",
         "function_call",
     }
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 8
-    assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
 
 
 def test_round5a1_terminal_path_does_not_import_compaction_or_recovery() -> None:

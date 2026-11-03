@@ -334,6 +334,17 @@ class LocalSkillManagementService:
             config = workspace_skill_config_path(workspace_root)
         return roots[0].path, path.parent.name, config
 
+    def loose_skill_install_destination(
+        self, request: InstallLooseLocalSkillRequest, validation: LocalSkillValidationOutcome,
+    ) -> Path | None:
+        """Use the publisher's layout for effect-free receipt admission."""
+        if validation.disposition is not LocalSkillValidationDisposition.VALID or validation.parsed is None:
+            raise ValueError("Skill destination requires native validated content")
+        return self._publisher.install_destination(
+            scope=request.scope, workspace_root=request.workspace_root,
+            pulsara_home=self._home_resolution() if request.scope is LocalSkillInstallScope.USER else None,
+            parsed=validation.parsed)
+
     def install_loose_local_skill(
         self,
         request: InstallLooseLocalSkillRequest,

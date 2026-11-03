@@ -70,15 +70,18 @@ async def exercise(root: Path) -> None:
         cell_id = await code_mode.start(source="console.log('offline QuickJS');return 42;",
             source_exec_attempt_id="installed-smoke-attempt", turn_id="installed-smoke-turn",
             snapshot=None, tool_catalog={}, invoke=never_called)
+        owned = code_mode._cells[cell_id]
         records = []
         async with asyncio.timeout(10):
-            while True:
-                page = await code_mode.observe(cell_id, 100)
-                records.extend(page.output)
-                await code_mode.acknowledge(page)
-                if page.state in {"completed", "failed", "terminated"} and not page.pending_calls and not page.has_more:
-                    assert page.state == "completed", page.error
-                    break
+            while cell_id in code_mode._cells:
+                lease = await code_mode.lease_output(cell_id)
+                if lease is not None:
+                    records.append(dict(lease.record))
+                    await code_mode.acknowledge_output(lease)
+                else:
+                    await asyncio.sleep(.001)
+        assert owned.state == "completed", owned.error
+        assert not owned.pending and not owned.output
         assert records == [{"kind": "log", "text": "offline QuickJS"}, {"kind": "return", "text": "42"}]
         assert code_mode._node.resolve().is_relative_to(package.parent)
     finally:

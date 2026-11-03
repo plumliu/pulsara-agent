@@ -16,6 +16,29 @@ from pulsara_agent.conversation_kernel.tool_contracts import PreparedToolPrepara
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.tools.builtins.presentation import OpenInPulsaraTool
 from tests.support.round3 import direct_tool_invocation_context, prepare_test_direct_tool_surface
+from pulsara_agent.identity import derive_id
+
+SESSION_ID = derive_id("session", "test-fixture", "open-in-pulsara")
+
+
+def test_presentation_control_is_not_partially_accepted_when_it_does_not_fit(tmp_path):
+    from pulsara_agent.ports.tool_execution import ToolCall
+    from pulsara_agent.message import ToolResultState
+
+    class NoRoom:
+        def fits(self, body):
+            return False
+
+    async def resolve(_kind, _identity):
+        pytest.fail("PANEL requests do not need an object lookup")
+
+    tool = OpenInPulsaraTool(tmp_path)
+    call = ToolCall("external-provider-call", "open_in_pulsara",
+        {"targets": [{"kind": "PANEL", "name": "browser"}]}, page_budget=NoRoom())
+    result = asyncio.run(tool.execute_async(call, resolve_object=resolve))
+    assert result.status is ToolResultState.ERROR
+    assert result.page_complete
+    assert json.loads(result.output)["error"] == "PRESENTATION_RESULT_TOO_LARGE"
 
 
 @pytest.mark.parametrize('arguments,rejected', [
@@ -28,8 +51,8 @@ from tests.support.round3 import direct_tool_invocation_context, prepare_test_di
 ])
 def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
-        ids = dict(session_id='session:test', tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        ids = dict(session_id=SESSION_ID, tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
         borrow, context = direct_tool_invocation_context(port, **ids)
         try:
             prepared = port.prepare_resolved_invocation(tool_name='open_in_pulsara', arguments=arguments, surface_borrow=borrow)
@@ -70,7 +93,7 @@ def test_real_tool_gate_and_invocation(tmp_path, arguments, rejected):
 
 def test_root_surface_and_recovery(tmp_path):
     async def run():
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
         try:
             prepared = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
             borrow = port.borrow_tool_surface(prepared)
@@ -106,8 +129,8 @@ def test_clean_import_order():
 def test_real_tool_rejects_removed_wrappers_without_aliases(tmp_path):
     async def run():
         task_id = 'task:6d7i5mg4ymfcckogzrqiser5km'
-        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id='session:test', live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
-        ids = dict(session_id='session:test', tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
+        port = DirectKernelToolPort(workspace_root=tmp_path, host_owner_id='host:aaaaaaaaaaaaaaaaaaaaaaaaaa', session_id=SESSION_ID, live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
+        ids = dict(session_id=SESSION_ID, tool_name='open_in_pulsara', tool_call_id='call:test', attempt_id='attempt:test', turn_id='turn:test', assistant_entry_id='entry:test')
         borrow, context = direct_tool_invocation_context(port, **ids)
         arguments = {'targets': [
             {'type': 'task', 'task_id': task_id},
@@ -292,16 +315,13 @@ def test_shared_identity_schemas_reject_wrong_kinds_and_trailing_newlines():
     from pulsara_agent.memory.targets import memory_target_schema, parse_memory_target
     from pulsara_agent.capability.source_query import capability_target_schema
 
-    for tool, kind, field, identity_kind in [
-        ("read_artifact", "ARTIFACT", "artifact_id", "artifact"),
-        ("export_artifact", "ARTIFACT", "artifact_id", "artifact"),
-    ]:
-        target_schema = builtin_tool_catalog_entry(tool).descriptor.input_schema["properties"]["target"]
-        valid = derive_id(identity_kind, "test-schema", "object")
-        validator = Draft202012Validator(target_schema)
-        assert validator.is_valid({"kind": kind, field: valid})
-        assert not validator.is_valid({"kind": kind, field: valid + "\n"})
-        assert not validator.is_valid({"kind": kind, field: derive_id("memory", "test-schema", "object")})
+    from pulsara_agent.ports.tool_output import session_entry_source_target_schema
+    target_schema = session_entry_source_target_schema()
+    valid = derive_id("entry", "test-schema", "object")
+    validator = Draft202012Validator(target_schema)
+    assert validator.is_valid({"kind": "SESSION_ENTRY", "entry_id": valid})
+    assert not validator.is_valid({"kind": "SESSION_ENTRY", "entry_id": valid + "\n"})
+    assert not validator.is_valid({"kind": "SESSION_ENTRY", "entry_id": derive_id("memory", "test-schema", "object")})
     memory = derive_id("memory", "test-schema", "object")
     validator = Draft202012Validator(memory_target_schema())
     assert validator.is_valid({"kind": "MEMORY", "memory_id": memory})

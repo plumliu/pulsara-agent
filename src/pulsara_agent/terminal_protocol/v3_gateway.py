@@ -37,10 +37,9 @@ from pulsara_agent.conversation_kernel.user_control import (
     UserControlTarget,
     UserControlTargetKind,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import (
-    ARTIFACT_READ_HARD_CHARS,
-    PostgresToolArtifactReadPort,
-)
+from pulsara_agent.conversation_kernel.tool_outputs import PostgresToolOutputReadPort
+from pulsara_agent.primitives.text_paging import TextPosition, paginate_text
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
 from pulsara_agent.conversation_kernel.live import LiveObservationKind
 from pulsara_agent.conversation_kernel.live import LiveSettlementKind
 from pulsara_agent.ports.live_agent_event import (
@@ -87,7 +86,7 @@ from pulsara_agent.conversation_kernel.repository import (
     PlanDraftIdentityConflict,
     PlanQuestionAnswer,
 )
-from pulsara_agent.ports.artifact import ArtifactContentError
+from pulsara_agent.ports.tool_output import ToolOutputContentError
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.plan_workflow import (
     PlanDraftDecision,
@@ -110,7 +109,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 6
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:fc4b4b0aa76fde3a31c6e672023cd5ff5c039813b9ade33110de3e3cb72d38be"
+    "sha256:1951ca1e67b659dd6d884cd48b80b1790409e9ea392e6c1f07931d285cc76953"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -304,8 +303,8 @@ class TerminalKernelProtocolServer:
             return await self._query_command(state, request)
         if kind == "read_content":
             return await self._read_content(state, request)
-        if kind == "read_tool_artifact":
-            return await self._read_tool_artifact(state, request)
+        if kind == "read_tool_output":
+            return await self._read_tool_output(state, request)
         if kind == "list_background_processes":
             return await self._list_background_processes(state, request)
         if kind == "read_background_process_log":
@@ -1375,78 +1374,46 @@ class TerminalKernelProtocolServer:
             )
         )
 
-    async def _read_tool_artifact(self, state: _Connection, request: wire.ReadToolArtifactRequest) -> wire.ServerFrame:
-        return await self.read_canonical_tool_artifact(
+    async def _read_tool_output(self, state: _Connection, request: wire.ReadToolOutputRequest) -> wire.ServerFrame:
+        return await self.read_canonical_tool_output(
             connection_provider=state.host_session.repository.connection_provider,
             protocol_reader=state.protocol_reader,
             session_id=state.host_session.session_id, request=request)
 
     @staticmethod
-    async def read_canonical_tool_artifact(*, connection_provider, protocol_reader: CanonicalProtocolReader,
-                             session_id: str, request: wire.ReadToolArtifactRequest) -> wire.ServerFrame:
-        if (
-            not request.result_entry_id
-            or not 1 <= request.max_chars <= ARTIFACT_READ_HARD_CHARS
-        ):
-            return _error(request.request_id, "TOOL_ARTIFACT_RANGE_INVALID")
+    async def read_canonical_tool_output(*, connection_provider, protocol_reader: CanonicalProtocolReader,
+                                        session_id: str, request: wire.ReadToolOutputRequest) -> wire.ServerFrame:
+        # Preserve the existing browser page resource boundary; this is not a
+        # model token estimate or a total output limit.
+        if not is_valid_id(request.result_entry_id, "entry") or not 1 <= request.max_chars <= 32_000:
+            return _error(request.request_id, "TOOL_OUTPUT_RANGE_INVALID")
         try:
-            reference = await asyncio.to_thread(
-                protocol_reader.resolve_tool_artifact_reference,
-                session_id=session_id,
-                result_entry_id=request.result_entry_id,
-                deadline_monotonic=monotonic() + 10.0,
+            position = TextPosition(request.position.line, request.position.char_offset) if request.HasField("position") else TextPosition()
+            workspace_id = await asyncio.to_thread(
+                protocol_reader.tool_output_workspace,
+                session_id=session_id, deadline_monotonic=monotonic() + 10.0,
             )
+            port = PostgresToolOutputReadPort(connection_provider, session_id=session_id, workspace_id=workspace_id)
+            body = await asyncio.to_thread(port.read_body,
+                {"kind": "SESSION_ENTRY", "entry_id": request.result_entry_id})
+            page = await asyncio.to_thread(paginate_text, body.content.decode("utf-8"),
+                position=position, max_chars=request.max_chars, fits=lambda _text, _next: True)
         except KeyError:
-            return _error(request.request_id, "TOOL_RESULT_MISSING")
-        disposition = str(reference["output_artifact_disposition"])
-        if disposition not in {"AVAILABLE", "INCOMPLETE"}:
-            return _error(request.request_id, "TOOL_ARTIFACT_UNAVAILABLE")
-        artifact_id = str(reference["output_artifact_id"] or "")
-        if not artifact_id:
-            return _error(request.request_id, "TOOL_ARTIFACT_CORRUPT")
-        port = PostgresToolArtifactReadPort(
-            connection_provider,
-            session_id=session_id,
-            workspace_id=str(reference["workspace_id"]),
+            return _error(request.request_id, "TOOL_OUTPUT_MISSING")
+        except (ValueError, ToolResultPageBoundary):
+            return _error(request.request_id, "TOOL_OUTPUT_RANGE_INVALID")
+        except (ToolOutputContentError, ConversationKernelConflict):
+            return _error(request.request_id, "TOOL_OUTPUT_UNAVAILABLE")
+        chunk = wire.ToolOutputTextChunk(
+            request_id=request.request_id, result_entry_id=request.result_entry_id,
+            source_coverage=body.source_coverage.value,
+            source_coverage_reason=body.source_coverage_reason.value if body.source_coverage_reason else "",
+            text=page.text,
+            position=wire.ToolOutputTextPosition(**page.start.public_value()),
         )
-        try:
-            page = await asyncio.to_thread(
-                port.read_text,
-                artifact_id,
-                offset_chars=request.offset_chars,
-                max_chars=request.max_chars,
-            )
-        except ValueError:
-            return _error(request.request_id, "TOOL_ARTIFACT_RANGE_INVALID")
-        except KeyError:
-            return _error(request.request_id, "TOOL_ARTIFACT_MISSING")
-        except (ArtifactContentError, ConversationKernelConflict):
-            return _error(request.request_id, "TOOL_ARTIFACT_CORRUPT")
-        return wire.ServerFrame(
-            tool_artifact=wire.ToolArtifactTextChunk(
-                request_id=request.request_id,
-                result_entry_id=request.result_entry_id,
-                artifact_disposition=page.record.artifact_disposition.value,
-                source_coverage=page.record.source_coverage.value,
-                display_kind=page.record.display_kind.value,
-                source_coverage_reason=(
-                    page.record.source_coverage_reason.value
-                    if page.record.source_coverage_reason is not None
-                    else ""
-                ),
-                artifact_unavailability_reason=(
-                    page.record.artifact_unavailability_reason.value
-                    if page.record.artifact_unavailability_reason is not None
-                    else ""
-                ),
-                text=page.text,
-                offset_chars=page.offset_chars,
-                returned_chars=page.returned_chars,
-                total_chars=page.total_chars,
-                has_more=page.has_more,
-                next_offset_chars=page.next_offset_chars or 0,
-            )
-        )
+        if page.next_position is not None:
+            chunk.next.CopyFrom(wire.ToolOutputTextPosition(**page.next_position.public_value()))
+        return wire.ServerFrame(tool_output=chunk)
 
     async def _list_background_processes(
         self, state: _Connection, request: wire.ListBackgroundProcessesRequest

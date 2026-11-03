@@ -235,7 +235,7 @@ class PreparedKernelToolSurface:
 
 CODE_MODE_SHARED_TOOL_NAMES = frozenset({
     "read_file", "write_file", "edit_file", "find_files", "search_content",
-    "exec_process", "query_processes", "manage_process", "read_artifact", "export_artifact",
+    "exec_process", "query_processes", "manage_process",
     "search_sessions", "search_session_content", "read_session_content",
     "query_capabilities", "use_new_mcp_tool", "read_mcp_resource",
     "run_agent", "query_agents", "send_agent_message",

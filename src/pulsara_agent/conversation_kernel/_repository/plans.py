@@ -13,6 +13,9 @@ from pulsara_agent.conversation_kernel.annotations import validate_annotation_so
 
 from pulsara_agent.conversation_kernel.interruption import interruption_payload
 
+from .tools import _output_body_values, _output_body_from_row
+
+import json
 from datetime import datetime
 from typing import Mapping
 from psycopg import Connection, IsolationLevel
@@ -26,6 +29,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     InlineContent,
     canonical_digest,
 )
+from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
 from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     canonical_json_bytes,
@@ -255,6 +259,17 @@ def _plan_review_body(
     return _plan_inline(payload)
 
 
+def _plan_public_output(content: InlineContent, origin_kind: str) -> InlineContent:
+    """Freeze the existing public Plan projection as C, leaving control storage intact."""
+    body = project_tool_result_storage_body(content.canonical_bytes.decode("utf-8"),
+        ToolObservationOrigin.PLAN_CONTROL if origin_kind == "PLAN_CONTROL" else ToolObservationOrigin.POLICY)
+    return InlineContent.from_bytes(body.encode("utf-8"), media_type="application/json", codec="utf-8")
+
+
+def _plan_public_facts(content: InlineContent, origin_kind: str) -> Mapping[str, object]:
+    return json.loads(_plan_public_output(content, origin_kind).canonical_bytes)
+
+
 def _plan_tool_result_settlement(
     *,
     candidate: PreparedPlanToolBatch,
@@ -282,6 +297,7 @@ def _plan_tool_result_settlement(
         result_state=result_state,
         result_origin_kind=result_origin_kind,
         canonical_body=canonical_json_bytes(payload).decode("utf-8"),
+        output_available=True, required_facts=_plan_public_facts(_plan_inline(payload), result_origin_kind),
         observed_at=candidate.occurred_at,
         observation_origin=(
             ToolObservationOrigin.PLAN_CONTROL
@@ -568,9 +584,11 @@ class _PlanOperations:
                         result_entry_id, result_state,
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
-                        tool_reported_duration_microseconds
+                        tool_reported_duration_microseconds,
+                        output_body_inline_content,output_body_blob_id,output_body_digest,
+                        output_body_size,output_body_media_type,output_body_codec,result_facts
                     ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL, %s, %s, %s,
-                              %s, %s, %s, %s, NULL, %s, NULL)
+                              %s, %s, %s, %s, NULL, %s, NULL, %s,%s,%s,%s,%s,%s,%s)
                     """,
                     (
                         self._accept_invocation_source(connection,guard,assistant_entry_id=candidate.assistant_entry_id,tool_call_id=call.tool_call_id,turn_id=candidate.origin_turn_id,require_running=False)[0].invocation_id,
@@ -591,6 +609,8 @@ class _PlanOperations:
                             if origin_kind == "PLAN_CONTROL"
                             else "POLICY"
                         ),
+                        *_output_body_values(_plan_public_output(_plan_inline(payload), origin_kind)),
+                        Jsonb(_plan_public_facts(_plan_inline(payload), origin_kind)),
                     ),
                 )
                 event_drafts.append(
@@ -789,10 +809,12 @@ class _PlanOperations:
                     result_entry_id, result_state,
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
-                    tool_reported_duration_microseconds
+                    tool_reported_duration_microseconds,
+                    output_body_inline_content,output_body_blob_id,output_body_digest,
+                    output_body_size,output_body_media_type,output_body_codec,result_facts
                 ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL,
                           'POLICY_NO_ATTEMPT', NULL, NULL, %s, %s, %s,
-                          %s, NULL, 'POLICY', NULL)
+                          %s, NULL, 'POLICY', NULL, %s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     self._accept_invocation_source(connection,guard,assistant_entry_id=candidate.assistant_entry_id,tool_call_id=call.tool_call_id,turn_id=candidate.origin_turn_id,require_running=False)[0].invocation_id,
@@ -805,6 +827,8 @@ class _PlanOperations:
                     call.result_entry_id,
                     result_state,
                     candidate.occurred_at,
+                    *_output_body_values(_plan_public_output(_plan_inline(payload), "POLICY_NO_ATTEMPT")),
+                    Jsonb(_plan_public_facts(_plan_inline(payload), "POLICY_NO_ATTEMPT")),
                 ),
             )
             event_drafts.append(
@@ -1052,6 +1076,7 @@ class _PlanOperations:
             result_state="CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
             result_origin_kind="PLAN_CONTROL",
             canonical_body=result_content.canonical_bytes.decode("utf-8"),
+            output_available=True, required_facts=_plan_public_facts(result_content, "PLAN_CONTROL"),
             observed_at=occurred_at,
             observation_origin=ToolObservationOrigin.PLAN_CONTROL,
         )
@@ -1199,9 +1224,11 @@ class _PlanOperations:
                     result_entry_id, result_state,
                     observed_at, observation_duration_microseconds,
                     observation_origin_kind,
-                    tool_reported_duration_microseconds
+                    tool_reported_duration_microseconds,
+                    output_body_inline_content,output_body_blob_id,output_body_digest,
+                    output_body_size,output_body_media_type,output_body_codec,result_facts
                 ) VALUES (%s, 'EXECUTED', %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL',
-                          %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL', NULL)
+                          %s, %s, %s, %s, %s, NULL, 'PLAN_CONTROL', NULL, %s,%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     self._accept_invocation_source(connection,guard,assistant_entry_id=interaction['assistant_entry_id'],tool_call_id=interaction['tool_call_id'],turn_id=interaction['origin_turn_id'],require_running=False)[0].invocation_id,
@@ -1215,6 +1242,8 @@ class _PlanOperations:
                     result_entry_id,
                     "CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
                     occurred_at,
+                    *_output_body_values(_plan_public_output(result_content, "PLAN_CONTROL")),
+                    Jsonb(_plan_public_facts(result_content, "PLAN_CONTROL")),
                 ),
             )
             response_digest = canonical_digest(
@@ -1329,6 +1358,7 @@ class _PlanOperations:
                         result_state="CANCELLED_BEFORE_DISPATCH" if answer is None else "SUCCESS",
                         result_origin_kind="PLAN_CONTROL",
                         canonical_body=result_content.canonical_bytes.decode("utf-8"),
+                        output_available=True, required_facts=_plan_public_facts(result_content, "PLAN_CONTROL"),
                         observed_at=occurred_at,
                         observation_origin=ToolObservationOrigin.PLAN_CONTROL,
                     )
@@ -2903,6 +2933,8 @@ class _PlanOperations:
                     or str(entry["turn_id"]) != candidate.origin_turn_id
                     or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
                     or self._content_from_row(entry) != _plan_inline(expected_payload)
+                    or _output_body_from_row(row) != _plan_public_output(_plan_inline(expected_payload), str(row["result_origin_kind"]))
+                    or row["result_facts"] != _plan_public_facts(_plan_inline(expected_payload), str(row["result_origin_kind"]))
                 ):
                     raise ConversationKernelConflict(
                         "rejected Plan batch result content conflicts"
@@ -3027,6 +3059,8 @@ class _PlanOperations:
                 or str(entry["turn_id"]) != candidate.origin_turn_id
                 or str(entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
                 or self._content_from_row(entry) != _plan_inline(expected_payload)
+                    or _output_body_from_row(row) != _plan_public_output(_plan_inline(expected_payload), str(row["result_origin_kind"]))
+                    or row["result_facts"] != _plan_public_facts(_plan_inline(expected_payload), str(row["result_origin_kind"]))
             ):
                 raise ConversationKernelConflict(
                     "Plan batch result content names another winner"
@@ -3613,6 +3647,8 @@ class _PlanOperations:
                 or str(result_entry["turn_id"]) != str(row["origin_turn_id"])
                 or str(result_entry["entry_kind"]) != EntryKind.TOOL_RESULT.value
                 or self._content_from_row(result_entry) != expected_content
+                or _output_body_from_row(result) != _plan_public_output(expected_content, "PLAN_CONTROL")
+                or result["result_facts"] != _plan_public_facts(expected_content, "PLAN_CONTROL")
             ):
                 raise ConversationKernelConflict(
                     "Plan question winner is partially installed"
@@ -3671,6 +3707,7 @@ class _PlanOperations:
                 result_state=result_state,
                 result_origin_kind="PLAN_CONTROL",
                 canonical_body=expected_content.canonical_bytes.decode("utf-8"),
+                output_available=True, required_facts=_plan_public_facts(expected_content, "PLAN_CONTROL"),
                 observed_at=result["observed_at"],
                 observation_origin=ToolObservationOrigin.PLAN_CONTROL,
             )

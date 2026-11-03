@@ -65,7 +65,6 @@ def test_pr03_late_termination_preserves_confirmed_natural_terminal_state(
 
     termination = registry.terminate_if_running(
         state.process_id,
-        max_output_chars=512,
         owner_host_session_id=owner,
     )
 
@@ -110,7 +109,6 @@ def test_pr03_background_adopted_only_after_successful_yield_publication(
 
     termination = registry.terminate_if_running(
         state.process_id,
-        max_output_chars=512,
         owner_host_session_id=owner,
     )
     assert termination.disposition is TerminalTerminationDisposition.TERMINATION_COMPLETED
@@ -142,7 +140,6 @@ def test_pr03_shell_exit_with_live_group_is_still_terminable(tmp_path: Path) -> 
 
     termination = registry.terminate_if_running(
         state.process_id,
-        max_output_chars=512,
         owner_host_session_id=owner,
     )
 
@@ -195,7 +192,6 @@ def test_pr03_natural_exit_during_physical_settlement_is_not_reported_as_termina
     releaser.start()
     result = registry.terminate_if_running(
         state.process_id,
-        max_output_chars=512,
         owner_host_session_id=owner,
         join_timeout_seconds=1,
     )

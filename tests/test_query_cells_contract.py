@@ -34,8 +34,8 @@ def test_cell_target_rejects_noncanonical_ids_and_padding(value):
 
 @pytest.mark.parametrize("name,schema,valid,invalid", [
     ("exec_cell", exec_cell_parameters_schema,
-     [{"code": ""}, {"path": "code.js", "yield_time_ms": 0}],
-     [{}, {"code": "", "path": "code.js"}, {"code": None}, {"code": "", "yield_time_ms": True}]),
+     [{"code": ""}, {"path": "code.js"}],
+     [{}, {"code": "", "path": "code.js"}, {"code": None}, {"code": "", "yield_time_ms": True}, {"path": "code.js", "yield_time_ms": 0}]),
     ("query_cells", query_cells_parameters_schema,
      [{}, {"max_items": 100000}, {"cursor": "cell:" + "a" * 26},
       {"target": cell_target("cell:" + "a" * 26), "offset_chars": 0, "max_chars": 32000}],
@@ -74,10 +74,22 @@ async def _terminal(host, cell_id):
             await asyncio.sleep(.001)
 
 
+def _context(*, maximum=None):
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+    from pulsara_agent.primitives.tool_result_projection import conservative_tool_result_page_logical_utf8_bytes
+    call_id = random_id("call")
+    def accepts(body, memory_ids):
+        return maximum is None or conservative_tool_result_page_logical_utf8_bytes(
+            tool_call_id=call_id, body=body, model_visible_memory_ids=memory_ids) <= maximum
+    return SimpleNamespace(tool_call_id=call_id, session_id=random_id("session"),
+                           page_budget=ToolResultPageBudget(call_id, accepts_provider_body=accepts))
+
+
 def test_real_host_inventory_pages_no_total_limit_and_released_cursor_remains_usable():
     async def run():
-        host = CodeModeHost(limits=replace(CodeModeLimits(), vm_slots=1))
-        foreign = CodeModeHost()
+        host, foreign = CodeModeHost(limits=replace(CodeModeLimits(), vm_slots=1)), CodeModeHost()
+        port = object.__new__(DirectKernelToolPort)
+        port._code_mode = host
         entered, release = asyncio.Event(), asyncio.Event()
         async def wait(_):
             entered.set()
@@ -89,32 +101,34 @@ def test_real_host_inventory_pages_no_total_limit_and_released_cursor_remains_us
             ids = [first] + [await _start(host, "console.log('queued');") for _ in range(56)]
             foreign_id = await _start(foreign, "console.log('other Host');")
             assert len(set(ids)) == 57 and all(is_valid_id(value, "cell") for value in ids)
-            initial = host.query_cells()
-            assert len(initial["cells"]) == 50 and initial["has_more"]
-            boundary = initial["next_cursor"]
-            assert boundary == initial["cells"][-1]["target"]["cell_id"]
-            following = host.query_cells(cursor=boundary)
-            all_ids = [row["target"]["cell_id"] for row in initial["cells"] + following["cells"]]
-            assert all_ids == sorted(ids) and following["next_cursor"] is None
-            assert len(host.query_cells(max_items=10**6)["cells"]) == 57
-            small = host.query_cells(max_items=10**6, maximum_page_bytes=500)
-            assert 0 < len(small["cells"]) < 50 and small["has_more"]
-            assert len(encode_tool_public_json(small)) <= 500
-            assert small["next_cursor"] == small["cells"][-1]["target"]["cell_id"]
-            with pytest.raises(CodeModeError, match="row exceeds"):
-                host.query_cells(maximum_page_bytes=100)
+            context = _context()
+            initial = await port._query_cells({}, context)
+            assert len(initial["cells"]) == 50 and initial["next"]["tool"] == "query_cells"
+            following = await port._query_cells(initial["next"]["arguments"], context)
+            assert [row["target"]["cell_id"] for row in initial["cells"] + following["cells"]] == sorted(ids)
+            assert following["next"] is None
+            assert len((await port._query_cells({"max_items": 10**6}, context))["cells"]) == 57
+            small_context = _context(maximum=1200)
+            small = await port._query_cells({"max_items": 10**6}, small_context)
+            assert 0 < len(small["cells"]) < 50 and small["next"]
+            assert small_context.page_budget.fits(encode_tool_public_json(small).decode())
+            with pytest.raises(CodeModeError, match="inventory row"):
+                await port._query_cells({}, _context(maximum=100))
             with pytest.raises(CodeModeError) as missing:
                 host.capture_cell(foreign_id)
             assert missing.value.code == "unavailable"
-            # Stopping and draining a queued boundary does not invalidate its
-            # string position for a subsequent live inventory page.
-            if boundary != first:
-                await host.stop(boundary)
-                await host._cells[boundary].vm_released.wait()
-                page = await host.observe(boundary, 0)
-                await host.acknowledge(page)
-                assert boundary not in host._cells
-                assert host.query_cells(cursor=boundary) == following
+            # Select a queued object as the keyset boundary, then retire it.
+            boundary_index = next(index for index, value in enumerate(sorted(ids)) if value != first)
+            before = await port._query_cells({"max_items": boundary_index + 1}, context)
+            boundary = before["next"]["arguments"]["cursor"]
+            expected = await port._query_cells(before["next"]["arguments"], context)
+            owned = host._cells[boundary]
+            await host.stop(boundary)
+            await owned.vm_released.wait()
+            async with asyncio.timeout(5):
+                while boundary in host._cells:
+                    await asyncio.sleep(.001)
+            assert await port._query_cells(before["next"]["arguments"], context) == expected
         finally:
             release.set()
             await host.aclose()
@@ -122,7 +136,7 @@ def test_real_host_inventory_pages_no_total_limit_and_released_cursor_remains_us
     asyncio.run(run())
 
 
-def test_live_query_does_not_reserve_or_consume_output_and_node_uses_same_canonical_id():
+def test_live_query_does_not_reserve_or_consume_formal_output():
     async def run():
         host = CodeModeHost()
         calls = []
@@ -130,110 +144,84 @@ def test_live_query_does_not_reserve_or_consume_output_and_node_uses_same_canoni
             calls.append(call)
             return CodeModeToolResult(value=1)
         try:
-            source = "console.log(await tools.read_file({}));"
-            cell_id = await _start(host, source, invoke)
-            second = await _start(host, source, invoke)
+            cell_id = await _start(host, "console.log(await tools.read_file({}));", invoke)
             await _terminal(host, cell_id)
-            await _terminal(host, second)
-            assert second != cell_id
-            assert {call.cell_id for call in calls} == {cell_id, second}
-            reserved = await host.observe(cell_id, 0)
+            lease = await host.lease_output(cell_id)
             captured = host.capture_cell(cell_id)
             assert captured.has_unread_output and captured.public_value()["target"] == cell_target(cell_id)
-            assert host.query_cells()["cells"]
+            assert host.list_cell_snapshots()["cells"]
+            assert (await host.lease_output(cell_id)) is lease
             stopped = await host.stop(cell_id)
-            assert stopped["target"] == cell_target(cell_id) and stopped["has_more"]
-            assert not host._cells[cell_id].terminal_delivered
-            host.abandon(reserved)
-            again = await host.observe(cell_id, 0)
-            assert again.output == reserved.output
-            await host._cells[cell_id].vm_released.wait()
-            await host.acknowledge(again)
+            assert stopped["target"] == cell_target(cell_id) and "output" not in stopped
+            assert not host.output_delivery_allowed(lease)
+            assert lease.record == {"kind":"log", "text":"1"}
+            owned = host._cells[cell_id]
+            await host.acknowledge_output(lease, accepted=False)
+            await owned.vm_released.wait()
+            async with asyncio.timeout(5):
+                while cell_id in host._cells:
+                    await asyncio.sleep(.001)
             assert captured.public_value()["has_unread_output"] is True
-            with pytest.raises(CodeModeError) as missing:
-                host.capture_cell(cell_id)
-            assert missing.value.code == "unavailable"
+            assert len(calls) == 1
         finally:
             await host.aclose()
     asyncio.run(run())
 
 
-def test_complete_target_output_envelope_utf8_boundary_and_failed_quote_preserve_output():
+@pytest.mark.parametrize("source", ["\\" * 20000, "// Hook后的冻结源码😀\n" * 5000])
+def test_query_source_uses_complete_quote_and_copyable_next_without_consuming_output(source):
     async def run():
         host = CodeModeHost()
-        try:
-            cell_id = await _start(host, "console.log('中文😀'.repeat(100));")
-            await _terminal(host, cell_id)
-            cell = host._cells[cell_id]
-            expected = host._public_page(cell, [cell.output[0].value], False)
-            size = len(encode_tool_public_json(expected))
-            with pytest.raises(CodeModeError) as failure:
-                await host.observe(cell_id, 0, maximum_page_bytes=size - 1)
-            assert failure.value.code == "output_resource_error"
-            assert cell.observation is None and cell.output and not cell.terminal_delivered
-            page = await host.observe(cell_id, 0, maximum_page_bytes=size)
-            assert page.public_value() == expected
-            assert len(encode_tool_public_json(page.public_value())) == size
-            assert "cell_id" not in page.public_value()
-            host.abandon(page)
-            repeated = await host.observe(cell_id, 0, maximum_page_bytes=size)
-            assert repeated.output == page.output
-        finally:
-            await host.aclose()
-    asyncio.run(run())
-
-
-def test_query_source_unicode_pages_read_only_and_captured_source_survives_release():
-    async def run():
-        host = CodeModeHost()
-        # Exercise the actual query adapter and source callback without another
-        # durable source store; PostgreSQL hydration is covered below.
         port = object.__new__(DirectKernelToolPort)
         port._code_mode = host
-        source = "// Hook后的冻结源码😀\n" * 5000
         read_started, read_release = asyncio.Event(), asyncio.Event()
         async def read_source(**_):
             read_started.set()
             await read_release.wait()
             return source
         port._code_mode_read_source = read_source
-        context = SimpleNamespace(tool_call_id=random_id("call"), session_id=random_id("session"))
+        context = _context()
         try:
             cell_id = await _start(host, "console.log('unread output');")
             await _terminal(host, cell_id)
             target = cell_target(cell_id)
-            reserved = await host.observe(cell_id, 0)
+            lease = await host.lease_output(cell_id)
             read_release.set()
-            offset, pieces = 0, []
+            arguments, pieces, previous_offset = {"target":target,"max_chars":32000}, [], -1
             while True:
-                value = await port._query_cells({"target": target, "offset_chars": offset,
-                                               "max_chars": 32000}, context)
-                assert len(encode_tool_public_json(value)) <= 40000
+                value = await port._query_cells(arguments, context)
+                assert context.page_budget.fits(encode_tool_public_json(value).decode())
                 assert value["cell"]["has_unread_output"]
                 page = value["source"]
-                assert page["returned_chars"] == len(page["text"])
+                assert page["returned_chars"] == len(page["text"]) > 0
+                assert page["offset_chars"] > previous_offset
+                previous_offset = page["offset_chars"]
                 pieces.append(page["text"])
-                if not page["has_more"]:
-                    assert page["next_offset_chars"] is None
+                assert (await host.lease_output(cell_id)) is lease
+                if value["next"] is None:
                     break
-                assert page["next_offset_chars"] == offset + len(page["text"])
-                offset = page["next_offset_chars"]
+                assert value["next"]["tool"] == "query_cells"
+                arguments = value["next"]["arguments"]
             assert "".join(pieces) == source
-            for offset in (len(source), len(source) + 10):
-                page = (await port._query_cells({"target": target, "offset_chars": offset}, context))["source"]
-                assert page["text"] == "" and not page["has_more"] and page["returned_chars"] == 0
+            for offset in (len(source),len(source)+10):
+                value = await port._query_cells({"target":target,"offset_chars":offset}, context)
+                assert value["source"]["text"] == "" and value["next"] is None
+            with pytest.raises(CodeModeError, match="cannot fit"):
+                await port._query_cells({"target":target}, _context(maximum=100))
+            assert (await host.lease_output(cell_id)) is lease
             read_started.clear()
             read_release.clear()
-            query = asyncio.create_task(port._query_cells({"target": target}, context))
+            query = asyncio.create_task(port._query_cells({"target":target}, context))
             await read_started.wait()
-            await host._cells[cell_id].vm_released.wait()
-            await host.acknowledge(reserved)
+            owned = host._cells[cell_id]
+            await owned.vm_released.wait()
+            await host.acknowledge_output(lease)
             assert cell_id not in host._cells
             read_release.set()
-            captured_page = (await query)["source"]
-            assert captured_page["text"] == source[:captured_page["returned_chars"]]
+            page = (await query)["source"]
+            assert page["text"] == source[:page["returned_chars"]]
             with pytest.raises(CodeModeError) as missing:
-                await port._query_cells({"target": target}, context)
+                await port._query_cells({"target":target}, context)
             assert missing.value.code == "unavailable"
         finally:
             read_release.set()
@@ -255,15 +243,13 @@ def test_missing_source_preserves_cell_metadata_and_does_not_consume_output(fail
         try:
             cell_id = await _start(host, "console.log('retained');")
             await _terminal(host, cell_id)
-            value = await port._query_cells({"target": cell_target(cell_id)}, SimpleNamespace(
-                tool_call_id=random_id("call"), session_id=random_id("session")))
-            assert value["cell"]["target"] == cell_target(cell_id)
-            assert value["cell"]["has_unread_output"]
-            assert value["source"]["status"] == "UNAVAILABLE"
-            assert value["source"]["reason"] and "text" not in value["source"]
-            page = await host.observe(cell_id, 0)
-            assert page.output == ({"kind": "log", "text": "retained"},)
-            host.abandon(page)
+            value = await port._query_cells({"target":cell_target(cell_id)}, _context())
+            assert value["cell"]["has_unread_output"] and value["next"] is None
+            assert value["source"]["status"] == "UNAVAILABLE" and value["source"]["reason"]
+            assert "text" not in value["source"]
+            lease = await host.lease_output(cell_id)
+            assert lease.record == {"kind":"log", "text":"retained"}
+            assert (await host.lease_output(cell_id)) is lease
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -336,21 +322,17 @@ def test_corrupt_blob_source_is_not_successful_empty_source(stage2_migrated_post
 
 
 @pytest.mark.postgres
-def test_real_host_hook_path_source_and_full_projection_failure_keep_original_output(
+def test_real_host_hook_path_source_and_ingress_retry_preserve_original_record(
     tmp_path, monkeypatch, stage2_migrated_postgres_database,
 ):
-    """Actual Hook→file read→freeze→VM→query and failed outer-page settlement."""
+    """Real Hook→source freeze→query, while an immutable output retries admission."""
+    import threading
     import pulsara_agent.conversation_kernel.host as kernel_host
     from pulsara_agent.conversation_kernel.host import KernelHostCore
-    from pulsara_agent.conversation_kernel.tool_artifacts import ToolOutputArtifactProcessor
-    from pulsara_agent.conversation_kernel.tool_contracts import ProcessLocalEffectSettlementDisposition
+    from pulsara_agent.conversation_kernel.repository import ConversationKernelRepository
     from pulsara_agent.llm.input import MessageRole, PromptContent, text_part_values
-    from pulsara_agent.model_input.contracts import ModelInputCompileFailureKind, StructuredModelInputCompileError
     from pulsara_agent.model_input.lowering import decode_tool_result_observation
     from pulsara_agent.primitives.permission import PermissionMode
-    from pulsara_agent.primitives.tool_result_projection import (
-        ToolResultDeliveryRequirement, classify_tool_result_delivery,
-    )
     from pulsara_agent.workspace_identity import HostWorkspaceInput
     from tests.support.model_config import test_model_binding, test_model_runtime
     from tests.support.round3 import CallbackScriptedKernelModel
@@ -365,125 +347,73 @@ def test_real_host_hook_path_source_and_full_projection_failure_keep_original_ou
     (workspace / "original.js").write_text(original)
     source_path = workspace / "executed.js"
     source_path.write_text(executed)
-    hook_log = tmp_path / "hook-input.json"
-    hook = tmp_path / "rewrite-hook.py"
-    hook.write_text(
-        "import json, pathlib, sys\n"
-        f"pathlib.Path({str(hook_log)!r}).write_text(sys.stdin.read())\n"
-        "print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', "
-        "'updatedInput': {'path': 'executed.js', 'yield_time_ms': 1000}}}))\n"
-    )
+    hook_log, hook = tmp_path / "hook-input.json", tmp_path / "rewrite-hook.py"
+    hook.write_text("import json,pathlib,sys\n" +
+        f"pathlib.Path({str(hook_log)!r}).write_text(sys.stdin.read())\n" +
+        "print(json.dumps({'hookSpecificOutput':{'hookEventName':'PreToolUse','updatedInput':{'path':'executed.js'}}}))\n")
     _install_trusted_sources(home=home, workspace_root=workspace, workspace_config=None,
-        user_config={"hooks": {"PreToolUse": [{"matcher": "^exec_cell$", "hooks": [{
-            "type": "command", "command": shlex.join([sys.executable, str(hook)]), "timeout": 5,
-        }]}]}})
-    monkeypatch.setenv("PULSARA_HOME", str(home))
-    failed_pages, dispositions, observed = [], [], []
-    original_prepare = ToolOutputArtifactProcessor.prepare
-    original_settle = DirectKernelToolPort.settle_process_local_effect
-
-    def fail_first_full_page(owner, **values):
-        if not failed_pages and "ACTUAL_FROZEN_EXECUTED" in values["public_output"]:
-            page = json.loads(values["public_output"])
-            if "output" in page:
-                assert page["output"] == [{"kind": "log", "text": "ACTUAL_FROZEN_EXECUTED"}]
-                assert classify_tool_result_delivery(tool_name="exec_cell", result_state="SUCCESS").requirement is (
-                    ToolResultDeliveryRequirement.FULL_REQUIRED)
-                failed_pages.append(page)
-                raise StructuredModelInputCompileError(
-                    ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE)
-        return original_prepare(owner, **values)
-
-    async def record_real_settlement(owner, token, disposition):
-        if hasattr(token.prepared, "observation") and token.prepared.observation.output:
-            dispositions.append(disposition)
-        return await original_settle(owner, token, disposition)
-
-    monkeypatch.setattr(ToolOutputArtifactProcessor, "prepare", fail_first_full_page)
-    monkeypatch.setattr(DirectKernelToolPort, "settle_process_local_effect", record_real_settlement)
-    target = None
-    recovering = False
-    recovery_calls = 0
-    active_session = None
+        user_config={"hooks":{"PreToolUse":[{"matcher":"^exec_cell$","hooks":[{
+            "type":"command","command":shlex.join([sys.executable,str(hook)]),"timeout":5}]}]}})
+    monkeypatch.setenv("PULSARA_HOME",str(home))
+    release_ingress = threading.Event()
+    attempted = threading.Event()
+    candidates, observed = [], []
+    original_enqueue = ConversationKernelRepository.enqueue_cell_output
+    def flaky_enqueue(owner, guard, *, candidate, deadline_monotonic):
+        candidates.append(candidate)
+        attempted.set()
+        if len(candidates) == 1:
+            raise OSError("injected pre-commit output failure")
+        assert release_ingress.wait(10), "test failed to release original output admission"
+        return original_enqueue(owner,guard,candidate=candidate,deadline_monotonic=deadline_monotonic)
+    monkeypatch.setattr(ConversationKernelRepository,"enqueue_cell_output",flaky_enqueue)
 
     async def stream(request):
-        nonlocal target, recovery_calls
         index = len(model.requests)
-        if not recovering:
-            if index == 1:
-                payloads = _tool_call("exec_cell", random_id("call"), {"path": "original.js"})
-            else:
-                # The first observation can end at the queued→running change.
-                # Wait for actual VM completion before selecting its full page.
-                message = next(item for item in reversed(request.compiled_input.messages)
-                               if item.role is MessageRole.TOOL_RESULT)
-                body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])["body"]))
-                target = body["target"]
-                await _terminal(active_session._code_mode, target["cell_id"])
-                payloads = _tool_call("manage_cell", random_id("call"), {"action": "wait", "target": target})
-        else:
-            recovery_calls += 1
-            if recovery_calls == 1:
-                for payload in _tool_call("query_cells", random_id("call"), {}):
-                    yield payload
-                return
-            message = next(item for item in reversed(request.compiled_input.messages)
-                           if item.role is MessageRole.TOOL_RESULT)
+        if index == 1:
+            payloads = _tool_call("exec_cell",random_id("call"),{"path":"original.js"})
+        elif index in {2,3}:
+            message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
             body = json.loads(str(decode_tool_result_observation(text_part_values(message.content)[0])["body"]))
-            observed.append(body)
-            if recovery_calls == 2:
-                assert len(body["cells"]) == 1 and body["cells"][0]["has_unread_output"]
-                target = body["cells"][0]["target"]
-                payloads = _tool_call("query_cells", random_id("call"), {"target": target})
-            elif recovery_calls == 3:
-                assert body["source"]["status"] == "AVAILABLE"
-                assert body["source"]["text"] == executed
-                assert body["source"]["text"] not in (original, changed)
-                assert body["cell"]["has_unread_output"]
-                payloads = _tool_call("manage_cell", random_id("call"), {"action": "wait", "target": target})
+            if index == 2:
+                assert body["accepted"]
+                source_path.write_text(changed)
+                async with asyncio.timeout(5):
+                    while not attempted.is_set():
+                        await asyncio.sleep(.001)
+                payloads = _tool_call("query_cells",random_id("call"),{"target":body["target"]})
             else:
-                assert recovery_calls == 4
-                assert body["target"] == target == failed_pages[0]["target"]
-                assert body["output"] == failed_pages[0]["output"]
-                payloads = _text(random_id("block"), "FROZEN_SOURCE_AND_REDELIVERY_CONFIRMED")
+                observed.append(body)
+                assert body["source"]["text"] == executed and body["cell"]["has_unread_output"]
+                release_ingress.set()
+                payloads = _text(random_id("block"),"FROZEN_SOURCE_CONFIRMED")
+        else:
+            payloads = _text(random_id("block"),"FROZEN_SOURCE_CONFIRMED")
         for payload in payloads:
             yield payload
-
     model = CallbackScriptedKernelModel(stream)
-    monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
-    monkeypatch.setattr(kernel_host.LocalMcpManagementService, "load_configs", lambda *_args, **_kwargs: ())
-    runtime = test_model_runtime(model_id="test-pro", wire_api="openai_chat_completions",
+    monkeypatch.setattr(kernel_host,"DirectKernelModelPort",lambda **_:model)
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService,"load_configs",lambda *_args,**_kwargs:())
+    runtime = test_model_runtime(model_id="test-pro",wire_api="openai_chat_completions",
                                  postgres_dsn=stage2_migrated_postgres_database.runtime_dsn)
-
     async def scenario():
-        nonlocal active_session, recovering
         core = KernelHostCore.production(model_runtime=runtime)
-        session = await core.open_session(HostWorkspaceInput(workspace_kind="project", workspace_root=workspace))
-        active_session = session
         try:
+            session = await core.open_session(HostWorkspaceInput(workspace_kind="project",workspace_root=workspace))
             await session.update_model_call_binding(test_model_binding(runtime))
-            with pytest.raises(StructuredModelInputCompileError) as failure:
-                await session.run_turn(PromptContent.text("Run the requested path"),
-                                       requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            assert failure.value.kind is ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
-            assert len(failed_pages) == 1
-            assert dispositions == [ProcessLocalEffectSettlementDisposition.DISCARDED]
-            cell_id = failed_pages[0]["target"]["cell_id"]
-            cell = session._code_mode._cells[cell_id]
-            assert cell.observation is None and cell.output and not cell.terminal_delivered
-            hook_input = json.loads(hook_log.read_text())
-            assert hook_input["tool_name"] == "exec_cell" and hook_input["tool_input"] == {"path": "original.js"}
-            source_path.write_text(changed)
-            recovering = True
-            result = await session.run_turn(PromptContent.text("Inspect the existing Cell and collect its original output"),
-                                            requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            assert result.final_text == "FROZEN_SOURCE_AND_REDELIVERY_CONFIRMED"
-            assert dispositions == [ProcessLocalEffectSettlementDisposition.DISCARDED,
-                                    ProcessLocalEffectSettlementDisposition.COMMITTED]
-            assert source_path.read_text() == changed
+            result = await session.run_turn(PromptContent.text("Run requested path"),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            assert result.final_text == "FROZEN_SOURCE_CONFIRMED"
             async with asyncio.timeout(5):
                 while session._code_mode.snapshot_cell_index():
                     await asyncio.sleep(.001)
+            assert len(candidates) == 2
+            assert candidates[0].content == candidates[1].content
+            assert candidates[0].content.record == {"kind":"log","text":"ACTUAL_FROZEN_EXECUTED"}
+            assert source_path.read_text() == changed
+            hook_input = json.loads(hook_log.read_text())
+            assert hook_input["tool_name"] == "exec_cell" and hook_input["tool_input"] == {"path":"original.js"}
+            assert observed[0]["next"] is None
         finally:
+            release_ingress.set()
             await core.shutdown()
     asyncio.run(scenario())

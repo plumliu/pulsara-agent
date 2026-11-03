@@ -10,7 +10,7 @@ import pytest
 
 from pulsara_agent.conversation_kernel.contracts import InlineContent
 from pulsara_agent.conversation_kernel.repository import AssistantTextBlock
-from pulsara_agent.identity import random_id
+from pulsara_agent.identity import derive_id, random_id
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader, CanonicalProtocolResourceExhausted
 from tests.test_conversation_fork import compact, final, new_session, repo as repo, rows, turn
 
@@ -43,21 +43,25 @@ def _reference(repository, session_id, ids, event_cut, entry_cut):
     Test metadata only; this deliberately does not assume one acceptance per
     entry, or the same ordering of entry sequence and occurrence sequence.
     """
-    entries = rows(repository, "SELECT * FROM pulsara_v3.transcript_entries WHERE session_id=%s ORDER BY entry_sequence", (session_id,))
+    entries = rows(repository, """SELECT e.*,
+        CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS session_scope
+        FROM pulsara_v3.transcript_entries e JOIN pulsara_v3.sessions s ON s.id=e.session_id
+        WHERE e.session_id=%s ORDER BY e.entry_sequence""", (session_id,))
     by_id = {entry["id"]: entry for entry in entries}
     accepted = rows(repository, "SELECT event_sequence, subject_entry_id FROM pulsara_v3.agent_events WHERE session_id=%s AND subject_entry_id IS NOT NULL", (session_id,))
     events = rows(repository, """SELECT ev.event_id, ev.event_sequence, ev.event_type,
-        coalesce(r.turn_id,ev.subject_turn_id) AS owner, t.conversation_scope_kind
-        FROM pulsara_v3.agent_events ev LEFT JOIN pulsara_v3.turn_context_binding_revisions r
+        coalesce(r.turn_id,ev.subject_turn_id) AS owner,
+        CASE WHEN s.root_session_id IS NULL THEN 'ROOT' ELSE 'SUBAGENT' END AS session_scope
+        FROM pulsara_v3.agent_events ev JOIN pulsara_v3.sessions s ON s.id=ev.session_id
+        LEFT JOIN pulsara_v3.turn_context_binding_revisions r
           ON r.session_id=ev.session_id AND r.id=ev.subject_context_binding_revision_id
-        LEFT JOIN pulsara_v3.turns t ON t.session_id=ev.session_id AND t.id=coalesce(r.turn_id,ev.subject_turn_id)
         WHERE ev.session_id=%s AND ev.event_type IN ('CompactionAdopted','TurnInterrupted')
           AND ev.event_sequence<=%s ORDER BY ev.event_sequence""", (session_id,event_cut))
 
     def mount(event, owner=None):
         candidates = [by_id[item["subject_entry_id"]] for item in accepted if item["event_sequence"]<event["event_sequence"]]
         if owner is None:
-            candidates = [entry for entry in candidates if entry["entry_owner_kind"]=="EXECUTED_TURN" and entry["conversation_scope_kind"]=="ROOT"]
+            candidates = [entry for entry in candidates if entry["entry_owner_kind"]=="EXECUTED_TURN" and entry["session_scope"]=="ROOT"]
         else:
             candidates = [entry for entry in candidates if entry["turn_id"]==owner]
         return max((entry["entry_sequence"] for entry in candidates), default=0)
@@ -65,7 +69,7 @@ def _reference(repository, session_id, ids, event_cut, entry_cut):
     selected = {by_id[entry_id]["entry_sequence"] for entry_id in ids}
     compactions = []
     for event in events:
-        if event["event_type"]!="CompactionAdopted" or event["conversation_scope_kind"]!="ROOT":
+        if event["event_type"]!="CompactionAdopted" or event["session_scope"]!="ROOT":
             continue
         boundary = mount(event)
         if boundary in selected or (boundary==0 and entries[0]["id"] in ids):
@@ -78,10 +82,10 @@ def _reference(repository, session_id, ids, event_cut, entry_cut):
             event = candidates[-1]
             boundary = mount(event,entry["turn_id"])
             start = next(item["id"] for item in entries if item["turn_id"]==entry["turn_id"] and boundary<item["entry_sequence"]<=entry_cut)
-            segments[entry_id] = (f"EXECUTED_TURN:{entry['turn_id']}:{event['event_id']}",start)
+            segments[entry_id] = (derive_id("segment", "history-boundary", "EXECUTED_TURN", entry["turn_id"], event["event_id"]),start)
         else:
             start = next(item["id"] for item in entries if item["turn_id"]==entry["turn_id"])
-            segments[entry_id] = (f"EXECUTED_TURN:{entry['turn_id']}:initial",start)
+            segments[entry_id] = (derive_id("segment", "history-initial", "EXECUTED_TURN", entry["turn_id"]),start)
     return compactions,segments
 
 

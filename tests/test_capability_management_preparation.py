@@ -1,3 +1,6 @@
+
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
 import asyncio
 import json
 from time import monotonic
@@ -213,13 +216,13 @@ def test_model_secret_template_update_requires_confirmation_only_for_new_destina
             if destination_changed:
                 assert prepared.user_inputs == ("credential_destination_confirmation",)
                 with pytest.raises(ValueError, match="requires user input"):
-                    await call.execute()
+                    await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
                 assert config_guard(owner.mcp.inspect(target)) == config_guard(
                     created.config
                 )
             else:
                 assert prepared.user_inputs == ()
-                assert (await call.execute())["status"] == "APPLIED"
+                assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
                 assert owner.mcp.inspect(target).resolved_headers() == {
                     "Authorization": "Bearer retained-test-credentialx"
                 }
@@ -496,7 +499,7 @@ def test_plugin_connection_form_keeps_target_and_reprepares_native_overlay(
         assert thaw_json(values.public_fields)["target"] == target
         assert thaw_json(values.public_fields)["expected_overlay"] is None
         call.accept(AcceptedCapabilityFormSubmission(values))
-        result = await call.execute()
+        result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED" and result["target"] == target
         assert "scope" not in result and "identity" not in result
         plugin = await owner._plugin(None, "example")

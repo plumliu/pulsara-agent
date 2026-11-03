@@ -18,6 +18,28 @@ const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABL
 let historyOwnerFixture: Record<string, unknown> = {};
 afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOwnerFixture = {}; });
 
+it('reads frozen output through its original entry and copies line/character continuation', async () => {
+  const requests: unknown[] = [];
+  const positions = [{ line: 1, char_offset: 0 }, { line: 2, char_offset: 3 }];
+  vi.stubGlobal('fetch', vi.fn(async (input, init) => {
+    expect(String(input)).toContain('/history/read-tool-output');
+    const body = JSON.parse(String(init?.body));
+    requests.push(body);
+    const first = requests.length === 1;
+    return new Response(JSON.stringify({ tool_output: {
+      result_entry_id: 'entry-output', text: first ? '你好🙂\r\nabc' : '剩余正文',
+      position: positions[first ? 0 : 1], ...(first ? { next: positions[1] } : {}),
+    } }), { status: 200 });
+  }));
+  const reader = new CanonicalHistoryView('cold', { path: '/missing', outcome: 'MISSING', reason: null },
+    { session_id: 'cold', event_sequence_cut: '0', entries: [], control: {} });
+  const first = await reader.readToolOutput('entry-output');
+  const last = await reader.readToolOutput('entry-output', first.next);
+  expect(first.text + last.text).toBe('你好🙂\r\nabc剩余正文');
+  expect(last.next).toBeUndefined();
+  expect(requests).toEqual(positions.map(position => ({ result_entry_id: 'entry-output', position, max_chars: 32_000 })));
+});
+
 // Page-context requests are an independent owner read, not another frame in
 // a command/content fixture's ordered response queue. Capture the fixture's
 // canonical metadata and return its explicit per-entry owner context here.
@@ -3006,7 +3028,7 @@ it('refreshes TODOs once per live batch without jumping interaction state or its
 
 it('presents only fresh authenticated complete root results, without history replay or blocking observe', async () => {
   const assistant = {entry_id:'open-call',turn_id:'turn-open',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'open-1',tool_name:'open_in_pulsara'}]};
-  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{target:{kind:'PANEL',name:'capabilities'}}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
+  const result = {entry_id:'open-result',turn_id:'turn-open',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify({targets:[{target:{kind:'PANEL',name:'capabilities'}}],errors:[{index:1,message:'invalid'}]})),tool_result:{assistant_entry_id:'open-call',tool_call_id:'open-1',result_state:'SUCCESS',source_coverage:'COMPLETE',output_omitted:false}};
   let committed: unknown[] = [];
   let cut = '9007199254740993';
   let releaseWindow!: () => void;
@@ -3034,7 +3056,7 @@ it('presents only fresh authenticated complete root results, without history rep
   cut='9007199254740996'; await connection.snapshot(); expect(seen[0].signal.aborted).toBe(true);
   committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740995',entry:result},{projection_kind:'IMMUTABLE_ENTRY',event_sequence:'9007199254740997',entry:{...result,entry_id:'imported',entry_owner_kind:'IMPORTED_HISTORY'}}];cut='9007199254740997';
   await connection.observe(); expect(seen).toHaveLength(1);
-  cut='9007199254740998';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'truncated',tool_result:{...result.tool_result,display_kind:'HEAD_TAIL'}}}];
+  cut='9007199254740998';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'truncated',tool_result:{...result.tool_result,output_omitted:true}}}];
   await connection.observe();expect(seen).toHaveLength(1);
   cut='9007199254740999';committed=[{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:{...result,entry_id:'new'}}];
   await connection.observe();expect(seen).toHaveLength(2); await reads[1];
@@ -3045,7 +3067,7 @@ it('announces only a fresh, complete, host-owned manage_capability OAuth success
   const authorization = {owner:{kind:'local',scope_key:'user',server_id:'notion',plugin_id:null},config_identity:'config',display_identity:'config',package_install_id:null};
   const value = {action:'AUTHORIZE_MCP',status:'APPLIED',target:{kind:'MCP_CONNECTION',scope:'USER',source_kind:'LOCAL',server_id:'notion'},current:{authorized:true},authorization};
   const assistant = {entry_id:'auth-call',turn_id:'turn-auth',entry_sequence:'1',entry_kind:'ASSISTANT',scope_kind:'ROOT',blocks:[{block_id:'b',block_kind:'TOOL_CALL',tool_call_id:'auth-1',tool_name:'manage_capability'}]};
-  const result = {entry_id:'auth-result',turn_id:'turn-auth',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify(value)),tool_result:{assistant_entry_id:'auth-call',tool_call_id:'auth-1',result_state:'SUCCESS',source_coverage:'COMPLETE',display_kind:'COMPLETE'}};
+  const result = {entry_id:'auth-result',turn_id:'turn-auth',entry_sequence:'2',entry_kind:'TOOL_RESULT',scope_kind:'ROOT',content:inlineContent(JSON.stringify(value)),tool_result:{assistant_entry_id:'auth-call',tool_call_id:'auth-1',result_state:'SUCCESS',source_coverage:'COMPLETE',output_omitted:false}};
   let committed: unknown[] = [];
   let cut = '10';
   stubRuntimeFetch(vi.fn(async input => {
@@ -3067,7 +3089,7 @@ it('announces only a fresh, complete, host-owned manage_capability OAuth success
   for (const changed of [
     {...result,entry_owner_kind:'IMPORTED_HISTORY'},
     {...result,scope_kind:'SUBAGENT'},
-    {...result,tool_result:{...result.tool_result,display_kind:'HEAD_TAIL'}},
+    {...result,tool_result:{...result.tool_result,output_omitted:true}},
     {...result,tool_result:{...result.tool_result,result_state:'ERROR'}},
   ]) {
     cut = String(Number(cut) + 1); committed = [{projection_kind:'IMMUTABLE_ENTRY',event_sequence:cut,entry:changed}];

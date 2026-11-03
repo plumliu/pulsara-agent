@@ -40,7 +40,7 @@ class _Connection:
         if "AS root_final" in sql:
             return _Result(one={"root_final": False})
         if "executed_status" in sql:
-            return _Result(one={**self.entry, "executed_status": "RUNNING", "executed_final": None})
+            return _Result(one={**self.entry, "root_session_id": None, "executed_status": "RUNNING", "executed_final": None})
         if "FROM pulsara_v3.assistant_message_blocks" in sql:
             return _Result(many=())
         if "FROM pulsara_v3.assistant_visualizations" in sql:
@@ -262,7 +262,8 @@ def test_cold_http_content_parser_preserves_reasoning_ordinal_presence():
     from pulsara_agent.identity import random_id
 
     seen = []
-    async def history_content(session_id, request, *, artifact):
+    async def history_content(session_id, request, *, tool_output):
+        assert tool_output is False
         seen.append(request)
         return wire.CanonicalContentChunk(request_id='req')
     target = {'entry_id': random_id('entry'), 'block_id': random_id('reasoning-block'), 'reasoning_ordinal': 0}

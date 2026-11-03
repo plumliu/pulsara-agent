@@ -2,7 +2,7 @@
 
 This module owns the one Round 7 outer envelope and its logical UTF-8 quote.
 It performs no I/O and imports no Kernel, repository, compiler, or provider
-adapter authority.  Artifact and future bounded page factories use the same
+adapter authority. Bounded page and projection factories use the same
 renderer instead of copying its field list or byte formula.
 """
 
@@ -35,10 +35,10 @@ from pulsara_agent.primitives.tool_observation import (
 
 
 TOOL_RESULT_LOGICAL_PROJECTION_CONTRACT = (
-    "pulsara.provider-visible-tool-result.logical-projection.v4"
+    "pulsara.provider-visible-tool-result.logical-projection.v5"
 )
 TOOL_RESULT_FULL_DELIVERY_CLASSIFIER_CONTRACT = (
-    "pulsara.tool-result-full-delivery-classifier.v1"
+    "pulsara.tool-result-full-delivery-classifier.v2"
 )
 MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES = 8 * 1024
 MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_ITEMS = 50
@@ -55,13 +55,7 @@ class ToolResultDeliveryRequirement(StrEnum):
 
 
 class ToolResultFullDeliveryReason(StrEnum):
-    CODE_MODE_OUTPUT_PAGE = "CODE_MODE_OUTPUT_PAGE"
-    CELL_QUERY_PAGE = "CELL_QUERY_PAGE"
-    ARTIFACT_PAGE = "ARTIFACT_PAGE"
-    ARTIFACT_EXPORT_LOCATION = "ARTIFACT_EXPORT_LOCATION"
-    MCP_DIRECTORY_PAGE = "MCP_DIRECTORY_PAGE"
-    MCP_INSPECT_SCHEMA = "MCP_INSPECT_SCHEMA"
-    SKILL_ACTIVATION = "SKILL_ACTIVATION"
+    RESULT_PROJECTION = "RESULT_PROJECTION"
     IMAGE_ATTACHMENT = "IMAGE_ATTACHMENT"
 
 
@@ -108,45 +102,12 @@ def classify_tool_result_delivery(
     has_image_attachment: bool = False,
     public_arguments: Mapping[str, object] | None = None,
 ) -> FrozenToolResultDeliveryRequirement:
-    """Rebuild the closed requirement from exact tool identity and result state.
+    """Deliver the already frozen native projection without another preview."""
 
-    Capability list pages and callable MCP schemas need their exact closed
-    payload in FULL. Ordinary capability details use the existing artifact path.
-    """
-
-    if result_state != "SUCCESS":
-        return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    if tool_name == "exec_cell" or (
-        tool_name == "manage_cell"
-        and (public_arguments or {}).get("action") in {"wait", "stop"}
-    ):
-        return full_required_tool_result_delivery(ToolResultFullDeliveryReason.CODE_MODE_OUTPUT_PAGE)
-    if tool_name == "view_image":
-        return full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.IMAGE_ATTACHMENT
-        )
-    if tool_name == "query_cells":
-        return full_required_tool_result_delivery(ToolResultFullDeliveryReason.CELL_QUERY_PAGE)
-    if tool_name == "query_capabilities" and "target" not in (public_arguments or {}):
-        return full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
-        )
-    if (
-        tool_name == "query_capabilities"
-        and isinstance((public_arguments or {}).get("target"), Mapping)
-        and public_arguments["target"].get("kind") == "MCP_TOOL"
-    ):
-        return full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
-        )
-    if tool_name == "export_artifact":
-        return full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION
-        )
-    if tool_name != "read_artifact":
-        return BEST_AVAILABLE_TOOL_RESULT_DELIVERY
     return full_required_tool_result_delivery(
-        ToolResultFullDeliveryReason.ARTIFACT_PAGE
+        ToolResultFullDeliveryReason.IMAGE_ATTACHMENT
+        if has_image_attachment and result_state == "SUCCESS"
+        else ToolResultFullDeliveryReason.RESULT_PROJECTION
     )
 
 
@@ -326,27 +287,29 @@ def provider_neutral_message_logical_bytes(message: LLMMessage) -> int:
     return content_bytes + sum(len(value.encode("utf-8")) for value in values)
 
 
-def conservative_artifact_page_logical_utf8_bytes(
+def conservative_tool_result_page_logical_utf8_bytes(
     *,
     tool_call_id: str,
     body: str,
     model_visible_memory_ids: tuple[str, ...],
 ) -> int:
-    """Quote a bounded artifact result under the largest call-local augmentation.
+    """Quote a bounded native result under the largest call-local augmentation.
 
     The exact call ID and memory provenance are already frozen by the tool
     invocation. Timing uses its closed maximum. Taking
     the maximum of ordinary and late carriers keeps a cancelled/late exact
-    page or export location representable without changing its canonicalized body.
+    page or control receipt representable without changing its canonicalized body.
     """
 
-    timing = _maximum_artifact_page_timing()
+    timing = _maximum_tool_result_page_timing()
     quotes = tuple(
         render_provider_tool_result_logical_message(
             message_kind=kind,
             tool_call_id=tool_call_id,
             body=body,
-            result_state="SUCCESS",
+            # Longest state in the closed canonical ToolResult vocabulary;
+            # pages also carry failures and cancellation, not only success.
+            result_state="CANCELLED_BEFORE_DISPATCH",
             timing=timing,
             model_visible_memory_ids=model_visible_memory_ids,
         ).logical_utf8_bytes
@@ -473,7 +436,7 @@ def decode_provider_tool_result_observation(text: str) -> Mapping[str, object]:
     return payload
 
 
-def _maximum_artifact_page_timing() -> FrozenToolObservationTimingFact:
+def _maximum_tool_result_page_timing() -> FrozenToolObservationTimingFact:
     values = {
         "source_turn_ref": "history:" + ("a" * 26),
         "observed_at_utc": "9999-12-31T23:59:59.999999Z",
@@ -544,7 +507,7 @@ __all__ = [
     "ToolResultFullDeliveryReason",
     "ToolResultLogicalMessageKind",
     "classify_tool_result_delivery",
-    "conservative_artifact_page_logical_utf8_bytes",
+    "conservative_tool_result_page_logical_utf8_bytes",
     "conservative_tool_result_logical_message",
     "decode_provider_tool_result_observation",
     "full_required_tool_result_delivery",

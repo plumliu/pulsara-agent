@@ -49,10 +49,6 @@ from pulsara_agent.memory.scope import (
     freeze_memory_read_context_binding,
     workspace_context_id,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
-)
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -151,13 +147,11 @@ def _open_direct_memory_session(repository, *, workspace_root: str | None = None
             attempt_id=attempt.attempt_id,
             result_state="SUCCESS",
             canonical_preview_content=InlineContent.from_bytes(b"{}"),
-            artifact_disposition=ToolOutputArtifactDisposition.NOT_REQUIRED,
-            artifact_id=None,
-            artifact_blob_descriptor=None,
+            output_body=None,
+            output_unavailability_reason=None,
+            output_omitted=False,
             source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            display_kind=ToolResultDisplayKind.COMPLETE,
             source_coverage_reason=None,
-            artifact_unavailability_reason=None,
             observed_at=datetime.now(timezone.utc),
             observation_duration_microseconds=None,
             observation_origin_kind=ToolObservationOrigin.BUILTIN,
@@ -1374,6 +1368,42 @@ def test_memory_mutation_rolls_back_if_tool_result_publication_fails(direct_memo
         assert c.execute("SELECT id FROM pulsara_v3.tool_results WHERE result_entry_id=%s", (unpublished[0],)).fetchone() is None
 
 
+@pytest.mark.parametrize("operation", ("remember", "mark_memory_relation"))
+def test_memory_receipt_budget_rejection_precedes_canonical_memory_change(direct_memory_session, operation):
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+    repository, _lease, invoke, remember = direct_memory_session
+    first = remember("The previous route is A.")[1]["target"]
+    second = remember("The current route is B.")[1]["target"]
+    def states():
+        with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                deadline_monotonic=monotonic() + 30) as connection:
+            return (connection.execute("SELECT id,lifecycle,statement FROM pulsara_v3.memory_facts ORDER BY id").fetchall(),
+                    connection.execute("SELECT * FROM pulsara_v3.memory_relations ORDER BY id").fetchall(),
+                    connection.execute("SELECT count(*) FROM pulsara_v3.tool_results").fetchone()[0])
+    before = states()
+    denied = ToolResultPageBudget(tool_call_id=_name("call"), accepts_provider_body=lambda *_: False)
+    if operation == "remember":
+        arguments = {"statement": "This fact must not be stored.", "context_target": "GLOBAL", "kind": "FACT"}
+        mutation = PreparedRememberWrite(memory_domain_id="u_local", context_id=CTX_GLOBAL,
+            kind=MemoryFactKind.FACT, statement=arguments["statement"], basis_refs=(), related=(),
+            retrieval_summary=freeze_json({"disposition": "COMPLETE"}), page_budget=denied)
+    else:
+        arguments = {"source": second, "target": first, "relation_kind": "SUPERSEDES"}
+        mutation = PreparedMemoryRelationWrite(memory_domain_id="u_local", source_memory_id=second["memory_id"],
+            target_memory_id=first["memory_id"], relation_kind=MemoryRelationKind.SUPERSEDES, page_budget=denied)
+    accepted, body, candidate = invoke(operation, arguments, mutation)
+    assert accepted.result_state == "APPLICATION_ERROR"
+    assert body == {"error": "RESULT_BUDGET_EXCEEDED", "memory_changed": False, "advisory": True}
+    after = states()
+    assert after[:2] == before[:2]
+    assert after[2] == before[2] + 1
+    with repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+            deadline_monotonic=monotonic() + 30) as connection:
+        row = connection.execute("SELECT result_state,output_body_inline_content,model_visible_memory_fact_ids "
+                                 "FROM pulsara_v3.tool_results WHERE result_entry_id=%s", (candidate.result_entry_id,)).fetchone()
+    assert row[0] == "APPLICATION_ERROR" and json.loads(bytes(row[1])) == body and row[2] == []
+
+
 def test_relation_repeats_and_late_relation_failure_do_not_undo_saved_fact(
     direct_memory_session,
 ):
@@ -1548,8 +1578,9 @@ def test_memory_get_omits_source_in_every_workspace_and_after_archival(
     assert set(same) == {
         "target", "kind", "context_product_label", "current_context",
         "lifecycle", "statement", "recorded_at", "relations",
-        "advisory", "may_be_stale_or_incomplete",
+        "advisory", "may_be_stale_or_incomplete", "relation_check",
     }
+    assert same["relation_check"] == "COMPLETE"
 
     page_detail = repository.memory_management_detail(
         memory_domain_id="u_local",

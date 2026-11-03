@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from pulsara_agent.identity import content_revision
 from pulsara_agent.capability.bundled_skills import (
     BundledSkillDefinitionProducer,
     BundledSkillDistributionBindingOwner,
@@ -408,14 +409,34 @@ def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
     first = tool.execute(ToolCall("call:first", "read_file", {"target": {"kind": "PATH", "path": "skill.md"}}))
     first_payload = json.loads(first.output)
     assert first.status is ToolResultState.SUCCESS
-    assert first_payload["limit"] == 2_000
-    assert first_payload["truncated"] is True
+    assert first.page_complete
+    assert first_payload["position"] == {"line": 1, "char_offset": 0}
+    assert first_payload["total_lines"] == 2_001
+    assert first_payload["content_revision"] == content_revision(path.read_bytes())
+    assert len(first_payload["content"].splitlines()) == 2_000
     assert "2000|old-1999" in first_payload["content"]
+    assert first_payload["next"] == {
+        "tool": "read_file",
+        "arguments": {
+            "target": {"kind": "PATH", "path": "skill.md"},
+            "limit": 2_000,
+            "continuation": {
+                "line": 2_001,
+                "char_offset": 0,
+                "content_revision": first_payload["content_revision"],
+            },
+        },
+    }
 
     path.write_text("new-first\nsecond\n", encoding="utf-8")
     second = tool.execute(ToolCall("call:second", "read_file", {"target": {"kind": "PATH", "path": "skill.md"}}))
     second_payload = json.loads(second.output)
     assert second.status is ToolResultState.SUCCESS
+    assert second.page_complete
+    assert second_payload["content_revision"] == content_revision(path.read_bytes())
+    assert second_payload["content_revision"] != first_payload["content_revision"]
+    assert second_payload["total_lines"] == 2
+    assert second_payload["next"] is None
     assert second_payload["content"] == "1|new-first\n2|second"
     assert "content_returned" not in second_payload
 

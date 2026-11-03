@@ -19,9 +19,9 @@ from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.tool_permission import preset_to_policy
 from tests.test_agent_session_host import AgentModel, eventually
 from tests.test_round4_plan_host import _open_test_session, _tool_call, _text
+from tests.test_agent_requests_persistence import source as source
 
 pytestmark = pytest.mark.postgres
-pytest_plugins = ['tests.test_agent_requests_persistence']
 
 
 def test_reader_attaches_existing_agent_without_resuming_and_recovers_cold(

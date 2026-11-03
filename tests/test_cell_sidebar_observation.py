@@ -47,9 +47,10 @@ def test_participants_use_one_nonblocking_reservation_and_sticky_incomplete():
             assert page["items"] == [{"agent_id": a, "work_id": None, "kinds": ["query", "wait"]}]
             await _terminal(host, cell_id)
             assert host.query_cell_participants(cell_id) == page
-            output = await host.observe(cell_id, 0)
-            assert output.output == ({"kind": "log", "text": "available"},)
-            host.abandon(output)
+            output = await host.lease_output(cell_id)
+            assert output.record == {"kind": "log", "text": "available"}
+            assert await host.lease_output(cell_id) is output
+            assert host.capture_cell(cell_id).has_unread_output
         finally:
             release.set()
             await host.aclose()
@@ -72,9 +73,10 @@ def test_real_participant_reservation_survives_terminal_until_cell_retirement():
                 "next_cursor": None,
             }
             await _terminal(host, cell_id)
-            page = await host.observe(cell_id, 0)
+            page = await host.lease_output(cell_id)
+            assert page.record == {"kind": "log", "text": "available"}
             await host._cells[cell_id].vm_released.wait()
-            await host.acknowledge(page)
+            await host.acknowledge_output(page)
             assert cell_id not in host._cells
         finally:
             await host.aclose()
@@ -87,6 +89,7 @@ def test_collaboration_observes_only_validated_targets_before_wait_or_message_re
     from pulsara_agent.conversation_kernel.subagents.collaboration_api import CollaborationToolPort
     from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import agent_target
     from pulsara_agent.primitives.permission import PermissionMode
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
     from tests.test_agent_collaboration_api import RepositoryOwner, RuntimeOwner
 
     async def run():
@@ -105,6 +108,7 @@ def test_collaboration_observes_only_validated_targets_before_wait_or_message_re
                 raise AssertionError("unexpected observation failure")
         port.bind_cell_observer(Observer())
         context = SimpleNamespace(session_id=root, code_cell_id=random_id("cell"),
+            page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
             effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             agent_message_cursors={}, cell_cancel_event=asyncio.Event())
         await port.invoke(tool_name="query_agents", arguments={}, invocation_context=context)
@@ -155,9 +159,9 @@ def test_real_budget_rejection_marks_incomplete_without_failing_cell():
             assert host.query_cell_participants(cell_id)["participation_coverage"] == "incomplete"
             assert host.capture_cell(cell_id).state == "completed"
             await host._send({"type": "release", "cell_id": cell_id, "bytes": low})
-            page = await host.observe(cell_id, 0)
-            assert page.output == ({"kind": "log", "text": "available"},)
-            await host.acknowledge(page)
+            page = await host.lease_output(cell_id)
+            assert page.record == {"kind": "log", "text": "available"}
+            await host.acknowledge_output(page)
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -182,8 +186,8 @@ def test_real_accepted_reservation_does_not_hold_retiring_cell():
             host.observe_agent_participation(cell_id, ((random_id("session"), None, "query"),))
             await asyncio.wait_for(accepted.wait(), 10)
             task = host._cells[cell_id].participation_task
-            page = await host.observe(cell_id, 0)
-            await host.acknowledge(page)
+            page = await host.lease_output(cell_id)
+            await host.acknowledge_output(page)
             assert cell_id not in host._cells
             await asyncio.gather(task, return_exceptions=True)
             replacement = await _start(host)
@@ -218,7 +222,7 @@ def test_actual_cell_work_graph_pages_use_canonical_source_and_root(tmp_path, mo
                     code = ("const x=await tools.run_agent.batch({a:{instruction:'first'},"
                             "b:{instruction:'second'}}); "
                             "await tools.wait_agent.works({targets:[x.a.work,x.b.work]});")
-                    events = _tool_call("exec_cell", random_id("call"), {"code": code, "yield_time_ms": 0})
+                    events = _tool_call("exec_cell", random_id("call"), {"code": code})
                 else:
                     events = _text("root done")
             for event in events:
@@ -283,8 +287,8 @@ def test_late_accepted_retention_ack_after_forget_does_not_release_twice():
             await asyncio.wait_for(ack_received.wait(), 10)
             assert delayed[0][1]["accepted"] is True
             task = host._cells[cell_id].participation_task
-            page = await host.observe(cell_id, 0)
-            await host.acknowledge(page)
+            page = await host.lease_output(cell_id)
+            await host.acknowledge_output(page)
             await asyncio.gather(task, return_exceptions=True)
             assert cell_id not in host._cells
             assert sum(message["type"] == "forget" and message["cell_id"] == cell_id for message in sent) == 1

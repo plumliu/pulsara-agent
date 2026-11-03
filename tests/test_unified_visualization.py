@@ -1,5 +1,7 @@
 """Frozen unified visualization contract: publication, shared reads and recovery."""
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 import asyncio
 from datetime import datetime, timezone
 from dataclasses import replace
@@ -47,6 +49,10 @@ from tests.test_kernel_image_input_k2_postgres import (
     _rows,
 )
 from tests.test_conversation_fork import assert_session_aggregate_deleted, fork
+
+
+def _cursor(page):
+    return None if page["next"] is None else page["next"]["arguments"]["cursor"]
 
 
 def test_async_preparation_mixed_sources_neutrality_and_timeout(tmp_path):
@@ -274,6 +280,7 @@ def test_shared_publication_history_chunks_fork_and_gc(
             {"target": {"kind": "SESSION_ENTRY", "session_id": b.guard.session_id, "entry_id": entry}, "limit": 1, **kwargs},
             current_range=SessionContentRange(0),
             tool_call_id="call:history",
+            page_budget=ToolResultPageBudget(tool_call_id="call:history"),
             deadline_monotonic=monotonic() + 30,
         )
 
@@ -290,7 +297,7 @@ def test_shared_publication_history_chunks_fork_and_gc(
             and "已保存展示项 3" in text
         )
         first = history(max_chars=len("Here is the image.\n"))
-        assert image.image_ref not in str(first["items"]) and first["next_cursor"]
+        assert image.image_ref not in str(first["items"]) and _cursor(first)
         with repo.connection_provider.connection(
             lane=PostgresConnectionLane.MEMORY_QUERY,
             row_factory=dict_row,

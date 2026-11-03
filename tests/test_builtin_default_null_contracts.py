@@ -3,7 +3,7 @@
 import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -28,6 +28,7 @@ from pulsara_agent.llm.model_target import (
 )
 from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.scheduling.contracts import ScheduledTaskError
 from pulsara_agent.scheduling.requests import validate_action
 from pulsara_agent.scheduling.service import ScheduledTaskService
@@ -148,6 +149,7 @@ def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_ident
             arguments,
             default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+            page_budget=ToolResultPageBudget(tool_call_id="schedule-default"),
         )
         dispatched = {
             key: value
@@ -155,6 +157,7 @@ def test_scheduled_tool_defaults_before_dispatch_without_losing_filters_or_ident
             if key not in {"action", "session"}
         }
         dispatched["session_id"] = expected
+        dispatched["model_summary" if action == "list" else "result_check"] = True if action == "list" else ANY
         target.assert_awaited_once_with(**dispatched)
         assert arguments == original
 
@@ -174,12 +177,14 @@ def test_scheduled_service_none_keeps_its_unfiltered_meaning():
             {"session": None},
             default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.READ_ONLY,
+            page_budget=ToolResultPageBudget(tool_call_id="schedule-scope"),
         )
         service._read.assert_awaited_once_with(
             "list_scheduled_tasks",
             cursor=None,
             status=None,
             session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
+            model_summary=True,
         )
 
     asyncio.run(run())
@@ -207,6 +212,7 @@ def test_scheduled_null_does_not_erase_forbidden_fields(action):
                 {key: value for key, value in args.items() if key != "action"} if action == "get" else args,
                 default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
                 permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+                page_budget=ToolResultPageBudget(tool_call_id="schedule-forbidden-fields"),
             )
         service.get.assert_not_awaited()
         service.mutate.assert_not_awaited()
@@ -231,10 +237,12 @@ def test_scheduled_create_status_schema_and_dispatch(status_fields):
             arguments,
             default_session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+            page_budget=ToolResultPageBudget(tool_call_id="schedule-create"),
         )
         service.create.assert_awaited_once_with(
             session_id="session:6g3pqrtwdp2ilmnlzfmxxxhelu",
             values=arguments["values"],
+            result_check=ANY,
             **status_fields,
         )
 
@@ -279,6 +287,7 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
                 },
                 default_session_id="session:" + "a" * 26,
                 permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+                page_budget=ToolResultPageBudget(tool_call_id="schedule-invalid-action"),
             )
         assert error.value.code == "INVALID_ACTION"
         assert_shape(
@@ -312,6 +321,7 @@ def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():
                 },
                 default_session_id="session:" + "a" * 26,
                 permission_mode=PermissionMode.READ_ONLY,
+                page_budget=ToolResultPageBudget(tool_call_id="schedule-permission"),
             )
         assert error.value.code == "PERMISSION_ESCALATION"
         service.switch.assert_not_awaited()

@@ -14,6 +14,7 @@ from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
 from pulsara_agent.desktop_app.application import DesktopApplication
 from pulsara_agent.desktop_app import session_controller as module
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
+from tests.support.model_config import test_model_runtime as make_runtime
 
 
 @pytest.mark.parametrize("arguments", [
@@ -33,8 +34,9 @@ def test_app_starts_without_a_workspace(tmp_path, monkeypatch):
     assert not hasattr(args, "workspace")
     assert not hasattr(args, "workspace_kind")
     core = SimpleNamespace(mcp_management=SimpleNamespace(lane=asyncio.Lock()))
+    runtime = make_runtime()
     app = DesktopApplication(
-        core=core, settings=object(), catalog=object(), model_runtime=object(),
+        core=core, settings=runtime.settings, catalog=runtime.catalog, model_runtime=runtime,
         permission_policy=None,
     )
     assert not hasattr(app, "workspace_input")

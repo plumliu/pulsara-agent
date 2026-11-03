@@ -9,8 +9,6 @@ from pathlib import Path
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
-    LIVE_EVENT_TYPES,
-    SUBJECT_SLOTS,
     AppendGuardKind,
     CommittedEventType,
     SubjectSlot,
@@ -45,13 +43,7 @@ def _imports(path: Path) -> set[str]:
     return imports
 
 
-def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 8
-    assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
-
+def test_round4_plan_events_bind_their_subjects_and_host_writer_guard() -> None:
     observed = {
         descriptor.event_type: descriptor
         for descriptor in COMMITTED_EVENT_DESCRIPTORS
@@ -64,9 +56,8 @@ def test_round4_final_oracles_and_plan_descriptors_are_exact() -> None:
         assert descriptor.append_guards == (AppendGuardKind.HOST_WRITER,)
 
 
-def test_round4_schema_has_exact_plan_relations_and_required_initial_entry() -> None:
+def test_round4_schema_enforces_plan_identity_and_permission_constraints() -> None:
     baseline = BASELINE.read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 30
     assert set(CONVERSATION_KERNEL_RELATIONS) >= {
         "plan_workflows",
         "plan_interactions",

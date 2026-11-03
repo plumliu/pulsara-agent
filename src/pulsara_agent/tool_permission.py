@@ -417,8 +417,8 @@ class PolicyPermissionGate:
 
     def _filesystem_write_access(self, call: ToolCall) -> FilesystemWriteAccess:
         target = call.arguments.get("target")
-        raw_path = (call.arguments.get("path") if call.name == "export_artifact"
-                    else target.get("path") if isinstance(target, Mapping) and target.get("kind") == "PATH" else None)
+        raw_path = (target.get("path")
+                    if isinstance(target, Mapping) and target.get("kind") == "PATH" else None)
         if not isinstance(raw_path, str) or not raw_path.strip():
             return FilesystemWriteAccess.DENY
         candidate = Path(raw_path).expanduser()

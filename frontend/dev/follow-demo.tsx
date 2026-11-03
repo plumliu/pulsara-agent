@@ -76,7 +76,7 @@ function Demo() {
       return true;
     },onStop:()=>{setRunning(false);setStreaming(false);},onCompact:async()=>{},onRenameSession:noop,onReopenRuntime:reset,runtimeReopenBusy:false,
     onReadInteraction:async()=>{throw Error('此演示没有交互卡片');},onResolveInteraction:async()=>false,
-    artifactOwnerKey:`demo-${version}`,onReadToolArtifact:async()=>{throw Error('此演示使用本地工具正文');},onReadPromptImage:async()=>new Uint8Array(),promptDraftStore:store,
+    outputOwnerKey:`demo-${version}`,onReadToolOutput:async()=>{throw Error('此演示使用本地工具正文');},onReadPromptImage:async()=>new Uint8Array(),promptDraftStore:store,
     onNotify:(title,message)=>setNotice(`${title}：${message}`),onPermissionChange:noop,
     onReadLatestHistory:async signal=>{await read(signal);setOldBand(false);},
     onReadProcessEnd:async(_entry,signal)=>{await read(signal);},

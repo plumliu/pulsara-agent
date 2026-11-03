@@ -125,49 +125,42 @@ def test_read_file_rejects_lossy_or_binary_text(
     assert _payload(result)["error"] == error
 
 
-def test_read_output_too_large_does_not_install_observation(tmp_path: Path) -> None:
+def test_long_line_is_read_without_loss_and_grants_observation_only_when_complete(tmp_path: Path) -> None:
     target = tmp_path / "sample.txt"
-    raw = ("x" * (filesystem.MAX_READ_CHARS + 1)).encode()
+    raw = ("x" * 100_001).encode()
     target.write_bytes(raw)
-    read_result = _call(ReadFileTool(tmp_path), {"target": {"kind": "PATH", "path": "sample.txt"}})
-    assert _payload(read_result)["error"] == "READ_OUTPUT_TOO_LARGE"
+    arguments = {"target": {"kind": "PATH", "path": "sample.txt"}}
+    parts = []
+    while True:
+        result = _call(ReadFileTool(tmp_path), arguments)
+        payload = _payload(result)
+        assert result.status is ToolResultState.SUCCESS
+        assert result.page_complete
+        parts.append(payload["content"].partition("|")[2])
+        if payload["next"] is None:
+            break
+        denied = _edit(tmp_path, "sample.txt", payload["content_revision"],
+                       [{"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["y"]}])
+        assert _payload(denied)["error"] == "UNSEEN_LINE_RANGE"
+        arguments = payload["next"]["arguments"]
+    assert "".join(parts).encode() == raw
+    assert _edit(tmp_path, "sample.txt", payload["content_revision"],
+                 [{"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["y"]}]).status is ToolResultState.SUCCESS
 
-    edit_result = _edit(
-        tmp_path,
-        "sample.txt",
-        content_revision(raw),
-        [{"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["y"]}],
-    )
-    assert _payload(edit_result)["error"] == "READ_OBSERVATION_REQUIRED"
-    assert target.read_bytes() == raw
 
-
-def test_head_tail_projected_read_does_not_authorize_partial_lines(
-    tmp_path: Path,
-) -> None:
+def test_budgeted_read_authorizes_only_the_complete_delivered_page(tmp_path: Path) -> None:
     target = tmp_path / "sample.txt"
-    target.write_text(
-        "\n".join(f"{index:04d}-" + "x" * 80 for index in range(600)), encoding="utf-8"
-    )
+    target.write_text("\n".join(f"{index:04d}-" + "x" * 80 for index in range(600)), encoding="utf-8")
     result = _call(ReadFileTool(tmp_path), {"target": {"kind": "PATH", "path": "sample.txt"}})
     payload = _payload(result)
-    assert result.status is ToolResultState.SUCCESS
-    assert len(result.output.encode("utf-8")) > 40_000
-
-    edit_result = _edit(
-        tmp_path,
-        "sample.txt",
-        payload["content_revision"],
-        [
-            {
-                "kind": "replace_lines",
-                "start_line": 1,
-                "end_line": 1,
-                "lines": ["changed"],
-            }
-        ],
-    )
-    assert _payload(edit_result)["error"] == "UNSEEN_LINE_RANGE"
+    assert result.status is ToolResultState.SUCCESS and result.page_complete
+    assert payload["next"] is not None
+    unseen = _edit(tmp_path, "sample.txt", payload["content_revision"],
+                   [{"kind": "replace_lines", "start_line": 600, "end_line": 600, "lines": ["changed"]}])
+    assert _payload(unseen)["error"] == "UNSEEN_LINE_RANGE"
+    visible = _edit(tmp_path, "sample.txt", payload["content_revision"],
+                    [{"kind": "replace_lines", "start_line": 1, "end_line": 1, "lines": ["changed"]}])
+    assert visible.status is ToolResultState.SUCCESS
 
 
 def test_search_result_does_not_authorize_edit(tmp_path: Path) -> None:
@@ -974,8 +967,6 @@ def test_filesystem_state_has_no_timestamp_or_revision_registry() -> None:
         "lock",
         "path_locks",
         "observations",
-        "last_lookup_key",
-        "consecutive_lookup_count",
     }
 
 

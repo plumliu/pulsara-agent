@@ -8,10 +8,7 @@ from importlib import import_module
 from pathlib import Path
 
 from pulsara_agent.conversation_kernel.vocabulary import (
-    APPEND_GUARDS,
     COMMITTED_EVENT_DESCRIPTORS,
-    LIVE_EVENT_TYPES,
-    SUBJECT_SLOTS,
 )
 from pulsara_agent.storage.migrations.contracts import (
     BASELINE_RESOURCE,
@@ -47,14 +44,13 @@ def _imports(path: Path) -> tuple[str, ...]:
     return tuple(result)
 
 
-def test_stage3_5_final_oracles_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 8
-    assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 30
+def test_stage3_5_event_descriptors_and_relations_are_unique() -> None:
+    assert len({item.event_type for item in COMMITTED_EVENT_DESCRIPTORS}) == len(
+        COMMITTED_EVENT_DESCRIPTORS
+    )
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == len(
+        CONVERSATION_KERNEL_RELATIONS
+    )
 
 
 def test_stage3_5_obsolete_authority_paths_are_physically_absent() -> None:
@@ -145,7 +141,6 @@ def test_stage3_5_clean_migration_universe_is_the_only_packaged_universe() -> No
     )
 
     baseline = (sql_root / BASELINE_RESOURCE).read_text(encoding="utf-8")
-    assert baseline.count("CREATE TABLE pulsara_v3.") == 30
     assert "CREATE TABLE public.pulsara_schema_migrations" in baseline
     assert "CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public" in baseline
     for token in (

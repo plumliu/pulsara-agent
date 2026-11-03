@@ -70,7 +70,6 @@ from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
     image_reference_part,
     lower_canonical_item,
-    ordinary_tool_result_can_degrade,
     source_variant_message,
 )
 from pulsara_agent.primitives.context import (
@@ -82,7 +81,6 @@ from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
 )
 from pulsara_agent.primitives.tool_result_projection import (
-    ToolResultDeliveryRequirement,
     provider_neutral_message_logical_bytes as _message_logical_bytes,
 )
 from pulsara_agent.tools.builtins.filesystem import (
@@ -426,34 +424,19 @@ class _SourceState:
 class _ToolState:
     lowered: LoweredCanonicalItem
     current_turn: bool
-    selected: int = 0
-    exhausted: bool = False
 
     @property
     def item(self):
         return self.lowered.source
 
     def message(self) -> LLMMessage:
-        return self.lowered.tool_result_variants[self.selected].message
+        return self.lowered.tool_result_variants[0].message
 
     def mode(self) -> ToolResultProviderRenderMode:
-        return self.lowered.tool_result_variants[self.selected].mode
+        return ToolResultProviderRenderMode.FULL
 
     def first_mode(self) -> ToolResultProviderRenderMode:
         return self.lowered.tool_result_variants[0].mode
-
-    def requires_full(self) -> bool:
-        return self.item.tool_result_delivery.requirement is (
-            ToolResultDeliveryRequirement.FULL_REQUIRED
-        )
-
-    def advance(self) -> bool:
-        if self.requires_full():
-            return False
-        if self.selected + 1 >= len(self.lowered.tool_result_variants):
-            return False
-        self.selected += 1
-        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,26 +684,18 @@ class StructuredModelInputCompiler:
 
     @staticmethod
     def _apply_tool_render_selection(states, wire_selection, floors):
-        choices = (
-            {}
-            if wire_selection is None
-            else {
-                item.source_entry_fingerprint: item.selected_mode
-                for item in wire_selection.tool_result_decisions
-            }
-        )
+        choices = {} if wire_selection is None else {
+            item.source_entry_fingerprint: item.selected_mode
+            for item in wire_selection.tool_result_decisions
+        }
         lower_bounds = dict(floors)
         for state in states:
             identity = compiled_tool_result_source_fingerprint(state.item)
-            modes = tuple(item.mode for item in state.lowered.tool_result_variants)
-            previous = choices.get(identity)
-            if previous is not None:
-                state.selected = modes.index(previous)
-            floor = lower_bounds.get(identity)
-            if floor is not None:
-                if not ordinary_tool_result_can_degrade(state.item):
-                    raise ValueError("wire tool render floor is not an ordinary result")
-                state.selected = max(state.selected, modes.index(floor))
+            if any(mode is not ToolResultProviderRenderMode.FULL for mode in (
+                choices.get(identity, ToolResultProviderRenderMode.FULL),
+                lower_bounds.get(identity, ToolResultProviderRenderMode.FULL),
+            )):
+                raise ValueError("frozen tool projections only allow FULL delivery")
 
     @staticmethod
     def _validate_wire_selection(request, selection):
@@ -745,7 +720,7 @@ class StructuredModelInputCompiler:
         planning=None,
         deadline_monotonic: float | None = None,
     ):
-        """Advance one legal source/result variant on the frozen compile basis.
+        """Advance one legal context-source variant on the frozen compile basis.
 
         Final wire measurement owns fit; the compiler owns legal render order.
         Append decisions cover only uninstalled delta; a cold epoch may reselect
@@ -796,61 +771,17 @@ class StructuredModelInputCompiler:
                     self._source_degradation_key(candidate),
                     candidate.source_kind,
                     next_mode,
-                    "source",
                 )
             )
-        decisions_by_result = {
-            item.source_entry_fingerprint: item
-            for item in compiled.tool_result_decisions
-        }
-        artifact_read_available = any(
-            tool.name == "read_artifact"
-            for tool in request.compile_binding.tool_surface.tool_specs
-        )
-        for item in request.canonical_input.items:
-            deadline.check()
-            if not ordinary_tool_result_can_degrade(item):
-                continue
-            identity = compiled_tool_result_source_fingerprint(item)
-            decision = decisions_by_result.get(identity)
-            # Append decisions describe only the not-yet-installed delta.
-            if decision is None:
-                continue
-            lowered = lower_canonical_item(
-                item,
-                artifact_read_available=artifact_read_available,
-                artifact_export_available=any(
-                    tool.name == "export_artifact"
-                    for tool in request.compile_binding.tool_surface.tool_specs
-                ),
-                limits=self._limits,
-            )
-            deadline.check()
-            state = _ToolState(
-                lowered,
-                current_turn=item.source_turn_id
-                == request.canonical_input.identity.turn_id,
-            )
-            modes = tuple(variant.mode for variant in lowered.tool_result_variants)
-            state.selected = modes.index(decision.selected_mode)
-            if self._tool_can_advance(state):
-                eligible.append(
-                    (
-                        self._tool_degradation_key(state),
-                        identity,
-                        modes[state.selected + 1],
-                        "tool",
-                    )
-                )
         deadline.check()
         if not eligible:
             return None
-        _, identity, mode, category = min(eligible)
-        sources, tools = dict(source_floors), dict(tool_floors)
-        (sources if category == "source" else tools)[identity] = mode
+        _, identity, mode = min(eligible)
+        sources = dict(source_floors)
+        sources[identity] = mode
         return (
             tuple(sorted(sources.items(), key=lambda item: item[0].value)),
-            tuple(sorted(tools.items())),
+            tuple(tool_floors),
         )
 
     def compile(
@@ -912,9 +843,6 @@ class StructuredModelInputCompiler:
         surface = request.compile_binding.tool_surface
         self._validate_tool_surface(request)
         deadline.check()
-        artifact_read_available = any(
-            tool.name == "read_artifact" for tool in surface.tool_specs
-        )
         canonical_items, materialized_plan_bytes = self._materialize_approved_plan(
             request
         )
@@ -924,12 +852,6 @@ class StructuredModelInputCompiler:
             lowered_items.append(
                 lower_canonical_item(
                     item,
-                    artifact_read_available=artifact_read_available,
-                    artifact_export_available=any(
-                        tool.name == "export_artifact"
-                        for tool in request.compile_binding.tool_surface.tool_specs
-                    ),
-                    limits=self._limits,
                 )
             )
         lowered = tuple(lowered_items)
@@ -978,11 +900,6 @@ class StructuredModelInputCompiler:
             for state in source_states
             if state.omitted or state.mode() is not state.candidate.initial_mode
         }
-        degraded_tool_ids = {
-            state.item.source_entry_id or ""
-            for state in tool_states
-            if state.selected > 0
-        }
 
         source_decisions = tuple(
             CompiledSourceDecision(
@@ -1020,15 +937,11 @@ class StructuredModelInputCompiler:
                 selected_mode=state.mode(),
                 delivery_requirement=(state.item.tool_result_delivery.requirement),
                 full_delivery_reason=state.item.tool_result_delivery.reason,
-                reason_code=self._tool_decision_reason(state),
+                reason_code="SELECTED_FULL",
             )
             for state in tool_states
         )
         omitted_sources = sum(state.omitted for state in source_states)
-        omitted_tools = sum(
-            state.mode() is ToolResultProviderRenderMode.OMITTED_BODY
-            for state in tool_states
-        )
         if degraded_source_kinds:
             self._add_diagnostic(
                 diagnostics, ContextPublicDiagnosticCode.SOURCE_DEGRADED
@@ -1036,14 +949,6 @@ class StructuredModelInputCompiler:
         if omitted_sources:
             self._add_diagnostic(
                 diagnostics, ContextPublicDiagnosticCode.SOURCE_OMITTED
-            )
-        if degraded_tool_ids:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.TOOL_RESULT_DEGRADED
-            )
-        if omitted_tools:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.TOOL_RESULT_BODY_OMITTED
             )
         if (
             len(source_decisions) + len(tool_decisions)
@@ -1113,8 +1018,8 @@ class StructuredModelInputCompiler:
             protected_prefix_fingerprint=None,
             degraded_source_count=len(degraded_source_kinds),
             omitted_source_count=omitted_sources,
-            degraded_tool_result_count=len(degraded_tool_ids),
-            omitted_tool_result_body_count=omitted_tools,
+            degraded_tool_result_count=0,
+            omitted_tool_result_body_count=0,
             decision_digest=decision_digest,
         )
         compiled_fingerprint = compiled_input_identity(
@@ -1358,22 +1263,12 @@ class StructuredModelInputCompiler:
         all_materialized, _ = self._materialize_approved_plan(request)
         old_count = 0
         delta_items = all_materialized[old_count:]
-        artifact_read_available = any(
-            tool.name == "read_artifact"
-            for tool in request.compile_binding.tool_surface.tool_specs
-        )
         lowered_delta_values: list[LoweredCanonicalItem] = []
         for item in delta_items:
             deadline.check()
             lowered_delta_values.append(
                 lower_canonical_item(
                     item,
-                    artifact_read_available=artifact_read_available,
-                    artifact_export_available=any(
-                        tool.name == "export_artifact"
-                        for tool in request.compile_binding.tool_surface.tool_specs
-                    ),
-                    limits=self._limits,
                 )
             )
         lowered_delta = tuple(lowered_delta_values)
@@ -1727,22 +1622,12 @@ class StructuredModelInputCompiler:
         old_count = len(predecessor.canonical_frontier.ordered_item_fingerprints)
         delta_items = request.canonical_input.items[old_count:]
         self._require_provider_safe_delta(delta_items)
-        artifact_read_available = any(
-            tool.name == "read_artifact"
-            for tool in request.compile_binding.tool_surface.tool_specs
-        )
         lowered_delta_values: list[LoweredCanonicalItem] = []
         for item in delta_items:
             deadline.check()
             lowered_delta_values.append(
                 lower_canonical_item(
                     item,
-                    artifact_read_available=artifact_read_available,
-                    artifact_export_available=any(
-                        tool.name == "export_artifact"
-                        for tool in request.compile_binding.tool_surface.tool_specs
-                    ),
-                    limits=self._limits,
                 )
             )
         lowered_delta = tuple(lowered_delta_values)
@@ -1987,11 +1872,6 @@ class StructuredModelInputCompiler:
                 or item.state.mode() is not item.state.candidate.initial_mode
             )
         }
-        degraded_tool_ids = {
-            state.item.source_entry_id or ""
-            for state in tool_states
-            if state.selected > 0
-        }
         suffix_logical_bytes = sum(
             _message_logical_bytes(item)
             for item in layout.messages[len(previous_messages) :]
@@ -2046,16 +1926,12 @@ class StructuredModelInputCompiler:
                 selected_mode=state.mode(),
                 delivery_requirement=(state.item.tool_result_delivery.requirement),
                 full_delivery_reason=state.item.tool_result_delivery.reason,
-                reason_code=self._tool_decision_reason(state),
+                reason_code="SELECTED_FULL",
             )
             for state in tool_states
         )
         omitted_sources = sum(
             item.state is not None and item.state.omitted for item in emissions
-        )
-        omitted_tools = sum(
-            state.mode() is ToolResultProviderRenderMode.OMITTED_BODY
-            for state in tool_states
         )
         if degraded_source_kinds:
             self._add_diagnostic(
@@ -2064,14 +1940,6 @@ class StructuredModelInputCompiler:
         if omitted_sources:
             self._add_diagnostic(
                 diagnostics, ContextPublicDiagnosticCode.SOURCE_OMITTED
-            )
-        if degraded_tool_ids:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.TOOL_RESULT_DEGRADED
-            )
-        if omitted_tools:
-            self._add_diagnostic(
-                diagnostics, ContextPublicDiagnosticCode.TOOL_RESULT_BODY_OMITTED
             )
         diagnostic_codes = tuple(dict.fromkeys(diagnostics))[
             : self._limits.maximum_diagnostics
@@ -2133,8 +2001,8 @@ class StructuredModelInputCompiler:
             protected_prefix_fingerprint=prefix_fingerprint,
             degraded_source_count=len(degraded_source_kinds),
             omitted_source_count=omitted_sources,
-            degraded_tool_result_count=len(degraded_tool_ids),
-            omitted_tool_result_body_count=omitted_tools,
+            degraded_tool_result_count=0,
+            omitted_tool_result_body_count=0,
             decision_digest=decision_digest,
         )
         compiled_fingerprint = compiled_input_identity(
@@ -2806,47 +2674,15 @@ class StructuredModelInputCompiler:
         )
 
     @staticmethod
-    def _tool_can_advance(state: _ToolState) -> bool:
-        return (
-            not state.requires_full()
-            and not state.exhausted
-            and state.selected + 1 < len(state.lowered.tool_result_variants)
-        )
-
-    @staticmethod
     def _validate_tool_delivery_variants(tools: list[_ToolState]) -> None:
         if any(
-            state.requires_full()
-            and state.first_mode() is not ToolResultProviderRenderMode.FULL
+            len(state.lowered.tool_result_variants) != 1
+            or state.first_mode() is not ToolResultProviderRenderMode.FULL
             for state in tools
         ):
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
             )
-
-    @staticmethod
-    def _tool_decision_reason(state: _ToolState) -> str:
-        if state.mode() is ToolResultProviderRenderMode.FULL:
-            return "SELECTED_FULL"
-        if state.selected == 0:
-            return "FULL_INELIGIBLE_RESULT_BOUND"
-        return "DEGRADED_FOR_BUDGET"
-
-    def _tool_degradation_key(self, state: _ToolState) -> tuple[object, ...]:
-        current = state.current_turn
-        budget = (
-            ContextBudgetClass.IMPORTANT if current else ContextBudgetClass.OPTIONAL
-        )
-        rank = _SacrificeRank[budget.name]
-        sequence = state.item.source_entry_sequence or 0
-        return (
-            int(rank),
-            -10 if current else -50,
-            0 if not current else 1,
-            "TOOL_RESULT",
-            f"{sequence:020d}",
-            state.item.source_entry_id or "",
-        )
 
     def _add_diagnostic(
         self,

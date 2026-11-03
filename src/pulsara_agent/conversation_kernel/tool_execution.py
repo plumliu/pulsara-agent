@@ -100,8 +100,8 @@ from pulsara_agent.conversation_kernel.extensions import (
 )
 
 
-from pulsara_agent.conversation_kernel.tool_artifacts import (
-    ToolOutputArtifactProcessor,
+from pulsara_agent.conversation_kernel.tool_outputs import (
+    ToolOutputProcessor,
 )
 
 from pulsara_agent.conversation_kernel.tool_contracts import (
@@ -146,10 +146,8 @@ from pulsara_agent.tools.builtins.filesystem import parse_view_image_source
 
 
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolResultDisplayKind,
-)
+from pulsara_agent.ports.tool_output import tool_output_read_call
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverage
 
 
@@ -172,6 +170,7 @@ from pulsara_agent.model_input.continuity import (
 
 
 from pulsara_agent.primitives.context import (
+    canonical_json_bytes,
     freeze_json,
     FrozenJsonObjectFact,
     thaw_json,
@@ -384,7 +383,7 @@ class ToolBatchExecutor:
         live_bus: LiveAgentEventBus,
         io_owner: KernelSessionIO,
         content_publisher: CanonicalContentPublisher,
-        tool_output_processor: ToolOutputArtifactProcessor,
+        tool_output_processor: ToolOutputProcessor,
         continuity_owner: HostProviderInputContinuityOwner,
         memory_projection: MemoryContextProjectionPort | None,
         extensions: KernelExtensionHost | None,
@@ -485,16 +484,8 @@ class ToolBatchExecutor:
                 raise RuntimeError("program invocation did not settle exactly one result")
             result, settlement = captured[0]
             metadata = settlement.public_projection.metadata
-            artifact = None
-            if metadata.artifact_disposition is not ToolOutputArtifactDisposition.NOT_REQUIRED:
-                artifact = {"disposition": metadata.artifact_disposition.value,
-                    "source_coverage": metadata.source_coverage.value}
-                if metadata.artifact_id is not None:
-                    artifact["target"] = {"kind": "ARTIFACT", "artifact_id": metadata.artifact_id}
-                if metadata.source_coverage_reason is not None:
-                    artifact["source_coverage_reason"] = metadata.source_coverage_reason.value
-                if metadata.artifact_unavailability_reason is not None:
-                    artifact["reason"] = metadata.artifact_unavailability_reason.value
+            read = (tool_output_read_call(metadata.session_id, metadata.result_entry_id)
+                    if metadata.output_available else None)
             value = result.public_value()
             async def delivered():
                 callback = result.delivery_succeeded
@@ -519,7 +510,12 @@ class ToolBatchExecutor:
             failure_message = (value.get("message") or value.get("error") or settlement.result_state) if isinstance(value, dict) else value
             return CodeModeToolResult(value=value, state=settlement.result_state,
                 result_id=settlement.result_id, result_entry_id=settlement.result_entry_id,
-                artifact=artifact, error_code=None if success else settlement.result_state,
+                read=read, output_available=metadata.output_available,
+                required_facts=metadata.required_facts,
+                source_coverage=metadata.source_coverage.value,
+                source_coverage_reason=(None if metadata.source_coverage_reason is None else metadata.source_coverage_reason.value),
+                output_unavailability_reason=(None if metadata.output_unavailability_reason is None else metadata.output_unavailability_reason.value),
+                error_code=None if success else settlement.result_state,
                 error_message=None if success else str(failure_message),
                 delivery_succeeded=delivered, read_undelivered=read_undelivered)
         finally:
@@ -800,9 +796,7 @@ class ToolBatchExecutor:
                 tool_result_body_text=projection_input.canonical_body,
                 tool_result_delivery=projection_input.delivery,
             )
-            projected = project_tool_result_public_value(
-                item, artifact_read_available=True
-            )
+            projected = project_tool_result_public_value(item)
             response_value = projected.value
         causal_ref = PostToolRef(
             settlement.turn_id,
@@ -980,6 +974,7 @@ class ToolBatchExecutor:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         hook_scope: HookDispatchScopeRef | None = None,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (),
+        result_page_budgets: tuple[ToolResultPageBudget, ...] = (),
         _partition_batch: bool = True,
         _call_ordinal_offset: int = 0,
         _close_surface_borrow: bool = True,
@@ -1042,6 +1037,7 @@ class ToolBatchExecutor:
                     continuity_scope=continuity_scope,
                     surface_borrow=surface_borrow,
                     image_call_allowances=image_call_allowances,
+                    result_page_budgets=result_page_budgets,
                     call_ordinal_offset=_call_ordinal_offset,
                     hook_scope=hook_scope,
                     hook_view=hook_view,
@@ -1683,6 +1679,12 @@ class ToolBatchExecutor:
                             else request.prepared_call.call.target.fact.input_modalities
                         ),
                         image_resource_allowance=image_allowance,
+                        page_budget=replace(
+                            next((item for item in result_page_budgets if item.tool_call_id == call.tool_call_id),
+                                 ToolResultPageBudget(tool_call_id=call.tool_call_id)),
+                            result_target={"kind": "SESSION_ENTRY", "session_id": request.session_id,
+                                           "entry_id": result_entry_id},
+                        ),
                         session_content_range=(
                             self._session_content_range(canonical_facts)
                             if call.tool_name in SESSION_QUERY_TOOL_NAMES else None
@@ -1797,6 +1799,14 @@ class ToolBatchExecutor:
                     _physical_complete()
                 if _settlement_gate is not None:
                     await _settlement_gate.wait()
+                assigned_budget = next((item for item in result_page_budgets
+                                        if item.tool_call_id == call.tool_call_id),
+                                       ToolResultPageBudget(tool_call_id=call.tool_call_id))
+                result = replace(result, page_budget=replace(
+                    assigned_budget,
+                    result_target={"kind": "SESSION_ENTRY", "session_id": request.session_id,
+                                   "entry_id": result_entry_id},
+                ))
                 unsettled_process_local_effect = result.process_local_settlement
                 if (
                     result.physical_observation is not None
@@ -1905,6 +1915,7 @@ class ToolBatchExecutor:
         continuity_scope: ProviderInputContinuityScope,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
+        result_page_budgets: tuple[ToolResultPageBudget, ...],
         call_ordinal_offset: int,
         hook_scope: HookDispatchScopeRef | None,
         hook_view: FrozenHookDefinitionView | None,
@@ -1928,6 +1939,7 @@ class ToolBatchExecutor:
                     surface_borrow=surface_borrow,
                     hook_scope=hook_scope,
                     image_call_allowances=image_call_allowances,
+                    result_page_budgets=result_page_budgets,
                     _partition_batch=False,
                     _call_ordinal_offset=call_ordinal_offset + index,
                     _close_surface_borrow=False,
@@ -1971,6 +1983,7 @@ class ToolBatchExecutor:
                     continuity_scope=continuity_scope,
                     surface_borrow=surface_borrow,
                     image_call_allowances=image_call_allowances,
+                    result_page_budgets=result_page_budgets,
                     call_ordinal_offset=call_ordinal_offset + allowed_offset,
                 )
                 allowed_calls = []
@@ -2023,6 +2036,7 @@ class ToolBatchExecutor:
                     surface_borrow=surface_borrow,
                     hook_scope=None,
                     image_call_allowances=image_call_allowances,
+                    result_page_budgets=result_page_budgets,
                     _partition_batch=False,
                     _call_ordinal_offset=call_ordinal_offset + index + relative,
                     _close_surface_borrow=False,
@@ -2056,6 +2070,7 @@ class ToolBatchExecutor:
         continuity_scope: ProviderInputContinuityScope,
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
+        result_page_budgets: tuple[ToolResultPageBudget, ...],
         call_ordinal_offset: int,
     ) -> ToolBatchExecutionResult:
         if len(preauthorizations) != len(calls) or any(
@@ -2092,6 +2107,7 @@ class ToolBatchExecutor:
                         surface_borrow=surface_borrow,
                             hook_scope=None,
                         image_call_allowances=image_call_allowances,
+                    result_page_budgets=result_page_budgets,
                         _partition_batch=False,
                         _call_ordinal_offset=(call_ordinal_offset + position),
                         _close_surface_borrow=False,
@@ -2179,82 +2195,69 @@ class ToolBatchExecutor:
                 actor_id=tool_name,
             )
             await self._publish_tool_remote_identity_exact(remote_identity_candidate)
+        from pulsara_agent.conversation_kernel.tool_result_display import project_native_tool_result
+        from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
+
+        if isinstance(result.content, bytes) and result.public_format is ToolOutputSourceFormatHint.JSON:
+            from pulsara_agent.primitives.tool_result_projection import preserved_tool_result_facts
+            result = replace(result, required_facts={
+                **preserved_tool_result_facts(result.content.decode("utf-8")),
+                **dict(result.required_facts),
+            })
         canonical_prompt = None
         direct_memory = result.memory_mutation is not None
+        output_body = None
+        output_unavailability_reason = None
+        source_coverage = ToolOutputSourceCoverage.COMPLETE
+        source_coverage_reason = None
+        output_omitted = False
         if direct_memory:
-            if result.state != "SUCCESS" or result.output_artifact_candidate is not None:
-                raise ValueError("direct memory write cannot publish a provisional artifact")
-            canonical_preview = InlineContent.from_bytes(
-                b"{}", media_type="text/plain", codec="utf-8"
-            )
-            artifact_disposition = ToolOutputArtifactDisposition.NOT_REQUIRED
-            artifact_id = None
-            artifact_blob = None
-            source_coverage = ToolOutputSourceCoverage.COMPLETE
-            display_kind = ToolResultDisplayKind.COMPLETE
-            source_coverage_reason = None
-            artifact_unavailability_reason = None
+            if result.state != "SUCCESS" or result.output_body_candidate is not None:
+                raise ValueError("direct memory write cannot publish provisional body")
+            # The accepting transaction replaces this with its actual final receipt.
+            canonical_preview = InlineContent.from_bytes(b"{}", media_type="text/plain", codec="utf-8")
             result_text = ""
         elif isinstance(result.content, FrozenPromptContent):
-            if result.output_artifact_candidate is not None or result.artifact_inline_result:
-                raise ValueError("image ToolResult cannot enter text artifact handling")
+            if result.output_body_candidate is not None:
+                raise ValueError("image content cannot enter text body storage")
             canonical_prompt = freeze_canonical_prompt(result.content, workspace_id=workspace_id)
             canonical_preview = InlineContent.from_bytes(
-                canonical_prompt.body,
-                media_type=PROMPT_BODY_MEDIA_TYPE,
-                codec=PROMPT_BODY_CODEC,
-            )
-            artifact_disposition = ToolOutputArtifactDisposition.NOT_REQUIRED
-            artifact_id = None
-            artifact_blob = None
-            source_coverage = ToolOutputSourceCoverage.COMPLETE
-            display_kind = ToolResultDisplayKind.COMPLETE
-            source_coverage_reason = None
-            artifact_unavailability_reason = None
+                canonical_prompt.body, media_type=PROMPT_BODY_MEDIA_TYPE, codec=PROMPT_BODY_CODEC)
             result_text = frozen_tool_result_public_text(canonical_prompt.content)
         else:
-            prepared_output = result.prepared_output_projection or await self._io.run(
-                self._tool_output_processor.prepare,
-                session_id=session_id,
-                workspace_id=workspace_id,
-                result_entry_id=result_entry_id,
-                public_output=result.content.decode("utf-8"),
-                candidate=result.output_artifact_candidate,
-                artifact_inline_result=result.artifact_inline_result,
-                deadline_monotonic=self._canonical_deadline(),
+            public_output = result.content.decode("utf-8")
+            body = await self._io.run(
+                self._tool_output_processor.materialize_body,
+                session_id=session_id, workspace_id=workspace_id, result_entry_id=result_entry_id,
+                public_output=public_output, output_body_candidate=result.output_body_candidate,
+                public_format=result.public_format, deadline_monotonic=self._canonical_deadline(),
             )
+            budget = result.page_budget or ToolResultPageBudget(
+                tool_call_id=tool_call_id,
+                result_target={"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": result_entry_id})
+            arguments = dict(
+                public_output=public_output,
+                native_output=None if result.native_output is None else result.native_output.decode("utf-8"),
+                page_complete=result.page_complete, required_facts=result.required_facts,
+                output_available=body.output_body is not None,
+                output_unavailability_reason=body.output_unavailability_reason,
+                model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
+            )
+            try:
+                result_text, output_omitted = project_native_tool_result(page_budget=budget, **arguments)
+            except ToolResultPageBoundary:
+                # An exact physical outcome must still settle if its actual
+                # follow-up window changed.  This is not provider delivery:
+                # the final dispatch owner must admit/compact the frozen P.
+                result_text, output_omitted = project_native_tool_result(
+                    page_budget=replace(budget, accepts_provider_body=None), **arguments)
+            prepared_output = self._tool_output_processor.prepare(
+                body=body, native_output=result_text, output_omitted=output_omitted)
             canonical_preview = prepared_output.canonical_preview
-            artifact_disposition = prepared_output.artifact_disposition
-            artifact_id = prepared_output.artifact_id
-            artifact_blob = prepared_output.artifact_blob
+            output_body = prepared_output.output_body
+            output_unavailability_reason = prepared_output.output_unavailability_reason
             source_coverage = prepared_output.source_coverage
-            display_kind = prepared_output.display_kind
             source_coverage_reason = prepared_output.source_coverage_reason
-            artifact_unavailability_reason = (
-                prepared_output.artifact_unavailability_reason
-            )
-            result_text = canonical_preview.canonical_bytes.decode("utf-8")
-            if (tool_name in {"exec_process", "manage_process"}
-                and result.public_format is ToolOutputSourceFormatHint.JSON
-                and result.output_artifact_candidate is not None
-                and result.output_artifact_candidate.source_format_hint is ToolOutputSourceFormatHint.JSON):
-                value = result.public_value()
-                if isinstance(value, dict) and artifact_disposition is not ToolOutputArtifactDisposition.NOT_REQUIRED:
-                    artifact = {"disposition": artifact_disposition.value,
-                        "source_coverage": source_coverage.value}
-                    if artifact_id is not None:
-                        artifact["target"] = {"kind": "ARTIFACT", "artifact_id": artifact_id}
-                    if source_coverage_reason is not None:
-                        artifact["source_coverage_reason"] = source_coverage_reason.value
-                    if artifact_unavailability_reason is not None:
-                        artifact["reason"] = artifact_unavailability_reason.value
-                    value["output_artifact"] = artifact
-                    result = replace(result, content=json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
-                    # Native and JS expose this same public JSON value.
-                    preview_value = json.loads(result_text)
-                    preview_value["output_artifact"] = artifact
-                    result_text = json.dumps(preview_value, ensure_ascii=False, separators=(",", ":"))
-                    canonical_preview = InlineContent.from_bytes(result_text.encode("utf-8"))
         if attempt_id is not None and not direct_memory:
             if tool_result_block_id is None or live_attribution is None:
                 raise RuntimeError("physical tool settlement lost live attribution")
@@ -2299,13 +2302,12 @@ class ToolBatchExecutor:
             result_state=result.state,
             canonical_preview_content=canonical_preview,
             canonical_prompt=canonical_prompt,
-            artifact_disposition=artifact_disposition,
-            artifact_id=artifact_id,
-            artifact_blob_descriptor=artifact_blob,
+            output_body=output_body,
+            output_unavailability_reason=output_unavailability_reason,
+            output_omitted=output_omitted,
+            required_facts=result.required_facts,
             source_coverage=source_coverage,
-            display_kind=display_kind,
             source_coverage_reason=source_coverage_reason,
-            artifact_unavailability_reason=artifact_unavailability_reason,
             observed_at=observed_at,
             observation_duration_microseconds=(
                 None
@@ -2348,6 +2350,12 @@ class ToolBatchExecutor:
             if not isinstance(accepted, AcceptedMemoryToolResult):
                 raise RuntimeError("direct memory writer returned no canonical result")
             result_text = accepted.canonical_body
+            result = replace(
+                result, content=result_text.encode("utf-8"), native_output=None,
+                required_facts=json.loads(result_text), page_complete=True,
+                public_format=ToolOutputSourceFormatHint.JSON,
+                model_visible_memory_fact_ids=accepted.model_visible_memory_fact_ids,
+            )
             if (
                 tool_name == "remember"
                 and accepted.result_state == "SUCCESS"
@@ -2462,14 +2470,12 @@ class ToolBatchExecutor:
                 prepared_acceptance.trusted_tool_reported_duration_microseconds
             ),
             observation_origin=prepared_acceptance.observation_origin_kind,
-            display_kind=prepared_acceptance.display_kind,
-            artifact_disposition=prepared_acceptance.artifact_disposition,
-            artifact_id=prepared_acceptance.artifact_id,
+            output_omitted=prepared_acceptance.output_omitted,
+            output_available=direct_memory or prepared_acceptance.output_body is not None,
+            required_facts=(result.required_facts if direct_memory else prepared_acceptance.required_facts),
             source_coverage=prepared_acceptance.source_coverage,
             source_coverage_reason=prepared_acceptance.source_coverage_reason,
-            artifact_unavailability_reason=(
-                prepared_acceptance.artifact_unavailability_reason
-            ),
+            output_unavailability_reason=prepared_acceptance.output_unavailability_reason,
             model_visible_memory_fact_ids=(
                 accepted.model_visible_memory_fact_ids
                 if isinstance(accepted, AcceptedMemoryToolResult)
@@ -2574,33 +2580,26 @@ class ToolBatchExecutor:
 
 
 def _tool_invocation_failure(error: Exception, effect_class: str) -> KernelToolResult:
-    """Observe an execution failure without claiming effects were rolled back."""
-
+    """Observe a physical failure without claiming rollback or safe retry."""
     read_only = effect_class in {"read_only", "TERMINAL_OBSERVATION"}
+    facts = {
+        "error": type(error).__name__,
+        "physical_outcome": "NO_RELIABLE_OBSERVATION" if read_only else "UNKNOWN",
+        "retry_performed": False,
+        "guidance": (
+            "The tool could not provide a reliable result. This does not "
+            "prove the resource is absent. Use the error to choose the next step."
+            if read_only else
+            "The operation may have partially or fully executed. Do not assume "
+            "success, no changes, or rollback. Check the actual state or "
+            "idempotency before repeating it; otherwise ask the user. "
+            "You may continue with independent work."
+        ),
+    }
     return KernelToolResult(
-        state="SYSTEM_ERROR",
-        public_format=ToolOutputSourceFormatHint.JSON,
-        content=json.dumps(
-            {
-                "error": type(error).__name__,
-                "message": str(error),
-                "physical_outcome": (
-                    "NO_RELIABLE_OBSERVATION" if read_only else "UNKNOWN"
-                ),
-                "retry_performed": False,
-                "guidance": (
-                    "The tool could not provide a reliable result. This does not "
-                    "prove the resource is absent. Use the error to choose the next step."
-                    if read_only else
-                    "The operation may have partially or fully executed. Do not assume "
-                    "success, no changes, or rollback. Check the actual state or "
-                    "idempotency before repeating it; otherwise ask the user. "
-                    "You may continue with independent work."
-                ),
-            },
-            ensure_ascii=False,
-        ).encode("utf-8"),
-        effect_class=effect_class,
+        state="SYSTEM_ERROR", public_format=ToolOutputSourceFormatHint.JSON,
+        content=canonical_json_bytes({**facts, "message": str(error)}),
+        required_facts=facts, effect_class=effect_class,
     )
 
 

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 import json
-from typing import Literal, Protocol, Callable
+from typing import TYPE_CHECKING, Protocol, Callable
 
 from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
 from pulsara_agent.message import ToolResultState
@@ -16,6 +16,10 @@ from pulsara_agent.primitives.context import (
     thaw_json,
 )
 from pulsara_agent.primitives.tool_observation import TrustedToolObservationSupplement
+
+if TYPE_CHECKING:
+    from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 
 def encode_tool_public_json(value: object) -> bytes:
@@ -85,6 +89,8 @@ class ToolCall:
     name: str
     arguments: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
     defer_file_observation: bool = False
+    page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
+    cancel_requested: Callable[[], bool] = field(default=lambda: False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.id or not self.name:
@@ -114,57 +120,16 @@ class ToolOutputSourceFormatHint(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolOutputArtifactCandidate:
-    """One process-local, sanitized primary tool-output body.
-
-    This carrier is deliberately not serializable or durable.  The text is the
-    exact body eligible for immutable blob publication, before any lossy
-    model-facing preview is built.
-    """
-
-    role: Literal["OUTPUT"]
-    text: str
-    source_coverage: ToolOutputSourceCoverage
-    source_coverage_reason: ToolOutputSourceCoverageReason | None = None
-    original_utf8_bytes: int | None = None
-    source_format_hint: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.TEXT
-
-    def __post_init__(self) -> None:
-        if self.role != "OUTPUT":
-            raise ValueError("Round 1 supports only the primary OUTPUT artifact")
-        encoded = self.text.encode("utf-8")
-        if self.source_coverage is ToolOutputSourceCoverage.COMPLETE:
-            if self.source_coverage_reason is not None:
-                raise ValueError("complete tool output cannot carry a coverage reason")
-        elif self.source_coverage is ToolOutputSourceCoverage.RETAINED_SNAPSHOT and (
-            self.source_coverage_reason
-            not in {
-                ToolOutputSourceCoverageReason.TERMINAL_RETENTION_GAP,
-                ToolOutputSourceCoverageReason.TERMINAL_SANITIZER_UNAVAILABLE,
-            }
-        ):
-            raise ValueError("retained tool output requires its closed coverage reason")
-        if self.original_utf8_bytes is not None:
-            if self.original_utf8_bytes < len(encoded):
-                raise ValueError(
-                    "original tool output size cannot be smaller than candidate"
-                )
-            if (
-                self.source_coverage is ToolOutputSourceCoverage.COMPLETE
-                and self.original_utf8_bytes != len(encoded)
-            ):
-                raise ValueError("complete tool output size must match its exact bytes")
-
-
-@dataclass(frozen=True, slots=True)
 class ToolExecutionResult:
     call_id: str
     tool_name: str
     status: ToolResultState
     output: str | FrozenPromptContent
     metadata: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
-    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
-    artifact_inline_result: bool = False
+    output_body_candidate: ToolOutputBodyCandidate | None = None
+    native_output: str | None = None
+    page_complete: bool = False
+    required_facts: FrozenToolJsonDict = field(default_factory=FrozenToolJsonDict)
     trusted_observation: TrustedToolObservationSupplement | None = None
     model_visible_memory_fact_ids: tuple[str, ...] = ()
     public_format: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.TEXT
@@ -174,8 +139,13 @@ class ToolExecutionResult:
         if not isinstance(self.public_format, ToolOutputSourceFormatHint):
             raise TypeError("public tool result format must be explicit TEXT or JSON")
         object.__setattr__(self, "metadata", freeze_tool_json_object(self.metadata))
+        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
+        if self.native_output is not None:
+            self.native_output.encode("utf-8")
+        if type(self.page_complete) is not bool:
+            raise TypeError("page_complete must be a boolean")
         # Reject surrogate-bearing or otherwise non-UTF-8-encodable public
-        # results at the process-local boundary.  Artifact publication must
+        # results at the process-local boundary. Body publication must
         # never replace raw truth with an implicit errors="replace" value.
         if isinstance(self.output, str):
             self.output.encode("utf-8")
@@ -192,8 +162,6 @@ class ToolExecutionResult:
                 raise ValueError("typed image output is invalid for this Tool result")
         else:
             raise TypeError("tool output must be text or frozen prompt content")
-        if self.artifact_inline_result and self.output_artifact_candidate is not None:
-            raise ValueError("artifact inline results cannot recursively own artifacts")
         if (
             len(self.model_visible_memory_fact_ids) > 50
             or len(set(self.model_visible_memory_fact_ids))
@@ -226,7 +194,6 @@ __all__ = [
     "ToolCall",
     "ToolExecutionResult",
     "ToolInvocationOwnerKind",
-    "ToolOutputArtifactCandidate",
     "ToolOutputSourceCoverage",
     "ToolOutputSourceCoverageReason",
     "ToolOutputSourceFormatHint",

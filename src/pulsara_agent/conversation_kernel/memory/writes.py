@@ -7,7 +7,11 @@ process-local inputs, not a second durable proposal ledger.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 from pulsara_agent.conversation_kernel.memory.contracts import (
     MAXIMUM_MEMORY_REFERENCE_ITEMS,
@@ -29,7 +33,6 @@ class MemoryRelatedPreview:
     memory_id: str
     kind: MemoryFactKind
     context_id: str
-    statement: str
     recorded_at: str
 
 
@@ -42,6 +45,7 @@ class PreparedRememberWrite:
     basis_refs: tuple[PreparedMemoryBasisReference, ...]
     related: tuple[MemoryRelatedPreview, ...]
     retrieval_summary: FrozenJsonObjectFact
+    page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         statement = normalize_memory_text(self.statement)
@@ -83,6 +87,7 @@ class PreparedMemoryRelationWrite:
     source_memory_id: str
     target_memory_id: str
     relation_kind: MemoryRelationKind
+    page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not all(
@@ -125,7 +130,6 @@ def memory_mutation_manifest(value: PreparedMemoryMutation) -> dict[str, object]
                 item.memory_id,
                 item.kind.value,
                 item.context_id,
-                item.statement,
                 item.recorded_at,
             )
             for item in value.related

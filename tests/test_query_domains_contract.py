@@ -1,9 +1,13 @@
 """Query branches share native schemas and preserve their existing domain owners."""
 
+from pulsara_agent.identity import derive_id as _capability_page_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
+
 import asyncio
 import json
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -35,6 +39,9 @@ from pulsara_agent.scheduling.requests import (
 )
 from pulsara_agent.scheduling.service import ScheduledTaskService
 
+_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
+
+
 ROOT = derive_id("session", "query-domains", "root")
 AGENT = derive_id("session", "query-domains", "agent")
 OTHER = derive_id("session", "query-domains", "other")
@@ -57,11 +64,11 @@ VALUES = {
 @pytest.mark.parametrize("schema,parse,valid,invalid", [
     (
         query_input_schema(), parse_query,
-        [{}, {"limit": 1}, {"parent": {"kind": "MCP_SERVER", "runtime_server_id": "s"}},
+        [{}, {"limit": 1}, {"parent": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}},
          {"target": {"kind": "MCP_TOOL", "server_id": "s", "tool_name": "t"}}],
         [{"target": None}, {"action": "list"},
-         {"target": {"kind": "MCP_SERVER", "runtime_server_id": "s"}, "limit": 1},
-         {"target": {"kind": "MCP_SERVER", "runtime_server_id": "s"}, "parent": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "p"}}],
+         {"target": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}, "limit": 1},
+         {"target": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}, "parent": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "p"}}],
     ),
     (
         query_agents_input_schema(), lambda a: validate_collaboration_parameters("query_agents", a),
@@ -94,9 +101,9 @@ def test_capability_owner_rejects_mixed_query_before_observing_runtime(monkeypat
         pytest.fail("an invalid branch must not observe a runtime")
 
     monkeypatch.setattr("pulsara_agent.conversation_kernel.capability_query.runtime_rows", unexpected)
-    query = CapabilitySourceQuery(None, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT)
+    query = CapabilitySourceQuery(None, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
     with pytest.raises(CapabilityQueryError):
-        asyncio.run(query.execute({"target": {"kind": "MCP_SERVER", "runtime_server_id": "s"}, "offset": 0}))
+        asyncio.run(query.execute({"target": {"kind": "MCP_SERVER", "runtime_server_id": derive_id("mcp-server", "query-domains", "server")}, "offset": 0}))
 
 
 def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
@@ -120,17 +127,21 @@ def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
 
         port = CollaborationToolPort(repository=repository, root_session_id=ROOT, session_id=ROOT,
                                      runtime=NS(read_deadline=lambda: 100), admission_facts=None, io=NS(run=read))
-        context = NS(session_id=ROOT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+        context = NS(session_id=ROOT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+                     page_budget=ToolResultPageBudget(tool_call_id=derive_id("call", "query-domains", "agent")))
         async def query(arguments):
             result = await port.invoke(tool_name="query_agents", arguments=arguments, invocation_context=context)
             return json.loads(result.content)
 
         page = await query({"max_items": 1})
-        assert page == {"root": agent_target("ROOT"), "agents": [{"agent": agent_target(AGENT), "name": None}], "next_cursor": AGENT}
+        assert page == {"root": agent_target("ROOT"), "agents": [{"agent": agent_target(AGENT), "name": None,
+            "inspect": {"tool": "query_agents", "arguments": {"target": agent_target(AGENT)}}}],
+            "next": {"tool": "query_agents", "arguments": {"cursor": AGENT, "max_items": 1}}}
         assert calls[-1][1]["limit"] == 2
         assert calls[-1][1]["observer_session_id"] == ROOT
         works = await query({"target": agent_target(AGENT), "cursor": WORK, "max_items": 1})
-        assert works["works"][0]["final"] == "Exact final"
+        assert "final" not in works["works"][0]
+        assert works["works"][0]["inspect"] == {"tool": "query_agents", "arguments": {"target": work_target(WORK)}}
         assert calls[-1][1]["cursor"] == WORK
         exact = await query({"target": work_target(WORK)})
         assert exact["instruction"] == "Exact work" and exact["final"] == "Exact final"
@@ -144,7 +155,7 @@ def test_collaboration_query_dispatch_preserves_scope_pages_and_work_details():
             await query({"target": agent_target("ROOT")})
         assert len(calls) == before
         await port.invoke(tool_name="query_agents", arguments={}, invocation_context=NS(
-            session_id=AGENT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS))
+            session_id=AGENT, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS, page_budget=context.page_budget))
         assert calls[-1][1]["observer_session_id"] == AGENT
         assert len(calls) == before + 1
 
@@ -158,13 +169,16 @@ def test_schedule_read_defaults_and_write_nulls_keep_independent_owners():
         service.list = AsyncMock(return_value={"tasks": [row], "next_cursor": SCHEDULE})
         service.get = AsyncMock(return_value=row)
         service.create = AsyncMock(return_value=row)
-        options = {"default_session_id": ROOT, "permission_mode": PermissionMode.BYPASS_PERMISSIONS}
+        options = {"default_session_id": ROOT, "permission_mode": PermissionMode.BYPASS_PERMISSIONS,
+            "page_budget": ToolResultPageBudget(tool_call_id=derive_id("call", "query-domains", "schedule"))}
         for arguments in ({}, {"session": None}):
             page = await service.invoke_query(arguments, **options)
-            service.list.assert_awaited_with(session_id=ROOT)
-            assert page["tasks"][0] == {"target": schedule_target(SCHEDULE), "session": {"kind": "SESSION", "session_id": ROOT}, **{k: v for k, v in row.items() if k not in {"id", "session_id"}}}
+            service.list.assert_awaited_with(session_id=ROOT, model_summary=True)
+            assert page["tasks"][0]["target"] == schedule_target(SCHEDULE)
+            assert page["tasks"][0]["session"] == {"kind": "SESSION", "session_id": ROOT}
+            assert "prompt" not in page["tasks"][0]
         await service.invoke_query({"session": {"kind": "SESSION", "session_id": OTHER}, "status": "ACTIVE", "cursor": SCHEDULE}, **options)
-        service.list.assert_awaited_with(session_id=OTHER, status="ACTIVE", cursor=SCHEDULE)
+        service.list.assert_awaited_with(session_id=OTHER, status="ACTIVE", cursor=SCHEDULE, model_summary=True)
         exact = await service.invoke_query({"target": schedule_target(SCHEDULE)}, **options)
         assert exact["revision"] == 3
         service.get.assert_awaited_once_with(SCHEDULE)
@@ -172,7 +186,7 @@ def test_schedule_read_defaults_and_write_nulls_keep_independent_owners():
             request = {"action": "create", "values": VALUES, "session": None, **status}
             assert Draft202012Validator(manage_schedule_schema()).is_valid(request)
             await service.invoke_manage(request, **options)
-            service.create.assert_awaited_with(values=VALUES, session_id=ROOT, **status)
+            service.create.assert_awaited_with(values=VALUES, session_id=ROOT, result_check=ANY, **status)
             assert creation_status(status.get("status")) == "PAUSED"
         reads = service.list.await_count
         with pytest.raises(ScheduledTaskError):
@@ -183,7 +197,8 @@ def test_schedule_read_defaults_and_write_nulls_keep_independent_owners():
                 validate_action({"action": action})
         with pytest.raises(ScheduledTaskError) as error:
             await service.invoke_manage({"action": "create", "values": {**VALUES, "permission_mode": "bypass-permissions"}},
-                                        default_session_id=ROOT, permission_mode=PermissionMode.ACCEPT_EDITS)
+                                        default_session_id=ROOT, permission_mode=PermissionMode.ACCEPT_EDITS,
+                                        page_budget=options["page_budget"])
         assert error.value.code == "PERMISSION_ESCALATION"
 
     asyncio.run(run())

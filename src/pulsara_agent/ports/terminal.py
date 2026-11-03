@@ -19,8 +19,11 @@ EXEC_PROCESS_TOOL_DESCRIPTION = (
     "environment changes stay within that call. A running command returns a PROCESS "
     "target for query_processes metadata or manage_process output and interaction. "
     "Response "
-    "size and initial wait settings do not limit the command's lifetime. Use "
-    "read_artifact for omitted output or export_artifact for extensive processing."
+    "size and initial wait settings do not limit the command's lifetime. Native "
+    "output shows the latest text within max_output_chars and the response budget. "
+    "Follow read to recover this observation's omitted saved text with read_file, "
+    "or use write_file with its result source to save the complete observation. "
+    "Follow observe to wait for new output from the same running command."
 )
 
 QUERY_PROCESSES_TOOL_DESCRIPTION = (
@@ -46,8 +49,11 @@ MANAGE_PROCESS_TOOL_DESCRIPTION = (
     "the command and its children and waits for exit. Omitted optional fields use "
     "their defaults; only since_cursor accepts null. status and exit_code describe "
     "process completion; output or echo alone does not establish completion. Use "
-    "manage_process wait for later updates, read_artifact for omitted logs, and "
-    "export_artifact for extensive retrieval."
+    "observe for later updates and read for this observation's omitted saved logs. "
+    "write and submit return output since just before input was written. "
+    "close_stdin and kill return control state without logs; poll or wait reads logs. "
+    "read_file reads saved output; write_file with its result source saves the "
+    "complete observation without rerunning the command."
 )
 
 class _StrictInput(BaseModel):
@@ -84,6 +90,10 @@ class TerminalInput(_StrictInput):
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
         le=DEFAULT_MAX_OUTPUT_CHARS,
+        description=(
+            "Maximum native tail preview characters, further limited by the response "
+            "budget; does not limit saved output, the JS value, or command lifetime."
+        ),
     )
 
 
@@ -132,7 +142,7 @@ class TerminalProcessPollInput(_ProcessInput):
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
         le=DEFAULT_MAX_OUTPUT_CHARS,
-        description="Maximum returned output characters; does not limit the command.",
+        description="Maximum native tail preview characters; saved output and JS retain the selected range.",
     )
 
 
@@ -154,7 +164,7 @@ class TerminalProcessWaitInput(_ProcessInput):
         default=DEFAULT_MAX_OUTPUT_CHARS,
         ge=MIN_TERMINAL_OUTPUT_CHARS,
         le=DEFAULT_MAX_OUTPUT_CHARS,
-        description="Maximum returned output characters; does not limit the command.",
+        description="Maximum native tail preview characters; saved output and JS retain the selected range.",
     )
 
 

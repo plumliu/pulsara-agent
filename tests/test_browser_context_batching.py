@@ -7,6 +7,7 @@ from time import monotonic
 import pytest
 import psycopg
 from psycopg.types.json import Jsonb
+from pulsara_agent.identity import derive_id
 
 from pulsara_agent.terminal_protocol.canonical_v3 import (
     CanonicalProtocolReader,
@@ -112,15 +113,18 @@ def test_sparse_latest_entry_keeps_segment_mounts_lazy_after_many_legal_adoption
     value = context(reader, session, [answer])
     latest = rows(repo, """SELECT event_id FROM pulsara_v3.agent_events
         WHERE session_id=%s AND event_type='CompactionAdopted' ORDER BY event_sequence DESC LIMIT 1""", (session,))[0]
-    assert value["entry_contexts"][0]["segment_id"] == f"EXECUTED_TURN:{owner}:{latest['event_id']}"
+    assert value["entry_contexts"][0]["segment_id"] == derive_id(
+        "segment", "history-boundary", "EXECUTED_TURN", owner, str(latest["event_id"])
+    )
     initial = str(rows(repo, "SELECT initial_entry_id FROM pulsara_v3.turns WHERE session_id=%s AND id=%s",
         (session, owner))[0]["initial_entry_id"])
     before = context(reader, session, [initial])
-    assert before["entry_contexts"][0]["segment_id"] == f"EXECUTED_TURN:{owner}:initial"
+    initial_segment = derive_id("segment", "history-initial", "EXECUTED_TURN", owner)
+    assert before["entry_contexts"][0]["segment_id"] == initial_segment
     first_adoption = int(rows(repo, """SELECT min(event_sequence) AS sequence FROM pulsara_v3.agent_events
         WHERE session_id=%s AND event_type='CompactionAdopted'""", (session,))[0]["sequence"])
     frozen = context(reader, session, [initial], cut_sequence=1, event_sequence_cut=first_adoption - 1)
-    assert frozen["entry_contexts"][0]["segment_id"] == f"EXECUTED_TURN:{owner}:initial"
+    assert frozen["entry_contexts"][0]["segment_id"] == initial_segment
 
     class Capture:
         def execute(self, sql, parameters):

@@ -1,5 +1,8 @@
 """Settled GUI facts stay advisory and share the existing adoption/install cuts."""
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -340,7 +343,7 @@ def test_plugin_removal_rejects_a_changed_instance_without_package_health(tmp_pa
             source_path=str(tmp_path / "source"),
             replace=True,
         )
-        result = await CapabilityManagementCall(service, prepared).execute()
+        result = await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] != "APPLIED"
         detail = await query_sources(
             service, target={"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"}
@@ -398,7 +401,7 @@ def test_enabled_damaged_plugin_keeps_process_effect_and_cleans_only_owned_crede
             {'action': "REMOVE_PLUGIN", 'target': {"kind": "PLUGIN", 'scope': "USER", 'plugin_id': "example"}}
         )
         assert prepared.effects.process_control
-        result = await CapabilityManagementCall(service, prepared).execute()
+        result = await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert (
             result["status"] == "APPLIED" and not result["current"]["cleanup_attention"]
         )

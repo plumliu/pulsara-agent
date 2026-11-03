@@ -633,7 +633,11 @@ def test_chat_replay_byte_overflow_is_typed_and_not_retried(
     assert failure.code_hint == "transport_source_payload_limit_exceeded"
     assert failure.retry_summary is not None
     assert failure.retry_summary.final_attempt == 1
-    assert failure.retry_summary.skipped_reason == "unknown_non_retryable"
+    assert failure.retry_summary.skipped_reason == "transport_source_payload_limit_exceeded"
+    assert failure.retry_summary.final_reason == "transport_source_payload_limit_exceeded"
+    assert failure.retry_summary.retry_count == 0
+    assert failure.retry_summary.attempts == ()
+    assert not failure.retry_summary.exhausted
 
 
 def test_chat_conflicting_array_final_and_incomplete_never_complete() -> None:

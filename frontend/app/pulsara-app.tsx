@@ -1,3 +1,4 @@
+import type { ToolOutputPage } from '../lib/runtime-adapter';
 import { usePendingSteerPages } from '../lib/pending-steer-pages';
 import { McpAuthorizationContext, mcpAuthorizationKey, useMcpAuthorization, useModelMcpAuthorization } from '../components/mcp-authorization';
 import { PresentationProvider } from '../components/presentation-provider';
@@ -2609,12 +2610,12 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     }
   }, [adapter, adoptCapabilityMutation, notify]);
 
-  const readToolArtifact = useCallback(async (resultEntryId: string, offsetChars: number) => {
+  const readToolOutput = useCallback(async (resultEntryId: string, position: ToolOutputPage['position']) => {
     const active = connectionRef.current ?? historyRef.current;
     if (!active) throw new RuntimeApiError('LOCAL_CONNECTION_UNAVAILABLE', '本地服务未连接。', true);
-    const page = await active.readToolArtifact(resultEntryId, offsetChars);
+    const page = await active.readToolOutput(resultEntryId, position);
     if (!ownsHistoryReader(active)) {
-      throw new RuntimeApiError('TOOL_ARTIFACT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
+      throw new RuntimeApiError('TOOL_OUTPUT_OWNER_CHANGED', '工具输出所属的会话已经改变。', true);
     }
     return page;
   }, [ownsHistoryReader]);
@@ -2884,8 +2885,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           runtimeReopenBusy={runtimeReopenBusy}
           onReadInteraction={readInteraction}
           onResolveInteraction={resolveInteraction}
-          artifactOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
-          onReadToolArtifact={readToolArtifact}
+          outputOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}`}
+          onReadToolOutput={readToolOutput}
           onReadPromptImage={readPromptImage}
           onLocateAnnotation={locateAnnotationSource}
           onReadVisualization={readVisualization}
@@ -2919,7 +2920,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           session={activeSession}
           isOpen={inspectorOpen}
           modelConfigurations={bootstrap?.model_configurations ?? []}
-          onReadToolArtifact={readToolArtifact}
+          onReadToolOutput={readToolOutput}
           onReadPromptImage={readPromptImage}
           onReadVisualization={readVisualization} onReadVisualizationThumbnail={readVisualizationThumbnail}
           canControl={canControl}

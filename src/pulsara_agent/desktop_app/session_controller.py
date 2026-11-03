@@ -2123,11 +2123,11 @@ class LocalSessionController:
             deadline_monotonic=self.core._canonical_deadline(), **cuts,
         )
 
-    async def history_content(self, session_id: str, request, *, artifact: bool = False):
+    async def history_content(self, session_id: str, request, *, tool_output: bool = False):
         from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
         reader = await self._history_reader(session_id)
         repository = await self.core._ensure_resources()
-        method = (TerminalKernelProtocolServer.read_canonical_tool_artifact if artifact
+        method = (TerminalKernelProtocolServer.read_canonical_tool_output if tool_output
                   else TerminalKernelProtocolServer.read_canonical_content)
         return await method(connection_provider=repository.connection_provider,
                             protocol_reader=reader, session_id=session_id, request=request)

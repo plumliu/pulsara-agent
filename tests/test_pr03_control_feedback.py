@@ -54,6 +54,7 @@ from pulsara_agent.ports.user_control_feedback import (
 )
 from pulsara_agent.primitives.permission import DEFAULT_PERMISSION_MODE
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+from pulsara_agent.terminal_process.models import TerminalProcessOrigin
 from pulsara_agent.terminal_protocol.canonical_v3 import (
     MAXIMUM_CONTROL_ITEMS,
     CanonicalProtocolReader,
@@ -79,7 +80,8 @@ def _content(*, session_id: str = 'session:5dyf7lfzp7z22pphjtostkgsjm') -> Proce
         command="python worker.py --literal 你好",
         cwd="/tmp/work tree",
         origin_turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
-        origin_subagent_task_id=None,
+        origin_conversation_scope_kind="ROOT",
+        origin_session_id=session_id,
         target_root_turn_id='turn:pt4zsuyxvb527qliae4ba7inwi',
         process=UserControlProcessFact(
             "TERMINATION_COMPLETED", "killed", -15, "TERMINAL", False
@@ -95,6 +97,8 @@ def _feedback_host() -> tuple[KernelHostSession, _UserControlAttempt, str]:
     host._workspace_recreated_at = None
     host._workspace_feedback_candidate = None
     host.session_id = 'session:5dyf7lfzp7z22pphjtostkgsjm'
+    host.root_session_id = None
+    host._session_scope_kind = ModelInputScopeKind.ROOT
     host.host_session_id = 'host:gubylb5v44ganghpuxoqfvlrji'
     host._lock = asyncio.Lock()
     host._control_monotonic = lambda: 100.0
@@ -171,6 +175,21 @@ def _provider_request(
         ),
         cut=SimpleNamespace(context_binding_revision_id=revision),
     )
+
+
+async def _await_feedback_install_started(
+    observed: asyncio.Event, installation: asyncio.Task[None],
+) -> None:
+    waiting = asyncio.create_task(observed.wait())
+    try:
+        done, _ = await asyncio.wait((waiting, installation), return_when=asyncio.FIRST_COMPLETED)
+        if installation in done and not observed.is_set():
+            await installation
+            raise AssertionError("Feedback installation ended before entering the runner")
+        await waiting
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
 
 
 def test_pr03_inclusion_requires_exact_final_placement_body_and_root() -> None:
@@ -401,7 +420,7 @@ def test_pr03_cancelled_completion_wait_releases_its_exact_writer_seal() -> None
         assert host._control_completion_write_reservation is None
         assert host._control_completion_sealed_turn_id is None
         assert host._control_completion_seal_changed.is_set()
-        root_key = host._compaction.scope_key(ModelInputScopeKind.ROOT, None)
+        root_key = host._compaction.scope_key(ModelInputScopeKind.ROOT)
         assert host._compaction_write_reservations.get(root_key, set()) == set()
 
     asyncio.run(scenario())
@@ -466,7 +485,8 @@ def test_pr03_normal_root_completion_does_not_wait_past_existing_watchdog() -> N
     asyncio.run(scenario())
 
 
-def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
+@pytest.mark.parametrize("origin_scope", ("ROOT", "SUBAGENT"))
+def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit(origin_scope) -> None:
     async def scenario() -> None:
         host, attempt, _provider_text = _feedback_host()
         active = asyncio.create_task(asyncio.Event().wait())
@@ -475,11 +495,15 @@ def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
         host.workspace = SimpleNamespace(workspace_key='workspace:scvzq3m6ilgcdfi5qvvqwjwvla')
         host._lease = SimpleNamespace(guard=SimpleNamespace(writer_generation=1))
         host._canonical_deadline = lambda: monotonic() + 1
+        origin_session_id = host.session_id if origin_scope == "ROOT" else _id("session")
         attempt.process_at_admission = SimpleNamespace(
             process_id='process:34npgaljkboupr4n456vrmou6a',
             command="python worker.py",
             cwd="/tmp",
-            origin=SimpleNamespace(turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u', scope_subagent_task_id=None),
+            origin=TerminalProcessOrigin(
+                turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
+                conversation_scope_kind=origin_scope, session_id=origin_session_id,
+            ),
         )
         feedback = attempt.outcome.user_control.feedback
         assert feedback is not None
@@ -533,7 +557,9 @@ def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
                 public_detail="done",
             )
         )
-        await install_observed.wait()
+        await _await_feedback_install_started(install_observed, installation)
+        assert attempt.feedback_candidate.content.origin_session_id == origin_session_id
+        assert attempt.feedback_candidate.content.origin_conversation_scope_kind == origin_scope
         async with host._lock:
             host._active_task = None
             host._active_turn_id = None
@@ -557,7 +583,8 @@ def test_pr03_target_end_exact_confirms_an_ambiguous_feedback_commit() -> None:
     asyncio.run(scenario())
 
 
-def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit() -> None:
+@pytest.mark.parametrize("origin_scope", ("ROOT", "SUBAGENT"))
+def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit(origin_scope) -> None:
     async def scenario() -> None:
         host, attempt, _provider_text = _feedback_host()
         active = asyncio.create_task(asyncio.Event().wait())
@@ -566,11 +593,15 @@ def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit() -> None:
         host.workspace = SimpleNamespace(workspace_key='workspace:scvzq3m6ilgcdfi5qvvqwjwvla')
         host._lease = SimpleNamespace(guard=SimpleNamespace(writer_generation=1))
         host._canonical_deadline = lambda: monotonic() + 1
+        origin_session_id = host.session_id if origin_scope == "ROOT" else _id("session")
         attempt.process_at_admission = SimpleNamespace(
             process_id='process:34npgaljkboupr4n456vrmou6a',
             command="python worker.py",
             cwd="/tmp",
-            origin=SimpleNamespace(turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u', scope_subagent_task_id=None),
+            origin=TerminalProcessOrigin(
+                turn_id='turn:qb63tb3eshpbkryzmq6wzhzt2u',
+                conversation_scope_kind=origin_scope, session_id=origin_session_id,
+            ),
         )
         feedback = attempt.outcome.user_control.feedback
         assert feedback is not None
@@ -628,8 +659,10 @@ def test_pr03_host_close_exact_confirms_an_ambiguous_feedback_commit() -> None:
                 public_detail="done",
             )
         )
-        await install_observed.wait()
+        await _await_feedback_install_started(install_observed, installation)
         assert attempt.feedback_candidate is not None
+        assert attempt.feedback_candidate.content.origin_session_id == origin_session_id
+        assert attempt.feedback_candidate.content.origin_conversation_scope_kind == origin_scope
         assert attempt.feedback_provider_text is not None
         request = _provider_request(
             turn_id='turn:74y74rvr2pht5lydgxvy57nxgq',
@@ -697,20 +730,35 @@ def test_pr03_terminal_input_selection_failure_closes_only_pending_inclusion(
     asyncio.run(scenario())
 
 
-def test_pr03_feedback_projection_is_typed_and_preserves_literal_facts() -> None:
-    content = _content()
+@pytest.mark.parametrize("scope", ("ROOT", "SUBAGENT"))
+def test_pr03_feedback_projection_is_typed_and_preserves_literal_facts(scope) -> None:
+    origin_session_id = _id("session")
+    content = replace(
+        _content(), origin_conversation_scope_kind=scope,
+        origin_session_id=origin_session_id,
+    )
     projection = project_user_control_feedback_for_provider(content.canonical_bytes())
     projected = json.loads(projection)["pulsara_user_control_feedback"]
     assert "python worker.py --literal 你好" in projection
-    assert projected["origin"] == "ROOT"
+    assert projected["origin"] == (
+        "ROOT" if scope == "ROOT"
+        else {"kind": "AGENT", "agent_id": origin_session_id}
+    )
+    assert content.canonical_mapping()["origin_session_id"] == origin_session_id
     assert projected["process"] == content.canonical_mapping()["process"]
     assert "schema_version" not in projected
-    assert "user_control_feedback.v2" not in projection
+    assert "user_control_feedback.v3" not in projection
     assert USER_CONTROL_FEEDBACK_MEDIA_TYPE.endswith("+json")
     with pytest.raises(ValueError, match="identity"):
         project_user_control_feedback_for_provider(
             content.canonical_bytes().replace(
                 b'"source":"USER_CONTROL"', b'"source":"HUMAN"'
+            )
+        )
+    with pytest.raises(ValueError, match="identity"):
+        project_user_control_feedback_for_provider(
+            content.canonical_bytes().replace(
+                b'user_control_feedback.v3', b'user_control_feedback.v2'
             )
         )
     parsed = content.canonical_mapping()
@@ -723,6 +771,17 @@ def test_pr03_feedback_projection_is_typed_and_preserves_literal_facts() -> None
         project_user_control_feedback_for_provider(
             json.dumps(malformed_process).encode("utf-8")
         )
+    for invalid_scope in ("TASK", None, [], True):
+        with pytest.raises(ValueError, match="origin scope"):
+            replace(content, origin_conversation_scope_kind=invalid_scope)
+        invalid_origin = content.canonical_mapping()
+        invalid_origin["origin_conversation_scope_kind"] = invalid_scope
+        with pytest.raises(ValueError, match="origin scope"):
+            project_user_control_feedback_for_provider(json.dumps(invalid_origin).encode())
+    invalid_origin = content.canonical_mapping()
+    invalid_origin["origin_session_id"] = _id("turn")
+    with pytest.raises(ValueError):
+        project_user_control_feedback_for_provider(json.dumps(invalid_origin).encode())
 
 
 @pytest.mark.postgres

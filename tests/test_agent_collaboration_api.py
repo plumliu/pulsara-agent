@@ -1,12 +1,15 @@
 """Observable collaboration contracts, without a second execution engine."""
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 import asyncio
+import json
 import unittest
+from unittest.mock import patch
 
 from pulsara_agent.identity import random_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     agent_target,
@@ -122,6 +125,64 @@ class ContractTests(unittest.TestCase):
             for _ in range(1500)
         )
         validate_agent_request_graph(requests)
+
+
+class SummaryRepositoryTests(unittest.TestCase):
+    def test_work_directory_never_hydrates_canonical_prompt_or_final(self):
+        from pulsara_agent.conversation_kernel._repository.subagents import _SubagentOperations
+
+        agent, work, root = random_id("session"), random_id("queue"), random_id("session")
+        class Connection:
+            def execute(self, sql, parameters):
+                return SimpleNamespace(fetchone=lambda: {"exists": True},
+                    fetchall=lambda: [{"id": work, "session_id": agent}])
+        @contextmanager
+        def connection(**kwargs):
+            yield Connection()
+        repository = _SubagentOperations()
+        repository._provider = SimpleNamespace(connection=connection)
+        repository._agent_work_value = lambda *_: self.fail("inventory must not hydrate a Work body")
+        with patch("pulsara_agent.conversation_kernel._repository.subagents.request_execution_from_row",
+                   return_value=SimpleNamespace(status=SimpleNamespace(value="completed"), terminal_reason=None)):
+            rows = repository.list_query_agent_works(root_session_id=root, observer_session_id=root,
+                agent_id=agent, deadline_monotonic=1e20)
+        self.assertEqual(rows, ({"work_id": work, "agent_id": agent, "status": "completed",
+            "terminal_reason": None, "cursor": work},))
+
+    def test_message_receipt_rejection_precedes_known_agents_and_prompt_writes(self):
+        from datetime import datetime, timezone
+        from pulsara_agent.conversation_kernel._repository.subagents import _SubagentOperations
+
+        agent, work, root = random_id("session"), random_id("queue"), random_id("session")
+        statements = []
+        class Connection:
+            def execute(self, sql, parameters):
+                statements.append(sql)
+                assert sql.startswith("SELECT"), "receipt rejection must precede message SQL effects"
+                if sql.startswith("SELECT * FROM pulsara_v3.prompt_queue_items"):
+                    row = None
+                elif sql.startswith("SELECT coalesce"):
+                    row = {"root_id": root}
+                elif sql.startswith("SELECT workspace_id"):
+                    row = {"workspace_id": random_id("workspace")}
+                else:
+                    row = {"id": work}
+                return SimpleNamespace(fetchone=lambda: row)
+        @contextmanager
+        def transaction(*args, **kwargs):
+            yield Connection()
+        repository = _SubagentOperations()
+        repository._writer_transaction = transaction
+        repository._merge_known_agents = lambda *_args, **_kwargs: self.fail("must not expand known-agent scope before quote")
+        def reject(actual_work):
+            self.assertEqual(actual_work, work)
+            raise ToolResultPageBoundary("no message receipt allowance")
+        with self.assertRaises(ToolResultPageBoundary):
+            repository.enqueue_agent_steer(SimpleNamespace(session_id=agent), target_turn_id=random_id("turn"),
+                queue_item_id=random_id("queue"), source_session_id=root, source_work_id=None,
+                text="must not be sent", occurred_at=datetime.now(timezone.utc), actor_id=root,
+                deadline_monotonic=1e20, result_check=reject)
+        self.assertEqual(len(statements), 5)
 
 
 class RepositoryOwner:
@@ -330,6 +391,8 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.repo = RepositoryOwner(self.root)
         self.runtime = RuntimeOwner(self.repo)
         self.context = SimpleNamespace(
+            page_budget=ToolResultPageBudget(tool_call_id=random_id("call"), result_target={
+                "kind": "SESSION_ENTRY", "session_id": self.root, "entry_id": random_id("entry")}),
             session_id=self.root,
             turn_id=random_id("turn"),
             attempt_id=random_id("attempt"),
@@ -377,6 +440,49 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
             tool_name=name, arguments=arguments, invocation_context=self.context
         )
         return result.public_value()
+
+    async def test_page_budget_reduces_whole_work_records_and_next_is_directly_callable(self):
+        agent, first = self.add_work(status="completed", final="\\\"中" * 40_000)
+        _, second = self.add_work(agent=agent, status="completed", final="second final")
+        self.context.page_budget = replace(self.context.page_budget,
+            accepts_provider_body=lambda body, memory: len(json.loads(body).get("works", [])) <= 1)
+        result = await self.api.invoke(tool_name="query_agents", arguments={"target": agent_target(agent)},
+            invocation_context=self.context)
+        page = result.public_value()
+        self.assertTrue(result.page_complete)
+        self.assertEqual([item["target"] for item in page["works"]], [work_target(first)])
+        for field in ("instruction", "final", "diagnostic"):
+            self.assertNotIn(field, page["works"][0])
+        following = await self.call(page["next"]["tool"], page["next"]["arguments"])
+        self.assertEqual([item["target"] for item in following["works"]], [work_target(second)])
+        self.assertIsNone(following["next"])
+        self.assertEqual((await self.call("query_agents", page["works"][0]["inspect"]["arguments"]))["final"], "\\\"中" * 40_000)
+
+    async def test_minimum_page_and_admission_budget_failure_make_no_progress_or_work(self):
+        agent, _ = self.add_work()
+        self.context.page_budget = replace(self.context.page_budget, accepts_provider_body=lambda *_: False)
+        with self.assertRaises(ToolResultPageBoundary):
+            await self.call("query_agents", {"target": agent_target(agent)})
+        before = set(self.repo.rows)
+        with self.assertRaises(ToolResultPageBoundary):
+            await self.call("run_agent", {"instruction": "must not be admitted"})
+        self.assertEqual(set(self.repo.rows), before)
+        self.assertEqual(self.runtime.wakes, 0)
+
+    async def test_stop_preserves_entire_set_and_required_facts_without_work_bodies(self):
+        agent, running = self.add_work()
+        queued = [self.add_work(agent=agent, status="queued")[1] for _ in range(70)]
+        self.repo.rows[running]["instruction"] = "large instruction" * 10_000
+        result = await self.api.invoke(tool_name="stop_agent", arguments={"target": agent_target(agent)},
+            invocation_context=self.context)
+        value = result.public_value()
+        self.assertEqual({item["target"]["work_id"] for item in value["works"]}, {running, *queued})
+        self.assertEqual(result.required_facts["affected_count"], 71)
+        self.assertEqual(value["status_counts"], {"stopped": 71})
+        for item in value["works"]:
+            self.assertNotIn("instruction", item)
+            self.assertNotIn("diagnostic", item)
+        self.assertTrue(all(self.repo.rows[identity]["status"] == "stopped" for identity in [running, *queued]))
 
     async def test_both_wait_branches_read_status_without_hydrating_result_bodies(self):
         agent, work = self.add_work(status="completed", final="full query result")
@@ -571,11 +677,11 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.api.session_id = self.context.session_id = own
         self.context.invocation_source = SimpleNamespace(kind="MODEL_TOOL_CALL")
         first = await self.call("query_agents", {"max_items": 1})
-        second = await self.call("query_agents", {"max_items": 1, "cursor": first["next_cursor"]})
+        second = await self.call("query_agents", first["next"]["arguments"])
         for page in (first, second):
             self.assertEqual(page["root"], agent_target("ROOT"))
             self.assertEqual(len(page["agents"]), 1)
-        self.assertIsNone(second["next_cursor"])
+        self.assertIsNone(second["next"])
         self.assertEqual(
             [page["agents"][0]["agent"]["agent_id"] for page in (first, second)],
             sorted((own, known)),
@@ -606,11 +712,11 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.repo.known[own] = {other}
         first = await self.call("query_agents", {"target": agent_target(other), "max_items": 1})
         second = await self.call("query_agents", {
-            "target": agent_target(other), "max_items": 1, "cursor": first["next_cursor"],
+            **first["next"]["arguments"],
         })
         self.assertEqual(first["works"][0]["target"], work_target(first_work))
         self.assertEqual(second["works"][0]["target"], work_target(second_work))
-        self.assertIsNone(second["next_cursor"])
+        self.assertIsNone(second["next"])
         for name, args in (("run_agent", {"instruction": "forbidden"}),
                            ("stop_agent", {"target": agent_target(other)})):
             with self.assertRaisesRegex(ValueError, "only to ROOT"):
@@ -814,4 +920,5 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repo.rows[queued]["status"], "queued")
         ended = await self.call("stop_agent", {"target": work_target(completed)})
         self.assertFalse(ended["stopped"])
-        self.assertEqual(ended["works"][0]["final"], "kept")
+        self.assertNotIn("final", ended["works"][0])
+        self.assertEqual((await self.call("query_agents", ended["works"][0]["inspect"]["arguments"]))["final"], "kept")

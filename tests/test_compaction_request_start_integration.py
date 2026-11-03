@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 import asyncio
 from dataclasses import replace
 from time import monotonic
@@ -207,7 +209,7 @@ def test_started_root_summary_preserves_exact_target_and_first_wire(
             assert _INITIAL not in _render(model.summary.contexts[0].messages)
 
             agent = await core._send_agent_message(root.session_id, _AGENT,
-                SimpleNamespace(session_id=child_id, work_id=work_id))
+                SimpleNamespace(session_id=child_id, work_id=work_id, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
             assert agent["delivery"] == "queued"
             q1 = await root.submit_prompt(command_id=random_id("command"),
                 content=PromptContent.text("INDEPENDENT_FUTURE_REQUEST"))
@@ -218,7 +220,7 @@ def test_started_root_summary_preserves_exact_target_and_first_wire(
             assert converted.status == "PENDING"
             assert (await root.query_command(q2_command)).prompt_delivery.execution.terminal_reason == "USER_REDIRECTED_TO_STEER"
             selected = await core._send_agent_message(root.session_id, _COMPLETION,
-                SimpleNamespace(session_id=child_id, work_id=work_id))
+                SimpleNamespace(session_id=child_id, work_id=work_id, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
             assert selected["delivery"] == "queued"
             model.child_release.set()
 
@@ -326,7 +328,7 @@ def test_fresh_host_empty_epoch_adoption_delivers_steer_on_first_responses_wire(
                 assert accepted.status == "PENDING"
                 if memory_case == "human_disable_then_agent":
                     delivery = await core._send_agent_message(root.session_id, _AGENT + "; use saved memory normally",
-                        SimpleNamespace(session_id=root.session_id, work_id=None))
+                        SimpleNamespace(session_id=root.session_id, work_id=None, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
                     assert delivery["delivery"] == "queued"
             assert _INITIAL not in _render(model.summary.contexts[0].messages)
             model.summary.release.set()
@@ -439,7 +441,7 @@ def test_subagent_first_summary_uses_full_initial_group_and_current_work(
                 root_session_id=root.session_id, deadline_monotonic=monotonic()+10)
             other, = (identity for identity in ids if identity != child.session_id)
             outcome = await core._send_agent_message(child.session_id, f'{_AGENT}: {other}',
-                SimpleNamespace(session_id=root.session_id, work_id=None))
+                SimpleNamespace(session_id=root.session_id, work_id=None, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
             assert outcome["delivery"] == "queued"
             visible = await child._io.run(child.repository.list_query_agent_sessions,
                 root_session_id=root.session_id, observer_session_id=child.session_id,

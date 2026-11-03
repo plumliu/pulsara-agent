@@ -53,7 +53,6 @@ from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
-    StructuredModelInputLimits,
 )
 from pulsara_agent.model_input.lowering import lower_canonical_item
 from pulsara_agent.primitives.permission import PermissionMode
@@ -586,8 +585,6 @@ def test_snapshot_codec_hydrates_in_owner_order_and_lowers_typed_content() -> No
     assert item.content is hydrated
     lowered = lower_canonical_item(
         item,
-        artifact_read_available=False,
-        limits=StructuredModelInputLimits(),
     )
     assert lowered.fixed_message is not None
     assert lowered.fixed_message.content == projected

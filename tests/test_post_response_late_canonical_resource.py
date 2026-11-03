@@ -4,7 +4,6 @@ from __future__ import annotations
 from tests.support.images import bound_test_image
 
 from dataclasses import replace
-from hashlib import sha256
 from io import BytesIO
 from time import monotonic
 
@@ -15,7 +14,6 @@ from pulsara_agent.conversation_kernel.assembler import CompletedToolCallBlock
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     provider_input_item_canonical_expanded_bytes,
 )
-from pulsara_agent.conversation_kernel.contracts import BlobContent
 from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_prompt
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
@@ -24,7 +22,7 @@ from pulsara_agent.conversation_kernel.runner import (
     _ordinary_result_followup_upper,
     _tool_result_closure_storage_text,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import ToolOutputArtifactProcessor
+from pulsara_agent.conversation_kernel.tool_result_display import project_native_tool_result
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMTextPart,
@@ -34,42 +32,40 @@ from pulsara_agent.model_input.contracts import (
     MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
     FrozenProviderInputItemKind,
 )
-from pulsara_agent.ports.artifact import ToolResultDisplayKind
+from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
 from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from tests.test_round3_structured_model_input_compiler import _tool_result
-
-
-class _MemoryArtifactPublisher:
-    def publish(self, *, content: bytes, media_type: str, codec: str, **_kwargs):
-        return BlobContent(
-            "blob:test",
-            "sha256:" + sha256(content).hexdigest(),
-            len(content),
-            media_type,
-            codec,
-        )
+from tests.support.tool_outputs import output_processor
 
 
 def _preview_and_late_charge(body: str) -> tuple[CompletedToolCallBlock, int]:
-    # Ordinary tools really publish the archive and retain a COMPLETE plain-text
-    # preview. Do not bypass artifact production with a hypothetical 64 KiB body.
-    projection = ToolOutputArtifactProcessor(
-        object(), publisher=_MemoryArtifactPublisher()
-    ).prepare(
+    processor = output_processor()
+    saved = processor.materialize_body(
         session_id='session:6ej3oydnee24zzis2etyixxioi',
         workspace_id='workspace:wdl6b3mtrkghwnvjo4an3ekbau',
         result_entry_id='entry:zvmjajlmix3vyoeoy2zhz6xd2a',
         public_output=body,
-        candidate=None,
-        artifact_inline_result=False,
+        output_body_candidate=None,
+        public_format=ToolOutputSourceFormatHint.TEXT,
         deadline_monotonic=monotonic() + 10,
     )
-    assert projection.display_kind is ToolResultDisplayKind.COMPLETE
-    preview = projection.canonical_preview.canonical_bytes.decode("utf-8")
-    assert preview.startswith(body)
     call = CompletedToolCallBlock(
         'block:eahusw3qjz45fyozavqv6xlbxa', "call:7", "read_file", freeze_json({"target": {"kind": "PATH", "path": "control.txt"}})
     )
+    native, omitted = project_native_tool_result(
+        public_output=body, native_output=None, page_complete=False, required_facts={},
+        output_available=saved.output_body is not None,
+        output_unavailability_reason=saved.output_unavailability_reason,
+        page_budget=ToolResultPageBudget(call.tool_call_id, {
+            "kind": "SESSION_ENTRY", "session_id": 'session:6ej3oydnee24zzis2etyixxioi',
+            "entry_id": 'entry:zvmjajlmix3vyoeoy2zhz6xd2a',
+        }),
+    )
+    projection = processor.prepare(body=saved, native_output=native, output_omitted=omitted)
+    assert saved.output_body.canonical_bytes == body.encode("utf-8")
+    preview = projection.canonical_preview.canonical_bytes.decode("utf-8")
+    assert projection.output_omitted == (preview != body)
     # Match the reader's plain LATE_TOOL_OUTCOME storage contract, then charge
     # the hydrated item with the production canonical resource owner.
     late_body = canonical_json_bytes(
@@ -102,7 +98,7 @@ def _preview_and_late_charge(body: str) -> tuple[CompletedToolCallBlock, int]:
     ),
     ids=("raw-controls", "slashes", "quotes", "newlines", "unicode"),
 )
-def test_real_complete_preview_late_canonical_charge_fits_reserved_upper(body):
+def test_real_frozen_preview_late_canonical_charge_fits_reserved_upper(body):
     call, actual_canonical = _preview_and_late_charge(body)
 
     assert actual_canonical <= _ordinary_result_followup_upper(call)[0]
@@ -153,7 +149,7 @@ def test_late_image_canonical_charge_fits_text_base_plus_exact_image_increment()
         }
     ).decode("utf-8")
     late = replace(
-        _tool_result(public_text, sequence=7, turn_id='turn:hei4tpo3ncy7wcxg6s4x3caeae', artifact=False),
+        _tool_result(public_text, sequence=7, turn_id='turn:hei4tpo3ncy7wcxg6s4x3caeae'),
         item_kind=FrozenProviderInputItemKind.LATE_TOOL_OUTCOME,
         content=(LLMTextPart(late_body), image),
         tool_call_ordinal=0,

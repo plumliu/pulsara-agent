@@ -634,7 +634,7 @@ def test_failed_initial_result_reader_preserves_adopted_running_process(tmp_path
         assert inventory[0].background_adopted is True
         assert registry.get_process_info(state.process_id, owner_host_session_id=OWNER).status == "running"
         stopped = registry.terminate_if_running(
-            state.process_id, max_output_chars=512, owner_host_session_id=OWNER,
+            state.process_id, owner_host_session_id=OWNER,
         )
         assert stopped.disposition is TerminalTerminationDisposition.TERMINATION_COMPLETED
         assert stopped.result.status.value == "killed"

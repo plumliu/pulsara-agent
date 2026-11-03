@@ -73,15 +73,23 @@ function clippedError(value) {
   // Control diagnostics have reserved bounded space even if ordinary output is full.
   const bytes = Buffer.from(JSON.stringify(value), 'utf8');
   if (bytes.length <= diagnosticBytes - 512) return value;
-  return {name: String(value?.name ?? 'Error').slice(0, 80),
+  const trimmed = {name: String(value?.name ?? 'Error').slice(0, 80),
     message: String(value?.message ?? 'JavaScript execution failed')
       .slice(0, Math.max(1, Math.floor((diagnosticBytes - 1024) / 4))),
     ...(value?.code ? {code: value.code} : {}),
     ...(value?.state ? {state: value.state} : {}),
     ...(value?.result_id ? {result_id: value.result_id} : {}),
     ...(value?.result_entry_id ? {result_entry_id: value.result_entry_id} : {}),
-    ...(value?.artifact ? {artifact: value.artifact} : {}),
+    ...(value?.read ? {read: value.read} : {}),
+    ...(value?.required_facts ? {required_facts: value.required_facts} : {}),
+    ...(value?.output_available !== undefined ? {output_available: value.output_available} : {}),
+    ...(value?.source_coverage ? {source_coverage: value.source_coverage} : {}),
+    ...(value?.source_coverage_reason ? {source_coverage_reason: value.source_coverage_reason} : {}),
+    ...(value?.output_unavailability_reason ? {output_unavailability_reason: value.output_unavailability_reason} : {}),
     diagnostic_truncated: true};
+  if (Buffer.byteLength(JSON.stringify(trimmed), 'utf8') > diagnosticBytes - 512)
+    delete trimmed.required_facts;
+  return trimmed;
 }
 function fail(error) {
   if (ended) return;

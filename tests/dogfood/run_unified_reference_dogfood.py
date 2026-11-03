@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import replace
 import json
 import os
+import shlex
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -130,22 +132,22 @@ async def run(args, report, saved):
                 ]
                 assert ids and all(is_valid_id(value, "memory") for value in ids)
                 report["checks"]["memory_roundtrip"] = True
-                await turn(
-                    "artifact_roundtrip",
+                body_reply = await turn(
+                    "result_body_roundtrip",
                     PromptContent.text(
-                        "Use exec_process to run python3 -c \"print('0123456789' * 16000); print('ARTIFACT_CANARY_529')\". The full stdout exceeds the inline preview. Use read_artifact with the returned artifact_id to read the saved output; do not fabricate an ID. Report the artifact ID and the canary at the end."
+                        f"Use exec_process to run {shlex.quote(sys.executable)} -c \"print('0123456789' * 16000); print('RESULT_BODY_CANARY_529')\". "
+                        "The full stdout exceeds the native preview. Follow the returned read call with read_file at its exact SESSION_ENTRY target; do not invent an entry ID. Copy each next call until the saved body ends. Report the result entry ID and the canary at the end."
                     ),
                 )
-                tools = common.tool_calls(
-                    common.phase_calls(report, "artifact_roundtrip")
-                )
-                ids = [
-                    json.loads(t["arguments"])["artifact_id"]
-                    for t in tools
-                    if t["tool_name"] == "read_artifact"
-                ]
-                assert ids and all(is_valid_id(value, "artifact") for value in ids)
-                report["checks"]["artifact_roundtrip"] = True
+                tools = common.tool_calls(common.phase_calls(report, "result_body_roundtrip"))
+                targets = [json.loads(t["arguments"])["target"] for t in tools
+                           if t["tool_name"] == "read_file"
+                           and json.loads(t["arguments"]).get("target", {}).get("kind") == "SESSION_ENTRY"]
+                assert targets and all(is_valid_id(value["entry_id"], "entry") for value in targets)
+                assert all("session_id" not in value or is_valid_id(value["session_id"], "session")
+                           for value in targets)
+                assert "RESULT_BODY_CANARY_529" in body_reply
+                report["checks"]["result_body_roundtrip"] = True
                 await turn(
                     "connection_task_roundtrip",
                     PromptContent.text(

@@ -3841,18 +3841,8 @@ def _mcp_standard_operation_identity(
     )
 
 
-def _mcp_invocation_failure(
-    *,
-    error: Exception,
-    client: BoundedMcpSdkClient,
-    remote_identity: str,
-    remote_identity_verification: str,
-    effect_kind: McpEffectKind,
-) -> McpKnownToolResult:
-    # The failed observation is known; the remote operation's outcome is not.
-    # Settle this call so the model can continue, without replaying tools/call
-    # or claiming that an external effect did not happen. See the MCP failure
-    # continuation specification.
+def mcp_failure_required_facts(effect_kind: McpEffectKind) -> dict[str, object]:
+    """The same bounded uncertain-outcome facts used before and after dispatch."""
     guidance = (
         "No reliable observation was received. You may continue with another "
         "source or retry this read when the connection is available."
@@ -3862,17 +3852,26 @@ def _mcp_invocation_failure(
         "verify its outcome or idempotency; otherwise ask the user. You may "
         "continue with independent work or another read-only source."
     )
+    return {"error": "MCP_CALL_FAILED", "remote_outcome": "UNKNOWN",
+            "retry_performed": False, "guidance": guidance}
+
+
+def _mcp_invocation_failure(
+    *,
+    error: Exception,
+    client: BoundedMcpSdkClient,
+    remote_identity: str,
+    remote_identity_verification: str,
+    effect_kind: McpEffectKind,
+) -> McpKnownToolResult:
+    # The failed observation is known; the remote operation's outcome is not.
+    # Settle without replaying tools/call or claiming an effect did not happen.
     return McpKnownToolResult(
         state="SYSTEM_ERROR",
-        content=canonical_json_bytes(
-            {
-                "error": "MCP_CALL_FAILED",
-                "message": client.diagnostic_message(error),
-                "remote_outcome": "UNKNOWN",
-                "retry_performed": False,
-                "guidance": guidance,
-            }
-        ),
+        content=canonical_json_bytes({
+            **mcp_failure_required_facts(effect_kind),
+            "message": client.diagnostic_message(error),
+        }),
         remote_identity=remote_identity,
         remote_identity_verification=remote_identity_verification,
     )
@@ -3940,4 +3939,5 @@ __all__ = [
     "McpKnownToolResult",
     "McpSlotLease",
     "McpSnapshotStale",
+    "mcp_failure_required_facts",
 ]

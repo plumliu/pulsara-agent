@@ -381,14 +381,16 @@ export interface QueuedPromptAction {
   lastCheckedConnectionGeneration?: number;
 }
 
-export interface ToolArtifactPage {
+export interface ToolOutputPosition {
+  line: number;
+  charOffset: number;
+}
+
+export interface ToolOutputPage {
   resultEntryId: string;
   text: string;
-  offsetChars: number;
-  returnedChars: number;
-  totalChars: number;
-  hasMore: boolean;
-  nextOffsetChars?: number;
+  position: ToolOutputPosition;
+  next?: ToolOutputPosition;
 }
 
 export interface BackgroundProcess {
@@ -756,7 +758,7 @@ export interface AgentConversationReader {
   readQueuePage(cursor?: string, signal?: AbortSignal, lane?: QueueLane): Promise<{items: QueuedPrompt[]; nextCursor: string | null}>;
   readQueueStatus(queueItemId: string, signal?: AbortSignal): Promise<QueueItemStatus | null>;
   readQueueItem(queueItemId: string, signal?: AbortSignal): Promise<QueuedPrompt | null>;
-  readToolArtifact(resultEntryId: string, offsetChars: number, maxChars?: number): Promise<ToolArtifactPage>;
+  readToolOutput(resultEntryId: string, position?: ToolOutputPosition, maxChars?: number): Promise<ToolOutputPage>;
   readPromptImage(image: CanonicalPromptImagePart): Promise<Uint8Array>;
   readImageReference(imageRef: string, signal?: AbortSignal): Promise<SavedImageData>;
   readVisualizationThumbnail(entryId: string, ordinal: number, digest: string, size: number, signal: AbortSignal): Promise<string>;
@@ -765,7 +767,7 @@ export interface AgentConversationReader {
 }
 
 export type AgentContentReader = Pick<AgentConversationReader,
-  'readToolArtifact' | 'readPromptImage' | 'readImageReference' | 'readVisualizationContent' | 'readVisualizationThumbnail'>;
+  'readToolOutput' | 'readPromptImage' | 'readImageReference' | 'readVisualizationContent' | 'readVisualizationThumbnail'>;
 
 export interface RuntimeConnection {
   readonly availability: WorkspaceAvailability;
@@ -820,7 +822,7 @@ export interface RuntimeConnection {
     commandId?: string,
   ): Promise<CommandReceipt | { submitted: boolean }>;
   queryCommand(commandId: string): Promise<CommandReceipt | undefined>;
-  readToolArtifact(resultEntryId: string, offsetChars: number, maxChars?: number): Promise<ToolArtifactPage>;
+  readToolOutput(resultEntryId: string, position?: ToolOutputPosition, maxChars?: number): Promise<ToolOutputPage>;
   close(): Promise<void>;
 }
 
@@ -918,8 +920,8 @@ interface ProtocolEntry {
     assistant_entry_id?: string; tool_call_id?: string; result_state?: string;
     attempt_id?: string; invocation_id?: string; source_kind?: string; source_exec_attempt_id?: string;
     call_sequence?: string | number; tool_name?: string; original_arguments_json?: string;
-    artifact_disposition?: string; source_coverage?: string; display_kind?: string;
-    source_coverage_reason?: string; artifact_unavailability_reason?: string;
+    output_body_available?: boolean; source_coverage?: string; output_omitted?: boolean;
+    source_coverage_reason?: string; output_unavailability_reason?: string; result_facts_json?: string;
   };
   input_origin?: string;
   input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string };
@@ -1928,7 +1930,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
       try { return await operation(reader); } finally { await reader.close(); }
     };
     return {
-      readToolArtifact:(id, offset, max) => read(reader => reader.readToolArtifact(id, offset, max)),
+      readToolOutput:(id, offset, max) => read(reader => reader.readToolOutput(id, offset, max)),
       readPromptImage:image => read(reader => reader.readPromptImage(image)),
       readImageReference:(ref, signal) => read(reader => reader.readImageReference(ref, signal)),
       readVisualizationContent:(id, ordinal, digest, size, item, signal) => read(reader => reader.readVisualizationContent(id, ordinal, digest, size, item, signal)),
@@ -2793,34 +2795,35 @@ abstract class CanonicalHistoryReader {
     );
   }
 
-  async readToolArtifact(
+  async readToolOutput(
     resultEntryId: string,
-    offsetChars: number,
+    position: ToolOutputPosition = { line: 1, charOffset: 0 },
     maxChars = 32_000,
-  ): Promise<ToolArtifactPage> {
+  ): Promise<ToolOutputPage> {
     const frame = await this.historyPost<{
-      tool_artifact?: {
-        result_entry_id?: string; text?: string; offset_chars?: string | number;
-        returned_chars?: string | number; total_chars?: string | number;
-        has_more?: boolean; next_offset_chars?: string | number;
+      tool_output?: {
+        result_entry_id?: string; text?: string;
+        position?: { line?: string | number; char_offset?: string | number };
+        next?: { line?: string | number; char_offset?: string | number };
       };
       error?: ProtocolError;
-    }>('read-tool-artifact', {
-      result_entry_id: resultEntryId, offset_chars: offsetChars, max_chars: maxChars,
+    }>('read-tool-output', {
+      result_entry_id: resultEntryId,
+      position: { line: position.line, char_offset: position.charOffset },
+      max_chars: maxChars,
     });
     assertProtocolFrame(frame);
-    const page = frame.tool_artifact;
-    if (!page || page.result_entry_id !== resultEntryId || numeric(page.offset_chars) !== offsetChars) {
-      throw new RuntimeApiError('TOOL_ARTIFACT_RESPONSE_INVALID', '工具原始输出暂时无法读取。', true);
+    const page = frame.tool_output;
+    if (!page || page.result_entry_id !== resultEntryId
+      || numeric(page.position?.line) !== position.line
+      || numeric(page.position?.char_offset) !== position.charOffset) {
+      throw new RuntimeApiError('TOOL_OUTPUT_RESPONSE_INVALID', '工具原始输出暂时无法读取。', true);
     }
     return {
       resultEntryId,
       text: page.text ?? '',
-      offsetChars,
-      returnedChars: numeric(page.returned_chars),
-      totalChars: numeric(page.total_chars),
-      hasMore: Boolean(page.has_more),
-      nextOffsetChars: page.has_more ? numeric(page.next_offset_chars) : undefined,
+      position,
+      next: page.next ? { line: numeric(page.next.line), charOffset: numeric(page.next.char_offset) } : undefined,
     };
   }
 
@@ -3098,7 +3101,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     const result = entry.tool_result;
     if (this.role !== 'controller' || entry.entry_kind !== 'TOOL_RESULT' || entry.scope_kind !== 'ROOT'
       || entry.entry_owner_kind === 'IMPORTED_HISTORY' || result?.result_state !== 'SUCCESS'
-      || result.source_coverage !== 'COMPLETE' || result.display_kind !== 'COMPLETE'
+      || result.source_coverage !== 'COMPLETE' || result.output_omitted === true
       || !result.assistant_entry_id || !result.tool_call_id) return;
     const signal = this.presentationEpoch.signal;
     const read = async (toolName: string) => {
@@ -4039,7 +4042,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         let trace = (callId && current.traces.find(candidate => candidate.id === callId)) || (blockId && current.traces[current.traceBlocks.indexOf(blockId)]) || undefined;
         if (!trace) {
           current.traceBlocks.push(blockId || undefined);
-          trace = { id: callId || newBlockId(), kind: 'artifact', title: '操作', subtitle: '等待参数与执行结果', status: 'running' };
+          trace = { id: callId || newBlockId(), kind: 'tool', title: '操作', subtitle: '等待参数与执行结果', status: 'running' };
           current.traces.push(trace);
         }
         trace.argumentsJson = (trace.argumentsJson ?? '') + String(item.delta ?? '');
@@ -4051,7 +4054,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         let trace = (toolCallId && current.traces.find((candidate) => candidate.id === toolCallId)) || (blockId && current.traces[current.traceBlocks.indexOf(blockId)]) || undefined;
         if (!trace && (toolCallId || blockId)) {
           current.traceBlocks.push(blockId || undefined);
-          trace = {id: toolCallId || blockId, kind: 'artifact', title: '操作', subtitle: '等待参数与执行结果', status: 'running'};
+          trace = {id: toolCallId || blockId, kind: 'tool', title: '操作', subtitle: '等待参数与执行结果', status: 'running'};
           current.traces.push(trace);
         }
         if (trace) {
@@ -4352,7 +4355,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       if (trace || !activeTurnIds.has(result.turnId)) continue;
       const detachedTrace: ToolTrace = {
         id: result.id,
-        kind: 'artifact',
+        kind: 'tool',
         title: '操作结果',
         subtitle: '调用信息尚未加载',
         status: result.ended ? toolResultStatus(result.resultState) : 'running',
@@ -4929,13 +4932,14 @@ function projectEntries(
         target!.sourceEntryIds = [...(target!.sourceEntryIds ?? [target!.id]), entry.entry_id];
         pendingTrace.resultState = resultState;
         pendingTrace.resultSummary = summarizeToolResult(pendingTrace.toolName, result);
-        pendingTrace.artifact = projectToolArtifact(resultRef);
+        pendingTrace.outputBody = projectToolOutput(resultRef);
+        pendingTrace.resultFacts = projectToolResultFacts(resultRef);
         pendingTrace.meta = succeeded ? '操作完成' : cancelled ? '操作已取消' : '操作未完成';
         continue;
       }
       const fallbackTrace: ToolTrace = {
         id: entry.entry_id,
-        kind: 'artifact',
+        kind: 'tool',
         title: '操作结果',
         subtitle: '已记录',
         status: toolResultStatus(resultRef?.result_state),
@@ -4944,7 +4948,8 @@ function projectEntries(
         resultEntryId: entry.entry_id,
         resultState: resultRef?.result_state,
         resultSummary: summarizeToolResult(undefined, projectedResult.text),
-        artifact: projectToolArtifact(resultRef),
+        outputBody: projectToolOutput(resultRef),
+        resultFacts: projectToolResultFacts(resultRef),
         associationPending: true,
       };
       messages.push({
@@ -4973,11 +4978,12 @@ function projectEntries(
     const result = decodeToolResultContent(entry);
     const child: ToolTrace = {
       id: source.invocation_id || entry.entry_id, attemptId: source.attempt_id,
-      kind: 'artifact', toolName: source.tool_name, title: source.tool_name || '操作结果',
+      kind: 'tool', toolName: source.tool_name, title: source.tool_name || '操作结果',
       argumentsJson: source.original_arguments_json, subtitle: '已记录',
       status: toolResultStatus(source.result_state), resultText: result.text,
       resultContent: result.content, resultEntryId: entry.entry_id, resultState: source.result_state,
-      resultSummary: summarizeToolResult(source.tool_name, result.text), artifact: projectToolArtifact(source),
+      resultSummary: summarizeToolResult(source.tool_name, result.text), outputBody: projectToolOutput(source),
+      resultFacts: projectToolResultFacts(source),
     };
     parent.programCalls = [...(parent.programCalls ?? []), child];
     owner.sourceEntryIds = [...(owner.sourceEntryIds ?? [owner.id]), entry.entry_id];
@@ -5055,23 +5061,25 @@ function toolResultStatus(state?: string): ToolTrace['status'] {
   return state ? 'failed' : 'running';
 }
 
-function projectToolArtifact(
+function projectToolResultFacts(value?: ProtocolEntry['tool_result']): Record<string, unknown> | undefined {
+  if (!value?.result_facts_json) return undefined;
+  const facts: unknown = JSON.parse(value.result_facts_json);
+  if (!facts || typeof facts !== 'object' || Array.isArray(facts)) {
+    throw new RuntimeApiError('TOOL_RESULT_FACTS_INVALID', '工具结果状态暂时无法读取。', true);
+  }
+  return facts as Record<string, unknown>;
+}
+
+function projectToolOutput(
   value?: ProtocolEntry['tool_result'],
-): ToolTrace['artifact'] | undefined {
-  const disposition = value?.artifact_disposition;
-  const coverage = value?.source_coverage;
-  const display = value?.display_kind;
-  if (
-    !['NOT_REQUIRED', 'AVAILABLE', 'INCOMPLETE', 'UNAVAILABLE'].includes(disposition ?? '')
-    || !['COMPLETE', 'RETAINED_SNAPSHOT'].includes(coverage ?? '')
-    || !['COMPLETE', 'HEAD_TAIL'].includes(display ?? '')
-  ) return undefined;
+): ToolTrace['outputBody'] | undefined {
+  if (!value || !['COMPLETE', 'RETAINED_SNAPSHOT'].includes(value.source_coverage ?? '')) return undefined;
   return {
-    disposition: disposition as NonNullable<ToolTrace['artifact']>['disposition'],
-    sourceCoverage: coverage as NonNullable<ToolTrace['artifact']>['sourceCoverage'],
-    displayKind: display as NonNullable<ToolTrace['artifact']>['displayKind'],
-    sourceCoverageReason: value?.source_coverage_reason || undefined,
-    unavailabilityReason: value?.artifact_unavailability_reason || undefined,
+    available: Boolean(value.output_body_available),
+    omitted: Boolean(value.output_omitted),
+    sourceCoverage: value.source_coverage as NonNullable<ToolTrace['outputBody']>['sourceCoverage'],
+    sourceCoverageReason: value.source_coverage_reason || undefined,
+    unavailabilityReason: value.output_unavailability_reason || undefined,
   };
 }
 
@@ -5234,7 +5242,6 @@ function toolDisplayName(name: string, argumentsJson?: string): string {
     }
     return '结束规划';
   }
-  if (normalized.includes('read_artifact')) return '读取保留内容';
   if (normalized.includes('write_file')) return '写入文件';
   if (normalized.includes('read_file')) return '读取文件';
   if (normalized.includes('apply_patch') || normalized.includes('edit')) return '更新文件';
@@ -5639,14 +5646,14 @@ function formatRelativeTime(value: string): string {
 
 function toolKind(name: string): ToolTrace['kind'] {
   const lower = name.toLowerCase();
-  if (['exec_cell', 'query_cells', 'manage_cell'].includes(lower)) return 'artifact';
+  if (['exec_cell', 'query_cells', 'manage_cell'].includes(lower)) return 'tool';
   if (['exec_process', 'query_processes', 'manage_process'].includes(lower)) return 'terminal';
   if (lower.includes('terminal') || lower.includes('exec')) return 'terminal';
   if (lower.includes('read')) return 'read';
   if (lower.includes('edit') || lower.includes('write')) return 'edit';
   if (lower.includes('search')) return 'search';
   if (lower.includes('mcp')) return 'mcp';
-  return 'artifact';
+  return 'tool';
 }
 
 function projectVisualizations(items: ProtocolEntry['visualizations']): VisualizationOccurrence[] {

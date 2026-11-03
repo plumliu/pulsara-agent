@@ -1,6 +1,8 @@
 """Real Host/queue/runner execution for reusable Agent sessions."""
 from __future__ import annotations
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
 import asyncio
 import json
 from time import monotonic
@@ -682,7 +684,7 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                     from types import SimpleNamespace
                     self.message_injected = True
                     outcome = await self.core._send_agent_message(self.root_id, 'AGENT_MESSAGE_DURING_TOOL',
-                        SimpleNamespace(session_id=self.agent_id, work_id=None))
+                        SimpleNamespace(session_id=self.agent_id, work_id=None, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
                     assert outcome['delivery'] == 'queued'
             elif not self.child_requests:
                 self.requests.append(request)

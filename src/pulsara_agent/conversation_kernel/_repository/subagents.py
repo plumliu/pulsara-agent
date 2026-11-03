@@ -217,6 +217,15 @@ class _SubagentOperations:
         return value
 
     @staticmethod
+    def _agent_work_summary_value(row):
+        execution = request_execution_from_row(row)
+        if execution is None:
+            raise ConversationKernelConflict("delegated work does not identify a NEW_TURN request")
+        return {"work_id": str(row["id"]), "agent_id": str(row["session_id"]),
+                "status": execution.status.value, "terminal_reason": execution.terminal_reason,
+                "cursor": str(row["id"])}
+
+    @staticmethod
     def _agent_prompt_text(connection, row):
         from pulsara_agent.conversation_kernel.prompt_storage import (
             hydrate_canonical_prompt_owner,
@@ -954,7 +963,9 @@ class _SubagentOperations:
                 ORDER BY q.queue_sequence LIMIT %s""",
                 (root_session_id, agent_id, cursor, agent_id, cursor, limit),
             ).fetchall()
-            return tuple(self._agent_work_value(connection, row) for row in rows)
+            # A directory page exposes identities/state only. Bodies remain on
+            # the exact WORK query and the existing material/dependency owners.
+            return tuple(self._agent_work_summary_value(row) for row in rows)
 
     def list_root_agent_session_ids(self, *, root_session_id, deadline_monotonic):
         with self._provider.connection(
@@ -1095,12 +1106,9 @@ class _SubagentOperations:
                 actor_id=actor_id,
                 locked_sessions=locked_sources | {agent_id},
             )
-            return tuple(
-                self._agent_work_in_connection(
-                    connection, root_session_id=root_guard.session_id, work_id=x
-                )
-                for x in ids
-            )
+            return tuple(self._agent_work_summary_value(connection.execute(
+                _WORK_SELECT + " AND q.id=%s", (root_guard.session_id, work_id)).fetchone())
+                for work_id in ids)
 
     @_retry_agent_transaction
     def enqueue_agent_steer(
@@ -1115,6 +1123,7 @@ class _SubagentOperations:
         occurred_at,
         actor_id,
         deadline_monotonic,
+        result_check=None,
     ):
         input_origin = "AGENT_MESSAGE"
         with self._writer_transaction(
@@ -1159,6 +1168,13 @@ class _SubagentOperations:
             ).fetchone()
             if turn is None:
                 return None
+            work = connection.execute(
+                """SELECT q.id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id WHERE q.session_id=%s AND e.turn_id=%s AND q.input_origin='AGENT_INSTRUCTION' """,
+                (guard.session_id, target_turn_id),
+            ).fetchone()
+            work_id = None if work is None else work["id"]
+            if result_check is not None:
+                result_check(work_id)
             pairs = {
                 (guard.session_id, candidate)
                 for candidate in _session_ids_in_text(text)
@@ -1208,11 +1224,7 @@ class _SubagentOperations:
                 {"delivery_mode": "STEER_ACTIVE_TURN", "input_origin": input_origin},
             )
             result = dict(row)
-            work = connection.execute(
-                """SELECT q.id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id WHERE q.session_id=%s AND e.turn_id=%s AND q.input_origin='AGENT_INSTRUCTION' """,
-                (guard.session_id, target_turn_id),
-            ).fetchone()
-            result["work_id"] = None if work is None else work["id"]
+            result["work_id"] = work_id
             return result
 
     def pending_agent_message_sources(

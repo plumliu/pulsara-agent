@@ -16,11 +16,7 @@ from pulsara_agent.conversation_kernel.contracts import (
     PromptDeliveryMode,
 )
 from pulsara_agent.conversation_kernel.prompt_content import FrozenCanonicalPrompt
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputArtifactUnavailabilityReason,
-    ToolResultDisplayKind,
-)
+from pulsara_agent.ports.tool_output import ToolOutputUnavailableReason
 from pulsara_agent.ports.tool_execution import (
     FrozenToolJsonDict,
     ToolOutputSourceCoverage,

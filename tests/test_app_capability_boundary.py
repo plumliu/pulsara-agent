@@ -1,5 +1,11 @@
 """Observable management contracts for the GUI/Host capability boundary."""
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
+
+from pulsara_agent.identity import derive_id as _capability_page_id
+
+
 import asyncio
 import json
 from pathlib import Path
@@ -18,6 +24,9 @@ from pulsara_agent.conversation_kernel.capability_management_execution import (
 from pulsara_agent.primitives.context import thaw_json
 
 
+_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
+
+
 def skill_source(tmp_path, name="boundary-example"):
     source = tmp_path / "download" / name
     source.mkdir(parents=True)
@@ -31,14 +40,14 @@ def skill_source(tmp_path, name="boundary-example"):
 async def invoke(service, **arguments):
     return await CapabilityManagementCall(
         service, await service.prepare(arguments)
-    ).execute()
+    ).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
 
 
 async def query_sources(service, **arguments):
     from pulsara_agent.conversation_kernel.capability_query import CapabilitySourceQuery
     from pulsara_agent.capability.source_query import parse_query
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
-    return await CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT).execute(
+    return await CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT, fits_result=_CAPABILITY_PAGE_BUDGET.fits).execute(
         parse_query(arguments))
 
 
@@ -62,7 +71,7 @@ def test_skill_lifecycle_keeps_source_and_uses_frozen_target(
         args = dict(action="INSTALL_LOOSE_SKILL", scope=scope, source_path=str(source))
         prepared = await service.prepare(args)
         assert not (service.workspace_root / ".pulsara").exists()
-        result = await CapabilityManagementCall(service, prepared).execute()
+        result = await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED"
         target_root = (
             tmp_path / "private"
@@ -223,7 +232,7 @@ def test_hook_trust_requires_full_review_then_future_source_adopts_trust(tmp_pat
         values = await form.prepare_submission({"hook_review_accepted": True})
         assert not service.hooks.discover().source_snapshots[-1].runnable
         call.accept(AcceptedCapabilityFormSubmission(values))
-        assert (await call.execute())["status"] == "APPLIED"
+        assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
         assert service.hooks.discover().source_snapshots[-1].runnable
         await invoke(
             service,
@@ -264,7 +273,7 @@ def test_hook_review_never_retargets_changed_definitions(tmp_path, after_submiss
         path.write_text(json.dumps(hook_document("printf changed")))
         with pytest.raises(McpManagementConflict):
             if after_submission:
-                await call.execute()
+                await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
             else:
                 await form.prepare_submission({"hook_review_accepted": True})
         assert not service.hooks.discover().source_snapshots[-1].runnable
@@ -376,7 +385,7 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
                 await form.prepare_submission({"hook_review_accepted": True})
             )
         )
-        assert (await call.execute())["status"] == "APPLIED"
+        assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
         plugin = await service._plugin(None, "example")
         assert not plugin.enabled
         observed = await inspect_hook(
@@ -401,7 +410,7 @@ def test_disabled_plugin_hook_full_inspection_trust_and_enable_are_separate(tmp_
                 await form.prepare_submission({"enable_review_accepted": True})
             )
         )
-        assert (await enable.execute())["status"] == "APPLIED"
+        assert (await enable.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
         observed = await inspect_hook(
             service,
             scope="USER",
@@ -535,7 +544,7 @@ def test_skill_install_cancellation_signals_native_publisher_and_joins_exact_out
             )
         )
         task = asyncio.create_task(
-            CapabilityManagementCall(service, prepared).execute()
+            CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         )
         try:
             assert await asyncio.to_thread(started.wait, 5)
@@ -656,7 +665,7 @@ def test_unavailable_native_hook_composition_remains_unknown_in_query(
                 await form.prepare_submission({"enable_review_accepted": True})
             )
         )
-        await enable.execute()
+        await enable.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
 
         def unavailable(**kwargs):
             raise OSError("composition unavailable fixture")

@@ -186,7 +186,9 @@ def test_real_mcp_tool_query_preserves_package_named_schema_fields(tmp_path):
                 borrow = port.borrow_tool_surface(surface)
                 name = next(spec.name for spec in surface.model_surface.tool_specs if spec.name.endswith("inspect"))
                 target = {"kind": "MCP_TOOL", "server_id": "catalog", "tool_name": name}
-                result = await port._query_capabilities_result(tool_name="query_capabilities", arguments={"target": target}, invocation_context=SimpleNamespace(surface_borrow=borrow))
+                from pulsara_agent.identity import random_id
+                from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+                result = await port._query_capabilities_result(tool_name="query_capabilities", arguments={"target": target}, invocation_context=SimpleNamespace(surface_borrow=borrow, page_budget=ToolResultPageBudget(tool_call_id=random_id("call"))))
                 assert result.state == "SUCCESS"
                 assert json.loads(result.content)["input_schema"] == schema
             finally:

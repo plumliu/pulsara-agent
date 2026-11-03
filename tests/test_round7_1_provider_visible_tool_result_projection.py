@@ -29,9 +29,7 @@ from pulsara_agent.model_input.contracts import (
     ModelInputCompileFailureKind,
     ProviderToolCall,
     StructuredModelInputCompileError,
-    StructuredModelInputLimits,
     ToolResultProviderRenderMode,
-    compiled_tool_result_source_fingerprint,
 )
 from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
@@ -43,7 +41,6 @@ from pulsara_agent.primitives.tool_observation import (
     ToolObservationOrigin,
 )
 from pulsara_agent.primitives.tool_result_projection import (
-    BEST_AVAILABLE_TOOL_RESULT_DELIVERY,
     FrozenToolResultDeliveryRequirement,
     MAXIMUM_TOOL_RESULT_MEMORY_PROVENANCE_UTF8_BYTES,
     ToolResultDeliveryRequirement,
@@ -135,11 +132,12 @@ def test_round7_1_full_variant_uses_exact_logical_utf8_quote(
     seed: str,
 ) -> None:
     item, _body = _body_with_exact_logical_bytes(target, seed=seed)
-    lowered = lower_canonical_item(
-        item,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
-    )
+    if target > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES:
+        with pytest.raises(StructuredModelInputCompileError) as failure:
+            lower_canonical_item(item)
+        assert failure.value.kind is ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
+        return
+    lowered = lower_canonical_item(item)
     full = tuple(
         variant
         for variant in lowered.tool_result_variants
@@ -150,70 +148,29 @@ def test_round7_1_full_variant_uses_exact_logical_utf8_quote(
         assert full[0].utf8_bytes == target
 
 
-def test_round7_1_no_full_variant_reports_actual_first_mode() -> None:
+def test_round7_1_oversized_frozen_projection_has_a_typed_failure() -> None:
     item, _body = _body_with_exact_logical_bytes(40_001, seed="🙂")
-    request = _prepared_request(
-        _snapshot(_user("question"), item),
-        _sources(),
-    )
-    compiled = StructuredModelInputCompiler().compile(request)
-    decision = compiled.tool_result_decisions[0]
-    assert decision.source_entry_fingerprint == (
-        compiled_tool_result_source_fingerprint(item)
-    )
-    assert decision.first_legal_mode is ToolResultProviderRenderMode.COMPACT
-    assert decision.selected_mode is ToolResultProviderRenderMode.COMPACT
-    assert decision.reason_code == "FULL_INELIGIBLE_RESULT_BOUND"
-    assert decision.delivery_requirement is ToolResultDeliveryRequirement.BEST_AVAILABLE
+    request = _prepared_request(_snapshot(_user("question"), item), _sources())
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        StructuredModelInputCompiler().compile(request)
+    assert failure.value.kind is ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
 
 
-def test_round7_1_complete_canonical_body_can_still_have_no_full_variant() -> None:
+def test_round7_1_complete_raw_body_must_fit_its_whole_message() -> None:
     item = _tool_result("a" * 40_000, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
-    lowered = lower_canonical_item(
-        item,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
-    )
-    assert item.tool_result_context is not None
-    assert item.tool_result_context.display_kind.value == "COMPLETE"
-    assert lowered.tool_result_variants[0].mode is ToolResultProviderRenderMode.COMPACT
-    assert all(
-        variant.mode is not ToolResultProviderRenderMode.FULL
-        for variant in lowered.tool_result_variants
-    )
+    assert item.tool_result_context.output_omitted is False
+    with pytest.raises(StructuredModelInputCompileError) as failure:
+        lower_canonical_item(item)
+    assert failure.value.kind is ModelInputCompileFailureKind.FULL_REQUIRED_TOOL_RESULT_NOT_INLINEABLE
 
 
-def test_round7_1_variant_validator_accepts_ordered_subsets_without_full() -> None:
-    item = _tool_result("x" * 40_000, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
-    lowered = lower_canonical_item(
-        item,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
-    )
-    by_mode = {variant.mode: variant for variant in lowered.tool_result_variants}
-    for mode in (
-        ToolResultProviderRenderMode.COMPACT,
-        ToolResultProviderRenderMode.REF_ONLY,
-    ):
-        text = by_mode[mode].message.content[0].text
-        body = json.loads(text)["pulsara_tool_result"]["body"]
-        target, _ = json.JSONDecoder().raw_decode(body.split("target=", 1)[1])
-        assert target == {"kind": "ARTIFACT", "artifact_id": item.tool_result_context.artifact_id}
-        assert "offset/limit" not in text
-    ref_and_omitted = (
-        by_mode[ToolResultProviderRenderMode.REF_ONLY],
-        by_mode[ToolResultProviderRenderMode.OMITTED_BODY],
-    )
-    assert LoweredCanonicalItem(item, None, ref_and_omitted).tool_result_variants == (
-        ref_and_omitted
-    )
-    assert LoweredCanonicalItem(
-        item,
-        None,
-        (by_mode[ToolResultProviderRenderMode.OMITTED_BODY],),
-    ).tool_result_variants
-    with pytest.raises(ValueError, match="ordered subset"):
-        LoweredCanonicalItem(item, None, tuple(reversed(ref_and_omitted)))
+def test_round7_1_frozen_projection_has_exactly_one_full_representation() -> None:
+    item = _tool_result("small frozen body", sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
+    lowered = lower_canonical_item(item)
+    assert len(lowered.tool_result_variants) == 1
+    assert lowered.tool_result_variants[0].mode is ToolResultProviderRenderMode.FULL
+    with pytest.raises(ValueError, match="one FULL"):
+        LoweredCanonicalItem(item, None, lowered.tool_result_variants * 2)
 
 
 def test_round7_1_tool_result_carriers_and_delivery_requirement_are_closed() -> None:
@@ -228,12 +185,12 @@ def test_round7_1_tool_result_carriers_and_delivery_requirement_are_closed() -> 
     with pytest.raises(TypeError, match="requirement is invalid"):
         FrozenToolResultDeliveryRequirement(  # type: ignore[arg-type]
             "FULL_REQUIRED",
-            ToolResultFullDeliveryReason.ARTIFACT_PAGE,
+            ToolResultFullDeliveryReason.RESULT_PROJECTION,
         )
     with pytest.raises(TypeError, match="reason is invalid"):
         FrozenToolResultDeliveryRequirement(  # type: ignore[arg-type]
             ToolResultDeliveryRequirement.FULL_REQUIRED,
-            "ARTIFACT_PAGE",
+            "RESULT_PROJECTION",
         )
 
 
@@ -254,8 +211,6 @@ def test_round7_1_fifty_memory_ids_share_the_canonical_eight_kib_bound() -> None
     )
     lowered = lower_canonical_item(
         item,
-        artifact_read_available=True,
-        limits=StructuredModelInputLimits(),
     )
     assert lowered.tool_result_variants
     assert lowered.tool_result_variants[0].mode is ToolResultProviderRenderMode.FULL
@@ -295,7 +250,7 @@ def test_round7_1_compatible_append_keeps_installed_prefix_and_actual_mode() -> 
         (LLMTextPart(""),),
         tool_calls=(call,),
     )
-    result_item, _body = _body_with_exact_logical_bytes(40_001, seed="中")
+    result_item, _body = _body_with_exact_logical_bytes(20_000, seed="中")
     result_item = replace(
         result_item,
         source_entry_id='entry:nvhyc6ehb7acx2htbxgk6cev4q',
@@ -312,74 +267,39 @@ def test_round7_1_compatible_append_keeps_installed_prefix_and_actual_mode() -> 
         request=second,
     )
     decision = appended.compiled_input.tool_result_decisions[0]
-    assert decision.first_legal_mode is ToolResultProviderRenderMode.COMPACT
-    assert decision.selected_mode is ToolResultProviderRenderMode.COMPACT
-    assert decision.reason_code == "FULL_INELIGIBLE_RESULT_BOUND"
+    assert decision.first_legal_mode is ToolResultProviderRenderMode.FULL
+    assert decision.selected_mode is ToolResultProviderRenderMode.FULL
+    assert decision.reason_code == "SELECTED_FULL"
     assert after.messages[: len(installed.messages)] == installed.messages
 
 
-def test_round7_1_parallel_siblings_degrade_without_downgrading_required_result() -> (
-    None
-):
-    calls = tuple(
-        ProviderToolCall(f"call:{index}", "test_tool", freeze_json({}))
-        for index in range(1, 4)
-    )
-    request_item = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        'entry:k5zfbzct6mhkogz33gyubxx3pa',
-        1,
-        'turn:klmmazz67vfgsfsvg6ceqgdsfu',
-        (LLMTextPart(""),),
-        tool_calls=calls,
-    )
-    results = tuple(
-        replace(
-            _tool_result(
-                ("required-" if index == 1 else "ordinary-") + ("x" * 12_000),
-                sequence=index + 1,
-                turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu',
-            ),
-            tool_call_id=calls[index - 1].tool_call_id,
-            tool_result_delivery=(
-                full_required_tool_result_delivery(
-                    ToolResultFullDeliveryReason.ARTIFACT_PAGE
-                )
-                if index == 1
-                else BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-            ),
-        )
-        for index in range(1, 4)
-    )
-    snapshot = _snapshot(request_item, *results)
-    request = _prepared_request(snapshot, _sources(), budget=1)
+def test_round7_1_parallel_siblings_all_keep_their_frozen_projections() -> None:
+    calls = tuple(ProviderToolCall(f"call:{index}", "test_tool", freeze_json({})) for index in range(1,4))
+    request_item = FrozenProviderInputItem(FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
+        'entry:k5zfbzct6mhkogz33gyubxx3pa', 1, 'turn:klmmazz67vfgsfsvg6ceqgdsfu',
+        (LLMTextPart(""),), tool_calls=calls)
+    results = tuple(replace(_tool_result("frozen-" + "x" * 12000,
+        sequence=index+1, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu'),
+        tool_call_id=calls[index-1].tool_call_id) for index in range(1,4))
+    request = _prepared_request(_snapshot(request_item, *results), _sources(), budget=1)
     compiler = StructuredModelInputCompiler()
     initial = compiler.compile(request)
-    assert all(item.selected_mode is ToolResultProviderRenderMode.FULL for item in initial.tool_result_decisions)
     floors = compiler.next_wire_render_floors(request=request, compiled=initial)
-    constrained = compiler.compile(request, source_render_floors=floors[0], tool_render_floors=floors[1], wire_selection=initial)
-    decisions = constrained.tool_result_decisions
-    assert decisions[0].delivery_requirement is (
-        ToolResultDeliveryRequirement.FULL_REQUIRED
-    )
-    assert decisions[0].selected_mode is ToolResultProviderRenderMode.FULL
-    assert any(
-        decision.selected_mode is not ToolResultProviderRenderMode.FULL
-        for decision in decisions[1:]
-    )
-    tool_result_ids = tuple(
-        message.tool_call_id
-        for message in constrained.messages
-        if message.tool_call_id is not None
-    )
-    assert tool_result_ids == tuple(call.tool_call_id for call in calls)
+    assert floors is not None and floors[1] == ()
+    constrained = compiler.compile(request, source_render_floors=floors[0],
+        tool_render_floors=floors[1], wire_selection=initial)
+    assert all(decision.delivery_requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
+        and decision.selected_mode is ToolResultProviderRenderMode.FULL
+        for decision in constrained.tool_result_decisions)
+    assert tuple(message for message in constrained.messages if message.tool_call_id is not None) == tuple(
+        message for message in initial.messages if message.tool_call_id is not None)
 
 
 @pytest.mark.parametrize(
     "reason",
     [
-        ToolResultFullDeliveryReason.ARTIFACT_PAGE,
-        ToolResultFullDeliveryReason.ARTIFACT_EXPORT_LOCATION,
+        ToolResultFullDeliveryReason.RESULT_PROJECTION,
+        ToolResultFullDeliveryReason.IMAGE_ATTACHMENT,
     ],
 )
 def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(
@@ -416,57 +336,13 @@ def test_round7_1_full_required_has_closed_not_inlineable_and_budget_failures(
     # the semantic compiler must preserve this required body until that boundary.
 
 
-def test_round7_1_full_delivery_classifier_is_request_and_result_derived() -> None:
-    assert classify_tool_result_delivery(
-        tool_name="read_artifact", result_state="SUCCESS"
-    ) == full_required_tool_result_delivery(ToolResultFullDeliveryReason.ARTIFACT_PAGE)
-    assert (
-        classify_tool_result_delivery(tool_name="read_artifact", result_state="ERROR")
-        == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    )
-    assert (
-        classify_tool_result_delivery(
-            tool_name="third_party_tool", result_state="SUCCESS"
-        )
-        == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    )
-    for tool_name in ("query_capabilities",):
-        assert classify_tool_result_delivery(
-            tool_name=tool_name,
-            result_state="SUCCESS",
-        ) == full_required_tool_result_delivery(
-            ToolResultFullDeliveryReason.MCP_DIRECTORY_PAGE
-        )
-
-    assert classify_tool_result_delivery(
-        tool_name="query_capabilities",
-        result_state="SUCCESS",
-        public_arguments={
-            "target": {"kind": "MCP_TOOL", "server_id": "s", "tool_name": "t"}
-        },
-    ) == full_required_tool_result_delivery(
-        ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
-    )
-
-    assert (
-        classify_tool_result_delivery(
-            tool_name="query_capabilities",
-            result_state="SUCCESS",
-            public_arguments={
-                "target": {
-                    "kind": "HOOK_SOURCE",
-                    "scope": "USER",
-                    "source_kind": "LOCAL",
-                }
-            },
-        )
-        == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
-    )
-
-    for reason in ToolResultFullDeliveryReason:
-        requirement = full_required_tool_result_delivery(reason)
-        assert requirement.requirement is ToolResultDeliveryRequirement.FULL_REQUIRED
-        assert requirement.reason is reason
+def test_round7_1_all_frozen_projections_require_full_delivery() -> None:
+    for tool_name in ("read_file", "query_capabilities", "third_party_tool", "manage_capability"):
+        for state in ("SUCCESS", "SYSTEM_ERROR", "CANCELLED"):
+            assert classify_tool_result_delivery(tool_name=tool_name, result_state=state) == (
+                full_required_tool_result_delivery(ToolResultFullDeliveryReason.RESULT_PROJECTION))
+    assert classify_tool_result_delivery(tool_name="view_image", result_state="SUCCESS",
+        has_image_attachment=True) == full_required_tool_result_delivery(ToolResultFullDeliveryReason.IMAGE_ATTACHMENT)
 
 
 def test_round7_1_logical_quote_is_not_chat_or_responses_wire_bytes() -> None:
@@ -512,7 +388,7 @@ def test_tool_result_wire_has_no_citation_handle_or_legacy_null_slot() -> None:
 
 def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
+    assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
     assert len(CONVERSATION_KERNEL_RELATIONS) == 30
@@ -565,48 +441,60 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
 
 
 @pytest.mark.parametrize("effect_class, expected_outcome", [
-    ("read_only", "NO_RELIABLE_OBSERVATION"),
-    ("filesystem_write", "UNKNOWN"),
+    ("read_only", "NO_RELIABLE_OBSERVATION"), ("filesystem_write", "UNKNOWN"),
 ])
-def test_explicit_failure_facts_survive_preview_and_all_provider_variants(
-    effect_class, expected_outcome,
-) -> None:
+def test_explicit_failure_facts_survive_body_publication_failure(effect_class, expected_outcome) -> None:
     from time import monotonic
     from pulsara_agent.conversation_kernel.tool_execution import _tool_invocation_failure
-    from pulsara_agent.conversation_kernel.tool_artifacts import (
-        ToolOutputArtifactProcessor, KnownArtifactPublicationFailure,
-    )
-    from tests.test_round1_tool_output_artifact import _RecordingPublisher
+    from pulsara_agent.conversation_kernel.tool_outputs import KnownOutputPublicationFailure
+    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
+    from tests.support.tool_outputs import RecordingOutputPublisher, output_processor
 
     result = _tool_invocation_failure(RuntimeError("connection closed " * 9000), effect_class)
+    facts = dict(result.required_facts)
+    assert facts["physical_outcome"] == expected_outcome
+    assert facts["retry_performed"] is False
     original = json.loads(result.content)
-    processor = ToolOutputArtifactProcessor(
-        object(), publisher=_RecordingPublisher(failure=KnownArtifactPublicationFailure("unavailable")),
-    )
-    projection = processor.prepare(
-        session_id='session:336wrfwkamrr3up6kjtsgvgcte',
+    assert facts["guidance"] == original["guidance"]
+    preview = canonical_json_bytes({**facts, "message_preview": "connection closed"}).decode()
+    processor = output_processor(RecordingOutputPublisher(failure=KnownOutputPublicationFailure("unavailable")))
+    body = processor.materialize_body(session_id='session:336wrfwkamrr3up6kjtsgvgcte',
         workspace_id='workspace:336wrfwkamrr3up6kjtsgvgcte',
-        result_entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a',
-        public_output=result.content.decode(), candidate=None,
-        artifact_inline_result=False, deadline_monotonic=monotonic()+5,
-    )
-    preview = projection.canonical_preview.canonical_bytes.decode()
-    parsed = json.loads(preview)
-    assert parsed['physical_outcome'] == expected_outcome
-    assert parsed['retry_performed'] is False
-    assert parsed['guidance'] == original['guidance']
-    assert len(preview.encode()) < len(result.content)
+        result_entry_id='entry:2b6xhmrsvzz7q4sgugd5cuq34a', public_output=result.content.decode(),
+        output_body_candidate=None, public_format=ToolOutputSourceFormatHint.JSON,
+        deadline_monotonic=monotonic()+5)
+    projection = processor.prepare(body=body, native_output=preview, output_omitted=True)
+    assert projection.output_body is None and projection.output_unavailability_reason is not None
+    assert projection.canonical_preview.canonical_bytes.decode() == preview
     item = _tool_result(preview, sequence=2, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu')
-    item = replace(item, tool_result_context=replace(
-        item.tool_result_context,
-        result_state='SYSTEM_ERROR', artifact_id=None,
-        artifact_disposition=projection.artifact_disposition,
-        artifact_unavailability_reason=projection.artifact_unavailability_reason,
-    ))
-    lowered = lower_canonical_item(item, artifact_read_available=False, limits=StructuredModelInputLimits())
-    assert any(v.mode is ToolResultProviderRenderMode.OMITTED_BODY for v in lowered.tool_result_variants)
-    for variant in lowered.tool_result_variants:
-        body = decode_provider_tool_result_observation(variant.message.content[0].text)['body']
-        assert f'"physical_outcome":"{expected_outcome}"' in body
-        assert '"retry_performed":false' in body
-        assert original['guidance'] in body
+    item = replace(item, tool_result_context=replace(item.tool_result_context,
+        result_state="SYSTEM_ERROR", output_omitted=True, output_available=False,
+        output_unavailability_reason=projection.output_unavailability_reason))
+    lowered = lower_canonical_item(item)
+    assert len(lowered.tool_result_variants) == 1
+    actual = decode_provider_tool_result_observation(lowered.tool_result_variants[0].message.content[0].text)["body"]
+    assert actual == preview
+    assert json.loads(actual)["physical_outcome"] == expected_outcome
+
+
+@pytest.mark.parametrize("state", ["SUCCESS", "APPLICATION_ERROR", "SYSTEM_ERROR", "CANCELLED",
+    "INVALID_ARGUMENTS", "PERMISSION_DENIED", "TOOL_UNAVAILABLE", "CANCELLED_BEFORE_DISPATCH"])
+def test_shared_page_budget_covers_near_boundary_error_states(state):
+    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+    from pulsara_agent.primitives.tool_result_projection import _maximum_tool_result_page_timing
+    call_id = derive_id("call", "near-boundary-result-state")
+    budget = ToolResultPageBudget(call_id)
+    low, high = 0, MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+    while low < high:
+        middle = (low + high + 1) // 2
+        if budget.fits("x" * middle):
+            low = middle
+        else:
+            high = middle - 1
+    body = "x" * low
+    assert budget.fits(body) and not budget.fits(body + "x")
+    for kind in ToolResultLogicalMessageKind:
+        rendered = render_provider_tool_result_logical_message(message_kind=kind,
+            tool_call_id=call_id, body=body, result_state=state,
+            timing=_maximum_tool_result_page_timing(), model_visible_memory_ids=())
+        assert rendered.logical_utf8_bytes <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES

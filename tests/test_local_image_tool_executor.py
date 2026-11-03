@@ -44,6 +44,7 @@ from pulsara_agent.hooks.contracts import (
     HookScopeKind,
 )
 from pulsara_agent.primitives.context import freeze_json
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
 from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSourceKind,
@@ -104,10 +105,16 @@ def _partition_executor(kinds, events: list[str]):
     async def execute_one(_self, *, calls, _preauthorization=None, **_kwargs):
         call = calls[0]
         assert _preauthorization is not None
+        assert call.tool_call_id in {
+            budget.tool_call_id for budget in _kwargs["result_page_budgets"]
+        }
         events.append(f"serial:{call.tool_call_id}")
         return ToolBatchExecutionResult(1)
 
     async def concurrent(_self, *, calls, **_kwargs):
+        assert {call.tool_call_id for call in calls} <= {
+            budget.tool_call_id for budget in _kwargs["result_page_budgets"]
+        }
         events.append("concurrent:" + ",".join(call.tool_call_id for call in calls))
         return ToolBatchExecutionResult(len(calls))
 
@@ -128,6 +135,7 @@ def _partition_kwargs(calls, *, hook_scope=None, hook_view=None):
         "continuity_scope": object(),
         "surface_borrow": object(),
         "image_call_allowances": (),
+        "result_page_budgets": tuple(ToolResultPageBudget(call.tool_call_id) for call in calls),
         "call_ordinal_offset": 0,
         "hook_scope": hook_scope,
         "hook_view": hook_view,
@@ -321,6 +329,7 @@ def test_reverse_physical_completion_still_releases_settlement_in_call_order() -
             continuity_scope=object(),
             surface_borrow=object(),
             image_call_allowances=(),
+            result_page_budgets=(),
             call_ordinal_offset=0,
         )
 
@@ -637,7 +646,8 @@ def test_concurrent_view_window_queues_tail_until_physical_completion() -> None:
                 agent_invocation_snapshot=None,
                 continuity_scope=object(),
                 surface_borrow=object(),
-                    image_call_allowances=(),
+                image_call_allowances=(),
+                result_page_budgets=(),
                 call_ordinal_offset=0,
             )
         )
@@ -700,7 +710,8 @@ def test_cancelling_concurrent_view_segment_drains_started_calls() -> None:
                 agent_invocation_snapshot=None,
                 continuity_scope=object(),
                 surface_borrow=object(),
-                    image_call_allowances=(),
+                image_call_allowances=(),
+                result_page_budgets=(),
                 call_ordinal_offset=0,
             )
         )

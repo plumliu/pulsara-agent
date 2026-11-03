@@ -54,6 +54,10 @@ class ProcessInputError(RuntimeError):
     pass
 
 
+class ProcessInputClosedError(ProcessInputError):
+    """Input was rejected before any stdin write was attempted."""
+
+
 class ProcessDecisionIdentityConflict(RuntimeError):
     """Admission rejected without acquiring the existing decision owner."""
 
@@ -186,6 +190,7 @@ class ProcessRegistry:
         decision_attempt_id: str | None = None,
         decision_deadline_monotonic: float | None = None,
         initial_result_reader: Callable[[_ProcessState], None] | None = None,
+        before_spawn: Callable[[TerminalResult], None] | None = None,
     ) -> tuple[_ProcessState, bool]:
         decision_handle = TerminalForegroundDecisionAttemptHandle(
             attempt_id=decision_attempt_id or random_id("terminal-decision"),
@@ -273,6 +278,7 @@ class ProcessRegistry:
                         conversation_scope_kind="ROOT",
                     )
                 ),
+                before_spawn=before_spawn,
             )
         except BaseException as error:
             scope = decision.interop_scope
@@ -549,6 +555,7 @@ class ProcessRegistry:
         shell_argv: tuple[str, ...],
         env: dict[str, str],
         origin: TerminalProcessOrigin,
+        before_spawn: Callable[[TerminalResult], None] | None = None,
     ) -> _ProcessState:
         with self._lock:
             process_id = random_id("process")
@@ -578,6 +585,14 @@ class ProcessRegistry:
         process: subprocess.Popen[bytes] | None = None
         stdin: IO[bytes] | None = None
         try:
+            if before_spawn is not None:
+                cursor = output.capture_cursor()
+                before_spawn(TerminalResult(
+                    status=TerminalStatus.RUNNING,
+                    output="", exit_code=-1, cwd=str(cwd), process_id=process_id,
+                    output_cursor=cursor, retained_from_cursor=cursor,
+                    output_body_candidate=output.body_candidate(),
+                ))
             if scope is not None:
                 scope.prepare()
                 env = scope.environment(env)
@@ -889,6 +904,7 @@ class ProcessRegistry:
         yield_time_ms: int,
         max_output_chars: int,
         owner_host_session_id: str,
+        before_effect: Callable[[TerminalResult], None] | None = None,
     ) -> TerminalResult:
         with self._owned(process_id, owner_host_session_id) as state:
             if (
@@ -896,8 +912,11 @@ class ProcessRegistry:
                 or state.stdin is None
                 or state.stdin_closed
             ):
-                raise ProcessInputError("terminal process stdin is closed")
+                raise ProcessInputClosedError("terminal process stdin is closed")
             payload = (data + ("\n" if append_newline else "")).encode("utf-8")
+            before_write = state.output.capture_cursor()
+            if before_effect is not None:
+                before_effect(_snapshot(state, 1, since_cursor=before_write))
             try:
                 state.stdin.write(payload)
                 state.stdin.flush()
@@ -906,12 +925,15 @@ class ProcessRegistry:
             # Reuse the same physical boundary as initial yield/wait. Output or PTY
             # echo does not establish that an interactive response is complete.
             state.physical_completion.wait(yield_time_ms / 1000)
-            return _snapshot(state, max_output_chars)
+            return _snapshot(state, max_output_chars, since_cursor=before_write)
 
     def close_stdin(
-        self, process_id: str, *, max_output_chars: int, owner_host_session_id: str
+        self, process_id: str, *, owner_host_session_id: str,
+        before_effect: Callable[[TerminalResult], None] | None = None,
     ) -> TerminalResult:
         with self._owned(process_id, owner_host_session_id) as state:
+            if before_effect is not None:
+                before_effect(_lifecycle_result(state))
             with state.lock:
                 if not state.stdin_closed and state.stdin is not None:
                     try:
@@ -933,15 +955,16 @@ class ProcessRegistry:
                             "terminal process stdin close failed"
                         ) from exc
                     state.stdin_closed = True
-            return _snapshot(state, max_output_chars)
+            return _lifecycle_result(state)
 
     def kill(
-        self, process_id: str, *, max_output_chars: int, owner_host_session_id: str
+        self, process_id: str, *, owner_host_session_id: str,
+        before_effect: Callable[[TerminalResult], None] | None = None,
     ) -> TerminalResult:
         termination = self.terminate_if_running(
             process_id,
-            max_output_chars=max_output_chars,
             owner_host_session_id=owner_host_session_id,
+            before_effect=before_effect,
         )
         if (
             termination.disposition
@@ -954,11 +977,13 @@ class ProcessRegistry:
         self,
         process_id: str,
         *,
-        max_output_chars: int,
         owner_host_session_id: str,
         join_timeout_seconds: float = 2.0,
+        before_effect: Callable[[TerminalResult], None] | None = None,
     ) -> TerminalTerminationResult:
         with self._owned(process_id, owner_host_session_id) as state:
+            if before_effect is not None:
+                before_effect(_lifecycle_result(state))
             with state.lock:
                 already_terminal = (
                     state.final_status is not None and state.physical_completion.is_set()
@@ -966,7 +991,7 @@ class ProcessRegistry:
             if already_terminal:
                 return TerminalTerminationResult(
                     TerminalTerminationDisposition.ALREADY_TERMINAL,
-                    _snapshot(state, max_output_chars),
+                    _lifecycle_result(state),
                     state.physical_state.value,
                     False,
                 )
@@ -989,7 +1014,7 @@ class ProcessRegistry:
                 disposition = TerminalTerminationDisposition.PHYSICAL_SETTLEMENT_INCOMPLETE
             return TerminalTerminationResult(
                 disposition,
-                _snapshot(state, max_output_chars),
+                _lifecycle_result(state),
                 state.physical_state.value,
                 group_alive,
             )
@@ -1064,7 +1089,7 @@ class ProcessRegistry:
         since_cursor: str | None = None,
     ) -> TerminalProcessLog:
         with self._owned(process_id, owner_host_session_id) as state:
-            snapshot, artifact_candidate = state.output.snapshot_with_artifact_candidate(
+            snapshot, body_candidate = state.output.snapshot_with_body_candidate(
                 maximum_chars=max_output_chars,
                 since_cursor=since_cursor,
             )
@@ -1074,7 +1099,7 @@ class ProcessRegistry:
                 truncated=(
                     snapshot.gap_before_output or snapshot.truncated_by_response_bound
                 ),
-                output_artifact_candidate=artifact_candidate,
+                output_body_candidate=body_candidate,
                 output_disposition=snapshot.disposition,
                 output_cursor=snapshot.output_cursor,
                 retained_from_cursor=snapshot.retained_from_cursor,
@@ -1478,6 +1503,7 @@ class TerminalManager:
         decision_attempt_id: str | None = None,
         decision_deadline_monotonic: float | None = None,
         cwd_scope: TerminalCwdScope = TerminalCwdScope.WORKSPACE,
+        before_spawn: Callable[[TerminalResult], None] | None = None,
     ) -> TerminalResult:
         # A command's cwd is an input, never process-local session memory.
         try:
@@ -1516,6 +1542,7 @@ class TerminalManager:
                     decision_attempt_id=attempt_id,
                     decision_deadline_monotonic=decision_deadline_monotonic,
                     initial_result_reader=read_initial_result,
+                    before_spawn=before_spawn,
                 )
             except ProcessDecisionIdentityConflict:
                 # Only this unpublished local allocation may change. Admission
@@ -1887,25 +1914,42 @@ def _snapshot(
     *,
     since_cursor: str | None = None,
 ) -> TerminalResult:
+    lifecycle = _lifecycle_result(state)
+    snapshot, body_candidate = state.output.snapshot_with_body_candidate(
+        maximum_chars=maximum_chars,
+        since_cursor=since_cursor,
+    )
+    return replace(
+        lifecycle,
+        output=snapshot.text,
+        truncated=snapshot.gap_before_output or snapshot.truncated_by_response_bound,
+        output_body_candidate=body_candidate,
+        output_disposition=snapshot.disposition,
+        output_cursor=snapshot.output_cursor,
+        retained_from_cursor=snapshot.retained_from_cursor,
+        gap_before_output=snapshot.gap_before_output,
+        truncated_by_response_bound=snapshot.truncated_by_response_bound,
+        source_coverage=snapshot.source_coverage,
+    )
+
+
+def _lifecycle_result(state: _ProcessState) -> TerminalResult:
+    """Observe actual process settlement without selecting retained output."""
+
     state.refresh()
     status = _status(state)
     code = state.process.poll()
     if status is not TerminalStatus.RUNNING:
         with state.lock:
             _frozen_status, code = _freeze_final_outcome_locked(state, code=code)
-    snapshot, artifact_candidate = state.output.snapshot_with_artifact_candidate(
-        maximum_chars=maximum_chars,
-        since_cursor=since_cursor,
-    )
     return TerminalResult(
         status=status,
-        output=snapshot.text,
+        output="",
         exit_code=(
             code if status is not TerminalStatus.RUNNING and code is not None else -1
         ),
         cwd=str(state.cwd),
         timed_out=state.timed_out,
-        truncated=snapshot.gap_before_output or snapshot.truncated_by_response_bound,
         error=(
             state.interop_scope.failure
             if state.interop_scope is not None and state.interop_scope.failure
@@ -1914,13 +1958,6 @@ def _snapshot(
             else status.value
         ),
         process_id=state.process_id,
-        output_artifact_candidate=artifact_candidate,
-        output_disposition=snapshot.disposition,
-        output_cursor=snapshot.output_cursor,
-        retained_from_cursor=snapshot.retained_from_cursor,
-        gap_before_output=snapshot.gap_before_output,
-        truncated_by_response_bound=snapshot.truncated_by_response_bound,
-        source_coverage=snapshot.source_coverage,
         trusted_process_duration_microseconds=max(
             0, int(((state.ended_at or monotonic()) - state.started_at) * 1_000_000)
         ),

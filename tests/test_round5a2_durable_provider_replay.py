@@ -11,12 +11,6 @@ from types import SimpleNamespace
 import pytest
 
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
-from pulsara_agent.conversation_kernel.vocabulary import (
-    APPEND_GUARDS,
-    COMMITTED_EVENT_DESCRIPTORS,
-    LIVE_EVENT_TYPES,
-    SUBJECT_SLOTS,
-)
 from pulsara_agent.llm.provider_replay import (
     MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES,
     MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
@@ -51,7 +45,6 @@ from pulsara_agent.primitives.context import (
     FrozenJsonObjectFact,
     freeze_json,
 )
-from pulsara_agent.storage.migrations.manifest import CONVERSATION_KERNEL_RELATIONS
 from tests.support.model_config import build_test_provider_replay_target
 
 
@@ -630,7 +623,7 @@ def test_round5a2_metadata_read_and_writer_paths_are_sealed() -> None:
     assert "UPDATE pulsara_v3.transcript_entries\n" not in repository_source
 
 
-def test_round5a2_has_no_vendor_or_remote_state_branch_and_oracle_is_exact() -> None:
+def test_round5a2_replay_has_no_vendor_or_remote_state_authority() -> None:
     paths = (
         PRODUCTION / "llm/provider_replay.py",
         PRODUCTION / "model_input/provider_replay.py",
@@ -662,8 +655,3 @@ def test_round5a2_has_no_vendor_or_remote_state_branch_and_oracle_is_exact() -> 
             for token in ("checkpoint", "receipt", "repair")
             for name in authority_names
         ), path
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 8
-    assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30

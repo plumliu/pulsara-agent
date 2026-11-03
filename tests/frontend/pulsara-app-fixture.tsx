@@ -504,10 +504,9 @@ class FakeConnection implements RuntimeConnection {
     };
   });
 
-  readToolArtifact = vi.fn(async () => {
+  readToolOutput = vi.fn(async () => {
     return {
-      resultEntryId: 'result-1', text: '', offsetChars: 0, returnedChars: 0,
-      totalChars: 0, hasMore: false,
+      resultEntryId: 'result-1', text: '', position: { line: 1, charOffset: 0 },
     };
   });
 

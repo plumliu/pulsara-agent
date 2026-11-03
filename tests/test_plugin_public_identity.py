@@ -1,5 +1,8 @@
 """Public package IDs never replace the owner's exact management guard."""
 
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.identity import random_id as _new_management_call_id
+
 import asyncio
 import json
 
@@ -28,7 +31,7 @@ def test_plugin_mcp_configuration_and_oauth_use_exact_prepared_owner(tmp_path, m
         args = {"action": "CONFIGURE_PLUGIN_MCP_CONNECTION", "target": target, "overlay": overlay}
         prepared = await service.prepare(args)
         assert thaw_json(prepared.expected_current)["expected_package_install_id"] == package
-        assert (await CapabilityManagementCall(service, prepared).execute())["status"] == "APPLIED"
+        assert (await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
         with pytest.raises(McpManagementConflict):
             await service.prepare({**args, "expected_package_install_id": random_id("package")})
         await service.prepare({**args, "expected_package_install_id": package})
@@ -44,20 +47,20 @@ def test_plugin_mcp_configuration_and_oauth_use_exact_prepared_owner(tmp_path, m
         assert public["plugin"]["package_install_id"] == expected
         assert public["expected_current"]["expected_package_install_id"] == expected
         call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
-        result = await call.execute()
+        result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED"
         assert result["current"]["authorized"] is True
         assert result["authorization"]["package_install_id"] == expected
         assert secret not in json.dumps(result)
         clear = CapabilityManagementCall(service, await service.prepare({"action": "CLEAR_MCP_AUTHORIZATION", "target": target}))
-        cleared = await clear.execute()
+        cleared = await clear.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert cleared["status"] == "APPLIED"
         assert cleared["current"]["authorized"] is False
         remove = {"action": "REMOVE_PLUGIN", "target": {"kind": "PLUGIN", "scope": "USER", "plugin_id": "example"}}
         with pytest.raises(McpManagementConflict):
             await service.prepare({**remove, "expected_package_install_id": random_id("package")})
         await service.prepare({**remove, "expected_package_install_id": package})
-        removed = await CapabilityManagementCall(service, await service.prepare(remove)).execute()
+        removed = await CapabilityManagementCall(service, await service.prepare(remove)).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert removed["status"] == "APPLIED"
         assert removed["current"]["operation_status"] == "REMOVED"
         await service.mcp.aclose()
@@ -76,7 +79,7 @@ def test_fixed_key_overlap_preserves_real_configuration_and_oauth_settlement(tmp
             public_headers=tuple(sorted(((secret, "external-value"), ("ordinary", "prefix-" + secret))))))
         result = await CapabilityManagementCall(service, await service.prepare({
             "action": "CONFIGURE_PLUGIN_MCP_CONNECTION", "target": target, "overlay": overlay,
-        })).execute()
+        })).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED"
         assert result["current"]["overlay"]["withheld_fields"] == ["public_headers"]
         assert "public_headers" not in result["current"]["overlay"]
@@ -98,7 +101,7 @@ def test_fixed_key_overlap_preserves_real_configuration_and_oauth_settlement(tmp
         expected = {"visibility": "WITHHELD"} if secret == "package" else {"visibility": "VISIBLE", "value": package}
         assert public["plugin"]["package_install_id"] == expected
         call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
-        authorized = await call.execute()
+        authorized = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert authorized["status"] == "APPLIED"
         assert authorized["current"]["authorized"] is True
         assert authorized["authorization"]["package_install_id"] == expected
@@ -128,7 +131,7 @@ def test_model_install_projects_secret_id_and_preserves_unknown_cut(tmp_path, mo
         call = CapabilityManagementCall(service, await service.prepare({
             "action": "INSTALL_PLUGIN", "scope": "USER", "source_path": str(source),
         }))
-        result = await call.execute()
+        result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert package not in json.dumps(result)
         if ack_unknown:
             assert result["status"] == "PARTIAL"
@@ -157,7 +160,7 @@ def test_remove_form_scrubs_original_and_rotated_credentials(tmp_path):
         assert public["expected_current"]["expected_package_install_id"] == {"visibility": "WITHHELD"}
         assert secret not in json.dumps(public)
         call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({})))
-        result = await call.execute()
+        result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED"
         assert result["current"]["prior_package_install_id"] == {"visibility": "WITHHELD"}
         assert secret not in json.dumps(result)
@@ -188,7 +191,7 @@ def test_local_hook_review_preserves_preparation_scrub_across_rotation(tmp_path)
         assert "retained-command" in command
         assert public["prefill"]["hook_source"]["definitions"][0]["event"] == "PreToolUse"
         call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission({"hook_review_accepted": True})))
-        assert (await call.execute())["status"] == "APPLIED"
+        assert (await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call"))))["status"] == "APPLIED"
         assert service.hooks.trust_store.read(call.prepared.hook.provenance.trust_subject).trusted_definition_digest == digest
         await service.mcp.aclose()
     asyncio.run(run())
@@ -224,7 +227,7 @@ def test_model_cleanup_keeps_prior_cut_and_scrubs_both_diagnostics(tmp_path, mon
         async def settled(*args, **kwargs):
             return wrapped
         monkeypatch.setattr(service.plugins, "install_local_plugin", settled)
-        result = await CapabilityManagementCall(service, prepared).execute()
+        result = await CapabilityManagementCall(service, prepared).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["current"]["operation_status"] == "CLEANUP_UNAVAILABLE"
         assert result["current"]["prior_operation_status"] == "ACK_UNKNOWN"
         assert result["current"]["last_known_cut"] == "CUT_UNKNOWN"
@@ -267,7 +270,7 @@ def test_model_form_and_config_result_preserve_package_named_dynamic_fields(tmp_
         connection = {"kind": "MCP_CONNECTION", "scope": "USER", "source_kind": "PLUGIN", "plugin_id": "physical-plugin", "server_id": "web"}
         result = await CapabilityManagementCall(service, await service.prepare({
             "action": "CONFIGURE_PLUGIN_MCP_CONNECTION", "target": connection, "overlay": overlay,
-        })).execute()
+        })).execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED"
         assert result["current"]["overlay"]["public_headers"]["package_install_id"] == "updated-header"
         await service.mcp.aclose()
@@ -320,7 +323,7 @@ def test_plugin_hook_actions_keep_real_guard_and_scrub_public_result(tmp_path, a
         assert secret not in json.dumps(public)
         submission = {"hook_review_accepted": True} if action == "TRUST_HOOK_SOURCE" else {}
         call.accept(AcceptedCapabilityFormSubmission(await form.prepare_submission(submission)))
-        result = await call.execute()
+        result = await call.execute( page_budget=ToolResultPageBudget(_new_management_call_id("call")))
         assert result["status"] == "APPLIED"
         assert secret not in json.dumps(result)
         observed = service.hooks.trust_store.assess(subject, digest)

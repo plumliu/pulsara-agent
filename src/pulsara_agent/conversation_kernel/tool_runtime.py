@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
-from threading import Condition, Lock, RLock
+from threading import Condition, Event, Lock, RLock
 from time import monotonic
 from typing import TYPE_CHECKING, Mapping, Protocol
 
@@ -26,7 +26,10 @@ if TYPE_CHECKING:
 
 
 from .capability_management import CapabilityManagementPreparation
-from .capability_management_execution import CapabilityManagementCall
+from .capability_management_execution import (
+    CapabilityManagementCall, capability_management_required_facts, capability_reload_required_facts,
+    require_capability_reload_budget,
+)
 from pulsara_agent.capability.mcp_management import McpManagementConflict
 from pulsara_agent.capability.management_form import (
     PendingCapabilityForm,
@@ -64,7 +67,6 @@ from pulsara_agent.capability.contracts import (
 )
 from pulsara_agent.capability.mcp_projection import (
     McpInspectionDescriptorValues,
-    conservative_mcp_inspection_logical_utf8_bytes,
     render_inspected_new_mcp_tool_provider_result,
 )
 from pulsara_agent.model_input.contracts import (
@@ -80,7 +82,8 @@ from pulsara_agent.model_input.continuity import (
 )
 from pulsara_agent.message import ToolResultState
 from pulsara_agent.mcp_config import McpServerConfig
-from pulsara_agent.ports.artifact import ToolArtifactReadPort
+from pulsara_agent.ports.tool_output import ToolOutputReadPort
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
 from pulsara_agent.ports.terminal import (
     parse_exec_process_input,
     parse_manage_process_input,
@@ -90,8 +93,6 @@ from pulsara_agent.ports.tool_execution import (
     Tool,
     ToolCall,
     ToolExecutionResult,
-    ToolOutputArtifactCandidate,
-    ToolOutputSourceCoverage,
     ToolOutputSourceFormatHint,
     encode_tool_public_json,
 )
@@ -153,7 +154,6 @@ from pulsara_agent.tools.builtins.todo import (
     TodoValidationError,
     parse_todo_replacement,
 )
-from pulsara_agent.tools.builtins.artifact import ArtifactExportTool, ArtifactReadTool
 from pulsara_agent.conversation_kernel.io import (
     KernelSessionIO,
     PhysicalToolInvocationDisposition,
@@ -201,14 +201,10 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.run_permission import FrozenRunPermissionSnapshot
 from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
     PhysicalToolObservationSupplement,
     ToolObservationOrigin,
     TrustedToolObservationSupplement,
     normalize_observation_duration,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    ToolResultFullDeliveryReason,
 )
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
@@ -262,14 +258,15 @@ from .mcp.supervisor import (
     McpInstalledRuntimeGeneration,
     McpKnownToolResult,
     McpSnapshotStale,
+    mcp_failure_required_facts,
 )
+from .tool_result_display import require_native_result_minimum
 from .mcp.contracts import McpDiscoveryCatalogInspection
 from .mcp.schema import McpSchemaEvaluationFailure, validate_mcp_arguments
 from .capability_query import CapabilitySourceQuery
 from pulsara_agent.capability.source_query import (
     parse_query,
     CapabilityQueryError,
-    fits_result,
     query_error,
 )
 from .mcp.meta import (
@@ -486,6 +483,10 @@ class KernelCapabilityReloadPort(Protocol):
     ) -> Mapping[str, object]: ...
 
 
+class TerminalEffectAdmissionRejected(ToolResultPageBoundary):
+    """The owned process action was rejected before its physical effect."""
+
+
 @dataclass(slots=True)
 class _DirectTerminalTool:
     manager: TerminalManager
@@ -527,6 +528,7 @@ class _DirectTerminalTool:
                 if effective_permission_mode is PermissionMode.READ_ONLY
                 else TerminalCwdScope.HOST_LOCAL
             ),
+            before_spawn=lambda minimum: _admit_terminal_effect(call, minimum, action="start"),
         )
         return _terminal_execution_result(call, result)
 
@@ -576,6 +578,7 @@ class _DirectTerminalProcessTool:
                 yield_time_ms=request.yield_time_ms,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
+                before_effect=lambda minimum: _admit_terminal_effect(call, minimum, action=action),
             )
         elif action == "submit":
             result = self.manager.write_process(
@@ -585,18 +588,19 @@ class _DirectTerminalProcessTool:
                 yield_time_ms=request.yield_time_ms,
                 max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
+                before_effect=lambda minimum: _admit_terminal_effect(call, minimum, action=action),
             )
         elif action == "close_stdin":
             result = self.manager.close_process_stdin(
                 request.target.process_id,
-                max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
+                before_effect=lambda minimum: _admit_terminal_effect(call, minimum, action=action),
             )
         elif action == "kill":
             result = self.manager.kill_process(
                 request.target.process_id,
-                max_output_chars=maximum,
                 owner_host_session_id=self.owner_host_session_id,
+                before_effect=lambda minimum: _admit_terminal_effect(call, minimum, action=action),
             )
         else:  # pragma: no cover - pydantic discriminator is exhaustive
             raise AssertionError(action)
@@ -696,7 +700,7 @@ class DirectKernelToolPort:
         authorization_policy: ToolDispatchAuthorizationPolicy,
         session_id: str,
         live_bus: LiveAgentEventBus,
-        artifact_read_port: ToolArtifactReadPort | None = None,
+        result_source_reader: ToolOutputReadPort | None = None,
         image_reference_read_port: CanonicalImageReferenceReadPort | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         pulsara_home_resolution: PulsaraHomeResolution | None = None,
@@ -734,6 +738,7 @@ class DirectKernelToolPort:
         tools: tuple[Tool, ...] = (
             ReadFileTool(
                 root,
+                result_source_reader=result_source_reader,
                 pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
@@ -759,6 +764,7 @@ class DirectKernelToolPort:
             ),
             WriteFileTool(
                 root,
+                result_source_reader=result_source_reader,
                 pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
@@ -776,15 +782,6 @@ class DirectKernelToolPort:
             _DirectMcpCatalogTool("use_new_mcp_tool"),
             _DirectMcpCatalogTool("read_mcp_resource"),
         )
-        if artifact_read_port is not None:
-            tools = (
-                *tools,
-                ArtifactReadTool(artifact_read_port),
-                ArtifactExportTool(
-                    workspace_root=workspace_root,
-                    artifact_read_port=artifact_read_port,
-                ),
-            )
         self._scheduled_tasks = scheduled_tasks
         self._session_content_query = session_content_query
         if session_content_query is not None:
@@ -1187,13 +1184,11 @@ class DirectKernelToolPort:
         self,
         process_id: str,
         *,
-        maximum_chars: int = 32_000,
         deadline_monotonic: float | None = None,
     ):
         del deadline_monotonic
         return self._terminal.terminate_process_if_running(
             process_id,
-            max_output_chars=maximum_chars,
             owner_host_session_id=self._terminal_owner_id,
         )
 
@@ -1725,19 +1720,20 @@ class DirectKernelToolPort:
         }
         if len(decision_by_source) != len(compiled_input.tool_result_decisions):
             raise RuntimeError("compiled ToolResult delivery decisions are duplicated")
+        calls_by_id = {(entry.source_entry_id, call.tool_call_id): call
+                       for entry in canonical_facts.canonical_input.items for call in entry.tool_calls}
         full_inspect_entry_ids: list[str] = []
         for source_fingerprint, decision in decision_by_source.items():
-            if (
-                decision.full_delivery_reason
-                is not ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
-            ):
-                continue
             item = canonical_by_source.get(source_fingerprint)
+            call = None if item is None else calls_by_id.get((item.tool_request_entry_id, item.tool_call_id))
+            arguments = None if call is None else thaw_json(call.arguments)
+            if (call is None or call.tool_name != "query_capabilities"
+                or not isinstance(arguments, Mapping)
+                or not isinstance(arguments.get("target"), Mapping)
+                or arguments["target"].get("kind") != "MCP_TOOL"):
+                continue
             if (
-                item is None
-                or item.tool_result_delivery.reason
-                is not ToolResultFullDeliveryReason.MCP_INSPECT_SCHEMA
-                or decision.selected_mode is not ToolResultProviderRenderMode.FULL
+                decision.selected_mode is not ToolResultProviderRenderMode.FULL
             ):
                 raise RuntimeError("MCP inspect result was not installed as exact FULL")
             assert item.source_entry_id is not None
@@ -2785,26 +2781,14 @@ class DirectKernelToolPort:
                 runtime=runtime,
                 plan=borrow.prepared.capability_exposure_plan,
                 scope=scope,
+                fits_result=_invocation_page_budget(invocation_context).fits,
                 code_direct_specs=borrow.tool_specs if borrow.code_cell_id is not None else None,
             ).execute(values)
             content = canonical_json_bytes(result)
-            # Only MCP_TOOL schema inspection is FULL-required. Ordinary details
-            # use the existing OUTPUT artifact and provider result projection.
-            candidate = (
-                None
-                if "target" not in values
-                else ToolOutputArtifactCandidate(
-                    role="OUTPUT",
-                    text=content.decode("utf-8"),
-                    source_coverage=ToolOutputSourceCoverage.COMPLETE,
-                    original_utf8_bytes=len(content),
-                    source_format_hint=ToolOutputSourceFormatHint.TEXT,
-                )
-            )
             return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="SUCCESS",
                 content=content,
-                output_artifact_candidate=candidate,
+                page_complete="target" not in values,
                 effect_class="read_only",
             )
         except CapabilityQueryError as exc:
@@ -2822,6 +2806,8 @@ class DirectKernelToolPort:
                 ),
                 effect_class="read_only",
             )
+        except ToolResultPageBoundary:
+            raise
         except (OSError, ValueError) as exc:
             # Query output passes the same concrete credential-value scrub owner;
             # no internal DTO or complete config is serialized on failures.
@@ -2866,10 +2852,13 @@ class DirectKernelToolPort:
             frozen = next((item for item in borrow.tool_specs
                            if item.name == semantic.provider_tool_name), None)
             if frozen == semantic.provider_spec():
-                return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON, state="SUCCESS", effect_class="read_only",
-                    content=canonical_json_bytes({"target": dict(target), "description": frozen.description,
+                body = canonical_json_bytes({"target": dict(target), "description": frozen.description,
                         "input_schema": thaw_json(frozen.parameters),
-                        "invocation": {"mode": "DIRECT", "tool_name": frozen.name}}))
+                        "invocation": {"mode": "DIRECT", "tool_name": frozen.name}})
+                if not _invocation_page_budget(invocation_context).fits(body.decode("utf-8")):
+                    return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
+                return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON, state="SUCCESS", effect_class="read_only",
+                                        content=body, page_complete=True)
             return self._prepare_mcp_inspection_result(executor=executor,
                 route_fingerprint="CODE_CELL", invocation_context=invocation_context)
         plan = borrow.prepared.capability_exposure_plan
@@ -2889,6 +2878,7 @@ class DirectKernelToolPort:
             if isinstance(direct_binding, PreparedUnavailableDirectMcpGate):
                 return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                     state="SUCCESS",
+                    page_complete=True,
                     effect_class="read_only",
                     content=canonical_json_bytes(
                         {
@@ -2921,16 +2911,18 @@ class DirectKernelToolPort:
                 "input_schema": thaw_json(spec.parameters),
                 "invocation": {"mode": "DIRECT", "tool_name": spec.name},
             }
-            if not fits_result(body):
+            if not _invocation_page_budget(invocation_context).fits(canonical_json_bytes(body).decode("utf-8")):
                 return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
             return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="SUCCESS",
+                page_complete=True,
                 content=canonical_json_bytes(body),
                 effect_class="read_only",
             )
         if route.route is ToolCapabilityRouteKind.UNAVAILABLE:
             return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
                 state="SUCCESS",
+                page_complete=True,
                 effect_class="read_only",
                 content=canonical_json_bytes(
                     {
@@ -2974,9 +2966,6 @@ class DirectKernelToolPort:
                                  execution_policy_fingerprint(current.policy), "CODE_CELL", current.runtime_generation_id))
             self._mcp_meta_refs.retire_unroutable(**self._mcp_ref_consumer_for_borrow(borrow), allowed=allowed)
         values = _mcp_inspection_values(executor)
-        quote = conservative_mcp_inspection_logical_utf8_bytes(values)
-        if quote > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES:
-            return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
         try:
             prepared = self._mcp_meta_refs.prepare(
                 **self._mcp_ref_consumer_for_borrow(borrow),
@@ -2996,6 +2985,9 @@ class DirectKernelToolPort:
                 values,
                 tool_ref=prepared.ref.opaque_token,
             ).encode("utf-8")
+            if not _invocation_page_budget(invocation_context).fits(body.decode("utf-8")):
+                self._mcp_meta_refs.settle(prepared=prepared, committed=False)
+                return _local_mcp_application_error("MCP_DESCRIPTOR_OVERBOUND")
         except BaseException:
             self._mcp_meta_refs.settle(
                 prepared=prepared,
@@ -3009,6 +3001,7 @@ class DirectKernelToolPort:
         self._mcp_ref_settlements[token.token_id] = token
         return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
             state="SUCCESS",
+            page_complete=True,
             content=body,
             process_local_settlement=token,
             effect_class="read_only",
@@ -3072,41 +3065,54 @@ class DirectKernelToolPort:
     async def _query_cells(self, arguments, context):
         """Adapt shared Cell facts to the model result envelope without consuming output."""
         from pulsara_agent.code_mode.contracts import CodeModeError
-        from pulsara_agent.primitives.tool_result_projection import conservative_artifact_page_logical_utf8_bytes
-
-        envelope_bytes = conservative_artifact_page_logical_utf8_bytes(
-            tool_call_id=context.tool_call_id, body="", model_visible_memory_ids=())
-        maximum = MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES - envelope_bytes
+        budget = _invocation_page_budget(context)
+        def fits(value):
+            return budget.fits(encode_tool_public_json(value).decode("utf-8"))
         if "target" not in arguments:
-            return self._code_mode.query_cells(
-                cursor=arguments.get("cursor"), max_items=arguments.get("max_items", 50),
-                maximum_page_bytes=maximum)
+            maximum = arguments.get("max_items", 50)
+            page = self.query_code_cells(cursor=arguments.get("cursor"), max_items=maximum)
+            rows = page["cells"]
+            for count in range(len(rows), -1, -1):
+                if rows and count == 0:
+                    break
+                selected = rows[:count]
+                more = count < len(rows) or page["has_more"]
+                value = {"cells": selected, "next": {
+                    "tool": "query_cells", "arguments": {"cursor": selected[-1]["target"]["cell_id"], "max_items": maximum}
+                } if more and selected else None}
+                if fits(value):
+                    return value
+            raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "One Cell inventory row cannot fit the result budget")
         capture = self.capture_code_cell(arguments["target"]["cell_id"])
         value = await self.read_code_cell_source_page(
             session_id=context.session_id, capture=capture,
             offset_chars=arguments.get("offset_chars", 0),
             max_chars=arguments.get("max_chars", 20000))
-        if len(encode_tool_public_json(value)) <= maximum:
-            return value
         source = value["source"]
         if source["status"] != "AVAILABLE":
+            value["next"] = None
+            if fits(value):
+                return value
             raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell source availability exceeds the result page budget")
         available = source["text"]
         def page(count):
             end = source["offset_chars"] + count
             has_more = end < source["total_chars"]
-            return {"cell": value["cell"], "source": {**source, "text": available[:count],
-                "returned_chars": count, "has_more": has_more,
-                "next_offset_chars": end if has_more else None}}
+            return {"cell": value["cell"], "source": {
+                **{key: item for key, item in source.items() if key not in {"has_more", "next_offset_chars"}},
+                "text": available[:count], "returned_chars": count},
+                "next": {"tool": "query_cells", "arguments": {
+                    "target": dict(arguments["target"]), "offset_chars": end,
+                    "max_chars": arguments.get("max_chars", 20000)}} if has_more else None}
         low, high = 0, len(available)
         while low < high:
             count = (low + high + 1) // 2
-            if len(encode_tool_public_json(page(count))) <= maximum:
+            if fits(page(count)):
                 low = count
             else:
                 high = count - 1
         value = page(low)
-        if (available and low == 0) or len(encode_tool_public_json(value)) > maximum:
+        if (available and low == 0) or not fits(value):
             raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell source cannot fit a complete result page")
         return value
 
@@ -3118,7 +3124,15 @@ class DirectKernelToolPort:
             if tool_name == "query_cells":
                 value = await self._query_cells(arguments, context)
             elif tool_name == "manage_cell" and arguments["action"] == "stop":
-                value = await self._code_mode.stop(arguments["target"]["cell_id"])
+                try:
+                    value = await self._code_mode.stop(arguments["target"]["cell_id"], page_budget=_invocation_page_budget(context))
+                except ToolResultPageBoundary:
+                    return _no_effect_budget_result()
+                except CodeModeError as exc:
+                    if exc.code == "OUTPUT_PAGE_BOUNDARY":
+                        return _no_effect_budget_result()
+                    raise
+                value = {key: value[key] for key in ("target", "state")}
             elif tool_name == "exec_cell":
                 if self._code_mode_invoke is None or context.code_mode_snapshot is None:
                     raise RuntimeError("exec_cell lost its common execution snapshot")
@@ -3132,11 +3146,19 @@ class DirectKernelToolPort:
                 directory = context.code_mode_snapshot.tool_directory
                 catalog = {spec.name: {"parameters": thaw_json(spec.parameters)}
                     for spec in directory.tool_specs}
-                cell_id = await self._code_mode.start(
-                    source=source, source_exec_attempt_id=context.attempt_id,
-                    turn_id=context.turn_id, snapshot=context.code_mode_snapshot,
-                    tool_catalog=catalog, invoke=self._code_mode_invoke,
-                    on_cell_closed=self.release_code_cell_mcp_refs)
+                try:
+                    cell_id = await self._code_mode.start(
+                        source=source, source_exec_attempt_id=context.attempt_id,
+                        turn_id=context.turn_id, snapshot=context.code_mode_snapshot,
+                        tool_catalog=catalog, invoke=self._code_mode_invoke,
+                        page_budget=_invocation_page_budget(context),
+                        on_cell_closed=self.release_code_cell_mcp_refs)
+                except ToolResultPageBoundary:
+                    return _no_effect_budget_result()
+                except CodeModeError as exc:
+                    if exc.code == "OUTPUT_PAGE_BOUNDARY":
+                        return _no_effect_budget_result()
+                    raise
                 value = {"accepted": True, "target": {"kind": "CELL", "cell_id": cell_id}}
             else:
                 value = await self._code_mode.wait_state(
@@ -3144,7 +3166,11 @@ class DirectKernelToolPort:
             return KernelToolResult(
                 state="SUCCESS", content=encode_tool_public_json(value),
                 public_format=ToolOutputSourceFormatHint.JSON,
+                page_complete=True,
+                required_facts=value if tool_name != "query_cells" else {},
                 physical_observation=_freeze_physical_observation(monotonic(), ToolObservationOrigin.BUILTIN))
+        except ToolResultPageBoundary:
+            raise
         except (CodeModeError, ValueError, OSError, UnicodeError) as exc:
             value = {"error": getattr(exc, "code", "CODE_MODE_ERROR"), "message": str(exc)}
             return KernelToolResult(
@@ -3188,6 +3214,7 @@ class DirectKernelToolPort:
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
+        page_budget = _invocation_page_budget(invocation_context)
         if invocation_context.cell_cancel_event is not None and invocation_context.cell_cancel_event.is_set():
             key = (invocation_context.surface_borrow.prepared.access.surface_generation, tool_call_id)
             self._mcp_confirmation_admissions.pop(key, None)
@@ -3212,7 +3239,7 @@ class DirectKernelToolPort:
             from pulsara_agent.conversation_kernel.repository_errors import (
                 ConversationKernelConflict,
             )
-            from pulsara_agent.ports.artifact import ArtifactContentError
+            from pulsara_agent.ports.tool_output import ToolOutputContentError
             from pulsara_agent.terminal_protocol.canonical_v3 import (
                 CanonicalProtocolGap,
             )
@@ -3240,6 +3267,7 @@ class DirectKernelToolPort:
                         dict(arguments),
                         current_range=invocation_context.session_content_range,
                         tool_call_id=tool_call_id,
+                        page_budget=page_budget,
                         deadline_monotonic=deadline_monotonic,
                     )
                     return "SUCCESS", value
@@ -3265,11 +3293,13 @@ class DirectKernelToolPort:
                         "code": code,
                         "message": "Canonical session storage is unavailable or timed out.",
                     }
-                except (RuntimeError, ArtifactContentError, ConversationKernelConflict):
+                except (RuntimeError, ToolOutputContentError, ConversationKernelConflict):
                     return "APPLICATION_ERROR", {
                         "code": "CONTENT_CORRUPT",
                         "message": "Saved session content could not be verified.",
                     }
+                except ToolResultPageBoundary:
+                    raise
                 except ValueError:
                     return "APPLICATION_ERROR", {
                         "code": "INVALID_REQUEST",
@@ -3309,7 +3339,7 @@ class DirectKernelToolPort:
                 content=json.dumps(
                     value, ensure_ascii=False, separators=(",", ":")
                 ).encode(),
-                artifact_inline_result=True,
+                page_complete=True,
                 public_format=ToolOutputSourceFormatHint.JSON,
                 caller_cancelled_while_running=physical.caller_cancelled,
                 effect_class="read_only",
@@ -3332,8 +3362,11 @@ class DirectKernelToolPort:
                               else self._scheduled_tasks.invoke_manage)
                     value = await method(arguments,
                         default_session_id=self._session_id,
-                        permission_mode=invocation_context.effective_permission_mode)
+                        permission_mode=invocation_context.effective_permission_mode,
+                        page_budget=page_budget)
                     return "SUCCESS", value
+                except ToolResultPageBoundary:
+                    raise
                 except (ScheduledTaskError, KeyError, ValueError) as exc:
                     return "APPLICATION_ERROR", {"error": getattr(exc, "code", "INVALID_REQUEST"), "message": str(exc)}
             # Reuse the existing admitted-async-operation settlement: cancellation
@@ -3343,6 +3376,11 @@ class DirectKernelToolPort:
             state, value = known
             return KernelToolResult(state=state,
                 content=json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode(),
+                public_format=ToolOutputSourceFormatHint.JSON,
+                page_complete=tool_name == "manage_schedule" or "target" not in arguments,
+                required_facts=(value if tool_name == "manage_schedule" and state == "SUCCESS" else {
+                    key: value[key] for key in ("target", "status", "revision") if key in value
+                }),
                 caller_cancelled_while_running=cancelled,
                 effect_class="read_only" if tool_name == "query_schedules" else "unknown_effect",
                 physical_observation=_freeze_physical_observation(invocation_started, observation_origin))
@@ -3357,7 +3395,9 @@ class DirectKernelToolPort:
             ):
                 raise RuntimeError("capability execution lost its exact prepared owner")
             try:
-                values = await call.execute(cell_cancel_event=invocation_context.cell_cancel_event)
+                values = await call.execute(cell_cancel_event=invocation_context.cell_cancel_event, page_budget=page_budget)
+            except ToolResultPageBoundary:
+                raise
             except McpManagementConflict as exc:
                 values = {
                     "status": "CONFLICT",
@@ -3392,6 +3432,8 @@ class DirectKernelToolPort:
                 content=json.dumps(
                     values, ensure_ascii=False, separators=(",", ":")
                 ).encode(),
+                public_format=ToolOutputSourceFormatHint.JSON,
+                required_facts=capability_management_required_facts(values),
                 effect_class="read_only"
                 if call.prepared.effects.read_only
                 else "unknown_effect",
@@ -3402,6 +3444,10 @@ class DirectKernelToolPort:
         if tool_name == "reload_capabilities":
             if self._capability_reload is None:
                 raise RuntimeError("Capability reload port is unavailable")
+            try:
+                require_capability_reload_budget(page_budget)
+            except ToolResultPageBoundary:
+                return _no_effect_budget_result()
             values = await self._capability_reload.reload_capabilities(
                 deadline_monotonic=self._deadlines.deadline(
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
@@ -3416,6 +3462,8 @@ class DirectKernelToolPort:
             return KernelToolResult(
                 state="SUCCESS",
                 content=content,
+                public_format=ToolOutputSourceFormatHint.JSON,
+                required_facts=capability_reload_required_facts(values),
                 effect_class="read_only",
                 physical_observation=_freeze_physical_observation(
                     invocation_started, observation_origin
@@ -3449,6 +3497,9 @@ class DirectKernelToolPort:
             if frozen_inner != prepared_meta.arguments:
                 permit.release()
                 raise RuntimeError("MCP meta arguments changed after authorization")
+            rejected = _mcp_pre_dispatch_result(page_budget, permit, prepared_meta.executor.policy.effect_kind)
+            if rejected is not None:
+                return rejected
             if permit.state.value == "ADMITTED":
                 permit.mark_attempt_accepted()
             operation_task = asyncio.create_task(
@@ -3479,6 +3530,9 @@ class DirectKernelToolPort:
                 if permit is not None:
                     permit.release()
                 raise RuntimeError("MCP dispatch admission resource is missing")
+            rejected = _mcp_pre_dispatch_result(page_budget, permit, executor.policy.effect_kind)
+            if rejected is not None:
+                return rejected
             if permit.state.value == "ADMITTED":
                 permit.mark_attempt_accepted()
             operation_task = asyncio.create_task(
@@ -3488,29 +3542,9 @@ class DirectKernelToolPort:
             known, caller_cancelled = await _await_mcp_operation(operation_task, permit=permit)
             if known is None:
                 return _cancelled_mcp_before_dispatch(executor.policy.effect_kind)
-            text = known.content.decode("utf-8")
-            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
-                state=known.state,
-                content=known.content,
-                remote_identity=known.remote_identity,
-                remote_identity_verification=known.remote_identity_verification,
-                output_artifact_candidate=ToolOutputArtifactCandidate(
-                    role="OUTPUT",
-                    text=text,
-                    source_coverage=ToolOutputSourceCoverage.COMPLETE,
-                    original_utf8_bytes=len(known.content),
-                    # MCP typed JSON is the complete public body, not the
-                    # legacy terminal envelope whose JSON hint requires an
-                    # ``output`` member.  Treat it as exact UTF-8 text so Round
-                    # 1 archives these bytes without reinterpreting the shape.
-                    source_format_hint=ToolOutputSourceFormatHint.TEXT,
-                ),
-                caller_cancelled_while_running=caller_cancelled,
-                effect_class=(
-                    "read_only"
-                    if executor.policy.effect_kind is McpEffectKind.READ_ONLY
-                    else "unknown_effect"
-                ),
+            return _kernel_result_from_mcp_known(
+                known, caller_cancelled=caller_cancelled,
+                effect_kind=executor.policy.effect_kind,
                 physical_observation=_freeze_physical_observation(
                     invocation_started, observation_origin
                 ),
@@ -3528,6 +3562,9 @@ class DirectKernelToolPort:
                 if permit is not None:
                     permit.release()
                 raise RuntimeError("MCP standard admission resource is missing")
+            rejected = _mcp_pre_dispatch_result(page_budget, permit, McpEffectKind.READ_ONLY)
+            if rejected is not None:
+                return rejected
             operation_task = asyncio.create_task(
                 runtime.invoke_standard(
                     tool_name=tool_name,
@@ -3549,21 +3586,8 @@ class DirectKernelToolPort:
                 raise
             if known is None:
                 return _cancelled_mcp_before_dispatch(McpEffectKind.READ_ONLY)
-            text = known.content.decode("utf-8")
-            return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
-                state=known.state,
-                content=known.content,
-                remote_identity=known.remote_identity,
-                remote_identity_verification=known.remote_identity_verification,
-                output_artifact_candidate=ToolOutputArtifactCandidate(
-                    role="OUTPUT",
-                    text=text,
-                    source_coverage=ToolOutputSourceCoverage.COMPLETE,
-                    original_utf8_bytes=len(known.content),
-                    source_format_hint=ToolOutputSourceFormatHint.TEXT,
-                ),
-                caller_cancelled_while_running=caller_cancelled,
-                effect_class="read_only",
+            return _kernel_result_from_mcp_known(
+                known, caller_cancelled=caller_cancelled, effect_kind=McpEffectKind.READ_ONLY,
                 physical_observation=_freeze_physical_observation(
                     invocation_started, observation_origin
                 ),
@@ -3615,6 +3639,12 @@ class DirectKernelToolPort:
                 sort_keys=True,
             ).encode("utf-8")
             try:
+                fits_receipt = page_budget.fits(acknowledgement.decode("utf-8"))
+            except ToolResultPageBoundary:
+                return _no_effect_budget_result()
+            if not fits_receipt:
+                return _no_effect_budget_result()
+            try:
                 prepared = self._todo_owner.prepare_replace(
                     scope_kind=(
                         invocation_context.surface_borrow.prepared.access.conversation_scope_kind
@@ -3644,17 +3674,25 @@ class DirectKernelToolPort:
             return KernelToolResult(
                 state="SUCCESS",
                 content=acknowledgement,
+                public_format=ToolOutputSourceFormatHint.JSON,
+                page_complete=True,
+                required_facts=json.loads(acknowledgement),
                 process_local_settlement=token,
                 effect_class="read_only",
                 physical_observation=_freeze_physical_observation(
                     invocation_started, observation_origin
                 ),
             )
+        cancel_requested = Event()
         call = ToolCall(
             id=tool_call_id,
             name=tool_name,
             arguments=dict(arguments),
             defer_file_observation=invocation_context.code_cell_id is not None,
+            page_budget=page_budget,
+            cancel_requested=lambda: (cancel_requested.is_set() or (
+                invocation_context.cell_cancel_event is not None and invocation_context.cell_cancel_event.is_set()
+            )),
         )
         if isinstance(tool, OpenInPulsaraTool):
             from pulsara_agent.conversation_kernel.presentation_targets import (
@@ -3672,7 +3710,10 @@ class DirectKernelToolPort:
 
             result = await tool.execute_async(call, resolve_object=resolve_object)
             return KernelToolResult(
-                state="SUCCESS", content=result.output.encode("utf-8"),
+                state=_kernel_tool_state(result.status), content=result.output.encode("utf-8"),
+                public_format=result.public_format, page_complete=result.page_complete,
+                native_output=None if result.native_output is None else result.native_output.encode("utf-8"),
+                required_facts=result.required_facts, output_body_candidate=result.output_body_candidate,
                 effect_class="read_only",
                 physical_observation=_freeze_physical_observation(invocation_started, observation_origin),
             )
@@ -3979,6 +4020,7 @@ class DirectKernelToolPort:
                 deadline_monotonic=self._deadlines.deadline(
                     KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
                 ),
+                on_caller_cancelled=cancel_requested.set,
             )
         if physical.disposition is PhysicalToolInvocationDisposition.RAISED:
             assert physical.error is not None
@@ -4006,13 +4048,7 @@ class DirectKernelToolPort:
             if isinstance(result.output, str)
             else result.output
         )
-        state = {
-            ToolResultState.SUCCESS: "SUCCESS",
-            ToolResultState.ERROR: "APPLICATION_ERROR",
-            ToolResultState.INTERRUPTED: "CANCELLED",
-            ToolResultState.DENIED: "APPLICATION_ERROR",
-            ToolResultState.RUNNING: "SUCCESS",
-        }[result.status]
+        state = _kernel_tool_state(result.status)
         remote_identity: str | None = None
         if tool_name in {"exec_process", "manage_process"}:
             if not isinstance(result.output, str):
@@ -4034,8 +4070,10 @@ class DirectKernelToolPort:
             state=state,
             content=encoded,
             remote_identity=remote_identity,
-            output_artifact_candidate=result.output_artifact_candidate,
-            artifact_inline_result=result.artifact_inline_result,
+            output_body_candidate=result.output_body_candidate,
+            native_output=None if result.native_output is None else result.native_output.encode("utf-8"),
+            page_complete=result.page_complete,
+            required_facts=result.required_facts,
             physical_timing=physical.timing.value,
             caller_cancelled_while_running=physical.caller_cancelled,
             physical_observation=(None if physical.observation is None else replace(
@@ -4420,7 +4458,7 @@ def _execute_tool_call(
     # the physical thread and makes a close timeout explicit; adapters with
     # their own timeouts continue to enforce them inside execute().
     del deadline_monotonic
-    if isinstance(tool, (EditFileTool, WriteFileTool, ArtifactExportTool)):
+    if isinstance(tool, (EditFileTool, WriteFileTool)):
         write_scope = (
             WritePathScope.HOST_LOCAL
             if effective_permission_mode is PermissionMode.BYPASS_PERMISSIONS
@@ -4499,41 +4537,144 @@ def _execute_terminal_tool_call(
     *,
     deadline_monotonic: float,
 ) -> ToolExecutionResult:
-    if isinstance(tool, _DirectTerminalTool):
-        return tool.execute(
-            call,
-            live_sink=live_sink,
-            origin=origin,
-            decision_attempt_id=decision_attempt_id,
-            decision_deadline_monotonic=deadline_monotonic,
-            effective_permission_mode=effective_permission_mode,
-        )
+    from pulsara_agent.terminal_process.manager import ProcessInputClosedError
+
     try:
+        if isinstance(tool, _DirectTerminalTool):
+            return tool.execute(
+                call,
+                live_sink=live_sink,
+                origin=origin,
+                decision_attempt_id=decision_attempt_id,
+                decision_deadline_monotonic=deadline_monotonic,
+                effective_permission_mode=effective_permission_mode,
+            )
         return tool.execute(call, live_sink=live_sink)
+    except (TerminalEffectAdmissionRejected, ProcessInputClosedError) as error:
+        budget_rejected = isinstance(error, TerminalEffectAdmissionRejected)
+        payload = {
+            "status": "resource_boundary" if budget_rejected else "error",
+            "error": "RESULT_BUDGET_EXCEEDED" if budget_rejected else "PROCESS_STDIN_CLOSED",
+            "effect_applied": False,
+        }
+        output = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        return ToolExecutionResult(
+            call_id=call.id, tool_name=call.name, status=ToolResultState.ERROR,
+            output=output, native_output=output, page_complete=True,
+            public_format=ToolOutputSourceFormatHint.JSON, required_facts=payload,
+        )
     except InvalidTerminalOutputCursor:
+        payload = {
+            "error": "INVALID_CURSOR",
+            "message": (
+                "This output cursor is invalid for this process. Copy an "
+                "output_cursor from the same process, or omit since_cursor "
+                "to read its currently retained output."
+            ),
+        }
+        output = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        if not (call.page_budget or ToolResultPageBudget(call.id)).fits(output):
+            raise ToolResultPageBoundary("Terminal cursor error exceeds the result budget")
         return ToolExecutionResult(
             call_id=call.id,
             tool_name=call.name,
             status=ToolResultState.ERROR,
-            output=json.dumps(
-                {
-                    "error": "INVALID_CURSOR",
-                    "message": (
-                        "This output cursor is invalid for this process. Copy an "
-                        "output_cursor from the same process, or omit since_cursor "
-                        "to read its currently retained output."
-                    ),
-                }
-            ),
+            output=output,
+            public_format=ToolOutputSourceFormatHint.JSON,
+            native_output=output,
+            page_complete=True,
+            required_facts=payload,
         )
 
 
 def _terminal_process_payload(native: Mapping[str, object]) -> dict[str, object]:
     payload = dict(native)
     payload["target"] = {"kind": "PROCESS", "process_id": payload.pop("process_id")}
+    # Metadata was not an output observation and must not advance a log reader.
+    payload.pop("output_cursor", None)
+    payload.pop("retained_from_cursor", None)
     return payload
 
 
+
+
+def _terminal_result_facts(
+    call: ToolCall,
+    result: TerminalResult,
+    *,
+    action: str = "start",
+) -> dict[str, object]:
+    control_only = action in {"close_stdin", "kill"}
+    candidate = None if control_only else result.output_body_candidate
+    payload = {
+        "status": result.status.value,
+        "terminal_process_action": action,
+        "exit_code": result.exit_code,
+        "cwd": result.cwd,
+        "timed_out": result.timed_out,
+        "error": result.error if action == "start" else None,
+        "reason": None if result.reason is None else result.reason.value,
+        "yielded_to_background": result.status.value == "running",
+    }
+    if result.process_id is not None:
+        payload["target"] = {"kind": "PROCESS", "process_id": result.process_id}
+    if not control_only:
+        payload.update(
+            output_disposition=result.output_disposition.value,
+            output_cursor=result.output_cursor,
+            retained_from_cursor=result.retained_from_cursor,
+            gap_before_output=result.gap_before_output,
+            source_coverage=(
+                candidate.source_coverage.value if candidate is not None
+                else result.source_coverage.value
+            ),
+        )
+        if candidate is not None and candidate.source_coverage_reason is not None:
+            payload["source_coverage_reason"] = candidate.source_coverage_reason.value
+    if result.status.value == "running" and result.process_id is not None:
+        observe_arguments = {
+            "action": "wait",
+            "target": payload["target"],
+            "timeout_seconds": 30,
+        }
+        if not control_only and result.output_cursor is not None:
+            observe_arguments["since_cursor"] = result.output_cursor
+        if "max_output_chars" in call.arguments:
+            observe_arguments["max_output_chars"] = call.arguments["max_output_chars"]
+        payload["observe"] = {"tool": "manage_process", "arguments": observe_arguments}
+    return payload
+
+
+def _admit_terminal_effect(call: ToolCall, result: TerminalResult, *, action: str) -> None:
+    """Quote known owned identities before stdin, signals, or process spawn."""
+    from pulsara_agent.terminal_process.models import TerminalStatus
+    from pulsara_agent.ports.tool_execution import ToolOutputSourceCoverageReason
+
+    budget = call.page_budget or ToolResultPageBudget(call.id)
+    control_only = action in {"close_stdin", "kill"}
+    # exit_code is sint32 in the existing terminal wire protocol. This is a
+    # quote of its scalar width, never a synthesized process identity/outcome.
+    # Cursors have no protocol upper bound: retain the actual owned positions.
+    for status in (TerminalStatus.RUNNING, TerminalStatus.SUCCESS, TerminalStatus.ERROR,
+                   TerminalStatus.TIMEOUT, TerminalStatus.KILLED):
+        for timed_out in (False, True):
+            facts = _terminal_result_facts(call, replace(
+                result, status=status, exit_code=-(1 << 31), timed_out=timed_out,
+                error=result.error or status.value,
+            ), action=action)
+            if not control_only:
+                facts.update(
+                    truncated=True, truncated_by_response_bound=True, output_preview="",
+                    source_coverage="RETAINED_SNAPSHOT",
+                    source_coverage_reason=max(
+                        ToolOutputSourceCoverageReason, key=lambda reason: len(reason.value)
+                    ).value,
+                )
+            body = json.dumps(facts, ensure_ascii=False, separators=(",", ":"))
+            if not budget.fits(body, include_read=not control_only and budget.read is not None):
+                raise TerminalEffectAdmissionRejected(
+                    "Terminal minimum receipt cannot fit before the process action"
+                )
 
 
 def _terminal_execution_result(
@@ -4542,26 +4683,62 @@ def _terminal_execution_result(
     *,
     action: str = "start",
 ) -> ToolExecutionResult:
-    payload = {
-        "status": result.status.value,
-        "terminal_process_action": action,
-        "output": result.output,
-        "exit_code": result.exit_code,
-        "cwd": result.cwd,
-        "timed_out": result.timed_out,
-        "truncated": result.truncated,
-        "error": result.error if action == "start" else None,
-        "reason": None if result.reason is None else result.reason.value,
-        "yielded_to_background": result.status.value == "running",
-        "output_disposition": result.output_disposition.value,
-        "output_cursor": result.output_cursor,
-        "retained_from_cursor": result.retained_from_cursor,
-        "gap_before_output": result.gap_before_output,
-        "truncated_by_response_bound": result.truncated_by_response_bound,
-        "source_coverage": result.source_coverage.value,
-    }
-    if result.process_id is not None:
-        payload["target"] = {"kind": "PROCESS", "process_id": result.process_id}
+    budget = call.page_budget or ToolResultPageBudget(call.id)
+    control_only = action in {"close_stdin", "kill"}
+    candidate = None if control_only else result.output_body_candidate
+    payload = _terminal_result_facts(call, result, action=action)
+    required_facts = dict(payload)
+
+    def encoded(value: Mapping[str, object]) -> str:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    if control_only:
+        public_output = native_output = encoded(payload)
+        if not budget.fits(native_output):
+            if budget.accepts_provider_body is not None:
+                # This exact action already returned. Preserve its real result;
+                # final dispatch must admit/compact P, never rerun the action.
+                return _terminal_execution_result(replace(call, page_budget=replace(
+                    budget, accepts_provider_body=None
+                )), result, action=action)
+            raise ToolResultPageBoundary("Terminal control facts exceed the result budget")
+    else:
+        complete_text = candidate.text if candidate is not None else result.output
+        payload.update(
+            output=complete_text,
+            truncated=result.gap_before_output,
+            truncated_by_response_bound=False,
+        )
+        public_output = encoded(payload)
+        if len(result.output) == len(complete_text) and budget.fits(public_output):
+            native_output = public_output
+        else:
+            preview_facts = {
+                **required_facts,
+                "truncated": True,
+                "truncated_by_response_bound": True,
+            }
+            maximum = len(result.output)
+            low, high = 0, maximum
+            winner = None
+            while low <= high:
+                take = (low + high) // 2
+                preview = encoded({
+                    **preview_facts,
+                    "output_preview": result.output[-take:] if take else "",
+                })
+                if budget.fits(preview, include_read=budget.read is not None):
+                    winner = preview
+                    low = take + 1
+                else:
+                    high = take - 1
+            if winner is None:
+                if budget.accepts_provider_body is not None:
+                    return _terminal_execution_result(replace(call, page_budget=replace(
+                        budget, accepts_provider_body=None
+                    )), result, action=action)
+                raise ToolResultPageBoundary("Terminal observation facts exceed the result budget")
+            native_output = winner
     state = (
         ToolResultState.SUCCESS
         if action != "start" or result.status.value in {"success", "running"}
@@ -4578,11 +4755,12 @@ def _terminal_execution_result(
         call_id=call.id,
         tool_name=call.name,
         status=state,
-        output=json.dumps(payload, ensure_ascii=False),
+        output=public_output,
         public_format=ToolOutputSourceFormatHint.JSON,
-        output_artifact_candidate=(replace(result.output_artifact_candidate,
-            source_format_hint=ToolOutputSourceFormatHint.JSON)
-            if result.output_artifact_candidate is not None else None),
+        output_body_candidate=candidate,
+        native_output=native_output,
+        page_complete=control_only,
+        required_facts=required_facts,
         trusted_observation=(
             TrustedToolObservationSupplement(trusted_duration)
             if trusted_duration is not None
@@ -4619,11 +4797,26 @@ def _validated_terminal_observation_supplement(
     return None
 
 
+def _kernel_tool_state(status: ToolResultState) -> str:
+    return {
+        ToolResultState.SUCCESS: "SUCCESS", ToolResultState.ERROR: "APPLICATION_ERROR",
+        ToolResultState.INTERRUPTED: "CANCELLED", ToolResultState.DENIED: "APPLICATION_ERROR",
+        ToolResultState.RUNNING: "SUCCESS",
+    }[status]
+
+
+def _invocation_page_budget(context: KernelToolInvocationContext) -> ToolResultPageBudget:
+    budget = getattr(context, "page_budget", None)
+    if budget is not None:
+        return budget
+    if context.surface_borrow.code_cell_id is not None:
+        return ToolResultPageBudget(tool_call_id=context.tool_call_id)
+    raise ToolResultPageBoundary("native invocation has no allocated result budget")
+
+
 def _success(
     call: ToolCall,
     payload: Mapping[str, object],
-    *,
-    output_artifact_candidate: ToolOutputArtifactCandidate | None = None,
 ) -> ToolExecutionResult:
     return ToolExecutionResult(
         call_id=call.id,
@@ -4631,7 +4824,6 @@ def _success(
         status=ToolResultState.SUCCESS,
         output=json.dumps(dict(payload), ensure_ascii=False),
         public_format=ToolOutputSourceFormatHint.JSON,
-        output_artifact_candidate=output_artifact_candidate,
     )
 
 
@@ -4734,6 +4926,21 @@ def _local_mcp_application_error(code: str) -> KernelToolResult:
     )
 
 
+def _mcp_pre_dispatch_result(page_budget, permit, effect_kind) -> KernelToolResult | None:
+    try:
+        require_native_result_minimum(page_budget, required_facts=mcp_failure_required_facts(effect_kind))
+    except ToolResultPageBoundary:
+        permit.release()
+        return _no_effect_budget_result()
+    return None
+
+
+def _no_effect_budget_result() -> KernelToolResult:
+    facts = {"error": "OUTPUT_PAGE_BOUNDARY", "physical_outcome": "NO_EFFECT", "retry_performed": False}
+    return KernelToolResult(state="APPLICATION_ERROR", content=canonical_json_bytes(facts),
+        required_facts=facts, public_format=ToolOutputSourceFormatHint.JSON, effect_class="read_only")
+
+
 def _kernel_result_from_mcp_known(
     known: McpKnownToolResult,
     *,
@@ -4741,19 +4948,11 @@ def _kernel_result_from_mcp_known(
     effect_kind: McpEffectKind,
     physical_observation: PhysicalToolObservationSupplement,
 ) -> KernelToolResult:
-    text = known.content.decode("utf-8")
     return KernelToolResult(public_format=ToolOutputSourceFormatHint.JSON,
         state=known.state,
         content=known.content,
         remote_identity=known.remote_identity,
         remote_identity_verification=known.remote_identity_verification,
-        output_artifact_candidate=ToolOutputArtifactCandidate(
-            role="OUTPUT",
-            text=text,
-            source_coverage=ToolOutputSourceCoverage.COMPLETE,
-            original_utf8_bytes=len(known.content),
-            source_format_hint=ToolOutputSourceFormatHint.TEXT,
-        ),
         caller_cancelled_while_running=caller_cancelled,
         effect_class=(
             "read_only" if effect_kind is McpEffectKind.READ_ONLY else "unknown_effect"

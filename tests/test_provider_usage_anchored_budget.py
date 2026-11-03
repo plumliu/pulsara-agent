@@ -277,28 +277,31 @@ def test_one_dispatch_floor_selection_uses_one_anchor_snapshot():
     assert owner.current_usage_anchor(view.scope).reported_input_tokens == 5
 
 
-def test_root_and_child_usage_anchors_are_independent_in_one_owner():
+def test_root_and_child_session_usage_anchors_are_independent():
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
+    from pulsara_agent.identity import random_id
     port = _port()
     root_request, _ = _prepared_execution(port)
-    child_request, _ = _prepared_execution(port, scope_kind=ModelInputScopeKind.SUBAGENT_TASK, scope_subagent_task_id='subagent:test')
+    child_request, _ = _prepared_execution(port, scope_kind=ModelInputScopeKind.SUBAGENT,
+        session_id=random_id("session"), turn_id=random_id("turn"))
     try:
-        owner, root_candidate = _continuity_candidate(root_request)
-        root_execution = port.preflight_execution(root_request, append_candidate=root_candidate, install_authority=owner.install_authority)
-        root_permit = owner.install(candidate=root_candidate, execution=root_execution)
-        _, child_candidate = _continuity_candidate(child_request, owner=owner)
-        child_execution = port.preflight_execution(child_request, append_candidate=child_candidate, install_authority=owner.install_authority)
-        child_permit = owner.install(candidate=child_candidate, execution=child_execution)
+        root_owner, root_candidate = _continuity_candidate(root_request)
+        root_execution = port.preflight_execution(root_request, append_candidate=root_candidate, install_authority=root_owner.install_authority)
+        root_permit = root_owner.install(candidate=root_candidate, execution=root_execution)
+        child_owner, child_candidate = _continuity_candidate(child_request)
+        child_execution = port.preflight_execution(child_request, append_candidate=child_candidate, install_authority=child_owner.install_authority)
+        child_permit = child_owner.install(candidate=child_candidate, execution=child_execution)
+        assert root_permit.scope.session_id != child_permit.scope.session_id
         root_anchor = _anchor(root_request, reported=11, revision=root_permit.epoch_revision, nonce=root_permit.epoch_nonce)
         child_anchor = _anchor(child_request, reported=22, revision=child_permit.epoch_revision, nonce=child_permit.epoch_nonce)
-        for permit, anchor in ((root_permit, root_anchor), (child_permit, child_anchor)):
+        for owner, permit, anchor in ((root_owner, root_permit, root_anchor), (child_owner, child_permit, child_anchor)):
             owner.observe_usage_anchor(permit.scope, epoch_nonce=permit.epoch_nonce, epoch_revision=permit.epoch_revision,
                 reported_model_id=anchor.reported_model_id, anchor=anchor)
-        assert owner.current_usage_anchor(root_permit.scope) is root_anchor
-        assert owner.current_usage_anchor(child_permit.scope) is child_anchor
-        owner.retire_terminal_subagent_scope(child_permit.scope)
-        assert owner.current_usage_anchor(root_permit.scope) is root_anchor
-        assert owner.current_usage_anchor(child_permit.scope) is None
+        assert root_owner.current_usage_anchor(root_permit.scope) is root_anchor
+        assert child_owner.current_usage_anchor(child_permit.scope) is child_anchor
+        child_owner.close()
+        assert root_owner.current_usage_anchor(root_permit.scope) is root_anchor
+        assert child_owner.current_usage_anchor(child_permit.scope) is None
     finally:
         root_request.surface_borrow.close()
         child_request.surface_borrow.close()

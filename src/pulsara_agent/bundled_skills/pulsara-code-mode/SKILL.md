@@ -8,7 +8,7 @@ description: Compose Pulsara tools and agents in JavaScript, including continuin
 ## One tool system, two entry points
 
 For tools available in both forms, native calls and `tools.name(...)` execute the
-same operations on the same files, processes, artifacts, and agents. Either entry
+same operations on the same files, processes, saved results, and agents. Either entry
 point can suit a single call; even a one-line `exec_cell` is useful. JavaScript also
 provides variables, conditions, and loops for connecting calls. The two entry
 points can be mixed as the task develops.
@@ -77,10 +77,12 @@ the task instead calls for a new agent. Adapt paths and instructions to the task
 - `manage_cell` with `action:"stop"` stops further script execution and submissions.
   Accepted agent work continues; use `stop_agent` when that work should stop too.
 
-Large output retains its complete content through the existing content/artifact
-owner. Use a supplied exact ARTIFACT target with native `read_artifact` or
-`export_artifact` when that is the returned reading route. Output is never replaced
-by a truncated preview presented as complete.
+A result's `next` call continues its source. When native output omits part of an
+accepted result, its `read` call reads that frozen body with `read_file` and the
+exact SESSION_ENTRY target. Copy that target into `write_file.source` to create a
+new file containing the whole body; reading a page first is unnecessary. These
+operations never repeat the original tool action. A complete saved body covers
+that invocation's returned content, which may be only one source page.
 
 The environment provides JavaScript, Promises, `tools`, and `console.log`.
 Access files, processes, and remote services through tools; Node modules,
@@ -92,8 +94,8 @@ mode. Subagents use their native tools.
 | Need | Reference |
 | --- | --- |
 | Available JS tools, sequential and parallel calls, MCP | [Tool patterns](references/tool-calling/patterns.md) |
-| Worked examples: search then read, follow a process, inspect and export its log | [Ordinary tool examples](references/tool-calling/examples.md) |
-| Errors, active output, artifacts, images | [Results and errors](references/tool-calling/results-and-errors.md) |
+| Worked examples: search then read, follow a process, inspect and save its log | [Ordinary tool examples](references/tool-calling/examples.md) |
+| Errors, active output, saved bodies, images | [Results and errors](references/tool-calling/results-and-errors.md) |
 | Agent reuse, batch teammate references, messages, dependencies, waiting and stopping | [Coordination](references/agent-orchestration/coordination.md) |
 | Worked examples: specialists, teammates, dependencies, native → JS reuse and JS → native control | [Agent examples](references/agent-orchestration/examples.md) |
 | Investigation → review → revision → implementation → code review; continuing after interruption | [Workflows](references/agent-orchestration/workflows.md) |

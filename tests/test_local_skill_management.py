@@ -1683,6 +1683,9 @@ def test_cli_four_loose_commands_project_typed_service_outcomes(
     else:
         assert install["disposition"] == "PUBLISH_UNAVAILABLE"
         return
+    destination = workspace / ".pulsara" / "skills" / "cli-skill"
+    assert Path(install["destination_path"]) == destination
+    assert (destination / "SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
 
     for command in ("list", "doctor"):
         monkeypatch.setattr(
@@ -1700,18 +1703,20 @@ def test_cli_four_loose_commands_project_typed_service_outcomes(
         cli.main()
         payload = json.loads(capsys.readouterr().out)
         assert payload["operation"] == "inspect_effective_skill_catalog"
-        assert {item["name"] for item in payload["skills"]} == {
-            "cli-skill",
-            "pulsara-data-analysis",
-            "pulsara-docs",
-            "pulsara-mcp-installer",
-            "pulsara-pdf",
-            "pulsara-plugin-installer",
-            "pulsara-sheets",
-            "pulsara-skill-creator",
-            "pulsara-skill-installer",
-            "pulsara-subagent",
-        }
+        assert payload["projection"] == command
+        assert payload["disposition"] == "COMPLETE"
+        installed = [item for item in payload["skills"] if item["name"] == "cli-skill"]
+        assert installed == [{
+            "name": "cli-skill",
+            "description": "Portable local Skill.",
+            "skill_path": (destination / "SKILL.md").relative_to(workspace).as_posix(),
+            "source": "workspace",
+            "origin_label": "workspace:.pulsara/skills",
+        }]
+        if command == "doctor":
+            assert any(root["root_kind"] == "WORKSPACE_PULSARA"
+                       and root["path"] == str(workspace / ".pulsara" / "skills")
+                       for root in payload["roots"])
 
 
 def test_cli_user_scope_rejects_workspace_as_usage_error(

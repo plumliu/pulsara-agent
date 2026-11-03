@@ -22,23 +22,19 @@ from pulsara_agent.conversation_kernel.session_text import (
     decode_saved_text,
     prompt_history_text,
 )
-from pulsara_agent.conversation_kernel.tool_artifacts import (
-    ARTIFACT_READ_DEFAULT_CHARS,
-    ARTIFACT_READ_HARD_CHARS,
-    PostgresToolArtifactReadPort,
-)
+from pulsara_agent.conversation_kernel.tool_outputs import read_tool_output_content
 from pulsara_agent.ports.session_content import (
     SESSION_QUERY_MAX_ITEMS,
     SESSION_QUERY_TOOL_NAMES,
+    SESSION_READ_DEFAULT_CHARS,
+    SESSION_READ_MAX_CHARS,
     SessionContentRange,
     session_entry_target,
 )
 from pulsara_agent.primitives.context import canonical_json_bytes
-from pulsara_agent.primitives.tool_observation import (
-    MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    conservative_artifact_page_logical_utf8_bytes,
+from pulsara_agent.primitives.tool_result_budget import (
+    ToolResultPageBoundary,
+    ToolResultPageBudget,
 )
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 
@@ -144,20 +140,31 @@ def _target(arguments, operation, current_session_id):
     raise SessionQueryError("INVALID_REQUEST", "Unsupported session target kind.")
 
 
-def _fits(payload, tool_call_id):
-    return (
-        conservative_artifact_page_logical_utf8_bytes(
-            tool_call_id=tool_call_id,
-            body=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            model_visible_memory_ids=(),
-        )
-        <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+def _fits(payload, tool_call_id, page_budget=None):
+    budget = page_budget if page_budget is not None else ToolResultPageBudget(tool_call_id=tool_call_id)
+    return budget.fits(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     )
 
 
+def _next_call(operation, cursor, limit, maximum=None):
+    if cursor is None:
+        return None
+    arguments = {"cursor": cursor, "limit": limit}
+    if maximum is not None:
+        arguments["max_chars"] = maximum
+    return {"tool": operation, "arguments": arguments}
+
+
+def _entry_read(target, *, include_tools=False):
+    arguments = {"target": target, "limit": 1}
+    if include_tools:
+        arguments["include_tools"] = True
+    return {"tool": "read_session_content", "arguments": arguments}
+
+
 def _resource_error(message=None):
-    return SessionQueryError(
-        "RESULT_BUDGET_EXCEEDED",
+    return ToolResultPageBoundary(
         message
         or "One readable item and its cursor cannot fit the tool result budget.",
     )
@@ -220,6 +227,7 @@ class SessionContentQuery:
         *,
         current_range: SessionContentRange,
         tool_call_id: str,
+        page_budget: ToolResultPageBudget,
         deadline_monotonic: float,
     ):
         if operation not in SESSION_QUERY_TOOL_NAMES:
@@ -243,10 +251,10 @@ class SessionContentQuery:
             maximum=SESSION_QUERY_MAX_ITEMS,
         )
         maximum = _integer(
-            arguments.get("max_chars", ARTIFACT_READ_DEFAULT_CHARS),
+            arguments.get("max_chars", SESSION_READ_DEFAULT_CHARS),
             "max_chars",
             minimum=1,
-            maximum=ARTIFACT_READ_HARD_CHARS,
+            maximum=SESSION_READ_MAX_CHARS,
         )
         cursor = None
         if "cursor" in arguments:
@@ -268,6 +276,7 @@ class SessionContentQuery:
                     limit,
                     tool_call_id,
                     deadline_monotonic,
+                    page_budget,
                 )
             elif operation == "search_session_content":
                 payload = self._search_content_bm25(
@@ -278,6 +287,7 @@ class SessionContentQuery:
                     limit,
                     tool_call_id,
                     deadline_monotonic,
+                    page_budget,
                 )
             else:
                 payload = self._content(
@@ -291,8 +301,9 @@ class SessionContentQuery:
                     tool_call_id,
                     deadline_monotonic,
                     caller["workspace_id"],
+                    page_budget,
                 )
-            if not _fits(payload, tool_call_id):
+            if not _fits(payload, tool_call_id, page_budget):
                 raise _resource_error()
             return payload
 
@@ -331,7 +342,7 @@ class SessionContentQuery:
                 )
 
     def _sessions(
-        self, connection, arguments, cursor, actual, limit, call_id, deadline
+        self, connection, arguments, cursor, actual, limit, call_id, deadline, page_budget
     ):
         if cursor is None:
             query = arguments.get("query", "")
@@ -418,6 +429,7 @@ class SessionContentQuery:
                     "target": session_entry_target(row["id"], row["entry_id"]),
                     **{key: row[key] for key in ("role", "at", "text")},
                 }
+                hit["read"] = _entry_read(hit["target"])
                 if row["partial"]:
                     hit["partial"] = True
                 if row["scheduled_input"] is not None:
@@ -433,15 +445,15 @@ class SessionContentQuery:
                     "id": row["id"],
                 }
             )
-            candidate = {"items": [*items, item], "next_cursor": token(row_cursor)}
-            if not _fits(candidate, call_id):
+            candidate = {"items": [*items, item], "next": _next_call("search_sessions", token(row_cursor), limit)}
+            if not _fits(candidate, call_id, page_budget):
                 if not items:
                     raise _resource_error()
-                return {"items": items, "next_cursor": token(inner)}
+                return {"items": items, "next": _next_call("search_sessions", token(inner), limit)}
             items.append(item)
             inner = row_cursor
-        payload = {"items": items, "next_cursor": token(after)}
-        if not _fits(payload, call_id):
+        payload = {"items": items, "next": _next_call("search_sessions", token(after), limit)}
+        if not _fits(payload, call_id, page_budget):
             raise _resource_error()
         return payload
 
@@ -457,6 +469,7 @@ class SessionContentQuery:
         call_id,
         deadline,
         caller_workspace_id,
+        page_budget,
     ):
         if cursor is None:
             target, anchor_id = _target(arguments, operation, self.session_id)
@@ -551,7 +564,7 @@ class SessionContentQuery:
                 )
         self.reader.validate_history_cut(connection, session, cut, event_cut)
         if target == self.session_id and end == 0:
-            return {"items": [], "next_cursor": None, "note": "没有更早的会话内容。"}
+            return {"items": [], "next": None, "note": "没有更早的会话内容。"}
 
         def token(sequence, start):
             return _encode(
@@ -607,6 +620,7 @@ class SessionContentQuery:
                 deadline,
                 tools,
                 caller_workspace_id,
+                page_budget,
             )
 
     def _document(
@@ -631,17 +645,21 @@ class SessionContentQuery:
             item["origin"] = "scheduled"
         fact = None
         if role == "tool":
-            # Resolve ownership before loading result/artifact bodies. Missing
+            # Resolve ownership before loading the saved body. Missing
             # canonical edges are corruption, not an excuse to hide a result.
             fact = connection.execute(
-                """SELECT r.*,a.tool_name FROM pulsara_v3.tool_results r
-                JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id
+                """SELECT r.*,CASE WHEN r.result_record_kind='IMPORTED_HISTORY'
+                  OR i.source_kind='MODEL_TOOL_CALL' THEN a.tool_name ELSE i.tool_name END AS tool_name
+                FROM pulsara_v3.tool_results r
+                LEFT JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id
+                  AND i.id=r.invocation_id
+                LEFT JOIN pulsara_v3.assistant_message_blocks a ON a.session_id=r.session_id
                   AND a.assistant_entry_id=r.tool_call_entry_id AND a.tool_call_id=r.tool_call_id
                   AND a.block_kind='TOOL_CALL'
                 WHERE r.session_id=%s AND r.result_entry_id=%s""",
                 (entry["session_id"], entry["id"]),
             ).fetchone()
-            if fact is None:
+            if fact is None or fact["tool_name"] is None:
                 raise RuntimeError("saved tool result has no canonical edge")
         bounds = ()
         if role == "assistant":
@@ -678,6 +696,13 @@ class SessionContentQuery:
                 decoded.parts,
                 image_references=entry["workspace_id"] == caller_workspace_id,
             )
+        elif role == "tool":
+            if fact["output_unavailability_reason"] is None:
+                text = read_tool_output_content(connection, fact).decode("utf-8")
+                segments = ((0, text),)
+            else:
+                text = "[Saved tool output is unavailable.]"
+                segments = ()
         else:
             content = entry["inline_content"]
             if content is None:
@@ -698,52 +723,19 @@ class SessionContentQuery:
             segments = ((0, text),)
         if role == "tool":
             item.update(tool_name=fact["tool_name"], result_state=fact["result_state"])
-            disposition = fact["output_artifact_disposition"]
+            if fact["result_facts"]:
+                item["result_facts"] = fact["result_facts"]
             if (
                 fact["output_source_coverage"] != "COMPLETE"
-                or fact["output_display_kind"] != "COMPLETE"
-                or disposition in {"INCOMPLETE", "UNAVAILABLE"}
+                or fact["output_unavailability_reason"] is not None
             ):
                 for source, name in (
                     ("output_source_coverage", "source_coverage"),
-                    ("output_display_kind", "display_kind"),
-                    ("output_artifact_disposition", "artifact_disposition"),
                     ("output_source_coverage_reason", "source_coverage_reason"),
-                    (
-                        "output_artifact_unavailability_reason",
-                        "artifact_unavailability_reason",
-                    ),
+                    ("output_unavailability_reason", "output_unavailability_reason"),
                 ):
                     if fact[source] is not None:
                         item[name] = fact[source]
-            if disposition in {"AVAILABLE", "INCOMPLETE"}:
-                reference = self.reader.resolve_tool_artifact_reference(
-                    session_id=entry["session_id"],
-                    result_entry_id=entry["id"],
-                    deadline_monotonic=deadline,
-                    read_connection=connection,
-                )
-                remaining = deadline - monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("session artifact query deadline exceeded")
-                port = PostgresToolArtifactReadPort(
-                    self.repository.connection_provider,
-                    session_id=entry["session_id"],
-                    workspace_id=reference["workspace_id"],
-                    operation_timeout_seconds=remaining,
-                )
-                try:
-                    body = port.read_body(
-                        reference["output_artifact_id"]
-                    ).content.decode("utf-8")
-                except KeyError as exc:
-                    raise RuntimeError("saved tool artifact is missing") from exc
-                prefix, separator = "Saved tool result:\n", "\n\nTool output:\n"
-                segments = tuple(
-                    (len(prefix) + at, value) for at, value in segments
-                ) + ((len(prefix) + len(text) + len(separator), body),)
-                bounds = tuple((len(prefix) + a, len(prefix) + b) for a, b in bounds)
-                text = prefix + text + separator + body
         notices = self.reader._notices(
             connection, entry["session_id"], event_cut, entry
         )
@@ -757,7 +749,7 @@ class SessionContentQuery:
         return item, text, segments, bounds
 
     def _search_content_bm25(
-        self, connection, arguments, cursor, actual, limit, call_id, deadline
+        self, connection, arguments, cursor, actual, limit, call_id, deadline, page_budget
     ):
         from pulsara_agent.conversation_kernel.history_search import (
             FrozenHistoryReadScope,
@@ -833,8 +825,8 @@ class SessionContentQuery:
         )
 
         def finish(items, more):
-            payload = {"items": items, "next_cursor": next_cursor if more else None}
-            if not _fits(payload, call_id):
+            payload = {"items": items, "next": _next_call("search_session_content", next_cursor if more else None, limit)}
+            if not _fits(payload, call_id, page_budget):
                 raise _resource_error()
             if more:
                 self._history_consumed_pages[page_id] = _HistoryConsumedPage(
@@ -879,13 +871,21 @@ class SessionContentQuery:
                         "target": session_entry_target(
                             candidate.session_id, m["entry_id"]
                         ),
+                        "read": _entry_read(
+                            session_entry_target(candidate.session_id, m["entry_id"]),
+                            include_tools=tools,
+                        ),
                         **{k: m[k] for k in ("role", "label", "at", "text")},
+                        **{k: m[k] for k in (
+                            "result_state", "result_facts", "source_coverage",
+                            "source_coverage_reason", "output_unavailability_reason",
+                        ) if k in m},
                     }
                     for m in candidate.messages
                 ],
             }
-            payload = {"items": [*items, item], "next_cursor": next_cursor}
-            if not _fits(payload, call_id):
+            payload = {"items": [*items, item], "next": _next_call("search_session_content", next_cursor, limit)}
+            if not _fits(payload, call_id, page_budget):
                 if not items:
                     raise _resource_error()
                 return finish(items, True)
@@ -909,6 +909,7 @@ class SessionContentQuery:
         deadline,
         include_tools,
         caller_workspace_id,
+        page_budget,
     ):
         items = []
         remaining = maximum
@@ -954,7 +955,7 @@ class SessionContentQuery:
                     )
                 return {
                     "items": items,
-                    "next_cursor": token(entry["entry_sequence"], offset),
+                    "next": _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum),
                 }
 
             def build(length):
@@ -968,16 +969,16 @@ class SessionContentQuery:
                     if next_entry is not None
                     else None
                 )
-                return {"items": [*items, value], "next_cursor": after}
+                return {"items": [*items, value], "next": _next_call("read_session_content", after, limit, maximum)}
 
             payload = build(take)
-            if not _fits(payload, call_id):
+            if not _fits(payload, call_id, page_budget):
                 low, high, winner = 1, take, None
                 while low <= high:
                     middle = (low + high) // 2
                     length = whole_length(middle)
                     candidate = build(length)
-                    if _fits(candidate, call_id):
+                    if _fits(candidate, call_id, page_budget):
                         if length:
                             winner = candidate
                         low = middle + 1
@@ -988,7 +989,7 @@ class SessionContentQuery:
                         raise _resource_error()
                     return {
                         "items": items,
-                        "next_cursor": token(entry["entry_sequence"], offset),
+                        "next": _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum),
                     }
                 return winner
             items = payload["items"]
@@ -996,4 +997,4 @@ class SessionContentQuery:
             if offset + take < len(text) or not remaining or len(items) == limit:
                 return payload
             entry, offset = next_entry, 0
-        return {"items": items, "next_cursor": None}
+        return {"items": items, "next": None}

@@ -10,8 +10,6 @@ const labels: Record<string, [title: string, pending: string, completed: string]
   find_files: ['查找文件', '正在查找文件', '查找已结束'],
   edit_file: ['修改文件', '正在修改文件', '已修改文件'],
   write_file: ['写入文件', '正在写入文件', '已写入文件'],
-  read_artifact: ['读取完整输出', '正在读取之前保留的输出', '已读取保留的输出'],
-  export_artifact: ['导出完整输出', '正在导出保留的输出', '已导出保留的输出'],
   exec_process: ['运行命令', '命令正在执行', '已执行命令'],
   query_processes: ['查看命令', '正在读取命令状态', '已读取命令状态'],
   manage_process: ['管理命令', '正在处理命令进程', '已查看命令状态'],
@@ -120,7 +118,7 @@ function failure(trace: ToolTrace, result: Record<string, unknown>): string {
 
 export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle: string } | undefined {
   if (trace.toolName === 'open_in_pulsara' && trace.status === 'completed') {
-    const result = parse(trace.resultText);
+    const result = { ...parse(trace.resultText), ...trace.resultFacts };
     const accepted = count(result.targets) ?? 0, rejected = count(result.errors) ?? 0;
     return { title: accepted ? '请求展示' : '目标未通过检查', subtitle: accepted ? `${accepted} 个目标${rejected ? `，${rejected} 项未通过检查` : ''}` : `${rejected} 项未通过检查` };
   }
@@ -129,9 +127,10 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
   const label = labels[name];
   if (!label) return undefined;
   const args = parse(trace.argumentsJson);
-  const result = parse(trace.resultText);
+  const result = { ...parse(trace.resultText), ...trace.resultFacts };
   const action = text(args.action);
-  const title = (name === 'manage_process' ? processActions[action]
+  const title = (name === 'read_file' && object(args.target).kind === 'SESSION_ENTRY' ? '读取内容'
+    : name === 'manage_process' ? processActions[action]
     : name === 'manage_cell' ? ({ wait: '等待脚本结束', stop: '停止脚本' } as Record<string, string>)[action]
     : name === 'query_capabilities' && Object.hasOwn(args, 'target') ? '查看能力详情' : undefined) ?? label[0];
   let target = '';
@@ -155,25 +154,31 @@ export function builtinToolSummary(trace: ToolTrace): { title: string; subtitle:
     const status = text(result.status).toLowerCase();
     switch (name) {
       case 'read_file': {
+        if (object(args.target).kind === 'SESSION_ENTRY') {
+          detail = `已读取保留的输出${result.next ? '，还有后续内容' : '，已到末尾'}`;
+          if (result.source_coverage === 'RETAINED_SNAPSHOT') detail += ' · 仅保留了部分原始输出';
+          break;
+        }
         const total = number(result.total_lines);
-        if (total !== undefined) detail = `已读取文件 · 共 ${total} 行${result.truncated === true || (number(result.offset) ?? 1) > 1 ? '，本次仅返回部分内容' : ''}`;
+        if (total !== undefined) detail = `已读取文件 · 共 ${total} 行${Boolean(result.next) || (number(object(result.position).line) ?? 1) > 1 || (number(object(result.position).char_offset) ?? 0) > 0 ? '，本次仅返回部分内容' : ''}`;
         break;
       }
       case 'search_content':
       case 'find_files': {
-        const total = number(result.total_count);
-        if (total !== undefined) detail = `找到 ${total} ${name === 'find_files' ? '个文件' : result.output_mode === 'files_only' ? '个包含匹配的文件' : '行匹配'}${result.truncated === true || (number(args.offset) ?? 0) > 0 ? '，本次仅返回部分结果' : ''}`;
+        const mode = text(result.output_mode) || text(args.output_mode);
+        if (mode === 'count') {
+          detail = `本次列出 ${count(result.counts) ?? 0} 个文件的匹配行数`;
+        } else {
+          const files = name === 'find_files' || mode === 'files_only';
+          detail = `本次找到 ${count(files ? result.targets : result.matches) ?? 0} ${files ? '个文件' : '行匹配'}`;
+        }
+        if (result.next) detail += '，可继续搜索';
+        if (text(result.status).toUpperCase() === 'PARTIAL') detail += ' · 部分范围未完整读取';
         break;
       }
       case 'write_file': {
         const bytes = number(result.bytes_written);
         if (bytes !== undefined) detail = `已写入 ${bytes} 字节`;
-        break;
-      }
-      case 'read_artifact': {
-        const chars = number(result.returned_chars);
-        if (chars !== undefined) detail = `已读取 ${chars} 个字符${result.has_more === true ? '，还有后续内容' : '，已到末尾'}`;
-        if (result.source_coverage === 'RETAINED_SNAPSHOT') detail += ' · 仅保留了部分原始输出';
         break;
       }
       case 'exec_process':

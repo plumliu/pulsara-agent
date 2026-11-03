@@ -283,6 +283,17 @@ class AtomicLocalSkillPublisher:
     ) -> None:
         self._exclusive = exclusive_publisher or PlatformExclusiveDirectoryPublisher()
 
+    def install_destination(
+        self, *, scope: LocalSkillInstallScope, workspace_root: Path | None,
+        pulsara_home: PulsaraHomeResolution | None, parsed: ParsedSkillDocument,
+    ) -> Path | None:
+        """Resolve the validated destination without creating or publishing it."""
+        configuration = self._target_configuration(
+            scope=scope, workspace_root=workspace_root, pulsara_home=pulsara_home)
+        if isinstance(configuration, PulsaraHomeUnavailableReason):
+            return None
+        return configuration[0] / parsed.name
+
     def install(
         self,
         *,

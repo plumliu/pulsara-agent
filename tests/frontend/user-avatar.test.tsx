@@ -47,7 +47,7 @@ function setup() {
   const history = (userSenderKind: 'user' | 'agent', scheduled = false) => <ConversationMessages
     messages={[{ id: scheduled ? 'scheduled' : userSenderKind, role: 'user', userKind: scheduled ? 'scheduled' : 'prompt', body: 'hello', time: '10:00' }]}
     userSenderKind={userSenderKind} userLabel={userSenderKind === 'agent' ? '主 Agent' : '你'}
-    artifactOwnerKey="test" onReadToolArtifact={vi.fn()} onNotify={notify} />;
+    outputOwnerKey="test" onReadToolOutput={vi.fn()} onNotify={notify} />;
   render(<UserAvatarProvider adapter={adapter}>
     <ActivityRail activeView="settings" onNavigate={vi.fn()} />
     <SettingsView initialSection="general" adapter={adapter} theme="light" runtimeStatus="online" onThemeChange={vi.fn()} onConfigurationChanged={vi.fn()}

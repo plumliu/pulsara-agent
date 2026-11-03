@@ -904,7 +904,7 @@ describe('PulsaraApp', () => {
     await act(async () => adapter.lastConnection?.emit({
       ...projection('Skill installed'), isRunning: false, eventSequence: 2,
       messages: [{id: 'managed-skill', role: 'assistant', time: '现在', body: 'Skill installed',
-        status: 'completed', traces: [{id: 'install', kind: 'artifact', toolName: 'manage_capability',
+        status: 'completed', traces: [{id: 'install', kind: 'tool', toolName: 'manage_capability',
           title: '管理扩展能力', subtitle: '配置变更已应用', status: 'completed',
           resultText: '{"status":"APPLIED","adoption":{"status":"RELOADED"}}'}]}],
     }));
@@ -1419,7 +1419,7 @@ describe('PulsaraApp', () => {
     expect(diffOutput.classList.contains('tool-result-diff')).toBe(true);
     expect(screen.queryByText('操作已完成。')).toBeNull();
     expect(screen.queryByRole('button', { name: '复制工具差异' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '复制工具原始结果' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '复制工具展示结果' })).toBeNull();
     expect(container.querySelector('.tool-result-raw')).toBeNull();
   });
 
@@ -1448,19 +1448,19 @@ describe('PulsaraApp', () => {
     fireEvent.click(await screen.findByRole('button', { name: /展开工具详情：mcp__external__report/ }));
 
     expect(screen.queryByLabelText('文件差异')).toBeNull();
-    expect(screen.getByLabelText('工具原始结果').textContent).toContain(resultText);
+    expect(screen.getByLabelText('工具展示结果').textContent).toContain(resultText);
   });
 
-  it('collapses retained artifact content independently from the tool card', async () => {
+  it('collapses retained output content independently from the tool card', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
       ...projection(''),
       messages: [{
-        id: 'assistant-artifact', role: 'assistant', time: '18:03', body: '', status: 'completed',
+        id: 'assistant-output', role: 'assistant', time: '18:03', body: '', status: 'completed',
         traces: [{
-          id: 'trace-artifact', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search', title: '搜索内容',
+          id: 'trace-output', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search', title: '搜索内容',
           subtitle: '已完成', status: 'completed', resultEntryId: 'result-1', resultText: '{"content":[]}',
-          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
+          outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: false },
           meta: '操作完成',
         }],
       }],
@@ -1475,9 +1475,9 @@ describe('PulsaraApp', () => {
 
     const collapse = screen.getByRole('button', { name: /收起工具详情/ });
     expect(collapse.textContent).not.toContain('收起详情');
-    const artifactTrigger = screen.getByRole('button', { name: '查看完整输出' });
-    expect(artifactTrigger.classList.contains('tool-artifact__trigger')).toBe(true);
-    fireEvent.click(artifactTrigger);
+    const outputTrigger = screen.getByRole('button', { name: '查看完整输出' });
+    expect(outputTrigger.classList.contains('tool-output__trigger')).toBe(true);
+    fireEvent.click(outputTrigger);
 
     const end = await screen.findByRole('status', { name: '完整输出读取状态' });
     expect(end.textContent).toContain('已到末页');
@@ -1487,25 +1487,25 @@ describe('PulsaraApp', () => {
     fireEvent.click(screen.getByRole('button', { name: '收起完整输出' }));
     expect(screen.queryByRole('button', { name: '复制当前工具输出页' })).toBeNull();
     expect(screen.getByRole('button', { name: '查看完整输出' })).toBeTruthy();
-    expect(screen.getByLabelText('工具原始结果')).toBeTruthy();
+    expect(screen.getByLabelText('工具展示结果')).toBeTruthy();
 
     fireEvent.click(collapse);
-    expect(screen.queryByRole('region', { name: '工具原始结果' })).toBeNull();
-    expect(screen.queryByLabelText('工具原始结果')).toBeNull();
+    expect(screen.queryByRole('region', { name: '工具展示结果' })).toBeNull();
+    expect(screen.queryByLabelText('工具展示结果')).toBeNull();
   });
 
-  it('invalidates an in-flight artifact page when the whole tool card is collapsed', async () => {
+  it('invalidates an in-flight output page when the whole tool card is collapsed', async () => {
     const adapter = new FakeAdapter();
-    const page = deferred<Awaited<ReturnType<RuntimeConnection['readToolArtifact']>>>();
+    const page = deferred<Awaited<ReturnType<RuntimeConnection['readToolOutput']>>>();
     adapter.connectionValue = {
       ...projection(''),
       messages: [{
-        id: 'assistant-artifact-race', role: 'assistant', time: '18:03', body: '', status: 'completed',
+        id: 'assistant-output-race', role: 'assistant', time: '18:03', body: '', status: 'completed',
         traces: [{
-          id: 'trace-artifact-race', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search',
+          id: 'trace-output-race', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search',
           status: 'completed',
           title: '搜索内容', subtitle: '已完成', resultEntryId: 'result-race', resultText: '{}',
-          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
+          outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: false },
           meta: '操作完成',
         }],
       }],
@@ -1517,15 +1517,15 @@ describe('PulsaraApp', () => {
     fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     const active = adapter.lastConnection!;
-    active.readToolArtifact.mockImplementationOnce(() => page.promise);
+    active.readToolOutput.mockImplementationOnce(() => page.promise);
     fireEvent.click(expand);
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
-    await waitFor(() => expect(active.readToolArtifact).toHaveBeenCalledWith('result-race', 0));
+    await waitFor(() => expect(active.readToolOutput).toHaveBeenCalledWith('result-race', { line: 1, charOffset: 0 }));
     fireEvent.click(screen.getByRole('button', { name: /收起工具详情/ }));
 
     await act(async () => page.resolve({
-      resultEntryId: 'result-race', text: '不应落回的迟到页', offsetChars: 0,
-      returnedChars: 9, totalChars: 9, hasMore: false,
+      resultEntryId: 'result-race', text: '不应落回的迟到页', position: { line: 1, charOffset: 0 },
+
     }));
     fireEvent.click(screen.getByRole('button', { name: /展开工具详情/ }));
 
@@ -1533,9 +1533,9 @@ describe('PulsaraApp', () => {
     expect(screen.getByRole('button', { name: '查看完整输出' })).toBeTruthy();
   });
 
-  it('does not apply an old-session artifact page to a reused trace identity', async () => {
+  it('does not apply an old-session output page to a reused trace identity', async () => {
     const adapter = new FakeAdapter();
-    const oldPage = deferred<Awaited<ReturnType<RuntimeConnection['readToolArtifact']>>>();
+    const oldPage = deferred<Awaited<ReturnType<RuntimeConnection['readToolOutput']>>>();
     const secondSession: SessionSummary = {
       ...initialSession,
       id: 'session:hrluejkx3v2ajzf4ec6bb3ierm',
@@ -1543,7 +1543,7 @@ describe('PulsaraApp', () => {
       live: false,
     };
     adapter.sessions = [initialSession, secondSession];
-    const artifactProjection = (resultText: string): RuntimeProjection => ({
+    const outputProjection = (resultText: string): RuntimeProjection => ({
       ...projection(''),
       messages: [{
         id: 'assistant-shared', role: 'assistant', time: '18:03', body: '', status: 'completed',
@@ -1551,37 +1551,37 @@ describe('PulsaraApp', () => {
           id: 'trace-shared', kind: 'mcp', toolName: 'mcp__firecrawl__firecrawl_search',
           status: 'completed',
           title: '搜索内容', subtitle: '已完成', resultEntryId: 'result-shared', resultText,
-          artifact: { disposition: 'AVAILABLE', sourceCoverage: 'COMPLETE', displayKind: 'COMPLETE' },
+          outputBody: { available: true, sourceCoverage: 'COMPLETE', omitted: false },
           meta: '操作完成',
         }],
       }],
       isRunning: false,
       activeTurnId: undefined,
     });
-    adapter.connectionValues.set('session:bwpogagzox7onyn52iumyctnkq', artifactProjection('{"session":"A"}'));
-    adapter.connectionValues.set('session:hrluejkx3v2ajzf4ec6bb3ierm', artifactProjection('{"session":"B"}'));
+    adapter.connectionValues.set('session:bwpogagzox7onyn52iumyctnkq', outputProjection('{"session":"A"}'));
+    adapter.connectionValues.set('session:hrluejkx3v2ajzf4ec6bb3ierm', outputProjection('{"session":"B"}'));
 
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     fireEvent.click(await screen.findByRole('button', { name: '展开处理过程' }));
     const expand = await screen.findByRole('button', { name: /展开工具详情/ });
     const first = adapter.lastConnection!;
-    first.readToolArtifact.mockImplementationOnce(() => oldPage.promise);
+    first.readToolOutput.mockImplementationOnce(() => oldPage.promise);
     fireEvent.click(expand);
     fireEvent.click(screen.getByRole('button', { name: '查看完整输出' }));
-    await waitFor(() => expect(first.readToolArtifact).toHaveBeenCalledWith('result-shared', 0));
+    await waitFor(() => expect(first.readToolOutput).toHaveBeenCalledWith('result-shared', { line: 1, charOffset: 0 }));
 
     fireEvent.click(screen.getByRole('button', { name: /另一个会话/ }));
     await screen.findByRole('heading', { name: '另一个会话' });
     const processToggle = screen.queryByRole('button', { name: '展开处理过程' });
     if (processToggle) fireEvent.click(processToggle);
     await act(async () => oldPage.resolve({
-      resultEntryId: 'result-shared', text: '会话 A 的迟到 artifact', offsetChars: 0,
-      returnedChars: 17, totalChars: 17, hasMore: false,
+      resultEntryId: 'result-shared', text: '会话 A 的迟到 output', position: { line: 1, charOffset: 0 },
+
     }));
     const summary = screen.getByRole('button', { name: /工具详情：mcp__firecrawl__firecrawl_search/ });
     if (summary.getAttribute('aria-expanded') !== 'true') fireEvent.click(summary);
 
-    expect(screen.queryByText('会话 A 的迟到 artifact')).toBeNull();
+    expect(screen.queryByText('会话 A 的迟到 output')).toBeNull();
     expect(screen.getByRole('button', { name: '查看完整输出' })).toBeTruthy();
   });
 
@@ -1609,7 +1609,7 @@ describe('PulsaraApp', () => {
       messages: [{
         id: 'assistant-capabilities', role: 'assistant', time: '18:11', body: '', status: 'completed',
         traces: [{
-          id: 'trace-reload', kind: 'artifact', toolName: 'reload_capabilities', title: '刷新能力',
+          id: 'trace-reload', kind: 'tool', toolName: 'reload_capabilities', title: '刷新能力',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
           argumentsJson: '{}', resultText: '{"status":"RELOADED"}',
         }, {
@@ -1625,7 +1625,7 @@ describe('PulsaraApp', () => {
             items: [{ kind: 'MCP_SERVER', name: 'firecrawl', status: '连接已就绪。' }, {
               kind: 'MCP_SERVER', name: 'local-docs', status: '正在连接。',
             }],
-          }) + '\n\n[TOOL OUTPUT ARTIFACT: full retained output is available as artifact_id=artifact:test.]',
+          }),
         }, {
           id: 'trace-inspect', kind: 'mcp', toolName: 'query_capabilities', title: '查看能力详情',
           subtitle: '已完成', status: 'completed', meta: '操作完成',
@@ -2050,7 +2050,7 @@ describe('PulsaraApp', () => {
       await screen.findByRole('heading', { name: '准备发布' });
       fireEvent.click(screen.getByRole('button', { name: '设置' }));
       fireEvent.click(screen.getByRole('button', { name: '通用' }));
-      const toggle = screen.getByRole('switch', { name: '显示内置工具原始结果' });
+      const toggle = screen.getByRole('switch', { name: '显示内置工具结果详情' });
       expect(toggle.getAttribute('aria-checked')).toBe('false');
       fireEvent.click(toggle);
       expect(toggle.getAttribute('aria-checked')).toBe('true');
@@ -2061,7 +2061,7 @@ describe('PulsaraApp', () => {
       await screen.findByRole('heading', { name: '准备发布' });
       fireEvent.click(screen.getByRole('button', { name: '设置' }));
       fireEvent.click(screen.getByRole('button', { name: '通用' }));
-      const restored = screen.getByRole('switch', { name: '显示内置工具原始结果' });
+      const restored = screen.getByRole('switch', { name: '显示内置工具结果详情' });
       expect(restored.getAttribute('aria-checked')).toBe('true');
       fireEvent.click(restored);
       expect(uiPreferences.getItem('pulsara-show-builtin-tool-results')).toBe('false');

@@ -11,3 +11,5 @@ test('shared Electron identity uses the Python canonical vectors', () => {
   }
   assert.throws(() => deriveIdentity('entry', 'fixture', '\ud800'));
 });
+
+test('rejects removed artifact identity allocation', () => { assert.throws(() => randomIdentity('artifact' as never)); });

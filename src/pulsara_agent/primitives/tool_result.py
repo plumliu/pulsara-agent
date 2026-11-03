@@ -24,7 +24,6 @@ class ToolResultOperationalKind(StrEnum):
     TERMINAL_PROCESS_OBSERVATION = "terminal_process_observation"
     TERMINAL_PROCESS_INVENTORY = "terminal_process_inventory"
     TERMINAL_PROCESS_ERROR = "terminal_process_error"
-    ARTIFACT = "artifact"
 
 
 class ToolResultEssentialEnvelopeKind(StrEnum):
@@ -34,7 +33,6 @@ class ToolResultEssentialEnvelopeKind(StrEnum):
     TERMINAL_PROCESS_OBSERVATION = "terminal_process_observation"
     TERMINAL_PROCESS_INVENTORY = "terminal_process_inventory"
     TERMINAL_PROCESS_ERROR = "terminal_process_error"
-    ARTIFACT = "artifact"
 
 
 class ToolResultRenderVariantCode(StrEnum):

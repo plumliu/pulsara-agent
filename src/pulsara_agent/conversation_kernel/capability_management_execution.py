@@ -7,6 +7,7 @@ user submission or execute directly, never both; no lookup registry is involved.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from pulsara_agent.capability.local_skill_management import (
 from pulsara_agent.capability.local_skill_publisher import (
     LocalSkillInstallScope,
     LocalSkillInstallDisposition,
+    LocalSkillCleanupLocationStatus,
 )
 from pulsara_agent.capability.local_skill_removal import LocalSkillRemovalDisposition
 from pulsara_agent.capability.inspection_presentation import diagnostic_payload
@@ -52,6 +54,7 @@ from pulsara_agent.plugins.contracts import (
     ExternalProcessAcceptance,
     InstallLocalPluginRequest,
     PluginInstanceState,
+    PluginInstallDisposition, PluginEnablementDisposition, PluginRemovalDisposition,
     PluginScopeKind,
     PreparedPluginInstanceObservation,
     RemoveLocalPluginRequest,
@@ -67,6 +70,8 @@ from pulsara_agent.plugins.mcp_connection import (
     connection_editor_definition,
 )
 from pulsara_agent.primitives.context import freeze_json, thaw_json
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget, ToolResultPageBoundary
+from .tool_result_display import require_native_result_minimum
 from pulsara_agent.public_projection import public_record
 from pulsara_agent.capability.public_projection import (
     public_connection_editor, public_diagnostic, public_mcp_config,
@@ -423,7 +428,66 @@ class CapabilityManagementCall:
             else None
         )
 
-    async def execute(self, *, cell_cancel_event: asyncio.Event | None = None):
+    def _require_result_budget(self, prepared, fields, root, budget, scrub):
+        """Admit the same compact control contract used after settlement.
+
+        Only real prepared targets and existing guards enter this witness.
+        Future package IDs and staging names remain in C, at their native
+        allocation boundary. Closed outcome scalars use their longest legal
+        value; this quote is not published as an observed result.
+        """
+        action = prepared.intent.action
+        target = thaw_json(prepared.intent.target) if prepared.intent.target is not None else None
+        current = {}
+        if action is Action.INSTALL_LOOSE_SKILL:
+            destination = self.service.skills.loose_skill_install_destination(
+                InstallLooseLocalSkillRequest(Path(fields["source_path"]),
+                    LocalSkillInstallScope(prepared.resolved_scope.value.lower()), root,
+                    fields.get("name"), fields.get("description")), prepared.skill_validation)
+            if destination is not None:
+                target = {"kind": "SKILL", "skill_path": str(destination / "SKILL.md")}
+            current = {"operation_status": max(LocalSkillInstallDisposition, key=lambda item: len(item.value)).value,
+                       "prior_operation_status": max(LocalSkillInstallDisposition, key=lambda item: len(item.value)).value,
+                       "cleanup_attention": False,
+                       "cleanup_location_status": max(LocalSkillCleanupLocationStatus, key=lambda item: len(item.value)).value}
+        elif action is Action.REMOVE_LOOSE_SKILL:
+            current = {"operation_status": max(LocalSkillRemovalDisposition, key=lambda item: len(item.value)).value,
+                       "cleanup_attention": False}
+        elif action in {Action.SET_LOOSE_SKILL_ENABLED, Action.SET_HOOK_SOURCE_ENABLED}:
+            current = {"enabled": fields["enabled"]}
+        elif action is Action.REVOKE_HOOK_TRUST:
+            current = {"trust_revoked": True}
+        elif action in {Action.AUTHORIZE_MCP, Action.CLEAR_MCP_AUTHORIZATION}:
+            current = {"authorized": action is Action.AUTHORIZE_MCP}
+        elif action in {Action.ADD_LOCAL_MCP, Action.UPDATE_LOCAL_MCP, Action.REMOVE_LOCAL_MCP,
+                        Action.CONFIGURE_PLUGIN_MCP_CONNECTION}:
+            current = {"cleanup_attention": False}
+        elif action in {Action.INSTALL_PLUGIN, Action.SET_PLUGIN_ENABLED, Action.REMOVE_PLUGIN}:
+            disposition = (PluginInstallDisposition if action is Action.INSTALL_PLUGIN else
+                           PluginEnablementDisposition if action is Action.SET_PLUGIN_ENABLED else PluginRemovalDisposition)
+            current = {"operation_status": max(disposition, key=lambda item: len(item.value)).value,
+                       "cleanup_attention": False}
+            if action is Action.INSTALL_PLUGIN:
+                expected = thaw_json(prepared.expected_current)
+                target = {"kind": "PLUGIN", "scope": prepared.resolved_scope.value, "plugin_id": expected["plugin_id"]}
+                current["prior_operation_status"] = max(disposition, key=lambda item: len(item.value)).value
+            if action is Action.SET_PLUGIN_ENABLED:
+                current.update(intended_enabled=fields["enabled"], desired_enabled=fields["enabled"])
+        expected = thaw_json(prepared.expected_current)
+        for name in ("expected_package_install_id", "expected_identity"):
+            if name in expected:
+                current[name] = expected[name]
+        if prepared.plugin is not None:
+            current.setdefault("expected_package_install_id", prepared.plugin.package_install_id)
+        witness = {"status": "CANCELLED", "action": action.value,
+                   "adoption": "NOT_APPLICABLE", "current": current}
+        if target is not None:
+            witness["target"] = target
+        public = _public_management_result(witness, scrub)
+        require_native_result_minimum(budget, required_facts=capability_management_required_facts(public))
+
+    async def execute(self, *, page_budget: ToolResultPageBudget,
+                      cell_cancel_event: asyncio.Event | None = None):
         state = self._state
         if state not in {"prepared", "submitted"}:
             raise RuntimeError(
@@ -452,6 +516,13 @@ class CapabilityManagementCall:
         action = prepared.intent.action
         root = self._root()
         service = self.service
+        scrub = self._public_scrub(prepared)
+        for change in changes:
+            scrub.observe(change.value)
+        try:
+            self._require_result_budget(prepared, fields, root, page_budget, scrub)
+        except ToolResultPageBoundary:
+            return capability_budget_rejection(action=action.value)
         if action in {
             Action.INSTALL_LOOSE_SKILL,
             Action.SET_LOOSE_SKILL_ENABLED,
@@ -917,6 +988,54 @@ class CapabilityManagementCall:
             "current": current,
             "adoption": "NOT_APPLICABLE",
         }
+
+
+def capability_management_required_facts(value: Mapping[str, object]) -> dict[str, object]:
+    """Preserve settled control facts from the already scrubbed public result.
+
+    Configuration, review bodies and diagnostics remain in the same result's
+    complete body. Their omission must never hide an applied mutation, adoption
+    failure, actionable target, cleanup state, or package concurrency guard.
+    """
+    facts = {name: value[name] for name in ("status", "action", "target", "adoption", "error", "physical_outcome", "retry_performed") if name in value}
+    current = value.get("current")
+    if isinstance(current, Mapping):
+        facts["current"] = {
+            name: current[name] for name in (
+                "operation_status", "prior_operation_status", "cleanup_attention",
+                "cleanup_location_status", "intended_enabled",
+                "desired_enabled", "enabled", "authorized", "trust_revoked",
+                "expected_package_install_id", "expected_identity",
+            ) if name in current
+        }
+    return facts
+
+
+def capability_budget_rejection(*, action: str) -> dict[str, object]:
+    """An observed pre-effect rejection, never an uncertain physical failure."""
+    return {"status": "REJECTED", "action": action, "adoption": "NOT_APPLICABLE",
+            "error": "OUTPUT_PAGE_BOUNDARY", "physical_outcome": "NO_EFFECT",
+            "retry_performed": False,
+            "message": "The minimum control receipt cannot fit; the operation was not started."}
+
+
+def require_capability_reload_budget(page_budget: ToolResultPageBudget) -> None:
+    # Counts and source details are C, not indispensable adoption facts. These
+    # are the longest members of the existing closed reload status vocabularies.
+    require_native_result_minimum(page_budget, required_facts={
+        "status": "RELOADED", "plugin_view": "UNAVAILABLE", "skill_producer": "UNAVAILABLE",
+        "mcp": "BOUND_EXCEEDED", "same_epoch_prefix": "UNCHANGED",
+        "interruption": "CANCELLED", "local_hooks": "RELOADED",
+    })
+
+
+def capability_reload_required_facts(value: Mapping[str, object]) -> dict[str, object]:
+    """Keep adoption/epoch status while large source reports remain readable."""
+    facts = {name: value[name] for name in (
+        "status", "plugin_view", "skill_producer", "mcp",
+        "same_epoch_prefix", "interruption", "local_hooks",
+    ) if name in value}
+    return facts
 
 
 def _public_management_fields(value, scrub):

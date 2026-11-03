@@ -26,7 +26,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     ModelInputTokenEstimator,
-    STRUCTURED_MODEL_INPUT_LIMITS,
     ToolResultProviderRenderMode,
     compiled_tool_result_source_fingerprint,
     provider_input_item_fingerprint,
@@ -35,7 +34,6 @@ from pulsara_agent.model_input.lowering import (
     decode_tool_result_observation,
     lower_canonical_item,
 )
-from pulsara_agent.ports.artifact import ToolResultDisplayKind
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
     ProviderRuntimeObservation,
@@ -167,8 +165,7 @@ def freeze_retained_skill_context(
             or item.source_turn_id != canonical_read.scope.turn_id
             or item.tool_result_context is None
             or item.tool_result_context.result_state != "SUCCESS"
-            or item.tool_result_context.display_kind
-            is not ToolResultDisplayKind.COMPLETE
+            or item.tool_result_context.output_omitted
         ):
             continue
         if not _was_installed_full(
@@ -282,11 +279,7 @@ def _was_installed_full(
     if len(matches) != 1:
         return False
     try:
-        lowered = lower_canonical_item(
-            item,
-            artifact_read_available=True,
-            limits=STRUCTURED_MODEL_INPUT_LIMITS,
-        )
+        lowered = lower_canonical_item(item)
     except ValueError:
         return False
     full = next(
@@ -421,15 +414,14 @@ def _exact_historical_read(
         "content_revision",
         "access_scope",
         "workspace_relative",
-        "offset",
-        "limit",
+        "position",
         "total_lines",
         "file_size",
-        "truncated",
+        "next",
         "content",
     }
     if not required.issubset(payload) or not (set(payload) - required).issubset(
-        {"had_utf8_bom", "_hint", "_warning"}
+        {"had_utf8_bom"}
     ):
         return None
     target = payload.get("target")
@@ -448,14 +440,12 @@ def _exact_historical_read(
         payload.get("status") == "ok"
         and target.get("path")
         == _project_historical_public_path(catalog_row["skill_path"], root_policy)
-        and payload.get("offset") == 1
-        and isinstance(payload.get("limit"), int)
+        and payload.get("position") == {"line": 1, "char_offset": 0}
         and isinstance(total_lines, int)
         and isinstance(payload.get("file_size"), int)
         and payload["file_size"] >= 0
         and total_lines >= 0
-        and payload["limit"] >= total_lines
-        and payload.get("truncated") is False
+        and payload.get("next") is None
         and isinstance(content, str)
         and isinstance(payload.get("had_utf8_bom", False), bool)
     ):

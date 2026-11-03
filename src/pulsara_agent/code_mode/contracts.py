@@ -1,13 +1,14 @@
 """Process-local Code Mode boundary; business execution remains in the kernel."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import asyncio
 from typing import Awaitable, Callable, Literal, Mapping, Protocol
 
 from pulsara_agent.primitives.tool_observation import MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
 from pulsara_agent.identity import ID_PAYLOAD_PATTERN
+from pulsara_agent.ports.tool_execution import freeze_tool_json_object
 
 from .targets import cell_target, cell_target_schema
 
@@ -80,7 +81,7 @@ class CodeModeLimits:
     # The existing model tool-result boundary includes the complete envelope.
     page_bytes: int = MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
     # One existing bounded model page plus error/control scratch is reserved so
-    # a full collector can still deliver an artifact locator and make progress.
+    # a full collector can still deliver an accepted-result reading route and make progress.
     control_bytes: int = 64 * 1024
 
     def __post_init__(self) -> None:
@@ -120,12 +121,20 @@ class CodeModeToolResult:
     state: str = "SUCCESS"
     result_id: str | None = None
     result_entry_id: str | None = None
-    artifact: Mapping[str, object] | None = None
+    read: Mapping[str, object] | None = None
+    output_available: bool = False
+    source_coverage: str = "COMPLETE"
+    source_coverage_reason: str | None = None
+    output_unavailability_reason: str | None = None
+    required_facts: Mapping[str, object] = field(default_factory=dict)
     error_code: str | None = None
     error_message: str | None = None
     delivery_succeeded: Callable[[], Awaitable[None]] | None = None
     # Accepted-result owner can read a large/late result without another result store.
     read_undelivered: Callable[[], Awaitable[Mapping[str, object]]] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
 
 
 CodeModeInvoke = Callable[[CodeModeInvocation], Awaitable[CodeModeToolResult]]

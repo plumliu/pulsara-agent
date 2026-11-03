@@ -7,6 +7,8 @@ from datetime import datetime
 import json
 from psycopg import Connection, IsolationLevel
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from pulsara_agent.ports.tool_execution import thaw_tool_json_object
 from pulsara_agent.conversation_kernel.contracts import BlobContent, CanonicalContent, EntryKind, HostWriterGuard, InlineContent, canonical_digest
 from pulsara_agent.conversation_kernel.prompt_storage import (
     canonical_prompt_owner_is_exact,
@@ -36,16 +38,35 @@ from .matching import (
     _event_row_matches_draft,
 )
 
+def _output_body_values(content):
+    return ((None,) * 6 if content is None else (
+        content.canonical_bytes if isinstance(content, InlineContent) else None,
+        content.blob_id if isinstance(content, BlobContent) else None,
+        content.digest, content.size, content.media_type, content.codec,
+    ))
+
+
+def _output_body_from_row(row):
+    if row["output_body_digest"] is None:
+        return None
+    if row["output_body_inline_content"] is not None:
+        return InlineContent(bytes(row["output_body_inline_content"]), str(row["output_body_digest"]),
+            int(row["output_body_size"]), str(row["output_body_media_type"]), str(row["output_body_codec"]))
+    return BlobContent(str(row["output_body_blob_id"]), str(row["output_body_digest"]),
+        int(row["output_body_size"]), str(row["output_body_media_type"]), str(row["output_body_codec"]))
+
+
 class _ToolOperations:
     def read_accepted_tool_result_observation(self, *, session_id, result_id, deadline_monotonic):
-        """Read one accepted result for a live cell's undelivered observation."""
+        """Read the accepted display and original body route for an undelivered call."""
+        from pulsara_agent.ports.tool_output import tool_output_read_call
         with self._provider.connection(lane=PostgresConnectionLane.INSPECTOR,
             row_factory=dict_row, deadline_monotonic=deadline_monotonic) as connection:
             row = connection.execute(
                 """SELECT e.*, r.id AS result_id, r.result_state,
-                          r.output_display_kind, r.output_source_coverage,
-                          r.output_source_coverage_reason, r.output_artifact_disposition,
-                          r.output_artifact_id, r.output_artifact_unavailability_reason
+                          r.output_source_coverage,r.output_source_coverage_reason,
+                          r.output_omitted,r.output_body_digest,r.output_unavailability_reason,
+                          r.model_visible_memory_fact_ids,r.result_facts
                    FROM pulsara_v3.tool_results r
                    JOIN pulsara_v3.transcript_entries e ON e.session_id=r.session_id
                     AND e.id=r.result_entry_id AND e.entry_owner_kind='EXECUTED_TURN'
@@ -56,19 +77,19 @@ class _ToolOperations:
             content = self._content_from_row(row)
             if not isinstance(content, InlineContent):
                 raise ConversationKernelConflict("accepted Code Mode result preview is not inline")
+            available = row["output_body_digest"] is not None
             result = {"result_id": row["result_id"], "result_entry_id": row["id"],
                 "state": row["result_state"], "result": content.canonical_bytes.decode("utf-8"),
-                "display_kind": row["output_display_kind"], "source_coverage": row["output_source_coverage"]}
+                "output_omitted": row["output_omitted"], "output_available": available,
+                "source_coverage": row["output_source_coverage"],
+                "model_visible_memory_fact_ids": list(row["model_visible_memory_fact_ids"]),
+                "required_facts": row["result_facts"]}
+            if available:
+                result["read"] = tool_output_read_call(session_id, str(row["id"]))
             if row["output_source_coverage_reason"] is not None:
                 result["source_coverage_reason"] = row["output_source_coverage_reason"]
-            if row["output_artifact_disposition"] != 'NOT_REQUIRED':
-                artifact = {"disposition": row["output_artifact_disposition"],
-                            "source_coverage": row["output_source_coverage"]}
-                if row["output_artifact_id"] is not None:
-                    artifact["target"] = {"kind": "ARTIFACT", "artifact_id": row["output_artifact_id"]}
-                if row["output_artifact_unavailability_reason"] is not None:
-                    artifact["reason"] = row["output_artifact_unavailability_reason"]
-                result["output_artifact"] = artifact
+            if row["output_unavailability_reason"] is not None:
+                result["output_unavailability_reason"] = row["output_unavailability_reason"]
             return result
 
     def freeze_code_mode_source(self, guard, *, attempt_id, content, deadline_monotonic):
@@ -364,10 +385,12 @@ class _ToolOperations:
                         result_entry_id, result_state,
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
-                        tool_reported_duration_microseconds
+                        tool_reported_duration_microseconds,
+                        output_body_inline_content,output_body_blob_id,output_body_digest,
+                        output_body_size,output_body_media_type,output_body_codec
                     ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
-                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
+                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL, %s,%s,%s,%s,%s,%s)
                     """,
                     (
                         result_id,
@@ -379,6 +402,7 @@ class _ToolOperations:
                         permission_snapshot_fingerprint,
                         result_entry_id,
                         occurred_at,
+                        *_output_body_values(denial_content),
                     ),
                 )
                 drafts.append(
@@ -642,11 +666,11 @@ class _ToolOperations:
                 tool_call_id=candidate.tool_call_id, turn_id=candidate.turn_id,
                 source=candidate.invocation_source, require_running=False,
             )
-            if candidate.artifact_blob_descriptor is not None:
-                self._require_exact_tool_artifact_blob(
+            if isinstance(candidate.output_body, BlobContent):
+                self._require_exact_tool_output_blob(
                     connection,
                     workspace_id=candidate.workspace_id,
-                    expected=candidate.artifact_blob_descriptor,
+                    expected=candidate.output_body,
                 )
             memory_outcome = (
                 self._settle_direct_memory_mutation(
@@ -679,6 +703,13 @@ class _ToolOperations:
                     raise ValueError("ToolResult canonical prompt body must be inline")
                 canonical_entry_content = publication.body
                 canonical_image_blob_ids = publication.image_blob_ids
+            output_body = (
+                self._canonical_content_publisher.materialize_in_connection(
+                    connection, workspace_id=candidate.workspace_id,
+                    content=memory_outcome.canonical_body.encode("utf-8"),
+                    media_type="application/json", codec="utf-8",
+                ) if memory_outcome is not None else candidate.output_body
+            )
             entry_sequence = self._allocate_entry_sequence(connection, guard.session_id)
             self._insert_entry(
                 connection,
@@ -690,77 +721,32 @@ class _ToolOperations:
                 entry_kind=EntryKind.TOOL_RESULT,
                 content=canonical_entry_content,
             )
-            connection.execute(
-                """
-                INSERT INTO pulsara_v3.tool_results (
-                    result_record_kind, id, session_id, workspace_id,
-                    tool_call_entry_id, tool_call_id, invocation_id, attempt_id,
-                    result_origin_kind, result_entry_id, result_state,
-                    permission_snapshot_fingerprint,
-                    output_artifact_disposition, output_artifact_id,
-                    output_artifact_blob_id, output_source_coverage,
-                    output_display_kind, output_source_coverage_reason,
-                    output_artifact_unavailability_reason,
-                    model_visible_memory_fact_ids,
-                    observed_at, observation_duration_microseconds,
-                    observation_origin_kind,
-                    tool_reported_duration_microseconds
-                ) VALUES (
-                    'EXECUTED', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s
-                )
-                """,
-                (
-                    candidate.result_id,
-                    guard.session_id,
-                    candidate.workspace_id,
-                    candidate.assistant_entry_id,
-                    candidate.tool_call_id,
-                    invocation_source.invocation_id,
-                    candidate.attempt_id,
-                    (
-                        "PHYSICAL_ATTEMPT"
-                        if candidate.attempt_id is not None
-                        else "POLICY_NO_ATTEMPT"
-                    ),
-                    candidate.result_entry_id,
-                    (
-                        memory_outcome.result_state
-                        if memory_outcome is not None
-                        else candidate.result_state
-                    ),
-                    str(turn["permission_snapshot_fingerprint"]),
-                    candidate.artifact_disposition.value,
-                    candidate.artifact_id,
-                    (
-                        None
-                        if candidate.artifact_blob_descriptor is None
-                        else candidate.artifact_blob_descriptor.blob_id
-                    ),
-                    candidate.source_coverage.value,
-                    candidate.display_kind.value,
-                    (
-                        None
-                        if candidate.source_coverage_reason is None
-                        else candidate.source_coverage_reason.value
-                    ),
-                    (
-                        None
-                        if candidate.artifact_unavailability_reason is None
-                        else candidate.artifact_unavailability_reason.value
-                    ),
-                    list(
-                        memory_outcome.visible_memory_fact_ids
-                        if memory_outcome is not None
-                        else candidate.model_visible_memory_fact_ids
-                    ),
-                    candidate.observed_at,
-                    candidate.observation_duration_microseconds,
-                    candidate.observation_origin_kind.value,
-                    candidate.trusted_tool_reported_duration_microseconds,
-                ),
+            columns = (
+                "result_record_kind,id,session_id,workspace_id,tool_call_entry_id,tool_call_id,"
+                "invocation_id,attempt_id,result_origin_kind,result_entry_id,result_state,"
+                "permission_snapshot_fingerprint,output_body_inline_content,output_body_blob_id,"
+                "output_body_digest,output_body_size,output_body_media_type,output_body_codec,"
+                "output_unavailability_reason,output_source_coverage,output_source_coverage_reason,"
+                "output_omitted,result_facts,model_visible_memory_fact_ids,observed_at,"
+                "observation_duration_microseconds,observation_origin_kind,tool_reported_duration_microseconds"
             )
+            values = (
+                "EXECUTED",candidate.result_id,guard.session_id,candidate.workspace_id,
+                candidate.assistant_entry_id,candidate.tool_call_id,invocation_source.invocation_id,
+                candidate.attempt_id,"PHYSICAL_ATTEMPT" if candidate.attempt_id is not None else "POLICY_NO_ATTEMPT",
+                candidate.result_entry_id,memory_outcome.result_state if memory_outcome is not None else candidate.result_state,
+                str(turn["permission_snapshot_fingerprint"]),*_output_body_values(output_body),
+                None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value,
+                candidate.source_coverage.value,
+                None if candidate.source_coverage_reason is None else candidate.source_coverage_reason.value,
+                candidate.output_omitted,
+                Jsonb(json.loads(memory_outcome.canonical_body) if memory_outcome is not None else thaw_tool_json_object(candidate.required_facts)),
+                list(memory_outcome.visible_memory_fact_ids if memory_outcome is not None else candidate.model_visible_memory_fact_ids),
+                candidate.observed_at,candidate.observation_duration_microseconds,
+                candidate.observation_origin_kind.value,candidate.trusted_tool_reported_duration_microseconds,
+            )
+            connection.execute("INSERT INTO pulsara_v3.tool_results (" + columns + ") VALUES ("
+                               + ",".join("%s" for _ in values) + ")", values)
             if candidate.canonical_prompt is not None:
                 insert_canonical_prompt_refs(
                     connection,
@@ -847,7 +833,7 @@ class _ToolOperations:
                 raise ConversationKernelConflict(
                     "tool result winner is only partially installed"
                 )
-            blob = candidate.artifact_blob_descriptor
+            body = candidate.output_body
             dynamic_memory = isinstance(
                 candidate.side_branch, PreparedMemoryMutationSideBranch
             )
@@ -890,26 +876,17 @@ class _ToolOperations:
                 )
                 or str(result["permission_snapshot_fingerprint"])
                 != str(turn["permission_snapshot_fingerprint"])
-                or str(result["output_artifact_disposition"])
-                != candidate.artifact_disposition.value
-                or result["output_artifact_id"] != candidate.artifact_id
-                or result["output_artifact_blob_id"]
-                != (None if blob is None else blob.blob_id)
-                or str(result["output_source_coverage"])
-                != candidate.source_coverage.value
-                or str(result["output_display_kind"]) != candidate.display_kind.value
-                or result["output_source_coverage_reason"]
-                != (
-                    None
-                    if candidate.source_coverage_reason is None
-                    else candidate.source_coverage_reason.value
-                )
-                or result["output_artifact_unavailability_reason"]
-                != (
-                    None
-                    if candidate.artifact_unavailability_reason is None
-                    else candidate.artifact_unavailability_reason.value
-                )
+                or (not dynamic_memory and _output_body_from_row(result) != candidate.output_body)
+                or (dynamic_memory and _output_body_from_row(result) != self._canonical_content_publisher.describe(
+                    workspace_id=candidate.workspace_id, content=observed_body.encode("utf-8"),
+                    media_type="application/json", codec="utf-8"))
+                or result["output_unavailability_reason"] != (
+                    None if candidate.output_unavailability_reason is None else candidate.output_unavailability_reason.value)
+                or str(result["output_source_coverage"]) != candidate.source_coverage.value
+                or result["output_source_coverage_reason"] != (
+                    None if candidate.source_coverage_reason is None else candidate.source_coverage_reason.value)
+                or bool(result["output_omitted"]) != candidate.output_omitted
+                or result["result_facts"] != (json.loads(observed_body) if dynamic_memory else thaw_tool_json_object(candidate.required_facts))
                 or (
                     not dynamic_memory
                     and tuple(result["model_visible_memory_fact_ids"])
@@ -952,11 +929,11 @@ class _ToolOperations:
                 session_id=candidate.session_id,
                 workspace_id=candidate.workspace_id,
             )
-            if blob is not None:
-                self._require_exact_tool_artifact_blob(
+            if isinstance(body, BlobContent):
+                self._require_exact_tool_output_blob(
                     connection,
                     workspace_id=candidate.workspace_id,
-                    expected=blob,
+                    expected=body,
                 )
             if dynamic_memory:
                 return AcceptedMemoryToolResult(
@@ -976,7 +953,7 @@ class _ToolOperations:
             )
 
     @staticmethod
-    def _require_exact_tool_artifact_blob(
+    def _require_exact_tool_output_blob(
         connection: Connection,
         *,
         workspace_id: str,
@@ -1002,7 +979,7 @@ class _ToolOperations:
             != expected
         ):
             raise ConversationKernelConflict(
-                "prepared tool artifact descriptor names a different blob"
+                "prepared tool output descriptor names a different blob"
             )
 
     @staticmethod
@@ -1292,10 +1269,12 @@ class _ToolOperations:
                         result_entry_id, result_state,
                         observed_at, observation_duration_microseconds,
                         observation_origin_kind,
-                        tool_reported_duration_microseconds
+                        tool_reported_duration_microseconds,
+                        output_body_inline_content,output_body_blob_id,output_body_digest,
+                        output_body_size,output_body_media_type,output_body_codec
                     ) VALUES ('EXECUTED', %s, %s, %s, %s, %s, %s, NULL,
                               'POLICY_NO_ATTEMPT', %s, %s,
-                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL)
+                              'PERMISSION_DENIED', %s, NULL, 'POLICY', NULL, %s,%s,%s,%s,%s,%s)
                     """,
                     (
                         result_id,
@@ -1307,6 +1286,7 @@ class _ToolOperations:
                         permission_snapshot_fingerprint,
                         result_entry_id,
                         occurred_at,
+                        *_output_body_values(denial_content),
                     ),
                 )
                 drafts.append(
@@ -1481,7 +1461,8 @@ class _ToolOperations:
                 or result["result_state"] != "PERMISSION_DENIED"
                 or result["permission_snapshot_fingerprint"] != permission_snapshot_fingerprint
                 or entry["entry_kind"] != EntryKind.TOOL_RESULT.value
-                or self._content_from_row(entry) != denial_content):
+                or self._content_from_row(entry) != denial_content
+                or _output_body_from_row(result) != denial_content):
                 raise ConversationKernelConflict("interaction DENY result is incomplete or conflicting")
         else:
             raise ConversationKernelConflict("interaction decision union is invalid")

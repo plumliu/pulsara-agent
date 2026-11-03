@@ -10,7 +10,7 @@ from pulsara_agent.terminal_protocol.generated_v3 import terminal_kernel_v3_pb2 
 from pulsara_agent.desktop_app.renderer_bridge import protobuf_json
 from pulsara_agent.terminal_protocol.canonical_v3 import (
     CanonicalProtocolGap, CanonicalProtocolResourceExhausted,
-    MAXIMUM_HISTORY_PAGE_BYTES, browser_history_uint64,
+    MAXIMUM_HISTORY_PAGE_BYTES, browser_history_uint64, browser_tool_output_request,
 )
 
 import asyncio
@@ -606,14 +606,14 @@ class LocalHttpServer:
         self._app.router.add_get("/api/sessions/{session_id}/workspace-availability", self._workspace_availability)
         self._app.router.add_post("/api/sessions/{session_id}/restore-workspace", self._restore_workspace)
         self._app.router.add_get("/api/sessions/{session_id}/history-snapshot", self._history_snapshot)
-        for operation in ("history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"):
+        for operation in ("history", "window", "context", "read-content", "read-tool-output", "visualization-thumbnail"):
             self._app.router.add_post("/api/sessions/{session_id}/history/" + operation, self._cold_history_action)
         self._app.router.add_post("/api/sessions/{session_id}/queue", self._sidebar_queue)
         self._app.router.add_post("/api/sessions/{session_id}/agents", self._sidebar_agents)
         self._app.router.add_get("/api/sessions/{session_id}/agents/{agent_id}", self._sidebar_agent)
         self._app.router.add_post("/api/sessions/{session_id}/agents/{agent_id}/reader", self._sidebar_reader)
         self._app.router.add_post("/api/sessions/{session_id}/agents/{agent_id}/queue", self._sidebar_queue)
-        for operation in ("snapshot", "history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"):
+        for operation in ("snapshot", "history", "window", "context", "read-content", "read-tool-output", "visualization-thumbnail"):
             self._app.router.add_post("/api/sessions/{session_id}/agents/{agent_id}/history/" + operation, self._sidebar_history)
         self._app.router.add_post("/api/sessions/{session_id}/works/{work_id}/inputs", self._sidebar_work)
         self._app.router.add_post("/api/sessions/{session_id}/hosts/{host_id}/cells", self._sidebar_cells)
@@ -715,7 +715,7 @@ class LocalHttpServer:
             "read-plan-question",
             "read-plan-draft",
             "read-content",
-            "read-tool-artifact",
+            "read-tool-output",
             "visualization-thumbnail",
             "list-background-processes",
             "read-background-process-log",
@@ -2256,15 +2256,13 @@ class LocalHttpServer:
                 read_content=lambda value: self._cold_content(agent, value),
                 cancelled=lambda: request.transport is None or request.transport.is_closing())
         else:
-            result = await self._cold_content(agent, body, artifact=operation == "read-tool-artifact")
+            result = await self._cold_content(agent, body, tool_output=operation == "read-tool-output")
         await self.sessions.authorize_agent_reader(root, agent)
         return web.json_response(result)
 
-    async def _cold_content(self, session_id, body, *, artifact=False):
-        if artifact:
-            content_request = wire.ReadToolArtifactRequest(
-                result_entry_id=body.get("result_entry_id", ""),
-                offset_chars=int(body.get("offset_chars", 0)), max_chars=int(body.get("max_chars", 32000)))
+    async def _cold_content(self, session_id, body, *, tool_output=False):
+        if tool_output:
+            content_request = browser_tool_output_request(body)
         else:
             if sum(field in body for field in ("entry_id", "queue_item_id", "image_ref")) != 1:
                 raise ValueError("exactly one canonical content owner is required")
@@ -2276,7 +2274,7 @@ class LocalHttpServer:
             for field in ("entry_id", "queue_item_id", "image_ref", "image_ref_ordinal", "visualization_ordinal", "reasoning_ordinal"):
                 if field in body:
                     setattr(content_request, field, body[field])
-        return protobuf_json(await self.sessions.history_content(session_id, content_request, artifact=artifact))
+        return protobuf_json(await self.sessions.history_content(session_id, content_request, tool_output=tool_output))
 
     async def _cold_history_action(self, request):
         session_id = request.match_info["session_id"]
@@ -2297,7 +2295,7 @@ class LocalHttpServer:
             return web.json_response(await self._visualization_previews.read_canonical(
                 body, read_content=lambda value: self._cold_content(session_id, value),
                 cancelled=lambda: request.transport is None or request.transport.is_closing()))
-        return web.json_response(await self._cold_content(session_id, body, artifact=operation == "read-tool-artifact"))
+        return web.json_response(await self._cold_content(session_id, body, tool_output=operation == "read-tool-output"))
 
     @web.middleware
     async def _chat_write_admission(self, request, handler):
@@ -2309,7 +2307,7 @@ class LocalHttpServer:
             sidebar_read = (suffix in {"agents", "queue"}
                 or (len(parts) == 3 and parts[0] == "agents" and parts[2] in {"reader", "queue"})
                 or (len(parts) == 4 and parts[0] == "agents" and parts[2] == "history"
-                    and parts[3] in {"snapshot", "history", "window", "context", "read-content", "read-tool-artifact", "visualization-thumbnail"})
+                    and parts[3] in {"snapshot", "history", "window", "context", "read-content", "read-tool-output", "visualization-thumbnail"})
                 or (len(parts) == 3 and parts[0] == "works" and parts[2] == "inputs")
                 or (len(parts) == 3 and parts[0] == "hosts" and parts[2] == "cells")
                 or (len(parts) == 2 and parts[0] == "cell-sources")
@@ -2830,7 +2828,7 @@ class LocalHttpServer:
                 "visualization-thumbnail": lambda: self._visualization_previews.read(
                     connection_id, body, cancelled=lambda: request.transport is None or request.transport.is_closing(),
                 ),
-                "read-tool-artifact": lambda: self.bridge.read_tool_artifact(
+                "read-tool-output": lambda: self.bridge.read_tool_output(
                     connection_id, body
                 ),
                 "list-background-processes": lambda: (

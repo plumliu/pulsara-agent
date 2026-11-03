@@ -98,7 +98,7 @@ import type {
   QueuedPrompt,
   QueuedPromptAction,
   LocalPromptSubmission,
-  ToolArtifactPage,
+  ToolOutputPage,
   CanonicalPromptImagePart,
   EditablePromptContent,
 } from '../lib/runtime-adapter';
@@ -243,8 +243,8 @@ interface WorkbenchViewProps {
     interaction: RuntimeInteractionSummary,
     resolution: RuntimeInteractionResolution,
   ) => Promise<boolean>;
-  artifactOwnerKey: string;
-  onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
+  outputOwnerKey: string;
+  onReadToolOutput: (resultEntryId: string, position: ToolOutputPage['position']) => Promise<ToolOutputPage>;
   onReadPromptImage: (image: CanonicalPromptImagePart) => Promise<Uint8Array>;
   onReadVisualization?: import("./inline-visualization").ReadVisualization;
   onReadVisualizationThumbnail?: import("./inline-visualization").ReadVisualizationThumbnail;
@@ -258,7 +258,7 @@ const traceIcons: Record<ToolTrace['kind'], typeof TerminalSquare> = {
   read: FileSearch,
   edit: FileDiff,
   search: FileSearch,
-  artifact: Braces,
+  tool: Braces,
   mcp: Zap,
 };
 
@@ -289,10 +289,7 @@ interface McpTraceDetail {
 function parseJsonObject(value?: string): JsonObject | undefined {
   if (!value) return undefined;
   try {
-    // Complete inline results may also carry the canonical artifact reread hint.
-    // That hint is presentation text, outside the structured result body.
-    const artifactHint = value.indexOf('\n\n[TOOL OUTPUT ARTIFACT:');
-    const parsed = JSON.parse(artifactHint < 0 ? value : value.slice(0, artifactHint)) as unknown;
+    const parsed = JSON.parse(value) as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
       ? parsed as JsonObject
       : undefined;
@@ -305,6 +302,7 @@ function terminalOutputText(value: string | undefined, running: boolean): string
   if (running) return value ?? '';
   if (value === undefined) return undefined;
   const result = parseJsonObject(value);
+  if (typeof result?.output_preview === 'string') return result.output_preview;
   if (
     typeof result?.output === 'string'
     && (
@@ -472,8 +470,8 @@ function TraceCard({
   disclosureOwnerId,
   skills,
   mcpToolRefs,
-  artifactOwnerKey,
-  onReadToolArtifact,
+  outputOwnerKey,
+  onReadToolOutput,
   onReadPromptImage,
   onNotify,
 }: {
@@ -481,8 +479,8 @@ function TraceCard({
   disclosureOwnerId: string;
   skills: SkillCapability[];
   mcpToolRefs: ReadonlyMap<string, McpToolIdentity>;
-  artifactOwnerKey: string;
-  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  outputOwnerKey: string;
+  onReadToolOutput: WorkbenchViewProps['onReadToolOutput'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
   onNotify: MarkdownNotify;
 }) {
@@ -491,26 +489,26 @@ function TraceCard({
   };
   const { showBuiltinToolResults } = useContext(ToolResultDisplayContext);
   const [expanded, setExpanded] = useHistoryDisclosure(JSON.stringify(['trace', disclosureOwnerId, trace.id]));
-  const [artifactPage, setArtifactPage] = useState<ToolArtifactPage>();
-  const [artifactBusy, setArtifactBusy] = useState(false);
-  const [artifactError, setArtifactError] = useState('');
-  const artifactRequestRevision = useRef(0);
-  const artifactOwnerKeyRef = useRef(artifactOwnerKey);
-  const artifactResultEntryIdRef = useRef(trace.resultEntryId);
+  const [outputPage, setOutputPage] = useState<ToolOutputPage>();
+  const [outputBusy, setOutputBusy] = useState(false);
+  const [outputError, setOutputError] = useState('');
+  const outputRequestRevision = useRef(0);
+  const outputOwnerKeyRef = useRef(outputOwnerKey);
+  const outputResultEntryIdRef = useRef(trace.resultEntryId);
   const terminalOutputRef = useRef<HTMLPreElement>(null);
   const terminalFollowTailRef = useRef(true);
   useEffect(() => {
-    artifactRequestRevision.current += 1;
-    return () => { artifactRequestRevision.current += 1; };
+    outputRequestRevision.current += 1;
+    return () => { outputRequestRevision.current += 1; };
   }, []);
   useLayoutEffect(() => {
-    artifactOwnerKeyRef.current = artifactOwnerKey;
-    artifactResultEntryIdRef.current = trace.resultEntryId;
-    artifactRequestRevision.current += 1;
-    setArtifactPage(undefined);
-    setArtifactBusy(false);
-    setArtifactError('');
-  }, [artifactOwnerKey, trace.resultEntryId]);
+    outputOwnerKeyRef.current = outputOwnerKey;
+    outputResultEntryIdRef.current = trace.resultEntryId;
+    outputRequestRevision.current += 1;
+    setOutputPage(undefined);
+    setOutputBusy(false);
+    setOutputError('');
+  }, [outputOwnerKey, trace.resultEntryId]);
   const Icon = traceIcons[trace.kind];
   const skill = traceSkill(trace, skills);
   const mcpDetail = mcpTraceDetail(trace, mcpToolRefs);
@@ -518,11 +516,13 @@ function TraceCard({
   const purpose = skill ? `使用 ${skill.name} 技能` : builtinSummary?.title ?? trace.title;
   const showPurposeAsTitle = Boolean(builtinSummary) || trace.toolName === 'use_new_mcp_tool';
   const subtitle = mcpDetail?.subtitle ?? builtinSummary?.subtitle ?? trace.subtitle;
-  const parsedResult = parseJsonObject(trace.resultText);
+  const parsedResult = trace.resultFacts
+    ? { ...parseJsonObject(trace.resultText), ...trace.resultFacts }
+    : parseJsonObject(trace.resultText);
   const showTargets = useContext(PresentationContext);
   const sourceWorkspace = useDesktopWorkspace();
   const openSource = useInputNavigation(onNotify);
-  const presentation = trace.toolName === 'open_in_pulsara' && trace.status === 'completed' && trace.artifact?.sourceCoverage === 'COMPLETE' && trace.artifact?.displayKind === 'COMPLETE'
+  const presentation = trace.toolName === 'open_in_pulsara' && trace.status === 'completed' && trace.outputBody?.sourceCoverage === 'COMPLETE' && trace.outputBody?.omitted === false
     ? parsePresentationResult(trace.resultText ?? '') : undefined;
   const terminalOutput = trace.toolName === 'exec_process'
     ? terminalOutputText(trace.resultText, trace.status === 'running')
@@ -546,55 +546,56 @@ function TraceCard({
     || trace.toolName === 'use_new_mcp_tool';
   const hasRawResult = showRawResult && Object.prototype.hasOwnProperty.call(trace, 'resultText');
   const diffText = trace.toolName === 'edit_file' ? stringValue(parsedResult?.diff) : '';
-  const canReadArtifact = Boolean(
+  const canReadOutput = Boolean(
     showRawResult && trace.resultEntryId
-    && (trace.artifact?.disposition === 'AVAILABLE' || trace.artifact?.disposition === 'INCOMPLETE'),
+    && trace.outputBody?.available,
   );
+  const outputUnavailable = Boolean(showRawResult && trace.outputBody?.omitted && !trace.outputBody.available);
   const expandable = Boolean(trace.programCalls?.length) || Boolean(
     presentation || trace.command || diffText || hasTerminalOutput || hasRawResult
-    || trace.resultContent || mcpDetail || canReadArtifact
+    || trace.resultContent || mcpDetail || canReadOutput || outputUnavailable
   );
-  const artifactAtEnd = Boolean(artifactPage && !artifactPage.hasMore);
-  const artifactIsSinglePage = Boolean(
-    artifactAtEnd
-    && artifactPage?.offsetChars === 0
-    && artifactPage.returnedChars === artifactPage.totalChars,
+  const outputAtEnd = Boolean(outputPage && !outputPage.next);
+  const outputIsSinglePage = Boolean(
+    outputAtEnd
+    && outputPage?.position.line === 1
+    && outputPage.position.charOffset === 0,
   );
-  const closeArtifactPage = () => {
-    artifactRequestRevision.current += 1;
-    setArtifactPage(undefined);
-    setArtifactBusy(false);
-    setArtifactError('');
+  const closeOutputPage = () => {
+    outputRequestRevision.current += 1;
+    setOutputPage(undefined);
+    setOutputBusy(false);
+    setOutputError('');
   };
-  const readArtifactPage = (offsetChars: number) => {
-    const expectedOwnerKey = artifactOwnerKey;
+  const readOutputPage = (position: ToolOutputPage['position']) => {
+    const expectedOwnerKey = outputOwnerKey;
     const expectedResultEntryId = trace.resultEntryId!;
-    const requestRevision = ++artifactRequestRevision.current;
-    setArtifactBusy(true);
-    setArtifactError('');
-    void onReadToolArtifact(expectedResultEntryId, offsetChars).then(
+    const requestRevision = ++outputRequestRevision.current;
+    setOutputBusy(true);
+    setOutputError('');
+    void onReadToolOutput(expectedResultEntryId, position).then(
       (page) => {
         if (
-          requestRevision !== artifactRequestRevision.current
-          || artifactOwnerKeyRef.current !== expectedOwnerKey
-          || artifactResultEntryIdRef.current !== expectedResultEntryId
+          requestRevision !== outputRequestRevision.current
+          || outputOwnerKeyRef.current !== expectedOwnerKey
+          || outputResultEntryIdRef.current !== expectedResultEntryId
         ) return;
-        setArtifactPage(page);
+        setOutputPage(page);
       },
       () => {
         if (
-          requestRevision !== artifactRequestRevision.current
-          || artifactOwnerKeyRef.current !== expectedOwnerKey
-          || artifactResultEntryIdRef.current !== expectedResultEntryId
+          requestRevision !== outputRequestRevision.current
+          || outputOwnerKeyRef.current !== expectedOwnerKey
+          || outputResultEntryIdRef.current !== expectedResultEntryId
         ) return;
-        setArtifactError('完整输出暂时无法读取。');
+        setOutputError('完整输出暂时无法读取。');
       },
     ).finally(() => {
       if (
-        requestRevision === artifactRequestRevision.current
-        && artifactOwnerKeyRef.current === expectedOwnerKey
-        && artifactResultEntryIdRef.current === expectedResultEntryId
-      ) setArtifactBusy(false);
+        requestRevision === outputRequestRevision.current
+        && outputOwnerKeyRef.current === expectedOwnerKey
+        && outputResultEntryIdRef.current === expectedResultEntryId
+      ) setOutputBusy(false);
     });
   };
   const summary = <TraceSummary
@@ -613,7 +614,7 @@ function TraceCard({
           <button
             data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary"
             onClick={() => {
-              if (expanded) closeArtifactPage();
+              if (expanded) closeOutputPage();
               else terminalFollowTailRef.current = true;
               setExpanded((value) => !value);
             }}
@@ -624,8 +625,8 @@ function TraceCard({
         {trace.toolName === 'exec_cell' && trace.attemptId && sourceWorkspace && <button type="button" className="input-source-link" onClick={() => void openSource({ kind: 'cell', rootSessionId: sourceWorkspace.sessionId, sourceExecAttemptId: trace.attemptId! })}>查看源码</button>}
         {expandable && <AnimatedDisclosure unmountOnClose open={expanded} className="trace-card__disclosure">
           {trace.programCalls?.map(call => <TraceCard key={call.id} trace={call} disclosureOwnerId={disclosureOwnerId}
-            skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey}
-            onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />)}
+            skills={skills} mcpToolRefs={mcpToolRefs} outputOwnerKey={outputOwnerKey}
+            onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />)}
           {presentation && <PresentationResult result={presentation} onOpen={showTargets} />}
           {trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
@@ -636,7 +637,7 @@ function TraceCard({
               />
             </section>
           ) : (
-            (!presentation || hasRawResult || canReadArtifact) && <div className="terminal-output">
+            (!presentation || hasRawResult || canReadOutput) && <div className="terminal-output">
             {trace.command && <div className="terminal-command"><span>$</span> {trace.command}</div>}
             {mcpDetail && <McpTraceDetails detail={mcpDetail} />}
             {hasTerminalOutput && (
@@ -663,92 +664,103 @@ function TraceCard({
               </section>
             )}
             {diffText
-              ? <pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre>
+              ? <>{trace.outputBody?.omitted && <p className="tool-output-page__notice">差异节选</p>}
+                <pre className="tool-result-diff tool-output-scroll" aria-label="文件差异">{diffText}</pre></>
               : showRawResult && trace.toolName !== 'exec_process' && trace.resultSummary
                 && <div className="tool-result-summary">{trace.resultSummary}</div>}
             {hasRawResult && (
-              <section className="tool-result-raw" aria-label="工具原始结果">
+              <section className="tool-result-raw" aria-label="工具展示结果">
                 <header>
-                  <strong>原始结果</strong>
-                  <button type="button" aria-label="复制工具原始结果" onClick={() => copyOutput(trace.resultText ?? '')}><Copy size={12} /></button>
+                  <strong>本次展示</strong>
+                  <button type="button" aria-label="复制工具展示结果" onClick={() => copyOutput(trace.resultText ?? '')}><Copy size={12} /></button>
                 </header>
                 <pre className="tool-output-scroll">{trace.resultText === '' ? <span className="empty-result">（空字符串）</span> : trace.resultText}</pre>
               </section>
             )}
-            {canReadArtifact && trace.resultEntryId && (
-              <section className={`tool-artifact-page${artifactPage ? ' is-open' : ''}`} aria-label="完整工具输出">
-                {trace.artifact?.sourceCoverage === 'RETAINED_SNAPSHOT' && (
-                  <p className="tool-artifact-page__notice"><TriangleAlert size={12} />仅保留快照；页码相对于保留内容。</p>
+            {outputUnavailable && (
+              <p className="tool-output-page__notice" role="status">
+                <TriangleAlert size={12} />
+                {trace.outputBody?.unavailabilityReason === 'BODY_TOO_LARGE'
+                  ? '输出过大，未完整保存。'
+                  : trace.outputBody?.unavailabilityReason === 'BODY_PUBLICATION_UNCONFIRMED'
+                    ? '完整输出的保存状态未确认。'
+                    : '完整输出暂时无法读取。'}
+              </p>
+            )}
+            {canReadOutput && trace.resultEntryId && (
+              <section className={`tool-output-page${outputPage ? ' is-open' : ''}`} aria-label="完整工具输出">
+                {trace.outputBody?.sourceCoverage === 'RETAINED_SNAPSHOT' && (
+                  <p className="tool-output-page__notice"><TriangleAlert size={12} />仅保留快照；页码相对于保留内容。</p>
                 )}
-                {artifactPage ? (
+                {outputPage ? (
                   <>
-                    <header className="tool-artifact-page__header">
-                      <div className="tool-artifact-page__title">
-                        <span className="tool-artifact-page__icon"><BookOpenText size={13} /></span>
+                    <header className="tool-output-page__header">
+                      <div className="tool-output-page__title">
+                        <span className="tool-output-page__icon"><BookOpenText size={13} /></span>
                         <strong>完整输出</strong>
-                        <span className="tool-artifact-page__range">
-                          {artifactPage.offsetChars + 1}–{artifactPage.offsetChars + artifactPage.returnedChars} / {artifactPage.totalChars}
+                        <span className="tool-output-page__range">
+                          第 {outputPage.position.line} 行{outputPage.position.charOffset ? ` · 字符 ${outputPage.position.charOffset + 1}` : ''}
                         </span>
                       </div>
-                      <div className="tool-artifact-page__actions">
+                      <div className="tool-output-page__actions">
                         <button
                           type="button"
-                          className="tool-artifact-page__icon-button"
+                          className="tool-output-page__icon-button"
                           aria-label="复制当前工具输出页"
                           title="复制当前页"
-                          onClick={() => copyOutput(artifactPage.text)}
+                          onClick={() => copyOutput(outputPage.text)}
                         ><Copy size={13} /></button>
                         <button
                           type="button"
-                          className="tool-artifact-page__icon-button"
-                          disabled={artifactBusy}
+                          className="tool-output-page__icon-button"
+                          disabled={outputBusy}
                           aria-label="收起完整输出"
                           title="收起完整输出"
-                          onClick={closeArtifactPage}
+                          onClick={closeOutputPage}
                         ><ChevronUp size={14} /></button>
                       </div>
                     </header>
-                    <pre className="tool-output-scroll">{artifactPage.text}</pre>
-                    <footer className="tool-artifact-page__footer">
-                      <span className="tool-artifact-page__coverage">
-                        <i />{trace.artifact?.sourceCoverage === 'RETAINED_SNAPSHOT' ? '保留快照' : '完整保留'}
+                    <pre className="tool-output-scroll">{outputPage.text}</pre>
+                    <footer className="tool-output-page__footer">
+                      <span className="tool-output-page__coverage">
+                        <i />{trace.outputBody?.sourceCoverage === 'RETAINED_SNAPSHOT' ? '保留快照' : '完整保留'}
                       </span>
-                      {artifactAtEnd ? (
+                      {outputAtEnd ? (
                         <span
-                          className="tool-artifact-page__complete"
+                          className="tool-output-page__complete"
                           role="status"
                           aria-label="完整输出读取状态"
-                          title={artifactIsSinglePage ? '完整输出只有这一页' : '已读取到完整输出末页'}
+                          title={outputIsSinglePage ? '完整输出只有这一页' : '已读取到完整输出末页'}
                         ><Check size={12} />已到末页</span>
                       ) : (
                         <button
                           type="button"
-                          className="tool-artifact-page__next"
-                          disabled={artifactBusy}
-                          aria-label={artifactBusy ? '正在读取完整输出' : '读取下一页'}
+                          className="tool-output-page__next"
+                          disabled={outputBusy}
+                          aria-label={outputBusy ? '正在读取完整输出' : '读取下一页'}
                           onClick={() => {
-                            if (artifactPage.nextOffsetChars !== undefined) {
-                              void readArtifactPage(artifactPage.nextOffsetChars);
+                            if (outputPage.next !== undefined) {
+                              void readOutputPage(outputPage.next);
                             }
                           }}
-                        >{artifactBusy ? <LoaderCircle className="is-spinning" size={13} /> : <ArrowDown size={13} />}{artifactBusy ? '正在读取…' : '继续读取'}</button>
+                        >{outputBusy ? <LoaderCircle className="is-spinning" size={13} /> : <ArrowDown size={13} />}{outputBusy ? '正在读取…' : '继续读取'}</button>
                       )}
                     </footer>
                   </>
                 ) : (
                   <button
                     type="button"
-                    className="tool-artifact__trigger"
-                    disabled={artifactBusy}
-                    aria-label={artifactBusy ? '正在读取完整输出' : artifactError ? '重新读取完整输出' : '查看完整输出'}
-                    onClick={() => readArtifactPage(0)}
+                    className="tool-output__trigger"
+                    disabled={outputBusy}
+                    aria-label={outputBusy ? '正在读取完整输出' : outputError ? '重新读取完整输出' : '查看完整输出'}
+                    onClick={() => readOutputPage({ line: 1, charOffset: 0 })}
                   >
-                    <span className="tool-artifact__trigger-icon">
-                      {artifactBusy ? <LoaderCircle className="is-spinning" size={13} /> : <BookOpenText size={13} />}
+                    <span className="tool-output__trigger-icon">
+                      {outputBusy ? <LoaderCircle className="is-spinning" size={13} /> : <BookOpenText size={13} />}
                     </span>
-                    <span className="tool-artifact__trigger-copy">
-                      <strong>{artifactBusy ? '正在读取…' : artifactError ? '重新读取完整输出' : '查看完整输出'}</strong>
-                      <small>{artifactError || '按需加载保留的工具结果'}</small>
+                    <span className="tool-output__trigger-copy">
+                      <strong>{outputBusy ? '正在读取…' : outputError ? '重新读取完整输出' : '查看完整输出'}</strong>
+                      <small>{outputError || '按需加载保留的工具结果'}</small>
                     </span>
                     <ChevronRight size={13} />
                   </button>
@@ -1099,8 +1111,8 @@ function AssistantMessage({
   onNotify,
   onFork,
   canFork,
-  artifactOwnerKey,
-  onReadToolArtifact,
+  outputOwnerKey,
+  onReadToolOutput,
   onReadPromptImage,
   onReadVisualization,
   onReadVisualizationThumbnail,
@@ -1116,8 +1128,8 @@ function AssistantMessage({
   onNotify: WorkbenchViewProps['onNotify'];
   onFork: WorkbenchViewProps['onFork'];
   canFork: boolean;
-  artifactOwnerKey: string;
-  onReadToolArtifact: WorkbenchViewProps['onReadToolArtifact'];
+  outputOwnerKey: string;
+  onReadToolOutput: WorkbenchViewProps['onReadToolOutput'];
   onReadPromptImage: WorkbenchViewProps['onReadPromptImage'];
   onReadVisualization: NonNullable<WorkbenchViewProps['onReadVisualization']>;
   onReadVisualizationThumbnail?: WorkbenchViewProps['onReadVisualizationThumbnail'];
@@ -1194,7 +1206,7 @@ function AssistantMessage({
         <div className="assistant-progress"><i /> 正在处理…</div>
       )}
 
-      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${artifactOwnerKey}:${trace.id}`} trace={trace} disclosureOwnerId={message.sourceEntryIds?.[0] ?? messageViewKey(message)} skills={skills} mcpToolRefs={mcpToolRefs} artifactOwnerKey={artifactOwnerKey} onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage} />)}</div>}
+      {message.traces && <div className="execution-rail">{message.traces.map((trace) => <TraceCard onNotify={onNotify} key={`${outputOwnerKey}:${trace.id}`} trace={trace} disclosureOwnerId={message.sourceEntryIds?.[0] ?? messageViewKey(message)} skills={skills} mcpToolRefs={mcpToolRefs} outputOwnerKey={outputOwnerKey} onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage} />)}</div>}
 
     </article>
   );
@@ -1489,8 +1501,8 @@ export function ConversationMessages({
   messages,
   interruptionNotices = [],
   skills = [],
-  artifactOwnerKey,
-  onReadToolArtifact,
+  outputOwnerKey,
+  onReadToolOutput,
   onNotify,
   onFork = async () => undefined,
   canFork = false,
@@ -1515,8 +1527,8 @@ export function ConversationMessages({
   messages: Message[];
   interruptionNotices?: TurnInterruptionNotice[];
   skills?: SkillCapability[];
-  artifactOwnerKey: string;
-  onReadToolArtifact: (resultEntryId: string, offsetChars: number) => Promise<ToolArtifactPage>;
+  outputOwnerKey: string;
+  onReadToolOutput: (resultEntryId: string, position: ToolOutputPage['position']) => Promise<ToolOutputPage>;
   onNotify: MarkdownNotify;
   onFork?: (entryId: string) => Promise<void>;
   canFork?: boolean;
@@ -1547,8 +1559,8 @@ export function ConversationMessages({
       responseActionEligible={!preview && isCompleteAnswer(value)} startsAssistantRun={startsRun}
       joinsPreviousToolChain={toolChainConnections.before.has(value.id)}
       joinsNextToolChain={toolChainConnections.after.has(value.id)} skills={skills} mcpToolRefs={mcpToolRefs}
-      onNotify={onNotify} onFork={onFork} canFork={!preview && canFork} artifactOwnerKey={artifactOwnerKey}
-      onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
+      onNotify={onNotify} onFork={onFork} canFork={!preview && canFork} outputOwnerKey={outputOwnerKey}
+      onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage}
       onReadVisualization={onReadVisualization} onReadVisualizationThumbnail={onReadVisualizationThumbnail}
       assistantLabel={assistantLabel} />;
     const fallback = message.pendingAssistant;
@@ -1588,7 +1600,7 @@ export function ConversationMessages({
       ? focusedEntry
       : undefined;
     const runIds = new Set(run.map(messageSourceEntryId).filter((id): id is string => Boolean(id)));
-    content.push(<ConversationRun key={`${artifactOwnerKey}:${processIdentity(run[0])}:${interruptionBoundaries.get(run[0].turnId ?? '') ?? 'start'}`} messages={run}
+    content.push(<ConversationRun key={`${outputOwnerKey}:${processIdentity(run[0])}:${interruptionBoundaries.get(run[0].turnId ?? '') ?? 'start'}`} messages={run}
       renderMessage={renderMessage} focusRequest={focused} assistantLabel={assistantLabel}
       tail={Boolean(latestMessage && run.includes(latestMessage))}
       completed={Boolean(run[0].turnId && completedTurns.has(run[0].turnId))}
@@ -2364,7 +2376,7 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
             <ConversationMessages history={projection.history} onLoadHistory={reading.loadHistory}
               messages={projection.messages} interruptionNotices={projection.interruptionNotices}
               activeTurnId={projection.activeTurnId} isRunning={projection.isRunning} assistantLabel={agentName}
-              artifactOwnerKey={sessionId} onReadToolArtifact={contentReader.readToolArtifact}
+              outputOwnerKey={sessionId} onReadToolOutput={contentReader.readToolOutput}
               onReadPromptImage={contentReader.readPromptImage} onNotify={onNotify}
               onReadVisualization={contentReader.readVisualizationContent}
               onReadVisualizationThumbnail={contentReader.readVisualizationThumbnail}
@@ -2472,8 +2484,8 @@ export function WorkbenchView({
   runtimeReopenBusy,
   onReadInteraction,
   onResolveInteraction,
-  artifactOwnerKey,
-  onReadToolArtifact,
+  outputOwnerKey,
+  onReadToolOutput,
   onReadPromptImage,
   onReadVisualization = unavailableVisualization,
   onReadVisualizationThumbnail,
@@ -3054,9 +3066,9 @@ export function WorkbenchView({
             {history.loading ? '正在读取最近记录…' : history.error ?? '此区域有已保存记录，暂无主对话正文。'}
             {onLoadHistory && !history.windows.length && (history.hasOlder || history.error) && <button type="button" disabled={history.loading} onClick={() => { void loadHistory(history.windows[0]?.id).catch(() => {}); }}>{history.error ? '重试' : '加载更早记录'}</button>}
           </div>}
-          <ConversationMessages key={session.id} history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} artifactOwnerKey={artifactOwnerKey} isRunning={isRunning}
+          <ConversationMessages key={session.id} history={history} onLoadHistory={loadHistory} localSubmissions={localSubmissions} activeTurnId={activeTurnId} messages={messages} interruptionNotices={interruptionNotices} skills={skills} outputOwnerKey={outputOwnerKey} isRunning={isRunning}
             revealEarlierProcess={revealEarlierProcess} canAutoCollapse={canAutoCollapse} onReadProcessEnd={onReadProcessEnd ? readProcessEnd : undefined} onProcessLayout={restoreReadingPosition}
-            onReadToolArtifact={onReadToolArtifact} onReadPromptImage={onReadPromptImage}
+            onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage}
             onReadVisualization={onReadVisualization}
             onReadVisualizationThumbnail={onReadVisualizationThumbnail}
             onNotify={onNotify} onFork={onFork} canFork={canControl}

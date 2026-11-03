@@ -1,5 +1,9 @@
 """Unified source queries prove observable selection and existing owner boundaries."""
 
+from pulsara_agent.identity import derive_id as _capability_page_id
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+
+
 import asyncio
 import json
 from pathlib import Path
@@ -24,6 +28,9 @@ from tests.test_capability_management_preparation import preparation, install_pl
 from tests.test_app_capability_boundary import skill_source, hook_document, invoke
 
 
+_CAPABILITY_PAGE_BUDGET = ToolResultPageBudget(_capability_page_id("call", "capability-query-test", __name__))
+
+
 async def query(
     service,
     arguments,
@@ -37,7 +44,7 @@ async def query(
     )
     return await CapabilitySourceQuery(
         service, runtime=runtime, plan=plan, scope=scope
-    ).execute(values)
+    , fits_result=_CAPABILITY_PAGE_BUDGET.fits).execute(values)
 
 
 @pytest.mark.parametrize(
@@ -126,19 +133,19 @@ def test_offset_pages_are_complete_without_cursor_state():
         )
         for i in range(3)
     ]
-    first = render_page(rows, {"limit": 1})
-    assert first["returned_count"] == 1 and first["next_offset"] == 1
-    second = render_page(rows, {"limit": 1, "offset": first["next_offset"]})
+    first = render_page(rows, {"limit": 1}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
+    assert first["returned_count"] == 1 and first["next"]["arguments"]["offset"] == 1
+    second = render_page(rows, {"limit": 1, "offset": first["next"]["arguments"]["offset"]}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
     assert second["items"][0]["name"] == "s1"
-    assert render_page(rows, {"offset": 99})["items"] == []
-    assert render_page(rows, {"offset": 99})["next_offset"] is None
+    assert render_page(rows, {"offset": 99}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)["items"] == []
+    assert render_page(rows, {"offset": 99}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)["next"] is None
     assert (
         render_page(
             rows,
             {},
             diagnostics=[{"code": "UNAVAILABLE", "message": "actual failure"}],
             completeness="PARTIAL",
-        )["completeness"]
+         fits_result=_CAPABILITY_PAGE_BUDGET.fits)["completeness"]
         == "PARTIAL"
     )
 
@@ -482,16 +489,20 @@ def test_page_budget_advances_and_single_row_overbound_is_visible():
         )
         for i in range(20)
     ]
-    page = render_page(rows, {"limit": 20})
+    page = render_page(rows, {"limit": 20}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
     assert 0 < page["returned_count"] < 20
-    assert page["next_offset"] == page["returned_count"]
-    second = render_page(rows, {"limit": 20, "offset": page["next_offset"]})
+    assert page["next"]["arguments"]["offset"] == page["returned_count"]
+    second = render_page(rows, {"limit": 20, "offset": page["next"]["arguments"]["offset"]}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
     assert not {json.dumps(item["target"]) for item in page["items"]} & {
         json.dumps(item["target"]) for item in second["items"]
     }
     rows[0]["description"] = "x" * MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
+    compact = render_page(rows, {"limit": 20}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
+    assert compact["items"][0]["description_omitted"] is True
+    assert compact["items"][0]["target"] == rows[0]["target"]
+    rows[0]["target"]["skill_path"] = "/" + "x" * MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES
     with pytest.raises(CapabilityQueryError) as error:
-        render_page(rows, {"limit": 20})
+        render_page([rows[0]], {"limit": 20}, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
     assert error.value.code == "CAPABILITY_ROW_OVERBOUND"
 
 
@@ -525,7 +536,7 @@ def test_repeated_query_cancellation_joins_native_observation_and_closes_anchor(
 
         owner = CapabilitySourceQuery(
             service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT
-        )
+        , fits_result=_CAPABILITY_PAGE_BUDGET.fits)
         work = asyncio.create_task(owner._native(observe))
         assert await asyncio.to_thread(started.wait, 2)
         work.cancel()
@@ -545,7 +556,6 @@ def test_repeated_query_cancellation_joins_native_observation_and_closes_anchor(
 def test_credential_scrub_happens_before_page_budget(tmp_path, monkeypatch):
     import pulsara_agent.conversation_kernel.capability_query as owner
     from pulsara_agent.process_credential_boundary import ProcessCredentialScrubSet
-    from pulsara_agent.capability.source_query import fits_result
 
     service = preparation(tmp_path)
     scrub = ProcessCredentialScrubSet()
@@ -587,7 +597,7 @@ def test_credential_scrub_happens_before_page_budget(tmp_path, monkeypatch):
             service, {"limit": 20}, scope=ModelInputScopeKind.ROOT, runtime=None
         )
         assert 0 < result["returned_count"] < 20
-        assert result["next_offset"] == result["returned_count"] and fits_result(result)
+        assert result["next"]["arguments"]["offset"] == result["returned_count"] and _CAPABILITY_PAGE_BUDGET.fits(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         assert "short-test-key" not in json.dumps(result)
         assert "[REDACTED_CREDENTIAL]" in json.dumps(result)
         await service.mcp.aclose()
@@ -825,21 +835,15 @@ def test_exact_invalid_plugin_hook_retains_error_without_a_default_list_row(tmp_
     asyncio.run(run())
 
 
-def test_large_hook_details_use_existing_output_artifact_owner(tmp_path):
+def test_large_hook_details_keep_exact_body_under_original_result(tmp_path):
     async def run():
         from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
         from pulsara_agent.primitives.tool_result_projection import (
             classify_tool_result_delivery,
-            BEST_AVAILABLE_TOOL_RESULT_DELIVERY,
+            ToolResultFullDeliveryReason,
         )
-        from tests.test_round1_tool_output_artifact import (
-            _RecordingPublisher,
-            _processor,
-        )
-        from pulsara_agent.ports.artifact import (
-            ToolOutputArtifactDisposition,
-            ToolResultDisplayKind,
-        )
+        from tests.support.tool_outputs import RecordingOutputPublisher, output_processor
+        from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
 
         service = preparation(tmp_path)
         hooks = {
@@ -879,7 +883,8 @@ def test_large_hook_details_use_existing_output_artifact_owner(tmp_path):
             tool_name="query_capabilities",
             arguments=arguments,
             invocation_context=SimpleNamespace(
-                surface_borrow=SimpleNamespace(prepared=prepared, code_cell_id=None)
+                surface_borrow=SimpleNamespace(prepared=prepared, code_cell_id=None),
+                page_budget=_CAPABILITY_PAGE_BUDGET,
             ),
         )
         assert result.state == "SUCCESS" and len(result.content) > 40000
@@ -890,42 +895,46 @@ def test_large_hook_details_use_existing_output_artifact_owner(tmp_path):
                 result_state=result.state,
                 public_arguments=arguments,
             )
-            == BEST_AVAILABLE_TOOL_RESULT_DELIVERY
+            .reason is ToolResultFullDeliveryReason.RESULT_PROJECTION
         )
-        publisher = _RecordingPublisher()
-        output = _processor(publisher).prepare(
+        publisher = RecordingOutputPublisher()
+        # The projection is selected once by the caller; storage must preserve
+        # that exact preview and the original full public JSON separately.
+        preview = b'{"status":"SUCCESS","output_omitted":true}'
+        processor = output_processor(publisher)
+        body = processor.materialize_body(
             session_id='session:6ej3oydnee24zzis2etyixxioi',
             workspace_id='workspace:ijxc7ystomoemoode2pzmvsvmq',
-            result_entry_id="hook-result",
+            result_entry_id=_capability_page_id("entry", "hook-output-test"),
             public_output=result.content.decode(),
-            candidate=result.output_artifact_candidate,
-            artifact_inline_result=False,
+            output_body_candidate=result.output_body_candidate,
+            public_format=ToolOutputSourceFormatHint.JSON,
             deadline_monotonic=monotonic() + 10,
         )
-        assert output.artifact_disposition is ToolOutputArtifactDisposition.AVAILABLE
-        assert output.display_kind is ToolResultDisplayKind.HEAD_TAIL
-        assert publisher.calls == [result.content] and output.artifact_id
+        output = processor.prepare(body=body, native_output=preview.decode(), output_omitted=True)
+        assert output.canonical_preview.canonical_bytes == preview
+        assert output.output_body is not None
+        assert publisher.calls == [result.content]
         await service.mcp.aclose()
 
     asyncio.run(run())
 
 
 @pytest.mark.postgres
-def test_large_hook_query_artifact_roundtrips_through_canonical_postgres_owner(
+def test_large_hook_query_body_roundtrips_through_original_result_entry(
     tmp_path, stage2_migrated_postgres_database
 ):
     from datetime import datetime, timezone
-    from tests.test_round1_tool_output_artifact import _install_tool_call, _name
+    from tests.support.tool_outputs import _install_tool_call, _name
     from tests.support.postgres import verified_postgres_provider
     from pulsara_agent.conversation_kernel.repository import (
         ConversationKernelRepository,
         build_prepared_tool_result_acceptance,
     )
-    from pulsara_agent.conversation_kernel.tool_artifacts import (
-        ToolOutputArtifactProcessor,
-        PostgresToolArtifactReadPort,
-        ARTIFACT_READ_HARD_CHARS,
+    from pulsara_agent.conversation_kernel.tool_outputs import (
+        ToolOutputProcessor, PostgresToolOutputReadPort,
     )
+    from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
     from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
     from pulsara_agent.primitives.context import canonical_json_bytes
 
@@ -972,15 +981,18 @@ def test_large_hook_query_artifact_roundtrips_through_canonical_postgres_owner(
         repository, workspace_id
     )
     entry_id = _name("entry")
-    output = ToolOutputArtifactProcessor(provider).prepare(
+    preview = '{"status":"SUCCESS","output_omitted":true}'
+    processor = ToolOutputProcessor(provider)
+    materialized = processor.materialize_body(
         session_id=lease.guard.session_id,
         workspace_id=workspace_id,
         result_entry_id=entry_id,
         public_output=body,
-        candidate=None,
-        artifact_inline_result=False,
+        output_body_candidate=None,
+        public_format=ToolOutputSourceFormatHint.JSON,
         deadline_monotonic=monotonic() + 30,
     )
+    output = processor.prepare(body=materialized, native_output=preview, output_omitted=True)
     accepted = build_prepared_tool_result_acceptance(
         guard=lease.guard,
         workspace_id=workspace_id,
@@ -992,13 +1004,11 @@ def test_large_hook_query_artifact_roundtrips_through_canonical_postgres_owner(
         attempt_id=attempt_id,
         result_state="SUCCESS",
         canonical_preview_content=output.canonical_preview,
-        artifact_disposition=output.artifact_disposition,
-        artifact_id=output.artifact_id,
-        artifact_blob_descriptor=output.artifact_blob,
+        output_body=output.output_body,
+        output_omitted=output.output_omitted,
         source_coverage=output.source_coverage,
-        display_kind=output.display_kind,
         source_coverage_reason=output.source_coverage_reason,
-        artifact_unavailability_reason=output.artifact_unavailability_reason,
+        output_unavailability_reason=output.output_unavailability_reason,
         actor_id="query",
         observed_at=datetime.now(timezone.utc),
         observation_duration_microseconds=None,
@@ -1008,21 +1018,14 @@ def test_large_hook_query_artifact_roundtrips_through_canonical_postgres_owner(
     repository.accept_tool_result(
         lease.guard, candidate=accepted, deadline_monotonic=monotonic() + 30
     )
-    reader = PostgresToolArtifactReadPort(
+    reader = PostgresToolOutputReadPort(
         provider, session_id=lease.guard.session_id, workspace_id=workspace_id
     )
-    pieces, offset = [], 0
-    while True:
-        page = reader.read_text(
-            output.artifact_id, offset_chars=offset, max_chars=ARTIFACT_READ_HARD_CHARS
-        )
-        pieces.append(page.text)
-        if not page.has_more:
-            break
-        offset = page.next_offset_chars
-    assert (
-        "".join(pieces) == body and len(json.loads("".join(pieces))["definitions"]) == 8
-    )
+    saved = reader.read_body({
+        "kind": "SESSION_ENTRY", "session_id": lease.guard.session_id, "entry_id": entry_id,
+    })
+    assert saved.content == body.encode("utf-8")
+    assert len(json.loads(saved.content)["definitions"]) == 8
 
 
 @pytest.mark.parametrize("kind", ["HOOK_SOURCE", "MCP_CONNECTION"])
@@ -1185,7 +1188,7 @@ def test_public_query_scrubs_captured_and_rotated_package_secrets(tmp_path, monk
     old.observe(secret[12:18])
     current = ProcessCredentialScrubSet()
     current.observe("other-credential")
-    query_owner = CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT)
+    query_owner = CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
     query_owner.held.append(SimpleNamespace(scrub_set=old))
     async def capture(*_args, **_kwargs):
         return current
@@ -1211,10 +1214,49 @@ def test_query_refuses_only_secret_key_block(tmp_path, monkeypatch):
     service = preparation(tmp_path)
     scrub = ProcessCredentialScrubSet()
     scrub.observe("private-token")
-    query_owner = CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT)
+    query_owner = CapabilitySourceQuery(service, runtime=None, plan=None, scope=ModelInputScopeKind.ROOT, fits_result=_CAPABILITY_PAGE_BUDGET.fits)
     async def capture(*_args, **_kwargs):
         return scrub
     monkeypatch.setattr(query_owner, "_native", capture)
     value = asyncio.run(query_owner._scrub({"description": "retained", "input_schema": {"properties": {"private-token": {"type": "string"}}}}))
     assert value == {"description": "retained", "withheld_fields": ["input_schema"]}
     asyncio.run(service.mcp.aclose())
+
+
+def test_directory_next_retains_filters_and_uses_complete_escaped_message_budget():
+    from pulsara_agent.primitives.tool_result_projection import (
+        conservative_tool_result_page_logical_utf8_bytes,
+    )
+    from pulsara_agent.primitives.context import canonical_json_bytes
+
+    call_id = _capability_page_id("call", "escaped-capability-page")
+    allowance = 2_000
+
+    def provider_accepts(body, memory_ids):
+        return conservative_tool_result_page_logical_utf8_bytes(
+            tool_call_id=call_id, body=body, model_visible_memory_ids=memory_ids,
+        ) <= allowance
+
+    budget = ToolResultPageBudget(call_id, accepts_provider_body=provider_accepts)
+    rows = [minimal_row(
+        "SKILL", str(index),
+        {"kind": "SKILL", "skill_path": f'/skills/{index}/反\\斜"线/SKILL.md'},
+        {"kind": "LOCAL", "scope": "USER"}, "known", "\\\"汉" * 25,
+    ) for index in range(9)]
+    arguments = {"kind": "SKILL", "scope": "USER", "source_kind": "LOCAL", "limit": 9}
+    seen = []
+    while True:
+        page = render_page(rows, arguments, fits_result=budget.fits)
+        assert budget.fits(canonical_json_bytes(page).decode("utf-8"))
+        assert page["returned_count"] > 0
+        seen.extend(item["target"] for item in page["items"])
+        assert "next_offset" not in page and "truncated" not in page
+        if page["next"] is None:
+            break
+        assert page["next"]["tool"] == "query_capabilities"
+        arguments = page["next"]["arguments"]
+        assert {key: arguments[key] for key in ("kind", "scope", "source_kind", "limit")} == {
+            "kind": "SKILL", "scope": "USER", "source_kind": "LOCAL", "limit": 9,
+        }
+    assert len(seen) == len(rows)
+    assert len({json.dumps(target, sort_keys=True) for target in seen}) == len(rows)

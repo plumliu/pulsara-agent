@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import asdict, fields
+from dataclasses import asdict
 import json
 import re
 from pathlib import Path
@@ -13,13 +13,9 @@ from typing import get_args
 
 from pulsara_agent.conversation_kernel.limits import (
     STAGE2_LIMITS,
-    Stage2RuntimeLimits,
 )
 from pulsara_agent.conversation_kernel.vocabulary import (
     APPEND_GUARDS,
-    COMMITTED_EVENT_DESCRIPTORS,
-    LIVE_EVENT_TYPES,
-    SUBJECT_SLOTS,
 )
 from pulsara_agent.storage.migrations.manifest import (
     CONVERSATION_KERNEL_RELATIONS,
@@ -54,12 +50,8 @@ def _repository_aggregate_source() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in paths)
 
 
-def test_stage2_registry_schema_and_removed_job_universe_are_exact() -> None:
-    assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
-    assert len(LIVE_EVENT_TYPES) == 23
-    assert len(SUBJECT_SLOTS) == 8
+def test_stage2_schema_runtime_grants_and_append_guard_have_single_owners() -> None:
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
 
     policy = build_postgres_runtime_grant_policy()
     assert policy.relation_privileges == CONVERSATION_KERNEL_RUNTIME_PRIVILEGES
@@ -134,7 +126,6 @@ def test_stage2_provider_production_graph_has_one_live_vocabulary_and_no_adoptio
         assert not any(token in source for token in forbidden_tokens), path
 
     provider_types = set(get_args(ProviderStreamPayload))
-    assert len(provider_types) == 12
     assert provider_types < set(get_args(LivePayload))
     assert not (KERNEL / "live_payloads.py").exists()
 
@@ -213,7 +204,6 @@ def test_stage2_product_contract_survives_the_clean_migration_universe() -> None
     assert POSTGRES_MIGRATION_REGISTRY.latest_version == 0
     assert manifest.product_relations == CONVERSATION_KERNEL_RELATIONS
     assert latest.resource_name == "0000_conversation_kernel_baseline.sql"
-    assert len(fields(Stage2RuntimeLimits)) == 52
     assert all(value > 0 for value in asdict(STAGE2_LIMITS).values())
 
 

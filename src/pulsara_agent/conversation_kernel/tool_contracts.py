@@ -23,7 +23,6 @@ from pulsara_agent.llm.input import (
 
 if TYPE_CHECKING:
     from .capability_management_execution import CapabilityManagementCall
-    from .tool_artifacts import PreparedToolOutputProjection
 
 from pulsara_agent.conversation_kernel.capability_composition import (
     PreparedMcpCapabilitySourceSnapshotSet,
@@ -59,7 +58,6 @@ from pulsara_agent.conversation_kernel.agent_context import (
     FrozenAgentInvocationSnapshot,
 )
 from pulsara_agent.ports.tool_execution import (
-    ToolOutputArtifactCandidate,
     ToolOutputSourceCoverage,
     ToolOutputSourceCoverageReason,
     ToolOutputSourceFormatHint,
@@ -69,11 +67,9 @@ from .tool_invocations import (
     ToolInvocationSourceKind,
     current_tool_invocation,
 )
-from pulsara_agent.ports.artifact import (
-    ToolOutputArtifactDisposition,
-    ToolOutputArtifactUnavailabilityReason,
-    ToolResultDisplayKind,
-)
+from pulsara_agent.ports.tool_output import ToolOutputBodyCandidate, ToolOutputUnavailableReason
+from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
+from pulsara_agent.ports.tool_execution import freeze_tool_json_object
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.ports.session_content import SessionContentRange
 from pulsara_agent.primitives.context import FrozenJsonObjectFact, thaw_json
@@ -111,8 +107,10 @@ class KernelToolResult:
     memory_mutation: PreparedMemoryMutation | None = None
     remote_identity: str | None = None
     remote_identity_verification: str | None = None
-    output_artifact_candidate: ToolOutputArtifactCandidate | None = None
-    artifact_inline_result: bool = False
+    output_body_candidate: ToolOutputBodyCandidate | None = None
+    native_output: bytes | None = None
+    page_complete: bool = False
+    required_facts: Mapping[str, object] = field(default_factory=dict)
     process_local_settlement: ProcessLocalEffectSettlementToken | None = None
     physical_timing: str = "ON_TIME"
     caller_cancelled_while_running: bool = False
@@ -122,9 +120,7 @@ class KernelToolResult:
     model_visible_memory_fact_ids: tuple[str, ...] = ()
     public_format: ToolOutputSourceFormatHint = ToolOutputSourceFormatHint.TEXT
     delivery_succeeded: Callable[[], None | Awaitable[None]] | None = field(default=None, repr=False, compare=False)
-    prepared_output_projection: PreparedToolOutputProjection | None = field(
-        default=None, repr=False, compare=False
-    )
+    page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
 
     def public_value(self) -> object:
         """Decode only the format explicitly declared by the business owner."""
@@ -160,10 +156,11 @@ class KernelToolResult:
             raise TypeError(
                 "kernel Tool result content must be bytes or frozen content"
             )
-        if self.artifact_inline_result and self.output_artifact_candidate is not None:
-            raise ValueError(
-                "artifact inline results cannot recursively own an artifact"
-            )
+        if self.native_output is not None:
+            self.native_output.decode("utf-8")
+        if not isinstance(self.page_complete, bool):
+            raise TypeError("page completeness must be boolean")
+        object.__setattr__(self, "required_facts", freeze_tool_json_object(self.required_facts))
 
 
 class KernelToolPhysicalInvocationError(RuntimeError):
@@ -204,6 +201,7 @@ class KernelToolInvocationContext:
     surface_borrow: ProcessLocalToolSurfaceBorrow = field(repr=False, compare=False)
     input_modalities: tuple[str, ...] | None = None
     image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
+    page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
     session_content_range: SessionContentRange | None = None
     permission_confirmation_granted: bool = False
     cell_cancel_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
@@ -596,16 +594,12 @@ def build_accepted_canonical_tool_result_settlement(
     observation_origin: ToolObservationOrigin,
     observation_duration_microseconds: int | None = None,
     tool_reported_duration_microseconds: int | None = None,
-    display_kind: ToolResultDisplayKind = ToolResultDisplayKind.COMPLETE,
-    artifact_disposition: ToolOutputArtifactDisposition = (
-        ToolOutputArtifactDisposition.NOT_REQUIRED
-    ),
-    artifact_id: str | None = None,
+    output_omitted: bool = False,
+    output_available: bool = False,
+    required_facts: Mapping[str, object] | None = None,
     source_coverage: ToolOutputSourceCoverage = ToolOutputSourceCoverage.COMPLETE,
     source_coverage_reason: ToolOutputSourceCoverageReason | None = None,
-    artifact_unavailability_reason: (
-        ToolOutputArtifactUnavailabilityReason | None
-    ) = None,
+    output_unavailability_reason: ToolOutputUnavailableReason | None = None,
     model_visible_memory_fact_ids: tuple[str, ...] = (),
     canonical_content: FrozenPromptContent | None = None,
 ) -> AcceptedCanonicalToolResultSettlement:
@@ -620,14 +614,16 @@ def build_accepted_canonical_tool_result_settlement(
         observation_origin=observation_origin,
     )
     metadata = ProviderToolResultContextMetadata(
+        session_id=session_id,
         result_id=result_id,
+        result_entry_id=result_entry_id,
         result_state=result_state,
-        display_kind=display_kind,
-        artifact_disposition=artifact_disposition,
-        artifact_id=artifact_id,
+        output_omitted=output_omitted,
+        output_available=output_available,
+        required_facts=freeze_tool_json_object(required_facts or {}),
         source_coverage=source_coverage,
         source_coverage_reason=source_coverage_reason,
-        artifact_unavailability_reason=artifact_unavailability_reason,
+        output_unavailability_reason=output_unavailability_reason,
         model_visible_memory_fact_ids=model_visible_memory_fact_ids,
         timing=timing,
     )

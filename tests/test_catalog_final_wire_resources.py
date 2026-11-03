@@ -195,7 +195,7 @@ def _mixed_results():
     public_text = frozen_tool_result_public_text(content)
     results = tuple(
         replace(
-            _tool_result(text, sequence=index + 3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu', artifact=False),
+            _tool_result(text, sequence=index + 3, turn_id='turn:klmmazz67vfgsfsvg6ceqgdsfu'),
             tool_call_id=call.tool_call_id,
             tool_request_entry_id=assistant.source_entry_id,
             tool_call_ordinal=index,

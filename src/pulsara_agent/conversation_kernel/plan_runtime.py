@@ -444,9 +444,7 @@ class PlanToolBatchCoordinator:
             tool_call_ordinal=settlement.call_ordinal,
             tool_call_arguments=settlement.public_arguments,
         )
-        projected = project_tool_result_public_value(
-            item, artifact_read_available=True
-        )
+        projected = project_tool_result_public_value(item)
         causal_ref = PostToolRef(
             settlement.turn_id,
             settlement.tool_call_id,

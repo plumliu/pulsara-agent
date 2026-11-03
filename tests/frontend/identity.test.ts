@@ -25,3 +25,5 @@ describe('caller identity encoding', () => {
     }
   });
 });
+
+it('rejects removed artifact identity allocation', () => { expect(() => randomIdentity('artifact' as never)).toThrow(); });

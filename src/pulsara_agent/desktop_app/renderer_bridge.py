@@ -25,7 +25,7 @@ from pulsara_agent.primitives.plan_workflow import (
     MINIMUM_PLAN_CHUNK_BYTES,
 )
 from pulsara_agent.terminal_protocol.canonical_v3 import (
-    MAXIMUM_CONTROL_ITEMS, browser_history_uint64,
+    MAXIMUM_CONTROL_ITEMS, browser_history_uint64, browser_tool_output_request,
 )
 from pulsara_agent.terminal_protocol.v3_gateway import (
     MAXIMUM_OBSERVATION_EVENTS,
@@ -940,22 +940,13 @@ class RendererBridge:
         return await self._reader_reply(connection_id, connection,
             await connection.controller.request("read_content", request))
 
-    async def read_tool_artifact(
+    async def read_tool_output(
         self, connection_id: str, body: dict[str, object]
     ) -> dict[str, object]:
         connection = await self._connection(connection_id)
-        request = wire.ReadToolArtifactRequest(
-            result_entry_id=_required_string(body, "result_entry_id"),
-            offset_chars=_uint(body.get("offset_chars", 0), "offset_chars"),
-            max_chars=_bounded_uint(
-                body.get("max_chars", 32_000),
-                "max_chars",
-                minimum=1,
-                maximum=32_000,
-            ),
-        )
+        request = browser_tool_output_request(body)
         return await self._reader_reply(connection_id, connection,
-            await connection.controller.request("read_tool_artifact", request))
+            await connection.controller.request("read_tool_output", request))
 
     async def list_background_processes(
         self, connection_id: str, body: dict[str, object]
