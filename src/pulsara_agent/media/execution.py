@@ -7,12 +7,15 @@ source, decoder, transcript and image owners into one atomic result candidate.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from time import monotonic
 
 from pulsara_agent.conversation_kernel.io import PhysicalToolInvocationDisposition
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
-from pulsara_agent.conversation_kernel.prompt_content import bind_prompt_images
+from pulsara_agent.conversation_kernel.prompt_content import (
+    MAXIMUM_PROMPT_MULTIPART_BYTES,
+    bind_prompt_images,
+)
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMTextPart,
@@ -26,7 +29,19 @@ from pulsara_agent.ports.tool_execution import (
 )
 from pulsara_agent.tools.builtins.media import validate_media_arguments
 from .asr_cache import AsrMediaKey
-from .frames import FrameBudget, read_video_frames
+from .frames import (
+    FRAME_ANALYSIS_FRAMES,
+    FRAME_SELECTION_REVISION,
+    FrameBudget,
+    frame_page_fits_geometry,
+    prepare_frame_plan,
+    render_frame_page,
+)
+from .frames_paging import (
+    FramePagePosition,
+    read_frame_continuation,
+    with_frame_page_continuation,
+)
 from .source import MediaError, MediaSource, probe_media, validate_range
 from .transcript import TranscriptService
 
@@ -182,21 +197,23 @@ async def execute_media(
             raise RuntimeError("video image allowance does not exact-join")
         if image_validator is None:
             raise RuntimeError("video image validation owner is unavailable")
-        maximum_bytes = min(
-            allowance.canonical_bytes,
-            allowance.logical_bytes,
-            3 * (allowance.wire_bytes // 4),
+        mode = arguments.get("mode", "overview")
+        crop = arguments.get("crop")
+        position = (
+            read_frame_continuation(
+                arguments["continuation"], source=source, info=info,
+                start=span.start, end=span.end, mode=mode, crop=crop,
+                selection_revision=FRAME_SELECTION_REVISION,
+            ) if "continuation" in arguments else FramePagePosition()
         )
-        if maximum_bytes <= 0 or allowance.input_tokens <= 0:
-            return result("APPLICATION_ERROR", {"error": "IMAGE_RESOURCE_EXCEEDED"})
-        # Existing image pixel boundary bounds this call's encoded/raster
-        # working set. Scan capacity derives from that physical allocation.
+        # Selection is owned by the fixed quality/physical analysis profile.
+        # Provider allowance may split its delivery, never change the plan.
         pixels = MAXIMUM_PROMPT_IMAGE_PIXELS
         budget = FrameBudget(
-            maximum_bytes=maximum_bytes,
+            maximum_bytes=MAXIMUM_PROMPT_MULTIPART_BYTES,
             image_pixels=pixels,
             maximum_images=max(1, pixels // (160 * 90)),
-            analysis_frames=max(3, pixels // (256 * 256)),
+            analysis_frames=FRAME_ANALYSIS_FRAMES,
         )
         touched = False
         first_span = None
@@ -232,66 +249,32 @@ async def execute_media(
         from pulsara_agent.tools.builtins.media import parse_image_tool_source
 
         image_source = parse_image_tool_source(tool.name, arguments)
-        while True:
-            candidate = await worker.run(
-                read_video_frames,
-                source,
-                info,
-                start=span.start,
-                end=span.end,
-                mode=arguments.get("mode", "overview"),
-                crop=arguments.get("crop"),
-                budget=budget,
-                deadline_monotonic=deadline,
-                on_progress=begin_frames_range,
-                on_started=begin_frames,
-            )
-            content = await image_validator.freeze(
-                PromptContent(
-                    (
-                        LLMTextPart(candidate.text),
-                        *(
-                            PromptImagePart(image.data, image.mime)
-                            for image in candidate.images
-                        ),
-                    )
-                ),
-                deadline_monotonic=deadline,
-            )
-            content = bind_prompt_images(content, workspace_id=context.workspace_id)
-            quote = allowance.quote_owner.quote(
-                tool_call_id=context.tool_call_id,
-                tool_name=tool.name,
-                source=image_source,
-                content=content,
-            )
-            if all(
-                getattr(quote, key) <= getattr(allowance, key)
-                for key in (
-                    "canonical_bytes",
-                    "logical_bytes",
-                    "wire_bytes",
-                    "input_tokens",
-                )
-            ):
-                source.assert_unchanged()
-                if candidate.processed_range != first_span:
-                    begin(*candidate.processed_range)
-                return MediaExecutionResult(
-                    state="SUCCESS",
-                    content=content,
-                    public_format=ToolOutputSourceFormatHint.TEXT,
-                )
-            # A quote is authoritative. Rebuild all evidence together at a
-            # smaller output allocation; no partial text/image commit.
-            if budget.image_pixels <= 160 * 90 or budget.maximum_bytes <= 1:
-                return result("APPLICATION_ERROR", {"error": "IMAGE_RESOURCE_EXCEEDED"})
-            budget = replace(
-                budget,
-                image_pixels=max(1, budget.image_pixels // 2),
-                maximum_bytes=max(1, budget.maximum_bytes // 2),
-                maximum_images=max(1, budget.maximum_images // 2),
-            )
+        plan = await worker.run(
+            prepare_frame_plan, source, info,
+            start=span.start, end=span.end, mode=mode, crop=crop,
+            window_start=position.window_start,
+            analysis_frames=FRAME_ANALYSIS_FRAMES,
+            deadline_monotonic=deadline,
+            on_progress=begin_frames_range,
+            on_started=begin_frames,
+        )
+        if position.next_observation >= plan.observation_count:
+            raise MediaError("INVALID_ARGUMENTS", "Frame continuation is outside the selection plan")
+        content = await render_prepared_frame_page(
+            source=source, info=info, plan=plan, position=position,
+            budget=budget, allowance=allowance, page_budget=page_budget,
+            image_source=image_source, workspace_id=context.workspace_id,
+            worker=worker, image_validator=image_validator, deadline=deadline,
+            refresh_image_resources=context.refresh_image_resources,
+        )
+        source.assert_unchanged()
+        processed_range = tuple(map(float, plan.processed_range))
+        if processed_range != first_span:
+            begin(*processed_range)
+        return MediaExecutionResult(
+            state="SUCCESS", content=content,
+            public_format=ToolOutputSourceFormatHint.TEXT,
+        )
     except TimeoutError as exc:
         return result(
             "APPLICATION_ERROR",
@@ -309,6 +292,109 @@ async def execute_media(
     finally:
         if source is not None:
             source.close()
+
+
+async def render_prepared_frame_page(
+    *, source, info, plan, position, budget, allowance, page_budget,
+    image_source, workspace_id, worker, image_validator, deadline,
+    refresh_image_resources=None,
+) -> FrozenPromptContent:
+    """Quote complete slices of one prepared plan; never reselect or reanalyse.
+
+    Encoding/layout cost is not monotone. A finite trailing removal reaches
+    the actual indexed singleton boundary without assuming binary search fits.
+    The one-shot render worker may decode again; only bounded low-res plan
+    values survive between attempts.
+    """
+    count = plan.observation_count - position.next_observation
+    if count < 1:
+        raise MediaError("INVALID_ARGUMENTS", "Frame continuation has no remaining observation")
+    floor = False
+    refresh_attempted = False
+    while True:
+        source.assert_unchanged()
+        if not frame_page_fits_geometry(
+            plan, offset=position.next_observation, count=count,
+            budget=budget, floor=floor,
+        ):
+            if count > 1:
+                count -= 1
+                continue
+            if plan.mode == "overview" and not floor:
+                floor = True
+                continue
+            raise MediaError("RESOURCE_BOUNDARY", "The minimum frame geometry exceeds the physical allocation")
+        try:
+            candidate = await worker.run(
+                render_frame_page, source, info, plan,
+                offset=position.next_observation, count=count, budget=budget,
+                floor=floor, deadline_monotonic=deadline,
+            )
+        except MediaError as exc:
+            if exc.code != "RESOURCE_BOUNDARY":
+                raise
+            if count > 1:
+                count -= 1
+                continue
+            if plan.mode == "overview" and not floor:
+                floor = True
+                continue
+            raise
+        candidate = with_frame_page_continuation(
+            candidate, source=source, info=info, plan=plan, position=position,
+            count=count, selection_revision=FRAME_SELECTION_REVISION,
+        )
+        content = await image_validator.freeze(
+            PromptContent((LLMTextPart(candidate.text), *(
+                PromptImagePart(image.data, image.mime) for image in candidate.images
+            ))), deadline_monotonic=deadline,
+        )
+        content = bind_prompt_images(content, workspace_id=workspace_id)
+        logical_fits = page_budget.fits_logical(candidate.text)
+        if allowance.accepts_page(
+            content=content, source=image_source, tool_name="read_video_frames",
+            page_budget=page_budget,
+        ):
+            source.assert_unchanged()
+            return content
+        if logical_fits and refresh_image_resources is not None and not refresh_attempted:
+            # The batch owner prepares only the closed-prefix successor here;
+            # it does not adopt a new epoch while physical tools are running.
+            # Keep this page and fixed plan unaccepted until its fresh quote.
+            refresh_attempted = True
+            refreshed = await refresh_image_resources()
+            source.assert_unchanged()
+            if refreshed is not None:
+                fresh_allowance, fresh_budget = refreshed
+                if (
+                    fresh_allowance.tool_call_id != allowance.tool_call_id
+                    or fresh_allowance.call_ordinal != allowance.call_ordinal
+                    or fresh_allowance.executor_binding_fingerprint
+                    != allowance.executor_binding_fingerprint
+                    or fresh_budget.tool_call_id != page_budget.tool_call_id
+                ):
+                    raise RuntimeError("Refreshed frame resources do not own this exact invocation")
+                allowance, page_budget = fresh_allowance, fresh_budget
+                # Earlier larger slices failed physical geometry/bytes or the
+                # immutable wrapped 40k limit. This is still the largest viable
+                # candidate; retest it before removing any selected observation.
+                if allowance.accepts_page(
+                    content=content, source=image_source,
+                    tool_name="read_video_frames", page_budget=page_budget,
+                ):
+                    source.assert_unchanged()
+                    return content
+        # Do not retain a rejected encoded page while the next child renders.
+        del content, candidate
+        if count > 1:
+            count -= 1
+        elif plan.mode == "overview" and not floor:
+            floor = True
+        else:
+            raise MediaError(
+                "RESOURCE_BOUNDARY",
+                "One minimum readable frame, its complete index and continuation do not fit this call",
+            )
 
 
 def _open_media_source(tool, arguments, *, deadline_monotonic):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.blob import MAXIMUM_BLOB_BYTES
+
 from pulsara_agent.identity import require_id
 
 from dataclasses import dataclass, field
@@ -40,9 +42,6 @@ from pulsara_agent.conversation_kernel.compaction.prompt import (
 )
 from pulsara_agent.conversation_kernel.repository_errors import (
     ConversationKernelConflict,
-)
-from pulsara_agent.model_input.contracts import (
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
 )
 from pulsara_agent.llm.input import LLMImagePart
 from pulsara_agent.storage.postgres_connection_provider import (
@@ -193,7 +192,7 @@ def read_image_reference_in_connection(connection, *, session_id: str, workspace
     if candidate is None:
         raise CanonicalImageReferenceUnavailable(image_ref)
     content_size = int(candidate["content_size"])
-    if not 0 <= content_size <= MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
+    if not 0 <= content_size <= MAXIMUM_BLOB_BYTES:
         raise ConversationKernelConflict(
             "canonical image owner body size is out of bounds"
         )
@@ -303,7 +302,7 @@ def read_image_reference_in_connection(connection, *, session_id: str, workspace
     if (
         descriptor.encoded_bytes > maximum_encoded_bytes
         or len(body) + descriptor.encoded_bytes
-        > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
+        > MAXIMUM_BLOB_BYTES
     ):
         raise CanonicalImageReferenceResourceExceeded(
             "canonical image reference exceeds its read allowance"
@@ -709,7 +708,7 @@ def _read_body(
         raise ConversationKernelConflict("canonical prompt body descriptor is invalid")
     expected_digest = str(row["content_digest"])
     expected_size = int(row["content_size"])
-    if not 0 <= expected_size <= MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
+    if not 0 <= expected_size <= MAXIMUM_BLOB_BYTES:
         raise ConversationKernelConflict("canonical body size is out of bounds")
     inline = row["inline_content"]
     blob_id = row["blob_id"]

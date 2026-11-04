@@ -271,7 +271,7 @@ def test_code_results_do_not_consume_canonical_or_compaction_budget(
         reader = CanonicalProviderInputReader(
             repository.connection_provider,
             blob_reader=PostgresCanonicalBlobStore(repository.connection_provider),
-            maximum_canonical_bytes=8192,
+
         )
         canonical = reader.read_frozen_dispatch(
             cut, deadline_monotonic=deadline()

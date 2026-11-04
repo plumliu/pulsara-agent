@@ -49,16 +49,9 @@ from pulsara_agent.conversation_kernel.direct_model import (
     DirectKernelModelPort,
     KernelModelTargetPreparationRequest,
 )
-import pulsara_agent.conversation_kernel.input_continuity as input_continuity
-from pulsara_agent.conversation_kernel.input_continuity import (
-    HostProviderInputContinuityOwner,
-    ProviderInputContinuityConflict,
-    _issue_root_bootstrap_lease_source,
-)
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionDisposition,
     CompactionTrigger,
-    ResolvedCompactionHeadroomBounds,
     ResolvedCompactionPolicy,
 )
 from pulsara_agent.conversation_kernel.provider_dispatch import (
@@ -1385,26 +1378,6 @@ class _CompactionSequencedDirectKernelModel(_SequencedDirectKernelModel):
         return resolved
 
 
-class _NearBoundReplayContinuityOwner(HostProviderInputContinuityOwner):
-    def reserve_assistant_replay_fragment(self, **kwargs):
-        view = self.current_view(kwargs["scope"])
-        assert view is not None
-        fragment = kwargs["fragment"]
-        original = input_continuity.MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES
-        input_continuity.MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = (
-            max(
-                view.logical_bytes,
-                view.wire_input_plan.quote.final_wire_utf8_bytes,
-            )
-            + fragment.logical_utf8_bytes
-            - 1
-        )
-        try:
-            return super().reserve_assistant_replay_fragment(**kwargs)
-        finally:
-            input_continuity.MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = original
-
-
 class _FailingPostConsumptionReader:
     def __init__(self, delegate: CanonicalProviderInputReader) -> None:
         self._delegate = delegate
@@ -2365,11 +2338,14 @@ def test_root_control_feedback_fence_keeps_turn_open_for_the_next_request(
         quote: FrozenPostResponseResourceQuote,
         *,
         effective_input_budget_tokens: int,
+        allow_image_page_recovery: bool,
     ) -> None:
+        assert allow_image_page_recovery is False
         resource_quotes.append(quote)
         require_resources(
             quote,
             effective_input_budget_tokens=effective_input_budget_tokens,
+            allow_image_page_recovery=allow_image_page_recovery,
         )
 
     monkeypatch.setattr(runner, "_require_post_response_resources", observe_resources)
@@ -3573,14 +3549,13 @@ def test_visual_destination_projection_preserves_selected_image_history_and_rece
 
 
 @pytest.mark.parametrize(
-    ("canonical_capacity_delta", "admitted"),
-    ((0, True), (-1, False)),
-    ids=("exact-headroom", "one-byte-short"),
+    "admitted",
+    (True, False),
+    ids=("admitted", "denied"),
 )
-def test_k3_multipart_input_keeps_exact_canonical_service_headroom_before_open(
+def test_multipart_input_resource_admission_precedes_provider_open(
     stage2_migrated_postgres_database,
     monkeypatch: pytest.MonkeyPatch,
-    canonical_capacity_delta: int,
     admitted: bool,
 ) -> None:
     from pulsara_agent.conversation_kernel import provider_dispatch
@@ -3604,28 +3579,9 @@ def test_k3_multipart_input_keeps_exact_canonical_service_headroom_before_open(
         FrozenPromptContent((LLMTextPart("before"), image, image)),
         workspace_id=workspace_id,
     )
-    quote = prompt.resource_quote
-    values = {
-        "maximum_canonical_items": 4_096,
-        "maximum_canonical_expanded_bytes": (
-            quote.canonical_expanded_bytes + (4 << 20) + canonical_capacity_delta
-        ),
-        "maximum_epoch_logical_bytes": 64 << 20,
-        "reserved_canonical_items": 296,
-        "reserved_canonical_expanded_bytes": 4 << 20,
-        "reserved_epoch_logical_bytes": 4 << 20,
-    }
-    bounds = ResolvedCompactionHeadroomBounds(
-        **values,
-        resolved_hard_bound_set_fingerprint=context_fingerprint(
-            "pulsara.compaction-resource-headroom.v3-expanded-content",
-            {"role": "minimum_service_headroom", **values},
-        ),
-    )
     monkeypatch.setattr(
-        provider_dispatch,
-        "resolved_compaction_headroom_bounds",
-        lambda: bounds,
+        provider_dispatch, "MAXIMUM_PROVIDER_WIRE_INPUT_BYTES",
+        provider_dispatch.MAXIMUM_PROVIDER_WIRE_INPUT_BYTES if admitted else 1,
     )
     runtime = test_model_runtime(
         wire_api="openai_chat_completions",
@@ -4193,9 +4149,9 @@ def test_final_wire_compaction_summary_prefix_search_shrinks_replay_heavy_wire(
     ("image_side", "text_padding", "expected_disposition"),
     (
         (1024, 0, CompactionDisposition.COMPACTED),
-        (2047, 4_000, CompactionDisposition.FAILED),
+        (2047, 4_000, CompactionDisposition.COMPACTED),
     ),
-    ids=("large-image-admitted", "full-d2-overbound"),
+    ids=("large-image-admitted", "larger-image-admitted"),
 )
 def test_k4_compaction_prefix_search_keeps_large_image_mandatory_suffix(
     stage2_migrated_postgres_database,
@@ -7130,10 +7086,8 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
         target_turn_id=turn_id,
     )
     monkeypatch.setattr(repository, "read_pending_prompt_steer_facts", pending_gate)
-    # Nested prefixes share the same 64 KiB canonical base.  The injected
-    # target admits only one steer.  A 512 KiB planning bound admits the unique
-    # base + suffix materialization, while charging the base for each of the
-    # sixteen trials would fail before reaching the valid one-item prefix.
+    # Nested prefixes share the same canonical base. The target admits one
+    # steer; planning must still reach that valid FIFO prefix.
     initial = "x" * (64 << 10)
     body = b"12345678"
     queue_ids = tuple(_name("queue") for index in range(1, 17))
@@ -7161,10 +7115,6 @@ def test_round3_1_planning_reaches_shorter_fifo_prefix_without_recharging_base(
                 actor_id="test",
                 deadline_monotonic=monotonic() + 10,
             )
-        monkeypatch.setattr(
-            "pulsara_agent.conversation_kernel.provider_dispatch.MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
-            512 << 10,
-        )
         pending_gate.release.set()
         await asyncio.wait_for(model.started.wait(), timeout=5)
         user_messages = [
@@ -8779,7 +8729,10 @@ def test_k3_output_resource_gate_precedes_assistant_and_tool_effects(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
         repository=repository,
         writer_lease=lease,
-        model=_ScriptedModel([_many_tool_stream(256)]),
+        model=_LimitedCompactionScriptedModel([_named_tool_stream(
+            tool_name="exec_process", tool_call_id="call:oversized-followup",
+            arguments={"command": "x" * (256 << 10)},
+        )], summary="unused"),
         tools=StructuredToolPort(tools),
         live_bus=bus,
         context_source_collector=StaticContextSourceCollector(),
@@ -8788,8 +8741,9 @@ def test_k3_output_resource_gate_precedes_assistant_and_tool_effects(
     with pytest.raises(OutputResourceInterruption) as caught:
         asyncio.run(runner.run_turn(frozen_test_prompt("produce an oversized batch")))
 
-    assert caught.value.reason == "CANONICAL_BYTES"
-    assert caught.value.quote.canonical_upper_after > 16 << 20
+    assert caught.value.reason == "FOLLOWUP_INPUT_TOKENS"
+    assert caught.value.quote.followup_wire is not None
+    assert caught.value.quote.followup_wire.budget_input_tokens > 47_192
     assert tools.invocations == []
     with provider.connection(
         lane=PostgresConnectionLane.INSPECTOR,
@@ -8814,7 +8768,7 @@ def test_k3_output_resource_gate_precedes_assistant_and_tool_effects(
     observed = bus.observe(observer_id, after_revision=0, maximum_events=2_048)
     assert any(
         item.kind is LiveSettlementKind.ABORTED
-        and item.reason_code == "OUTPUT_RESOURCE_CANONICAL_BYTES"
+        and item.reason_code == "OUTPUT_RESOURCE_FOLLOWUP_INPUT_TOKENS"
         for item in observed.settlements
     )
 
@@ -9448,70 +9402,6 @@ def test_round5a2_selected_hydration_reuses_dispatch_deadline_and_opens_once_or_
     assert reader.dispatch_deadlines == [reader.hydration_deadlines[0]] * 2
 
 
-def test_round5a1_replay_fragment_capacity_fails_before_assistant_commit(
-    stage2_migrated_postgres_database,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = _CountingAssistantCommitRepository(provider)
-    session_id = _name("session")
-    lease = _acquire_bound_host_writer(
-        repository,
-        session_id=session_id,
-        workspace_id=_name("workspace"),
-        writer_owner_id=_name("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    profile = RouteWireProfile(
-        id="test:chat:near-bound",
-        wire_api="openai_chat_completions",
-    )
-    model = _SequencedDirectKernelModel(
-        model_runtime=test_model_runtime(
-            api_key="sk-fixture-secret",
-            base_url="https://example.invalid/v1",
-            model_id="test-pro",
-            wire_api="openai_chat_completions",
-            route_wire_profile=profile,
-        ),
-        scripts=(_round5a1_chat_scripts()[1],),
-    )
-    continuity = _NearBoundReplayContinuityOwner(
-        root_lease_source=_issue_root_bootstrap_lease_source(lease)
-    )
-    runner = ConversationKernelRunner(
-        model_resolution_snapshot_provider=test_model_resolution_snapshot,
-        repository=repository,
-        writer_lease=lease,
-        model=model,
-        tools=StructuredToolPort(_AssertingTool(provider, session_id), tool_names=()),
-        live_bus=LiveAgentEventBus(),
-        context_source_collector=StaticContextSourceCollector(),
-        continuity_owner=continuity,
-    )
-
-    with pytest.raises(
-        ProviderInputContinuityConflict,
-        match="exhausts the epoch byte bound",
-    ):
-        asyncio.run(
-            runner.run_turn(frozen_test_prompt("reject the oversized replay carrier"))
-        )
-
-    assert repository.assistant_commit_calls == 0
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        deadline_monotonic=monotonic() + 10,
-    ) as connection:
-        assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.transcript_entries "
-            "WHERE session_id = %s AND entry_kind LIKE 'ASSISTANT%%'",
-            (session_id,),
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT status FROM pulsara_v3.turns WHERE session_id = %s",
-            (session_id,),
-        ).fetchone() == ("INTERRUPTED",)
 
 
 def test_stage2_lost_tool_request_ack_confirms_before_single_dispatch(

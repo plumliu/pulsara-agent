@@ -1,9 +1,10 @@
-"""Paired, real-provider visual benchmark on small synthetic ground truth.
+"""Real-provider visual QA on small synthetic ground truth.
 
-Selection pair: uniform/grid vs production anchor+changes/grid. Layout pair:
-identical production-selected frames/grid vs production DP. Fixed frame-count,
-image and pixel admission, same source/questions/model; actual usage is measured.
-This narrow fixture suite cannot establish general visual understanding quality.
+The production overview plan is rendered and fully drained through its source
+continuations before pictures reach the model. The physical budget applies to
+each source page; the fixed-picture probe receives the collected pages. Actual
+usage is measured. This fixture suite does not compare alternate selectors or
+layouts and cannot establish general visual understanding quality.
 """
 
 from __future__ import annotations
@@ -12,9 +13,7 @@ import argparse
 import asyncio
 from dataclasses import replace
 from fractions import Fraction
-import io
 import json
-import math
 import os
 from pathlib import Path
 from time import monotonic
@@ -31,12 +30,10 @@ from pulsara_agent.llm.input import LLMTextPart, PromptContent, PromptImagePart
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
 from pulsara_agent.media.frames import (
+    FRAME_ANALYSIS_FRAMES,
     FrameBudget,
-    FrameImage,
-    _visible,
     read_video_frames,
 )
-from pulsara_agent.media.frames_selection import Sample, uniform_indices
 from pulsara_agent.media.source import MediaSource, probe_media
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
@@ -59,7 +56,7 @@ CASES = {
     "action": ("START", "FINISH", "JUMP"),
     "narrative": ("ARRIVAL", "DEPARTURE", "VISITOR"),
 }
-BUDGET = FrameBudget(4_000_000, 1280 * 720, 1, 128, maximum_frames=6)
+BUDGET = FrameBudget(4_000_000, 1280 * 720, 1, FRAME_ANALYSIS_FRAMES)
 
 
 def fixture(path, category, truth):
@@ -107,39 +104,48 @@ def fixture(path, category, truth):
             output.mux(packet)
 
 
-def grid(source, info, times):
-    columns = math.ceil(math.sqrt(len(times)))
-    rows = math.ceil(len(times) / columns)
-    w = min(1280 // columns, int(math.sqrt(BUDGET.image_pixels / len(times) * 16 / 9)))
-    h = math.floor(w * 9 / 16)
-    canvas = Image.new("RGB", (columns * w, rows * h), "#202020")
-    index = []
-    for i, t in enumerate(times):
-        actual, _, image = _visible(source, info, t, None)
-        x, y = i % columns * w, i // columns * h
-        canvas.paste(image.resize((w, h), Image.Resampling.LANCZOS), (x, y))
-        d = ImageDraw.Draw(canvas)
-        box = d.textbbox((x + 4, y + 3), str(i + 1))
-        d.rectangle((x, y, box[2] + 5, box[3] + 4), fill="black")
-        d.text((x + 4, y + 3), str(i + 1), fill="white")
-        index.append(
-            {
-                "n": i + 1,
-                "image": 1,
-                "t": actual,
-                "cell_rect": [
-                    x / canvas.width,
-                    y / canvas.height,
-                    (x + w) / canvas.width,
-                    (y + h) / canvas.height,
-                ],
-            }
+def collect_overview_pages(source, info, *, start, end, budget):
+    """Use the public source-page pipeline and copy its complete next calls.
+
+    Printed frame numbers remain local to each accepted page. The benchmark's
+    image index is remapped to the accumulated picture attachments, with the
+    original page and image indices retained explicitly.
+    """
+    arguments = {"from": start, "to": end, "mode": "overview"}
+    images, index, pages = [], [], []
+    while True:
+        result = read_video_frames(
+            source,
+            info,
+            start=arguments["from"],
+            end=arguments["to"],
+            mode=arguments["mode"],
+            crop=arguments.get("crop"),
+            continuation=arguments.get("continuation"),
+            budget=budget,
         )
-    output = io.BytesIO()
-    canvas.save(output, format="JPEG", quality=90)
-    return (
-        FrameImage(output.getvalue(), "image/jpeg", canvas.width, canvas.height),
-    ), index
+        body = json.loads(result.text)
+        image_offset = len(images)
+        pages.append(body)
+        images.extend(result.images)
+        index.extend(
+            dict(
+                frame,
+                source_page=len(pages),
+                page_image=frame["image"],
+                image=image_offset + frame["image"],
+            )
+            for frame in body["frames"]
+        )
+        following = body["next"]
+        if following is None:
+            break
+        assert following["tool"] == "read_video_frames"
+        next_arguments = following["arguments"]
+        assert next_arguments != arguments, "Source continuation did not advance"
+        assert next_arguments["target"] == {"kind": "PATH", "path": str(source.path)}
+        arguments = next_arguments
+    return tuple(images), index, pages
 
 
 def prepare(workspace, category, truth):
@@ -148,31 +154,16 @@ def prepare(workspace, category, truth):
     begin = monotonic()
     with MediaSource.open(source_path) as source:
         info = probe_media(source)
-        production = read_video_frames(
-            source, info, start=0, end=info.duration, mode="overview", budget=BUDGET
+        images, index, pages = collect_overview_pages(
+            source, info, start=0, end=info.duration, budget=BUDGET
         )
-        body = json.loads(production.text)
-        times = [row["t"] for row in body["frames"]]
-        # The uniform baseline uses the exact same real source PTS pool and count.
-        samples = [Sample(i / 10, None, 0) for i in range(120)]
-        uniform = [samples[i].t for i in uniform_indices(samples, len(times))]
-        anchor_grid = grid(source, info, times)
-        uniform_grid = grid(source, info, uniform)
     preparation_seconds = monotonic() - begin
-    variants = {
-        "uniform_grid": uniform_grid,
-        "anchor_changes_grid": anchor_grid,
-        "anchor_changes_dp": (production.images, body["frames"]),
-    }
-    result = []
-    for name, (images, index) in variants.items():
-        paths = []
-        for i, image in enumerate(images):
-            p = workspace / f"{category}-{name}-{i + 1}.jpg"
-            p.write_bytes(image.data)
-            paths.append(str(p))
-        result.append((name, images, index, paths, preparation_seconds))
-    return result
+    paths = []
+    for i, image in enumerate(images):
+        path = workspace / f"{category}-production_overview-{i + 1}.jpg"
+        path.write_bytes(image.data)
+        paths.append(str(path))
+    return images, index, paths, preparation_seconds, pages
 
 
 def parse(answer):
@@ -238,11 +229,12 @@ async def run(args, report):
     core = None
     report.update(
         model=args.model,
-        scope="synthetic paired 4-category benchmark; one run per variant; no broad accuracy or latency guarantee",
+        pipeline="production_overview",
+        scope="synthetic 4-category production-overview visual QA; one run per source; no broad accuracy or latency guarantee",
         declared_budget={
             "maximum_images": BUDGET.maximum_images,
             "image_pixels": BUDGET.image_pixels,
-            "maximum_frames": BUDGET.maximum_frames,
+            "scope": "per accepted source page, not the combined picture probe",
             "analysis_frames": BUDGET.analysis_frames,
         },
         runs=[],
@@ -272,97 +264,96 @@ async def run(args, report):
             model_runtime=_RecordingModelRuntime(runtime, records)
         )
         for category, truth in CASES.items():
-            variants = await asyncio.to_thread(prepare, workspace, category, truth)
-            for name, images, index, paths, preparation_seconds in variants:
-                prompt = (
-                    "Inspect only these sampled frames and their actual source timestamps. Do not use any tools. "
-                    "These are sparse observations; do not invent unseen events or interpolate. "
-                    "Return only JSON with keys first_label, last_label, brief_label, brief_t, brand. "
-                    "Read the main large label in first/last supplied frames. brief_label is the visible temporary main label that differs from both; "
-                    "brief_t is its supplied timestamp; use null if absent. brand is the explicit company/brand name shown; null if absent. "
-                    "Frame index: " + json.dumps(index)
-                )
-                session = await core.open_session(
-                    HostWorkspaceInput(
-                        workspace_kind="project",
-                        workspace_root=workspace,
-                        trust_workspace_mcp_config=False,
+            images, index, paths, preparation_seconds, pages = await asyncio.to_thread(
+                prepare, workspace, category, truth
+            )
+            prompt = (
+                "Inspect only these sampled frames and their actual source timestamps. Do not use any tools. "
+                "These are sparse observations; do not invent unseen events or interpolate. "
+                "Return only JSON with keys first_label, last_label, brief_label, brief_t, brand. "
+                "Read the main large label at the earliest/latest supplied source timestamps; page order may differ from time order and printed numbers are local to source_page. brief_label is the visible temporary main label that differs from both; "
+                "brief_t is its supplied timestamp; use null if absent. brand is the explicit company/brand name shown; null if absent. "
+                "Frame index: " + json.dumps(index)
+            )
+            session = await core.open_session(
+                HostWorkspaceInput(
+                    workspace_kind="project",
+                    workspace_root=workspace,
+                    trust_workspace_mcp_config=False,
+                ),
+                system_prompt="Answer the user from supplied visual evidence. Be literal and do not use tools.",
+            )
+            try:
+                await session.attach_controller(random_id("attachment"))
+                await session.update_model_call_binding(_binding(runtime, selected))
+                start_record = len(records)
+                begin = monotonic()
+                result = await session.run_turn(
+                    PromptContent(
+                        (
+                            LLMTextPart(prompt),
+                            *(PromptImagePart(i.data, i.mime) for i in images),
+                        )
                     ),
-                    system_prompt="Answer the user from supplied visual evidence. Be literal and do not use tools.",
+                    command_id=random_id("command"),
+                    requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                 )
-                try:
-                    await session.attach_controller(random_id("attachment"))
-                    await session.update_model_call_binding(_binding(runtime, selected))
-                    start_record = len(records)
-                    begin = monotonic()
-                    result = await session.run_turn(
-                        PromptContent(
-                            (
-                                LLMTextPart(prompt),
-                                *(PromptImagePart(i.data, i.mime) for i in images),
-                            )
-                        ),
-                        command_id=random_id("command"),
-                        requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-                    )
-                    elapsed = monotonic() - begin
-                    calls = [
-                        r
-                        for r in records[start_record:]
-                        if r["purpose"] == "agent_model_loop"
-                    ]
-                    assert calls and any(
-                        "data:image/" in json.dumps(r["provider_input"]) for r in calls
-                    )
-                    row = {
-                        "category": category,
-                        "variant": name,
-                        "truth": truth,
-                        "index": index,
-                        "images": paths,
-                        "image_pixels": sum(i.width * i.height for i in images),
-                        "image_bytes": sum(len(i.data) for i in images),
-                        "prompt": prompt,
-                        "answer": result.final_text,
-                        "seconds": elapsed,
-                        "shared_preparation_seconds": preparation_seconds,
-                        "latency_definition": "Host run_turn seconds excludes shared fixture/selection/layout preparation; shared preparation separately measured.",
-                        "model_calls": len(calls),
-                        "usage": [r["terminal"] for r in calls],
-                        **grade(result.final_text, truth, index),
-                    }
-                    report["runs"].append(row)
-                    save()
-                    print(
-                        category,
-                        name,
-                        row["facts_correct"],
-                        "/3",
-                        "event",
-                        row["event_selected"],
-                        "seconds",
-                        round(elapsed, 2),
-                        flush=True,
-                    )
-                finally:
-                    await core.close_session(session.host_session_id)
-        report["summary"] = {}
-        for name in ("uniform_grid", "anchor_changes_grid", "anchor_changes_dp"):
-            runs = [r for r in report["runs"] if r["variant"] == name]
-            usage = [u for r in runs for u in r["usage"]]
-            report["summary"][name] = {
-                "facts_correct": sum(r["facts_correct"] for r in runs),
-                "facts_total": 12,
-                "localized_events": sum(r["localized"] for r in runs),
-                "selection_misses": sum(not r["event_selected"] for r in runs),
-                "unsupported_claims": sum(r["unsupported_claims"] or 0 for r in runs),
-                "model_calls": sum(r["model_calls"] for r in runs),
-                "input_tokens": sum(u.get("input_tokens") or 0 for u in usage),
-                "output_tokens": sum(u.get("output_tokens") or 0 for u in usage),
-                "total_seconds": sum(r["seconds"] for r in runs),
-            }
+                elapsed = monotonic() - begin
+                calls = [
+                    r
+                    for r in records[start_record:]
+                    if r["purpose"] == "agent_model_loop"
+                ]
+                assert calls and any(
+                    "data:image/" in json.dumps(r["provider_input"]) for r in calls
+                )
+                row = {
+                    "category": category,
+                    "truth": truth,
+                    "index": index,
+                    "images": paths,
+                    "source_pages": pages,
+                    "image_pixels": sum(i.width * i.height for i in images),
+                    "image_bytes": sum(len(i.data) for i in images),
+                    "prompt": prompt,
+                    "answer": result.final_text,
+                    "seconds": elapsed,
+                    "shared_preparation_seconds": preparation_seconds,
+                    "latency_definition": "Host run_turn seconds excludes shared fixture/selection/layout preparation; shared preparation separately measured.",
+                    "model_calls": len(calls),
+                    "usage": [r["terminal"] for r in calls],
+                    **grade(result.final_text, truth, index),
+                }
+                report["runs"].append(row)
+                save()
+                print(
+                    category,
+                    row["facts_correct"],
+                    "/3",
+                    "event",
+                    row["event_selected"],
+                    "seconds",
+                    round(elapsed, 2),
+                    flush=True,
+                )
+            finally:
+                await core.close_session(session.host_session_id)
+        runs = report["runs"]
+        usage = [u for r in runs for u in r["usage"]]
+        report["summary"] = {
+            "facts_correct": sum(r["facts_correct"] for r in runs),
+            "facts_total": 12,
+            "localized_events": sum(r["localized"] for r in runs),
+            "selection_misses": sum(not r["event_selected"] for r in runs),
+            "unsupported_claims": sum(r["unsupported_claims"] or 0 for r in runs),
+            "model_calls": sum(r["model_calls"] for r in runs),
+            "input_tokens": sum(u.get("input_tokens") or 0 for u in usage),
+            "output_tokens": sum(u.get("output_tokens") or 0 for u in usage),
+            "total_seconds": sum(r["seconds"] for r in runs),
+        }
         report["unmeasured"] = [
             "natural lecture/screencast/action/narrative videos",
+            "alternate selection/layout comparisons",
             "multiple repeats or confidence intervals",
             "ASR cold/hot/parallel/quality/cost (saved ASR config absent)",
             "subtitle disagreement covered by separate production Host dogfood",
@@ -386,7 +377,7 @@ async def run(args, report):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="qwen3.8-flash")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

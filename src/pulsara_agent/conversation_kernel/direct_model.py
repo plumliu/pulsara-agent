@@ -2031,15 +2031,16 @@ def _materialize_provider_followup(
 
 def quote_provider_followup_wire_resources(
     *,
-    request: KernelModelExecutionRequest,
+    plan: FrozenProviderWireInputPlan,
+    call: ResolvedModelCall,
     actual_assistant_message: LLMMessage,
     provider_replay: PreparedDurableProviderAssistantReplay | None,
     bounded_suffix_messages: tuple[LLMMessage, ...],
     usage_anchor: ProviderInputUsageAnchor | None = None,
 ) -> ProviderFollowupWireResourceQuote:
     return _materialize_provider_followup(
-        plan=request.wire_input_plan,
-        call=request.prepared_call.call,
+        plan=plan,
+        call=call,
         actual_assistant_message=actual_assistant_message,
         provider_replay=provider_replay,
         bounded_suffix_messages=bounded_suffix_messages,

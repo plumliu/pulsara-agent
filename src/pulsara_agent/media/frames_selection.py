@@ -156,99 +156,75 @@ def detect_changes(samples: Sequence[Sample]) -> Changes:
     )
 
 
-def uniform_indices(samples: Sequence[Sample], count: int) -> list[int]:
-    if count <= 0 or not samples:
-        return []
-    if count == 1:
-        return [0]
-    a, b = samples[0].t, samples[-1].t
-    # Nearest visible interval start, rather than fabricated target timestamps.
-    result = set()
-    cursor = 0
-    for k in range(count):
-        target = b if k == count - 1 else a + (b - a) * k / (count - 1)
-        while cursor + 1 < len(samples) and samples[cursor + 1].t <= target:
-            cursor += 1
-        result.add(cursor)
-    return sorted(result)
+def overview_priority(samples: Sequence[Sample], allocation: int) -> tuple[int, ...]:
+    """Frozen sparse evidence, in endpoint/temporal-refinement priority order.
 
-
-class MotionEvidenceOverflow(ValueError):
-    """The observed process needs more cells than this window can deliver."""
-
-
-def select_samples(
-    samples: Sequence[Sample], changes: Changes, count: int, mode: str
-) -> list[int]:
-    if len(samples) <= count:
-        return list(range(len(samples)))
-    if mode == "detail":
-        required = {
-            role: i for i, sample in enumerate(samples) for role in sample.required
-        }
-        selected = {required[role] for role in (0, 2) if role in required}
-        if len(selected) > count:
-            raise ValueError("detail endpoints exceed image allowance")
-        if 1 in required and len(selected) < count:
-            selected.add(required[1])
-        for i in sorted(
-            range(len(samples)),
-            key=lambda i: (-sharpness(samples[i].image), samples[i].t),
-        ):
-            if len(selected) >= count:
-                break
-            selected.add(i)
-        return sorted(selected)
-    if mode == "motion":
-        protected = set()
-        final = len(samples) - 1
-        last_change = max(changes.candidates, default=-1)
-        for before, middle, after in changes.round_trips:
-            # A later independently observed return can also be the temporal
-            # endpoint when no later change was observed. This removes only
-            # adjacent same-state redundancy; the B evidence remains intact.
-            if last_change <= after:
-                global_change, local_change = distance(
-                    features(samples[after].image), features(samples[final].image)
-                )
-                if global_change <= 3.5 and local_change <= 0.07:
-                    after = final
-            protected.update((before, middle, after))
-        protected.update((0, final))
-        if len(protected) > count:
-            raise MotionEvidenceOverflow(
-                "observed round trip and temporal endpoints exceed image allowance"
+    Groups only compare sampled pixels with their fixed first observation.
+    They do not establish an unchanged interval or identify semantic scenes.
+    The allocation is the orientation profile's cell geometry, never the
+    delivery page's remaining allowance.
+    """
+    if not samples:
+        return ()
+    if allocation < min(2, len(samples)):
+        raise ValueError("overview allocation must preserve temporal endpoints")
+    views = [features(sample.image) for sample in samples]
+    groups: list[list[int]] = []
+    for i in range(len(samples)):
+        if groups:
+            global_change, local_change = distance(views[groups[-1][0]], views[i])
+            if global_change <= 3 and local_change <= 0.15:
+                groups[-1].append(i)
+                continue
+        groups.append([i])
+    representatives, novelty = [], []
+    for group_index, group in enumerate(groups):
+        midpoint = (samples[group[0]].t + samples[group[-1]].t) / 2
+        representatives.append(
+            max(
+                group,
+                key=lambda i: (
+                    sharpness(samples[i].image),
+                    -abs(samples[i].t - midpoint),
+                    -samples[i].t,
+                ),
             )
-        # The uniform skeleton reserves endpoints; observed round-trip groups
-        # consume only slots reserved for supplementary evidence.
-        selected = (
-            set(uniform_indices(samples, max(2, count - len(protected) + 2)))
-            | protected
         )
-        if len(selected) > count:
-            raise MotionEvidenceOverflow(
-                "motion skeleton and observed process exceed image allowance"
+        neighboring = (
+            j for j in (group_index - 1, group_index + 1) if 0 <= j < len(groups)
+        )
+        novelty.append(
+            max(
+                (
+                    max(global_change / 10, local_change / 0.2)
+                    for global_change, local_change in (
+                        distance(views[group[0]], views[groups[j][0]])
+                        for j in neighboring
+                    )
+                ),
+                default=0.0,
             )
-    else:
-        selected = set(uniform_indices(samples, max(2, (count + 1) // 2)))
-    # Time partitions alternate; high motion at one point cannot monopolize
-    # all slots. Adjacent equivalent states may be omitted, never ABA facts.
-    bins: list[list[int]] = [[] for _ in range(max(1, len(selected) - 1))]
-    span = samples[-1].t - samples[0].t
-    for i in changes.candidates:
-        bucket = (
-            min(len(bins) - 1, int((samples[i].t - samples[0].t) / span * len(bins)))
-            if span
-            else 0
         )
-        bins[bucket].append(i)
-    while len(selected) < count and any(bins):
-        for bucket in bins:
-            if bucket and len(selected) < count:
-                selected.add(bucket.pop(0))
-    if len(selected) < count:
-        for i in uniform_indices(samples, count):
-            selected.add(i)
-            if len(selected) == count:
-                break
-    return sorted(selected)
+    selected = [0] if len(samples) == 1 else [0, len(samples) - 1]
+    represented = {
+        group_index
+        for group_index, group in enumerate(groups)
+        if any(index in group for index in selected)
+    }
+    while len(selected) < allocation and len(represented) < len(groups):
+
+        def coverage(group_index):
+            t = samples[representatives[group_index]].t
+            left = max(samples[i].t for i in selected if samples[i].t < t)
+            right = min(samples[i].t for i in selected if samples[i].t > t)
+            # The largest eligible gap comes first. Native PTS quantization
+            # must not prefer refining a shorter but better-centered gap.
+            return right - left, min(t - left, right - t), novelty[group_index], -t
+
+        group_index = max(
+            (i for i in range(len(groups)) if i not in represented),
+            key=coverage,
+        )
+        selected.append(representatives[group_index])
+        represented.add(group_index)
+    return tuple(selected)

@@ -30,7 +30,6 @@ from pulsara_agent.llm.input import (
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItemKind,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
     validate_compaction_request_shape,
 )
 from pulsara_agent.model_input.lowering import (
@@ -558,8 +557,6 @@ def compaction_snapshot_canonical_expanded_bytes(value: str | bytes) -> int:
     charge = len(decoded.encoded) + sum(
         descriptor.encoded_bytes for descriptor in _decoded_image_descriptors(decoded)
     )
-    if charge > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
-        raise ValueError("snapshot carrier exceeds the canonical expanded bound")
     return charge
 
 
@@ -597,9 +594,6 @@ def parse_compaction_snapshot_carrier(
         raise TypeError("snapshot image payloads must be immutable bytes")
     decoded = _decode_compaction_snapshot_carrier(value)
     descriptors = _decoded_image_descriptors(decoded)
-    charge = len(decoded.encoded) + sum(item.encoded_bytes for item in descriptors)
-    if charge > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
-        raise ValueError("snapshot carrier exceeds the canonical expanded bound")
     expected_count = len(descriptors)
     if len(image_payloads) != expected_count:
         raise ValueError("snapshot image refs are incomplete or excessive")

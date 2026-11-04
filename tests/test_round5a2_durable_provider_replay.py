@@ -12,7 +12,6 @@ import pytest
 
 from pulsara_agent.conversation_kernel.reader import CanonicalProviderInputReader
 from pulsara_agent.llm.provider_replay import (
-    MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES,
     MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
     ProviderAssistantReplayCodecKind,
     build_prepared_durable_provider_assistant_replay,
@@ -30,12 +29,9 @@ from pulsara_agent.model_input.contracts import (
 from pulsara_agent.model_input.continuity import ProviderInputContinuityScope
 from pulsara_agent.ports.live_agent_event import ReasoningPresentationKind
 from pulsara_agent.model_input.provider_replay import (
-    ProviderReplayHydrationError,
-    ProviderReplayHydrationFailureKind,
     decode_provider_replay_fragment,
     freeze_provider_replay_manifest,
     freeze_provider_replay_manifest_cut,
-    quote_provider_dispatch_composite_bytes,
     select_compatible_provider_replay_manifests,
 )
 from pulsara_agent.ports.provider_stream import (
@@ -571,29 +567,8 @@ def test_round5a2_responses_item_count_and_allowlist_are_closed() -> None:
         )
 
 
-@pytest.mark.parametrize("delta", (-1, 0))
-def test_round5a2_dispatch_composite_accepts_exact_boundary(delta: int) -> None:
-    canonical = 1 << 20
-    metadata = 8 << 10
-    selected = MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES - canonical - metadata + delta
-    assert (
-        quote_provider_dispatch_composite_bytes(
-            canonical_compile_bytes=canonical,
-            manifest_metadata_bytes=metadata,
-            selected_payload_bytes=selected,
-        )
-        == MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES + delta
-    )
 
 
-def test_round5a2_dispatch_composite_rejects_boundary_plus_one_typed() -> None:
-    with pytest.raises(ProviderReplayHydrationError) as captured:
-        quote_provider_dispatch_composite_bytes(
-            canonical_compile_bytes=MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES,
-            manifest_metadata_bytes=0,
-            selected_payload_bytes=1,
-        )
-    assert captured.value.kind is ProviderReplayHydrationFailureKind.RESOURCE_BOUNDARY
 
 
 def test_round5a2_metadata_read_and_writer_paths_are_sealed() -> None:

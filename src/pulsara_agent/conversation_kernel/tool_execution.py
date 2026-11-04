@@ -25,7 +25,7 @@ import json
 
 from threading import Lock
 
-from typing import Callable, Mapping
+from typing import Awaitable, Callable, Mapping
 
 
 from psycopg import Error as PostgresError
@@ -975,6 +975,7 @@ class ToolBatchExecutor:
         hook_scope: HookDispatchScopeRef | None = None,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...] = (),
         result_page_budgets: tuple[ToolResultPageBudget, ...] = (),
+        image_resource_refresh: Callable[[str], Awaitable[tuple[FrozenImageToolResourceAllowance, ToolResultPageBudget] | None]] | None = None,
         _partition_batch: bool = True,
         _call_ordinal_offset: int = 0,
         _close_surface_borrow: bool = True,
@@ -1038,6 +1039,7 @@ class ToolBatchExecutor:
                     surface_borrow=surface_borrow,
                     image_call_allowances=image_call_allowances,
                     result_page_budgets=result_page_budgets,
+                    image_resource_refresh=image_resource_refresh,
                     call_ordinal_offset=_call_ordinal_offset,
                     hook_scope=hook_scope,
                     hook_view=hook_view,
@@ -1679,6 +1681,11 @@ class ToolBatchExecutor:
                             else request.prepared_call.call.target.fact.input_modalities
                         ),
                         image_resource_allowance=image_allowance,
+                        refresh_image_resources=(
+                            (lambda call_id=call.tool_call_id: image_resource_refresh(call_id))
+                            if image_resource_refresh is not None and call.tool_name in IMAGE_TOOL_NAMES and not code_call
+                            else None
+                        ),
                         page_budget=replace(
                             next((item for item in result_page_budgets if item.tool_call_id == call.tool_call_id),
                                  ToolResultPageBudget(tool_call_id=call.tool_call_id)),
@@ -1916,6 +1923,7 @@ class ToolBatchExecutor:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
         result_page_budgets: tuple[ToolResultPageBudget, ...],
+        image_resource_refresh: Callable[[str], Awaitable[tuple[FrozenImageToolResourceAllowance, ToolResultPageBudget] | None]] | None,
         call_ordinal_offset: int,
         hook_scope: HookDispatchScopeRef | None,
         hook_view: FrozenHookDefinitionView | None,
@@ -1940,6 +1948,7 @@ class ToolBatchExecutor:
                     hook_scope=hook_scope,
                     image_call_allowances=image_call_allowances,
                     result_page_budgets=result_page_budgets,
+                    image_resource_refresh=image_resource_refresh,
                     _partition_batch=False,
                     _call_ordinal_offset=call_ordinal_offset + index,
                     _close_surface_borrow=False,
@@ -1984,6 +1993,7 @@ class ToolBatchExecutor:
                     surface_borrow=surface_borrow,
                     image_call_allowances=image_call_allowances,
                     result_page_budgets=result_page_budgets,
+                    image_resource_refresh=image_resource_refresh,
                     call_ordinal_offset=call_ordinal_offset + allowed_offset,
                 )
                 allowed_calls = []
@@ -2037,6 +2047,7 @@ class ToolBatchExecutor:
                     hook_scope=None,
                     image_call_allowances=image_call_allowances,
                     result_page_budgets=result_page_budgets,
+                    image_resource_refresh=image_resource_refresh,
                     _partition_batch=False,
                     _call_ordinal_offset=call_ordinal_offset + index + relative,
                     _close_surface_borrow=False,
@@ -2071,6 +2082,7 @@ class ToolBatchExecutor:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         image_call_allowances: tuple[FrozenImageToolResourceAllowance, ...],
         result_page_budgets: tuple[ToolResultPageBudget, ...],
+        image_resource_refresh: Callable[[str], Awaitable[tuple[FrozenImageToolResourceAllowance, ToolResultPageBudget] | None]] | None,
         call_ordinal_offset: int,
     ) -> ToolBatchExecutionResult:
         if len(preauthorizations) != len(calls) or any(
@@ -2108,6 +2120,7 @@ class ToolBatchExecutor:
                             hook_scope=None,
                         image_call_allowances=image_call_allowances,
                     result_page_budgets=result_page_budgets,
+                    image_resource_refresh=image_resource_refresh,
                         _partition_batch=False,
                         _call_ordinal_offset=(call_ordinal_offset + position),
                         _close_surface_borrow=False,
@@ -2198,6 +2211,28 @@ class ToolBatchExecutor:
         from pulsara_agent.conversation_kernel.tool_result_display import project_native_tool_result
         from pulsara_agent.primitives.tool_result_budget import ToolResultPageBoundary
 
+        budget = result.page_budget or ToolResultPageBudget(
+            tool_call_id=tool_call_id,
+            result_target={"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": result_entry_id})
+        multimodal_text = None
+        if isinstance(result.content, FrozenPromptContent):
+            multimodal_text = frozen_tool_result_public_text(result.content, tool_name=tool_name)
+            if not budget.fits_logical(
+                multimodal_text,
+                model_visible_memory_fact_ids=result.model_visible_memory_fact_ids,
+            ):
+                # Producers must page/repack before returning. Keep this final
+                # acceptance guard on the same physical carrier boundary: a
+                # missed producer check is a typed result, never text-only image
+                # success or an exception that abandons the entire turn. Current
+                # provider allowance belongs to final dispatch, not settlement.
+                facts = {"error": "RESULT_BUDGET_EXCEEDED"}
+                result = replace(
+                    result, state="APPLICATION_ERROR", content=json.dumps(
+                        facts, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8"), public_format=ToolOutputSourceFormatHint.JSON,
+                    page_complete=True, required_facts=facts,
+                )
         if isinstance(result.content, bytes) and result.public_format is ToolOutputSourceFormatHint.JSON:
             from pulsara_agent.primitives.tool_result_projection import preserved_tool_result_facts
             result = replace(result, required_facts={
@@ -2223,7 +2258,8 @@ class ToolBatchExecutor:
             canonical_prompt = freeze_canonical_prompt(result.content, workspace_id=workspace_id)
             canonical_preview = InlineContent.from_bytes(
                 canonical_prompt.body, media_type=PROMPT_BODY_MEDIA_TYPE, codec=PROMPT_BODY_CODEC)
-            result_text = frozen_tool_result_public_text(canonical_prompt.content, tool_name=tool_name)
+            assert multimodal_text is not None
+            result_text = multimodal_text
         else:
             public_output = result.content.decode("utf-8")
             body = await self._io.run(
@@ -2232,9 +2268,6 @@ class ToolBatchExecutor:
                 public_output=public_output, output_body_candidate=result.output_body_candidate,
                 public_format=result.public_format, deadline_monotonic=self._canonical_deadline(),
             )
-            budget = result.page_budget or ToolResultPageBudget(
-                tool_call_id=tool_call_id,
-                result_target={"kind": "SESSION_ENTRY", "session_id": session_id, "entry_id": result_entry_id})
             arguments = dict(
                 public_output=public_output,
                 native_output=None if result.native_output is None else result.native_output.decode("utf-8"),

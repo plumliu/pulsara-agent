@@ -6,12 +6,6 @@ import json
 
 import pytest
 
-from pulsara_agent.conversation_kernel.compaction.contracts import (
-    CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES,
-    CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS,
-    EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES,
-    resolved_compaction_headroom_bounds,
-)
 from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.prompt_content import (
     CanonicalPromptBody,
@@ -46,13 +40,8 @@ from pulsara_agent.llm.input import (
     prompt_text_projection,
 )
 from pulsara_agent.model_input.continuity import (
-    MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
     provider_input_logical_bytes,
     provider_input_prefix_fingerprint,
-)
-from pulsara_agent.model_input.contracts import (
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
 )
 from pulsara_agent.primitives.tool_result_projection import (
     provider_neutral_message_logical_bytes,
@@ -330,21 +319,3 @@ def test_wire_estimator_charges_each_image_occurrence() -> None:
         ordered_input_items=wire * 2, ordered_input_sources=(message,) * 2)
     assert quote.visual_image_tokens == 512
     assert quote.total_input_tokens > 512
-
-
-def test_d2_minimum_service_headroom_is_distinct_and_exact() -> None:
-    bounds = resolved_compaction_headroom_bounds()
-
-    assert CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES == 4 << 20
-    assert EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES == 4 << 20
-    assert CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS == 296
-    assert bounds.maximum_canonical_expanded_bytes == (
-        MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
-    )
-    assert bounds.maximum_epoch_logical_bytes == (
-        MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES
-    )
-    assert bounds.maximum_canonical_items == MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS
-    assert bounds.reserved_canonical_expanded_bytes == 4 << 20
-    assert bounds.reserved_epoch_logical_bytes == 4 << 20
-    assert bounds.reserved_canonical_items == 296

@@ -120,12 +120,12 @@ def test_three_calls_with_middle_missing_keep_entire_assistant_suffix(api):
         middle_reply = LLMMessage(role=MessageRole.ASSISTANT, content=(LLMTextPart('middle reply ' * 12),))
         user = LLMMessage(role=MessageRole.USER, content=(LLMTextPart('next question'),))
         result = quote_provider_followup_wire_resources(
-            request=request, actual_assistant_message=first_reply, provider_replay=None,
+            plan=request.wire_input_plan, call=request.prepared_call.call, actual_assistant_message=first_reply, provider_replay=None,
             bounded_suffix_messages=(user, middle_reply, user), usage_anchor=anchor,
         )
         assert result.budget_input_tokens == anchor.reported_input_tokens + result.raw_final_wire_estimated_input_tokens - anchor.raw_input_tokens
         shorter = quote_provider_followup_wire_resources(
-            request=request, actual_assistant_message=first_reply, provider_replay=None,
+            plan=request.wire_input_plan, call=request.prepared_call.call, actual_assistant_message=first_reply, provider_replay=None,
             bounded_suffix_messages=(user,), usage_anchor=anchor,
         )
         assert result.budget_input_tokens > shorter.budget_input_tokens > anchor.reported_input_tokens

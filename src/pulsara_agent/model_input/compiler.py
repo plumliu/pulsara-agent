@@ -19,14 +19,11 @@ from pulsara_agent.llm.input import (
     content_has_image,
     join_text_content,
     llm_content_identity_value,
-    llm_content_logical_bytes,
-    prompt_provider_parts,
 )
 from pulsara_agent.model_input._stable_input_identity import compiled_input_identity
 from pulsara_agent.model_input.contracts import (
     CompiledSourceDecision,
     CompiledToolResultDecision,
-    CompactionSnapshotCarrier,
     ContextBudgetClass,
     ContextChannel,
     ContextCompileReport,
@@ -64,7 +61,6 @@ from pulsara_agent.model_input.continuity import (
     SourceObservationPresence,
     encode_runtime_observation,
     provider_input_dispatch_anchor_value,
-    provider_input_logical_bytes,
 )
 from pulsara_agent.model_input.lowering import (
     LoweredCanonicalItem,
@@ -79,9 +75,6 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.primitives.plan_workflow import (
     PlanApprovedMaterializationDisposition,
-)
-from pulsara_agent.primitives.tool_result_projection import (
-    provider_neutral_message_logical_bytes as _message_logical_bytes,
 )
 from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSource,
@@ -848,13 +841,12 @@ class StructuredModelInputCompiler:
         self._validate_wire_selection(request, wire_selection)
         deadline = _CompileDeadline(deadline_monotonic)
         deadline.check()
-        self._validate_canonical_input_bound(request)
         deadline.check()
         self._validate_sources(request)
         surface = request.compile_binding.tool_surface
         self._validate_tool_surface(request)
         deadline.check()
-        canonical_items, materialized_plan_bytes = self._materialize_approved_plan(
+        canonical_items = self._materialize_approved_plan(
             request
         )
         lowered_items: list[LoweredCanonicalItem] = []
@@ -884,19 +876,11 @@ class StructuredModelInputCompiler:
             for item in lowered
             if item.tool_result_variants
         ]
-        if len(tool_states) > self._limits.maximum_tool_result_decisions:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
         self._apply_tool_render_selection(
             tool_states, wire_selection, tool_render_floors
         )
         self._validate_tool_delivery_variants(tool_states)
-        self._validate_physical_bounds(
-            request,
-            lowered,
-            materialized_plan_bytes=materialized_plan_bytes,
-        )
+        self._validate_source_byte_bounds(request)
         diagnostics = [item.code for item in request.sources.diagnostics]
 
         layout = self._layout(
@@ -1180,7 +1164,6 @@ class StructuredModelInputCompiler:
         self._validate_wire_selection(request, wire_selection)
         deadline = _CompileDeadline(deadline_monotonic)
         deadline.check()
-        self._validate_canonical_input_bound(request)
         deadline.check()
         identity = request.canonical_input.identity
         if (
@@ -1271,7 +1254,7 @@ class StructuredModelInputCompiler:
             )
         )
         deadline.check()
-        all_materialized, _ = self._materialize_approved_plan(request)
+        all_materialized = self._materialize_approved_plan(request)
         old_count = 0
         delta_items = all_materialized[old_count:]
         lowered_delta_values: list[LoweredCanonicalItem] = []
@@ -1505,12 +1488,6 @@ class StructuredModelInputCompiler:
             prefix=prefix_placements,
             values=suffix_placement_values,
         )
-        if provider_input_logical_bytes(
-            system_prompt=system_prompt, tools=tools, messages=messages
-        ) > (64 << 20):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
         if semantic_projection:
             return FrozenProviderInputAppendSemanticProjection(
                 projected_input=FrozenModelInputSemanticProjection(
@@ -1653,10 +1630,6 @@ class StructuredModelInputCompiler:
             for item in lowered_delta
             if item.tool_result_variants
         ]
-        if len(tool_states) > self._limits.maximum_tool_result_decisions:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
         self._apply_tool_render_selection(
             tool_states, wire_selection, tool_render_floors
         )
@@ -1828,42 +1801,6 @@ class StructuredModelInputCompiler:
                 )
             )
 
-        source_states = [item.state for item in emissions if item.state is not None]
-        typed_source_states = [item for item in source_states if item is not None]
-        aggregate_source_variants = sum(
-            variant.utf8_bytes
-            for state in typed_source_states
-            for variant in state.candidate.variants
-        )
-        aggregate_tool_variants = sum(
-            variant.utf8_bytes
-            for state in tool_states
-            for variant in state.lowered.tool_result_variants
-        )
-        fixed_observation_bytes = sum(
-            _message_logical_bytes(item.fixed_message)
-            for item in emissions
-            if item.fixed_message is not None
-        )
-        delta_carrier_bytes = sum(
-            _message_logical_bytes(item.fixed_message)
-            for item in lowered_delta
-            if item.fixed_message is not None
-        )
-        if (
-            request.canonical_input.canonical_expanded_bytes
-            > self._limits.maximum_canonical_input_bytes
-            or predecessor.logical_bytes
-            + aggregate_source_variants
-            + aggregate_tool_variants
-            + fixed_observation_bytes
-            + delta_carrier_bytes
-            > self._limits.maximum_compile_working_set_bytes
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
-
         diagnostics = [item.code for item in request.sources.diagnostics]
         layout = self._append_layout(
             request,
@@ -1883,17 +1820,6 @@ class StructuredModelInputCompiler:
                 or item.state.mode() is not item.state.candidate.initial_mode
             )
         }
-        suffix_logical_bytes = sum(
-            _message_logical_bytes(item)
-            for item in layout.messages[len(previous_messages) :]
-        )
-        if predecessor.logical_bytes + suffix_logical_bytes > (
-            self._limits.maximum_compile_working_set_bytes
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
-
         source_decisions = tuple(
             CompiledSourceDecision(
                 source_kind=item.source_kind,
@@ -2383,25 +2309,10 @@ class StructuredModelInputCompiler:
                 ModelInputCompileFailureKind.TOOL_SURFACE_INVALID
             )
 
-    def _validate_canonical_input_bound(
-        self, request: StructuredModelInputCompileRequest
-    ) -> None:
-        if (
-            len(request.canonical_input.items)
-            > self._limits.maximum_canonical_input_items
-            or request.canonical_input.canonical_expanded_bytes
-            > self._limits.maximum_canonical_input_bytes
-        ):
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
 
-    def _validate_physical_bounds(
+    def _validate_source_byte_bounds(
         self,
         request: StructuredModelInputCompileRequest,
-        lowered: tuple[LoweredCanonicalItem, ...],
-        *,
-        materialized_plan_bytes: int,
     ) -> None:
         candidates = request.sources.candidates
         aggregate_full = sum(item.variants[0].utf8_bytes for item in candidates)
@@ -2416,64 +2327,18 @@ class StructuredModelInputCompiler:
             raise StructuredModelInputCompileError(
                 ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
             )
-        tool_variant_bytes = sum(
-            variant.utf8_bytes
-            for item in lowered
-            for variant in item.tool_result_variants
-        )
-        schema_bytes = sum(
-            len(tool.canonical_bytes)
-            for tool in request.compile_binding.tool_surface.tool_specs
-        )
-        source_carrier_bytes = sum(
-            max(
-                0,
-                _message_logical_bytes(
-                    source_variant_message(candidate, variant.text, mode=variant.mode)
-                )
-                - variant.utf8_bytes,
-            )
-            for candidate in candidates
-            if candidate.channel is not ContextChannel.SYSTEM
-            for variant in candidate.variants
-        )
-        system_source_count = sum(
-            candidate.channel is ContextChannel.SYSTEM for candidate in candidates
-        )
-        system_join_bytes = max(0, system_source_count - 1) * len(
-            "\n\n".encode("utf-8")
-        )
-        fixed_envelopes = sum(
-            _fixed_message_envelope_logical_bytes(item)
-            for item in lowered
-            if item.fixed_message is not None
-        )
-        working = (
-            request.canonical_input.canonical_expanded_bytes
-            + materialized_plan_bytes
-            + aggregate_all
-            + source_carrier_bytes
-            + system_join_bytes
-            + tool_variant_bytes
-            + schema_bytes
-            + fixed_envelopes
-        )
-        if working > self._limits.maximum_compile_working_set_bytes:
-            raise StructuredModelInputCompileError(
-                ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-            )
 
     @staticmethod
     def _materialize_approved_plan(
         request: StructuredModelInputCompileRequest,
-    ) -> tuple[tuple[FrozenProviderInputItem, ...], int]:
+    ) -> tuple[FrozenProviderInputItem, ...]:
         approved = request.canonical_facts.approved_plan_materialization_fact
         if (
             approved is None
             or approved.disposition
             is PlanApprovedMaterializationDisposition.PIN_EXISTING_CANONICAL_BLOCK
         ):
-            return request.canonical_input.items, 0
+            return request.canonical_input.items
         handoff = request.canonical_facts.plan_handoff_fact
         if handoff is None:
             raise StructuredModelInputCompileError(
@@ -2544,10 +2409,7 @@ class StructuredModelInputCompiler:
         )
         items = list(request.canonical_input.items)
         items[index] = replacement
-        added = len(materialized_text.encode("utf-8")) - len(
-            original_text.encode("utf-8")
-        )
-        return tuple(items), added
+        return tuple(items)
 
     def _layout(
         self,
@@ -2705,20 +2567,6 @@ class StructuredModelInputCompiler:
         diagnostics.append(code)
 
 
-def _fixed_message_envelope_logical_bytes(item: LoweredCanonicalItem) -> int:
-    message = item.fixed_message
-    assert message is not None
-    source = item.source
-    source_bytes = (
-        source.content.canonical_expanded_bytes
-        if isinstance(source.content, CompactionSnapshotCarrier)
-        else llm_content_logical_bytes(prompt_provider_parts(source.content))
-    )
-    # The reader's canonical byte charge is content-oriented and does not
-    # promise to include JSONB-backed tool arguments.  Count every non-body
-    # provider carrier byte here, even when a parent manifest conservatively
-    # causes some identity bytes to be charged twice.
-    return max(0, _message_logical_bytes(message) - source_bytes)
 
 
 def _llm_message_value(message: LLMMessage) -> object:

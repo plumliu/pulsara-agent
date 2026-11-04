@@ -43,7 +43,6 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     DestinationDialogueEntry,
     DestinationDialogueProjectionPlan,
     RecentDialogueUnit,
-    crosses_compaction_resource_headroom,
     enumerate_destination_backbone_projections,
     enumerate_complete_tool_groups,
     enumerate_safe_summary_prefixes,
@@ -52,7 +51,6 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     project_destination_dialogue_plan_for_text_only_handover,
     rebase_compaction_dispatch_read_through_sequence,
     retain_destination_tool_evidence,
-    resolved_compaction_headroom_bounds,
     should_trigger_compaction,
     validate_compaction_reclaim,
 )
@@ -68,7 +66,6 @@ from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
 )
 from pulsara_agent.conversation_kernel.host import KernelHostSession
-from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.conversation_kernel.memory.contracts import MemoryUsePolicy
 from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     FrozenTerminalProcessHandoffFact,
@@ -1279,6 +1276,7 @@ def test_round5b_summary_prefix_enumerates_every_finite_safe_boundary() -> None:
         SimpleNamespace(
             source_entry_id=derive_id("entry", "test-fixture", f"entry:{index + 1}"),
             source_entry_sequence=index + 1,
+            item_kind=FrozenProviderInputItemKind.USER,
         )
         for index in range(count)
     )
@@ -1306,6 +1304,7 @@ def test_round5b_summary_prefix_enumerates_every_finite_safe_boundary() -> None:
             )
         ),
         exact_safe_canonical_head=count,
+        latest_assistant_input_through_sequence=None,
     )
 
     candidates = enumerate_safe_summary_prefixes(
@@ -1945,35 +1944,6 @@ def test_compaction_cut_lineage_uses_full_history_materialization_floor() -> Non
     )
 
 
-def test_round5b_resource_headroom_exact_boundaries() -> None:
-    bounds = resolved_compaction_headroom_bounds()
-    maximum_admission = max(
-        STAGE2_LIMITS.prompt_hard_bytes,
-        MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES,
-        STAGE2_LIMITS.tool_result_hard_bytes,
-    )
-    assert bounds.reserved_canonical_expanded_bytes == maximum_admission
-    assert bounds.reserved_epoch_logical_bytes == maximum_admission
-    assert (
-        bounds.soft_canonical_expanded_byte_limit
-        + MAXIMUM_COMPLETED_ASSISTANT_MESSAGE_UTF8_BYTES
-        <= bounds.maximum_canonical_expanded_bytes
-    )
-    assert not crosses_compaction_resource_headroom(
-        selected_item_count=bounds.soft_canonical_item_limit - 1,
-        selected_canonical_expanded_bytes=bounds.soft_canonical_expanded_byte_limit - 1,
-        continuity_epoch_logical_bytes=(bounds.soft_epoch_logical_byte_limit - 1),
-    )
-    assert crosses_compaction_resource_headroom(
-        selected_item_count=bounds.soft_canonical_item_limit,
-        selected_canonical_expanded_bytes=0,
-        continuity_epoch_logical_bytes=0,
-    )
-    assert crosses_compaction_resource_headroom(
-        selected_item_count=0,
-        selected_canonical_expanded_bytes=14 << 20,
-        continuity_epoch_logical_bytes=0,
-    )
 
 
 def test_round5b_empty_session_manual_compaction_never_starts_summary() -> None:
@@ -2781,12 +2751,33 @@ def test_compaction_adoption_transfers_unbound_input_to_common_safe_point() -> N
         )
     )
     assert len(no_hook_prepares) == 0
+    pending_finalization = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_finalize_pending_tool_batch"
+    )
+    pending_nodes = set(ast.walk(pending_finalization))
+    # Pending image admission adds one dry-only pre-FULL revalidation of the
+    # actual complete batch.  The ordinary family/lease protocol below stays
+    # exact; pending finalization cannot bind executable authority itself.
+    pending_attributes = tuple(
+        node.func.attr
+        for node in pending_nodes
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    )
+    assert pending_attributes.count("prepare_compaction_candidate_family") == 1
+    assert pending_attributes.count("prepare_compaction_candidate") == 1
+    assert pending_attributes.count("bind_selected_compaction_dry_projection") == 1
+    assert "bind_selected_compaction_candidate" not in pending_attributes
+    assert "install_provider_open" not in pending_attributes
     family_prepares = tuple(
         call
         for call in ast.walk(tree)
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
         and call.func.attr == "prepare_compaction_candidate_family"
+        and call not in pending_nodes
     )
     family_candidates = tuple(
         call
@@ -2794,6 +2785,7 @@ def test_compaction_adoption_transfers_unbound_input_to_common_safe_point() -> N
         if isinstance(call, ast.Call)
         and isinstance(call.func, ast.Attribute)
         and call.func.attr == "prepare_compaction_candidate"
+        and call not in pending_nodes
     )
     family_binds = tuple(
         call

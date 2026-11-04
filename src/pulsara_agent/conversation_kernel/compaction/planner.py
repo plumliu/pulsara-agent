@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from pulsara_agent.scheduling.contracts import ScheduledProvenance
+from pulsara_agent.identity import is_valid_id
 
 from dataclasses import dataclass, fields, replace
 from time import monotonic
@@ -28,7 +29,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     _compaction_working_set_identity_digest,
     compaction_summary_message_prefix_fingerprint,
     freeze_compaction_canonical_range,
-    resolved_compaction_headroom_bounds,
     provider_input_item_canonical_expanded_bytes,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
@@ -346,8 +346,9 @@ def project_compaction_read_for_text_only_handover(
 ) -> FrozenCompactionCanonicalRead:
     """Build the process-local destination history view of one authoritative canonical cut.
 
-    The exact active request of a running turn remains untouched.  Every historical
-    image occurrence becomes the ordinary text part required by D4.  A terminal
+    The exact active request and unconsumed image-tool batch remain untouched.
+    Other historical image occurrences become the ordinary text part required
+    by D4.  A terminal
     source has no active request, so its initial request is historical too.  The
     resulting value is used only to compile B's source call; canonical settlement
     continues to use the unprojected reader value.
@@ -356,6 +357,10 @@ def project_compaction_read_for_text_only_handover(
     old_dispatch = canonical_read.dispatch_read
     old_facts = old_dispatch.compile_snapshot
     old_input = old_facts.canonical_input
+    pending_image_start = pending_image_evidence_start_sequence(
+        old_input,
+        consumed_through_sequence=canonical_read.latest_assistant_input_through_sequence,
+    )
     active_entry_id = (
         old_input.identity.initial_entry_id
         if canonical_read.turn_status == "RUNNING"
@@ -406,6 +411,10 @@ def project_compaction_read_for_text_only_handover(
             items.append(replace(item, content=project_carrier(carrier)))
             continue
         if item.source_entry_id == active_entry_id or (
+            pending_image_start is not None
+            and item.source_entry_sequence is not None
+            and item.source_entry_sequence >= pending_image_start
+        ) or (
             first_call_history_through_sequence is not None
             and item.source_entry_sequence is not None
             and item.source_entry_sequence > first_call_history_through_sequence
@@ -505,6 +514,7 @@ def project_compaction_read_for_text_only_handover(
             <= projected_range.source_through_sequence
         ),
         executed_history_interruptions=canonical_read.executed_history_interruptions,
+        latest_assistant_input_through_sequence=canonical_read.latest_assistant_input_through_sequence,
     )
 
 
@@ -1265,9 +1275,6 @@ def freeze_compaction_source_view(
         "selected_item_count": len(selected_items),
         "selected_canonical_expanded_bytes": canonical_input.canonical_expanded_bytes,
         "continuity_epoch_logical_bytes": projection.logical_bytes,
-        "resolved_hard_bound_set_fingerprint": (
-            resolved_compaction_headroom_bounds().resolved_hard_bound_set_fingerprint
-        ),
     }
     working = CompactionPhysicalWorkingSetReport(**working_values)
     values = {
@@ -1278,6 +1285,7 @@ def freeze_compaction_source_view(
         "provider_projection": projection,
         "provider_wire_quote": provider_wire_quote,
         "physical_working_set": working,
+        "latest_assistant_input_through_sequence": canonical_read.latest_assistant_input_through_sequence,
     }
     return FrozenCompactionSourceView(
         **values,
@@ -1359,12 +1367,106 @@ def enumerate_complete_tool_groups(
     return tuple(groups)
 
 
+def pending_image_tool_group_start_sequence(
+    canonical_input: CanonicalModelInputSnapshot,
+    *,
+    consumed_through_sequence: int | None,
+) -> int | None:
+    """Keep image evidence exact until a business assistant has consumed it.
+
+    This is derived from the current canonical cut, not a delivery receipt or
+    a persisted acknowledgement.  The assistant request and every result in
+    its batch remain one mandatory suffix; an optional historical-tail policy
+    cannot replace newly returned pictures and their index with a summary.
+    """
+
+    items = canonical_input.items
+    pending_requests = {
+        item.tool_request_entry_id
+        for item in items
+        if item.item_kind is FrozenProviderInputItemKind.TOOL_RESULT
+        # The reader's owner union maps imported relational groups to their
+        # existing history ID.  Settled imported evidence is not a new result
+        # awaiting an executed assistant's input cut in this session.
+        and not is_valid_id(item.source_turn_id, "history")
+        and item.source_entry_sequence is not None
+        and (
+            consumed_through_sequence is None
+            or item.source_entry_sequence > consumed_through_sequence
+        )
+        and content_has_image(item.content)
+    }
+    if not pending_requests:
+        return None
+    requests = {
+        item.source_entry_id: item.source_entry_sequence
+        for item in items
+        if item.item_kind is FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST
+        and item.source_entry_id in pending_requests
+        and item.source_entry_sequence is not None
+    }
+    if set(requests) != pending_requests:
+        raise CompactionPlanningError(
+            "pending image evidence lacks its whole assistant tool batch"
+        )
+    return min(requests.values())
+
+
+def pending_image_evidence_start_sequence(
+    canonical_input: CanonicalModelInputSnapshot,
+    *,
+    consumed_through_sequence: int | None,
+) -> int | None:
+    """Protect normal batches and standalone late observations as they exist.
+
+    A late outcome is already an observation carrier, not a provider Tool-role
+    reply. Its original assistant request may have been summarized; retaining
+    that new observation and its image attachment never reconstructs the old
+    request or makes it an execution authority again.
+    """
+
+    ordinary = pending_image_tool_group_start_sequence(
+        canonical_input, consumed_through_sequence=consumed_through_sequence,
+    )
+    late = min((
+        item.source_entry_sequence
+        for item in canonical_input.items
+        if item.item_kind is FrozenProviderInputItemKind.LATE_TOOL_OUTCOME
+        and not is_valid_id(item.source_turn_id, "history")
+        and item.source_entry_sequence is not None
+        and (consumed_through_sequence is None or item.source_entry_sequence > consumed_through_sequence)
+        and content_has_image(item.content)
+    ), default=None)
+    values = tuple(value for value in (ordinary, late) if value is not None)
+    return min(values) if values else None
+
+
+def minimum_pending_image_tool_groups(
+    *,
+    source_view: FrozenCompactionSourceView,
+    complete_tool_groups: tuple[CompleteToolGroup, ...],
+) -> int:
+    """The exact suffix floor, independent of optional retained-tail limits."""
+
+    canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
+    first = pending_image_tool_group_start_sequence(
+        canonical,
+        consumed_through_sequence=source_view.latest_assistant_input_through_sequence,
+    )
+    if first is None:
+        return 0
+    for index, group in enumerate(complete_tool_groups):
+        if group.assistant_entry_sequence == first:
+            return len(complete_tool_groups) - index
+    raise CompactionPlanningError("pending image tool batch is not complete")
+
+
 def freeze_tail_and_prefix(
     *,
     source_view: FrozenCompactionSourceView,
     complete_tool_groups: tuple[CompleteToolGroup, ...],
     retained_group_count: int,
-    source_projection: FrozenModelInputSemanticProjection | None = None,
+    source_projection: FrozenModelInputSemanticProjection,
     summary_prefix_message_count: int | None = None,
     deadline_monotonic: float | None = None,
 ) -> tuple[ProtectedTailSelectionFact, ProviderPrefixCutProof]:
@@ -1376,23 +1478,21 @@ def freeze_tail_and_prefix(
         retained_group_count=retained_group_count,
     )
     messages = source_view.materialized_messages()
-    if (source_projection is None) != (summary_prefix_message_count is None):
-        raise ValueError("explicit summary boundary inputs are incomplete")
-    if source_projection is not None:
-        safe = dict(
-            _safe_summary_boundaries(
-                source_view=source_view,
-                source_projection=source_projection,
-                maximum_message_count=tail_start,
-                deadline_monotonic=deadline_monotonic,
-            )
+    safe = dict(
+        _safe_summary_boundaries(
+            source_view=source_view,
+            source_projection=source_projection,
+            maximum_message_count=tail_start,
+            deadline_monotonic=deadline_monotonic,
         )
-        assert summary_prefix_message_count is not None
-        selected = safe.get(summary_prefix_message_count)
-        if selected is None:
-            raise CompactionPlanningError("requested summary boundary is not safe")
-        tail_start = summary_prefix_message_count
-        boundary = selected
+    )
+    if summary_prefix_message_count is None:
+        summary_prefix_message_count = max(safe)
+    selected = safe.get(summary_prefix_message_count)
+    if selected is None:
+        raise CompactionPlanningError("requested summary boundary is not safe")
+    tail_start = summary_prefix_message_count
+    boundary = selected
     return _freeze_tail_and_prefix_facts(
         source_view=source_view,
         messages=messages,
@@ -1411,6 +1511,13 @@ def _retained_tail_coordinates(
 ) -> tuple[tuple[CompleteToolGroup, ...], str | None, int, int]:
     if not 0 <= retained_group_count <= len(complete_tool_groups):
         raise ValueError("retained compaction group count is out of bounds")
+    retained_group_count = max(
+        retained_group_count,
+        minimum_pending_image_tool_groups(
+            source_view=source_view,
+            complete_tool_groups=complete_tool_groups,
+        ),
+    )
     retained = (
         complete_tool_groups[-retained_group_count:] if retained_group_count else ()
     )
@@ -1462,6 +1569,10 @@ def _safe_summary_boundaries(
             "budgeted prefix projection differs from its source view"
         )
     canonical = source_view.canonical_dispatch_read.compile_snapshot.canonical_input
+    pending_image_start = pending_image_evidence_start_sequence(
+        canonical,
+        consumed_through_sequence=source_view.latest_assistant_input_through_sequence,
+    )
     sequence_by_entry = {
         item.source_entry_id: item.source_entry_sequence
         for item in canonical.items
@@ -1519,17 +1630,35 @@ def _safe_summary_boundaries(
             if later is None
             else min(sequence, later)
         )
+    prefix_maximum: list[int | None] = [None]
+    for placement in placements:
+        sequences = placement_sequences(placement)
+        previous = prefix_maximum[-1]
+        current = None if not sequences else max(sequences)
+        prefix_maximum.append(
+            current if previous is None
+            else previous if current is None
+            else max(previous, current)
+        )
     safe_by_count: dict[int, int] = {}
-    if maximum_message_count == len(messages):
+    if maximum_message_count == len(messages) and pending_image_start is None:
         safe_by_count[maximum_message_count] = source_view.exact_safe_canonical_head
     for count in range(minimum_message_count, maximum_message_count + 1):
         if deadline_monotonic is not None and monotonic() >= deadline_monotonic:
             raise TimeoutError("compaction prefix planning deadline expired")
         placement = placements[count - 1]
         entry_id = placement.origin_entry_id
-        current_sequences = placement_sequences(placement)
-        sequence = None if not current_sequences else max(current_sequences)
+        # Image attachments can follow a newer text result while referring to
+        # an earlier result.  A prefix owns every canonical item already
+        # represented, never just the last carrier's older source sequence.
+        sequence = (
+            source_view.exact_safe_canonical_head
+            if count == len(messages)
+            else prefix_maximum[count]
+        )
         if sequence is None or messages[count - 1].tool_calls:
+            continue
+        if pending_image_start is not None and sequence >= pending_image_start:
             continue
         if count < len(messages):
             next_message = messages[count]
@@ -1804,28 +1933,9 @@ def should_trigger_compaction(
     budget = source_view.normal_compile_binding.effective_input_budget_tokens
     estimate = source_view.provider_wire_quote.budget_input_tokens
     token_trigger = estimate >= int(budget * policy.auto_trigger_ratio)
-    working = source_view.physical_working_set
-    headroom_trigger = crosses_compaction_resource_headroom(
-        selected_item_count=working.selected_item_count,
-        selected_canonical_expanded_bytes=(working.selected_canonical_expanded_bytes),
-        continuity_epoch_logical_bytes=(working.continuity_epoch_logical_bytes),
-    )
-    return token_trigger or headroom_trigger
+    return token_trigger
 
 
-def crosses_compaction_resource_headroom(
-    *,
-    selected_item_count: int,
-    selected_canonical_expanded_bytes: int,
-    continuity_epoch_logical_bytes: int,
-) -> bool:
-    bounds = resolved_compaction_headroom_bounds()
-    return (
-        selected_item_count >= bounds.soft_canonical_item_limit
-        or selected_canonical_expanded_bytes
-        >= bounds.soft_canonical_expanded_byte_limit
-        or continuity_epoch_logical_bytes >= bounds.soft_epoch_logical_byte_limit
-    )
 
 
 def validate_compaction_reclaim(
@@ -1887,12 +1997,14 @@ def _logical_input_bytes(
 __all__ = [
     "CompactionPlanningError",
     "CompactionReclaimUnavailable",
-    "crosses_compaction_resource_headroom",
     "enumerate_complete_tool_groups",
     "enumerate_safe_summary_prefixes",
     "freeze_compaction_continuation",
     "freeze_compaction_source_view",
     "freeze_tail_and_prefix",
+    "minimum_pending_image_tool_groups",
+    "pending_image_tool_group_start_sequence",
+    "pending_image_evidence_start_sequence",
     "provider_dispatch_effective_history_has_image",
     "select_recent_human_messages",
     "should_trigger_compaction",

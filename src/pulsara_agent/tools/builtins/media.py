@@ -46,6 +46,11 @@ def media_parameters_schema(name: str) -> dict:
                 "minItems": 4,
                 "maxItems": 4,
             },
+            continuation={
+                "type": "object",
+                "minProperties": 1,
+                "description": "Copy the complete next call returned by runtime; omit on the first read.",
+            },
         )
     elif name == "read_transcript":
         properties["continuation"] = {
@@ -107,7 +112,7 @@ def validate_media_arguments(name: str, arguments: Mapping[str, object]) -> None
         not isinstance(arguments["text"], str) or not arguments["text"].strip()
     ):
         raise ValueError("INVALID_ARGUMENTS: text must contain non-whitespace text")
-    if name == "read_transcript" and "continuation" in arguments:
+    if name in {"read_video_frames", "read_transcript"} and "continuation" in arguments:
         if (
             not isinstance(arguments["continuation"], Mapping)
             or not arguments["continuation"]

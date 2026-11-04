@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from pulsara_agent.llm.provider_replay import (
-    MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES,
     MAXIMUM_PROVIDER_REPLAY_JSON_DEPTH,
     MAXIMUM_PROVIDER_REPLAY_PAYLOAD_BYTES,
     MAXIMUM_PROVIDER_REPLAY_STRING_UTF8_BYTES,
@@ -48,25 +47,6 @@ class ProviderReplayHydrationError(RuntimeError):
         super().__init__(f"provider replay hydration failed: {kind.value}")
 
 
-def quote_provider_dispatch_composite_bytes(
-    *,
-    canonical_compile_bytes: int,
-    manifest_metadata_bytes: int,
-    selected_payload_bytes: int,
-) -> int:
-    values = (
-        canonical_compile_bytes,
-        manifest_metadata_bytes,
-        selected_payload_bytes,
-    )
-    if any(value < 0 for value in values):
-        raise ValueError("provider replay composite quote is negative")
-    total = sum(values)
-    if total > MAXIMUM_PROVIDER_DISPATCH_COMPOSITE_BYTES:
-        raise ProviderReplayHydrationError(
-            ProviderReplayHydrationFailureKind.RESOURCE_BOUNDARY
-        )
-    return total
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,7 +515,6 @@ __all__ = [
     "FrozenSelectedDurableProviderReplayHydration",
     "ProviderReplayHydrationError",
     "ProviderReplayHydrationFailureKind",
-    "quote_provider_dispatch_composite_bytes",
     "decode_provider_replay_fragment",
     "freeze_provider_replay_manifest",
     "freeze_provider_replay_manifest_cut",

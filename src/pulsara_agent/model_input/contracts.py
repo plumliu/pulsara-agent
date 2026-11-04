@@ -217,8 +217,6 @@ class StructuredModelInputCompileError(ValueError):
         super().__init__(f"structured model input compile failed: {kind.value}")
 
 
-MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS = 4_096
-MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES = 16 << 20
 MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT = 64
 MAXIMUM_MCP_NATIVE_TOOL_COUNT = 128
 
@@ -235,15 +233,11 @@ class StructuredModelInputLimits:
         MAXIMUM_BUILTIN_NATIVE_TOOL_COUNT + MAXIMUM_MCP_NATIVE_TOOL_COUNT
     )
     maximum_tool_spec_canonical_bytes: int = 1 << 20
-    maximum_compile_working_set_bytes: int = 64 << 20
     maximum_diagnostics: int = 64
     maximum_public_diagnostic_bytes: int = 32 << 10
     maximum_tool_result_compact_bytes: int = 8 << 10
     maximum_tool_result_ref_only_bytes: int = 2 << 10
-    maximum_tool_result_decisions: int = 4_096
     maximum_decision_samples: int = 64
-    maximum_canonical_input_items: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS
-    maximum_canonical_input_bytes: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
 
     def __post_init__(self) -> None:
         if (
@@ -255,15 +249,11 @@ class StructuredModelInputLimits:
                 self.maximum_aggregate_source_variant_bytes,
                 self.maximum_tool_specs,
                 self.maximum_tool_spec_canonical_bytes,
-                self.maximum_compile_working_set_bytes,
                 self.maximum_diagnostics,
                 self.maximum_public_diagnostic_bytes,
                 self.maximum_tool_result_compact_bytes,
                 self.maximum_tool_result_ref_only_bytes,
-                self.maximum_tool_result_decisions,
                 self.maximum_decision_samples,
-                self.maximum_canonical_input_items,
-                self.maximum_canonical_input_bytes,
             )
             < 1
         ):
@@ -2397,11 +2387,6 @@ class FrozenCompiledModelInput:
         ):
             raise ValueError("compiled message placement role drifted")
         if (
-            len(self.tool_result_decisions)
-            > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_result_decisions
-        ):
-            raise ValueError("compiled tool-result decisions exceed the hard bound")
-        if (
             len(self.diagnostic_codes)
             > STRUCTURED_MODEL_INPUT_LIMITS.maximum_diagnostics
         ):
@@ -2452,9 +2437,7 @@ class FrozenModelInputSemanticProjection:
         ):
             raise ValueError("semantic projection placement role drifted")
         if (
-            len(self.tool_result_decisions)
-            > STRUCTURED_MODEL_INPUT_LIMITS.maximum_tool_result_decisions
-            or len(self.diagnostic_codes)
+            len(self.diagnostic_codes)
             > STRUCTURED_MODEL_INPUT_LIMITS.maximum_diagnostics
             or len(self.diagnostic_codes) != len(set(self.diagnostic_codes))
         ):

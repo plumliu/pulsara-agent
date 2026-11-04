@@ -65,8 +65,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenProviderInputItemKind,
     LateToolOutcomeObservation,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
     ModelInputScopeKind,
     ProviderToolCall,
     ProviderToolResultClosure,
@@ -96,7 +94,6 @@ from pulsara_agent.model_input.provider_replay import (
     freeze_provider_replay_manifest,
     freeze_provider_replay_manifest_cut,
     freeze_selected_provider_replay_hydration,
-    quote_provider_dispatch_composite_bytes,
     select_compatible_provider_replay_manifests,
 )
 from pulsara_agent.model_input.continuity import (
@@ -232,15 +229,9 @@ class CanonicalProviderInputReader:
         connection_provider: VerifiedPostgresConnectionProviderProtocol,
         *,
         blob_reader: CanonicalBlobReader | None = None,
-        maximum_items: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
-        maximum_canonical_bytes: int = MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
     ) -> None:
-        if maximum_items < 1 or maximum_canonical_bytes < 1:
-            raise ValueError("provider input bounds must be positive")
         self._provider = connection_provider
         self._blob_reader = blob_reader
-        self._maximum_items = maximum_items
-        self._maximum_canonical_bytes = maximum_canonical_bytes
 
     def read_frozen_snapshot(
         self,
@@ -368,7 +359,7 @@ class CanonicalProviderInputReader:
                       AND e.entry_sequence > %s
                       AND e.entry_sequence <= %s
                     ORDER BY e.entry_sequence
-                    LIMIT %s
+
                 ),
                 entry_totals AS (
                     SELECT
@@ -397,7 +388,7 @@ class CanonicalProviderInputReader:
                     JOIN selected_entries AS e
                       ON e.id = b.assistant_entry_id
                     ORDER BY b.assistant_entry_id, b.block_ordinal
-                    LIMIT %s
+
                 ),
                 entry_image_totals AS (
                     SELECT coalesce(sum(b.logical_size), 0) AS image_bytes
@@ -456,8 +447,8 @@ class CanonicalProviderInputReader:
                     cut.session_id,
                     floor,
                     cut.provider_input_through_sequence,
-                    self._maximum_items + 1,
-                    self._maximum_items + 1,
+
+
                     cut.session_id,
                     cut.session_id,
                     binding["context_snapshot_id"],
@@ -632,6 +623,19 @@ class CanonicalProviderInputReader:
                     if item.source_entry_sequence is not None
                 ),
             )
+            # Accepted order is not evidence of consumption: a late image can
+            # arrive while an older provider request is still streaming.  The
+            # already stored business-assistant input cut says what it read.
+            consumed = connection.execute(
+                """
+                SELECT max(provider_input_through_sequence) AS through_sequence
+                FROM pulsara_v3.transcript_entries
+                WHERE session_id = %s AND entry_sequence <= %s
+                  AND entry_owner_kind = 'EXECUTED_TURN'
+                  AND entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
+                """,
+                (cut.session_id, cut.provider_input_through_sequence),
+            ).fetchone()["through_sequence"]
             return freeze_compaction_canonical_read(
                 scope=scope,
                 turn_status=str(row["status"]),
@@ -645,6 +649,7 @@ class CanonicalProviderInputReader:
                     for ending in executed_history_endings
                     if ending.owner_id != cut.turn_id
                 ),
+                latest_assistant_input_through_sequence=None if consumed is None else int(consumed),
             )
 
 
@@ -655,7 +660,6 @@ class CanonicalProviderInputReader:
         deadline_monotonic: float,
         _connection: object | None = None,
         _historical_scope: bool = False,
-        _canonical_byte_budget: int | None = None,
     ) -> FrozenCanonicalProviderDispatchRead:
         from contextlib import nullcontext
 
@@ -833,34 +837,44 @@ class CanonicalProviderInputReader:
                       AND e.entry_sequence > %s
                   AND e.entry_sequence <= %s
                 ORDER BY e.entry_sequence
-                LIMIT %s
+
                 """,
                 (
                     cut.session_id,
                     source_floor,
                     stored_through_sequence,
-                    self._maximum_items + 1,
+
                 ),
             ).fetchall()
-            if len(entries) > self._maximum_items:
-                raise ConversationKernelConflict("provider input item bound exceeded")
 
             entry_ids = tuple(str(row["id"]) for row in entries)
+            snapshot_late_calls = self._load_snapshot_late_calls(
+                connection,
+                cut.session_id,
+                result_entry_ids=tuple(
+                    str(row["id"]) for row in entries if row["entry_kind"] == "TOOL_RESULT"
+                ),
+                source_floor=source_floor,
+            )
+            snapshot_late_by_result = {
+                str(row["result_entry_id"]): row for row in snapshot_late_calls
+            }
             block_metadata = self._load_block_metadata(
                 connection, cut.session_id, entry_ids
             )
+            block_metadata = (*block_metadata, *snapshot_late_calls)
             tool_state = self._load_tool_state(
                 connection,
                 cut.session_id,
                 entry_ids,
                 provider_input_through_sequence=(cut.provider_input_through_sequence),
+                snapshot_late_result_ids=tuple(snapshot_late_by_result),
             )
-            self._preflight_physical_bytes(
+            self._require_image_ref_metadata(
                 connection=connection,
                 session_id=cut.session_id,
                 snapshot=snapshot,
                 entries=entries,
-                blocks=block_metadata,
             )
             entry_payloads = self._load_entry_payloads(
                 connection,
@@ -885,11 +899,6 @@ class CanonicalProviderInputReader:
                 tuple(str(row["id"]) for row in block_metadata),
             )
             blocks_by_entry = self._join_block_payloads(block_metadata, block_payloads)
-            remaining_bytes = _RemainingReadBudget(
-                self._maximum_canonical_bytes
-                if _canonical_byte_budget is None
-                else _canonical_byte_budget
-            )
             if snapshot is not None:
                 snapshot = dict(snapshot)
                 snapshot["inline_content"] = self._load_snapshot_payload(
@@ -906,7 +915,6 @@ class CanonicalProviderInputReader:
                         "context snapshot carrier is invalid"
                     ) from error
                 expanded_bytes = carrier.canonical_expanded_bytes
-                remaining_bytes.consume(expanded_bytes)
                 items.append(
                     ProviderInputItem(
                         item_kind=ProviderInputItemKind.CONTEXT_SNAPSHOT,
@@ -922,18 +930,134 @@ class CanonicalProviderInputReader:
             late: list[LateToolOutcomeObservation] = []
             late_items: list[tuple[int, ProviderInputItem]] = []
 
+            def append_late_result(*, request_entry_id, call, call_ordinal, result):
+                nonlocal canonical_bytes
+                result_sequence = int(result["entry_sequence"])
+                observation = LateToolOutcomeObservation(
+                    assistant_entry_id=request_entry_id,
+                    tool_call_id=call.tool_call_id,
+                    result_entry_id=str(result["result_entry_id"]),
+                    result_entry_sequence=result_sequence,
+                    result_state=str(result["result_state"]),
+                )
+                late.append(observation)
+                result_row = _with_inline_payload(
+                    result,
+                    entry_payloads[str(result["result_entry_id"])],
+                )
+                typed_result = (
+                    str(result["content_media_type"]) == PROMPT_BODY_MEDIA_TYPE
+                )
+                if typed_result:
+                    result_prompt = hydrate_canonical_prompt_owner(
+                        connection,
+                        row=result_row,
+                        transcript_entry_id=str(result["result_entry_id"]),
+                    )
+                    result_body_text = frozen_tool_result_public_text(
+                        result_prompt.content, tool_name=call.tool_name
+                    )
+                    result_images = tuple(
+                        part
+                        for part in result_prompt.content.parts
+                        if isinstance(part, LLMImagePart)
+                    )
+                else:
+                    result_content = self._read_content(
+                        result_row,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    result_body_text = _decode_provider_text(
+                        result_content, str(result["content_codec"])
+                    )
+                    result_images = ()
+                if call.tool_name == "annotate_media" and str(result["result_state"]) == "SUCCESS":
+                    from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
+                    result_body_text = project_tool_result_storage_body(result_body_text,
+                        ToolObservationOrigin.BUILTIN, tool_name=call.tool_name,
+                        result_state=str(result["result_state"]))
+                late_text = _canonical_json_text(
+                    {
+                        "schema_version": "late_tool_outcome_observation.v1",
+                        "tool_call_id": call.tool_call_id,
+                        "result_state": result["result_state"],
+                        "result": result_body_text,
+                    }
+                )
+                late_content = (LLMTextPart(late_text), *result_images)
+                late_expanded_bytes = (
+                    len(
+                        canonical_prompt_body_bytes(
+                            FrozenPromptContent(late_content)
+                        )
+                    )
+                    + sum(len(image.immutable_bytes) for image in result_images)
+                    if typed_result
+                    else len(late_text.encode("utf-8"))
+                )
+                canonical_bytes += late_expanded_bytes
+                late_items.append(
+                    (
+                        result_sequence,
+                        ProviderInputItem(
+                            item_kind=ProviderInputItemKind.LATE_TOOL_OUTCOME,
+                            source_entry_id=str(result["result_entry_id"]),
+                            source_entry_sequence=result_sequence,
+                            source_turn_id=str(result["result_turn_id"]),
+                            content=late_content,
+                            tool_call_id=call.tool_call_id,
+                            tool_request_entry_id=request_entry_id,
+                            tool_result_context=_tool_result_metadata(result),
+                            tool_result_body_text=result_body_text,
+                            tool_result_delivery=(
+                                classify_tool_result_delivery(
+                                    tool_name=call.tool_name,
+                                    public_arguments=thaw_json(call.arguments),
+                                    result_state=str(result["result_state"]),
+                                    has_image_attachment=bool(result_images),
+                                )
+                            ),
+                            tool_call_ordinal=call_ordinal,
+                            tool_call_arguments=call.arguments,
+                            tool_call_name=call.tool_name if result_images else None,
+                        ),
+                    )
+                )
+
             for stored_row in entries:
                 row = historical_source_attribution(stored_row)
                 entry_id = str(row["id"])
                 sequence = int(row["entry_sequence"])
                 kind = str(row["entry_kind"])
                 if kind == "TOOL_RESULT":
+                    old_call = snapshot_late_by_result.get(entry_id)
+                    if old_call is not None:
+                        request_id = str(old_call["assistant_entry_id"])
+                        block = next(
+                            block for block in blocks_by_entry[request_id]
+                            if block["id"] == old_call["id"]
+                        )
+                        call = ProviderToolCall(
+                            tool_call_id=str(block["tool_call_id"]),
+                            tool_name=str(block["tool_name"]),
+                            arguments=_freeze_tool_arguments(
+                                block["tool_arguments"],
+                            ),
+                        )
+                        result = tool_state.get((request_id, call.tool_call_id), {}).get("result")
+                        if result is None or str(result["result_entry_id"]) != entry_id:
+                            raise ConversationKernelConflict("snapshot late result source drifted")
+                        append_late_result(
+                            request_entry_id=request_id,
+                            call=call,
+                            call_ordinal=int(old_call["tool_call_ordinal"]),
+                            result=result,
+                        )
                     continue
                 if kind == "USER_CONTROL_FEEDBACK":
                     content = self._read_content(
                         _with_inline_payload(row, entry_payloads[entry_id]),
                         deadline_monotonic=deadline_monotonic,
-                        remaining_bytes=remaining_bytes,
                     )
                     canonical_bytes += len(content)
                     if (
@@ -983,9 +1107,6 @@ class CanonicalProviderInputReader:
                             row=prompt_row,
                             transcript_entry_id=entry_id,
                         )
-                        remaining_bytes.consume(
-                            prompt.resource_quote.canonical_expanded_bytes
-                        )
                         canonical_bytes += (
                             prompt.resource_quote.canonical_expanded_bytes
                         )
@@ -994,7 +1115,6 @@ class CanonicalProviderInputReader:
                         content = self._read_content(
                             prompt_row,
                             deadline_monotonic=deadline_monotonic,
-                            remaining_bytes=remaining_bytes,
                         )
                         canonical_bytes += len(content)
                         prompt_parts = (
@@ -1022,7 +1142,6 @@ class CanonicalProviderInputReader:
                     content = self._read_content(
                         _with_inline_payload(row, entry_payloads[entry_id]),
                         deadline_monotonic=deadline_monotonic,
-                        remaining_bytes=remaining_bytes,
                     )
                     canonical_bytes += len(content)
                     text = _decode_provider_text(content, str(row["content_codec"]))
@@ -1050,7 +1169,6 @@ class CanonicalProviderInputReader:
                     content = self._read_content(
                         _with_inline_payload(row, entry_payloads[entry_id]),
                         deadline_monotonic=deadline_monotonic,
-                        remaining_bytes=remaining_bytes,
                     )
                     storage_text = _decode_provider_text(
                         content, str(row["content_codec"])
@@ -1084,7 +1202,6 @@ class CanonicalProviderInputReader:
                     self._block_text(
                         item,
                         deadline_monotonic=deadline_monotonic,
-                        remaining_bytes=remaining_bytes,
                     )
                     for item in blocks
                     if item["block_kind"] in ("TEXT", "DATA")
@@ -1096,8 +1213,6 @@ class CanonicalProviderInputReader:
                         tool_name=str(item["tool_name"]),
                         arguments=_freeze_tool_arguments(
                             item["tool_arguments"],
-                            expected_physical_bytes=int(item["tool_arguments_size"]),
-                            remaining_bytes=remaining_bytes,
                         ),
                     )
                     for item in blocks
@@ -1157,9 +1272,6 @@ class CanonicalProviderInputReader:
                                 row=result_row,
                                 transcript_entry_id=str(result["result_entry_id"]),
                             )
-                            remaining_bytes.consume(
-                                result_prompt.resource_quote.canonical_expanded_bytes
-                            )
                             canonical_bytes += (
                                 result_prompt.resource_quote.canonical_expanded_bytes
                             )
@@ -1171,7 +1283,6 @@ class CanonicalProviderInputReader:
                             result_content = self._read_content(
                                 result_row,
                                 deadline_monotonic=deadline_monotonic,
-                                remaining_bytes=remaining_bytes,
                             )
                             canonical_bytes += len(result_content)
                             result_body_text = _decode_provider_text(
@@ -1252,98 +1363,11 @@ class CanonicalProviderInputReader:
                         result is not None
                         and result_sequence <= cut.provider_input_through_sequence
                     ):
-                        observation = LateToolOutcomeObservation(
-                            assistant_entry_id=entry_id,
-                            tool_call_id=call.tool_call_id,
-                            result_entry_id=str(result["result_entry_id"]),
-                            result_entry_sequence=result_sequence,
-                            result_state=str(result["result_state"]),
-                        )
-                        late.append(observation)
-                        result_row = _with_inline_payload(
-                            result,
-                            entry_payloads[str(result["result_entry_id"])],
-                        )
-                        typed_result = (
-                            str(result["content_media_type"]) == PROMPT_BODY_MEDIA_TYPE
-                        )
-                        if typed_result:
-                            result_prompt = hydrate_canonical_prompt_owner(
-                                connection,
-                                row=result_row,
-                                transcript_entry_id=str(result["result_entry_id"]),
-                            )
-                            result_body_text = frozen_tool_result_public_text(
-                                result_prompt.content, tool_name=call.tool_name
-                            )
-                            result_images = tuple(
-                                part
-                                for part in result_prompt.content.parts
-                                if isinstance(part, LLMImagePart)
-                            )
-                        else:
-                            result_content = self._read_content(
-                                result_row,
-                                deadline_monotonic=deadline_monotonic,
-                                remaining_bytes=remaining_bytes,
-                            )
-                            result_body_text = _decode_provider_text(
-                                result_content, str(result["content_codec"])
-                            )
-                            result_images = ()
-                        if call.tool_name == "annotate_media" and str(result["result_state"]) == "SUCCESS":
-                            from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
-                            result_body_text = project_tool_result_storage_body(result_body_text,
-                                ToolObservationOrigin.BUILTIN, tool_name=call.tool_name,
-                                result_state=str(result["result_state"]))
-                        late_text = _canonical_json_text(
-                            {
-                                "schema_version": "late_tool_outcome_observation.v1",
-                                "tool_call_id": call.tool_call_id,
-                                "result_state": result["result_state"],
-                                "result": result_body_text,
-                            }
-                        )
-                        late_content = (LLMTextPart(late_text), *result_images)
-                        late_expanded_bytes = (
-                            len(
-                                canonical_prompt_body_bytes(
-                                    FrozenPromptContent(late_content)
-                                )
-                            )
-                            + sum(len(image.immutable_bytes) for image in result_images)
-                            if typed_result
-                            else len(late_text.encode("utf-8"))
-                        )
-                        if typed_result:
-                            remaining_bytes.consume(late_expanded_bytes)
-                        canonical_bytes += late_expanded_bytes
-                        late_items.append(
-                            (
-                                result_sequence,
-                                ProviderInputItem(
-                                    item_kind=ProviderInputItemKind.LATE_TOOL_OUTCOME,
-                                    source_entry_id=str(result["result_entry_id"]),
-                                    source_entry_sequence=result_sequence,
-                                    source_turn_id=str(result["result_turn_id"]),
-                                    content=late_content,
-                                    tool_call_id=call.tool_call_id,
-                                    tool_request_entry_id=entry_id,
-                                    tool_result_context=_tool_result_metadata(result),
-                                    tool_result_body_text=result_body_text,
-                                    tool_result_delivery=(
-                                        classify_tool_result_delivery(
-                                            tool_name=call.tool_name,
-                                            public_arguments=thaw_json(call.arguments),
-                                            result_state=str(result["result_state"]),
-                                            has_image_attachment=bool(result_images),
-                                        )
-                                    ),
-                                    tool_call_ordinal=call_ordinal,
-                                    tool_call_arguments=call.arguments,
-                                    tool_call_name=call.tool_name if result_images else None,
-                                ),
-                            )
+                        append_late_result(
+                            request_entry_id=entry_id,
+                            call=call,
+                            call_ordinal=call_ordinal,
+                            result=result,
                         )
 
 
@@ -1361,14 +1385,6 @@ class CanonicalProviderInputReader:
                         insert_at = index
                         break
                 items.insert(insert_at, late_item)
-            if len(items) > self._maximum_items:
-                raise ConversationKernelConflict("provider input item bound exceeded")
-            if canonical_bytes > (
-                self._maximum_canonical_bytes
-                if _canonical_byte_budget is None
-                else _canonical_byte_budget
-            ):
-                raise ConversationKernelConflict("provider input byte bound exceeded")
             pure_scope = ModelInputScopeKind(scope_kind)
             identity_fingerprint = canonical_model_input_identity_fingerprint(
                 session_id=cut.session_id,
@@ -1469,19 +1485,15 @@ class CanonicalProviderInputReader:
                     'ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST'
                   )
                 ORDER BY e.entry_sequence
-                LIMIT %s
+
                 """,
                 (
                     cut.session_id,
                     source_floor,
                     stored_through_sequence,
-                    self._maximum_items + 1,
+
                 ),
             ).fetchall()
-            if len(manifest_rows) > self._maximum_items:
-                raise ConversationKernelConflict(
-                    "provider replay manifest item bound exceeded"
-                )
             manifests = []
             for row in manifest_rows:
                 if row["replay_id"] is None:
@@ -1516,13 +1528,6 @@ class CanonicalProviderInputReader:
                 provider_input_through_sequence=(cut.provider_input_through_sequence),
                 manifests=tuple(manifests),
             )
-            if (
-                manifest_cut.aggregate_manifest_utf8_bytes
-                > self._maximum_canonical_bytes
-            ):
-                raise ConversationKernelConflict(
-                    "provider replay manifest metadata bound exceeded"
-                )
             return FrozenCanonicalProviderDispatchRead(
                 compile_snapshot=compile_snapshot,
                 replay_manifest_cut=manifest_cut,
@@ -1568,13 +1573,6 @@ class CanonicalProviderInputReader:
         if not selected:
             return None
         aggregate_payload_bytes = sum(item.payload_size for item in selected)
-        quote_provider_dispatch_composite_bytes(
-            canonical_compile_bytes=(
-                dispatch_read.compile_snapshot.canonical_input.canonical_expanded_bytes
-            ),
-            manifest_metadata_bytes=manifest_cut.aggregate_manifest_utf8_bytes,
-            selected_payload_bytes=aggregate_payload_bytes,
-        )
 
         replay_ids = [item.replay_id for item in selected]
         entry_ids = [item.assistant_entry_id for item in selected]
@@ -1682,6 +1680,55 @@ class CanonicalProviderInputReader:
                 ProviderReplayHydrationFailureKind.CANONICAL_CORRUPTION
             ) from exc
 
+    def _load_snapshot_late_calls(
+        self, connection, session_id: str, *, result_entry_ids: Sequence[str],
+        source_floor: int,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Load only the source call facts of retained post-snapshot outcomes.
+
+        Their requests and closures already belong to the snapshot. Re-reading
+        those assistant entries would resurrect history; the accepted result's
+        original call name/arguments are needed only for its late observation
+        and existing image attachment carrier.
+        """
+        if source_floor == 0 or not result_entry_ids:
+            return ()
+        rows = tuple(connection.execute(
+            """
+            SELECT b.id, b.assistant_entry_id, b.block_ordinal, b.block_kind,
+                   b.tool_call_id, b.tool_name, b.blob_id, b.content_digest,
+                   b.content_size, b.content_media_type, b.content_codec,
+                   CASE WHEN b.inline_content IS NULL THEN 0
+                        ELSE octet_length(b.inline_content) END AS inline_content_size,
+                   CASE WHEN b.tool_arguments IS NULL THEN 0
+                        ELSE octet_length(b.tool_arguments::text) END AS tool_arguments_size,
+                   result.result_entry_id,
+                   (SELECT count(*) FROM pulsara_v3.assistant_message_blocks AS prior
+                    WHERE prior.session_id = b.session_id
+                      AND prior.assistant_entry_id = b.assistant_entry_id
+                      AND prior.block_kind = 'TOOL_CALL'
+                      AND prior.block_ordinal < b.block_ordinal) AS tool_call_ordinal
+            FROM pulsara_v3.tool_results AS result
+            JOIN pulsara_v3.transcript_entries AS request
+              ON request.session_id = result.session_id
+             AND request.id = result.tool_call_entry_id
+            JOIN pulsara_v3.assistant_message_blocks AS b
+              ON b.session_id = result.session_id
+             AND b.assistant_entry_id = result.tool_call_entry_id
+             AND b.tool_call_id = result.tool_call_id
+             AND b.block_kind = 'TOOL_CALL'
+            WHERE result.session_id = %s
+              AND result.result_entry_id = ANY(%s)
+              AND request.entry_sequence <= %s
+            ORDER BY b.assistant_entry_id, b.block_ordinal
+
+            """,
+            (session_id, list(result_entry_ids), source_floor),
+        ).fetchall())
+        if len({str(row["result_entry_id"]) for row in rows}) != len(rows):
+            raise ConversationKernelConflict("snapshot late result source conflicts")
+        return rows
+
     def _load_block_metadata(
         self, connection, session_id: str, entry_ids: Sequence[str]
     ) -> tuple[Mapping[str, object], ...]:
@@ -1702,18 +1749,11 @@ class CanonicalProviderInputReader:
                 FROM pulsara_v3.assistant_message_blocks
                 WHERE session_id = %s AND assistant_entry_id = ANY(%s)
                 ORDER BY assistant_entry_id, block_ordinal
-                LIMIT %s
+
                 """,
-                (session_id, list(entry_ids), self._maximum_items + 1),
+                (session_id, list(entry_ids)),
             ).fetchall()
         )
-        if len(rows) > self._maximum_items:
-            raise ConversationKernelConflict("provider input block bound exceeded")
-        if (
-            sum(1 for row in rows if row["block_kind"] == "TOOL_CALL")
-            > self._maximum_items
-        ):
-            raise ConversationKernelConflict("provider input tool-call bound exceeded")
         return rows
 
 
@@ -2232,9 +2272,10 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         entry_ids: Sequence[str],
         *,
         provider_input_through_sequence: int,
+        snapshot_late_result_ids: Sequence[str] = (),
     ):
         state: dict[tuple[str, str], dict[str, object]] = {}
-        if not entry_ids:
+        if not entry_ids and not snapshot_late_result_ids:
             return state
         rows = tuple(
             connection.execute(
@@ -2283,16 +2324,14 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
                 LEFT JOIN pulsara_v3.transcript_entries AS e
                   ON e.session_id = r.session_id AND e.id = r.result_entry_id
                 WHERE b.session_id = %s
-                  AND b.assistant_entry_id = ANY(%s)
+                  AND (b.assistant_entry_id = ANY(%s) OR r.result_entry_id = ANY(%s))
                   AND b.block_kind = 'TOOL_CALL'
                 ORDER BY b.assistant_entry_id, b.block_ordinal
-                LIMIT %s
+
                 """,
-                (session_id, list(entry_ids), self._maximum_items + 1),
+                (session_id, list(entry_ids), list(snapshot_late_result_ids)),
             ).fetchall()
         )
-        if len(rows) > self._maximum_items:
-            raise ConversationKernelConflict("provider input tool-call bound exceeded")
         for row in rows:
             payload: dict[str, object] = {
                 "attempt_id": row["attempt_id"],
@@ -2389,35 +2428,14 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             result.setdefault(str(row["assistant_entry_id"]), []).append(joined)
         return {key: tuple(value) for key, value in result.items()}
 
-    def _preflight_physical_bytes(
+    def _require_image_ref_metadata(
         self,
         *,
         connection,
         session_id: str,
         snapshot: Mapping[str, object] | None,
         entries: Sequence[Mapping[str, object]],
-        blocks: Sequence[Mapping[str, object]],
     ) -> None:
-        total = 0 if snapshot is None else int(snapshot["content_size"])
-        for row in entries:
-            if row["entry_kind"] in {
-                "USER_MESSAGE",
-                "USER_STEER",
-                "TERMINAL_OBSERVATION",
-                "USER_CONTROL_FEEDBACK",
-                "PLAN_CONTINUATION",
-                "TOOL_RESULT",
-            }:
-                total += int(row["content_size"])
-        for row in blocks:
-            if row["block_kind"] in ("TEXT", "DATA"):
-                total += max(int(row["content_size"]), int(row["inline_content_size"]))
-            else:
-                total += int(row["tool_arguments_size"])
-            if total > self._maximum_canonical_bytes:
-                raise ConversationKernelConflict(
-                    "provider input physical byte bound exceeded"
-                )
         owner_entry_ids = tuple(
             str(row["id"])
             for row in entries
@@ -2442,23 +2460,15 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
             raise ConversationKernelConflict(
                 "canonical image ref metadata is incomplete"
             )
-        total += int(image_quote["logical_size"])
-        if total > self._maximum_canonical_bytes:
-            raise ConversationKernelConflict(
-                "provider input physical byte bound exceeded"
-            )
 
     def _read_content(
         self,
         row: Mapping[str, object],
         *,
         deadline_monotonic: float,
-        remaining_bytes: _RemainingReadBudget | None = None,
         connection=None,
     ) -> bytes:
         expected_size = int(row["content_size"])
-        if remaining_bytes is not None:
-            remaining_bytes.consume(expected_size)
         expected_digest = str(row["content_digest"])
         if row["inline_content"] is not None:
             content = bytes(row["inline_content"])
@@ -2515,28 +2525,15 @@ class CanonicalProviderInputReader(CanonicalProviderInputReader):
         row: Mapping[str, object],
         *,
         deadline_monotonic: float,
-        remaining_bytes: _RemainingReadBudget | None = None,
     ) -> str:
         return _decode_provider_text(
             self._read_content(
                 row,
                 deadline_monotonic=deadline_monotonic,
-                remaining_bytes=remaining_bytes,
             ),
             str(row["content_codec"]),
         )
 
-
-@dataclass(slots=True)
-class _RemainingReadBudget:
-    remaining_bytes: int
-
-    def consume(self, physical_bytes: int) -> None:
-        if physical_bytes < 0 or physical_bytes > self.remaining_bytes:
-            raise ConversationKernelConflict(
-                "provider input physical byte bound exceeded"
-            )
-        self.remaining_bytes -= physical_bytes
 
 
 def _with_inline_payload(
@@ -2624,11 +2621,7 @@ def _canonical_json_text(payload: Mapping[str, object]) -> str:
 
 def _freeze_tool_arguments(
     value: object,
-    *,
-    expected_physical_bytes: int,
-    remaining_bytes: _RemainingReadBudget,
 ) -> FrozenJsonObjectFact:
-    remaining_bytes.consume(expected_physical_bytes)
     frozen = freeze_json(value)
     if not isinstance(frozen, FrozenJsonObjectFact):
         raise ConversationKernelConflict("canonical tool arguments are not an object")

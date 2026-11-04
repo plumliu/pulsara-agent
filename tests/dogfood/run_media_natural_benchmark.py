@@ -1,9 +1,9 @@
-"""Natural footage paired benchmark using production sampling and real vision.
+"""Natural-footage visual QA using production overview and real vision.
 
-All questions/checkpoints were independently derived from inspected source
-frames, before variants were rendered. Only sampled images reach the provider.
-Benchmark-local layout substitution isolates selection and layout without any
-production-code changes. A separate native-tool run verifies the full Host path.
+Questions/checkpoints come from independently inspected source frames. Source
+continuations are fully drained using the production selection/render pipeline;
+only those pictures reach the sealed-tool vision probe. A separate native-tool
+run verifies the full Host path. No alternate layout/selector is injected.
 """
 
 from __future__ import annotations
@@ -12,11 +12,9 @@ import argparse
 import asyncio
 from dataclasses import replace
 import json
-import math
 import os
 from pathlib import Path
 from time import monotonic
-from contextlib import contextmanager
 
 from psycopg.conninfo import make_conninfo
 
@@ -33,10 +31,7 @@ from pulsara_agent.llm.input import (
 )
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
-import pulsara_agent.media.frames as frame_owner
-from pulsara_agent.media.frames import FrameBudget, read_video_frames
-from pulsara_agent.media.frames_layout import Cell, Layout
-from pulsara_agent.media.frames_selection import select_samples, uniform_indices
+from pulsara_agent.media.frames import FRAME_ANALYSIS_FRAMES, FrameBudget
 from pulsara_agent.media.source import MediaSource, probe_media
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
@@ -48,6 +43,7 @@ from tests.dogfood.run_model_switch_handover_dogfood import (
     _find_connection,
 )
 from tests.dogfood.run_tool_output_pagination_dogfood import _trace
+from tests.dogfood.run_media_visual_benchmark import collect_overview_pages
 from tests.support.postgres_database import (
     admin_root_dsn,
     create_migrated_postgres_test_database,
@@ -136,7 +132,7 @@ async def evaluate_pictures(runtime, saved, selected, prompt, images):
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BUDGET = FrameBudget(4_000_000, 1280 * 720, 1, 128, maximum_frames=6)
+BUDGET = FrameBudget(4_000_000, 1280 * 720, 1, FRAME_ANALYSIS_FRAMES)
 CASES = {
     "screencast": {
         "path": "assets/Pulsara-demo.mp4",
@@ -188,71 +184,20 @@ CASES = {
 }
 
 
-def fixed_grid(samples, changes, mode, budget, capacity, uniform):
-    selected = (
-        uniform_indices(samples, capacity)
-        if uniform
-        else select_samples(samples, changes, capacity, mode)
-    )
-    count = len(selected)
-    aspect = samples[0].image.width / samples[0].image.height
-    cols = math.ceil(math.sqrt(count))
-    rows = math.ceil(count / cols)
-    width = min(1280 // cols, int(math.sqrt(budget.image_pixels / count * aspect)))
-    height = math.floor(width / aspect)
-    cells = tuple(
-        Cell(
-            i,
-            0,
-            (
-                i % cols * width,
-                i // cols * height,
-                (i % cols + 1) * width,
-                (i // cols + 1) * height,
-            ),
-        )
-        for i in range(count)
-    )
-    return selected, Layout(
-        cells, ((cols * width, rows * height),), 0, count * width * height
-    )
-
-
-@contextmanager
-def layout_variant(name):
-    original = frame_owner._layout
-    try:
-        if name != "anchor_changes_dp":
-            frame_owner._layout = lambda samples, changes, mode, budget, capacity: (
-                fixed_grid(
-                    samples, changes, mode, budget, capacity, name == "uniform_grid"
-                )
-            )
-        yield
-    finally:
-        frame_owner._layout = original
-
-
-def prepare_variant(workspace, category, case, variant):
+def prepare(workspace, category, case):
     begin = monotonic()
     with MediaSource.open((ROOT / case["path"]).resolve()) as source:
         info = probe_media(source)
-        with layout_variant(variant):
-            result = read_video_frames(
-                source,
-                info,
-                start=case["from"],
-                end=case["to"],
-                mode="overview",
-                budget=BUDGET,
-            )
+        images, index, pages = collect_overview_pages(
+            source, info, start=case["from"], end=case["to"], budget=BUDGET
+        )
     elapsed = monotonic() - begin
     paths = []
-    for i, image in enumerate(result.images):
-        path = workspace / f"{category}-{variant}-{i + 1}.jpg"
+    for i, image in enumerate(images):
+        path = workspace / f"{category}-production_overview-{i + 1}.jpg"
         path.write_bytes(image.data)
         paths.append(str(path))
-    return result, paths, elapsed
+    return images, index, pages, paths, elapsed
 
 
 def decoded(answer):
@@ -342,21 +287,22 @@ async def run(args):
     records = []
     core = None
     report = {
-        "latency_definition": "Preparation includes source open/probe, strategy-specific sampling/layout/encoding; end_to_end adds the complete model call. Shared catalog/runtime startup and artifact file writes are excluded. One run per strategy/source; no population latency claim.",
+        "latency_definition": "Preparation includes source open/probe, production sampling/layout/encoding; end_to_end adds the complete model call. Shared catalog/runtime startup and artifact file writes are excluded. One run per source; no population latency claim.",
         "output_budget": "Each fixed-picture probe uses the same 1024 total output-token allocation, including model reasoning. A response hitting this boundary is retained as incomplete and not rerun.",
         "model": args.model,
-        "scope": "Natural screencast, filmed lecture, stable narrated portrait; one fixed sealed-tools functional vision probe per variant. Natural action/narrative not evaluated.",
+        "pipeline": "production_overview",
+        "scope": "Natural screencast, filmed lecture, stable narrated portrait; one production-overview sealed-tools vision probe per source. Natural action/narrative not evaluated.",
         "sources": CASES,
         "budget": {
             "maximum_images": 1,
             "image_pixels": BUDGET.image_pixels,
-            "maximum_frames": 6,
-            "analysis_frames": 128,
+            "scope": "per accepted source page, not the combined picture probe",
+            "analysis_frames": BUDGET.analysis_frames,
         },
         "runs": [],
         "native_tool_runs": [],
-        "excluded_host_trial": "natural-visual-host-observation.json records normal Host investigation using additional local image/terminal evidence, interrupted before user clarification. It is distinguished by evidence source, not treated as product failure or restarted. All fixed-picture paired probes below have tools omitted and no dispatcher.",
-        "method": "All variants use the production read_video_frames function and same observed PTS pool. Benchmark-local _layout injection only selects uniform vs production indices and fixed-grid vs production DP. Native Host tool also verified separately. Ground-truth checkpoint images inspected independently before any variant/model call.",
+        "excluded_host_trial": "natural-visual-host-observation.json records normal Host investigation using additional local image/terminal evidence, interrupted before user clarification. It is distinguished by evidence source, not treated as product failure or restarted. All fixed-picture probes below have tools omitted and no dispatcher.",
+        "method": "Production read_video_frames prepares the fixed overview and every accepted page is collected by copying its complete next call. No selector or layout substitution. The picture probe bundles those pages; native Host tools are separately verified. Ground-truth checkpoint images were inspected independently.",
     }
 
     def save():
@@ -400,56 +346,46 @@ async def run(args):
             model_runtime=_RecordingModelRuntime(runtime, records)
         )
         for category, case in CASES.items():
-            anchor_index = None
-            for variant in ("uniform_grid", "anchor_changes_grid", "anchor_changes_dp"):
-                result, paths, preparation = await asyncio.to_thread(
-                    prepare_variant, workspace, category, case, variant
-                )
-                index = json.loads(result.text)["frames"]
-                if variant == "anchor_changes_grid":
-                    anchor_index = [r["t"] for r in index]
-                if variant == "anchor_changes_dp":
-                    assert anchor_index == [r["t"] for r in index], (
-                        "layout comparison must use identical source frames"
-                    )
-                prompt = (
-                    case["question"]
-                    + " Do not use tools for this question; inspect only the supplied sampled pictures. Frame indices and actual source timestamps: "
-                    + json.dumps(index)
-                )
-                begin = monotonic()
-                outcome, calls = await evaluate_pictures(
-                    runtime, saved, selected, prompt, result.images
-                )
-                host_seconds = monotonic() - begin
-                row = {
-                    "category": category,
-                    "variant": variant,
-                    "prompt": prompt,
-                    "answer": outcome.text,
-                    "status": outcome.status.value,
-                    "tools_advertised": False,
-                    "tool_execution_owner_present": False,
-                    "index": index,
-                    "images": paths,
-                    "preparation_seconds": preparation,
-                    "host_seconds": host_seconds,
-                    "end_to_end_seconds": preparation + host_seconds,
-                    "model_calls": len(calls),
-                    "usage": [r["terminal"] for r in calls],
-                    "image_pixels": sum(i.width * i.height for i in result.images),
-                    **score(category, outcome.text, index),
-                }
-                report["runs"].append(row)
-                save()
-                print(
-                    category,
-                    variant,
-                    row["facts_correct"],
-                    row.get("facts_total"),
-                    round(row["end_to_end_seconds"], 2),
-                    flush=True,
-                )
+            images, index, pages, paths, preparation = await asyncio.to_thread(
+                prepare, workspace, category, case
+            )
+            prompt = (
+                case["question"]
+                + " Do not use tools for this question; inspect only the supplied sampled pictures. Pages can be in coverage-priority order; use actual source timestamps for temporal comparisons. Printed frame numbers are local to source_page. Frame indices: "
+                + json.dumps(index)
+            )
+            begin = monotonic()
+            outcome, calls = await evaluate_pictures(
+                runtime, saved, selected, prompt, images
+            )
+            host_seconds = monotonic() - begin
+            row = {
+                "category": category,
+                "prompt": prompt,
+                "answer": outcome.text,
+                "status": outcome.status.value,
+                "tools_advertised": False,
+                "tool_execution_owner_present": False,
+                "index": index,
+                "images": paths,
+                "source_pages": pages,
+                "preparation_seconds": preparation,
+                "host_seconds": host_seconds,
+                "end_to_end_seconds": preparation + host_seconds,
+                "model_calls": len(calls),
+                "usage": [r["terminal"] for r in calls],
+                "image_pixels": sum(i.width * i.height for i in images),
+                **score(category, outcome.text, index),
+            }
+            report["runs"].append(row)
+            save()
+            print(
+                category,
+                row["facts_correct"],
+                row.get("facts_total"),
+                round(row["end_to_end_seconds"], 2),
+                flush=True,
+            )
             session = await session_for()
             offset = len(records)
             begin = monotonic()
@@ -489,29 +425,27 @@ async def run(args):
                 save()
             finally:
                 await core.close_session(session.host_session_id)
-        report["summary"] = {}
-        for variant in ("uniform_grid", "anchor_changes_grid", "anchor_changes_dp"):
-            rows = [r for r in report["runs"] if r["variant"] == variant]
-            usage = [u for r in rows for u in r["usage"]]
-            report["summary"][variant] = {
-                "facts_correct": sum(r["facts_correct"] for r in rows),
-                "facts_total": sum(
-                    {"screencast": 5, "lecture": 4, "narrated": 3}[r["category"]]
-                    for r in rows
-                ),
-                "incomplete_samples": sum(r["status"] != "COMPLETED" for r in rows),
-                "unavailable_speech_checks": sum(
-                    r.get("unsupported_speech_claim") is None for r in rows
-                ),
-                "unsupported_speech_claims": sum(
-                    bool(r["unsupported_speech_claim"]) for r in rows
-                ),
-                "input_tokens": sum(u.get("input_tokens") or 0 for u in usage),
-                "output_tokens": sum(u.get("output_tokens") or 0 for u in usage),
-                "model_calls": sum(r["model_calls"] for r in rows),
-                "preparation_seconds": sum(r["preparation_seconds"] for r in rows),
-                "end_to_end_seconds": sum(r["end_to_end_seconds"] for r in rows),
-            }
+        rows = report["runs"]
+        usage = [u for r in rows for u in r["usage"]]
+        report["summary"] = {
+            "facts_correct": sum(r["facts_correct"] for r in rows),
+            "facts_total": sum(
+                {"screencast": 5, "lecture": 4, "narrated": 3}[r["category"]]
+                for r in rows
+            ),
+            "incomplete_samples": sum(r["status"] != "COMPLETED" for r in rows),
+            "unavailable_speech_checks": sum(
+                r.get("unsupported_speech_claim") is None for r in rows
+            ),
+            "unsupported_speech_claims": sum(
+                bool(r["unsupported_speech_claim"]) for r in rows
+            ),
+            "input_tokens": sum(u.get("input_tokens") or 0 for u in usage),
+            "output_tokens": sum(u.get("output_tokens") or 0 for u in usage),
+            "model_calls": sum(r["model_calls"] for r in rows),
+            "preparation_seconds": sum(r["preparation_seconds"] for r in rows),
+            "end_to_end_seconds": sum(r["end_to_end_seconds"] for r in rows),
+        }
         report["status"] = (
             "completed_with_incomplete_samples"
             if any(r["status"] != "COMPLETED" for r in report["runs"])
@@ -539,7 +473,7 @@ async def run(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="qwen3.8-flash")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

@@ -27,7 +27,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     ResolvedCompactionPolicy,
     freeze_compaction_canonical_range,
     provider_input_item_canonical_expanded_bytes,
-    resolved_compaction_headroom_bounds,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
     CompactionWriteReservation,
@@ -42,7 +41,6 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     CompactionPlanningError,
     CompactionReclaimUnavailable,
     compaction_effective_history_has_image,
-    crosses_compaction_resource_headroom,
     project_prompt_content_for_text_only_handover,
     recent_human_window_has_image,
 )
@@ -892,7 +890,6 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
         )
 
     policy = ResolvedCompactionPolicy()
-    bounds = resolved_compaction_headroom_bounds()
     admitted = item_with_occurrences(1)
     admitted_tail = freeze_compaction_canonical_range(
         scope=scope,
@@ -907,13 +904,8 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
     assert admitted_tail.canonical_utf8_bytes < (
         policy.maximum_retained_tail_utf8_bytes
     )
-    assert admitted_c < bounds.soft_canonical_expanded_byte_limit
-    assert admitted_l < bounds.soft_epoch_logical_byte_limit
-    assert not crosses_compaction_resource_headroom(
-        selected_item_count=1,
-        selected_canonical_expanded_bytes=admitted_c,
-        continuity_epoch_logical_bytes=admitted_l,
-    )
+    assert 0 < admitted_c < 16 << 20
+    assert 0 < admitted_l < 64 << 20
 
     overbound = item_with_occurrences(4)
     overbound_tail = freeze_compaction_canonical_range(
@@ -929,15 +921,8 @@ def test_large_image_tail_uses_descriptor_budget_then_full_d2_charge() -> None:
     assert overbound_tail.canonical_utf8_bytes < (
         policy.maximum_retained_tail_utf8_bytes
     )
-    assert (
-        overbound_c >= bounds.soft_canonical_expanded_byte_limit
-        or overbound_l >= bounds.soft_epoch_logical_byte_limit
-    )
-    assert crosses_compaction_resource_headroom(
-        selected_item_count=1,
-        selected_canonical_expanded_bytes=overbound_c,
-        continuity_epoch_logical_bytes=overbound_l,
-    )
+    assert overbound_c > 12 << 20
+    assert overbound_l > admitted_l
 
 
 def test_text_only_projection_p_preserves_order_occurrences_and_is_idempotent() -> None:
@@ -1351,17 +1336,6 @@ def _post_response_quote(
     ("quote", "budget", "reason"),
     (
         (
-            _post_response_quote(current_canonical=(16 << 20) + 1),
-            10,
-            "CANONICAL_BYTES",
-        ),
-        (
-            _post_response_quote(current_logical=(64 << 20) + 1),
-            10,
-            "EPOCH_LOGICAL_BYTES",
-        ),
-        (_post_response_quote(current_items=4_096), 10, "CANONICAL_ITEMS"),
-        (
             _post_response_quote(
                 wire=ProviderFollowupWireResourceQuote((64 << 20) + 1, 1, 1, 1)
             ),
@@ -1464,8 +1438,14 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
     from types import SimpleNamespace
     from pulsara_agent.conversation_kernel import runner as module
     from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
+    from tests.test_stage2_direct_model import _port, _prepared_execution
 
     estimator = PulsaraHeuristicTokenEstimatorV3()
+    prepared_request, _ = _prepared_execution(
+        _port(api="openai_chat_completions"), maximum_input_tokens=200_000
+    )
+    prepared_call = prepared_request.prepared_call
+    prepared_request.surface_borrow.close()
     wire_plan = SimpleNamespace(
         quote=SimpleNamespace(effective_input_budget_tokens=200_000)
     )
@@ -1489,6 +1469,8 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
     seen = []
 
     def quote_wire(**kwargs):
+        assert kwargs["plan"] is wire_plan
+        assert kwargs["call"] is prepared_call.call
         messages = kwargs["bounded_suffix_messages"]
         seen.extend(messages)
         items = tuple(chat_semantic_wire_group(message)[0] for message in messages)
@@ -1525,6 +1507,7 @@ def test_plugin_enable_keeps_epoch_bound_without_phantom_maximum_catalog_tokens(
     quote = runner._quote_post_response_resources(
         request=SimpleNamespace(
             wire_input_plan=wire_plan,
+            prepared_call=prepared_call,
             compiled_input=SimpleNamespace(canonical_input_identity=identity),
         ),
         permit=SimpleNamespace(scope=None, epoch_nonce="epoch", epoch_revision=1),

@@ -68,9 +68,6 @@ QueuedInputContent = FrozenCanonicalPrompt | CellOutputContent
 
 MAXIMUM_STEER_ITEMS_PER_SAFE_POINT = 128
 MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES = 16 << 20
-# Bounds cumulative canonical-prefix materialization across longest-first
-# trials.  This is a process-local planning-work quote, not durable capacity.
-MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES = 256 << 20
 
 
 @dataclass(frozen=True, slots=True)
@@ -1036,7 +1033,7 @@ class AcceptedSteerDispatchBatch:
             0 < self.canonical_expanded_bytes <= MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES
         ):
             raise ValueError("accepted steer batch expanded bound is invalid")
-        if not 0 < self.resulting_epoch_logical_bytes <= (64 << 20):
+        if self.resulting_epoch_logical_bytes <= 0:
             raise ValueError("accepted steer batch epoch bound is invalid")
 
 
@@ -1061,9 +1058,9 @@ class SteerSuffixAdmissionQuote:
             <= MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES
         ):
             raise ValueError("steer quote body bound is invalid")
-        if not 0 < self.prospective_snapshot_hydrated_bytes <= (16 << 20):
+        if self.prospective_snapshot_hydrated_bytes <= 0:
             raise ValueError("steer quote snapshot bound is invalid")
-        if not 0 < self.resulting_epoch_logical_bytes <= (64 << 20):
+        if self.resulting_epoch_logical_bytes <= 0:
             raise ValueError("steer quote epoch bound is invalid")
         reservations = tuple(
             item
@@ -1075,10 +1072,6 @@ class SteerSuffixAdmissionQuote:
         )
         if self.effective_target_budget < 1:
             raise ValueError("steer quote target budget is invalid")
-        if self.resulting_epoch_logical_bytes + sum(
-            item.invalidation_epoch_bytes_ceiling for item in reservations
-        ) > (64 << 20):
-            raise ValueError("steer quote epoch reservation is invalid")
         if any(
             item.estimator_fingerprint != self.estimator_fingerprint
             for item in reservations
@@ -1469,7 +1462,6 @@ __all__ = [
     "MAXIMUM_STEER_CANDIDATE_EXPANDED_BYTES",
     "MAXIMUM_STEER_ITEMS_PER_SAFE_POINT",
     "MemorySourceInvalidationReservation",
-    "MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES",
     "PendingPromptSteerFact",
     "PreparedPromptIngressCommand",
     "PreparedCellOutputIngress",

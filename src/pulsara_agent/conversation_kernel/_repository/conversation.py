@@ -803,6 +803,98 @@ class _ConversationOperations:
                 lock=False,
             )
 
+    def require_pending_tool_batch_compaction_safe(
+        self,
+        guard: HostWriterGuard,
+        *,
+        closed_source_cut: PreparedProviderInputCut,
+        assistant_entry_id: str,
+        ordered_tool_call_ids: tuple[str, ...],
+        deadline_monotonic: float,
+    ) -> None:
+        """Allow summary preparation over the exact closed pre-batch prefix.
+
+        This grants no provider installation or canonical adoption. The only
+        permitted append is the already accepted assistant batch and its real
+        results; the coordinator rechecks it before ordinary safe settlement.
+        """
+        cut = closed_source_cut
+        if (
+            cut.session_id != guard.session_id
+            or not ordered_tool_call_ids
+            or len(set(ordered_tool_call_ids)) != len(ordered_tool_call_ids)
+            or any(not isinstance(value, str) or not value for value in ordered_tool_call_ids)
+        ):
+            raise ValueError("pending tool batch has no exact closed source")
+        with self._provider.connection(
+            lane=PostgresConnectionLane.HOST_CONTROL,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+            isolation_level=IsolationLevel.REPEATABLE_READ,
+        ) as connection:
+            self._require_writer(connection, guard, lock=False)
+            row = connection.execute(
+                """SELECT t.current_context_binding_revision_id,
+                          e.entry_sequence, e.context_binding_revision_id,
+                          e.provider_input_through_sequence
+                   FROM pulsara_v3.turns AS t
+                   JOIN pulsara_v3.transcript_entries AS e
+                     ON e.session_id=t.session_id AND e.turn_id=t.id
+                   WHERE t.session_id=%s AND t.id=%s AND t.status='RUNNING'
+                     AND e.id=%s AND e.entry_owner_kind='EXECUTED_TURN'
+                     AND e.entry_kind='ASSISTANT_TOOL_REQUEST'""",
+                (guard.session_id, cut.turn_id, assistant_entry_id),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["current_context_binding_revision_id"]) != cut.context_binding_revision_id
+                or str(row["context_binding_revision_id"]) != cut.context_binding_revision_id
+                or int(row["provider_input_through_sequence"]) != cut.provider_input_through_sequence
+                or int(row["entry_sequence"]) <= cut.provider_input_through_sequence
+            ):
+                raise ConversationKernelConflict("pending tool batch closed source changed")
+            calls = connection.execute(
+                """SELECT tool_call_id FROM pulsara_v3.assistant_message_blocks
+                   WHERE session_id=%s AND assistant_entry_id=%s
+                     AND block_kind='TOOL_CALL' ORDER BY block_ordinal""",
+                (guard.session_id, assistant_entry_id),
+            ).fetchall()
+            if tuple(str(item["tool_call_id"]) for item in calls) != ordered_tool_call_ids:
+                raise ConversationKernelConflict("pending tool batch call order changed")
+            unrelated = connection.execute(
+                """SELECT 1 FROM pulsara_v3.transcript_entries AS e
+                   LEFT JOIN pulsara_v3.tool_results AS r
+                     ON r.session_id=e.session_id AND r.result_entry_id=e.id
+                   WHERE e.session_id=%s AND e.entry_sequence>%s
+                     AND NOT (
+                       (e.id=%s AND e.turn_id=%s
+                        AND e.entry_kind='ASSISTANT_TOOL_REQUEST'
+                        AND e.entry_owner_kind='EXECUTED_TURN')
+                       OR (e.entry_kind='TOOL_RESULT' AND e.turn_id=%s
+                           AND e.entry_owner_kind='EXECUTED_TURN'
+                           AND COALESCE(r.tool_call_entry_id=%s
+                               AND r.tool_call_id=ANY(%s),false))
+                     ) LIMIT 1""",
+                (guard.session_id, cut.provider_input_through_sequence,
+                 assistant_entry_id, cut.turn_id, cut.turn_id,
+                 assistant_entry_id, list(ordered_tool_call_ids)),
+            ).fetchone()
+            other_open = connection.execute(
+                """SELECT 1 FROM pulsara_v3.assistant_message_blocks AS b
+                   JOIN pulsara_v3.transcript_entries AS e
+                     ON e.session_id=b.session_id AND e.id=b.assistant_entry_id
+                   LEFT JOIN pulsara_v3.tool_results AS r
+                     ON r.session_id=b.session_id
+                    AND r.tool_call_entry_id=b.assistant_entry_id
+                    AND r.tool_call_id=b.tool_call_id
+                   WHERE b.session_id=%s AND e.turn_id=%s
+                     AND b.block_kind='TOOL_CALL' AND r.id IS NULL
+                     AND b.assistant_entry_id<>%s LIMIT 1""",
+                (guard.session_id, cut.turn_id, assistant_entry_id),
+            ).fetchone()
+            if unrelated is not None or other_open is not None:
+                raise ConversationKernelConflict("pending compaction suffix escaped its tool batch")
+
     def require_prospective_active_root_input_safe(
         self,
         guard: HostWriterGuard,
@@ -1542,6 +1634,10 @@ class _ConversationOperations:
         ).fetchone()
         if later is not None:
             raise ConversationKernelConflict("compaction canonical head advanced")
+        # A snapshot already owns its earlier requests/closures. A later
+        # physical outcome is an independent late observation, as is a result
+        # excluded by the first assistant cut after an unsummarized request.
+        # Only an ordinary paired result can make this a split tool group.
         split_group = connection.execute(
             """
             SELECT 1
@@ -1558,14 +1654,29 @@ class _ConversationOperations:
              AND result_entry.id = result.result_entry_id
             WHERE request.entry_owner_kind = 'EXECUTED_TURN' AND request.session_id = %s
               AND call.block_kind = 'TOOL_CALL'
+              AND request.entry_sequence > %s
               AND request.entry_sequence <= %s
               AND result_entry.entry_sequence > %s
+              AND result_entry.entry_sequence <= COALESCE(
+                (SELECT next_assistant.provider_input_through_sequence
+                 FROM pulsara_v3.transcript_entries AS next_assistant
+                 WHERE next_assistant.session_id = request.session_id
+                   AND next_assistant.entry_kind IN ('ASSISTANT_MESSAGE', 'ASSISTANT_TOOL_REQUEST')
+                   AND next_assistant.entry_sequence > request.entry_sequence
+                   AND next_assistant.entry_sequence <= %s
+                 ORDER BY next_assistant.entry_sequence
+                 LIMIT 1),
+                %s
+              )
             LIMIT 1
             """,
             (
                 candidate.scope.session_id,
+                predecessor.effective_materialization_lineage_floor,
                 candidate.snapshot.source_through_sequence,
                 candidate.snapshot.source_through_sequence,
+                preconditions.expected_safe_head,
+                preconditions.expected_safe_head,
             ),
         ).fetchone()
         if split_group is not None:

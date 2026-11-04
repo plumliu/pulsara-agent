@@ -76,13 +76,31 @@ class ToolResultPageBudget:
             if read is None:
                 raise ValueError("recovery quote requires the original result target")
             body = with_output_read(body, read)
-        if conservative_tool_result_page_logical_utf8_bytes(
-            tool_call_id=self.tool_call_id,
-            body=body,
-            model_visible_memory_ids=model_visible_memory_fact_ids,
-        ) > MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES:
+        if not self.fits_logical(
+            body,
+            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
+        ):
             return False
         return (
             self.accepts_provider_body is None
             or self.accepts_provider_body(body, model_visible_memory_fact_ids)
         )
+
+    def fits_logical(
+        self,
+        body: str,
+        *,
+        model_visible_memory_fact_ids: tuple[str, ...] = (),
+    ) -> bool:
+        """Check the same complete carrier without a text-only provider quote.
+
+        Image results replace this call's text slot and add its attachments in
+        one joint provider quote. They still require this ordinary/late result
+        boundary; invoking the text predicate as well would quote a different
+        candidate from the complete multimodal page.
+        """
+        return conservative_tool_result_page_logical_utf8_bytes(
+            tool_call_id=self.tool_call_id,
+            body=body,
+            model_visible_memory_ids=model_visible_memory_fact_ids,
+        ) <= MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES

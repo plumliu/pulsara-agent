@@ -202,6 +202,9 @@ class KernelToolInvocationContext:
     input_modalities: tuple[str, ...] | None = None
     image_resource_allowance: "FrozenImageToolResourceAllowance | None" = None
     page_budget: ToolResultPageBudget | None = field(default=None, repr=False, compare=False)
+    refresh_image_resources: Callable[
+        [], Awaitable[tuple["FrozenImageToolResourceAllowance", ToolResultPageBudget] | None]
+    ] | None = field(default=None, repr=False, compare=False)
     session_content_range: SessionContentRange | None = None
     permission_confirmation_granted: bool = False
     cell_cancel_event: asyncio.Event | None = field(default=None, repr=False, compare=False)
@@ -311,6 +314,35 @@ class FrozenImageToolResourceAllowance:
         ):
             raise ValueError("image Tool resource allowance is invalid")
 
+    def accepts_page(
+        self,
+        *,
+        content: FrozenPromptContent,
+        source: ViewImageSource,
+        tool_name: str,
+        page_budget: ToolResultPageBudget,
+        model_visible_memory_fact_ids: tuple[str, ...] = (),
+    ) -> bool:
+        """Admit one complete text/index and image page, without double charge."""
+        if page_budget.tool_call_id != self.tool_call_id:
+            raise ValueError("image page budget does not own this call")
+        if not page_budget.fits_logical(
+            frozen_tool_result_public_text(content, tool_name=tool_name),
+            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
+        ):
+            return False
+        increment = self.quote_owner.quote(
+            tool_call_id=self.tool_call_id,
+            tool_name=tool_name,
+            source=source,
+            content=content,
+            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
+        )
+        return all(
+            getattr(increment, name) <= getattr(self, name)
+            for name in ("canonical_bytes", "logical_bytes", "wire_bytes", "input_tokens")
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class FrozenImageToolResourceIncrement:
@@ -340,6 +372,7 @@ class ImageToolResourceQuotePort(Protocol):
         tool_name: str = "view_image",
         source: ViewImageSource,
         content: FrozenPromptContent,
+        model_visible_memory_fact_ids: tuple[str, ...] = (),
     ) -> FrozenImageToolResourceIncrement: ...
 
 

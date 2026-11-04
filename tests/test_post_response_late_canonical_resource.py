@@ -18,7 +18,6 @@ from pulsara_agent.conversation_kernel.prompt_content import freeze_canonical_pr
 from pulsara_agent.conversation_kernel.runner import (
     ConversationKernelRunner,
     FrozenPostResponseResourceQuote,
-    OutputResourceInterruption,
     _ordinary_result_followup_upper,
     _tool_result_closure_storage_text,
 )
@@ -29,7 +28,6 @@ from pulsara_agent.llm.input import (
     frozen_tool_result_public_text,
 )
 from pulsara_agent.model_input.contracts import (
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
     FrozenProviderInputItemKind,
 )
 from pulsara_agent.ports.tool_execution import ToolOutputSourceFormatHint
@@ -104,10 +102,10 @@ def test_real_frozen_preview_late_canonical_charge_fits_reserved_upper(body):
     assert actual_canonical <= _ordinary_result_followup_upper(call)[0]
 
 
-def test_control_character_late_preview_is_rejected_before_canonical_exhaustion():
+def test_control_character_late_preview_accepts_large_history_with_token_room():
     call, actual_canonical = _preview_and_late_charge("\x01" * 24_000)
     upper = _ordinary_result_followup_upper(call)[0]
-    current = MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES - actual_canonical + 1
+    current = (64 << 20) + actual_canonical
     quote = FrozenPostResponseResourceQuote(
         current_canonical_expanded_bytes=current,
         actual_assistant_canonical_bytes=0,
@@ -122,12 +120,9 @@ def test_control_character_late_preview_is_rejected_before_canonical_exhaustion(
         item_upper_after=3,
     )
 
-    with pytest.raises(OutputResourceInterruption) as raised:
-        ConversationKernelRunner._require_post_response_resources(
-            quote, effective_input_budget_tokens=100_000
-        )
-
-    assert raised.value.reason == "CANONICAL_BYTES"
+    ConversationKernelRunner._require_post_response_resources(
+        quote, effective_input_budget_tokens=100_000
+    )
 
 
 def test_late_image_canonical_charge_fits_text_base_plus_exact_image_increment():

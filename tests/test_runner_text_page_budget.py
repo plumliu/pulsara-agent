@@ -86,7 +86,7 @@ def _quoted(api, count, *, anchor_delta=0):
 
 def _wire(request, completed, messages, anchor):
     return quote_provider_followup_wire_resources(
-        request=request,
+        plan=request.wire_input_plan, call=request.prepared_call.call,
         actual_assistant_message=_completed_assistant_semantic_message(completed),
         provider_replay=None, bounded_suffix_messages=tuple(messages), usage_anchor=anchor,
     )

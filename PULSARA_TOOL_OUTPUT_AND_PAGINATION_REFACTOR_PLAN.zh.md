@@ -1,6 +1,6 @@
 # Pulsara 工具输出与分页重构实施方案
 
-日期：2026-11-03。状态：已实施，三项技术合同与逐条语义审计完成；单一路径 hard cut，无兼容入口。本轮合同相关验证通过；第 8 节行为回归已闭合，完整 Python 回归零失败。视频理解继续延后，不在本轮实现。
+日期：2026-11-05。状态：正文/展示/来源和图文源页沿单一路径实施。共享完整文字边界、实际图文联合 quote、稳定 next，以及压缩后整页/缩页的真实视觉读取已经专项复验；最小原子页不适配返回 typed boundary。验收事实与限制分别见本文件及视频实现规格。
 
 ## 1. 目标与边界
 
@@ -54,14 +54,43 @@
 
 预算顺序固定：
 
-1. response 后、效果前，以冻结 prefix、实际 assistant/replay、必要小回执构造 base；canonical/epoch/items 物理预留保留，不再为每个普通文本页假设需要满 40k 展示。
+1. response 后、效果前，以冻结 prefix、实际 assistant/replay、必要小回执构造 base；保留现有 items 准入，不按历史累计 canonical/epoch 字节预留，不再为每个普通文本页假设需要满 40k 展示。
 2. 使用原 provider quote owner 计算本批可用 wire/token，确定各调用额度；复用已有 image allowance 的等分和精确 quote 思路。文本替换本调用 base body，不作为新附件重复计费；不假设 token 差值任意可相加。
 3. 域 owner 用同一个 fits 装页。最小原子记录放不下是 typed boundary，不跳项、不返回原地 next。控制/写操作在可确定实际最小成功回执时，必须先验证再执行效果；记忆事务在首次写之前验证最终小回执。
 4. 公共投影为非分页大值生成 P；保留 required_facts，仅省略正文时添加准确 read。域已提供 native_output 时不重建另一份 head/tail；仍须完整预算验证。
 5. 已发生效果的真实结果即使超出原 provider 份额，也必须先沿物理 Q 保存事实；不能转为 UNKNOWN 或重执行业务。最终派发仍须通过原预算 owner，不能把保存成功当成 provider 交付成功。
 6. 存储 C/P 后最终整批由原预算 owner 校验、安装。已冻结页不得被下游缩为裸引用。资源不足沿既有中断/允许的 compaction successor 收束，不重装已安装 prefix，也不重执行已接受效果。
 
-`page_complete=True` 的正常源页与完整短控制回执要求完整交付；旧历史进入批准的 compaction successor 时仍可归摘要。不增加总页数、总调用数或历史上限。显示默认沿现有量级，单结果 40k 是物理上界，不是必须填满的目标。
+`page_complete=True` 的正常源页与完整短控制回执要求完整交付；旧历史进入批准的 compaction successor 时仍可归摘要，刚返回且尚待业务模型处理的图文页必须保留原图和索引完整组。不增加总页数、总调用数或历史上限。显示默认沿现有量级，单结果 40k 是物理上界，不是必须填满的目标。
+
+### 2.2.1 图文页面与压缩
+
+view_image、read_video_frames 等真实图片结果分支同样执行 ToolResultPageBudget 的完整外层文字检查，并复用图片 owner 已有的实际图文联合 provider quote。单条消息 canonical/logical 容量、实际 wire 和 token 均须通过；不按历史累计字节缩减本次消息容量，同一份文字不能重复计费。FrozenPromptContent 不形成跳过文字预算的例外。
+
+read_video_frames 的页面包含实际图片、对应完整索引、必要控制事实和完整 next；先联合检查再接受，不能只分页索引、先提交文字后丢图片，或保存成功后才发现模型无法取得最小页。C/P 仅包含本次接受页，无隐藏图文后缀。来源工具拥有稳定代表序列和 continuation，通用层只验证，不重选帧。预算只改变页切分与排版；减少本页末尾观察后用实际 quote 重排，不能假设 JPEG/DP 字节单调。最小原子证据为一帧及其对应索引；端点或已选中间过程可以跨页，但必须披露未完成并保留 next，不能删除中间状态。
+
+read_file(SESSION_ENTRY) 只读取既有 UTF-8 正文，不能充当多模态源续读或取得尚未交付图片的入口；历史图片沿已有 IMAGE_REF。图文 continuation 不建立 hash、HMAC、实体 ID、注册表、持久分页计划或后台作业。
+
+preaccept 只准备 CLOSED prefix 摘要与 dry quote，不提前 adopt；ROOT 队列按真实 dry successor 发放 fresh 份额，实际 batch 仍沿原 epoch 结算，完成后验证实际 suffix 再 adopt/install。未消费状态从已接受业务 assistant 的真实 input cut 推导；导入已结算历史不当作刚返回页，独立 late observation 保留其图文 carrier 而不恢复旧 request。复用既有 owner，不增加 durable job、ACK、实体 ID 或恢复图。
+
+上下文不足时必须闭合四项合同：
+
+1. 刚返回、尚待业务模型处理的当前图文页完整保留。压缩切点不在工具文字结果和对应图片附件 user 消息之间，摘要不能替代该页原图及索引；后继正常请求保留真实调用关联。
+2. 旧历史使最小页无法交付时，在既有合法安全点使用 compaction successor，再按压缩后完整请求重新分配页额度；不能仅用压缩前余额提前判定永久失败，不重写已安装 epoch 前缀。
+3. 压缩后仍不足时，来源工具仅从固定证据序列缩小当前未接受页并保留完整 next。已接受页不可回写缩小；最小可辨帧、索引和控制仍不适配才返回 typed boundary，不返回空成功或原地 next。
+4. 生产 Host 和真实请求组装必须强制工具返回后压缩，核对原图、编号、时刻、索引及工具归属，让真实视觉模型完成定位/对照并复制 next 续读。覆盖整页可交付、必须缩页、最小页仍无法交付三个分支，验证无重漏或工具重执行；单元切点或摘要提到图片不构成验收。
+
+### 2.2.2 历史累计字节与条目数
+
+会话历史的 canonical 总量、编译工作集、单个 epoch、canonical 与 replay 副本合计，以及 steer/fork、Host 已安装和待安装副本的历史材料不设固定累计字节上限。删除相应 16/64 MiB、Host 320/640 MiB 检查和 canonical/epoch 的 4 MiB 压缩预留，不用放大常量、倍率或另一层累计字节检查替代。字节计量可保留用于诊断和资源引用一致性，不因图片编码字节较大而要求摘要历史。
+
+历史消息、assistant block、工具调用及工具结果投影不设累计条目数上限，不按条目数触发自动压缩。读取、编译、fork、steer 与工具结果准入完整处理所选历史；移除 4,096 项硬拒绝、296 项预留、3,800 项压缩阈值和工具结果投影的等价总数检查。数据库游标、源查询分页和单批控制操作保持原有独立边界，不以读取批大小截断完整历史。
+
+token 准入使用实际完整 provider 输入及现有 usage 校正；达到既有 token 自动阈值时使用批准的 compaction successor。实际请求传输边界、单个消息/文件/blob/replay、独立 source/schema、媒体 worker 的资源边界保持各自语义。单条图片结果的容量独立于已有历史，不把所有结果共用一个 16 MiB 会话池。同 epoch SYSTEM/tools 不变，messages 只追加；历史超出曾有字节阈值不成为新的 rebase 理由。
+
+验收必须包含：实际会话的 70 张图片及 13.08 MiB 历史在 token 充足时不因累计字节触发压缩；超过原 16/64 MiB 的有效历史完成读取、编译、续接与回放；原 token 压缩、完整图文保护、next、源权限、fork 和真实请求传输边界继续有效。单项内容超限仍明确拒绝，不扩大单消息/媒体工作内存限制。
+
+条目数验收：5,000 条消息和 5,000 个工具结果完整编译，5,000 条历史续接保持已安装前缀不变；真实 PostgreSQL 读取 4,100 个 assistant block 无遗漏。高条目计数不触发压缩或阻断结果准入，token 与实际请求传输失败继续沿原结算路径。源码已完成检查。
 
 ### 2.3 合同三：模型接口、源续查与激活
 
@@ -164,7 +193,8 @@ Pulsara 驻留为页、argv/路径批次、管道缓存和**最大单条 rg JSON
 | remember / mark_memory_relation | 同一接受事务生成最终 receipt、C 和 facts，写前预算检查 | canonical 写入与单一 exposure；禁止保存 provisional {}，结果恢复不重写记忆 |
 | exec_cell / query_cells / manage_cell | 接纳/控制短回执；冻结源码页用完整 Q 与 next | 正式输出仍由既有队列接受；普通内部结果不自动向 ROOT 披露；不消费输出来查询状态 |
 | open_in_pulsara | 整份展示控制执行前准入，不给展示效果做结果分页 | 顺序、逐项 errors、最终选中目标；不新增任意 maxItems |
-| view_image | 沿原图片 owner 整体准入与真实多模态交付 | IMAGE_REF、精确附件、完整成功/错误分支预算，不变成 Base64 文本 |
+| view_image | 沿原图片 owner 和共享完整工具文字预算联合准入 | IMAGE_REF、精确附件、完整成功/错误分支和实际图文 quote，不变成 Base64 文本 |
+| read_video_frames | 固定代表计划的完整图文源页与原工具 continuation | 六参数 ROOT 直接工具，图文索引一一对应；预算不重选帧，当前页压缩保护和完整 next，不用 read_file 代替多模态源续读 |
 | todo | 原计数短回执，安装前检查 | 原 checklist 及安装/取消结算，不新增持久状态 |
 | enter_plan / ask_plan_question / exit_plan | 原短控制结果，C/facts 为公开投影 | 独占执行、批准/修订/取消、完整答案及 continuation；不把内部 storage carrier 当公开正文 |
 
@@ -198,14 +228,15 @@ Pulsara 驻留为页、argv/路径批次、管道缓存和**最大单条 rg JSON
 6. terminal 完整 C/V、一次 P、cursor/gap、控制回执、取消物理清理；MCP 使用原 schema，未知远端效果不伪装安全重试。
 7. memory 单一 exposure、文件实际交付观察、Code Mode 完整 V 和 4MiB value_boundary、read/facts 保留且 callback 不误触发。
 8. clean-v0 与 expected catalog 由真实独立 PostgreSQL 核验；原 DB 未经核验不重置；协议生成、frontend/desktop 构建与测试通过。
-9. 真实 provider 验证批量小查询、连续源 next、原正文 read、直接 source copy、中间日志不重执行、Code Mode 与明确 compaction successor；同 epoch tools/SYSTEM 不变且 messages 前缀连续。
+9. 真实 provider 验证批量小查询、连续源 next、原正文 read、直接 source copy、中间日志不重执行、Code Mode 与明确 compaction successor；另逐项完成第 2.2.1 节图文页压缩后理解和续读。相同 epoch tools/SYSTEM 不变且 messages 前缀连续，六参数工具面只在批准的新前缀边界安装。
 
-实施使用原 8 个 gpt-6.1-sol / high 代理分别负责 core/CodeMode、filesystem/search、terminal、capability/MCP、history、agent/schedule、memory/runtime、frontend/protocol。root 负责公共预算、执行集成与最终逐条严格审计。视频理解待本方案完整验收后再讨论接口。
+实施使用原 8 个 gpt-6.1-sol / high 代理分别负责 core/CodeMode、filesystem/search、terminal、capability/MCP、history、agent/schedule、memory/runtime、frontend/protocol。root 负责公共预算、执行集成与最终逐条严格审计。视频图文页按第 2.2.1 节和视频实现规格的六参数接口共同验收。
 
 ## 7. 本轮验收记录
 
-- 完整 Python 回归：5228 通过、0 失败、20 个既有 Linux/WSL 环境跳过、15 subtests 通过；未新增 skip/xfail。
-- 前端 1570 项、desktop 使用项目 Node 22 的 140 项已通过；本轮未改它们的生产代码/CSS，真实 Chromium 行为测试由完整 Python 回归覆盖。
+- 真实视觉模型专项共 20 次请求：自然 hello、三页工具返回后压缩、preaccept 真实重新预算后的整页/缩页、固定图对照与 detail/crop。当前页原图、完整索引和 tool-call 归属保留，next 逐观察无重漏；七对同 epoch 前缀连续。最小页不适配由真实 Host typed-boundary 测试核对。固定图对照出现小字误读，不能据此宣布理解质量占优；原始输入/回答/usage 保存在 output/video-implementation-acceptance/。
+- 完整 Python 回归：5621 通过、0 失败、20 个既有 Linux/WSL 环境跳过、15 subtests 通过；未新增 skip/xfail。
+- 前端 1606 项、desktop 使用项目 Node 22 的 149 项已通过；本轮未改它们的生产代码/CSS，真实 Chromium 行为测试由完整 Python 回归覆盖。
 - 工具输出完整真实 provider 验证覆盖大结果、准确 source copy、Code Mode bridge 和明确 compaction；当前行为收尾另以 3 次真实调用验证 next 与两对 prefix 连续性。
 - 打包、效果前拒绝、效果后保真、来源/权限、查询次数、精确观察等专项通过；生产 Ruff、协议生成与 diff 检查通过。
 - 45 项原失败全部闭合。有意义的行为断言继续保留；仅冻结旧数量、字段、哈希、CSS 或接口实现的部分删除，不恢复已移除实体或接口。

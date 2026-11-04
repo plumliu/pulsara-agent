@@ -24,9 +24,7 @@ from pulsara_agent.hooks.contracts import (
     HookSourceKind,
     JsonValue,
 )
-from pulsara_agent.model_input.contracts import (
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-)
+from pulsara_agent.conversation_kernel.limits import STAGE2_LIMITS
 from pulsara_agent.process_credential_boundary import (
     CredentialObjectKeyConflict,
     ProcessCredentialBoundary,
@@ -227,7 +225,7 @@ class HookCommandExecutor:
                 ).encode("utf-8")
             except (TypeError, ValueError):
                 return _failure(request, scrub, "HOOK_STDIN_INVALID")
-            if len(stdin) > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
+            if len(stdin) > STAGE2_LIMITS.canonical_blob_hard_bytes:
                 return _failure(request, scrub, "HOOK_STDIN_BOUND_EXCEEDED")
             environment = _spawn_environment(scrub, overlay)
             attempt = _HookProcessAttempt()

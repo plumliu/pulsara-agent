@@ -37,6 +37,64 @@ def check_cancelled(cancelled: CancelCheck) -> None:
         raise MediaError("CANCELLED", "Media processing was cancelled.")
 
 
+def exact_seconds(value: int | float | Fraction) -> Fraction:
+    """Read public decimal seconds once; keep native coordinates rational.
+
+    Native PTS never passes through this conversion. Public JSON numbers use
+    their decimal spelling, rather than their incidental binary float error.
+    """
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MediaError("INVALID_RANGE", "Media time must be a finite number.")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise MediaError("INVALID_RANGE", "Media time must be a finite number.")
+    return Fraction(str(value))
+
+
+@dataclass(frozen=True, slots=True)
+class FramePosition:
+    """Native source coordinate, not an allocated media identity."""
+
+    pts: int
+    time_base: Fraction
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.pts, bool)
+            or not isinstance(self.pts, int)
+            or not isinstance(self.time_base, Fraction)
+            or self.time_base <= 0
+        ):
+            raise MediaError(
+                "MEDIA_TIMESTAMP_UNAVAILABLE", "Invalid native frame coordinate."
+            )
+
+    @property
+    def absolute_time(self) -> Fraction:
+        return self.pts * self.time_base
+
+    @classmethod
+    def from_frame(cls, frame: Any) -> FramePosition:
+        if frame.pts is None or frame.time_base is None:
+            raise MediaError(
+                "MEDIA_TIMESTAMP_UNAVAILABLE",
+                "Decoded frame has no presentation timestamp or time base.",
+            )
+        return cls(frame.pts, Fraction(frame.time_base))
+
+
+@dataclass(frozen=True, slots=True)
+class SourceVersion:
+    """Existing stat comparison facts for strict source continuation only."""
+
+    dev: int
+    ino: int
+    size: int
+    modified_ns: int
+    changed_ns: int
+
+
 def _identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     # Transient descriptor integrity, never a durable source/cache identity.
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
@@ -138,6 +196,11 @@ class MediaSource:
     @property
     def size(self) -> int:
         return self._info.st_size
+
+    @property
+    def version(self) -> SourceVersion:
+        self.assert_unchanged()
+        return SourceVersion(*_identity(self._info))
 
     def assert_unchanged(self) -> None:
         if self._closed:
@@ -249,7 +312,7 @@ def validate_range(
 @dataclass(frozen=True, slots=True)
 class MediaInfo:
     duration: float | None
-    timeline_origin: float
+    timeline_origin: Fraction
     video_stream_index: int | None
     audio_stream_index: int | None
     subtitle_stream_indices: tuple[int, ...]
@@ -257,15 +320,20 @@ class MediaInfo:
     height: int | None
     rotation: int = 0
     sample_aspect_ratio: Fraction = Fraction(1)
-    video_end: float | None = None
+    video_end: Fraction | None = None
+    video_start: Fraction | None = None
+
+    def __post_init__(self) -> None:
+        # Direct typed callers may supply decimal seconds; native probing below
+        # supplies Fractions directly and never round-trips through a float.
+        object.__setattr__(self, "timeline_origin", exact_seconds(self.timeline_origin))
+        for name in ("video_end", "video_start"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, exact_seconds(value))
 
     def frame_time(self, frame: Any) -> float:
-        if frame.pts is None or frame.time_base is None:
-            raise MediaError(
-                "MEDIA_TIMESTAMP_UNAVAILABLE",
-                "Decoded frame has no presentation timestamp.",
-            )
-        return float(frame.pts * frame.time_base) - self.timeline_origin
+        return float(FramePosition.from_frame(frame).absolute_time - self.timeline_origin)
 
 
 _TEXT_SUBTITLE_CODECS = frozenset(
@@ -363,14 +431,14 @@ def probe_media(
             if s.type == "subtitle" and s.codec_context.name in _TEXT_SUBTITLE_CODECS
         )
         known_starts = [
-            float(s.start_time * s.time_base)
+            s.start_time * Fraction(s.time_base)
             for s in streams
             if s.type in {"audio", "video"}
             and s.start_time is not None
             and s.time_base is not None
         ]
         if container.start_time is not None:
-            origin = float(container.start_time / av.time_base)
+            origin = Fraction(container.start_time, av.time_base)
         elif known_starts:
             origin = min(known_starts)
         else:
@@ -387,18 +455,18 @@ def probe_media(
                             and packet.pts is not None
                             and packet.time_base is not None
                         ):
-                            first_times[packet.stream.index] = float(
-                                packet.pts * packet.time_base
+                            first_times[packet.stream.index] = (
+                                packet.pts * Fraction(packet.time_base)
                             )
                             if len(first_times) == len(wanted):
                                 break
-            origin = min(first_times.values(), default=0.0)
+            origin = min(first_times.values(), default=Fraction(0))
 
         def stream_end(stream):
             if stream is None or stream.duration is None or stream.time_base is None:
                 return None
             return (
-                float(((stream.start_time or 0) + stream.duration) * stream.time_base)
+                ((stream.start_time or 0) + stream.duration) * Fraction(stream.time_base)
                 - origin
             )
 
@@ -410,7 +478,7 @@ def probe_media(
         duration = (
             max(ends)
             if ends
-            else float(container.duration / av.time_base)
+            else Fraction(container.duration, av.time_base)
             if container.duration is not None
             else None
         )
@@ -418,7 +486,7 @@ def probe_media(
             # FFmpeg's Matroska demuxer exposes Segment Duration as the maximum
             # presentation endpoint; MOV/TS expose elapsed duration instead.
             duration -= origin
-        if duration is not None and (not math.isfinite(duration) or duration <= 0):
+        if duration is not None and duration <= 0:
             duration = None
         sar = (
             Fraction(video.sample_aspect_ratio or 1)
@@ -436,7 +504,7 @@ def probe_media(
                 width, height = height, width
         check_cancelled(cancelled)
         return MediaInfo(
-            duration,
+            float(duration) if duration is not None else None,
             origin,
             video.index if video is not None else None,
             sound.index if sound is not None else None,
@@ -446,6 +514,11 @@ def probe_media(
             rotation,
             sar,
             stream_end(video),
+            (
+                FramePosition.from_frame(first_video).absolute_time - origin
+                if first_video is not None
+                else None
+            ),
         )
 
 

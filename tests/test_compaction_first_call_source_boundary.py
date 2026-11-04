@@ -220,6 +220,7 @@ def _source(read):
         normal_compile_binding=binding,
         canonical_dispatch_read=read.dispatch_read,
         exact_safe_canonical_head=5,
+        latest_assistant_input_through_sequence=1,
         snapshot_carrier=None,
     )
     return source, projection

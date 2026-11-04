@@ -959,7 +959,7 @@ def test_k3_followup_quote_uses_the_exact_installed_wire_owner(api: str) -> None
     result = LLMMessage.tool_result("result", tool_call_id="call:1")
 
     quote = quote_provider_followup_wire_resources(
-        request=request,
+        plan=request.wire_input_plan, call=request.prepared_call.call,
         actual_assistant_message=assistant,
         provider_replay=None,
         bounded_suffix_messages=(result,),
@@ -1027,7 +1027,7 @@ def test_k3_followup_quote_counts_image_dimensions_and_elides_payload_tokens(
             ),
         )
         return quote_provider_followup_wire_resources(
-            request=request,
+            plan=request.wire_input_plan, call=request.prepared_call.call,
             actual_assistant_message=assistant,
             provider_replay=None,
             bounded_suffix_messages=(result, carrier),
@@ -1069,7 +1069,7 @@ def test_k3_followup_quote_uses_native_replay_in_place_of_generic_assistant() ->
     )
 
     quote = quote_provider_followup_wire_resources(
-        request=request,
+        plan=request.wire_input_plan, call=request.prepared_call.call,
         actual_assistant_message=assistant,
         provider_replay=replay,
         bounded_suffix_messages=(),

@@ -91,12 +91,9 @@ from pulsara_agent.conversation_kernel.compaction.planner import (
     enumerate_safe_summary_prefixes,
 )
 from pulsara_agent.conversation_kernel.compaction.prompt import (
-    build_compaction_snapshot_carrier,
     compaction_summary_request,
-    freeze_compaction_summary_output,
 )
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    CompactionContinuationMode,
     provider_input_item_canonical_expanded_bytes,
 )
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
@@ -152,7 +149,6 @@ from pulsara_agent.llm.request import (
 from pulsara_agent.llm.result import TransportUsageReport
 from pulsara_agent.model_input.compiler import (
     StructuredModelInputCompiler,
-    _message_logical_bytes,
 )
 from pulsara_agent.model_input.contracts import (
     ApprovedPlanMaterializationFact,
@@ -219,7 +215,6 @@ from pulsara_agent.conversation_kernel.cold_epoch import CanonicalColdContinuati
 from pulsara_agent.model_input.lowering import (
     decode_tool_result_observation,
     lower_canonical_item,
-    source_variant_message,
 )
 from pulsara_agent.model_input.provider_replay import (
     FrozenDurableProviderReplayManifestCut,
@@ -2385,106 +2380,8 @@ def test_round3_wire_feedback_does_not_rewrite_old_or_current_native_results() -
     assert selected.tool_result_decisions[1].current_turn is True
 
 
-def test_round3_aggregate_variant_and_total_working_set_exact_boundaries() -> None:
-    snapshot = _snapshot(canonical_expanded_bytes=100)
-    request = _prepared_request(snapshot, _sources())
-    candidates = request.sources.candidates
-    expected_working_bytes = (
-        snapshot.canonical_expanded_bytes
-        + sum(
-            variant.utf8_bytes
-            for candidate in candidates
-            for variant in candidate.variants
-        )
-        + sum(
-            _message_logical_bytes(source_variant_message(candidate, variant.text))
-            - variant.utf8_bytes
-            for candidate in candidates
-            if candidate.channel is ContextChannel.RUNTIME_OBSERVATION
-            for variant in candidate.variants
-        )
-        + max(
-            0,
-            sum(candidate.channel is ContextChannel.SYSTEM for candidate in candidates)
-            - 1,
-        )
-        * len("\n\n".encode())
-    )
-    exact = StructuredModelInputLimits(
-        maximum_compile_working_set_bytes=expected_working_bytes
-    )
-    StructuredModelInputCompiler(limits=exact).compile(request)
-    too_small = replace(
-        exact, maximum_compile_working_set_bytes=expected_working_bytes - 1
-    )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler(limits=too_small).compile(request)
-    assert (
-        failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-    )
-
-    call = ProviderToolCall(
-        "call:large",
-        "exec_process",
-        freeze_json({"command": "x" * 256}),
-    )
-    tool_request = FrozenProviderInputItem(
-        FrozenProviderInputItemKind.ASSISTANT_TOOL_REQUEST,
-        "entry:bqaudgk7nim6e3ritkabopkyh4",
-        1,
-        "turn:klmmazz67vfgsfsvg6ceqgdsfu",
-        (LLMTextPart(""),),
-        tool_calls=(call,),
-    )
-    argument_bound = replace(
-        StructuredModelInputLimits(), maximum_compile_working_set_bytes=128
-    )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        StructuredModelInputCompiler(limits=argument_bound).compile(
-            _prepared_request(
-                _snapshot(tool_request, canonical_expanded_bytes=0),
-                _sources(),
-            )
-        )
-    assert (
-        failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-    )
 
 
-def test_snapshot_display_expansion_participates_in_compiler_working_set() -> None:
-    limits = StructuredModelInputLimits(maximum_compile_working_set_bytes=60_000)
-
-    def request_for(summary: str) -> StructuredModelInputCompileRequest:
-        carrier = build_compaction_snapshot_carrier(
-            summary=freeze_compaction_summary_output(
-                summary, maximum_utf8_bytes=65_536
-            ),
-            recent_human_requests=(),
-            continuation_mode=CompactionContinuationMode.AWAIT_NEXT_USER,
-            active_request=None,
-        )
-        # Both canonical bodies fit. Reserved-tag escaping makes only the
-        # second snapshot's actual provider representation exceed this budget.
-        assert len(carrier.body) < limits.maximum_compile_working_set_bytes
-        snapshot = _snapshot(
-            FrozenProviderInputItem(
-                FrozenProviderInputItemKind.CONTEXT_SNAPSHOT,
-                None,
-                1,
-                None,
-                carrier,
-            ),
-            canonical_expanded_bytes=len(carrier.body),
-        )
-        return _prepared_request(snapshot, _sources())
-
-    compiler = StructuredModelInputCompiler(limits=limits)
-    compiler.compile(request_for("x" * 50_000))
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        compiler.compile(request_for("[PULSARA_RETAINED_CONTENT" * 2_000))
-    assert (
-        failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-    )
 
 
 def test_round3_equal_cost_source_floors_progress_to_legal_omission() -> None:
@@ -2646,8 +2543,8 @@ class _SlowIdentityCompiler(StructuredModelInputCompiler):
         return super()._identity_source_contents(request, decisions)
 
 
-def test_round3_4096_item_allocation_does_not_full_reestimate_per_item() -> None:
-    items = tuple(_user("x", sequence=index + 1) for index in range(4_096))
+def test_round3_5000_item_allocation_does_not_full_reestimate_per_item() -> None:
+    items = tuple(_user("x", sequence=index + 1) for index in range(5_000))
     request = _prepared_request(_snapshot(*items), _sources())
     counting = _CountingEstimator(request.compile_binding.estimator)
     request = replace(
@@ -2655,7 +2552,7 @@ def test_round3_4096_item_allocation_does_not_full_reestimate_per_item() -> None
         compile_binding=replace(request.compile_binding, estimator=counting),
     )
     compiled = StructuredModelInputCompiler().compile(request)
-    assert sum(m.content == (LLMTextPart("x"),) for m in compiled.messages) == 4096
+    assert sum(m.content == (LLMTextPart("x"),) for m in compiled.messages) == 5000
     assert counting.calls == 0
 
 
@@ -2770,6 +2667,7 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
     )
     source_view = SimpleNamespace(
         source_view_fingerprint=source_fingerprint,
+        latest_assistant_input_through_sequence=None,
         materialized_messages=lambda: projected.messages,
         materialized_system_prompt=lambda: projected.system_prompt,
         predecessor_epoch_view=installed,
@@ -2799,14 +2697,14 @@ def test_round3_1_overbudget_append_can_be_projected_without_execution_authority
     assert prefix.source_through_sequence < source_view.exact_safe_canonical_head
 
 
-def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work() -> (
+def test_round3_5000_tool_results_produce_complete_candidate_with_bounded_work() -> (
     None
 ):
     items = tuple(
         _tool_result(
             "x" * 1_024, sequence=index + 1, turn_id="turn:uyenyjpuysm57ziiygjzxjhcum"
         )
-        for index in range(4_096)
+        for index in range(5_000)
     )
     request = _prepared_request(
         _snapshot(*items),
@@ -2820,7 +2718,7 @@ def test_round3_4096_tool_results_produce_complete_candidate_with_bounded_work()
         compile_binding=replace(request.compile_binding, estimator=counting),
     )
     candidate = StructuredModelInputCompiler().compile(request)
-    assert len(candidate.tool_result_decisions) == 4_096
+    assert len(candidate.tool_result_decisions) == 5_000
     assert all(
         item.selected_mode is ToolResultProviderRenderMode.FULL
         for item in candidate.tool_result_decisions
@@ -5207,38 +5105,6 @@ def test_round3_1_root_drift_cannot_rebuild_an_installed_epoch() -> None:
     assert owner.current_view(scope) is first_view
 
 
-def test_round3_1_append_quotes_canonical_item_and_snapshot_bounds_before_install() -> (
-    None
-):
-    request = _prepared_request(
-        _snapshot(_user("one", sequence=1), _user("two", sequence=2)),
-        _sources(),
-    )
-
-    item_limited = StructuredModelInputCompiler(
-        limits=replace(
-            StructuredModelInputLimits(),
-            maximum_canonical_input_items=1,
-        )
-    )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        item_limited.compile(request)
-    assert (
-        failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-    )
-
-    byte_limited = StructuredModelInputCompiler(
-        limits=replace(
-            StructuredModelInputLimits(),
-            maximum_canonical_input_bytes=request.canonical_input.canonical_expanded_bytes
-            - 1,
-        )
-    )
-    with pytest.raises(StructuredModelInputCompileError) as failure:
-        byte_limited.compile(request)
-    assert (
-        failure.value.kind is ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-    )
 
 
 def test_round3_pure_compiler_import_graph_has_no_kernel_transport_or_io() -> None:
@@ -5309,7 +5175,3 @@ def test_round3_pure_compiler_import_graph_has_no_kernel_transport_or_io() -> No
     reader_source = (kernel / "reader.py").read_text(encoding="utf-8")
     assert "SELECT e.*" not in reader_source
     assert "SELECT * FROM pulsara_v3.assistant_message_blocks" not in reader_source
-    assert reader_source.count("LIMIT %s") >= 5
-    assert reader_source.index("_preflight_physical_bytes(") < reader_source.index(
-        "_load_entry_payloads("
-    )

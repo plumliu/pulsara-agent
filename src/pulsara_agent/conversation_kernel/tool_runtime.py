@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pulsara_agent.conversation_kernel.prompt_content import bind_prompt_images
+from pulsara_agent.conversation_kernel.prompt_content import bind_prompt_images, MAXIMUM_PROMPT_MULTIPART_BYTES
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
@@ -146,6 +146,7 @@ from pulsara_agent.llm.input import (
     FrozenPromptContent,
     LLMImagePart,
     LLMTextPart,
+    frozen_tool_result_public_text,
 )
 from pulsara_agent.tools.builtins.workspace import WritePathScope
 from pulsara_agent.tools.builtins.media import MEDIA_TOOL_NAMES, MediaTool, validate_media_arguments
@@ -3854,11 +3855,11 @@ class DirectKernelToolPort:
                 and self._image_reference_read_port is None
             ):
                 raise RuntimeError("view_image reference read owner is unavailable")
-            maximum_bytes = min(
-                allowance.canonical_bytes,
-                allowance.logical_bytes,
-                3 * (allowance.wire_bytes // 4),
-            )
+            # Reading one immutable candidate obeys the existing physical image
+            # boundary. A full old context is not a smaller file-read boundary:
+            # the same candidate may fit a dry compaction successor without a
+            # second source read, browser render or image-reference lookup.
+            maximum_bytes = MAXIMUM_PROMPT_MULTIPART_BYTES
             deadline = self._deadlines.deadline(
                 KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
             )
@@ -4047,17 +4048,33 @@ class DirectKernelToolPort:
                 "SVG image rendered at its dimensions or viewBox aspect ratio, without cropping. Scripts and external resources disabled." if svg_source else "Image loaded."
             ), image))
             content = bind_prompt_images(content, workspace_id=invocation_context.workspace_id)
-            increment = allowance.quote_owner.quote(
-                tool_call_id=tool_call_id,
+            accepted_page = allowance.accepts_page(
                 source=source,
                 content=content,
+                tool_name=tool_name,
+                page_budget=page_budget,
             )
             if (
-                increment.canonical_bytes > allowance.canonical_bytes
-                or increment.logical_bytes > allowance.logical_bytes
-                or increment.wire_bytes > allowance.wire_bytes
-                or increment.input_tokens > allowance.input_tokens
+                not accepted_page
+                and invocation_context.refresh_image_resources is not None
+                and page_budget.fits_logical(frozen_tool_result_public_text(content, tool_name=tool_name))
             ):
+                refreshed = await invocation_context.refresh_image_resources()
+                if refreshed is not None:
+                    fresh_allowance, fresh_budget = refreshed
+                    if (
+                        fresh_allowance.tool_call_id != allowance.tool_call_id
+                        or fresh_allowance.call_ordinal != allowance.call_ordinal
+                        or fresh_allowance.executor_binding_fingerprint != allowance.executor_binding_fingerprint
+                        or fresh_budget.tool_call_id != page_budget.tool_call_id
+                    ):
+                        raise RuntimeError("Refreshed image resources do not own this exact invocation")
+                    allowance, page_budget = fresh_allowance, fresh_budget
+                    accepted_page = allowance.accepts_page(
+                        source=source, content=content, tool_name=tool_name,
+                        page_budget=page_budget,
+                    )
+            if not accepted_page:
                 return KernelToolResult(
                     state="APPLICATION_ERROR",
                     content=b'{"error":"IMAGE_RESOURCE_EXCEEDED"}',

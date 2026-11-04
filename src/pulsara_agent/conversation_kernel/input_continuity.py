@@ -203,20 +203,16 @@ class ProcessLocalProviderInputInstallAuthority:
         )
 
 
-MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = 64 << 20
-MAXIMUM_HOST_INSTALLED_BYTES = 320 << 20
-MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES = 640 << 20
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class ProcessLocalAssistantReplayFragmentReservation:
-    """Opaque Host-owned capacity claim for one completed replay fragment."""
+    """Opaque Host-owned settlement claim for one completed replay fragment."""
 
     scope: ProviderInputContinuityScope
     epoch_nonce: str
     epoch_revision: int
     fragment: ProviderAssistantReplayFragment
-    additional_resident_bytes: int
     reservation_nonce: str
     _already_bound: bool
 
@@ -227,20 +223,18 @@ class ProcessLocalAssistantReplayFragmentReservation:
         epoch_nonce: str,
         epoch_revision: int,
         fragment: ProviderAssistantReplayFragment,
-        additional_resident_bytes: int,
         already_bound: bool,
         reservation_nonce: str,
         _seal: object,
     ) -> None:
         if _seal is not _ASSISTANT_REPLAY_RESERVATION_SEAL:
             raise TypeError("assistant replay reservation is Host-owned")
-        if epoch_revision < 1 or additional_resident_bytes < 0 or not reservation_nonce:
+        if epoch_revision < 1 or not reservation_nonce:
             raise ValueError("assistant replay reservation identity is invalid")
         object.__setattr__(self, "scope", scope)
         object.__setattr__(self, "epoch_nonce", epoch_nonce)
         object.__setattr__(self, "epoch_revision", epoch_revision)
         object.__setattr__(self, "fragment", fragment)
-        object.__setattr__(self, "additional_resident_bytes", additional_resident_bytes)
         object.__setattr__(self, "reservation_nonce", reservation_nonce)
         object.__setattr__(self, "_already_bound", already_bound)
 
@@ -1045,50 +1039,6 @@ class HostProviderInputContinuityOwner:
                 raise ProviderInputContinuityConflict(
                     "provider wire plan does not exact-join compiled input"
                 )
-            candidate_bytes = provider_input_logical_bytes(
-                system_prompt=candidate.resulting_compiled_input.system_prompt,
-                tools=candidate.resulting_compiled_input.tools,
-                messages=candidate.resulting_compiled_input.messages,
-            )
-            if candidate_bytes > MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES:
-                raise ProviderInputContinuityConflict(
-                    "provider-input epoch exceeds its logical bound"
-                )
-            candidate_bytes = max(
-                candidate_bytes,
-                candidate.wire_input_plan.quote.final_wire_utf8_bytes,
-            )
-            installed_bytes = sum(
-                _slot_installed_and_reserved_bytes(current)
-                for current in self._slots.values()
-            )
-            current_bytes = 0 if installed is None else _view_resident_bytes(installed)
-            if (
-                installed_bytes - current_bytes + candidate_bytes
-                > MAXIMUM_HOST_INSTALLED_BYTES
-            ):
-                raise ProviderInputContinuityConflict(
-                    "Host provider-input resident bound is exhausted"
-                )
-            prepared_bytes = sum(
-                max(
-                    provider_input_logical_bytes(
-                        system_prompt=current.prepared.resulting_compiled_input.system_prompt,
-                        tools=current.prepared.resulting_compiled_input.tools,
-                        messages=current.prepared.resulting_compiled_input.messages,
-                    ),
-                    current.prepared.wire_input_plan.quote.final_wire_utf8_bytes,
-                )
-                for current in self._slots.values()
-                if current.prepared is not None
-            )
-            if (
-                installed_bytes + prepared_bytes + candidate_bytes
-                > MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES
-            ):
-                raise ProviderInputContinuityConflict(
-                    "Host provider-input aggregate bound is exhausted"
-                )
             transition = candidate.transition
             if candidate._preparation_basis is None:
                 raise ProviderInputContinuityConflict(
@@ -1344,53 +1294,13 @@ class HostProviderInputContinuityOwner:
                         "assistant replay fragment identity conflicts"
                     )
                 already_bound = True
-                additional_bytes = 0
             else:
                 already_bound = False
-                current_view_bytes = _view_resident_bytes(view)
-                new_view_bytes = _view_resident_bytes(
-                    view,
-                    additional_fragment=fragment,
-                )
-                if new_view_bytes > MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES:
-                    raise ProviderInputContinuityConflict(
-                        "assistant replay fragment exhausts the epoch byte bound"
-                    )
-                additional_bytes = new_view_bytes - current_view_bytes
-                host_bytes = sum(
-                    _slot_installed_and_reserved_bytes(current)
-                    for current in self._slots.values()
-                )
-                if host_bytes + additional_bytes > MAXIMUM_HOST_INSTALLED_BYTES:
-                    raise ProviderInputContinuityConflict(
-                        "assistant replay fragment exhausts the Host byte bound"
-                    )
-                prepared_bytes = sum(
-                    max(
-                        provider_input_logical_bytes(
-                            system_prompt=(
-                                current.prepared.resulting_compiled_input.system_prompt
-                            ),
-                            tools=current.prepared.resulting_compiled_input.tools,
-                            messages=current.prepared.resulting_compiled_input.messages,
-                        ),
-                        current.prepared.wire_input_plan.quote.final_wire_utf8_bytes,
-                    )
-                    for current in self._slots.values()
-                    if current.prepared is not None
-                )
-                if host_bytes + additional_bytes + prepared_bytes > (
-                    MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES
-                ):
-                    raise ProviderInputContinuityConflict(
-                        "assistant replay fragment exhausts the Host aggregate bound"
-                    )
             reservation = ProcessLocalAssistantReplayFragmentReservation(
                 scope=scope,
                 epoch_nonce=epoch_nonce,
                 epoch_revision=epoch_revision,
                 fragment=fragment,
-                additional_resident_bytes=additional_bytes,
                 already_bound=already_bound,
                 reservation_nonce=random_id("replay-reservation"),
                 _seal=_ASSISTANT_REPLAY_RESERVATION_SEAL,
@@ -2123,29 +2033,6 @@ class HostProviderInputContinuityOwner:
         )
 
 
-def _view_resident_bytes(
-    view: FrozenProviderInputEpochView,
-    *,
-    additional_fragment: ProviderAssistantReplayFragment | None = None,
-) -> int:
-    materialized_fragments = {
-        item.replay_fragment_fingerprint for item in view.wire_input_plan.replacements
-    }
-    fragments = view.assistant_replay_fragments + (
-        () if additional_fragment is None else (additional_fragment,)
-    )
-    unmaterialized = sum(
-        item.logical_utf8_bytes
-        for item in fragments
-        if item.fragment_fingerprint not in materialized_fragments
-    )
-    return (
-        max(
-            view.logical_bytes,
-            view.wire_input_plan.quote.final_wire_utf8_bytes,
-        )
-        + unmaterialized
-    )
 
 
 def _planning_input_from_predecessor(
@@ -2189,23 +2076,10 @@ def _planning_input_from_predecessor(
     )
 
 
-def _slot_installed_and_reserved_bytes(slot: _Slot) -> int:
-    installed = (
-        0 if slot.installed is None else _view_resident_bytes(slot.installed.view)
-    )
-    reserved = (
-        0
-        if slot.replay_reservation is None
-        else slot.replay_reservation.additional_resident_bytes
-    )
-    return installed + reserved
 
 
 __all__ = [
     "HostProviderInputContinuityOwner",
-    "MAXIMUM_HOST_INSTALLED_AND_PREPARED_BYTES",
-    "MAXIMUM_HOST_INSTALLED_BYTES",
-    "MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES",
     "ProviderInputContinuityConflict",
     "ProcessLocalAssistantReplayFragmentReservation",
     "ProcessLocalProviderInputInstallAuthority",

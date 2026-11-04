@@ -55,7 +55,6 @@ FULL_HISTORY_CONTEXT_BASE_IDENTITY = context_fingerprint(
     "pulsara:context-base-semantic-identity:v1",
     {"kind": "FULL_HISTORY", "lowering": PROVIDER_MESSAGE_LOWERING_CONTRACT},
 )
-MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES = 64 << 20
 _EMPTY_SCOPE_COLD_START_SEAL = object()
 _EXPLICIT_MODEL_SWITCH_AUTHORITY_SEAL = object()
 _DIRECT_SWITCH_ADMISSION_SEAL = object()
@@ -364,8 +363,6 @@ class FrozenProviderInputEpochView:
             system_prompt=self.system_prompt, tools=self.tools, messages=self.messages
         ):
             raise ValueError("provider-input epoch logical size mismatch")
-        if self.logical_bytes > MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES:
-            raise ValueError("provider-input epoch exceeds its hard bound")
         expected = provider_input_prefix_fingerprint(
             system_prompt=self.system_prompt, tools=self.tools, messages=self.messages
         )
@@ -773,7 +770,6 @@ __all__ = [
     "FrozenProviderInputEpochView",
     "InstalledEpochAppend",
     "InstalledEpochRuntimeCohort",
-    "MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES",
     "NewTriggerAnchor",
     "NoNewTriggerAnchor",
     "PROVIDER_MESSAGE_LOWERING_CONTRACT",

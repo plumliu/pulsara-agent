@@ -29,9 +29,6 @@ from pulsara_agent.llm.input import (
     frozen_prompt_content_canonical_value,
     llm_content_logical_bytes,
 )
-from pulsara_agent.model_input.contracts import (
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-)
 from pulsara_agent.primitives.context import canonical_json_bytes
 from pulsara_agent.identity import derive_id, require_id
 
@@ -40,7 +37,7 @@ PROMPT_BODY_SCHEMA = "pulsara.prompt/v2"
 PROMPT_BODY_MEDIA_TYPE = "application/vnd.pulsara.prompt+json"
 PROMPT_BODY_CODEC = "utf-8"
 PROMPT_IMAGE_BLOB_CODEC = "binary"
-MAXIMUM_PROMPT_MULTIPART_BYTES = MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
+MAXIMUM_PROMPT_MULTIPART_BYTES = 16 << 20
 
 _SHA256_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 

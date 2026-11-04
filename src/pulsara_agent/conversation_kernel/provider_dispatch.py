@@ -35,7 +35,6 @@ from pulsara_agent.conversation_kernel.context_sources import (
 from pulsara_agent.conversation_kernel.compaction.contracts import (
     FrozenCompactionCanonicalRead,
     FrozenCompactionHeadroomPreflight,
-    resolved_compaction_headroom_bounds,
 )
 from pulsara_agent.conversation_kernel.compaction.runtime import (
     HostCompactionRuntimeOwner,
@@ -152,7 +151,6 @@ from pulsara_agent.conversation_kernel.safe_point import (
 )
 from pulsara_agent.conversation_kernel.steer import (
     MemorySourceInvalidationReservation,
-    MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES,
     AcceptedSteerDispatchBatch,
     PendingPromptSteerFact,
     PreparedActiveRootInputAdmission,
@@ -172,8 +170,6 @@ from pulsara_agent.conversation_kernel.steer_consumption import (
 from pulsara_agent.model_input.compiler import StructuredModelInputCompiler
 from pulsara_agent.hooks.context import HookContextReservation
 from pulsara_agent.model_input.contracts import (
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
     CapabilityActivationSubjectKind,
     CanonicalInputOriginKind,
     CollectedContextSources,
@@ -461,33 +457,6 @@ class ProviderWireMeasurementCandidate(Protocol):
     def tool_choice(self) -> str | None: ...
 
 
-def _provider_candidate_meets_input_resource_headroom(
-    candidate: ProviderWireMeasurementCandidate,
-) -> bool:
-    """Apply D2's input C/L/N headroom to an executable candidate only."""
-
-    if not isinstance(candidate, PreparedProviderWireCandidate) or (
-        candidate.append_result is None
-    ):
-        # Compaction summary/dry-run inputs are not canonical successor opens.
-        return True
-    canonical = candidate.canonical_read.compile_snapshot.canonical_input
-    semantic = candidate.semantic_input
-    bounds = resolved_compaction_headroom_bounds()
-    logical_bytes = provider_input_logical_bytes(
-        system_prompt=semantic.system_prompt,
-        tools=semantic.tools,
-        messages=semantic.messages,
-    )
-    return (
-        len(canonical.items) + bounds.reserved_canonical_items
-        <= bounds.maximum_canonical_items
-        and canonical.canonical_expanded_bytes
-        + bounds.reserved_canonical_expanded_bytes
-        <= bounds.maximum_canonical_expanded_bytes
-        and logical_bytes + bounds.reserved_epoch_logical_bytes
-        <= bounds.maximum_epoch_logical_bytes
-    )
 
 
 def _remaining_invalidation_input_tokens(
@@ -561,7 +530,7 @@ class PreparedWireMeasurementDecision:
         admitted = (
             self.quote.budget_input_tokens <= self.quote.effective_input_budget_tokens
             and self.quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
-            and _provider_candidate_meets_input_resource_headroom(candidate)
+
         )
         if admitted != (self.wire_input_plan is not None):
             raise ValueError("wire measurement decision has invalid admission union")
@@ -3422,31 +3391,6 @@ class ProviderDispatchCoordinator:
                 # exhaust the planning bound before reaching a valid shorter
                 # prefix.  Cooperative deadline checks still bound the at-most
                 # 128 compile trials.
-                maximum_suffix_items = max(
-                    0,
-                    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS - len(base_input.items),
-                )
-                maximum_suffix_bytes = max(
-                    0,
-                    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
-                    - base_input.canonical_expanded_bytes,
-                )
-                eligible_count = 0
-                eligible_bytes = 0
-                for _fact, prompt in hydrated[:maximum_suffix_items]:
-                    prompt_bytes = prompt.resource_quote.canonical_expanded_bytes
-                    if eligible_bytes + prompt_bytes > maximum_suffix_bytes:
-                        break
-                    eligible_bytes += prompt_bytes
-                    eligible_count += 1
-                planning_work_bytes = (
-                    base_input.canonical_expanded_bytes + eligible_bytes
-                )
-                if planning_work_bytes > (MAXIMUM_STEER_PLANNING_CANONICAL_WORK_BYTES):
-                    raise StructuredModelInputCompileError(
-                        ModelInputCompileFailureKind.COMPILE_WORKING_SET_EXCEEDED
-                    )
-                hydrated = all_hydrated[:eligible_count]
                 for count in range(len(hydrated), 0, -1):
                     if monotonic() >= deadline:
                         raise StructuredModelInputCompileError(
@@ -3674,16 +3618,6 @@ class ProviderDispatchCoordinator:
                         )
                         if item is not None
                     )
-                    if provider_input_logical_bytes(
-                        system_prompt=append.compiled_input.system_prompt,
-                        tools=append.compiled_input.tools,
-                        messages=append.compiled_input.messages,
-                    ) + sum(
-                        item.invalidation_epoch_bytes_ceiling for item in reservations
-                    ) > (64 << 20):
-                        if planning_basis is None:
-                            self._continuity.abort_planning(planning)
-                        continue
                     quote = build_steer_suffix_quote(
                         candidates=candidates,
                         prospective_snapshot_hydrated_bytes=(
@@ -4686,7 +4620,7 @@ class ProviderDispatchCoordinator:
             admitted = (
                 quote.budget_input_tokens <= quote.effective_input_budget_tokens
                 and quote.final_wire_utf8_bytes <= MAXIMUM_PROVIDER_WIRE_INPUT_BYTES
-                and _provider_candidate_meets_input_resource_headroom(candidate)
+
             )
             consumed, measurement = measurement, None
             if admitted:

@@ -16,7 +16,6 @@ import pytest
 
 from pulsara_agent.conversation_kernel.host import KernelHostCore
 from pulsara_agent.conversation_kernel.compaction.contracts import (
-    ResolvedCompactionHeadroomBounds,
     ResolvedCompactionPolicy,
 )
 from pulsara_agent.conversation_kernel.direct_model import KernelModelExecutionRequest
@@ -44,7 +43,6 @@ from pulsara_agent.llm.input import (
 from pulsara_agent.llm.estimator import PulsaraHeuristicTokenEstimatorV3
 from pulsara_agent.model_input.contracts import CapabilityActivationSubjectKind
 from pulsara_agent.model_input.lowering import image_reference_part
-from pulsara_agent.primitives.context import context_fingerprint
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
 
@@ -693,29 +691,6 @@ def test_k3_queued_root_resource_failure_interrupts_consumed_request(
     image_output = BytesIO()
     Image.effect_noise((256, 256), 100).convert("RGB").save(image_output, "PNG")
     image_bytes = image_output.getvalue()
-    maximum_canonical_expanded_bytes = (4 << 20) + 1_024
-    values = {
-        "maximum_canonical_items": 4_096,
-        "maximum_canonical_expanded_bytes": maximum_canonical_expanded_bytes,
-        "maximum_epoch_logical_bytes": 64 << 20,
-        "reserved_canonical_items": 296,
-        "reserved_canonical_expanded_bytes": 4 << 20,
-        "reserved_epoch_logical_bytes": 4 << 20,
-    }
-    constrained_bounds = ResolvedCompactionHeadroomBounds(
-        **values,
-        resolved_hard_bound_set_fingerprint=context_fingerprint(
-            "pulsara.compaction-resource-headroom.v3-expanded-content",
-            {"role": "minimum_service_headroom", **values},
-        ),
-    )
-    default_bounds = provider_dispatch.resolved_compaction_headroom_bounds()
-    active_bounds = [default_bounds]
-    monkeypatch.setattr(
-        provider_dispatch,
-        "resolved_compaction_headroom_bounds",
-        lambda: active_bounds[0],
-    )
 
     async def scenario() -> tuple[str, str]:
         core = KernelHostCore.production(model_runtime=runtime)
@@ -754,10 +729,9 @@ def test_k3_queued_root_resource_failure_interrupts_consumed_request(
             assert queued.prompt_delivery is not None
             queue_item_id = queued.prompt_delivery.queue_item_id
 
-            # This exact multipart exceeds C even as the only user input after G.
-            # Compaction is unavailable. The request still starts canonically,
-            # then settles the same consumed request before provider open.
-            active_bounds[0] = constrained_bounds
+            # The actual serialized request exceeds this test-only transport
+            # allocation. The consumed request must settle before provider open.
+            monkeypatch.setattr(provider_dispatch, "MAXIMUM_PROVIDER_WIRE_INPUT_BYTES", 1)
             session._compaction.policy = ResolvedCompactionPolicy(  # noqa: SLF001
                 enabled=False,
                 automatic_enabled=False,

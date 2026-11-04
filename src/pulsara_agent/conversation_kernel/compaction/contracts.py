@@ -29,8 +29,6 @@ from pulsara_agent.model_input.contracts import (
     FrozenProviderInputItem,
     FrozenRetainedHistoricalRequest,
     LateToolOutcomeObservation,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
     ModelInputCompileBinding,
     ModelInputScopeKind,
     ProviderToolResultClosure,
@@ -42,7 +40,6 @@ from pulsara_agent.model_input.contracts import (
 )
 from pulsara_agent.model_input.continuity import (
     FrozenProviderInputEpochView,
-    MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
     provider_input_prefix_fingerprint,
 )
 from pulsara_agent.model_input.provider_replay import (
@@ -80,9 +77,6 @@ COMPACTION_SUMMARY_PROMPT_CONTRACT = (
 COMPACTION_MODEL_CONTRACT = "pulsara.primary-model-compaction.v1"
 CONTEXT_SNAPSHOT_MEDIA_TYPE = "application/vnd.pulsara.context-snapshot+json"
 CONTEXT_SNAPSHOT_CODEC = "utf-8"
-CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES = 4 << 20
-EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES = 4 << 20
-CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS = 296
 
 
 def compaction_summary_message_prefix_fingerprint(
@@ -298,78 +292,8 @@ FrozenCompactionProviderProjection = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ResolvedCompactionHeadroomBounds:
-    """Frozen hard limits and D2 minimum service headroom G."""
-
-    maximum_canonical_items: int
-    maximum_canonical_expanded_bytes: int
-    maximum_epoch_logical_bytes: int
-    reserved_canonical_items: int
-    reserved_canonical_expanded_bytes: int
-    reserved_epoch_logical_bytes: int
-    resolved_hard_bound_set_fingerprint: str
-
-    def __post_init__(self) -> None:
-        if (
-            not 0 < self.reserved_canonical_items < self.maximum_canonical_items
-            or not 0
-            < self.reserved_canonical_expanded_bytes
-            < self.maximum_canonical_expanded_bytes
-            or not 0
-            < self.reserved_epoch_logical_bytes
-            < self.maximum_epoch_logical_bytes
-        ):
-            raise ValueError("compaction headroom bounds are invalid")
-        values: dict[str, object] = {
-            "role": "minimum_service_headroom",
-            "maximum_canonical_items": self.maximum_canonical_items,
-            "maximum_canonical_expanded_bytes": self.maximum_canonical_expanded_bytes,
-            "maximum_epoch_logical_bytes": (self.maximum_epoch_logical_bytes),
-            "reserved_canonical_items": self.reserved_canonical_items,
-            "reserved_canonical_expanded_bytes": self.reserved_canonical_expanded_bytes,
-            "reserved_epoch_logical_bytes": (self.reserved_epoch_logical_bytes),
-        }
-        if self.resolved_hard_bound_set_fingerprint != context_fingerprint(
-            "pulsara.compaction-resource-headroom.v3-expanded-content", values
-        ):
-            raise ValueError("compaction headroom fingerprint mismatch")
-
-    @property
-    def soft_canonical_item_limit(self) -> int:
-        return self.maximum_canonical_items - self.reserved_canonical_items
-
-    @property
-    def soft_canonical_expanded_byte_limit(self) -> int:
-        return (
-            self.maximum_canonical_expanded_bytes
-            - self.reserved_canonical_expanded_bytes
-        )
-
-    @property
-    def soft_epoch_logical_byte_limit(self) -> int:
-        return self.maximum_epoch_logical_bytes - self.reserved_epoch_logical_bytes
 
 
-def resolved_compaction_headroom_bounds() -> ResolvedCompactionHeadroomBounds:
-    # These are D2's minimum service headroom G values.  They deliberately do
-    # not claim to bound a whole assistant/tool execution window; K3 must quote
-    # that actual batch before assistant settlement and tool effects.
-    values = {
-        "maximum_canonical_items": MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
-        "maximum_canonical_expanded_bytes": MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-        "maximum_epoch_logical_bytes": MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
-        "reserved_canonical_items": CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS,
-        "reserved_canonical_expanded_bytes": CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES,
-        "reserved_epoch_logical_bytes": EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES,
-    }
-    return ResolvedCompactionHeadroomBounds(
-        **values,
-        resolved_hard_bound_set_fingerprint=context_fingerprint(
-            "pulsara.compaction-resource-headroom.v3-expanded-content",
-            {"role": "minimum_service_headroom", **values},
-        ),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,7 +301,6 @@ class CompactionPhysicalWorkingSetReport:
     selected_item_count: int
     selected_canonical_expanded_bytes: int
     continuity_epoch_logical_bytes: int
-    resolved_hard_bound_set_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -403,7 +326,6 @@ class FrozenCompactionHeadroomPreflight:
     provider_input_through_sequence: int
     selected_item_count: int
     selected_canonical_expanded_bytes: int
-    resolved_hard_bound_set_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -438,7 +360,6 @@ def freeze_compaction_headroom_preflight(
     selected_item_count: int,
     selected_canonical_expanded_bytes: int,
 ) -> FrozenCompactionHeadroomPreflight:
-    bounds = resolved_compaction_headroom_bounds()
     return FrozenCompactionHeadroomPreflight(
         session_id=session_id,
         turn_id=turn_id,
@@ -450,9 +371,6 @@ def freeze_compaction_headroom_preflight(
         provider_input_through_sequence=provider_input_through_sequence,
         selected_item_count=selected_item_count,
         selected_canonical_expanded_bytes=selected_canonical_expanded_bytes,
-        resolved_hard_bound_set_fingerprint=(
-            bounds.resolved_hard_bound_set_fingerprint
-        ),
     )
 
 
@@ -499,7 +417,6 @@ def _compaction_working_set_identity_digest(
             "items": report.selected_item_count,
             "canonical_expanded_bytes": report.selected_canonical_expanded_bytes,
             "epoch_bytes": report.continuity_epoch_logical_bytes,
-            "resolved_hard_bounds": report.resolved_hard_bound_set_fingerprint,
         },
     )
 
@@ -514,6 +431,7 @@ class FrozenCompactionSourceView:
     provider_wire_quote: FrozenProviderWireInputQuote
     physical_working_set: CompactionPhysicalWorkingSetReport
     source_view_fingerprint: str
+    latest_assistant_input_through_sequence: int | None = None
 
     def __post_init__(self) -> None:
         compatible = (
@@ -711,6 +629,7 @@ class FrozenCompactionCanonicalRead:
     source_interruption: TurnInterruptionNotice | None = None
     imported_interruptions: tuple[TurnInterruptionNotice, ...] = ()
     executed_history_interruptions: tuple[TurnInterruptionNotice, ...] = ()
+    latest_assistant_input_through_sequence: int | None = None
 
     def __post_init__(self) -> None:
         if self.source_interruption is not None and (
@@ -739,6 +658,12 @@ class FrozenCompactionCanonicalRead:
         ):
             raise ValueError("compaction executed history interruption is out of cut")
         identity = self.dispatch_read.compile_snapshot.canonical_input.identity
+        consumed = self.latest_assistant_input_through_sequence
+        if consumed is not None and (
+            type(consumed) is not int
+            or not 0 <= consumed <= identity.provider_input_through_sequence
+        ):
+            raise ValueError("accepted assistant input cut is outside the compaction read")
         if (
             identity.session_id != self.scope.session_id
             or identity.turn_id != self.scope.turn_id
@@ -795,6 +720,7 @@ def freeze_compaction_canonical_read(
     source_interruption: TurnInterruptionNotice | None = None,
     imported_interruptions: tuple[TurnInterruptionNotice, ...] = (),
     executed_history_interruptions: tuple[TurnInterruptionNotice, ...] = (),
+    latest_assistant_input_through_sequence: int | None = None,
 ) -> FrozenCompactionCanonicalRead:
     return FrozenCompactionCanonicalRead(
         scope=scope,
@@ -805,6 +731,7 @@ def freeze_compaction_canonical_read(
         source_interruption=source_interruption,
         imported_interruptions=imported_interruptions,
         executed_history_interruptions=executed_history_interruptions,
+        latest_assistant_input_through_sequence=latest_assistant_input_through_sequence,
     )
 
 
@@ -1339,8 +1266,6 @@ class CompactionOutcome:
 
 
 __all__ = [
-    "CANONICAL_MINIMUM_SERVICE_HEADROOM_BYTES",
-    "CANONICAL_MINIMUM_SERVICE_HEADROOM_ITEMS",
     "COMPACTION_CANONICAL_RANGE_CONTRACT",
     "COMPACTION_MODEL_CONTRACT",
     "COMPACTION_SNAPSHOT_COMPILER_CONTRACT",
@@ -1348,7 +1273,6 @@ __all__ = [
     "COMPACTION_SUMMARY_PROMPT_CONTRACT",
     "CONTEXT_SNAPSHOT_CODEC",
     "CONTEXT_SNAPSHOT_MEDIA_TYPE",
-    "EPOCH_MINIMUM_SERVICE_HEADROOM_BYTES",
     "ColdRebuildCompactionProjection",
     "CompactionAdoptionConfirmation",
     "CompactionAttemptPhase",
@@ -1383,7 +1307,6 @@ __all__ = [
     "ProtectedTailSelectionFact",
     "ProviderPrefixCutProof",
     "RecentHumanMessageProof",
-    "ResolvedCompactionHeadroomBounds",
     "ResolvedCompactionPolicy",
     "TurnContextBindingRevisionDraft",
     "FrozenCompactionSummary",
@@ -1397,5 +1320,4 @@ __all__ = [
     "manual_compaction_command_semantic_digest",
     "manual_compaction_snapshot_id",
     "provider_input_item_canonical_expanded_bytes",
-    "resolved_compaction_headroom_bounds",
 ]

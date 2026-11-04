@@ -7,7 +7,6 @@ from hashlib import sha256
 from time import monotonic
 
 import pytest
-from psycopg.rows import dict_row
 
 from pulsara_agent.llm.input import FrozenPromptContent
 
@@ -41,7 +40,6 @@ from pulsara_agent.conversation_kernel.reader import (
     CanonicalProviderInputReader,
     ProviderInputItemKind,
     ProviderToolResultClosureKind,
-    _RemainingReadBudget,
 )
 from pulsara_agent.conversation_kernel.query import CanonicalConversationQuery
 from pulsara_agent.conversation_kernel.execution_watchdogs import (
@@ -50,7 +48,6 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
 from pulsara_agent.conversation_kernel.repository import (
     AssistantTextBlock,
     AssistantToolCallBlock,
-    ConversationKernelConflict,
     ConversationKernelRepository,
     build_prepared_tool_result_acceptance,
 )
@@ -387,44 +384,6 @@ def test_provider_reader_fails_closed_on_canonical_blob_and_utf8_integrity() -> 
     assert invalid.value.kind is CanonicalProviderContinuityFailureKind.INVALID_UTF8
 
 
-def test_provider_blob_hydration_consumes_one_monotonic_remaining_budget() -> None:
-    from hashlib import sha256
-
-    class CountingBlobReader:
-        calls = 0
-
-        def read_exact(self, **kwargs):
-            del kwargs
-            self.calls += 1
-            return b"data"
-
-    blob_reader = CountingBlobReader()
-    reader = object.__new__(CanonicalProviderInputReader)
-    reader._blob_reader = blob_reader  # type: ignore[attr-defined]
-    row = {
-        "inline_content": None,
-        "blob_id": "blob:test",
-        "content_size": 4,
-        "content_digest": "sha256:" + sha256(b"data").hexdigest(),
-    }
-    budget = _RemainingReadBudget(4)
-    assert (
-        reader._read_content(
-            row,
-            deadline_monotonic=monotonic() + 1,
-            remaining_bytes=budget,
-        )
-        == b"data"
-    )
-    with pytest.raises(
-        ConversationKernelConflict, match="physical byte bound exceeded"
-    ):
-        reader._read_content(
-            row,
-            deadline_monotonic=monotonic() + 1,
-            remaining_bytes=budget,
-        )
-    assert blob_reader.calls == 1
 
 
 def test_reader_uses_exact_scope_and_lowers_late_result_without_replay(
@@ -747,154 +706,11 @@ def test_reader_preserves_saved_output_page_full_requirement_from_exact_rows(
     )
 
 
-def test_reader_rejects_declared_bytes_before_loading_any_payload(
-    stage2_migrated_postgres_database,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    lease = repository.acquire_host_writer(
-        intent="NEW",
-        session_id=_id("session"),
-        workspace_id=_id("workspace"),
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    turn_id = _start_turn(repository, lease, b"five!")
-    reader = CanonicalProviderInputReader(provider, maximum_canonical_bytes=4)
-
-    def forbidden_payload_load(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("payload loaded before metadata size admission")
-
-    monkeypatch.setattr(reader, "_load_entry_payloads", forbidden_payload_load)
-    with pytest.raises(
-        ConversationKernelConflict, match="physical byte bound exceeded"
-    ):
-        reader.read_frozen_snapshot(
-            repository.prepare_provider_input_cut(
-                lease.guard,
-                turn_id=turn_id,
-                deadline_monotonic=monotonic() + 30,
-            ),
-            deadline_monotonic=monotonic() + 30,
-        )
 
 
-def test_reader_preflights_plan_continuation_before_loading_any_payload(
-    stage2_migrated_postgres_database,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.test_round4_plan_postgres import (
-        _commit_plan_batch,
-    )
-
-    provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
-    repository = ConversationKernelRepository(provider)
-    workspace_id = _id("workspace")
-    lease = repository.acquire_host_writer(
-        intent="NEW",
-        session_id=_id("session"),
-        workspace_id=workspace_id,
-        writer_owner_id=_id("host"),
-        lease_seconds=30,
-        deadline_monotonic=monotonic() + 30,
-    )
-    origin_turn_id = _start_turn(repository, lease, b"enter plan")
-    prepared = _commit_plan_batch(
-        repository,
-        lease,
-        workspace_id=workspace_id,
-        turn_id=origin_turn_id,
-        selected_tool_name="enter_plan",
-        selected_arguments={"reason": "preflight plan continuation"},
-        workflow_id=_id("plan"),
-        expected_workflow_revision=None,
-    )
-    accepted = repository.accept_plan_tool_batch(
-        lease.guard,
-        candidate=prepared.candidate,
-        deadline_monotonic=monotonic() + 30,
-    )
-    assert accepted.continuation_turn_id is not None
-    assert accepted.continuation_entry_id is not None
-    cut = repository.prepare_provider_input_cut(
-        lease.guard,
-        turn_id=accepted.continuation_turn_id,
-        deadline_monotonic=monotonic() + 30,
-    )
-
-    probe = CanonicalProviderInputReader(provider)
-    with provider.connection(
-        lane=PostgresConnectionLane.INSPECTOR,
-        row_factory=dict_row,
-        deadline_monotonic=monotonic() + 30,
-    ) as connection:
-        entries = tuple(
-            connection.execute(
-                """SELECT id, entry_kind, content_size
-                   FROM pulsara_v3.transcript_entries
-                   WHERE session_id = %s
-                     AND entry_sequence > 0
-                     AND entry_sequence <= %s
-                   ORDER BY entry_sequence""",
-                (lease.guard.session_id, cut.provider_input_through_sequence),
-            ).fetchall()
-        )
-        blocks = probe._load_block_metadata(  # noqa: SLF001
-            connection,
-            lease.guard.session_id,
-            tuple(str(row["id"]) for row in entries),
-        )
-    plan_rows = tuple(
-        row for row in entries if str(row["entry_kind"]) == "PLAN_CONTINUATION"
-    )
-    assert tuple(str(row["id"]) for row in plan_rows) == (
-        accepted.continuation_entry_id,
-    )
-    bytes_without_plan = sum(
-        int(row["content_size"])
-        for row in entries
-        if row["entry_kind"]
-        in (
-            "USER_MESSAGE",
-            "USER_STEER",
-            "TERMINAL_OBSERVATION",
-            "USER_CONTROL_FEEDBACK",
-            "INTER_AGENT_MESSAGE",
-            "TOOL_RESULT",
-        )
-    ) + sum(
-        (
-            max(int(row["content_size"]), int(row["inline_content_size"]))
-            if row["block_kind"] in ("TEXT", "DATA")
-            else int(row["tool_arguments_size"])
-        )
-        for row in blocks
-    )
-    assert bytes_without_plan > 0
-    assert int(plan_rows[0]["content_size"]) > 0
-    reader = CanonicalProviderInputReader(
-        provider,
-        maximum_canonical_bytes=bytes_without_plan,
-    )
-
-    def forbidden_payload_load(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("plan payload loaded before metadata size admission")
-
-    monkeypatch.setattr(reader, "_load_entry_payloads", forbidden_payload_load)
-    with pytest.raises(
-        ConversationKernelConflict, match="physical byte bound exceeded"
-    ):
-        reader.read_frozen_snapshot(
-            cut,
-            deadline_monotonic=monotonic() + 30,
-        )
 
 
-def test_reader_has_an_independent_bounded_assistant_block_query(
+def test_reader_preserves_assistant_blocks_beyond_old_history_item_limit(
     stage2_migrated_postgres_database,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
@@ -907,7 +723,7 @@ def test_reader_has_an_independent_bounded_assistant_block_query(
         lease_seconds=30,
         deadline_monotonic=monotonic() + 30,
     )
-    turn_id = _start_turn(repository, lease, b"bounded blocks")
+    turn_id = _start_turn(repository, lease, b"all blocks")
     cut = repository.prepare_provider_input_cut(
         lease.guard,
         turn_id=turn_id,
@@ -923,22 +739,25 @@ def test_reader_has_an_independent_bounded_assistant_block_query(
                 block_id=_id("block"),
                 text=InlineContent.from_bytes(f"part-{index}".encode()),
             )
-            for index in range(3)
+            for index in range(4_100)
         ),
         occurred_at=datetime.now(timezone.utc),
         actor_id="model:test",
         deadline_monotonic=monotonic() + 30,
     )
-    reader = CanonicalProviderInputReader(provider, maximum_items=2)
-    with pytest.raises(ConversationKernelConflict, match="block bound exceeded"):
-        reader.read_frozen_snapshot(
-            repository.prepare_provider_input_cut(
-                lease.guard,
-                turn_id=turn_id,
-                deadline_monotonic=monotonic() + 30,
-            ),
+    reader = CanonicalProviderInputReader(provider)
+    snapshot = reader.read_frozen_snapshot(
+        repository.prepare_provider_input_cut(
+            lease.guard, turn_id=turn_id,
             deadline_monotonic=monotonic() + 30,
-        )
+        ),
+        deadline_monotonic=monotonic() + 30,
+    )
+    from pulsara_agent.llm.input import LLMTextPart
+
+    parts = [part.text for item in snapshot.items for part in item.content
+             if isinstance(part, LLMTextPart) and part.text.startswith("part-")]
+    assert parts == ["".join(f"part-{index}" for index in range(4_100))]
 
 
 @pytest.mark.parametrize("include_text", [False, True])
@@ -999,7 +818,7 @@ def test_round3_reader_uses_ordered_semantic_blocks_not_parent_manifest(
         deadline_monotonic=monotonic() + 30,
     )
     materialized = CanonicalProviderInputReader(
-        provider, maximum_canonical_bytes=4_096
+        provider
     ).read_frozen_snapshot(
         repository.prepare_provider_input_cut(
             lease.guard,

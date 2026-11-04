@@ -8,6 +8,12 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal"); vi.restoreAllMocks(); });
 
+function savedModelCards() {
+  const section = screen.getByRole('heading', { name: '模型配置', exact: true }).closest('section');
+  expect(section).not.toBeNull();
+  return within(section!).getAllByRole('article');
+}
+
 function modelConfiguration(index: number): ModelConfigurationSummary {
   return {
     id: `connection-${index}`, source: 'user_declared', route_id: 'test', route_name: 'Test',
@@ -118,7 +124,7 @@ it.each([{ modalities: null }, { modalities: ['text', 'image', 'audio', 'future-
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(updateModel).toHaveBeenCalledExactlyOnceWith('connection-1', { ...detail.configuration, configuration_name: 'Edited' });
   expect(addModel).not.toHaveBeenCalled();
-  expect(screen.getAllByRole('article')).toHaveLength(1);
+  expect(savedModelCards()).toHaveLength(1);
   expect(screen.getByText('Edited · Model 1')).toBeTruthy();
 });
 
@@ -197,7 +203,7 @@ it('paginates all saved models in compact summaries and clears pending deletion 
   const { deleteModel } = setup(Array.from({ length: 11 }, (_, index) => modelConfiguration(index + 1)));
   fireEvent.click(screen.getByRole('button', { name: '模型' }));
   expect(await screen.findByText('Test · Model 1')).toBeTruthy();
-  expect(screen.getAllByRole('article')).toHaveLength(5);
+  expect(savedModelCards()).toHaveLength(5);
   expect(screen.getByText('1–5 / 共 11 项')).toBeTruthy();
   expect(screen.queryByText(/输入：|推理请求：/)).toBeNull();
   expect(screen.getByRole('button', { name: '上一页' })).toHaveProperty('disabled', true);
@@ -209,7 +215,7 @@ it('paginates all saved models in compact summaries and clears pending deletion 
   for (let index = 6; index <= 10; index += 1) expect(screen.getByText(`Test · Model ${index}`)).toBeTruthy();
   fireEvent.click(screen.getByRole('button', { name: '下一页' }));
   expect(screen.getByText('11–11 / 共 11 项')).toBeTruthy();
-  expect(screen.getAllByRole('article')).toHaveLength(1);
+  expect(savedModelCards()).toHaveLength(1);
   expect(screen.getByText('Test · Model 11')).toBeTruthy();
   expect(screen.getByRole('button', { name: '下一页' })).toHaveProperty('disabled', true);
   fireEvent.click(screen.getByRole('button', { name: '上一页' }));
@@ -227,7 +233,7 @@ it('returns to the preceding page after deleting the only model on the last page
   fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
   expect(await screen.findByText('Test · Model 1')).toBeTruthy();
   expect(deleteModel).toHaveBeenCalledExactlyOnceWith('connection-6');
-  expect(screen.getAllByRole('article')).toHaveLength(5);
+  expect(savedModelCards()).toHaveLength(5);
   expect(screen.queryByRole('navigation', { name: '模型配置分页' })).toBeNull();
   expect(screen.queryByText('Test · Model 6')).toBeNull();
 });
@@ -251,7 +257,7 @@ it('shows the page containing a newly saved model while retaining capability con
   fireEvent.click(within(dialog).getByRole('button', { name: '保存配置' }));
   expect(await screen.findByText('Test · Model 6')).toBeTruthy();
   expect(screen.getByText('6–6 / 共 6 项')).toBeTruthy();
-  expect(screen.getAllByRole('article')).toHaveLength(1);
+  expect(savedModelCards()).toHaveLength(1);
   expect(screen.queryByRole('heading', { name: '添加模型配置' })).toBeNull();
   expect(addModel).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
     max_output_tokens: 8192, input_modalities: ['text', 'image'], reasoning: { kind: 'effort', values: ['low', 'medium', 'high'] },

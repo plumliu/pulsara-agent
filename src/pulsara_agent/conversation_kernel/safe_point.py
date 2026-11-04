@@ -623,6 +623,36 @@ class ProviderSafePointCoordinator:
             self._active_handle = handle
             return handle
 
+    def freeze_pending_tool_batch_compaction(
+        self,
+        *,
+        closed_source_cut: PreparedProviderInputCut,
+        assistant_entry_id: str,
+        ordered_tool_call_ids: tuple[str, ...],
+        deadline_monotonic: float,
+    ) -> PreparedProviderInputHandle:
+        """Prepare only the closed prefix behind one exact unaccepted batch.
+
+        This handle cannot represent the open batch as provider input.  The
+        pending compaction owner must rotate it at a real provider-safe point
+        after the actual results settle, before canonical adoption.
+        """
+
+        with self._lock:
+            if self._active_handle is not None:
+                raise RuntimeError("provider input handle is already active")
+            self._repository.require_pending_tool_batch_compaction_safe(
+                self._guard,
+                closed_source_cut=closed_source_cut,
+                assistant_entry_id=assistant_entry_id,
+                ordered_tool_call_ids=ordered_tool_call_ids,
+                deadline_monotonic=deadline_monotonic,
+            )
+            self._generation += 1
+            handle = PreparedProviderInputHandle(closed_source_cut, self, self._generation)
+            self._active_handle = handle
+            return handle
+
     def rotate_provider_input(
         self,
         handle: PreparedProviderInputHandle,

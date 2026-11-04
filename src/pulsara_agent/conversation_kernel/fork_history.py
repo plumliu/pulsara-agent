@@ -27,9 +27,6 @@ from pulsara_agent.conversation_kernel.compaction.contracts import (
     CompactionContinuationMode,
     FrozenRetainedHistoricalRequest,
 )
-from pulsara_agent.conversation_kernel.compaction.prompt import (
-    compaction_snapshot_image_parts,
-)
 from pulsara_agent.conversation_kernel.prompt_storage import (
     hydrate_canonical_prompt_owner,
     hydrate_canonical_snapshot_owner,
@@ -50,14 +47,10 @@ from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json
 from pulsara_agent.model_input.contracts import (
     CanonicalInputOriginKind,
     FrozenProviderInputItemKind,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
 )
 from pulsara_agent.model_input.provider_replay import (
     decode_provider_replay_fragment,
     freeze_provider_replay_manifest,
-    manifest_cut_metadata_bytes,
-    quote_provider_dispatch_composite_bytes,
 )
 from pulsara_agent.ports.user_control_feedback import (
     USER_CONTROL_FEEDBACK_MEDIA_TYPE,
@@ -256,7 +249,6 @@ def read_fork_historical_material(
     reader: CanonicalProviderInputReader,
 ) -> FrozenForkHistoricalMaterial:
     from pulsara_agent.conversation_kernel.reader import (
-        _RemainingReadBudget,
         _next_assistant_cuts,
         historical_source_attribution,
         historical_tool_closure_kind,
@@ -292,7 +284,6 @@ def read_fork_historical_material(
     ).fetchone()
     if session is None:
         raise ConversationKernelConflict("Fork source session is absent")
-    budget = _RemainingReadBudget(MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES)
     snapshot = None
     carrier = None
     retained: tuple[FrozenRetainedHistoricalRequest, ...] = ()
@@ -313,13 +304,6 @@ def read_fork_historical_material(
             connection,
             row=snapshot,
             context_snapshot_id=str(snapshot["id"]),
-        )
-        budget.consume(
-            len(carrier.body)
-            + sum(
-                len(image.immutable_bytes)
-                for image in compaction_snapshot_image_parts(carrier)
-            )
         )
         retained = carrier.retained_historical_requests
         active = carrier.active_request
@@ -486,11 +470,8 @@ def read_fork_historical_material(
                 block_bodies[str(block["id"])] = reader._read_content(
                     block,
                     deadline_monotonic=deadline_monotonic,
-                    remaining_bytes=budget,
                     connection=connection,
                 ).decode("utf-8")
-            else:
-                budget.consume(len(canonical_json_bytes(block["tool_arguments"])))
             blocks.append(MappingProxyType(dict(block)))
             blocks_by_entry.setdefault(str(block["assistant_entry_id"]), []).append(
                 block
@@ -552,10 +533,6 @@ def read_fork_historical_material(
             )
             # Validate original content too: assistant manifests remain storage
             # data and are never used in place of their ordered blocks.
-            assistant = raw["entry_kind"] in {
-                "ASSISTANT_MESSAGE",
-                "ASSISTANT_TOOL_REQUEST",
-            }
             # Storage manifests never consume the canonical provider budget.
             if raw["entry_kind"] in {"USER_MESSAGE", "USER_STEER"}:
                 if raw["content_media_type"] != PROMPT_BODY_MEDIA_TYPE:
@@ -567,15 +544,11 @@ def read_fork_historical_material(
                     row=raw,
                     transcript_entry_id=str(raw["id"]),
                 )
-                budget.consume(prompt.resource_quote.canonical_expanded_bytes)
                 body = prompt.body
             else:
                 body = reader._read_content(
                     raw,
                     deadline_monotonic=deadline_monotonic,
-                    remaining_bytes=_RemainingReadBudget(int(raw["content_size"]))
-                    if assistant
-                    else budget,
                     connection=connection,
                 )
             attributed = historical_source_attribution(raw)
@@ -613,10 +586,6 @@ def read_fork_historical_material(
             }
             entry["source_group_key"] = group_key
             entries.append(MappingProxyType(entry))
-        if max(len(entries), len(blocks)) > MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS:
-            raise ConversationKernelConflict(
-                "Fork effective context exceeds canonical item admission"
-            )
         last = (int(page[-1]["entry_sequence"]), str(page[-1]["id"]))
 
     entry_ids = {str(row["id"]) for row in entries}
@@ -713,7 +682,6 @@ def read_fork_historical_material(
             )
         )
     manifests = []
-    replay_payload_bytes = 0
     for entry in entries:
         if entry["entry_kind"] not in {"ASSISTANT_MESSAGE", "ASSISTANT_TOOL_REQUEST"}:
             continue
@@ -778,21 +746,8 @@ def read_fork_historical_material(
             fragment_fingerprint=str(row["fragment_fingerprint"]),
         )
         manifests.append(manifest)
-        replay_payload_bytes += manifest.payload_size
-        metadata_bytes = manifest_cut_metadata_bytes(tuple(manifests))
-        if metadata_bytes > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
-            raise ConversationKernelConflict(
-                "Fork replay manifest metadata bound exceeded"
-            )
-        # Reuse the existing dispatch composite admission, not a new history cap.
         # Every copied native replay must be validated even if the next cold
         # epoch ultimately selects another provider target.
-        quote_provider_dispatch_composite_bytes(
-            canonical_compile_bytes=MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
-            - budget.remaining_bytes,
-            manifest_metadata_bytes=metadata_bytes,
-            selected_payload_bytes=replay_payload_bytes,
-        )
         replays.append(
             (
                 str(row["wire_api"]),

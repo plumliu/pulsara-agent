@@ -6,6 +6,8 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 
 from __future__ import annotations
 
+from pulsara_agent.conversation_kernel.prompt_content import MAXIMUM_PROMPT_MULTIPART_BYTES
+
 from pulsara_agent.capability.change_observation import FrozenCapabilityChange
 from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_tool_source
 from pulsara_agent.identity import derive_id
@@ -63,6 +65,7 @@ from pulsara_agent.conversation_kernel.compaction.coordinator import (
     CompactionAttemptToken,
     CompactionCoordinator,
     CompactionExecutionResult,
+    PendingToolBatchCompaction,
     ModelSwitchCompactionTriggerCandidate,
     ModelSwitchDirectPrecompileDecision,
     OrdinaryPrecompileDecision,
@@ -103,10 +106,12 @@ from pulsara_agent.model_input.lowering import (
     ordinary_tool_result_minimum_upper,
 )
 from pulsara_agent.llm.request import (
+    FrozenProviderWireInputPlan,
     ProviderInputUsageAnchor,
     MAXIMUM_PROVIDER_WIRE_INPUT_BYTES,
     provider_assistant_public_projection_fingerprint,
 )
+from pulsara_agent.llm.resolution import ResolvedModelCall
 from pulsara_agent.llm.provider_replay import (
     PreparedDurableProviderAssistantReplay,
 )
@@ -167,7 +172,7 @@ from pulsara_agent.conversation_kernel.tool_contracts import (
 )
 from pulsara_agent.conversation_kernel.tool_surface import BuiltinExecutionPolicyRef
 from pulsara_agent.conversation_kernel.workspace import WorkspaceExecutionGate
-from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
+from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor, ToolBatchExecutionResult
 from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSource,
     ViewImageSourceKind,
@@ -232,6 +237,7 @@ from pulsara_agent.model_input.diagnostics import (
     project_model_input_compile_observation,
 )
 from pulsara_agent.model_input.contracts import (
+    CanonicalModelInputIdentity,
     FrozenCanonicalCompileSnapshot,
     FrozenCompiledModelInput,
     ContextSourceKind,
@@ -239,13 +245,11 @@ from pulsara_agent.model_input.contracts import (
     ModelInputCompileFailureKind,
     ModelInputScopeKind,
     StructuredModelInputCompileError,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES,
-    MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS,
     ProviderToolResultClosureKind,
     STRUCTURED_MODEL_INPUT_LIMITS,
 )
 from pulsara_agent.model_input.continuity import (
-    MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES,
+    ProviderInputContinuityScope,
     ProcessLocalProviderInputInstallPermit,
     SourceObservationLifecycle,
     SourceObservationPresence,
@@ -381,12 +385,9 @@ class OutputResourceInterruption(RuntimeError):
         self.quote = quote
         super().__init__(
             "provider output resource interruption: "
-            f"{reason}; canonical={quote.canonical_upper_after}/"
-            f"{MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES}, "
-            f"logical={quote.logical_upper_after}/"
-            f"{MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES}, "
-            f"items={quote.item_upper_after}/"
-            f"{MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS}"
+            f"{reason}; canonical={quote.canonical_upper_after}, "
+            f"logical={quote.logical_upper_after}, "
+            f"items={quote.item_upper_after}"
         )
 
 
@@ -401,7 +402,8 @@ class _CollectedModelResponse:
 
 @dataclass(frozen=True, slots=True)
 class _ToolResultResourceQuoteOwner:
-    request: KernelModelExecutionRequest = dataclass_field(repr=False)
+    plan: FrozenProviderWireInputPlan = dataclass_field(repr=False)
+    call: ResolvedModelCall = dataclass_field(repr=False)
     assistant: LLMMessage = dataclass_field(repr=False)
     provider_replay: PreparedDurableProviderAssistantReplay | None = dataclass_field(
         repr=False
@@ -432,7 +434,7 @@ class _ToolResultResourceQuoteOwner:
         self, messages: tuple[LLMMessage, ...]
     ) -> ProviderFollowupWireResourceQuote:
         quoted = quote_provider_followup_wire_resources(
-            request=self.request,
+            plan=self.plan, call=self.call,
             actual_assistant_message=self.assistant,
             provider_replay=self.provider_replay,
             bounded_suffix_messages=messages,
@@ -473,13 +475,15 @@ class _ToolResultResourceQuoteOwner:
         tool_name: str = "view_image",
         source: ViewImageSource,
         content: FrozenPromptContent,
+        model_visible_memory_fact_ids: tuple[str, ...] = (),
     ) -> FrozenImageToolResourceIncrement:
         images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
         if not images:
             raise ValueError("image Tool quote requires validated images")
         carrier = tool_image_attachment_message(tuple((tool_call_id, source, image) for image in images))
         quoted = self._quote_suffix((*self.result_suffix(
-            tool_call_id=tool_call_id, body=frozen_tool_result_public_text(content, tool_name=tool_name)
+            tool_call_id=tool_call_id, body=frozen_tool_result_public_text(content, tool_name=tool_name),
+            model_visible_memory_fact_ids=model_visible_memory_fact_ids,
         ), carrier))
         return FrozenImageToolResourceIncrement(
             canonical_bytes=freeze_canonical_prompt(
@@ -493,6 +497,98 @@ class _ToolResultResourceQuoteOwner:
                 quoted.budget_input_tokens - self.base_wire.budget_input_tokens
             ),
         )
+
+
+def _tool_result_resource_share(total: int, index: int, count: int) -> int:
+    quotient, remainder = divmod(total, count)
+    return quotient + (1 if index < remainder else 0)
+
+
+def _remaining_tool_result_resources(
+    *,
+    followup_wire: ProviderFollowupWireResourceQuote, effective_input_budget_tokens: int,
+) -> tuple[int, int, int, int]:
+    return tuple(max(0, value) for value in (
+        MAXIMUM_PROMPT_MULTIPART_BYTES,
+        MAXIMUM_PROMPT_MULTIPART_BYTES,
+        MAXIMUM_PROVIDER_WIRE_INPUT_BYTES - followup_wire.final_wire_utf8_bytes,
+        effective_input_budget_tokens - followup_wire.budget_input_tokens,
+    ))
+
+
+def refresh_tool_result_page_resources(
+    *,
+    original_quote: FrozenPostResponseResourceQuote,
+    prepared_call: PreparedKernelModelCall,
+    compiled_input: FrozenCompiledModelInput,
+    wire_input_plan: FrozenProviderWireInputPlan,
+) -> tuple[tuple[FrozenImageToolResourceAllowance, ...], tuple[ToolResultPageBudget, ...]]:
+    """Quote the same pending batch against a dry successor's exact prefix.
+
+    This creates no executable request and adopts no epoch. Accepted results still settle
+    against their original invocation, and final adoption revalidates the real
+    complete suffix rather than treating these call-local shares as authority.
+    """
+    if (
+        wire_input_plan.context_id != compiled_input.context_id
+        or wire_input_plan.compiled_semantic_fingerprint != compiled_input.compiled_semantic_fingerprint
+    ):
+        raise ValueError("pending wire plan differs from its compiled prefix")
+    originals = original_quote.image_call_allowances
+    if not originals:
+        raise ValueError("image resource refresh requires the original pending image batch")
+    owner = originals[0].quote_owner
+    if not isinstance(owner, _ToolResultResourceQuoteOwner) or any(
+        allowance.quote_owner is not owner for allowance in originals
+    ):
+        raise ValueError("pending image allowances do not share their original quote owner")
+    budgets = original_quote.result_page_budgets
+    if tuple(budget.tool_call_id for budget in budgets) != tuple(
+        call_id for call_id, _position in owner.result_message_indexes
+    ):
+        raise ValueError("pending result slots differ from the original call budgets")
+    for allowance in originals:
+        if not 0 <= allowance.call_ordinal < len(budgets) or (
+            budgets[allowance.call_ordinal].tool_call_id != allowance.tool_call_id
+        ):
+            raise ValueError("pending image allowance has lost its original call ordinal")
+    wire = quote_provider_followup_wire_resources(
+        plan=wire_input_plan, call=prepared_call.call,
+        actual_assistant_message=owner.assistant,
+        provider_replay=owner.provider_replay,
+        bounded_suffix_messages=owner.base_suffix_messages,
+        usage_anchor=None,
+    )
+    refreshed_owner = _ToolResultResourceQuoteOwner(
+        plan=wire_input_plan, call=prepared_call.call,
+        assistant=owner.assistant, provider_replay=owner.provider_replay,
+        base_suffix_messages=owner.base_suffix_messages, base_wire=wire,
+        result_message_indexes=owner.result_message_indexes, usage_anchor=None,
+    )
+    remaining = _remaining_tool_result_resources(
+        followup_wire=wire,
+        effective_input_budget_tokens=wire_input_plan.quote.effective_input_budget_tokens,
+    )
+    refreshed_budgets = tuple(
+        replace(budget, accepts_provider_body=partial(
+            refreshed_owner.accepts_result_body,
+            tool_call_id=budget.tool_call_id,
+            wire_bytes=_tool_result_resource_share(remaining[2], index, len(budgets)),
+            input_tokens=_tool_result_resource_share(remaining[3], index, len(budgets)),
+        ))
+        for index, budget in enumerate(budgets)
+    )
+    refreshed_allowances = tuple(
+        replace(allowance,
+            canonical_bytes=remaining[0],
+            logical_bytes=remaining[1],
+            wire_bytes=_tool_result_resource_share(remaining[2], allowance.call_ordinal, len(budgets)),
+            input_tokens=_tool_result_resource_share(remaining[3], allowance.call_ordinal, len(budgets)),
+            quote_owner=refreshed_owner,
+        )
+        for index, allowance in enumerate(originals)
+    )
+    return refreshed_allowances, refreshed_budgets
 
 
 _PLAN_CONTROL_TOOL_NAMES = frozenset({"enter_plan", "ask_plan_question", "exit_plan"})
@@ -1409,6 +1505,131 @@ class ConversationKernelRunner:
                 admitted_writer=admitted_writer,
             )
 
+    async def _execute_tool_batch_with_page_recovery(
+        self,
+        *,
+        turn_id: str,
+        assistant_entry_id: str,
+        calls: tuple[CompletedToolCallBlock, ...],
+        canonical_facts: FrozenCanonicalCompileSnapshot,
+        canonical_identity: CanonicalModelInputIdentity,
+        request: KernelModelExecutionRequest,
+        agent_invocation_snapshot,
+        continuity_scope: ProviderInputContinuityScope,
+        surface_borrow: ProcessLocalToolSurfaceBorrow,
+        output_quote: FrozenPostResponseResourceQuote,
+        intent: ActiveTurnCancellationIntent,
+        model_call_index: int,
+        inherited_memory_use_policy: MemoryUsePolicy,
+    ) -> tuple[ToolBatchExecutionResult, CompactionExecutionResult | None]:
+        """Refresh page shares on the ROOT task; adopt only the settled batch.
+
+        Decode tasks can ask for a new quote but cannot run ROOT compaction.
+        The disposable queue retains no execution authority or durable state.
+        """
+        arguments = dict(
+            turn_id=turn_id, assistant_entry_id=assistant_entry_id, calls=calls,
+            canonical_facts=canonical_facts, canonical_identity=canonical_identity,
+            request=request, agent_invocation_snapshot=agent_invocation_snapshot,
+            continuity_scope=continuity_scope, surface_borrow=surface_borrow,
+            hook_scope=self._hook_scope,
+            image_call_allowances=output_quote.image_call_allowances,
+            result_page_budgets=output_quote.result_page_budgets,
+        )
+        if not output_quote.image_call_allowances:
+            return await self._tool_batches.execute(**arguments), None
+
+        resources = asyncio.Queue()
+        pending: PendingToolBatchCompaction | None = None
+        attempted = False
+        fresh = {}
+
+        async def refresh(call_id):
+            future = asyncio.get_running_loop().create_future()
+            resources.put_nowait((call_id, future))
+            return await future
+
+        task = asyncio.create_task(self._tool_batches.execute(
+            **arguments, image_resource_refresh=refresh,
+        ))
+        waiting = None
+        execution = None
+        try:
+            while not task.done():
+                waiting = asyncio.create_task(resources.get())
+                done, _ = await asyncio.wait(
+                    (task, waiting), return_when=asyncio.FIRST_COMPLETED,
+                )
+                if task in done:
+                    break
+                call_id, future = waiting.result()
+                waiting = None
+                if future.cancelled():
+                    continue
+                try:
+                    if not attempted:
+                        attempted = True
+                        pending = await self.compaction.prepare_pending_tool_batch(
+                            turn_id=turn_id, model_call_index=model_call_index,
+                            inherited_memory_use_policy=inherited_memory_use_policy,
+                            closed_source_cut=request.cut,
+                            assistant_entry_id=assistant_entry_id,
+                            ordered_tool_call_ids=tuple(call.tool_call_id for call in calls),
+                            hook_scope=self._hook_scope,
+                            session_start_compact_port=self._compact_session_start_port(intent),
+                            session_start_boundary_port=self._compact_session_start_boundary_port(intent),
+                        )
+                        if pending is not None:
+                            allowances, budgets = refresh_tool_result_page_resources(
+                                original_quote=output_quote,
+                                prepared_call=pending.prepared_call,
+                                compiled_input=pending.compiled_input,
+                                wire_input_plan=pending.wire_input_plan,
+                            )
+                            by_id = {budget.tool_call_id: budget for budget in budgets}
+                            fresh = {
+                                allowance.tool_call_id: (allowance, by_id[allowance.tool_call_id])
+                                for allowance in allowances
+                            }
+                    if not future.done():
+                        future.set_result(fresh.get(call_id))
+                except BaseException as error:
+                    if not future.done():
+                        future.cancel()
+                    # This is ROOT orchestration, not a media argument error.
+                    # Cancel/drain the batch before surfacing the original cause.
+                    raise error
+            batch = await task
+            execution = None if pending is None else await pending.finalize()
+            return batch, execution
+        finally:
+            cleanup_cancel = None
+            try:
+                cleanup_tasks = [task]
+                if waiting is not None:
+                    waiting.cancel()
+                    cleanup_tasks.append(waiting)
+                if not task.done():
+                    task.cancel()
+                drain = asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                while not drain.done():
+                    try:
+                        await asyncio.shield(drain)
+                    except asyncio.CancelledError as error:
+                        cleanup_cancel = error
+            finally:
+                while not resources.empty():
+                    _, future = resources.get_nowait()
+                    if not future.done():
+                        future.cancel()
+                if pending is not None:
+                    pending.close()
+                if cleanup_cancel is not None and execution is not None:
+                    if execution.successor_dispatch is not None:
+                        execution.successor_dispatch.close()
+            if cleanup_cancel is not None:
+                raise cleanup_cancel
+
     async def run_accepted_turn(
         self,
         turn_id: str,
@@ -1953,6 +2174,10 @@ class ConversationKernelRunner:
                         self._require_post_response_resources(
                             output_quote,
                             effective_input_budget_tokens=request.wire_input_plan.quote.effective_input_budget_tokens,
+                            allow_image_page_recovery=(
+                                bool(output_quote.image_call_allowances)
+                                and self.compaction.automatic_allowed(scope_kind=intent.scope_kind)
+                            ),
                         )
                     except OutputResourceInterruption as exc:
                         if (
@@ -2235,7 +2460,7 @@ class ConversationKernelRunner:
                     raise RuntimeError("Tool batch lost its execution-backed borrow")
                 batch_borrow = active_surface_borrow
                 active_surface_borrow = None
-                batch = await self._tool_batches.execute(
+                batch, page_compaction = await self._execute_tool_batch_with_page_recovery(
                     turn_id=turn_id,
                     assistant_entry_id=accepted.entry_id,
                     calls=calls,
@@ -2245,12 +2470,18 @@ class ConversationKernelRunner:
                     agent_invocation_snapshot=(provider_open.agent_invocation_snapshot),
                     continuity_scope=planning.scope,
                     surface_borrow=batch_borrow,
-                    hook_scope=self._hook_scope,
-                    image_call_allowances=output_quote.image_call_allowances,
-                    result_page_budgets=output_quote.result_page_budgets,
+                    output_quote=output_quote,
+                    intent=intent,
+                    model_call_index=model_call_count + 1,
+                    inherited_memory_use_policy=current_memory_use_policy,
                 )
                 tool_call_count += batch.tool_call_count
                 completed_tool_batch = True
+                if page_compaction is not None:
+                    self._require_active_compaction_continuation(page_compaction)
+                    successor_dispatch = page_compaction.successor_dispatch
+                    successor_wire_decision = page_compaction.successor_wire_decision
+                    completed_tool_batch = False
         except BaseException as error:
             try:
                 if successor_dispatch is not None:
@@ -2873,9 +3104,8 @@ class ConversationKernelRunner:
             for message in source_messages
         )
         # Dynamic catalog observations are frozen only at the next safe point.
-        # Their maximum serialized bytes remain in epoch physical admission, but
-        # cannot decide whether this mutation is allowed for a model's token
-        # window. The ordinary next-dispatch planner admits the actual catalog
+        # Their maximum serialized bytes cannot decide whether this mutation
+        # is allowed for a model's token window. The ordinary next-dispatch planner admits the actual catalog
         # and invokes existing compaction when needed, without rebasing prefixes.
         suffix_messages.extend(
             message for message in source_messages if message not in catalog_messages
@@ -2883,7 +3113,7 @@ class ConversationKernelRunner:
         usage_anchor = self._continuity.current_usage_anchor(permit.scope)
         wire = (
             quote_provider_followup_wire_resources(
-                request=request,
+                plan=request.wire_input_plan, call=request.prepared_call.call,
                 actual_assistant_message=assistant,
                 provider_replay=collected.provider_replay,
                 bounded_suffix_messages=tuple(suffix_messages),
@@ -2897,23 +3127,12 @@ class ConversationKernelRunner:
         if calls and not plan_batch:
             if wire is None:
                 raise ValueError("response calls require a follow-up wire quote")
-            remaining = (
-                MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES
-                - (
-                    canonical_input.canonical_expanded_bytes
-                    + assistant_canonical
-                    + canonical_followup
-                ),
-                MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES
-                - (epoch.logical_bytes + assistant_logical + logical_followup),
-                MAXIMUM_PROVIDER_WIRE_INPUT_BYTES - wire.final_wire_utf8_bytes,
-                request.wire_input_plan.quote.effective_input_budget_tokens
-                - wire.budget_input_tokens,
+            remaining = _remaining_tool_result_resources(
+                followup_wire=wire,
+                effective_input_budget_tokens=request.wire_input_plan.quote.effective_input_budget_tokens,
             )
-            if min(remaining) < 0:
-                remaining = tuple(max(0, value) for value in remaining)
             quote_owner = _ToolResultResourceQuoteOwner(
-                request=request,
+                plan=request.wire_input_plan, call=request.prepared_call.call,
                 assistant=assistant,
                 provider_replay=collected.provider_replay,
                 base_suffix_messages=tuple(suffix_messages),
@@ -2922,9 +3141,7 @@ class ConversationKernelRunner:
                 usage_anchor=usage_anchor,
             )
 
-            def share(total: int, index: int, count: int) -> int:
-                quotient, remainder = divmod(total, count)
-                return quotient + (1 if index < remainder else 0)
+            share = _tool_result_resource_share
 
             # Every call owns one disjoint wire/token share. An image's
             # success receipt and attachment are quoted together; its error
@@ -2946,8 +3163,8 @@ class ConversationKernelRunner:
                     call_ordinal=call_ordinal,
                     tool_call_id=call.tool_call_id,
                     executor_binding_fingerprint=binding_fingerprint,
-                    canonical_bytes=share(remaining[0], index, len(image_calls)),
-                    logical_bytes=share(remaining[1], index, len(image_calls)),
+                    canonical_bytes=remaining[0],
+                    logical_bytes=remaining[1],
                     wire_bytes=share(remaining[2], call_ordinal, len(calls)),
                     input_tokens=share(remaining[3], call_ordinal, len(calls)),
                     quote_owner=quote_owner,
@@ -2984,15 +3201,16 @@ class ConversationKernelRunner:
         quote: FrozenPostResponseResourceQuote,
         *,
         effective_input_budget_tokens: int,
+        allow_image_page_recovery: bool = False,
     ) -> None:
-        if quote.canonical_upper_after > MAXIMUM_CANONICAL_PROVIDER_INPUT_BYTES:
-            raise OutputResourceInterruption("CANONICAL_BYTES", quote)
-        if quote.logical_upper_after > MAXIMUM_PROVIDER_INPUT_EPOCH_BYTES:
-            raise OutputResourceInterruption("EPOCH_LOGICAL_BYTES", quote)
-        if quote.item_upper_after > MAXIMUM_CANONICAL_PROVIDER_INPUT_ITEMS:
-            raise OutputResourceInterruption("CANONICAL_ITEMS", quote)
         wire = quote.followup_wire
         if wire is None:
+            return
+        # The accepted assistant still belongs to its original epoch. A
+        # call-local image page may prepare a dry compacted prefix before its
+        # result is accepted; only then can the settled batch adopt it. This
+        # never grants provider dispatch or relaxes canonical/physical bounds.
+        if allow_image_page_recovery and quote.image_call_allowances:
             return
         if wire.final_wire_utf8_bytes > MAXIMUM_PROVIDER_WIRE_INPUT_BYTES:
             raise OutputResourceInterruption("FOLLOWUP_WIRE_BYTES", quote)

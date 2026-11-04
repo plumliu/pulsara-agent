@@ -223,7 +223,7 @@ class AcceptedAsrGap:
             "response_model": result.model,
             "language": result.language,
             "selected_audio_stream": self.info.audio_stream_index,
-            "timeline_origin": self.info.timeline_origin,
+            "timeline_origin": float(self.info.timeline_origin),
             "asr_requests": progress.request.public_value(),
         }
         return AsrCacheBlock(

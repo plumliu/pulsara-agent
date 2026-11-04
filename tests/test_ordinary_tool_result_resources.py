@@ -233,6 +233,7 @@ def _runner_quote(monkeypatch, calls, api):
     request = SimpleNamespace(
         wire_input_plan=wire_plan,
         compiled_input=SimpleNamespace(canonical_input_identity=identity),
+        prepared_call=SimpleNamespace(call=object()),
     )
     quote = runner._quote_post_response_resources(
         request=request,
@@ -376,7 +377,8 @@ def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
     if budget is None:
         measured = {}
 
-        def measure_minimum(quote, *, effective_input_budget_tokens):
+        def measure_minimum(quote, *, effective_input_budget_tokens, allow_image_page_recovery):
+            assert allow_image_page_recovery is False
             minimum = quote.followup_wire.budget_input_tokens
             measured["minimum"] = minimum
             measured["reserve"] = 32000 - effective_input_budget_tokens
@@ -394,11 +396,13 @@ def test_real_runner_minimum_gate_precedes_effects_and_admits_small_results(
         session_id, model, tools, runner = new_case(budget)
         real_require = runner._require_post_response_resources
 
-        def require_below_measured_minimum(quote, *, effective_input_budget_tokens):
+        def require_below_measured_minimum(quote, *, effective_input_budget_tokens, allow_image_page_recovery):
+            assert allow_image_page_recovery is False
             assert effective_input_budget_tokens == measured["minimum"] - 1
             assert quote.followup_wire.budget_input_tokens == measured["minimum"]
             return real_require(
-                quote, effective_input_budget_tokens=effective_input_budget_tokens
+                quote, effective_input_budget_tokens=effective_input_budget_tokens,
+                allow_image_page_recovery=allow_image_page_recovery,
             )
 
         runner._require_post_response_resources = require_below_measured_minimum
@@ -616,7 +620,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
             model_visible_memory_fact_ids=text_provenance,
         )
         text_quote = quote_provider_followup_wire_resources(
-            request=request, actual_assistant_message=owner.assistant,
+            plan=request.wire_input_plan, call=request.prepared_call.call, actual_assistant_message=owner.assistant,
             provider_replay=replay, bounded_suffix_messages=text_suffix,
         )
         text_tokens = text_quote.budget_input_tokens - owner.base_wire.budget_input_tokens
@@ -643,7 +647,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
                 )
             )
         combined = quote_provider_followup_wire_resources(
-            request=request,
+            plan=request.wire_input_plan, call=request.prepared_call.call,
             actual_assistant_message=owner.assistant,
             provider_replay=replay,
             bounded_suffix_messages=(*suffix, *carriers),
@@ -676,7 +680,7 @@ def test_real_followup_quote_mixes_minimum_results_multiple_images_and_native_re
         ]
         assert combined.final_wire_utf8_bytes == len(canonical_json_bytes(projection))
         without_replay = quote_provider_followup_wire_resources(
-            request=request,
+            plan=request.wire_input_plan, call=request.prepared_call.call,
             actual_assistant_message=LLMMessage.assistant_turn(text="public"),
             provider_replay=None,
             bounded_suffix_messages=owner.base_suffix_messages,

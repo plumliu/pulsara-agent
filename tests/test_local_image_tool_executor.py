@@ -136,6 +136,7 @@ def _partition_kwargs(calls, *, hook_scope=None, hook_view=None):
         "continuity_scope": object(),
         "surface_borrow": object(),
         "image_call_allowances": (),
+        "image_resource_refresh": None,
         "result_page_budgets": tuple(ToolResultPageBudget(call.tool_call_id) for call in calls),
         "call_ordinal_offset": 0,
         "hook_scope": hook_scope,
@@ -330,6 +331,7 @@ def test_reverse_physical_completion_still_releases_settlement_in_call_order() -
             continuity_scope=object(),
             surface_borrow=object(),
             image_call_allowances=(),
+            image_resource_refresh=None,
             result_page_budgets=(),
             call_ordinal_offset=0,
         )
@@ -648,6 +650,7 @@ def test_concurrent_view_window_queues_tail_until_physical_completion() -> None:
                 continuity_scope=object(),
                 surface_borrow=object(),
                 image_call_allowances=(),
+                image_resource_refresh=None,
                 result_page_budgets=(),
                 call_ordinal_offset=0,
             )
@@ -712,6 +715,7 @@ def test_cancelling_concurrent_view_segment_drains_started_calls() -> None:
                 continuity_scope=object(),
                 surface_borrow=object(),
                 image_call_allowances=(),
+                image_resource_refresh=None,
                 result_page_budgets=(),
                 call_ordinal_offset=0,
             )
@@ -787,7 +791,12 @@ def test_html_view_image_uses_production_owner_and_image_budget(tmp_path, monkey
                 assert quoted[0]['source'].kind is ViewImageSourceKind.PATH
             else:
                 assert result.state == ('SYSTEM_ERROR' if mode == 'preparation_deadline' else 'APPLICATION_ERROR')
-                assert not quoted
+                if mode == 'png_budget':
+                    # The immutable PNG is read under the physical image bound;
+                    # its full page then fails the actual joint allowance.
+                    assert len(quoted) == 1
+                else:
+                    assert not quoted
                 assert {'dependency_missing':'RESOURCE_READ_FAILED', 'preparation_deadline':'HTML_PREPARATION_DEADLINE_EXPIRED', 'png_budget':'IMAGE_RESOURCE_EXCEEDED','deadline':'PREVIEW_DEADLINE_EXPIRED','missing':'HTML_NOT_FOUND','text_only':'MODEL_IMAGE_INPUT_UNSUPPORTED'}[mode] in result.content.decode()
             if mode in {'deadline', 'preparation_deadline'}:
                 assert result.physical_timing == 'LATE_AFTER_WATCHDOG'

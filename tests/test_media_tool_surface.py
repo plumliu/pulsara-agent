@@ -111,7 +111,7 @@ async def invoke(port, name, arguments, *, image=False):
 
 def test_closed_media_fields_and_root_only_catalog():
     for name, count in [
-        ("read_video_frames", 5),
+        ("read_video_frames", 6),
         ("read_transcript", 4),
         ("annotate_media", 4),
     ]:
@@ -129,12 +129,13 @@ def test_closed_media_fields_and_root_only_catalog():
             "annotate_media",
             {"target": {"kind": "PATH", "path": "x"}, "from": 0, "to": 1, "text": "  "},
         )
-    for value in [None, {}]:
-        with pytest.raises(ValueError):
-            validate_media_arguments(
-                "read_transcript",
-                {"target": {"kind": "PATH", "path": "x"}, "continuation": value},
-            )
+    for name in ("read_video_frames", "read_transcript"):
+        for value in [None, {}]:
+            with pytest.raises(ValueError):
+                validate_media_arguments(
+                    name,
+                    {"target": {"kind": "PATH", "path": "x"}, "continuation": value},
+                )
 
 
 def test_media_hidden_subagent_code_mode_and_forged_entry_denied(tmp_path):
