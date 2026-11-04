@@ -156,6 +156,29 @@ def _next_call(operation, cursor, limit, maximum=None):
     return {"tool": operation, "arguments": arguments}
 
 
+def _query_page(operation, items, next_call, *, note=None):
+    guidance = {
+        "search_sessions": (
+            "Use item.target with search_session_content to find relevant questions and "
+            "answers, or read_session_content to browse that conversation. Copy a returned "
+            "hit.read to expand a body hit, or next to continue this search."
+        ),
+        "search_session_content": (
+            "Copy a message's read call to expand it with read_session_content. "
+            "Copy next to continue searching this conversation."
+        ),
+        "read_session_content": (
+            "Copy next to continue reading. To locate relevant questions and answers "
+            "instead, use search_session_content with this conversation's SESSION target."
+        ),
+    }[operation]
+    # Include guidance before every page quote, including partial and empty pages.
+    payload = {"items": items, "next": next_call, "guidance": guidance}
+    if note is not None:
+        payload["note"] = note
+    return payload
+
+
 def _entry_read(target, *, include_tools=False):
     arguments = {"target": target, "limit": 1}
     if include_tools:
@@ -445,14 +468,14 @@ class SessionContentQuery:
                     "id": row["id"],
                 }
             )
-            candidate = {"items": [*items, item], "next": _next_call("search_sessions", token(row_cursor), limit)}
+            candidate = _query_page("search_sessions", [*items, item], _next_call("search_sessions", token(row_cursor), limit))
             if not _fits(candidate, call_id, page_budget):
                 if not items:
                     raise _resource_error()
-                return {"items": items, "next": _next_call("search_sessions", token(inner), limit)}
+                return _query_page("search_sessions", items, _next_call("search_sessions", token(inner), limit))
             items.append(item)
             inner = row_cursor
-        payload = {"items": items, "next": _next_call("search_sessions", token(after), limit)}
+        payload = _query_page("search_sessions", items, _next_call("search_sessions", token(after), limit))
         if not _fits(payload, call_id, page_budget):
             raise _resource_error()
         return payload
@@ -564,7 +587,7 @@ class SessionContentQuery:
                 )
         self.reader.validate_history_cut(connection, session, cut, event_cut)
         if target == self.session_id and end == 0:
-            return {"items": [], "next": None, "note": "没有更早的会话内容。"}
+            return _query_page("read_session_content", [], None, note="没有更早的会话内容。")
 
         def token(sequence, start):
             return _encode(
@@ -825,7 +848,7 @@ class SessionContentQuery:
         )
 
         def finish(items, more):
-            payload = {"items": items, "next": _next_call("search_session_content", next_cursor if more else None, limit)}
+            payload = _query_page("search_session_content", items, _next_call("search_session_content", next_cursor if more else None, limit))
             if not _fits(payload, call_id, page_budget):
                 raise _resource_error()
             if more:
@@ -884,7 +907,7 @@ class SessionContentQuery:
                     for m in candidate.messages
                 ],
             }
-            payload = {"items": [*items, item], "next": _next_call("search_session_content", next_cursor, limit)}
+            payload = _query_page("search_session_content", [*items, item], _next_call("search_session_content", next_cursor, limit))
             if not _fits(payload, call_id, page_budget):
                 if not items:
                     raise _resource_error()
@@ -953,10 +976,7 @@ class SessionContentQuery:
                     raise _resource_error(
                         "Increase max_chars to fit one complete image placeholder and its result packaging."
                     )
-                return {
-                    "items": items,
-                    "next": _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum),
-                }
+                return _query_page("read_session_content", items, _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum))
 
             def build(length):
                 value = {**item, "text": text[offset : offset + length]}
@@ -969,7 +989,7 @@ class SessionContentQuery:
                     if next_entry is not None
                     else None
                 )
-                return {"items": [*items, value], "next": _next_call("read_session_content", after, limit, maximum)}
+                return _query_page("read_session_content", [*items, value], _next_call("read_session_content", after, limit, maximum))
 
             payload = build(take)
             if not _fits(payload, call_id, page_budget):
@@ -987,14 +1007,11 @@ class SessionContentQuery:
                 if winner is None:
                     if not items:
                         raise _resource_error()
-                    return {
-                        "items": items,
-                        "next": _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum),
-                    }
+                    return _query_page("read_session_content", items, _next_call("read_session_content", token(entry["entry_sequence"], offset), limit, maximum))
                 return winner
             items = payload["items"]
             remaining -= take
             if offset + take < len(text) or not remaining or len(items) == limit:
                 return payload
             entry, offset = next_entry, 0
-        return {"items": items, "next": None}
+        return _query_page("read_session_content", items, None)

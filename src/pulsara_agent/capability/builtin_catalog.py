@@ -213,11 +213,12 @@ def _remember_parameters() -> dict[str, Any]:
     return object_schema(
         properties={
             "based_on": {
-                "description": "Saved items this statement depends on, rather than merely "
-                "related items, paraphrases or wider-scope copies. GLOBAL "
-                "may depend only on GLOBAL; CURRENT_PROJECT may depend on "
-                "GLOBAL or this project's memories. Deleting any basis "
-                "also deletes this dependent item.",
+                "description": (
+                    "MEMORY targets this statement depends on; exclude merely related items, "
+                    "paraphrases and wider-scope copies. GLOBAL bases must be GLOBAL; "
+                    "CURRENT_PROJECT bases may be GLOBAL or this project. Deleting any basis "
+                    "deletes this item."
+                ),
                 "items": memory_target_schema(),
                 "maxItems": 8,
                 "type": "array",
@@ -238,7 +239,7 @@ def _remember_parameters() -> dict[str, Any]:
                     MEMORY_COHESIVE_UNIT_GUIDE
                     + " "
                     + MEMORY_RETRIEVAL_AUTHORING_GUIDE
-                    + " Maximum 8192 UTF-8 bytes; 2048 for RESPONSE_PREFERENCE."
+                    + " UTF-8 limit: 8192 bytes; RESPONSE_PREFERENCE: 2048."
                 ),
                 "maxLength": 8192,
                 "minLength": 1,
@@ -511,7 +512,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "read_file": _descriptor(
         name="read_file",
-        description='Read UTF-8 text from a PATH or the exact SESSION_ENTRY target returned for a saved result. PATH first reads accept optional one-based offset and limit; results provide content_revision for edit_file. SESSION_ENTRY reads take only target initially and accept this session\'s already accepted tool results or formally published Cell outputs, never arbitrary chat/history entries. They never grant file-edit context. Copy the complete next call to continue either source; it includes line and in-line character positions, and PATH revision. Content line labels and fragment metadata are not source text. Read affected complete lines or adjacent gaps before line edits. Use write_file with source to save the whole frozen result without copying its pages.',
+        description=(
+            "Read UTF-8 text. PATH first call: target, offset? (1-based), limit?; returns "
+            "content_revision for edit_file. SESSION_ENTRY first call: target only, "
+            "copied from this session's accepted tool result or formally published Cell "
+            "output. These reads supply frozen content, not file-edit context. Copy the "
+            "complete next call to continue either source (line/character positions and "
+            "PATH revision). Line labels/fragment metadata are display formatting, not "
+            "source text. Read complete affected lines or adjacent gaps before line "
+            "edits. Save the whole frozen result with write_file.source."
+        ),
         input_schema=read_file_parameters_schema(),
         is_read_only=True,
         permission_category="filesystem_read",
@@ -568,22 +578,19 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "edit_file": _descriptor(
         name="edit_file",
         description=(
-            ('Edit an existing UTF-8 file at a PATH target. Supply base_revision from read_file and operations '
- 'separately. Anchors are 1-based in that revision; ranges are inclusive and operations must not '
- 'overlap. Line edits require the affected lines or adjacent gaps to have been read. replace_file '
- 'must be the sole operation; it needs a current revision but not a full display. Results include '
- 'the new revision, diff and changed line windows. NO_OP means no bytes changed. Use write_file '
- 'for a new path.')
+            "Edit an existing UTF-8 PATH using read_file.content_revision as "
+            "base_revision. Anchors are 1-based in that revision; ranges inclusive, "
+            "operations non-overlapping. Line edits require prior reads of affected "
+            "complete lines or adjacent gaps. replace_file must be the sole operation; it "
+            "needs a current revision, not full display. Returns revision, diff and "
+            "changed windows; NO_OP means no bytes changed. Create new paths with "
+            "write_file."
         ),
         input_schema={'additionalProperties': False,
- 'properties': {'base_revision': {'description': 'Exact content_revision returned by read_file for '
-                                                 'this path.',
+ 'properties': {'base_revision': {'description': "Exact read_file.content_revision for this path.",
                                   'pattern': '^revision:[a-z2-7]{51}[aq]$',
                                   'type': 'string'},
-                'operations': {'description': 'Replacement text is literal file content without '
-                                              'read_file line labels. Each lines item contains one '
-                                              'line without CR, LF or NUL; an empty string is a '
-                                              'blank line.',
+                'operations': {'description': "Literal source text; omit read_file labels. Each lines item is one line without CR/LF/NUL; an empty string is a blank line.",
                                'items': {'oneOf': [{'additionalProperties': False,
                                                     'properties': {'end_line': {'minimum': 1,
                                                                                 'type': 'integer'},
@@ -625,15 +632,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                     'required': ['kind', 'line', 'lines'],
                                                     'type': 'object'},
                                                    {'additionalProperties': False,
-                                                    'properties': {'content': {'description': 'Complete '
-                                                                                              'replacement '
-                                                                                              'text; '
-                                                                                              'an '
-                                                                                              'empty '
-                                                                                              'string '
-                                                                                              'empties '
-                                                                                              'the '
-                                                                                              'file.',
+                                                    'properties': {'content': {'description': "Complete file text; an empty string empties it.",
                                                                                'type': 'string'},
                                                                    'kind': {'const': 'replace_file'}},
                                                     'required': ['kind', 'content'],
@@ -642,9 +641,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                'type': 'array'},
                 'target': {'type': 'object',
                            'properties': {'kind': {'type': 'string', 'const': 'PATH'},
-                                          'path': {'description': 'Existing file path, relative to '
-                                                                  'the workspace or absolute; ~ is '
-                                                                  'supported.',
+                                          'path': {'description': "Existing path; workspace-relative, absolute or ~.",
                                                    'minLength': 1,
                                                    'type': 'string'}},
                            'required': ['kind', 'path'],
@@ -690,9 +687,13 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "search_sessions": _descriptor(
         name="search_sessions",
         description=(
-            "Find saved conversations by title or message keywords; omit query to list by activity. This session's body hits cover only earlier content removed by compaction; other accessible sessions use saved ROOT history. Copy item.target (SESSION) to search/read a conversation, or hit.target (SESSION_ENTRY) to read a body hit. Title-only hits have no hit.\n"
-            'First page: optional query, lifecycle, limit.\n'
-            'Continue by copying the returned complete next call (cursor and optional limit). Send no other fields on continuation. Omit unused fields; null is not accepted.'
+            "Find saved conversations by title/message keywords; omitted query lists by "
+            "activity. This conversation's body hits cover compacted-out earlier content; "
+            "other accessible conversations use saved ROOT history. Copy item.target "
+            "(SESSION) to search/read a conversation or hit.target (SESSION_ENTRY) to "
+            "read a body hit. Title-only matches omit hit.\n"
+            "First: optional query, lifecycle, limit. Continue by copying next: cursor "
+            "and optional limit only. Omit unused fields; null is invalid."
         ),
         input_schema=session_query_input_schema(
             "search_sessions",
@@ -705,8 +706,16 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "search_session_content": _descriptor(
         name="search_session_content",
         description=(
-            "Find saved questions and their answer process by keyword relevance. First page: query; optional target (SESSION), include_tools, limit. Omit target for this conversation's earlier content removed by compaction; messages still in context are excluded. Other accessible conversations use saved ROOT history. Results preserve speakers, times and historical quotes/comments; [truncated] marks omitted text. Each item.target anchors its question; copy a message.target to read_session_content to expand that message. Images are presence markers; generated markers and image metadata are not search terms.\n"
-            'Continue by copying the returned complete next call (cursor and optional limit). Send no other fields on continuation. Omit unused fields; null is not accepted.'
+            "Find saved questions and their answer process by keyword relevance. First: "
+            "query; optional target (SESSION), include_tools, limit. Omitted target "
+            "searches this conversation's compacted-out earlier content, excluding "
+            "messages still in context; other accessible conversations use saved ROOT "
+            "history. Results keep speakers, times and historical quotes/comments; "
+            "[truncated] marks omissions. item.target anchors the question; copy a "
+            "message.target to read_session_content for expansion. Images are presence "
+            "markers; generated markers/image metadata are excluded from search terms.\n"
+            "Continue by copying next: cursor and optional limit only. Omit unused "
+            "fields; null is invalid."
         ),
         input_schema=session_query_input_schema(
             "search_session_content",
@@ -719,8 +728,18 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "read_session_content": _descriptor(
         name="read_session_content",
         description=(
-            "Read saved messages directly or expand a search hit; searching first is optional. First page: optional target (SESSION or SESSION_ENTRY), direction, include_tools, limit, max_chars. Omit target for this conversation's earlier content removed by compaction; SESSION_ENTRY may omit session_id for the same range. Other accessible conversations use saved ROOT history. A SESSION_ENTRY anchor is read first. Long messages start at the beginning and continue across pages before adjacent messages; partial marks a slice. Tool output may have missing saved content as shown by source_coverage and body availability; pagination cannot recover it. Images are text placeholders; same-workspace placeholders provide an IMAGE_REF target to copy into view_image. Increase max_chars if a placeholder cannot fit.\n"
-            'Continue by copying the returned complete next call (cursor and optional limit, max_chars). Send no other fields on continuation. Omit unused fields; null is not accepted.'
+            "Read saved messages directly or expand a hit; searching first is optional. "
+            "First: optional target (SESSION/SESSION_ENTRY), direction, include_tools, "
+            "limit, max_chars. Omitted target, or SESSION_ENTRY without session_id, "
+            "selects this conversation's compacted-out earlier content; other accessible "
+            "conversations use saved ROOT history. Read the anchor first, then finish "
+            "long messages across pages before adjacent messages; partial marks a slice. "
+            "source_coverage/body availability reports missing saved tool content, which "
+            "further pages cannot restore. Images are placeholders; copy same-workspace "
+            "IMAGE_REF targets into view_image. Increase max_chars if a whole placeholder "
+            "cannot fit.\n"
+            "Continue by copying next: cursor and optional limit/max_chars only. Omit "
+            "unused fields; null is invalid."
         ),
         input_schema=session_query_input_schema(
             "read_session_content",
@@ -1049,17 +1068,15 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "remember": _descriptor(
         name="remember",
         description=(
-            "Save reusable information for future conversations. Source-faithful "
-            "lightweight inferences from conversation, behavior, tool choice or planning "
-            "are welcome; self-report, repetition and high confidence are not required. "
-            "Save natural-language context, including attributed observations from tool "
-            "results. Exclude secrets, credentials, raw tool dumps, detailed executable "
-            "procedures and permission overrides. Saving takes effect immediately and "
-            "creates no task, reminder or execution authority. SAVED returns the new "
-            "MEMORY target; ALREADY_PRESENT returns the existing item without changing its "
-            "origin or dependencies. Users can delete saved items on the Memory page. "
-            "Supply statement, context_target and kind; optional based_on contains the "
-            "MEMORY targets this statement depends on."
+            "Save reusable natural-language context for future conversations, including "
+            "attributed tool observations and source-faithful lightweight inferences from "
+            "conversation, behavior, tool choice or planning. Self-report, repetition and "
+            "high confidence are not required. Exclude secrets/credentials, raw tool "
+            "dumps, detailed executable procedures and permission overrides. Saving takes "
+            "effect immediately; it creates no task, reminder or execution authority. "
+            "SAVED returns a new MEMORY target; ALREADY_PRESENT returns the existing item "
+            "with origin/dependencies unchanged. Users can delete memories on the Memory "
+            "page."
         ),
         input_schema=_REMEMBER_PARAMETERS,
         provider_kind=BuiltinToolDomainKind.MEMORY,

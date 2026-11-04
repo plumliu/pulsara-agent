@@ -75,7 +75,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
         "cursor": {
             "type": "string",
             "minLength": 1,
-            "description": "Exact cursor from this tool's returned next.arguments.",
+            "description": "Copy cursor from this tool's next.arguments.",
         },
         "limit": {
             "type": "integer",
@@ -88,9 +88,9 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
         properties["query"] = {
             "type": "string",
             "description": (
-                "Nonblank natural-language or technical-identifier query; Chinese and English are supported."
+                "Nonblank Chinese/English natural-language query or technical identifiers."
                 if name == "search_session_content"
-                else "Title or message keywords; omission or blank text lists by activity."
+                else "Title/message keywords; omitted or blank lists by activity."
             ),
         }
         if name == "search_session_content":
@@ -99,7 +99,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
         properties["lifecycle"] = {
             "type": "string",
             "enum": ["ALL", "OPEN", "ARCHIVED"],
-            "description": "Omit for ALL.",
+            "description": "Default ALL.",
         }
     else:
         properties.update(
@@ -108,12 +108,9 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
                 "include_tools": {
                     "type": "boolean",
                     "description": (
-                        "Also search saved tool names, arguments and results, excluding "
-                        "the three session-query tools' own calls/results. Omit for false."
+                        "Also search saved tool names/arguments/results, excluding the three session-query tools' own calls/results. Default false."
                         if name == "search_session_content"
-                        else "Include historical tool names, arguments, public results and "
-                        "retained output. Results and retained output are labeled separately. "
-                        "Omit for false."
+                        else "Include historical tool calls (names/arguments) and saved public result bodies. Default false."
                     ),
                 },
             }
@@ -126,9 +123,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
                     "type": "string",
                     "enum": ["older", "newer"],
                     "description": (
-                        "With SESSION_ENTRY, default newer; otherwise default older. "
-                        "The anchor is read first; older then reads preceding messages, newer following messages. "
-                        "Without an anchor, older starts at latest and newer at earliest."
+                        "SESSION_ENTRY: default newer, anchor first; older reads preceding messages, newer following. Without an anchor: default older; older starts latest, newer earliest."
                     ),
                 },
                 "max_chars": {
@@ -136,7 +131,7 @@ def session_query_input_schema(name: str, *, default_chars: int, maximum_chars: 
                     "minimum": 1,
                     "maximum": maximum_chars,
                     "default": default_chars,
-                    "description": "Total text characters across this page's entries.",
+                    "description": "Total message-text characters on this page.",
                 },
             }
         )

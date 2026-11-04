@@ -6,38 +6,37 @@ from __future__ import annotations
 MEMORY_KIND_PRODUCT_DEFINITIONS = (
     (
         "USER_PROFILE",
-        "who the user is, likes, tends to do, aims for or may prefer",
+        "identity, interests, habits, goals or possible preferences",
     ),
     (
         "RESPONSE_PREFERENCE",
-        "a soft default for answer style, explanation or formatting",
+        "soft defaults for answer style, explanation or formatting",
     ),
     (
         "FACT",
-        "attributed declarative context, including explicit retention of uncertain information",
+        "attributed declarative context, including uncertain information",
     ),
     (
         "DECISION",
-        "a source-supported choice, inclination, plan, goal, commitment or adopted high-level method",
+        "source-supported choices, inclinations, plans, goals, commitments or adopted high-level methods",
     ),
 )
 
 MEMORY_CONTEXT_PRODUCT_GUIDE = (
-    "GLOBAL is available across conversations sharing this memory store; "
-    "CURRENT_PROJECT only within this project. Either scope accepts any kind. "
-    "Availability does not broaden the claim: keep its actual subject, date and "
-    "conditions in statement."
+    "GLOBAL: conversations sharing this memory store. CURRENT_PROJECT: this "
+    "project only. Both accept any kind. Keep the claim's actual subject, date "
+    "and conditions in statement."
 )
 
 MEMORY_COHESIVE_UNIT_GUIDE = (
-    "One self-contained idea that can be read and deleted as a whole; separate unrelated claims."
+    "One self-contained idea, readable and deletable as a whole; split unrelated claims."
 )
 
 MEMORY_RETRIEVAL_AUTHORING_GUIDE = (
-    "Preserve the subject, attribution, project, time, conditions, quantities, "
-    "negations and uncertainty that matter. Distinguish suggestions, tentative plans, "
-    "adopted choices and completed actions. Resolve pronouns and relative dates only "
-    "when unambiguous. Use natural prose without template labels or invented details."
+    "Keep relevant subject, attribution, project, time, conditions, quantities, "
+    "negation and uncertainty. Distinguish suggestions, tentative plans, adopted "
+    "choices and completed actions. Resolve pronouns/relative dates only when "
+    "unambiguous. Use natural prose without template labels or invented details."
 )
 
 

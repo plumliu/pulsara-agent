@@ -438,10 +438,13 @@ def test_full_history_uses_zero_not_genesis_and_explicit_self_cannot_bypass(
     actual = ToolBatchExecutor._session_content_range(facts)
     assert actual == SessionContentRange(0)
     for args in ({}, {"target": {"kind": "SESSION", "session_id": caller.guard.session_id}}):
-        assert query(scope=actual, **args) == {
+        page = query(scope=actual, **args)
+        assert "search_session_content" in page["guidance"]
+        assert page == {
             "items": [],
             "next": None,
             "note": "没有更早的会话内容。",
+            "guidance": page["guidance"],
         }
         assert (
             query("search_session_content", scope=actual, query="decision", **args)[
@@ -669,7 +672,9 @@ def test_max_chars_is_whole_page_and_empty_filters_are_ordinary_results(repo, co
     rest = query(cursor=_cursor(page))
     assert rest["items"][0]["text"] == "345678" and rest["items"][0]["partial"]
     assert _cursor(rest) is None
-    assert query('search_session_content', target={'kind': 'SESSION', 'session_id': target.guard.session_id}, query='missing') == {"items": [], "next": None}
+    page = query('search_session_content', target={'kind': 'SESSION', 'session_id': target.guard.session_id}, query='missing')
+    assert "read_session_content" in page["guidance"]
+    assert page == {"items": [], "next": None, "guidance": page["guidance"]}
 
 
 def test_content_page_freezes_entries_and_interruption_event_cut(repo, context):
