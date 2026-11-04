@@ -109,6 +109,24 @@ def _merge_property_schema(
     return {"anyOf": alternatives}
 
 
+# These keywords contain schemas, rather than literal JSON values. Mapping
+# keys are user-defined names/patterns, even when named oneOf/const/discriminator.
+_SCHEMA_MAPPING_KEYWORDS = frozenset({
+    "properties", "patternProperties", "$defs", "definitions",
+    "dependentSchemas", "dependencies",
+})
+_SCHEMA_VALUE_KEYWORDS = frozenset({
+    "oneOf", "anyOf", "allOf", "not", "if", "then", "else",
+    "items", "prefixItems", "additionalItems", "contains",
+    "additionalProperties", "unevaluatedProperties", "unevaluatedItems",
+    "propertyNames", "contentSchema",
+})
+
+
+def _lower_schema_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    return {name: _lower_schema_node(schema) for name, schema in value.items()}
+
+
 def _lower_schema_node(value: object) -> object:
     if isinstance(value, list):
         return [_lower_schema_node(item) for item in value]
@@ -131,7 +149,13 @@ def _lower_schema_node(value: object) -> object:
                 "OpenAI function schema union must be a non-empty array"
             )
         target_key = "anyOf" if key == "oneOf" else key
-        result[target_key] = _lower_schema_node(nested)
+        if key in _SCHEMA_MAPPING_KEYWORDS and isinstance(nested, dict):
+            result[target_key] = _lower_schema_mapping(nested)
+        elif key in _SCHEMA_VALUE_KEYWORDS:
+            result[target_key] = _lower_schema_node(nested)
+        else:
+            # Annotations, enum values and extension data are not schemas.
+            result[target_key] = deepcopy(nested)
     if constant_present:
         existing = result.get("enum")
         if existing is not None and (
@@ -252,9 +276,7 @@ def _lower_root_object_union(parameters: dict[str, Any]) -> dict[str, Any]:
         raise OpenAIFunctionSchemaIncompatible(
             "OpenAI function root properties must be an object"
         )
-    lowered_base_properties = _lower_schema_node(raw_base_properties)
-    if not isinstance(lowered_base_properties, dict):
-        raise TypeError("OpenAI function properties did not remain an object")
+    lowered_base_properties = _lower_schema_mapping(raw_base_properties)
     properties.update(lowered_base_properties)
     for branch in lowered_branches:
         branch_properties = branch.get("properties", {})
