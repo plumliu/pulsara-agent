@@ -153,18 +153,16 @@ def test_real_tool_rejects_removed_wrappers_without_aliases(tmp_path):
     asyncio.run(run())
 
 
-def test_object_schema_reuses_canonical_targets_without_view_or_work():
-    from pulsara_agent.code_mode.targets import cell_target_schema
+def test_schema_exposes_only_files_webpages_and_canonical_agents():
     from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import target_schema
     schema = json.loads(json.dumps(builtin_tool_catalog_entry("open_in_pulsara").descriptor.input_schema))
     assert set(schema["properties"]) == {"targets"}
     assert schema["additionalProperties"] is False
     branches = schema["properties"]["targets"]["items"]["anyOf"]
     assert target_schema("AGENT") in branches
-    assert cell_target_schema() in branches
     assert "maxItems" not in schema["properties"]["targets"]
     assert {item["properties"]["kind"]["const"] for item in branches} == {
-        "AGENT", "CELL", "PATH", "URL", "PROCESS", "MCP_SERVER", "PANEL",
+        "PATH", "URL", "AGENT",
     }
 
 
@@ -222,17 +220,31 @@ def test_shared_object_reader_rejects_root_and_other_root_without_touching_lifec
     owner.capture_code_cell.assert_called_once_with(cell)
 
 
-def test_new_targets_reach_provider_lowering_with_closed_shapes():
+@pytest.mark.parametrize("lowered", [False, True])
+def test_public_targets_have_closed_shapes_and_exclude_internal_views(lowered):
     from jsonschema import Draft202012Validator
     from pulsara_agent.llm.adapters.openai.function_tools import lower_openai_function_parameters
     schema = json.loads(json.dumps(builtin_tool_catalog_entry("open_in_pulsara").descriptor.input_schema))
-    validator = Draft202012Validator(lower_openai_function_parameters(schema))
-    agent = {"kind": "AGENT", "agent_id": "session:" + "a" * 26}
-    cell = {"kind": "CELL", "cell_id": "cell:" + "a" * 26}
-    for target in [agent, cell, {"kind": "PANEL", "name": "subagents"}, {"kind": "PANEL", "name": "cells"}]:
+    validator = Draft202012Validator(lower_openai_function_parameters(schema) if lowered else schema)
+    targets = [
+        {"kind": "PATH", "path": "report.md"},
+        {"kind": "URL", "url": "https://example.test"},
+        {"kind": "AGENT", "agent_id": "session:" + "a" * 26},
+    ]
+    assert validator.is_valid({"targets": targets})
+    for target in targets:
         assert validator.is_valid({"targets": [target]})
         assert not validator.is_valid({"targets": [{**target, "view": "graph"}]})
-    assert not validator.is_valid({"targets": [cell], "root_session_id": "other"})
+    excluded = [
+        {"kind": "PROCESS", "process_id": "process:" + "a" * 26},
+        {"kind": "MCP_SERVER", "runtime_server_id": "mcp-server:" + "a" * 26},
+        {"kind": "CELL", "cell_id": "cell:" + "a" * 26},
+        *({"kind": "PANEL", "name": name} for name in
+          ["capabilities", "background", "subagents", "cells", "browser"]),
+    ]
+    for target in excluded:
+        assert not validator.is_valid({"targets": [target]})
+    assert not validator.is_valid({"targets": targets, "root_session_id": "other"})
 
 
 def test_real_dispatch_resolves_objects_through_common_read_owners(tmp_path):

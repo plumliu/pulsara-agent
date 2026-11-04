@@ -324,14 +324,13 @@ def _wait_agent_schema() -> dict[str, Any]:
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "open_in_pulsara": _descriptor(
-        name="open_in_pulsara", description=("ROOT only. Show targets in this conversation's tabs: PATH files, URL webpages, PROCESS "
- 'terminals, runtime MCP_SERVER connections, AGENT read-only conversations, CELL frozen source, or PANEL overview entries. '
- 'PANEL names: capabilities, background, subagents, cells, browser. Group related targets; '
- 'the last accepted target is selected. Invalid items '
- 'return their zero-based index while valid items proceed. Results acknowledge requests, not '
- "completed display or webpage contents. Copy each result item's target for reuse. "
- 'PANEL browser creates a blank tab; duplicates share one tab within '
- 'a call and later calls create new tabs.'),
+        name="open_in_pulsara", description=(
+            "ROOT only. Show local PATH files, URL webpages, or AGENT read-only conversations "
+            "in this conversation's tabs. Group related targets; the last accepted target is "
+            "selected. Invalid items return their zero-based index while valid items proceed. "
+            "Results acknowledge requests, not completed display or webpage contents. "
+            "Copy each result item's target for reuse."
+        ),
         input_schema={'additionalProperties': False,
  'properties': {'targets': {'items': {'anyOf': [{'additionalProperties': False,
                                                  'properties': {'path': {'description': 'File '
@@ -360,44 +359,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                                          'const': 'URL'}},
                                                  'required': ['kind', 'url'],
                                                  'type': 'object'},
-                                                {'additionalProperties': False,
-                                                 'properties': {'process_id': {'description': 'process_id '
-                                                                                              'from '
-                                                                                              'exec_process '
-                                                                                              'or '
-                                                                                              'manage_process.',
-                                                                               'pattern': f'^process:{ID_PAYLOAD_PATTERN}$',
-                                                                               'maxLength': 34,
-                                                                               'type': 'string'},
-                                                                'kind': {'type': 'string',
-                                                                         'const': 'PROCESS'}},
-                                                 'required': ['kind', 'process_id'],
-                                                 'type': 'object'},
-                                                {'additionalProperties': False,
-                                                 'properties': {'runtime_server_id': {'description': 'runtime_server_id '
-                                                                                                     'from '
-                                                                                                     'query_capabilities.',
-                                                                                      'pattern': f'^mcp-server:{ID_PAYLOAD_PATTERN}$',
-                                                                                      'maxLength': 37,
-                                                                                      'type': 'string'},
-                                                                'kind': {'type': 'string',
-                                                                         'const': 'MCP_SERVER'}},
-                                                 'required': ['kind', 'runtime_server_id'],
-                                                 'type': 'object'},
-                                                {'additionalProperties': False,
-                                                 'properties': {'name': {'enum': ['capabilities',
-
-                                                                                  'background',
-                                                                                  'subagents',
-                                                                                  'cells',
-                                                                                  'browser'],
-                                                                         'type': 'string'},
-                                                                'kind': {'type': 'string',
-                                                                         'const': 'PANEL'}},
-                                                 'required': ['kind', 'name'],
-                                                 'type': 'object'},
-                                                target_schema('AGENT'),
-                                                cell_target_schema()]},
+                                                target_schema('AGENT')]},
                             'minItems': 1,
                             'type': 'array'}},
  'required': ['targets'],
