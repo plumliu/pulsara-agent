@@ -742,18 +742,41 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_schedule": _descriptor(
         name="manage_schedule",
         description=(
-            'Manage saved schedules from the ROOT conversation. Set action and send only its listed fields; fields are required unless marked optional. Copy SCHEDULE targets from results or use a known exact target. session takes a SESSION target; omission/null means this session.\n'
-            'create: values; optional session, status.\n'
-            'update: target, expected_revision, values.\n'
-            'pause: target, expected_revision.\n'
-            'resume: target, expected_revision.\n'
-            'delete: target, expected_revision.\n'
-            'switch: target, expected_revision, replacement. target is the source ACTIVE schedule. replacement is {kind:"existing",target,expected_revision} for a PAUSED schedule, or {kind:"create",values} for a new schedule in the same session.\n'
-            "Use query_schedules for current values and revision; reread on revision conflict. session selects a new schedule's parent, never changes an existing schedule's owner.\n"
-            'values is the complete configuration; preserve unrequested fields on update. Choose a short name if unspecified. prompt contains self-contained future instructions and output expectations; timing and permissions have separate fields. Supply an IANA timezone; use Asia/Shanghai for new tasks unless requested otherwise. For create, use current permissions or a requested narrower preset. Saving configuration requires current permissions to cover permission_mode; preserve saved permissions unless a change is requested.\n'
-            'Each session supports one ACTIVE plan and any number of PAUSED plans. create with omitted/null status saves PAUSED; use ACTIVE to start automatic scheduling. An authorized replacement uses switch atomically; adding a task alone does not request replacement. Separate automatic plans need separate sessions.\n'
-            'Calendar rules use local HH:mm and YYYY-MM-DD start_date; weekdays are Monday=1 through Sunday=7. once and interval timestamps are whole-second UTC; new or changed once times must be in the future. Intervals keep their fixed anchor. Missing month days and nonexistent DST times are skipped; repeated DST times fire once. Explain saved times in ordinary language.\n'
-            "Edits preserve queued instructions. pause/delete/switch cancel the affected source plan's pending inputs and leave running replies alone; delete keeps the chat. Stopping a reply leaves its schedule active. Resume uses the next future recurrence without catch-up; an overdue untriggered once plan becomes due. Receipts report the actual mutation and revision without repeating prompt bodies; inspect the returned SCHEDULE for configuration. Do not repeat a mutation to recover its response."
+            "Manage saved schedules; ROOT only. Send only the selected action's fields; ? "
+            "means omittable.\n"
+            "create(values, session?, status?)\n"
+            "update(target, expected_revision, values)\n"
+            "pause/resume/delete(target, expected_revision)\n"
+            "switch(target, expected_revision, replacement)\n"
+            "Copy SCHEDULE targets or use a known exact target. session takes SESSION; "
+            "omission/null selects this session and only sets a new plan's parent. Read "
+            "configuration/revision with query_schedules; reread on revision conflict.\n"
+            "switch atomically pauses the source ACTIVE plan and activates replacement: "
+            "{kind:\"existing\",target,expected_revision} for a PAUSED plan, or "
+            "{kind:\"create\",values} for a new plan in the same session.\n"
+            "values replaces the complete configuration; preserve unrequested fields, "
+            "including permissions. Choose a short name if unspecified. prompt holds "
+            "self-contained future instructions and output expectations; "
+            "timing/permissions use separate fields. Supply an IANA timezone; new plans "
+            "default to Asia/Shanghai unless requested otherwise. Creation uses current "
+            "permissions or a requested narrower preset; saving requires current "
+            "permissions to cover permission_mode.\n"
+            "One ACTIVE plan per session; any number PAUSED. create.status omitted/null "
+            "saves PAUSED; ACTIVE enables automatic scheduling. Use switch for authorized "
+            "replacement; adding a task alone does not request replacement. Independent "
+            "automatic plans need separate sessions.\n"
+            "Calendar rules: local HH:mm, YYYY-MM-DD start_date, weekdays Monday=1 "
+            "through Sunday=7. once/interval instants: whole-second UTC; new/changed once "
+            "times must be future. Intervals retain their fixed anchor. Skip missing "
+            "month days and nonexistent DST times; repeated DST times fire once. Explain "
+            "saved times plainly.\n"
+            "Updates preserve queued instructions. pause/delete/switch cancel source "
+            "pending inputs; running replies continue. delete keeps the chat; stopping a "
+            "reply keeps scheduling active. Resume uses the next future recurrence "
+            "without catch-up; overdue untriggered once plans become due.\n"
+            "Results report mutation/revision without prompt bodies; inspect the returned "
+            "SCHEDULE for configuration. Do not repeat a mutation to recover its "
+            "response."
         ),
         input_schema=manage_schedule_schema(),
         provider_kind=BuiltinToolDomainKind.BUILTIN,
