@@ -142,7 +142,7 @@ from pulsara_agent.conversation_kernel.memory.dispatch import (
 )
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
-from pulsara_agent.tools.builtins.filesystem import parse_view_image_source
+from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_tool_source
 
 
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
@@ -927,7 +927,7 @@ class ToolBatchExecutor:
     ) -> None:
         expected: list[tuple[int, str, str]] = []
         for call_ordinal, call in enumerate(calls, start=call_ordinal_offset):
-            if call.tool_name != "view_image":
+            if call.tool_name not in IMAGE_TOOL_NAMES:
                 continue
             try:
                 binding = surface_borrow.execution_binding(call.tool_name)
@@ -939,7 +939,7 @@ class ToolBatchExecutor:
             ) or not isinstance(arguments, dict):
                 continue
             try:
-                parse_view_image_source(arguments)
+                parse_image_tool_source(call.tool_name, arguments)
             except ValueError:
                 continue
             expected.append(
@@ -1020,8 +1020,8 @@ class ToolBatchExecutor:
                 else None
             )
             if _partition_batch and any(
-                first.tool_name == "view_image"
-                and second.tool_name == "view_image"
+                first.tool_name in IMAGE_TOOL_NAMES
+                and second.tool_name in IMAGE_TOOL_NAMES
                 and not self._view_call_has_ordered_hook(first, hook_view)
                 and not self._view_call_has_ordered_hook(second, hook_view)
                 for first, second in zip(calls, calls[1:])
@@ -1924,7 +1924,7 @@ class ToolBatchExecutor:
         index = 0
         while index < len(calls):
             if (
-                calls[index].tool_name != "view_image"
+                calls[index].tool_name not in IMAGE_TOOL_NAMES
                 or self._view_call_has_ordered_hook(calls[index], hook_view)
             ):
                 result = await self.execute(
@@ -1952,7 +1952,7 @@ class ToolBatchExecutor:
             end = index + 1
             while (
                 end < len(calls)
-                and calls[end].tool_name == "view_image"
+                and calls[end].tool_name in IMAGE_TOOL_NAMES
                 and not self._view_call_has_ordered_hook(calls[end], hook_view)
             ):
                 end += 1
@@ -2223,7 +2223,7 @@ class ToolBatchExecutor:
             canonical_prompt = freeze_canonical_prompt(result.content, workspace_id=workspace_id)
             canonical_preview = InlineContent.from_bytes(
                 canonical_prompt.body, media_type=PROMPT_BODY_MEDIA_TYPE, codec=PROMPT_BODY_CODEC)
-            result_text = frozen_tool_result_public_text(canonical_prompt.content)
+            result_text = frozen_tool_result_public_text(canonical_prompt.content, tool_name=tool_name)
         else:
             public_output = result.content.decode("utf-8")
             body = await self._io.run(

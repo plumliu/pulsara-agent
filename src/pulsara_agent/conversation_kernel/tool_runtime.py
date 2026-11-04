@@ -148,6 +148,8 @@ from pulsara_agent.llm.input import (
     LLMTextPart,
 )
 from pulsara_agent.tools.builtins.workspace import WritePathScope
+from pulsara_agent.tools.builtins.media import MEDIA_TOOL_NAMES, MediaTool, validate_media_arguments
+from pulsara_agent.conversation_kernel.tool_invocations import current_tool_invocation, ToolInvocationSourceKind
 from pulsara_agent.tools.builtins.presentation import OpenInPulsaraTool
 from pulsara_agent.tools.builtins.todo import (
     TodoTool,
@@ -187,8 +189,7 @@ from pulsara_agent.conversation_kernel.live import (
 )
 from pulsara_agent.ports.live_agent_event import (
     TerminalProcessCompletedPayload,
-    TodoLiveItemProjection,
-    TodoSnapshotUpdatedPayload,
+    CurrentWorkSnapshotUpdatedPayload,
     live_digest,
 )
 from pulsara_agent.primitives.model_call import sha256_fingerprint
@@ -244,11 +245,12 @@ from .tool_contracts import (
     PreparedToolInvocation,
     PreparedToolPreparationRejection,
 )
-from .todo_runtime import (
-    FrozenTodoCloseProjection,
+from .current_work_runtime import (
+    FrozenCurrentWorkSnapshot,
+    FrozenCurrentWorkCloseProjection,
     PreparedTodoReplacement,
     TodoInstallation,
-    TodoRunStateOwner,
+    CurrentWorkStateOwner,
 )
 from .mcp.supervisor import (
     McpBoundToolExecutor,
@@ -709,6 +711,9 @@ class DirectKernelToolPort:
         image_validator: HostPromptImageValidator | None = None,
         scheduled_tasks,
         session_content_query=None,
+        media_cache=None,
+        read_media_settings=None,
+        media_asr_runtime=None,
         shared_terminal_owner: "DirectKernelToolPort | None" = None,
     ) -> None:
         root = workspace_root.expanduser().resolve()
@@ -722,6 +727,12 @@ class DirectKernelToolPort:
         self._workspace_root = root
         self._live_bus = live_bus
         self._physical_io = KernelSessionIO()
+        from pulsara_agent.media.worker import MediaWorker
+        self._media_worker = MediaWorker()
+        self._media_cache = media_cache
+        self._read_media_settings = read_media_settings
+        self._media_asr_runtime = media_asr_runtime
+        self._media_tasks = set()
         self._deadlines = deadline_factory or KernelExecutionDeadlineFactory()
         self._image_validator = image_validator
         self._image_reference_read_port = image_reference_read_port
@@ -771,6 +782,8 @@ class DirectKernelToolPort:
                 user_home_resolution=frozen_user_home,
             ),
             OpenInPulsaraTool(root, pulsara_home_resolution=frozen_pulsara_home, user_home_resolution=frozen_user_home, host_session_id=host_owner_id, root_session_id=session_id),
+            *(MediaTool(root, pulsara_home_resolution=frozen_pulsara_home,
+                user_home_resolution=frozen_user_home, name=name) for name in sorted(MEDIA_TOOL_NAMES)),
             TodoTool(),
             _DirectTerminalTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalProcessTool(self._terminal, self._terminal_owner_id),
@@ -818,7 +831,7 @@ class DirectKernelToolPort:
         self._terminal_release_task: asyncio.Task[object] | None = None
         self._todo_settlements: dict[str, ProcessLocalEffectSettlementToken] = {}
         self._mcp_ref_settlements: dict[str, ProcessLocalEffectSettlementToken] = {}
-        self._todo_owner = TodoRunStateOwner(
+        self._current_work_owner = CurrentWorkStateOwner(
             session_id=session_id,
             owner_epoch=host_owner_id,
         )
@@ -986,7 +999,7 @@ class DirectKernelToolPort:
                     for item in bindings
                     if item.tool_name
                     not in {
-                        "open_in_pulsara", "search_sessions", "search_session_content",
+                        *MEDIA_TOOL_NAMES, "open_in_pulsara", "search_sessions", "search_session_content",
                         "read_session_content", "query_schedules", "manage_schedule", "search_memory", "get_memory",
                         "remember", "mark_memory_relation", "enter_plan", "ask_plan_question",
                         "exit_plan", "reload_capabilities", "manage_capability",
@@ -1202,8 +1215,8 @@ class DirectKernelToolPort:
         )
 
     @property
-    def todo_owner(self) -> TodoRunStateOwner:
-        return self._todo_owner
+    def current_work_owner(self) -> CurrentWorkStateOwner:
+        return self._current_work_owner
 
     def _executor_bindings_locked(self) -> tuple[ProductionBuiltinExecutorBinding, ...]:
         if self._sealed_builtin_bindings is not None:
@@ -1261,6 +1274,14 @@ class DirectKernelToolPort:
                 KernelToolAuthorization(kind, reference, message),
             )
 
+        if tool_name in MEDIA_TOOL_NAMES and (
+            surface_borrow.code_cell_id is not None
+            or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
+            or (current_tool_invocation.get() is not None
+                and current_tool_invocation.get().kind is not ToolInvocationSourceKind.MODEL_TOOL_CALL)
+        ):
+            return reject(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "media:root-direct-only", "Media tools require a direct ROOT call")
         try:
             binding = self._validate_surface_borrow(surface_borrow, tool_name)
         except RuntimeError:
@@ -1401,7 +1422,7 @@ class DirectKernelToolPort:
             )
             if is_root or item.origin.session_id == session_id
         )
-        todo = self._todo_owner.freeze_compaction_handoff(scope_kind=conversation_scope_kind)
+        todo = self._current_work_owner.freeze_compaction_handoff(scope_kind=conversation_scope_kind)
         code_cells = (
             self._code_mode.freeze_compaction_handoff()
             if is_root and self._code_mode is not None else ()
@@ -1865,6 +1886,14 @@ class DirectKernelToolPort:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         memory_context: FrozenModelCallMemoryContext,
     ) -> KernelToolAuthorization:
+        if tool_name in MEDIA_TOOL_NAMES and (
+            surface_borrow.code_cell_id is not None
+            or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
+            or (current_tool_invocation.get() is not None
+                and current_tool_invocation.get().kind is not ToolInvocationSourceKind.MODEL_TOOL_CALL)
+        ):
+            return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
+                "media:root-direct-only", "Media tools require a direct ROOT call")
         try:
             binding = self._validate_surface_borrow(surface_borrow, tool_name)
         except RuntimeError:
@@ -1938,6 +1967,12 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
+        if tool_name in MEDIA_TOOL_NAMES:
+            try:
+                validate_media_arguments(tool_name, arguments)
+            except ValueError as exc:
+                return KernelToolAuthorization(KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    "media:invalid-arguments", str(exc))
         if tool_name == "open_in_pulsara" and surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
             return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED, "open_in_pulsara_root_only", "open_in_pulsara requires ROOT scope")
         if tool_name in {"view_image", "exec_process", "manage_process", "query_processes", "exec_cell", "query_cells", "manage_cell"}:
@@ -2019,7 +2054,7 @@ class DirectKernelToolPort:
                 )
             access = surface_borrow.prepared.access
             try:
-                self._todo_owner.require_active(
+                self._current_work_owner.require_active(
                     scope_kind=access.conversation_scope_kind,
                     exact_turn_id=turn_id,
                 )
@@ -3125,6 +3160,62 @@ class DirectKernelToolPort:
             raise CodeModeError("OUTPUT_PAGE_BOUNDARY", "Cell source cannot fit a complete result page")
         return value
 
+    async def _invoke_media(self, tool, arguments, context, binding, started, origin):
+        """Bind media orchestration to this exact direct tool invocation."""
+        from pulsara_agent.media.execution import execute_media
+
+        if (
+            context.conversation_scope_kind != ModelInputScopeKind.ROOT.value
+            or context.code_cell_id is not None
+            or context.surface_borrow.code_cell_id is not None
+            or (
+                context.invocation_source is not None
+                and context.invocation_source.kind
+                is not ToolInvocationSourceKind.MODEL_TOOL_CALL
+            )
+        ):
+            raise RuntimeError("Media tools require direct ROOT authority")
+        current = asyncio.current_task()
+        self._media_tasks.add(current)
+        try:
+            result = await execute_media(
+                tool,
+                arguments,
+                context,
+                binding,
+                io=self._physical_io,
+                worker=self._media_worker,
+                image_validator=self._image_validator,
+                cache=self._media_cache,
+                read_settings=self._read_media_settings,
+                asr_runtime=self._media_asr_runtime,
+                memory_domain_id=self._memory_domain_id,
+                deadline=self._deadlines.deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION
+                ),
+                page_budget=_invocation_page_budget(context),
+                reserve_read=lambda **facts: self.reserve_media_read_start(
+                    exact_turn_id=context.turn_id,
+                    attempt_id=context.attempt_id,
+                    **facts,
+                ),
+                observe_read=lambda **facts: self.observe_media_read_start(
+                    exact_turn_id=context.turn_id,
+                    attempt_id=context.attempt_id,
+                    **facts,
+                ),
+            )
+            return KernelToolResult(
+                state=result.state,
+                content=result.content,
+                public_format=result.public_format,
+                page_complete=True,
+                effect_class="read_only",
+                physical_observation=_freeze_physical_observation(started, origin),
+            )
+        finally:
+            self._media_tasks.discard(current)
+
     async def _invoke_code_mode_control(self, tool_name, arguments, context):
         from pulsara_agent.code_mode.contracts import CodeModeError
         try:
@@ -3655,7 +3746,7 @@ class DirectKernelToolPort:
             if not fits_receipt:
                 return _no_effect_budget_result()
             try:
-                prepared = self._todo_owner.prepare_replace(
+                prepared = self._current_work_owner.prepare_replace(
                     scope_kind=(
                         invocation_context.surface_borrow.prepared.access.conversation_scope_kind
                     ),
@@ -3704,6 +3795,9 @@ class DirectKernelToolPort:
                 invocation_context.cell_cancel_event is not None and invocation_context.cell_cancel_event.is_set()
             )),
         )
+        if isinstance(tool, MediaTool):
+            return await self._invoke_media(tool, arguments, invocation_context, binding,
+                invocation_started, observation_origin)
         if isinstance(tool, OpenInPulsaraTool):
             from pulsara_agent.conversation_kernel.presentation_targets import (
                 ResolvedPresentationObject, resolve_visible_cell,
@@ -4164,10 +4258,10 @@ class DirectKernelToolPort:
                     ProcessLocalEffectSettlementOutcome.DISCARDED
                 )
             if disposition is ProcessLocalEffectSettlementDisposition.COMMITTED:
-                installation = self._todo_owner.commit(token.prepared)
+                installation = self._current_work_owner.commit(token.prepared)
                 outcome = ProcessLocalEffectSettlementOutcome.INSTALLED
             else:
-                self._todo_owner.discard(token.prepared)
+                self._current_work_owner.discard(token.prepared)
                 installation = None
                 outcome = ProcessLocalEffectSettlementOutcome.DISCARDED
             self._todo_settlements.pop(token.token_id, None)
@@ -4176,84 +4270,61 @@ class DirectKernelToolPort:
             return ProcessLocalEffectSettlementResult(outcome)
         raise TypeError("process-local settlement token kind is unknown")
 
-    def offer_todo_close(self, projection: FrozenTodoCloseProjection | None) -> None:
-        """Best-effort projection of an exact owner-controlled run closure."""
+    def offer_current_work_close(self, projection: FrozenCurrentWorkCloseProjection | None) -> None:
+        if projection is not None:
+            self._offer_current_work_snapshot(
+                projection.run_identity.work_run_id, projection.last_turn_id)
 
-        if projection is None:
-            return
-        identity = projection.run_identity
-        self._offer_todo_snapshot(
-            todo_run_id=identity.todo_run_id,
-            todo_revision=projection.closing_revision,
-            disposition="CLOSED",
-            ordered_items=(),
-            pending_count=0,
-            in_progress_count=0,
-            completed_count=0,
-            turn_id=projection.last_turn_id,
-            scope_kind=identity.scope_kind,
-        )
+    def offer_current_work_idle(self, snapshot: FrozenCurrentWorkSnapshot | None, turn_id: str) -> None:
+        if snapshot is not None and snapshot.todos:
+            self._offer_current_work_snapshot(snapshot.todos[0].run_identity.work_run_id, turn_id)
 
     def offer_todo_installation(self, installation: TodoInstallation | None) -> None:
-        if installation is None:
-            return
-        snapshot = installation.installed_snapshot
-        identity = snapshot.run_identity
-        self._offer_todo_snapshot(
-            todo_run_id=identity.todo_run_id,
-            todo_revision=snapshot.revision,
-            disposition=installation.disposition.value,
-            ordered_items=tuple(
-                TodoLiveItemProjection(item.ordinal, item.text, item.status.value)
-                for item in snapshot.ordered_items
-            ),
-            pending_count=snapshot.pending_count,
-            in_progress_count=snapshot.in_progress_count,
-            completed_count=snapshot.completed_count,
-            turn_id=installation.turn_id,
-            scope_kind=identity.scope_kind,
-        )
+        if installation is not None:
+            self._offer_current_work_snapshot(
+                installation.installed_snapshot.run_identity.work_run_id, installation.turn_id)
 
-    def _offer_todo_snapshot(
-        self,
-        *,
-        todo_run_id: str,
-        todo_revision: int,
-        disposition: str,
-        ordered_items: tuple[TodoLiveItemProjection, ...],
-        pending_count: int,
-        in_progress_count: int,
-        completed_count: int,
-        turn_id: str,
-        scope_kind: ModelInputScopeKind,
-    ) -> None:
-        draft_identity = derive_id("block", "todo-snapshot", todo_run_id, str(todo_revision))
+    def reserve_media_read_start(
+        self, *, exact_turn_id: str, attempt_id: str, canonical_path: str, file_mtime_ns: str,
+    ) -> bool:
+        return self._current_work_owner.reserve_media_read_start(
+            exact_turn_id=exact_turn_id, attempt_id=attempt_id,
+            canonical_path=canonical_path, file_mtime_ns=file_mtime_ns)
+
+    def observe_media_read_start(
+        self, *, exact_turn_id: str, attempt_id: str, canonical_path: str,
+        file_mtime_ns: str, from_seconds: float, to_seconds: float,
+    ) -> bool:
+        accepted = self._current_work_owner.observe_media_read_start(
+            exact_turn_id=exact_turn_id, attempt_id=attempt_id, canonical_path=canonical_path,
+            file_mtime_ns=file_mtime_ns, from_seconds=from_seconds, to_seconds=to_seconds)
+        if accepted:
+            snapshot = self._current_work_owner.snapshot(scope_kind=ModelInputScopeKind.ROOT)
+            if snapshot is not None:
+                self._offer_current_work_snapshot(snapshot.run_identity.work_run_id, exact_turn_id, attempt_id)
+        return accepted
+
+    def _offer_current_work_snapshot(self, root_run_id: str, turn_id: str, media_read_attempt_id: str | None = None) -> None:
+        # This one notification invalidates TODO and media observations together.
+        # Only the live owner snapshot carries current values.
+        draft_identity = random_id("block")
         try:
             self._live_bus.offer_nowait(
-                event_type=LiveEventType.TODO_SNAPSHOT_UPDATED,
+                event_type=LiveEventType.CURRENT_WORK_SNAPSHOT_UPDATED,
                 session_id=self._session_id,
                 turn_id=turn_id,
                 draft_identity=draft_identity,
-                payload=TodoSnapshotUpdatedPayload(
-                    todo_run_id=todo_run_id,
-                    todo_revision=todo_revision,
-                    disposition=disposition,
-                    ordered_items=ordered_items,
-                    pending_count=pending_count,
-                    in_progress_count=in_progress_count,
-                    completed_count=completed_count,
-                ),
-                scope_kind=scope_kind.value,
+                payload=CurrentWorkSnapshotUpdatedPayload(root_run_id=root_run_id, media_read_attempt_id=media_read_attempt_id),
+                scope_kind=ModelInputScopeKind.ROOT.value,
                 channel_kind=LiveChannelKind.TERMINAL_EXTENSION,
-                generation_id=derive_id("generation", "channel", "todo", todo_run_id),
+                generation_id=derive_id("generation", "channel", "current-work", root_run_id),
                 proposed_entry_id=None,
                 block_id=draft_identity,
                 block_ordinal=0,
                 block_kind=LiveBlockKind.OPERATIONAL,
             )
         except BaseException:
-            # Live delivery is a disposable observation plane.  It cannot
-            # roll back the already-installed process-local snapshot.
+            # Losing an advisory invalidation cannot undo current state.
             pass
 
     @property
@@ -4263,13 +4334,26 @@ class DirectKernelToolPort:
         # local child remains; a cancelled logical waiter is insufficient.
         return (self._terminal_physically_closed
                 and self._physical_io.physical_close_complete
-                and self._visualization_screenshots.local_children_stopped)
+                and self._visualization_screenshots.local_children_stopped
+                and self._media_worker.physical_close_complete)
 
     def stop_local_process_admission(self) -> None:
         self._physical_io.stop_admission()
+        self._media_worker.stop_admission()
         self._visualization_screenshots.stop_admission()
 
+    async def _stop_media_physical_owners(self) -> None:
+        await self._media_worker.aclose()
+        tasks = tuple(
+            task for task in self._media_tasks if task is not asyncio.current_task()
+        )
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def stop_visualization_physical_owners(self) -> None:
+        await self._stop_media_physical_owners()
         await self._visualization_screenshots.aclose()
 
     @property
@@ -4278,7 +4362,8 @@ class DirectKernelToolPort:
             return (self._physically_closed and self._terminal_physically_closed
                     and not self._surface_borrows and not self._execution_borrows
                     and self._visualization_screenshots.local_children_stopped
-                    and self._physical_io.physical_close_complete)
+                    and self._physical_io.physical_close_complete
+                    and self._media_worker.physical_close_complete)
 
     async def aclose(self, *, timeout_seconds: float = 5.0) -> None:
         if timeout_seconds <= 0:
@@ -4300,6 +4385,7 @@ class DirectKernelToolPort:
             # same borrow deadline and are never replaced or detached.
             close_error: BaseException | None = None
             try:
+                await self._stop_media_physical_owners()
                 await self._visualization_screenshots.aclose()
                 await self._stop_terminal_physical_owners_locked(deadline)
             except BaseException as exc:

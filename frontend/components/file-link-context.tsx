@@ -12,5 +12,5 @@ export const FileMediaContext = createContext<{
   api: import('../lib/file-preview').FilePreviewApi;
   ownerKey: string;
   sessionId: string;
-  open: (path: string, time?: number) => void;
+  open: (path: string, time?: number, version?: {modified_ns: string; size: number}) => void;
 } | undefined>(undefined);

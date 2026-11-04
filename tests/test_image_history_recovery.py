@@ -384,6 +384,10 @@ def test_image_marker_is_atomic_when_result_packaging_budget_binds():
         "items": [{**item, "text": "前\n", "partial": True}],
         "next": {"tool": "read_session_content", "arguments": {
             "cursor": (1, 2), "limit": 1, "max_chars": len(text)}},
+        "guidance": (
+            "Copy next to continue reading. To locate relevant questions and answers "
+            "instead, use search_session_content with this conversation's SESSION target."
+        ),
     }
     reader._document = lambda *args: (item, marker, (), ((0, len(marker)),))
     budget = ToolResultPageBudget(tool_call_id="call:test", accepts_provider_body=

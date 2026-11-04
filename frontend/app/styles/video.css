@@ -82,3 +82,17 @@
 .video-layout:fullscreen { height: 100%; margin: 0; background: var(--paper-raised); }
 @container video-viewer (max-width: 480px) { .video-volume input { display: none; } .video-player-controls { gap: 3px; padding-inline: 10px; } .video-time { gap: 4px; margin-left: 3px; } .video-player-controls select { min-width: 45px; margin-left: 0; } }
 @container video-viewer (max-width: 400px) { .video-volume { display: none; } .video-player-controls { gap: 2px; } .video-icon-button:not(.video-primary-play) { width: 28px; } .video-player-controls select { min-width: 42px; } }
+
+.video-layout.is-audio { grid-template: 'viewer' auto 'notes' minmax(0, 1fr) / minmax(0, 1fr); }
+.video-layout.is-audio.is-plain { grid-template: 'viewer' auto / minmax(0, 1fr); align-content: start; }
+.audio-player-source { position: relative; }
+.audio-player-source .video-media-error { position: relative; color: var(--ink); background: var(--paper-raised); }
+.audio-player-source .video-loading { position: relative; display: block; bottom: auto; left: auto; margin: 0 16px; }
+
+.video-note-row { position: relative; flex: none; display: flex; gap: 5px; }
+.video-note-row .video-note-card { flex: 1; min-width: 0; }
+.video-note-source { flex: none; align-self: center; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 6px; color: var(--ink-soft); }
+.video-note-source:hover { background: var(--paper-deep); }
+/* The timeline is a viewport over loaded notes, not a bound on annotation count. */
+.video-note-track { max-height: var(--video-note-track-height, min(160px, 20vh)); overflow-y: auto; overscroll-behavior: contain; }
+.media-notes-more { align-self: center; flex: none; margin: 4px 12px 10px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: var(--paper-solid); }

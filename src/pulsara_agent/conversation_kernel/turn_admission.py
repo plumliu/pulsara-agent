@@ -30,16 +30,16 @@ from pulsara_agent.conversation_kernel.repository import (
     TurnAdmissionConfirmationKind,
 )
 from pulsara_agent.llm.model_target import FrozenModelResolutionSnapshot
-from pulsara_agent.conversation_kernel.todo_runtime import (
-    PreparedTodoRootRunActivation,
+from pulsara_agent.conversation_kernel.current_work_runtime import (
+    PreparedRootWorkActivation,
     build_root_activation,
 )
 
 
-class TodoRunAdmissionFinalizer(Protocol):
+class RootWorkAdmissionFinalizer(Protocol):
     async def __call__(
         self,
-        prepared: PreparedTodoRootRunActivation,
+        prepared: PreparedRootWorkActivation,
         accepted: AcceptedEntry,
     ) -> None: ...
 
@@ -58,7 +58,7 @@ class TurnAdmissionCoordinator:
         io_owner: KernelSessionIO,
         writer_lease: WriterLease,
         deadline_factory: KernelExecutionDeadlineFactory,
-        todo_finalizer: TodoRunAdmissionFinalizer | None,
+        root_work_finalizer: RootWorkAdmissionFinalizer | None,
         workspace_gate: WorkspaceExecutionGate | None = None,
     ) -> None:
         self._workspace_gate = workspace_gate
@@ -66,7 +66,7 @@ class TurnAdmissionCoordinator:
         self._io = io_owner
         self._writer_lease = writer_lease
         self._deadlines = deadline_factory
-        self._todo_finalizer = todo_finalizer
+        self._root_work_finalizer = root_work_finalizer
 
     def _deadline(self) -> float:
         return self._deadlines.deadline(KernelWatchdogOwner.FOREGROUND_CANONICAL)
@@ -133,7 +133,7 @@ class TurnAdmissionCoordinator:
         *,
         intent: PreparedRootTurnIntent,
         model_resolution_snapshot: FrozenModelResolutionSnapshot,
-        activation: PreparedTodoRootRunActivation,
+        activation: PreparedRootWorkActivation,
         cancellation_intent: ActiveTurnCancellationIntent,
         cancellation_requested: asyncio.Event,
     ) -> AcceptedRootTurnAdmission | None:
@@ -199,7 +199,7 @@ class TurnAdmissionCoordinator:
 
     async def _finalize_current_start(
         self,
-        activation: PreparedTodoRootRunActivation,
+        activation: PreparedRootWorkActivation,
         accepted: AcceptedEntry,
         cancellation_intent: ActiveTurnCancellationIntent,
     ) -> None:
@@ -221,7 +221,7 @@ class TurnAdmissionCoordinator:
                 )
                 if status in {TurnStatus.COMPLETED, TurnStatus.INTERRUPTED}:
                     # The immutable FULL admission remains true. A terminal
-                    # winner has no new TODO activation or public active target.
+                    # winner has no new ROOT work activation or public active target.
                     return
                 raise
         except StaleHostWriter:
@@ -233,19 +233,19 @@ class TurnAdmissionCoordinator:
                 reason=root_cancellation_terminal_reason(cancellation_intent),
             )
             raise
-        await self._finalize_todo(activation, accepted, cancellation_intent)
+        await self._finalize_root_work(activation, accepted, cancellation_intent)
 
-    async def _finalize_todo(
+    async def _finalize_root_work(
         self,
-        prepared: PreparedTodoRootRunActivation,
+        prepared: PreparedRootWorkActivation,
         accepted: AcceptedEntry,
         cancellation_intent: ActiveTurnCancellationIntent,
     ) -> None:
-        if self._todo_finalizer is None:
+        if self._root_work_finalizer is None:
             return
         activation = asyncio.create_task(
-            self._todo_finalizer(prepared, accepted),
-            name=f"kernel-todo-admission-finalizer:{accepted.turn_id}",
+            self._root_work_finalizer(prepared, accepted),
+            name=f"kernel-root-work-admission-finalizer:{accepted.turn_id}",
         )
         try:
             await _await_shielded(activation)
@@ -349,7 +349,7 @@ async def _await_shielded(
 
 
 __all__ = [
-    "TodoRunAdmissionFinalizer",
+    "RootWorkAdmissionFinalizer",
     "TurnAdmissionCoordinator",
     "root_cancellation_terminal_reason",
 ]

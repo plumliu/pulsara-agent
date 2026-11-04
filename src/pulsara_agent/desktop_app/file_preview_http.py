@@ -120,6 +120,7 @@ class FilePreviewHttp:
         router.add_delete(path, self.close)
         router.add_post(path + "/snapshot", self.snapshot)
         router.add_post(path + "/page", self.page)
+        router.add_post(path + "/annotations", self.annotations)
         router.add_post(path + "/action", self.action)
         router.add_get("/api/file-previews/{token}/content", self.content)
         router.add_get(
@@ -201,12 +202,31 @@ class FilePreviewHttp:
             if item.closed:
                 item.close_handles()
 
+    async def annotations(self, request):
+        body = await self.body(request)
+        item = await self.current(request, body)
+        if item.kind not in {"video", "audio"} or item.info is None:
+            raise ValueError("annotations require a media preview")
+        sessions = self.bridge.sessions
+        page = await sessions.core.read_media_annotations(
+            memory_domain_id=sessions.memory_domain_id, path=str(item.path),
+            modified_ns=str(item.info.st_mtime_ns), after=body.get("after"),
+        )
+        await self.current(request, body)
+        return web.json_response(page, headers=HEADERS)
+
     async def action(self, request):
         body = await self.body(request)
         item = await self.current(request, body)
         action = body.get("action")
         # action_path re-opens without following symlinks before path handoff to OS.
         path = item.action_path(action)
+        if action == "activate":
+            assert item.info is not None
+            await self.bridge.sessions.core.touch_asr_cache_source(
+                str(path), item.info.st_mtime_ns, item.info.st_size,
+            )
+            await self.current(request, body)
         return web.json_response(
             {
                 "path": str(path),
@@ -224,7 +244,7 @@ class FilePreviewHttp:
         attachment = request.query.get("download") == "1"
         mime = (
             item.mime
-            if item.kind in {"image", "svg", "pdf", "video"}
+            if item.kind in {"image", "svg", "pdf", "video", "audio"}
             else "text/plain"
             if item.kind in {"html", "text", "table", "markdown"}
             else "application/octet-stream"

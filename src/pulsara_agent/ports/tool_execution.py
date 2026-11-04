@@ -154,9 +154,10 @@ class ToolExecutionResult:
                 part for part in self.output.parts if isinstance(part, LLMImagePart)
             )
             if (
-                self.tool_name != "view_image"
+                self.tool_name not in {"view_image", "read_video_frames"}
                 or self.status is not ToolResultState.SUCCESS
-                or len(images) != 1
+                or not images
+                or (self.tool_name == "view_image" and len(images) != 1)
                 or not any(isinstance(part, LLMTextPart) for part in self.output.parts)
             ):
                 raise ValueError("typed image output is invalid for this Tool result")

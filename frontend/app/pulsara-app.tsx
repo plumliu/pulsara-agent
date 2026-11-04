@@ -1,3 +1,6 @@
+import { MediaNoteSourceDialog } from '../components/media-note-source-dialog';
+import { OpenMediaNoteSource } from '../components/media-annotation-view';
+import type { MediaNote } from '../lib/file-preview';
 import type { ToolOutputPage } from '../lib/runtime-adapter';
 import { usePendingSteerPages } from '../lib/pending-steer-pages';
 import { McpAuthorizationContext, mcpAuthorizationKey, useMcpAuthorization, useModelMcpAuthorization } from '../components/mcp-authorization';
@@ -1665,6 +1668,9 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     }
   }, [adapter, canControl, notify, openRuntimeSession, ownsConnection, runtimeReopenBusy]);
 
+  const [mediaSourceNote, setMediaSourceNote] = useState<MediaNote>();
+  useEffect(() => { setMediaSourceNote(undefined); }, [activeSessionId, activeView]);
+
   const openSession = (id: string) => {
     if (deletingSession.current === id || archivingSession.current === id) return;
     setActiveView('workbench');
@@ -2770,7 +2776,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     <UserAvatarProvider adapter={adapter}>
     <McpAuthorizationContext.Provider value={mcpAuthorizationStatuses}>
     <DesktopWorkspaceProvider visible={activeView === 'workbench' && !databaseBlocked} onBrowserShortcut={command => flushSync(() => { if (command === 'search') setSearchOpen(value => !value); else if (canCreateSession) setNewSessionOpen(true); })} controlRef={workspaceControl} sessionId={activeSessionId} onShow={() => setInspectorOpen(true)}>
-    <FilePreviewProvider sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
+    <OpenMediaNoteSource.Provider value={setMediaSourceNote}>
+    <FilePreviewProvider mediaRanges={connection ? projection.mediaRanges : []} mediaReadStarts={connection ? projection.mediaReadStarts : []} mediaAnnotationsRevision={projection.mediaAnnotationsRevision} sessionId={activeSessionId} imageOwnerKey={activeSessionId} readImageReference={readImageReference} ownerKey={connection ? `${connection.sessionId}:${connection.generation}` : 'disconnected'} api={connection?.filePreview} onNotify={notify}>
     <PresentationProvider connection={connection} visible={activeView === "workbench" && !databaseBlocked && !loadingSession} isOpen={inspectorOpen} onNotify={notify}>
     <ToolResultDisplayContext.Provider value={{ showBuiltinToolResults, onChange: setShowBuiltinToolResults }}>
     <main data-platform={desktopHost()?.platform} className={`pulsara-shell desktop-shell${sidebarOpen ? " sidebar-visible" : ""}${activeView === 'workbench' ? ' is-workbench' : ' is-surface'}${inspectorOpen && !databaseBlocked ? ' has-inspector' : ''}`}>
@@ -3136,12 +3143,14 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           if (!bulkDeletion.running) setBulkNoticeDismissed(true);
         }}
         onRetry={() => requestBulkDelete(bulkDeletion.items.filter(item => ['failed', 'unknown'].includes(item.status)).map(item => item.session))} />}
+      {mediaSourceNote && <MediaNoteSourceDialog key={mediaSourceNote.resultId} note={mediaSourceNote} adapter={adapter} onClose={() => setMediaSourceNote(undefined)} onNotify={notify}/> }
       <DesktopSidebarToggle onToggle={() => setSidebarOpen(value => !value)} />
       <DesktopWindowControls />
     </main>
     </ToolResultDisplayContext.Provider>
     </PresentationProvider>
     </FilePreviewProvider>
+    </OpenMediaNoteSource.Provider>
     </DesktopWorkspaceProvider>
     </McpAuthorizationContext.Provider>
     </UserAvatarProvider>

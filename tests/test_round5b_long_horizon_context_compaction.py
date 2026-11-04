@@ -499,6 +499,7 @@ def test_model_switch_destination_projection_is_dialogue_only_and_exact() -> Non
                 frozen_tool_result_public_text(content) if image is not None else body
             ),
             tool_call_ordinal=call_ordinal if image is not None else None,
+            tool_call_name="view_image" if image is not None else None,
             tool_call_arguments=(
                 freeze_json(
                     {"target": {"kind": "PATH", "path": f"/tmp/{call_ordinal}.png"}}
@@ -2649,7 +2650,7 @@ def test_round5b_architecture_and_oracle_are_exact() -> None:
     assert not {"TerminalMonitorOpened", "TerminalMonitorObservation", "TerminalMonitorClosed"} & set(LIVE_EVENT_TYPES)
     assert len(SUBJECT_SLOTS) == 8
     assert APPEND_GUARDS == ("HostWriterGuard",)
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
     assert "canonical_image_refs" in CONVERSATION_KERNEL_RELATIONS
     assert not {
         "durable_jobs",

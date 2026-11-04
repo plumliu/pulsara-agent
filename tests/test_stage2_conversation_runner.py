@@ -117,8 +117,8 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.conversation_kernel.todo_runtime import (
-    PreparedTodoRootRunActivation,
+from pulsara_agent.conversation_kernel.current_work_runtime import (
+    PreparedRootWorkActivation,
 )
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.llm.input import (
@@ -8373,11 +8373,11 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
     )
     seal_test_direct_tool_port(tools)
 
-    async def finalize_todo(
-        prepared: PreparedTodoRootRunActivation, accepted: AcceptedEntry
+    async def finalize_root_work(
+        prepared: PreparedRootWorkActivation, accepted: AcceptedEntry
     ) -> None:
         assert accepted.turn_id == prepared.exact_turn_id
-        tools.todo_owner.activate_root_run(prepared)
+        tools.current_work_owner.activate_root_run(prepared)
 
     runner = ConversationKernelRunner(
         model_resolution_snapshot_provider=test_model_resolution_snapshot,
@@ -8389,7 +8389,7 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
         tools=tools,
         live_bus=live_bus,
         context_source_collector=StaticContextSourceCollector(),
-        todo_admission_finalizer=finalize_todo,
+        root_work_admission_finalizer=finalize_root_work,
     )
 
     async def exercise():
@@ -8402,7 +8402,7 @@ def test_lightweight_todo_runs_through_canonical_tool_result_settlement(
 
     result = asyncio.run(exercise())
     assert result.final_text == "done"
-    snapshot = tools.todo_owner.snapshot(
+    snapshot = tools.current_work_owner.snapshot(
         scope_kind=ModelInputScopeKind.ROOT,
     )
     assert snapshot is not None and snapshot.revision == 1

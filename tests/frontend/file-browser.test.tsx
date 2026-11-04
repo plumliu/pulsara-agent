@@ -1,4 +1,5 @@
-import type { ReactElement } from "react";
+import { useContext, type ReactElement } from "react";
+import { FileMediaContext } from "../../frontend/components/file-link-context";
 import {
   DesktopWorkspace,
   DesktopWorkspaceProvider,
@@ -84,6 +85,7 @@ const file = (name: string): FilePreview => ({
 });
 function api(): FilePreviewApi {
   return {
+    annotations: vi.fn(async () => ({items: [], next: null})),
     snapshot: vi.fn(),
     open: vi.fn(async (path) => file(path)),
     close: vi.fn(async () => undefined),
@@ -830,4 +832,84 @@ it.each(['load', 'error'] as const)('settles the shared image loader on %s', asy
 
 beforeEach(() => {
   vi.stubGlobal('IntersectionObserver', class {observe() {} disconnect() {}});
+});
+
+it('activates media once for an actual read and keeps later reads from reopening it', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  const play = vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+  const reader = api();
+  vi.mocked(reader.open).mockImplementation(async path => ({...file(path.endsWith('.txt')?'notes.txt':'clip.mp4'),kind:path.endsWith('.txt')?'text':'video',modified_ns:'123'}));
+  const span = {canonical_path:'/project/clip.mp4',file_mtime_ns:'123',from_seconds:10,to_seconds:20,attempt_id:'read-1'};
+  const content = <MarkdownBody body="[文字](notes.txt)" onNotify={notify}/>;
+  const view = render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify} mediaRanges={[span]}>{content}</FilePreviewProvider>);
+  expect(reader.open).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('link',{name:'文字'}));
+  await screen.findByText('hello');
+  view.rerender(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify} mediaRanges={[span]} mediaReadStarts={[span]}>{content}</FilePreviewProvider>);
+  await screen.findByRole('tab',{name:'clip.mp4'});
+  expect(screen.getByRole('tab',{name:'clip.mp4'}).getAttribute('aria-selected')).toBe('true');
+  const video = view.container.querySelector('video')!;
+  Object.defineProperty(video,'duration',{value:100,configurable:true});
+  fireEvent.loadedMetadata(video);
+  expect(screen.getByRole('button',{name:'定位用户预览到模型读取范围 00:10–00:20'})).toBeTruthy();
+  expect(video.currentTime).toBe(0);
+  expect(play).not.toHaveBeenCalled();
+  expect(reader.action).toHaveBeenCalledWith('clip.mp4','activate');
+  fireEvent.click(screen.getByRole('button',{name:'关闭 clip.mp4'}));
+  const count = vi.mocked(reader.open).mock.calls.length;
+  const next = {...span,from_seconds:30,to_seconds:40,attempt_id:'read-2'};
+  view.rerender(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify} mediaRanges={[next]} mediaReadStarts={[next]}>{content}</FilePreviewProvider>);
+  expect(screen.queryByRole('tab',{name:'clip.mp4'})).toBeNull();
+  expect(reader.open).toHaveBeenCalledTimes(count);
+  expect(screen.getByRole('tab',{name:'notes.txt'}).getAttribute('aria-selected')).toBe('true');
+});
+
+it('rejects changed media evidence before adopting or seeking the current player', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  const reader = api();
+  let serial = 0;
+  vi.mocked(reader.open).mockImplementation(async () => ({...file('clip.mp4'),read_token:`media-${++serial}`,kind:'video',modified_ns:'123'}));
+  function Evidence() {
+    const media = useContext(FileMediaContext);
+    return <><button onClick={() => media?.open('/project/clip.mp4',12,{modified_ns:'123',size:5})}>原证据</button>
+      <button onClick={() => media?.open('/project/clip.mp4',90,{modified_ns:'122',size:5})}>过期证据</button></>;
+  }
+  const view = render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}><Evidence/></FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('button',{name:'原证据'}));
+  await screen.findByRole('tab',{name:'clip.mp4'});
+  const video = view.container.querySelector('video')!;
+  Object.defineProperty(video,'duration',{value:100,configurable:true});
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(12);
+  fireEvent.click(screen.getByRole('button',{name:'过期证据'}));
+  await waitFor(() => expect(reader.close).toHaveBeenCalledWith('media-2'));
+  expect(notify).toHaveBeenCalledWith('无法打开文件','媒体已变化，无法定位历史证据','warning');
+  expect(screen.getAllByRole('tab')).toHaveLength(1);
+  expect(view.container.querySelector('video')).toBe(video);
+  expect(video.currentTime).toBe(12);
+});
+
+it('revokes a replacement prepared after a read start and allows a new version start to open', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  const reader = api();
+  vi.mocked(reader.open).mockImplementation(async path => path.endsWith('.txt') ? file('notes.txt') : {...file('clip.mp4'),read_token:'replacement',kind:'video',modified_ns:'2'});
+  const first = {canonical_path:'/project/clip.mp4',file_mtime_ns:'1',from_seconds:0,to_seconds:1,attempt_id:'first'};
+  const content = <MarkdownBody body="[文字](notes.txt)" onNotify={notify}/>;
+  const view = render(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify}>{content}</FilePreviewProvider>);
+  fireEvent.click(screen.getByRole('link',{name:'文字'}));
+  await screen.findByText('hello');
+  view.rerender(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify} mediaRanges={[first]} mediaReadStarts={[first]}>{content}</FilePreviewProvider>);
+  await waitFor(() => expect(reader.close).toHaveBeenCalledWith('replacement'));
+  expect(screen.queryByRole('tab',{name:'clip.mp4'})).toBeNull();
+  expect(screen.getByRole('tab',{name:'notes.txt'}).getAttribute('aria-selected')).toBe('true');
+  const fresh = {...first,file_mtime_ns:'2',attempt_id:'second'};
+  view.rerender(<FilePreviewProvider api={reader} ownerKey="one" onNotify={notify} mediaRanges={[fresh]} mediaReadStarts={[fresh]}>{content}</FilePreviewProvider>);
+  await screen.findByRole('tab',{name:'clip.mp4'});
+  expect(screen.getByRole('tab',{name:'clip.mp4'}).getAttribute('aria-selected')).toBe('true');
 });

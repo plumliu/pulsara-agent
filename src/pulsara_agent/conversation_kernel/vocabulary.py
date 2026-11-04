@@ -74,7 +74,7 @@ class LiveEventType(StrEnum):
     INTERACTION_REPLACED = "InteractionReplaced"
     INTERACTION_CLOSED = "InteractionClosed"
     TERMINAL_PROCESS_COMPLETED = "TerminalProcessCompleted"
-    TODO_SNAPSHOT_UPDATED = "TodoSnapshotUpdated"
+    CURRENT_WORK_SNAPSHOT_UPDATED = "CurrentWorkSnapshotUpdated"
 
 
 @dataclass(frozen=True, slots=True)

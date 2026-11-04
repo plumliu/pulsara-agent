@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { FileVideoContent } from '../../frontend/components/file-video-content';
+import { FileVideoContent, placeVideoAnnotations } from '../../frontend/components/file-video-content';
 import { deriveIdentity } from '../../frontend/lib/identity';
 
 const notify = vi.fn();
@@ -123,4 +123,68 @@ it('applies explicit gallery positions to an existing player without autoplay or
   video.currentTime=70;
   view.rerender(<FileVideoContent {...props} previewPosition={{time:17}}/>);
   expect(video.currentTime).toBe(17);
+});
+
+it('shares controls and analysis with hidden native audio while observing its visible container', () => {
+  const observed: Element[] = [];
+  let changed!: IntersectionObserverCallback;
+  vi.stubGlobal('IntersectionObserver', class { constructor(callback: IntersectionObserverCallback) { changed = callback; } observe(element: Element) { observed.push(element); } disconnect() {} });
+  const source = vi.fn();
+  const note = { resultId: deriveIdentity('result', 'audio-note'), from: 8, to: 24, text: '音频证据', openSource: source };
+  const view = render(<StrictMode><FileVideoContent {...props} kind="audio" annotations={[note]} /></StrictMode>);
+  const audio = view.container.querySelector('audio')!;
+  expect(audio.hidden).toBe(true);
+  expect(view.container.querySelector('video, .video-player-viewport, .video-height-divider')).toBeNull();
+  expect(screen.queryByRole('button', { name: '全屏视频' })).toBeNull();
+  expect(observed.every(node => node === view.container.querySelector('.video-layout'))).toBe(true);
+  Object.defineProperty(audio, 'duration', { value: 96, configurable: true });
+  fireEvent.loadedMetadata(audio);
+  fireEvent.click(screen.getByRole('button', { name: '播放音频' }));
+  expect(audio.paused).toBe(false);
+  changed([{ isIntersecting: false, intersectionRect: { width: 0, height: 0 } } as IntersectionObserverEntry], {} as IntersectionObserver);
+  expect(audio.paused).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: /查看批注 1/ }));
+  expect(audio.currentTime).toBe(8);
+  fireEvent.click(screen.getByRole('button', { name: '定位来源调用' }));
+  expect(source).toHaveBeenCalledOnce();
+  view.unmount();
+  expect(audio.getAttribute('src')).toBeNull();
+});
+
+it('keeps an annotation outside the current duration readable and selected without seeking', () => {
+  const note = { resultId: deriveIdentity('result', 'out-of-range-note'), from: 8, to: 120, text: '完整的原记录' };
+  const view = render(<FileVideoContent {...props} annotations={[note]} />);
+  const video = view.container.querySelector('video')!;
+  metadata(video);
+  video.currentTime = 40;
+  fireEvent.click(screen.getByRole('button', { name: /查看批注 1/ }));
+  expect(video.currentTime).toBe(40);
+  expect(screen.getByText(note.text)).toBeDefined();
+  expect(screen.getAllByRole('button', { pressed: true })).toHaveLength(2);
+});
+
+it('places dense overlaps without repeated index lookups and keeps every loaded annotation selectable', () => {
+  const notes=Array.from({length:180},(_,index)=>({resultId:deriveIdentity('result',`overlap-${index}`),from:1,to:8,text:`完整批注 ${index}`}));
+  const view=render(<FileVideoContent {...props} annotations={notes}/>);
+  const video=view.container.querySelector('video')!;
+  metadata(video);
+  expect(view.container.querySelectorAll('.video-note-range')).toHaveLength(notes.length);
+  expect(view.container.querySelectorAll('.video-note-card')).toHaveLength(notes.length);
+  const last=screen.getByRole('button',{name:'查看批注 180，00:01–00:08，完整批注 179'});
+  fireEvent.click(last);
+  expect(video.currentTime).toBe(1);
+  expect(last.getAttribute('aria-pressed')).toBe('true');
+  const cards=view.container.querySelectorAll('.video-note-card');
+  video.currentTime=4;fireEvent.timeUpdate(video);
+  expect(view.container.querySelectorAll('.video-note-card')[179]).toBe(cards[179]);
+});
+
+
+it('uses ordered interval lanes with original numbering at large overlap and reuses the lowest free lane', () => {
+  const notes=Array.from({length:10000},(_,i)=>({resultId:String(i),from:1,to:2,text:''}));
+  const placement=placeVideoAnnotations(notes);
+  expect(placement.map(item=>item.lane)).toEqual(Array.from({length:10000},(_,i)=>i));
+  expect(placement.at(-1)?.ordinal).toBe(10000);
+  const reused=placeVideoAnnotations([{...notes[0],from:0,to:10},{...notes[1],from:1,to:2},{...notes[2],from:11,to:12}]);
+  expect(reused.map(item=>item.lane)).toEqual([0,1,0]);
 });

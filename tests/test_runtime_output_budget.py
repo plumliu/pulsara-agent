@@ -298,18 +298,18 @@ def test_todo_budget_rejection_precedes_prepared_or_installed_change(tmp_path):
         session = "session:cbauiajfisf4gvpdotrq4qgxhq"
         port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path, host_owner_id=random_id("host"), session_id=session,
             live_bus=LiveAgentEventBus(), authorization_policy=DefaultToolDispatchAuthorizationPolicy())
-        port.todo_owner.activate_root_run(_root_activation())
+        port.current_work_owner.activate_root_run(_root_activation())
         ids = {"tool_name": "todo", "tool_call_id": random_id("call"), "attempt_id": random_id("attempt"),
                "turn_id": "turn:nzc36cttgo7xxki7bcjc7ops7a", "assistant_entry_id": random_id("entry")}
         borrow, ctx = direct_tool_invocation_context(port, session_id=session, **ids)
         ctx = replace(ctx, page_budget=replace(ctx.page_budget, accepts_provider_body=lambda *_: False))
-        before = port.todo_owner.current_snapshots()
+        before = port.current_work_owner.current_snapshots()
         try:
             result = await port.invoke(**ids, arguments={"items": [{"text": "Must not install", "status": "pending"}]}, invocation_context=ctx)
             assert result.state == "APPLICATION_ERROR"
             assert json.loads(result.content) == result.required_facts == {
                 "error": "OUTPUT_PAGE_BOUNDARY", "physical_outcome": "NO_EFFECT", "retry_performed": False}
-            assert port.todo_owner.current_snapshots() == before
+            assert port.current_work_owner.current_snapshots() == before
             assert port._todo_settlements == {}
         finally:
             borrow.close()

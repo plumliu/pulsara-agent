@@ -404,26 +404,27 @@ def test_cold_image_content_target_is_exclusive():
     assert len(calls) == 1
 
 
-def test_video_publication_freezes_only_absolute_reference(tmp_path):
+@pytest.mark.parametrize(("suffix", "media_type"), [("MP4", "video"), ("mp3", "audio"), ("wav", "audio")])
+def test_media_publication_freezes_only_absolute_reference(tmp_path, suffix, media_type):
     import json
     from pulsara_agent.conversation_kernel.visualization import VISUALIZATION_VIDEO_MEDIA_TYPE
 
     async def run():
         io = KernelSessionIO()
-        path = tmp_path / 'demo.MP4'
+        path = tmp_path / f'demo.{suffix}'
         # Neither size nor video decoding is part of reference publication.
         with path.open('wb') as source:
             source.truncate(32 << 20)
         try:
             result = await materialize_visualizations(
-                '```pulsara-viz\nchart.html\ndemo.MP4\nmissing.webm\n```',
+                f'```pulsara-viz\nchart.html\ndemo.{suffix}\nmissing.webm\n```',
                 lambda value: (tmp_path / value).resolve(), io=io, validator=None,
                 image_reader=None, session_id=random_id('session'), workspace_id=random_id('workspace'),
                 deadline_monotonic=monotonic() + 10,
             )
             assert [item.state for item in result] == ['FAILED', 'READY', 'FAILED']
             video = result[1]
-            assert video.media_type == VISUALIZATION_VIDEO_MEDIA_TYPE and video.codec == 'utf-8'
+            assert video.media_type == VISUALIZATION_VIDEO_MEDIA_TYPE.replace('video-reference', f'{media_type}-reference') and video.codec == 'utf-8'
             assert json.loads(video.content) == {'path': str(path)}
             assert len(video.content) < 1024 and video.html is None and video.image is None
             path.unlink()
@@ -434,7 +435,8 @@ def test_video_publication_freezes_only_absolute_reference(tmp_path):
 
 
 @pytest.mark.postgres
-def test_video_reference_commit_confirm_protocol_read_and_fork(stage2_migrated_postgres_database):
+@pytest.mark.parametrize("kind", ["video", "audio"])
+def test_media_reference_commit_confirm_protocol_read_and_fork(stage2_migrated_postgres_database, kind):
     from pulsara_agent.conversation_kernel.visualization import VISUALIZATION_VIDEO_MEDIA_TYPE
     from pulsara_agent.conversation_kernel.prompt_storage import _read_body
     repo = _repository(stage2_migrated_postgres_database)
@@ -443,10 +445,11 @@ def test_video_reference_commit_confirm_protocol_read_and_fork(stage2_migrated_p
     intent, _ = _direct_intent(repo, lease, runtime, FrozenPromptContent.text('show video'))
     cut = repo.prepare_provider_input_cut(lease.guard, turn_id=intent.turn_id, deadline_monotonic=monotonic()+30)
     entry = random_id('entry')
-    payload = b'{"path":"/project/demo.mp4"}'
-    candidate = FrozenVisualizationOccurrence('demo.mp4', VisualizationOccurrenceState.READY, video=payload)
+    name = 'demo.mp4' if kind == 'video' else 'demo.mp3'
+    payload = ('{"path":"/project/' + name + '"}').encode()
+    candidate = FrozenVisualizationOccurrence(name, VisualizationOccurrenceState.READY, **{kind: payload})
     submission = dict(cut=cut, entry_id=entry, parent_content=InlineContent.from_bytes(b'manifest'),
-        blocks=(AssistantTextBlock(random_id('block'), InlineContent.from_bytes(b'```pulsara-viz\n/project/demo.mp4\n```')),),
+        blocks=(AssistantTextBlock(random_id('block'), InlineContent.from_bytes(f'```pulsara-viz\n/project/{name}\n```'.encode())),),
         visualizations=(candidate,), complete_turn=True, occurred_at=datetime.now(timezone.utc), actor_id='model:test', deadline_monotonic=monotonic()+30)
     repo.commit_assistant_message(lease.guard, **submission)
     assert repo.confirm_assistant_message_winner(lease.guard, **submission) is not None
@@ -457,4 +460,4 @@ def test_video_reference_commit_confirm_protocol_read_and_fork(stage2_migrated_p
         reference = protocol.resolve_content_reference(session_id=session_id, entry_id=entry_id, visualization_ordinal=0, deadline_monotonic=monotonic()+30)
         with repo.connection_provider.connection(lane=PostgresConnectionLane.ARTIFACT, row_factory=dict_row, deadline_monotonic=monotonic()+30) as connection:
             assert _read_body(connection, row=reference, workspace_id=workspace,
-                expected_media_type=VISUALIZATION_VIDEO_MEDIA_TYPE, expected_codec='utf-8') == payload
+                expected_media_type=VISUALIZATION_VIDEO_MEDIA_TYPE.replace('video-reference', f'{kind}-reference'), expected_codec='utf-8') == payload

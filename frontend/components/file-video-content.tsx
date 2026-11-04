@@ -1,11 +1,11 @@
-import { releaseVideo, pauseVideoWhenHidden } from '../lib/video-media';
-import { useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
-import { Check, ChevronRight, Film, Maximize2, Minimize2, MessageSquareText, Pause, Play, RotateCcw, RotateCw, Sparkles, Volume2, VolumeX } from 'lucide-react';
+import { releaseMedia, pauseMediaWhenHidden } from '../lib/video-media';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Check, ChevronRight, ExternalLink, Film, Maximize2, Minimize2, MessageSquareText, Pause, Play, RotateCcw, RotateCw, Sparkles, Volume2, VolumeX } from 'lucide-react';
 import type { MarkdownNotify } from './markdown-body';
 import '../app/styles/video.css';
 
 export interface VideoSpan { from: number; to: number }
-export interface VideoAnnotation extends VideoSpan { resultId: string; text: string }
+export interface VideoAnnotation extends VideoSpan { resultId: string; text: string; openSource?: () => void }
 export interface VideoPlaybackState { time: number; volume: number; muted: boolean; rate: number }
 const emptyAnnotations: readonly VideoAnnotation[] = [];
 const clock = (seconds: number) => {
@@ -14,13 +14,52 @@ const clock = (seconds: number) => {
   return value >= 3600 ? `${Math.floor(value / 3600)}:${base}` : base;
 };
 const spanText = ({ from, to }: VideoSpan) => `${clock(from)}–${clock(to)}`;
-const playbackState = (video: HTMLVideoElement): VideoPlaybackState => ({ time: video.currentTime, volume: video.volume, muted: video.muted, rate: video.playbackRate });
+const playbackState = (video: HTMLMediaElement): VideoPlaybackState => ({ time: video.currentTime, volume: video.volume, muted: video.muted, rate: video.playbackRate });
+
+/** Interval partitioning, with the earliest-ending lane at the heap root.
+ * Geometry is rebuilt only when loaded annotations change, never per play tick. */
+export function placeVideoAnnotations(annotations: readonly VideoAnnotation[]) {
+  type Lane = {end: number; lane: number};
+  const active: Lane[] = [], available: Lane[] = [];
+  const push = (heap: Lane[], value: Lane) => {
+    heap.push(value);
+    for (let child = heap.length - 1; child > 0; ) {
+      const parent = Math.floor((child - 1) / 2);
+      if (heap[parent].end <= heap[child].end) break;
+      [heap[parent], heap[child]] = [heap[child], heap[parent]]; child = parent;
+    }
+  };
+  const pop = (heap: Lane[]) => {
+    const first = heap[0], tail = heap.pop()!;
+    if (heap.length) {
+      heap[0] = tail;
+      for (let parent = 0; ;) {
+        let child = parent * 2 + 1;
+        if (child >= heap.length) break;
+        if (child + 1 < heap.length && heap[child + 1].end < heap[child].end) child++;
+        if (heap[parent].end <= heap[child].end) break;
+        [heap[parent], heap[child]] = [heap[child], heap[parent]]; parent = child;
+      }
+    }
+    return first;
+  };
+  let laneCount = 0;
+  return annotations.map((note, index) => ({note, ordinal:index + 1})).sort((a,b) => a.note.from - b.note.from).map(item => {
+    while (active.length && active[0].end <= item.note.from) {
+      const {lane} = pop(active); push(available, {end:lane,lane});
+    }
+    const lane = available.length ? pop(available).lane : laneCount++;
+    push(active, {end:item.note.to,lane});
+    return {...item,lane};
+  });
+}
 
 /** The file preview owner binds src and keys this component to its read lease.
  * Optional analysis is presentation data only; it never starts or restores work. */
-export function FileVideoContent({ src, name, poster, initialState, previewPosition, onPreviewPositioned, onPlaybackStateChange, onNotify, onRetry, activeSpan = null, annotations = emptyAnnotations }: {
+export function FileVideoContent({ src, name, kind = 'video', poster, initialState, previewPosition, onPreviewPositioned, onPlaybackStateChange, onNotify, onRetry, activeSpan = null, annotations = emptyAnnotations }: {
   src: string;
   name: string;
+  kind?: 'video' | 'audio';
   poster?: string;
   initialState?: Partial<VideoPlaybackState>;
   previewPosition?: {time: number};
@@ -31,10 +70,14 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
   activeSpan?: VideoSpan | null;
   annotations?: readonly VideoAnnotation[];
 }) {
-  const media = useRef<HTMLVideoElement>(null);
+  const media = useRef<HTMLMediaElement>(null);
+  const audio = kind === 'audio';
+  const Media = audio ? 'audio' : 'video';
+  const mediaLabel = audio ? '音频' : '视频';
   const layout = useRef<HTMLDivElement>(null);
   const splitDrag = useRef<{ axis: 'x' | 'y'; point: number; size: number } | null>(null);
   const cards = useRef(new Map<string, HTMLButtonElement>());
+  const markers = useRef(new Map<string, HTMLButtonElement>());
   const [duration, setDuration] = useState(0);
   const [time, setTime] = useState(initialState?.time ?? 0);
   const [requested, setRequested] = useState<number | null>(null);
@@ -79,19 +122,19 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
   // than a fixed reading area that keeps the picture short as width increases.
   const maxVideo = hasNotes ? Math.max(minVideo, stackedRoom - Math.min(96, stackedRoom * .6)) : stackedRoom;
   const clampVideo = (value: number) => Math.max(minVideo, Math.min(maxVideo, value));
-  const stackedHeight = stackedRoom ? clampVideo(videoRatio === null
+  const stackedHeight = audio ? 0 : stackedRoom ? clampVideo(videoRatio === null
     ? Math.max(0, space.width - playerInset) / aspect
     : stackedRoom * videoRatio) : 120;
   // 300px fits a readable note column; 360px fits the timeline and controls.
   // Only dock when the actual picture can keep its previous displayed size.
   const previousPictureWidth = Math.min(Math.max(0, space.width - playerInset), stackedHeight * aspect);
   const requiredViewerWidth = Math.max(360, previousPictureWidth + playerInset);
-  const sideBySide = hasNotes && space.width >= requiredViewerWidth + dividerSize + 300;
+  const sideBySide = !audio && hasNotes && space.width >= requiredViewerWidth + dividerSize + 300;
   const minViewer = requiredViewerWidth;
   const maxViewer = Math.max(minViewer, space.width - dividerSize - 264);
   const noteWidth = Math.max(264, Math.min(space.width - dividerSize - minViewer, preferredNoteWidth ?? 300));
   const viewerWidth = space.width - dividerSize - noteWidth;
-  const videoHeight = sideBySide ? Math.max(0, Math.min((viewerWidth - playerInset) / aspect, verticalRoom)) : stackedHeight;
+  const videoHeight = audio ? 0 : sideBySide ? Math.max(0, Math.min((viewerWidth - playerInset) / aspect, verticalRoom)) : stackedHeight;
   const splitSize = sideBySide ? viewerWidth : videoHeight;
   const splitMin = sideBySide ? minViewer : minVideo;
   const splitMax = sideBySide ? maxViewer : maxVideo;
@@ -99,7 +142,7 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
     if (sideBySide) setPreferredNoteWidth(space.width - dividerSize - Math.max(minViewer, Math.min(maxViewer, value)));
     else if (stackedRoom) setVideoRatio(clampVideo(value) / stackedRoom);
   };
-  const saveOnUnmount = useEffectEvent((video: HTMLVideoElement) => {
+  const saveOnUnmount = useEffectEvent((video: HTMLMediaElement) => {
     if (ready) onPlaybackStateChange?.(playbackState(video));
   });
   useEffect(() => {
@@ -108,16 +151,16 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
     if (video && !video.getAttribute('src')) video.src = src;
     const updateFullscreen = () => setFullscreen(document.fullscreenElement === root);
     document.addEventListener('fullscreenchange', updateFullscreen);
-    const stopVisibility = video ? pauseVideoWhenHidden(video) : undefined;
+    const stopVisibility = video ? pauseMediaWhenHidden(video, root!) : undefined;
     return () => {
       document.removeEventListener('fullscreenchange', updateFullscreen);
       stopVisibility?.();
       if (video) {
         saveOnUnmount(video);
-        releaseVideo(video);
+        releaseMedia(video);
       }
     };
-  }, [src]);
+  }, [src, kind]);
   const reportPosition = useEffectEvent(() => onPreviewPositioned?.());
   useEffect(() => {
     const video = media.current;
@@ -129,21 +172,21 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
     }
   }, [previewPosition, ready, duration]);
   const syncTime = () => { if (media.current) { setTime(media.current.currentTime); if (ready) onPlaybackStateChange?.(playbackState(media.current)); } };
-  const seek = (value: number) => {
+  const seek = useCallback((value: number) => {
     const video = media.current;
     if (!video || !duration || error) return;
     const next = Math.max(0, Math.min(duration, value));
     if (Math.abs(video.currentTime - next) < .001) return;
     setRequested(next);
     video.currentTime = next;
-  };
+  }, [duration, error]);
   const togglePlay = async () => {
     const video = media.current;
     if (!video || error) return;
     if (!video.paused) video.pause();
     else try { await video.play(); } catch (reason) {
       if (video.isConnected && !(reason instanceof DOMException && reason.name === 'AbortError')) {
-        onNotify('无法播放视频', reason instanceof Error ? reason.message : '请重试。', 'warning');
+        onNotify(`无法播放${mediaLabel}`, reason instanceof Error ? reason.message : '请重试。', 'warning');
       }
     }
   };
@@ -156,31 +199,32 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
   const showActive = activeSpan !== null && duration > 0;
   const showNoteTrack = hasNotes && duration > 0;
   // Lane placement is disposable geometry; note times and identities stay intact.
-  const lanes: number[] = [];
-  const placed = [...annotations].sort((a, b) => a.from - b.from).map(note => {
-    let lane = lanes.findIndex(end => end <= note.from);
-    if (lane < 0) lane = lanes.length;
-    lanes[lane] = note.to;
-    return { note, lane };
-  });
-  const fraction = (value: number) => duration ? `${Math.min(100, Math.max(0, value / duration * 100))}%` : '0%';
-  const geometry = ({ from, to }: VideoSpan): CSSProperties => ({ left: fraction(from), width: fraction(to - from) });
-  const selectNote = (note: VideoAnnotation) => {
-    setSelected(note.resultId); seek(note.from);
+  const placed = useMemo(() => placeVideoAnnotations(annotations), [annotations]);
+  const fraction = useCallback((value: number) => duration ? `${Math.min(100, Math.max(0, value / duration * 100))}%` : '0%', [duration]);
+  const geometry = useCallback(({ from, to }: VideoSpan): CSSProperties => ({ left: fraction(from), width: fraction(to - from) }), [fraction]);
+  const selectNote = useCallback((note: VideoAnnotation) => {
+    setSelected(note.resultId);
+    if (note.from >= 0 && note.to <= duration) seek(note.from);
     const card = cards.current.get(note.resultId);
-    const list = card?.parentElement;
-    if (card && list && (card.offsetTop < list.scrollTop || card.offsetTop + card.offsetHeight > list.scrollTop + list.clientHeight)) {
-      list.scrollTop = card.offsetTop;
+    const list = card?.closest<HTMLElement>('.video-note-list');
+    const row = card?.closest<HTMLElement>('.video-note-row');
+    if (row && list && (row.offsetTop < list.scrollTop || row.offsetTop + row.offsetHeight > list.scrollTop + list.clientHeight)) {
+      list.scrollTop = row.offsetTop;
     }
-  };
-  return <div ref={layout} className={`video-layout${sideBySide ? ' is-side-by-side' : ''}${!hasNotes ? ' is-plain' : ''}`} aria-label={`视频：${name}`} style={{ '--video-frame-height': `${videoHeight}px`, '--video-note-width': `${noteWidth}px` } as CSSProperties}>
+    const marker = markers.current.get(note.resultId);
+    const track = marker?.parentElement;
+    if (marker && track && (marker.offsetTop < track.scrollTop || marker.offsetTop + marker.offsetHeight > track.scrollTop + track.clientHeight)) track.scrollTop = marker.offsetTop;
+  }, [duration, seek]);
+  const noteMarkers = useMemo(() => placed.map(({ note, lane, ordinal }) => <button key={note.resultId} ref={node => { if (node) markers.current.set(note.resultId, node); else markers.current.delete(note.resultId); }} className={`video-note-range${selected === note.resultId ? ' is-selected' : ''}`} style={{ ...geometry(note), gridRow: lane + 1 }} aria-label={`批注 ${ordinal}，${spanText(note)}，${note.text}`} aria-pressed={selected === note.resultId} title={`${spanText(note)} ${note.text}`} onClick={() => selectNote(note)}><span>{ordinal}</span></button>), [placed, selected, geometry, selectNote]);
+  const noteCards = useMemo(() => annotations.map((note, index) => <div key={note.resultId} className="video-note-row"><button ref={node => { if (node) cards.current.set(note.resultId, node); else cards.current.delete(note.resultId); }} className={`video-note-card${selected === note.resultId ? ' is-selected' : ''}`} aria-label={`查看批注 ${index + 1}，${spanText(note)}，${note.text}`} aria-pressed={selected === note.resultId} onClick={() => selectNote(note)}><span className="video-note-number">{index + 1}</span><span className="video-note-body"><span className="video-note-meta"><b>{spanText(note)}</b>{selected === note.resultId && <Check size={13} />}</span><span>{note.text}</span></span><ChevronRight size={15} /></button>{selected === note.resultId && note.openSource && <button className="video-note-source" aria-label="定位来源调用" title="定位来源调用" onClick={note.openSource}><ExternalLink size={15}/></button>}</div>), [annotations, selected, selectNote]);
+  return <div ref={layout} className={`video-layout${sideBySide ? ' is-side-by-side' : ''}${!hasNotes ? ' is-plain' : ''}${audio ? ' is-audio' : ''}`} aria-label={`${mediaLabel}：${name}`} onKeyDown={event => { if (event.key === 'Escape') setSelected(null); }} style={{ '--video-note-track-height': `${Math.max(32, space.height * .2)}px`, ...(!audio ? { '--video-frame-height': `${videoHeight}px`, '--video-note-width': `${noteWidth}px` } : {}) } as CSSProperties}>
     <div className="video-viewer">
-    <div className="video-player-viewport">
-      <video ref={media} src={src} poster={poster} preload="metadata" playsInline muted={muted} onClick={() => void togglePlay()}
+    <div className={audio ? "audio-player-source" : "video-player-viewport"}>
+      <Media ref={node => { media.current = node; }} hidden={audio} src={src} poster={poster} preload="metadata" playsInline muted={muted} onClick={() => void togglePlay()}
         onLoadedMetadata={event => {
           const video = event.currentTarget;
           setReady(true);
-          if (video.videoWidth > 0 && video.videoHeight > 0) setAspect(video.videoWidth / video.videoHeight);
+          if (video instanceof HTMLVideoElement && video.videoWidth > 0 && video.videoHeight > 0) setAspect(video.videoWidth / video.videoHeight);
           if (Number.isFinite(video.duration) && video.duration > 0) setDuration(video.duration);
           video.volume = volume; video.playbackRate = rate;
           const target = initialState?.time ?? 0;
@@ -191,39 +235,39 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
         onRateChange={event => { setRate(event.currentTarget.playbackRate); if (ready) onPlaybackStateChange?.(playbackState(event.currentTarget)); }}
         onPlay={() => setPlaying(true)} onPause={() => { setPlaying(false); syncTime(); }} onEnded={() => setPlaying(false)} onWaiting={() => setWaiting(true)} onPlaying={() => setWaiting(false)} onCanPlay={() => setWaiting(false)}
         onProgress={event => { const ranges = event.currentTarget.buffered; setBuffered(Array.from({ length: ranges.length }, (_, index) => ({ from: ranges.start(index), to: ranges.end(index) }))); }}
-        onError={event => setError(event.currentTarget.error?.code === 4 ? '当前播放引擎不支持这个视频的容器或编码。' : '视频未能加载，请刷新文件后重试。')} />
-      {!playing && !error && <button className="video-play-overlay" aria-label="播放视频" onClick={() => void togglePlay()}><Play size={24} fill="currentColor" /></button>}
+        onError={event => setError(event.currentTarget.error?.code === 4 ? `当前播放引擎不支持这个${mediaLabel}的容器或编码。` : `${mediaLabel}未能加载，请刷新文件后重试。`)} />
+      {!audio && !playing && !error && <button className="video-play-overlay" aria-label="播放视频" onClick={() => void togglePlay()}><Play size={24} fill="currentColor" /></button>}
       {error && <div className="video-media-error" role="alert"><Film size={25} /><p>{error}</p><button className="video-button" onClick={onRetry}>重试</button></div>}
       {waiting && !error && <span className="video-loading" role="status">{requested === null ? '缓冲中' : `定位到 ${clock(requested)}`}</span>}
     </div>
     <div className="video-player-controls">
       <button className="video-icon-button" disabled={!duration || !!error} aria-label="后退 5 秒" title="后退 5 秒" onClick={() => seek((media.current?.currentTime ?? time) - 5)}><RotateCcw size={17} /></button>
-      <button className="video-icon-button video-primary-play" disabled={!ready || !!error} aria-label={playing ? '暂停视频' : '播放视频'} onClick={() => void togglePlay()}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>
+      <button className="video-icon-button video-primary-play" disabled={!ready || !!error} aria-label={`${playing ? '暂停' : '播放'}${mediaLabel}`} onClick={() => void togglePlay()}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button>
       <button className="video-icon-button" disabled={!duration || !!error} aria-label="前进 5 秒" title="前进 5 秒" onClick={() => seek((media.current?.currentTime ?? time) + 5)}><RotateCw size={17} /></button>
       <span className="video-time"><strong>{clock(time)}</strong><span>/</span>{duration ? clock(duration) : '--:--'}</span>
       <div className="video-volume"><button className="video-icon-button" aria-label={muted ? '取消静音' : '静音'} onClick={() => setMuted(value => !value)}>{muted || volume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}</button><input aria-label="音量" type="range" min="0" max="1" step=".05" value={muted ? 0 : volume} onChange={event => { const value = Number(event.target.value); setVolume(value); setMuted(value === 0); if (media.current) media.current.volume = value; }} /></div>
       <select aria-label="播放速度" value={rate} onChange={event => { const value = Number(event.target.value); setRate(value); if (media.current) media.current.playbackRate = value; }}>{[.5, 1, 1.5, 2].map(value => <option key={value} value={value}>{value}×</option>)}</select>
-      <button className="video-icon-button" aria-label={fullscreen ? "退出全屏视频" : "全屏视频"} onClick={() => void toggleFullscreen()}>{fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
+      {!audio && <button className="video-icon-button" aria-label={fullscreen ? "退出全屏视频" : "全屏视频"} onClick={() => void toggleFullscreen()}>{fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>}
     </div>
-    <section className="video-timeline-section" aria-label="Pulsara 视频时间轴" onClick={event => {
+    <section className="video-timeline-section" aria-label={`Pulsara ${mediaLabel}时间轴`} onClick={event => {
       if (event.target instanceof Element && !event.target.closest('button, input, .video-track-label')) setSelected(null);
     }} onKeyDown={event => { if (event.key === 'Escape') setSelected(null); }}>
       <div className="video-timeline-grid" style={{ gridTemplateRows: `24px ${showActive ? '28px ' : ''}${showNoteTrack ? 'minmax(32px, auto) ' : ''}22px` }}>
         <div className="video-track-label video-preview-label"><span className="video-playhead-key" />预览</div>
         <div className="video-seek-track">
           <div className="video-seek-rail">{buffered.map((range, index) => <i key={index} style={geometry(range)} />)}<b style={{ width: fraction(time) }} /></div>
-          <input aria-label="视频预览位置" aria-valuetext={`${clock(time)}，总时长 ${duration ? clock(duration) : '未知'}${requested !== null ? '，正在定位' : ''}`} type="range" min="0" max={duration || 1} step=".1" value={requested ?? time} disabled={!duration || !!error} onChange={event => seek(Number(event.target.value))} />
+          <input aria-label={`${mediaLabel}预览位置`} aria-valuetext={`${clock(time)}，总时长 ${duration ? clock(duration) : '未知'}${requested !== null ? '，正在定位' : ''}`} type="range" min="0" max={duration || 1} step=".1" value={requested ?? time} disabled={!duration || !!error} onChange={event => seek(Number(event.target.value))} />
         </div>
         {showActive && <><div className="video-track-label"><Sparkles size={13} />模型</div>
         <div className="video-reading-track"><button className="video-reading-range" style={geometry(activeSpan!)} onClick={() => seek(activeSpan!.from)} aria-label={`定位用户预览到模型读取范围 ${spanText(activeSpan!)}`}><span>{spanText(activeSpan!)}</span></button></div></>}
         {showNoteTrack && <><div className="video-track-label video-annotation-label"><MessageSquareText size={13} />批注</div>
-        <div className="video-note-track">{placed.map(({ note, lane }) => <button key={note.resultId} className={`video-note-range${selected === note.resultId ? ' is-selected' : ''}`} style={{ ...geometry(note), gridRow: lane + 1 }} aria-label={`批注 ${annotations.indexOf(note) + 1}，${spanText(note)}，${note.text}`} aria-pressed={selected === note.resultId} title={`${spanText(note)} ${note.text}`} onClick={() => selectNote(note)}><span>{annotations.indexOf(note) + 1}</span></button>)}</div></>}
+        <div className="video-note-track">{noteMarkers}</div></>}
         <div className="video-tick-spacer" /><div className="video-ticks">{[0, .25, .5, .75, 1].map(value => <span key={value} style={{ left: `${value * 100}%` }}>{duration ? clock(value * duration) : '--:--'}</span>)}</div>
         {duration > 0 && <div className="video-playhead-layer" aria-hidden="true"><i style={{ left: fraction(requested ?? time) }} /></div>}
       </div>
     </section>
     </div>
-    {hasNotes && <><div className="video-height-divider" role="separator" tabIndex={0}
+    {hasNotes && <>{!audio && <div className="video-height-divider" role="separator" tabIndex={0}
       aria-label={sideBySide ? '调整视频与批注区域宽度' : '调整视频与批注区域高度'} aria-orientation={sideBySide ? 'vertical' : 'horizontal'}
       aria-valuemin={Math.round(splitMin)} aria-valuemax={Math.round(splitMax)} aria-valuenow={Math.round(splitSize)} aria-valuetext={`视频${sideBySide ? '宽度' : '高度'} ${Math.round(splitSize)} 像素`}
       title={`${sideBySide ? '左右' : '上下'}拖动调整视频与批注；双击恢复默认`}
@@ -237,9 +281,9 @@ export function FileVideoContent({ src, name, poster, initialState, previewPosit
         if (![decrease, increase, 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
         resizeSplit(event.key === 'Home' ? splitMin : event.key === 'End' ? splitMax : splitSize + (event.key === decrease ? -24 : 24));
-      }}><span /></div>
+      }}><span /></div>}
     <section className="video-notes" aria-label="时间段批注列表">
-      <div className="video-note-list">{annotations.map((note, index) => <button key={note.resultId} ref={node => { if (node) cards.current.set(note.resultId, node); else cards.current.delete(note.resultId); }} className={`video-note-card${selected === note.resultId ? ' is-selected' : ''}`} aria-label={`查看批注 ${index + 1}，${spanText(note)}，${note.text}`} aria-pressed={selected === note.resultId} onClick={() => selectNote(note)}><span className="video-note-number">{index + 1}</span><span className="video-note-body"><span className="video-note-meta"><b>{spanText(note)}</b>{selected === note.resultId && <Check size={13} />}</span><span>{note.text}</span></span><ChevronRight size={15} /></button>)}</div>
+      <div className="video-note-list">{noteCards}</div>
     </section></>}
     </div>;
 }

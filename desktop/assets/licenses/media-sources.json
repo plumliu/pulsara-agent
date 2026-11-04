@@ -1,0 +1,147 @@
+{
+  "pyav_version": "17.1.0",
+  "ffmpeg_version": "8.1.1",
+  "build_source": "https://github.com/PyAV-Org/pyav-ffmpeg/tree/8.1.1-2",
+  "packages": [
+    {
+      "name": "ffmpeg",
+      "source_url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n8.1.1",
+      "sha256": "918929faccab2700c9cc7be2531c0b74f054a4dd5d3862bc485b0ab17af76486",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "gmp",
+      "source_url": "https://ftp.gnu.org/gnu/gmp/gmp-6.3.0.tar.xz",
+      "sha256": "a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
+      "name": "unistring",
+      "source_url": "https://ftp.gnu.org/gnu/libunistring/libunistring-1.4.2.tar.gz",
+      "sha256": "e82664b170064e62331962126b259d452d53b227bb4a93ab20040d846fec01d8",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
+      "name": "nettle",
+      "source_url": "https://ftp.gnu.org/gnu/nettle/nettle-3.10.2.tar.gz",
+      "sha256": "fe9ff51cb1f2abb5e65a6b8c10a92da0ab5ab6eaf26e7fc2b675c45f1fb519b5",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
+      "name": "gnutls",
+      "source_url": "https://www.gnupg.org/ftp/gcrypt/gnutls/v3.8/gnutls-3.8.13.tar.xz",
+      "sha256": "ffed8ec1bf09c2426d4f14aae377de4753b53e537d685e604e99a8b16ca9c97e",
+      "platforms": [
+        "linux"
+      ]
+    },
+    {
+      "name": "lame",
+      "source_url": "https://deb.debian.org/debian/pool/main/l/lame/lame_3.100.orig.tar.gz",
+      "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "opus",
+      "source_url": "https://ftp.osuosl.org/pub/xiph/releases/opus/opus-1.6.1.tar.gz",
+      "sha256": "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "dav1d",
+      "source_url": "https://code.videolan.org/videolan/dav1d/-/archive/1.5.3/dav1d-1.5.3.tar.bz2",
+      "sha256": "e099f53253f6c247580c554d53a13f1040638f2066edc3c740e4c2f15174ce22",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "libsvtav1",
+      "source_url": "https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v4.1.0/SVT-AV1-v4.1.0.tar.bz2",
+      "sha256": "184162d3db3a4448882b17230413b4938ca252eef6b3c5e2f1236b2fcf497881",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "vpx",
+      "source_url": "https://github.com/webmproject/libvpx/archive/refs/tags/v1.16.0.tar.gz",
+      "sha256": "7a479a3c66b9f5d5542a4c6a1b7d3768a983b1e5c14c60a9396edc9b649e015c",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "png",
+      "source_url": "https://downloads.sourceforge.net/project/libpng/libpng16/1.6.58/libpng-1.6.58.tar.xz",
+      "sha256": "28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "webp",
+      "source_url": "https://github.com/webmproject/libwebp/archive/refs/tags/v1.6.0.tar.gz",
+      "sha256": "93a852c2b3efafee3723efd4636de855b46f9fe1efddd607e1f42f60fc8f2136",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "opencore-amr",
+      "source_url": "https://downloads.sourceforge.net/project/opencore-amr/opencore-amr/opencore-amr-0.1.6.tar.gz",
+      "sha256": "483eb4061088e2b34b358e47540b5d495a96cd468e361050fae615b1809dc4a1",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "x264",
+      "source_url": "https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2",
+      "sha256": "6eeb82934e69fd51e043bd8c5b0d152839638d1ce7aa4eea65a3fedcf83ff224",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "x265",
+      "source_url": "https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.2.tar.gz",
+      "sha256": "40b1ea0453e0309f0eba934e0ddf533f8f6295966679e8894e8f1c1c8d5e1210",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    },
+    {
+      "name": "pyav-ffmpeg-build",
+      "source_url": "https://codeload.github.com/PyAV-Org/pyav-ffmpeg/tar.gz/refs/tags/8.1.1-2",
+      "sha256": "378cc829facb43b8606d0859935c31d1f9b7c45cffe92482aed20af889ed47b7",
+      "platforms": [
+        "darwin",
+        "linux"
+      ]
+    }
+  ]
+}

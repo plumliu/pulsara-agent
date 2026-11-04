@@ -154,6 +154,7 @@ def build_async_openai_client(
     credential_boundary: ProcessCredentialBoundary,
     max_retries: int | None = None,
     response_hooks: list | None = None,
+    request_hooks: list | None = None,
 ) -> AsyncOpenAI:
     """Create an AsyncOpenAI client for a model profile."""
 
@@ -180,7 +181,7 @@ def build_async_openai_client(
             credential_header_names=frozenset({b"authorization"}),
             timeout=timeout,
             follow_redirects=True,
-            event_hooks={"response": response_hooks or []},
+            event_hooks={"request": request_hooks or [], "response": response_hooks or []},
         ),
     }
     if max_retries is not None:

@@ -1,4 +1,4 @@
-import { InlineVideoPage, VideoThumbnail, isVideoVisualization, type VideoSource } from './inline-video';
+import { InlineMediaPage, MediaThumbnail, isMediaVisualization, audioReferenceMediaType, type MediaSource } from './inline-video';
 import { readThumbnailInOrder } from '../lib/visualization-thumbnails';
 import { WorkspaceLoading } from './workspace-loading';
 import { Images, Maximize2, ImageOff, RotateCcw } from 'lucide-react';
@@ -194,8 +194,8 @@ function Thumbnail({ item, entryId, enabled, onRead }: {
 
 export function InlineVisualization({entryId, items, onRead, onReadThumbnail, sourcePaths}: InlineVisualizationContext) {
   const checkOwner = useContext(VisualizationOwnerContext);
-  const [videoSources, setVideoSources] = useState<Record<number, VideoSource>>({});
-  const reportVideoSource = useCallback((ordinal: number, source: VideoSource) => setVideoSources(old =>
+  const [mediaSources, setMediaSources] = useState<Record<number, MediaSource>>({});
+  const reportMediaSource = useCallback((ordinal: number, source: MediaSource) => setMediaSources(old =>
     old[ordinal]?.path === source.path && old[ordinal]?.modified_ns === source.modified_ns ? old : {...old, [ordinal]: {path: source.path, modified_ns: source.modified_ns}}), []);
   const [selected, setSelected] = useState(items[0]?.ordinal);
   const [resident, setResident] = useState<number[]>(() => items.length ? [items[0].ordinal] : []);
@@ -242,7 +242,7 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail, so
   return <section className="inline-visualization" aria-label="可视化图集">
     <div className={`inline-visualization__layout${items.length > 1 ? ' has-thumbnails' : ''}`}>
       <div className="inline-visualization__figure">
-        {items.filter(item => !item.imageRef && !isVideoVisualization(item) && resident.includes(item.ordinal)).map(item => <GalleryPage
+        {items.filter(item => !item.imageRef && !isMediaVisualization(item) && resident.includes(item.ordinal)).map(item => <GalleryPage
           key={`${entryId}:${item.ordinal}:${item.contentDigest ?? item.state}`} entryId={entryId} item={item} sourcePath={sourcePaths?.[item.ordinal]} onRead={onRead} active={item.ordinal === current.ordinal} maximized={false} zoomControl={
         <button className="inline-visualization__zoom" title={visualizationName(current)}
           aria-label="放大可视化" onClick={() => workspace?.open({
@@ -255,8 +255,8 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail, so
         </button>
         }/>)}
 
-        {items.filter(item => isVideoVisualization(item) && resident.includes(item.ordinal)).map(item => <InlineVideoPage
-          key={`${entryId}:${item.ordinal}:${item.contentDigest}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} onSource={reportVideoSource}/>)}
+        {items.filter(item => isMediaVisualization(item) && resident.includes(item.ordinal)).map(item => <InlineMediaPage
+          key={`${entryId}:${item.ordinal}:${item.contentDigest}`} entryId={entryId} item={item} onRead={onRead} active={item.ordinal === current.ordinal} onSource={reportMediaSource}/>)}
         {current.imageRef && <><button className="inline-visualization__zoom" title="在标签中打开图片" aria-label="在标签中打开图片" onClick={() => workspace?.open({
           id: JSON.stringify([workspace.sessionId, 'visualization', entryId, current.ordinal]), sessionId: workspace.sessionId,
           title: visualizationName(current), kind: 'visualization', render: () => <FrozenVisualization sessionId={workspace.sessionId} entryId={entryId} item={current} onRead={onRead} checkOwner={checkOwner} />,
@@ -275,9 +275,9 @@ export function InlineVisualization({entryId, items, onRead, onReadThumbnail, so
           (strip.current?.children[next] as HTMLElement)?.focus({preventScroll: true});
         }}>
         {items.map((item, at) => <button key={`${item.ordinal}:${item.contentDigest ?? item.state}`} data-ordinal={item.ordinal}
-          aria-label={`查看${isVideoVisualization(item) ? '视频' : '可视化'} ${at + 1}${item.state === 'FAILED' ? '（无法显示）' : ''}`} title={visualizationName(item)}
+          aria-label={`查看${isMediaVisualization(item) ? item.mediaType === audioReferenceMediaType ? '音频' : '视频' : '可视化'} ${at + 1}${item.state === 'FAILED' ? '（无法显示）' : ''}`} title={visualizationName(item)}
           aria-pressed={item.ordinal === current.ordinal} onClick={() => select(at)}>
-          <>{isVideoVisualization(item) ? <VideoThumbnail entryId={entryId} item={item} onRead={onRead} enabled={visible.has(item.ordinal)} source={videoSources[item.ordinal]}/> : item.imageRef ? <ImageThumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onRead}/> : <Thumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onReadThumbnail}/>}</>
+          <>{isMediaVisualization(item) ? <MediaThumbnail entryId={entryId} item={item} onRead={onRead} enabled={visible.has(item.ordinal)} source={mediaSources[item.ordinal]}/> : item.imageRef ? <ImageThumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onRead}/> : <Thumbnail entryId={entryId} item={item} enabled={visible.has(item.ordinal)} onRead={onReadThumbnail}/>}</>
         </button>)}
       </div>
       </aside>}

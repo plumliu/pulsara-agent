@@ -1165,7 +1165,7 @@ class CanonicalProviderInputReader:
                             )
                             result_parts = result_prompt.content.parts
                             result_body_text = frozen_tool_result_public_text(
-                                result_prompt.content
+                                result_prompt.content, tool_name=call.tool_name
                             )
                         else:
                             result_content = self._read_content(
@@ -1177,6 +1177,11 @@ class CanonicalProviderInputReader:
                             result_body_text = _decode_provider_text(
                                 result_content, str(result["content_codec"])
                             )
+                            if call.tool_name == "annotate_media" and str(result["result_state"]) == "SUCCESS":
+                                from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
+                                result_body_text = project_tool_result_storage_body(result_body_text,
+                                    ToolObservationOrigin.BUILTIN, tool_name=call.tool_name,
+                                    result_state=str(result["result_state"]))
                             result_parts = (LLMTextPart(result_body_text),)
                         items.append(
                             ProviderInputItem(
@@ -1200,6 +1205,7 @@ class CanonicalProviderInputReader:
                                 ),
                                 tool_call_ordinal=call_ordinal,
                                 tool_call_arguments=call.arguments,
+                                tool_call_name=call.tool_name if typed_result else None,
                             )
                         )
                         continue
@@ -1268,7 +1274,7 @@ class CanonicalProviderInputReader:
                                 transcript_entry_id=str(result["result_entry_id"]),
                             )
                             result_body_text = frozen_tool_result_public_text(
-                                result_prompt.content
+                                result_prompt.content, tool_name=call.tool_name
                             )
                             result_images = tuple(
                                 part
@@ -1285,6 +1291,11 @@ class CanonicalProviderInputReader:
                                 result_content, str(result["content_codec"])
                             )
                             result_images = ()
+                        if call.tool_name == "annotate_media" and str(result["result_state"]) == "SUCCESS":
+                            from pulsara_agent.primitives.tool_result_projection import project_tool_result_storage_body
+                            result_body_text = project_tool_result_storage_body(result_body_text,
+                                ToolObservationOrigin.BUILTIN, tool_name=call.tool_name,
+                                result_state=str(result["result_state"]))
                         late_text = _canonical_json_text(
                             {
                                 "schema_version": "late_tool_outcome_observation.v1",
@@ -1330,6 +1341,7 @@ class CanonicalProviderInputReader:
                                     ),
                                     tool_call_ordinal=call_ordinal,
                                     tool_call_arguments=call.arguments,
+                                    tool_call_name=call.tool_name if result_images else None,
                                 ),
                             )
                         )

@@ -282,7 +282,7 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
             self._seed_todo(request)
 
     def _seed_todo(self, request):
-        owner = self.session._tools.todo_owner
+        owner = self.session._tools.current_work_owner
         prepared = owner.prepare_replace(scope_kind=ModelInputScopeKind.ROOT,
             exact_turn_id=request.turn_id, attempt_id=random_id("attempt"),
             proposed_result_entry_id=random_id("entry"), candidate=self.todo_candidate,
@@ -313,8 +313,8 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
             events += _tool_call("read_file", "call:trigger", {"target": {"kind": "PATH", "path": "input.txt"}})
         elif index == (3 if self.variant == "large_todo" else 2):
             if self.variant in {"large_todo", "todo_only"}:
-                self.todo_record_after_adoption = self.session._tools.todo_owner._root
-                self.todo_after_adoption = self.session._tools.todo_owner.freeze_compaction_handoff(
+                self.todo_record_after_adoption = self.session._tools.current_work_owner._root
+                self.todo_after_adoption = self.session._tools.current_work_owner.freeze_compaction_handoff(
                     scope_kind=ModelInputScopeKind.ROOT)
             if self.variant == "plan":
                 events = _tool_call("write_file", "call:denied-write", {
@@ -423,7 +423,7 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                 assert session._code_mode._cells[model.resources["active"]] is model.resources["active_cell_owner"]
                 assert model.child_calls == 1 and not model.child_release.is_set()
                 record_property("background_owners_unchanged", True)
-                record_property("todo_owner_and_snapshot_unchanged", True)
+                record_property("current_work_owner_and_snapshot_unchanged", True)
                 assert {row["target"]["process_id"] for row in payload["terminal_processes"]} == set(model.resources["running"])
                 assert model.resources["ended"] not in handoff.body
                 assert "terminal_monitors" not in payload

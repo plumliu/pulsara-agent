@@ -34,7 +34,7 @@ from pulsara_agent.ports.live_agent_event import (
     ThinkingDeltaPayload,
     ThinkingEndPayload,
     ThinkingStartPayload,
-    TodoSnapshotUpdatedPayload,
+    CurrentWorkSnapshotUpdatedPayload,
     ToolCallDeltaPayload,
     ToolCallEndPayload,
     ToolCallStartPayload,
@@ -65,7 +65,7 @@ LIVE_PAYLOAD_TYPE_BY_EVENT: dict[LiveEventType, type[object]] = {
     LiveEventType.INTERACTION_REPLACED: InteractionReplacedPayload,
     LiveEventType.INTERACTION_CLOSED: InteractionClosedPayload,
     LiveEventType.TERMINAL_PROCESS_COMPLETED: TerminalProcessCompletedPayload,
-    LiveEventType.TODO_SNAPSHOT_UPDATED: TodoSnapshotUpdatedPayload,
+    LiveEventType.CURRENT_WORK_SNAPSHOT_UPDATED: CurrentWorkSnapshotUpdatedPayload,
 }
 
 if set(LIVE_PAYLOAD_TYPE_BY_EVENT) != set(LiveEventType):
@@ -554,7 +554,7 @@ def _block_kind(event_type: LiveEventType) -> LiveBlockKind:
         "ToolCall": LiveBlockKind.TOOL_CALL,
         "ToolResult": LiveBlockKind.TOOL_RESULT,
         "TerminalProcessCompleted": LiveBlockKind.OPERATIONAL,
-        "TodoSnapshotUpdated": LiveBlockKind.OPERATIONAL,
+        "CurrentWorkSnapshotUpdated": LiveBlockKind.OPERATIONAL,
         "InteractionOpened": LiveBlockKind.OPERATIONAL,
         "InteractionReplaced": LiveBlockKind.OPERATIONAL,
         "InteractionClosed": LiveBlockKind.OPERATIONAL,

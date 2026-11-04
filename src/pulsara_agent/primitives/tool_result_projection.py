@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 import json
+import re
 from typing import Mapping
 
 from pulsara_agent.llm.input import (
@@ -112,10 +113,27 @@ def classify_tool_result_delivery(
 
 
 def project_tool_result_storage_body(
-    body: str, observation_origin: ToolObservationOrigin
+    body: str,
+    observation_origin: ToolObservationOrigin,
+    *,
+    tool_name: str | None = None,
+    result_state: str | None = None,
 ) -> str:
     """Project storage-only carriers into the single Round 7 public body."""
 
+    if tool_name == "annotate_media" and result_state == "SUCCESS":
+        value = json.loads(body)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"media_annotation", "canonical_path", "file_mtime_ns"}
+            or value.get("media_annotation") != "added"
+            or not isinstance(value.get("canonical_path"), str)
+            or not value["canonical_path"].startswith("/")
+            or not isinstance(value.get("file_mtime_ns"), str)
+            or re.fullmatch(r"-?(?:0|[1-9][0-9]*)", value["file_mtime_ns"]) is None
+        ):
+            raise ValueError("Media annotation canonical source facts are invalid")
+        return canonical_json_bytes({"media_annotation": "added"}).decode("utf-8")
     if observation_origin is not ToolObservationOrigin.PLAN_CONTROL:
         return body
     try:
@@ -129,13 +147,20 @@ def project_tool_result_storage_body(
     status = value.get("status")
     control = value.get("plan_control")
     if control == "QUESTION_CANCELLED":
-        if (status != "cancelled" or value.get("cancelled_by") != "USER_CANCELLED"
-            or value.get("message") != "用户取消了问题"):
+        if (
+            status != "cancelled"
+            or value.get("cancelled_by") != "USER_CANCELLED"
+            or value.get("message") != "用户取消了问题"
+        ):
             raise ValueError("Plan question cancellation carrier is invalid")
-        return canonical_json_bytes({
-            "status": "cancelled", "plan_control": "QUESTION_CANCELLED",
-            "cancelled_by": "USER_CANCELLED", "message": "用户取消了问题",
-        }).decode("utf-8")
+        return canonical_json_bytes(
+            {
+                "status": "cancelled",
+                "plan_control": "QUESTION_CANCELLED",
+                "cancelled_by": "USER_CANCELLED",
+                "message": "用户取消了问题",
+            }
+        ).decode("utf-8")
     if status != "success" or control not in {
         "ENTERED_PLAN",
         "EXITED_PLAN",

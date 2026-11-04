@@ -264,10 +264,15 @@ export interface RetrievalModelInput {
 }
 export interface RetrievalTestResult { status: 'ready'; elapsed_ms: number; dimensions?: number; result_count?: number }
 
+export interface AsrConnection { endpoint: string; model_id: string; credential_configured: boolean }
+export interface AsrModelInput { connection: Pick<AsrConnection, 'endpoint' | 'model_id'>; key_action: 'keep' | 'replace' | 'clear'; api_key?: string }
+export interface AsrTestResult { status: 'ready'; granularity: 'word' | 'segment'; elapsed_ms: number }
+
 export interface LocalSettingsSummary {
   state?: 'ready' | 'unavailable';
   pulsara_home?: string;
   memory_retrieval: MemoryRetrievalSettings;
+  asr?: AsrConnection | null;
   input_suggestions_enabled: boolean;
 }
 
@@ -338,6 +343,9 @@ export interface RuntimeProjection {
   control: ProtocolCanonicalControl;
   liveControl: ProtocolLiveControlSnapshot;
   todo?: TodoRun;
+  mediaRanges?: MediaReadRange[];
+  mediaReadStarts?: MediaReadRange[];
+  mediaAnnotationsRevision?: string;
   eventSequence: number;
   liveOwnerEpoch: number;
   liveRevision: number;
@@ -636,6 +644,10 @@ export interface RuntimeAdapter {
   testModelConfiguration(input: ModelConfigurationInput, connectionId?: string): Promise<{ status: 'ready' }>;
   checkPostgres(): Promise<Record<string, unknown>>;
   resetPostgres(): Promise<{ database_name: string; restart_required: boolean }>;
+  saveAsrModel(input: AsrModelInput): Promise<AsrConnection>;
+  clearAsrModel(): Promise<null>;
+  testAsrModel(input: AsrModelInput): Promise<AsrTestResult>;
+  clearOldAsrCache(): Promise<{ deleted_blocks: number; message: string }>;
   saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings>;
   clearMemoryModel(slot: MemoryModelSlot): Promise<MemoryRetrievalSettings>;
   testMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<RetrievalTestResult>;
@@ -651,6 +663,7 @@ export interface RuntimeAdapter {
   }>;
   closeSession(sessionId: string): Promise<{ status: 'closing' }>;
   connect(sessionId: string, takeover?: boolean): Promise<RuntimeConnection | CanonicalHistoryView>;
+  openHistoryReader(sessionId: string, signal?: AbortSignal): Promise<AgentConversationReader>;
   openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader>;
   createAgentContentReader(rootSessionId: string, agentSessionId: string): AgentContentReader;
   createSession(selection: SessionWorkspaceSelection, modelCallBinding?: ModelCallBindingPayload): Promise<SessionSummary>;
@@ -1026,11 +1039,20 @@ interface ProtocolLiveSnapshot {
   settlements?: ProtocolSettlement[];
 }
 
+export interface MediaReadRange {
+  canonical_path: string;
+  file_mtime_ns: string;
+  from_seconds: number;
+  to_seconds: number;
+  attempt_id: string;
+}
+
 export interface ProtocolLiveControlSnapshot {
   owner_epoch?: string | number;
   live_revision?: string | number;
   current_interaction?: Record<string, unknown>;
   current_todos?: ProtocolTodoRunSnapshot[];
+  media_ranges?: Array<Omit<MediaReadRange, 'from_seconds' | 'to_seconds'> & {from_seconds?: number; to_seconds?: number}>;
   compaction_in_progress?: boolean;
   root_compaction_in_progress?: boolean;
   input_admission_deferred?: boolean;
@@ -1401,6 +1423,19 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     return apiRequest('/api/local-settings/postgres/reset', {
       method: 'POST', body: JSON.stringify({ confirmed: true }),
     });
+  }
+
+  async saveAsrModel(input: AsrModelInput): Promise<AsrConnection> {
+    return apiRequest('/api/local-settings/asr', { method: 'PUT', body: JSON.stringify(input) });
+  }
+  async clearAsrModel(): Promise<null> {
+    return apiRequest('/api/local-settings/asr', { method: 'DELETE' });
+  }
+  async testAsrModel(input: AsrModelInput): Promise<AsrTestResult> {
+    return apiRequest('/api/local-settings/asr/test', { method: 'POST', body: JSON.stringify(input) });
+  }
+  async clearOldAsrCache(): Promise<{ deleted_blocks: number; message: string }> {
+    return apiRequest('/api/local-settings/asr/clear-old-cache', { method: 'POST' });
   }
 
   async saveMemoryModel(slot: MemoryModelSlot, input: RetrievalModelInput): Promise<MemoryRetrievalSettings> {
@@ -1905,6 +1940,19 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
     await connection.initialize();
     if (attempt === this.connectAttempt) this.chatConnection = connection;
     return connection;
+  }
+
+  async openHistoryReader(sessionId: string, signal?: AbortSignal): Promise<AgentConversationReader> {
+    const frame = await apiRequest<{snapshot?: {snapshot?: ProtocolCanonicalSnapshot}; error?: ProtocolError}>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/history-snapshot`, {signal});
+    assertProtocolFrame(frame);
+    const snapshot = frame.snapshot?.snapshot;
+    if (!snapshot || snapshot.session_id !== sessionId) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '来源会话记录不完整。', true);
+    // As with the existing detached content reader, this reader has no workspace
+    // attachment. The cold history endpoints independently authorize every read.
+    const reader = new CanonicalHistoryView(sessionId, {path:'', outcome:'UNAVAILABLE', reason:null}, snapshot);
+    try { await reader.initialize(); signal?.throwIfAborted(); return reader; }
+    catch (error) { await reader.close(); throw error; }
   }
 
   async openAgentReader(rootSessionId: string, agentSessionId: string, signal?: AbortSignal): Promise<AgentConversationReader> {
@@ -2997,6 +3045,7 @@ export class CanonicalHistoryView extends CanonicalHistoryReader {
   protected get queuePath() { return this.queueRoot ?? super.queuePath; }
   protected post<T>(suffix: string, body: object, signal?: AbortSignal): Promise<T> {
     if (this.closed) throw new RuntimeApiError('HISTORY_CLOSED', '会话已切换。', false);
+    if (suffix === 'snapshot' && !this.historyRoot) return apiRequest(`/api/sessions/${encodeURIComponent(this.sessionId)}/history-snapshot`, {signal});
     return apiRequest(`${this.historyPath}/${suffix}`, {
       method: 'POST', body: JSON.stringify(body), signal,
     });
@@ -3096,6 +3145,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   }
   private promptTransitions = new Map<string, LocalPromptSubmission>();
   private liveControl: ProtocolLiveControlSnapshot = {};
+  private mediaReadStarts: MediaReadRange[] = [];
+  private seenMediaReadAttempts = new Set<string>();
   private liveOwnerEpoch = 0;
   private liveRevision = 0;
   private liveControlOwnerEpoch = 0;
@@ -3163,6 +3214,7 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.role = payload.role;
     this.replaceSnapshot(payload.snapshot.snapshot);
     this.liveControl = payload.live_control_snapshot.snapshot ?? {};
+    for (const range of this.liveControl.media_ranges ?? []) this.seenMediaReadAttempts.add(range.attempt_id);
     this.liveControlOwnerEpoch = numeric(this.liveControl.owner_epoch);
     this.liveControlRevision = numeric(this.liveControl.live_revision);
     const live = payload.live_hello.live_snapshot ?? {};
@@ -3174,11 +3226,12 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   protected get queuePath() { return this.queueRoot ?? super.queuePath; }
 
   readonly filePreview: FilePreviewApi = {
+    annotations: (token, after, signal) => this.previewRequest('/annotations', {read_token: token, after}, 'POST', signal),
     snapshot: (path, html) => this.previewRequest('/snapshot', {path, html}),
     open: (path, basePreview, readingRoot) => this.previewRequest('', { path, base_preview: basePreview, reading_root: readingRoot }),
     close: async token => { await this.previewRequest('', { read_token: token }, 'DELETE'); },
     page: (token, cursor, mode, signal) => this.previewRequest('/page', { read_token: token, cursor, mode }, 'POST', signal),
-    action: async (token, action) => { const target = await this.previewRequest<{path:string;reveal:boolean}>('/action', { read_token: token, action }); const host=desktopHost();if(!host)throw new Error('桌面操作当前不可用。');await host.openPath(target); },
+    action: async (token, action) => { const target = await this.previewRequest<{path:string;reveal:boolean}>('/action', { read_token: token, action }); if (action === 'activate') return; const host=desktopHost();if(!host)throw new Error('桌面操作当前不可用。');await host.openPath(target); },
   };
 
   private previewRequest<T>(suffix: string, body: object, method = 'POST', signal?: AbortSignal): Promise<T> {
@@ -3302,11 +3355,12 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     this.liveRevision = numeric(observation.through_live_revision ?? this.liveRevision);
     this.liveControlOwnerEpoch = numeric(observation.live_control_owner_epoch ?? this.liveControlOwnerEpoch);
     this.liveControlRevision = numeric(observation.through_live_control_revision ?? this.liveControlRevision);
-    const todosInvalidated = (observation.live ?? []).some(
-      event => event.event_type === 'TODO_SNAPSHOT_UPDATED',
+    this.mediaReadStarts = [];
+    const workInvalidated = (observation.live ?? []).some(
+      event => event.event_type === 'CURRENT_WORK_SNAPSHOT_UPDATED',
     );
-    if (liveRingGap || todosInvalidated) {
-      // TODO live events invalidate the owner snapshot; their separate stream
+    if (liveRingGap || workInvalidated) {
+      // Current work live events invalidate the owner snapshot; their separate stream
       // can lag a previously read baseline, including across run changes.
       const controlFrame = await this.post<{
         live_control_snapshot?: { snapshot?: ProtocolLiveControlSnapshot };
@@ -3317,12 +3371,20 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       if (!baseline) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '当前运行状态暂时无法读取。', true);
       if (liveRingGap) {
         this.liveControl = baseline;
+        for (const range of baseline.media_ranges ?? []) this.seenMediaReadAttempts.add(range.attempt_id);
         this.liveControlOwnerEpoch = numeric(baseline.owner_epoch);
         this.liveControlRevision = numeric(baseline.live_revision);
       } else {
         // Keep interaction state and its cursor together: the ordinary control
-        // suffix still owns those transitions after this TODO-only refresh.
+        // suffix still owns those transitions after refreshing the current work.
         this.liveControl.current_todos = baseline.current_todos ?? [];
+        this.liveControl.media_ranges = baseline.media_ranges ?? [];
+        const actualStarts = new Set((observation.live ?? []).flatMap(event => {
+          const value = event.payload?.current_work_snapshot_updated?.media_read_attempt_id;
+          return typeof value === 'string' && value ? [value] : [];
+        }));
+        this.mediaReadStarts = projectMediaRanges(baseline).filter(range => actualStarts.has(range.attempt_id) && !this.seenMediaReadAttempts.has(range.attempt_id));
+        for (const range of this.mediaReadStarts) this.seenMediaReadAttempts.add(range.attempt_id);
       }
     }
     void this.hydrateQueuedPromptContent();
@@ -3725,6 +3787,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.liveControl.media_ranges = [];
+    this.mediaReadStarts = [];
     this.presentationEpoch.abort();
     this.presentationListeners.clear();
     this.authorizationListeners.clear();
@@ -3974,8 +4038,8 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
         }
         continue;
       }
-      if (event.event_type === 'TODO_SNAPSHOT_UPDATED') {
-        // The current owner snapshot, not retained live payloads, owns TODOs.
+      if (event.event_type === 'CURRENT_WORK_SNAPSHOT_UPDATED') {
+        // The current owner snapshot owns TODOs and media ranges.
         continue;
       }
       if (event.event_type.startsWith('TOOL_RESULT_')) {
@@ -4311,6 +4375,9 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       control: this.control,
       liveControl: this.liveControl,
       todo,
+      mediaRanges: this.scopeKind === 'ROOT' ? projectMediaRanges(this.liveControl) : [],
+      mediaReadStarts: this.scopeKind === 'ROOT' ? this.mediaReadStarts : [],
+      mediaAnnotationsRevision: canonical.filter(entry => entry.tool_result?.tool_name === 'annotate_media').at(-1)?.entry_id,
       eventSequence: this.eventSequence,
       liveOwnerEpoch: this.liveOwnerEpoch,
       liveRevision: this.liveRevision,
@@ -5325,6 +5392,16 @@ function terminalCommand(name: string, content: string): string | undefined {
     // Only complete, structured terminal arguments can be rendered as a command.
   }
   return undefined;
+}
+
+function projectMediaRanges(control: ProtocolLiveControlSnapshot): MediaReadRange[] {
+  return (control.media_ranges ?? []).flatMap(range => {
+    // Protobuf JSON omits numeric defaults, including a genuine source start at zero.
+    const from_seconds = range.from_seconds ?? 0;
+    const to_seconds = range.to_seconds ?? 0;
+    return Number.isFinite(from_seconds) && Number.isFinite(to_seconds) && from_seconds >= 0 && from_seconds < to_seconds
+      ? [{...range, from_seconds, to_seconds}] : [];
+  });
 }
 
 function projectTodo(control: ProtocolLiveControlSnapshot, scopeKind: 'ROOT' | 'SUBAGENT'): TodoRun | undefined {

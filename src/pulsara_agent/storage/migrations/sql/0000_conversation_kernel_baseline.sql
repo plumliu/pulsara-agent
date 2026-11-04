@@ -2443,3 +2443,24 @@ CREATE INDEX idx_pulsara_v3_history_session ON pulsara_v3.history_search_documen
 CREATE INDEX idx_pulsara_v3_history_bm25 ON pulsara_v3.history_search_documents USING bm25
     (id,body,body_en,body_tech)
     WITH (key_field='id',text_fields='{"body":{"tokenizer":{"type":"jieba","search_mode":true,"stopwords":["!","\"","#","$","%","&","''","(",")","*","+",",","-",".","/",":",";","<","=",">","?","@","[","\\","]","^","_","`","{","|","}","~"," ","\t","\n","\r","，","。","！","？","；","：","、","（","）","【","】","《","》","“","”","‘","’","—","…"]}},"body_en":{"tokenizer":{"type":"default","stemmer":"English"}},"body_tech":{"tokenizer":{"type":"regex","pattern":"[./:@+-]*[A-Za-z0-9_][A-Za-z0-9_./:@+-]*"}}}');
+
+-- Disposable successful audio/video transcription blocks, independent of sessions.
+CREATE TABLE pulsara_v3.asr_cache (
+    id text PRIMARY KEY CHECK (id ~ '^asr-cache:[a-z2-7]{25}[aeimquy4]$'),
+    memory_domain_id text NOT NULL CHECK (memory_domain_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
+    source_path text NOT NULL CHECK (source_path <> ''),
+    source_modified_ns bigint NOT NULL,
+    source_size bigint NOT NULL CHECK (source_size >= 0),
+    from_seconds double precision NOT NULL CHECK (from_seconds >= 0 AND from_seconds < 'Infinity'::double precision),
+    to_seconds double precision NOT NULL CHECK (to_seconds > from_seconds AND to_seconds < 'Infinity'::double precision),
+    provenance jsonb NOT NULL CHECK (jsonb_typeof(provenance) = 'object'),
+    payload jsonb NOT NULL CHECK (jsonb_typeof(payload) = 'object'),
+    last_used_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    CONSTRAINT uq_asr_cache_media_range UNIQUE (memory_domain_id,source_path,source_modified_ns,source_size,from_seconds,to_seconds)
+);
+-- PostgreSQL has no built-in float8 range. A native GiST box index preserves
+-- exact floating-point endpoints without quantization or a new extension/type.
+-- Reads retain explicit strict half-open comparisons to exclude touching edges.
+CREATE INDEX idx_asr_cache_interval ON pulsara_v3.asr_cache USING gist
+    (box(point(from_seconds, 0), point(to_seconds, 0)));
+REVOKE ALL ON pulsara_v3.asr_cache FROM PUBLIC;

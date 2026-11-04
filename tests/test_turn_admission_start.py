@@ -61,7 +61,7 @@ def _coordinator(repository, finalizer=None):
         io_owner=_IO(),
         writer_lease=SimpleNamespace(guard=SimpleNamespace(session_id="session")),
         deadline_factory=SimpleNamespace(deadline=lambda _owner: monotonic() + 5),
-        todo_finalizer=finalizer,
+        root_work_finalizer=finalizer,
     )
 
 
@@ -172,12 +172,12 @@ def test_cancelled_none_does_not_restart_request():
     asyncio.run(scenario())
 
 
-def test_todo_finalization_failure_settles_started_turn():
+def test_root_work_finalization_failure_settles_started_turn():
     async def scenario():
         repository = _Repository()
         async def finalize(prepared, accepted):
-            raise RuntimeError("TODO activation failed")
-        with pytest.raises(RuntimeError, match="TODO activation failed"):
+            raise RuntimeError("ROOT work activation failed")
+        with pytest.raises(RuntimeError, match="ROOT work activation failed"):
             await _coordinator(repository, finalize).accept_root_intent(
                 _request(), model_resolution_snapshot=object(), cancellation_intent=_intent(),
             )
@@ -185,13 +185,13 @@ def test_todo_finalization_failure_settles_started_turn():
     asyncio.run(scenario())
 
 
-def test_first_stop_cause_wins_over_concurrent_todo_failure():
+def test_first_stop_cause_wins_over_concurrent_root_work_failure():
     async def scenario():
         repository = _Repository()
         intent = _intent()
         async def finalize(prepared, accepted):
             intent.install_cause(ForegroundCancellationCause.USER_REQUEST)
-            raise RuntimeError("TODO activation failed while stopping")
+            raise RuntimeError("ROOT work activation failed while stopping")
         with pytest.raises(RuntimeError, match="while stopping"):
             await _coordinator(repository, finalize).accept_root_intent(
                 _request(), model_resolution_snapshot=object(), cancellation_intent=intent,
@@ -281,7 +281,7 @@ def test_waiter_cancel_without_explicit_cause_prevents_none_reissue():
 
 @pytest.mark.postgres
 @pytest.mark.parametrize("winner", ["terminal", "takeover"])
-def test_ack_unknown_terminal_or_takeover_never_republishes_active_todo(
+def test_ack_unknown_terminal_or_takeover_never_republishes_active_root_work(
     tmp_path, stage2_migrated_postgres_database, monkeypatch, winner,
 ):
     from datetime import datetime, timezone
@@ -306,13 +306,13 @@ def test_ack_unknown_terminal_or_takeover_never_republishes_active_todo(
         repository = session.repository
         provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
         original_accept = repository.accept_root_turn_intent
-        original_finalizer = session._runner._turn_admission._todo_finalizer
+        original_finalizer = session._runner._turn_admission._root_work_finalizer
         activations = []
         captured = []
         async def observe_finalization(prepared, accepted):
             activations.append(accepted.turn_id)
             await original_finalizer(prepared, accepted)
-        session._runner._turn_admission._todo_finalizer = observe_finalization
+        session._runner._turn_admission._root_work_finalizer = observe_finalization
         command = random_id("command")
         def commit_then_lose_ack(guard, **kwargs):
             outcome = original_accept(guard, **kwargs)
@@ -356,7 +356,7 @@ def test_ack_unknown_terminal_or_takeover_never_republishes_active_todo(
                 )
             assert len(captured) == 1
             assert activations == []
-            assert session._tools.todo_owner.current_snapshots() == ()
+            assert session._tools.current_work_owner.current_snapshots() == ()
             assert session.active_root_turn_id() is None
             assert not session._active_turn_started
             assert model.requests == []

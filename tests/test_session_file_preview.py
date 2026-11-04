@@ -281,15 +281,16 @@ def test_http_preview_contract(tmp_path):
     asyncio.run(run())
 
 
-def test_video_content_and_html_media_use_bound_range_reads(tmp_path):
+@pytest.mark.parametrize(("filename", "kind", "mime"), [("clip.MP4", "video", "video/mp4"), ("clip.wav", "audio", "audio/wav"), ("clip.mp3", "audio", "audio/mpeg"), ("clip.m4a", "audio", "audio/mp4"), ("clip.flac", "audio", "audio/flac"), ("clip.opus", "audio", "audio/ogg")])
+def test_media_content_and_html_media_use_bound_range_reads(tmp_path, filename, kind, mime):
     async def run():
         root = tmp_path.resolve()
         bridge = bridge_for(root)
         payload = bytes(range(256)) * 8192
         (root / "index.html").write_text("Pulsara")
-        path = root / "one" / "clip.MP4"
+        path = root / "one" / filename
         path.write_bytes(payload)
-        (root / "one" / "index.html").write_text('<video src="clip.MP4"></video>')
+        (root / "one" / "index.html").write_text(f'<{kind} src="{filename}"></{kind}>')
         server = LocalHttpServer(
             sessions=bridge.sessions, bridge=bridge, static_root=root,
             requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
@@ -308,15 +309,15 @@ def test_video_content_and_html_media_use_bound_range_reads(tmp_path):
                     assert response.status == 200
                     return await response.json()
 
-                video = await open_file("clip.MP4")
-                assert video["kind"] == "video"
+                video = await open_file(filename)
+                assert video["kind"] == kind
                 assert video["modified_ns"] == str(path.stat().st_mtime_ns)
                 assert video["document_url"] is None
                 assert video["images_url"] is None
                 url = server.origin + video["content_url"]
                 response = await client.get(url, headers={"Range": "bytes=16-47"})
                 assert response.status == 206
-                assert response.headers["Content-Type"] == "video/mp4"
+                assert response.headers["Content-Type"] == mime
                 assert response.headers["Content-Range"] == f"bytes 16-47/{len(payload)}"
                 assert "Content-Disposition" not in response.headers
                 assert await response.read() == payload[16:48]
@@ -330,7 +331,7 @@ def test_video_content_and_html_media_use_bound_range_reads(tmp_path):
                 html = await open_file("index.html")
                 document = await client.get(server.origin + html["document_url"], headers={"Sec-Fetch-Dest": "iframe"})
                 assert f"media-src {server.origin}{html['resources_url']}" in document.headers["Content-Security-Policy"]
-                embedded = await client.get(server.origin + html["document_url"].replace("index.html", "clip.MP4"))
+                embedded = await client.get(server.origin + html["document_url"].replace("index.html", filename))
                 assert embedded.status == 200
                 assert await embedded.read() == payload
                 path.write_bytes(b"replacement")
@@ -542,7 +543,8 @@ def test_unlink_and_atomic_replacement_never_reuse_old_page_or_cursor(tmp_path):
         item.close()
 
 
-def test_html_snapshot_binds_project_media_without_reopening_layout(tmp_path):
+@pytest.mark.parametrize(("media_name", "expected_mime"), [("clip.mp4", "video/mp4"), ("speech.wav", "audio/wav")])
+def test_html_snapshot_binds_project_media_without_reopening_layout(tmp_path, media_name, expected_mime):
     async def run():
         from pulsara_agent.desktop_app.file_preview_http import bind_html_snapshot
         root = tmp_path.resolve()
@@ -553,7 +555,7 @@ def test_html_snapshot_binds_project_media_without_reopening_layout(tmp_path):
         path = directory / 'gallery.html'
         image = project / 'image.png'
         image.write_bytes(b'first image')
-        video = project / 'clip.mp4'
+        video = project / media_name
         video.write_bytes(b'video bytes')
         (project / 'secret.json').write_text('{}')
         (project / 'linked.png').symlink_to(image)
@@ -575,12 +577,12 @@ def test_html_snapshot_binds_project_media_without_reopening_layout(tmp_path):
                     assert mime == 'image/png' and os.read(fd, 50) == body
                 finally:
                     os.close(fd)
-            fd, mime = item.resource('clip.mp4', images=False)
+            fd, actual_mime = item.resource(media_name, images=False)
             os.close(fd)
-            assert mime == 'video/mp4'
+            assert actual_mime == expected_mime
             video.write_bytes(b'replaced video')
             with pytest.raises(FilePreviewError) as changed:
-                item.resource('clip.mp4', images=False)
+                item.resource(media_name, images=False)
             assert changed.value.code == 'FILE_CHANGED'
             for name in ['secret.json', 'gallery.html', '../image.png', 'linked.png']:
                 with pytest.raises(FilePreviewError):
@@ -634,6 +636,44 @@ def test_html_snapshot_http_media_ranges_and_real_thumbnail(tmp_path):
                 assert (await expired.json())['error']['code'] == 'PREVIEW_EXPIRED'
         finally:
             await screenshots.aclose()
+            await bridge.aclose()
+            await server.aclose()
+    asyncio.run(run())
+
+
+def test_media_activation_touches_only_validated_sidebar_source(tmp_path):
+    async def run():
+        root = tmp_path.resolve()
+        bridge = bridge_for(root)
+        touch = AsyncMock()
+        bridge.sessions.core.touch_asr_cache_source = touch
+        path = root / 'one' / 'speech.wav'
+        path.write_bytes(b'RIFF audio source')
+        (root / 'index.html').write_text('Pulsara')
+        server = LocalHttpServer(sessions=bridge.sessions, bridge=bridge, static_root=root,
+            requested_port=0, is_ready=lambda: True, is_draining=lambda: False,
+            **_model_server_dependencies())
+        await server.start()
+        try:
+            async with ClientSession() as client:
+                endpoint = server.origin + '/api/connections/one/file-preview'
+                headers = {'Origin': server.origin, 'Sec-Fetch-Site': 'same-origin'}
+                response = await client.post(endpoint, headers=headers, json={'path': 'speech.wav'})
+                preview = await response.json()
+                assert response.status == 200
+                touch.assert_not_called()
+                await client.get(server.origin + preview['content_url'], headers={'Range': 'bytes=0-3'})
+                touch.assert_not_called()
+                activated = await client.post(endpoint + '/action', headers=headers,
+                    json={'read_token': preview['read_token'], 'action': 'activate'})
+                assert activated.status == 200
+                touch.assert_awaited_once_with(str(path), path.stat().st_mtime_ns, path.stat().st_size)
+                path.write_bytes(b'replaced')
+                changed = await client.post(endpoint + '/action', headers=headers,
+                    json={'read_token': preview['read_token'], 'action': 'activate'})
+                assert changed.status == 409
+                touch.assert_awaited_once()
+        finally:
             await bridge.aclose()
             await server.aclose()
     asyncio.run(run())

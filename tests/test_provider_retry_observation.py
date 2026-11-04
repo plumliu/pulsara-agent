@@ -157,7 +157,7 @@ def test_provider_cancellation_precedes_blocked_cell_join(operation):
             _session_scope_kind=ModelInputScopeKind.ROOT,
             host_session_id=random_id('host'),
             _tools=SimpleNamespace(
-                todo_owner=SimpleNamespace(mark_closing=lambda **kwargs: None),
+                current_work_owner=SimpleNamespace(mark_closing=lambda **kwargs: None),
                 stop_local_process_admission=lambda: None,
                 stop_terminal_physical_owners=AsyncMock(),
                 stop_visualization_physical_owners=AsyncMock(),

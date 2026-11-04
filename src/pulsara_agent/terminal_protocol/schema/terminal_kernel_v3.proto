@@ -81,7 +81,7 @@ enum LiveEventType {
   INTERACTION_CLOSED = 18;
   TERMINAL_PROCESS_COMPLETED = 19;
   reserved 20 to 22;
-  TODO_SNAPSHOT_UPDATED = 24;
+  CURRENT_WORK_SNAPSHOT_UPDATED = 24;
 }
 
 enum ConversationScopeKind {
@@ -542,12 +542,7 @@ message LiveTerminalProcessCompletedPayload {
 message LiveTodoItemProjection {
   uint32 ordinal = 1; string text = 2; string status = 3;
 }
-message LiveTodoSnapshotUpdatedPayload {
-  string todo_run_id = 1; uint64 todo_revision = 2; string disposition = 3;
-  repeated LiveTodoItemProjection ordered_items = 4;
-  uint32 pending_count = 5; uint32 in_progress_count = 6;
-  uint32 completed_count = 7;
-}
+message LiveCurrentWorkSnapshotUpdatedPayload { string root_run_id = 1; string media_read_attempt_id = 2; }
 
 message LiveEventPayload {
   oneof payload {
@@ -570,7 +565,7 @@ message LiveEventPayload {
     LiveInteractionReplacedPayload interaction_replaced = 17;
     LiveInteractionClosedPayload interaction_closed = 18;
     LiveTerminalProcessCompletedPayload terminal_process_completed = 19;
-    LiveTodoSnapshotUpdatedPayload todo_snapshot_updated = 24;
+    LiveCurrentWorkSnapshotUpdatedPayload current_work_snapshot_updated = 24;
   }
 }
 
@@ -645,12 +640,21 @@ message LiveTodoRunSnapshot {
   uint32 completed_count = 9;
 }
 
+message LiveMediaReadRange {
+  string canonical_path = 1;
+  string file_mtime_ns = 2;
+  double from_seconds = 3;
+  double to_seconds = 4;
+  string attempt_id = 5;
+}
+
 message SessionLiveControlSnapshot {
   string session_id = 1;
   uint64 owner_epoch = 2;
   uint64 live_revision = 3;
   LiveInteractionView current_interaction = 4;
   repeated LiveTodoRunSnapshot current_todos = 5;
+  repeated LiveMediaReadRange media_ranges = 16;
   bool compaction_in_progress = 6;
   string compaction_trigger = 7;
   string compaction_phase = 8;

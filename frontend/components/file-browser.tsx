@@ -11,6 +11,7 @@ import {
 import {
   createContext,
   useCallback,
+  useContext,
   useEffect,
   useEffectEvent,
   useLayoutEffect,
@@ -18,7 +19,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { SavedImageData } from "../lib/runtime-adapter";
+import type { MediaReadRange, SavedImageData } from "../lib/runtime-adapter";
 import type {
   FilePreview,
   FilePreviewApi,
@@ -32,6 +33,7 @@ import { type MarkdownNotify } from "./markdown-body";
 import { FileMarkdown } from "./file-markdown";
 import { FilePreviewPanel, FileTextContent } from "./file-preview-panel";
 import { FileVideoContent, type VideoPlaybackState } from "./file-video-content";
+import { MediaAnnotationView } from "./media-annotation-view";
 import { SandboxedHtmlPreview } from "./sandboxed-html-preview";
 
 const detail = (error: unknown) =>
@@ -68,6 +70,7 @@ type BrowserTab = {
   request?: object;
   touched: number;
 };
+type MediaEvidenceVersion = {path: string; modified_ns: string; size?: number};
 type OpenFile = (
   path: string,
   opener: HTMLElement,
@@ -85,6 +88,9 @@ const visit = (path: string): Visit => ({
 
 export const FilePresentationContext = createContext<((path: string, valid: () => boolean) => Promise<PreparedWorkspaceTab>) | undefined>(undefined);
 
+const emptyMediaRanges: readonly MediaReadRange[] = [];
+const MediaAnalysisContext = createContext<{ranges: readonly MediaReadRange[]; annotationRevision: string | number}>({ ranges: [], annotationRevision: '' });
+
 export function FilePreviewProvider({
   api,
   children,
@@ -93,7 +99,13 @@ export function FilePreviewProvider({
   sessionId = ownerKey,
   readImageReference,
   imageOwnerKey,
+  mediaRanges = emptyMediaRanges,
+  mediaReadStarts = emptyMediaRanges,
+  mediaAnnotationsRevision = '',
 }: {
+  mediaRanges?: readonly MediaReadRange[];
+  mediaReadStarts?: readonly MediaReadRange[];
+  mediaAnnotationsRevision?: string | number;
   sessionId?: string;
   imageOwnerKey?: string;
   readImageReference?: (
@@ -124,6 +136,10 @@ export function FilePreviewProvider({
     tab.api = undefined;
     if (old) void owner?.close(old.read_token).catch(() => undefined);
   };
+  const touchMedia = useCallback((tab: BrowserTab) => {
+    if (tab.file && (tab.file.kind === 'video' || tab.file.kind === 'audio'))
+      void tab.api?.action(tab.file.read_token, 'activate').catch(error => onNotify('转写缓存最近使用时间未能更新', detail(error), 'warning'));
+  }, [onNotify]);
   const close = (tab: BrowserTab) => {
     tab.request = undefined;
     release(tab);
@@ -199,7 +215,7 @@ export function FilePreviewProvider({
       changed();
     }
   };
-  const prepare = async (path: string, valid: () => boolean, root?: string, deduplicate = true, videoTime?: number): Promise<PreparedWorkspaceTab> => {
+  const prepare = async (path: string, valid: () => boolean, root?: string, deduplicate = true, videoTime?: number, expectedVersion?: MediaEvidenceVersion): Promise<PreparedWorkspaceTab> => {
     const expected = connection.current;
     const idInUse = (id: string) => tabs.current.has(id) || Boolean(workspaceRef.current?.tabs.some(item => item.id === id))
       || Boolean(workspaceRef.current?.browserTabs.records.has(id));
@@ -213,11 +229,16 @@ export function FilePreviewProvider({
       if (!expected.api) throw new Error('会话尚未连接，请连接后重试。');
       tab.file = await expected.api.open(pageAddress(path), undefined, root);
       tab.api = expected.api;
+      if (expectedVersion && (tab.file.path !== expectedVersion.path || tab.file.modified_ns !== expectedVersion.modified_ns || (expectedVersion.size !== undefined && tab.file.size !== expectedVersion.size) || !['video', 'audio'].includes(tab.file.kind))) {
+        release(tab);
+        throw new Error('媒体已变化，无法定位历史证据');
+      }
       tab.root = tab.file.reading_root;
       if (tab.file.kind === 'directory') { release(tab); throw new Error('目录不能作为文件预览打开。'); }
       tab.history = [visit(tab.file.path)];
       tab.history[0].anchor = new URL(pageAddress(path), fileUrl(tab.file.path)).hash.slice(1);
     } catch (error) {
+      if (expectedVersion) { release(tab); throw error; }
       tab.error = detail(error); tab.failed = { path: pageAddress(path), mode: 'refresh' };
     }
     if (!alive()) release(tab);
@@ -229,21 +250,21 @@ export function FilePreviewProvider({
           other.sessionId === tab.sessionId && !other.loading && !other.error && other.file?.path === tab.file!.path && other.root === tab.root) : [];
         const match = candidates.find(other => other.id === workspaceRef.current?.activeId) ?? candidates[0];
         if (match) {
-          if (match.file?.kind === 'video' && tab.file?.kind === 'video' && match.file.modified_ns !== tab.file.modified_ns) {
+          if ((match.file?.kind === 'video' || match.file?.kind === 'audio') && match.file.kind === tab.file?.kind && (match.file.modified_ns !== tab.file.modified_ns || match.file.size !== tab.file.size)) {
             release(match); match.file = tab.file; match.api = tab.api; tab.file = undefined; tab.api = undefined;
           }
           if (videoTime !== undefined) match.history[match.index].videoPosition = {time: videoTime};
           if (tab.history[0].anchor) match.history[match.index].anchor = tab.history[0].anchor;
-          release(tab); changed(); return describe(match);
+          touchMedia(match); release(tab); changed(); return describe(match);
         }
         while (idInUse(tab.id)) tab.id = randomIdentity('tab');
         if (videoTime !== undefined) tab.history[0].videoPosition = {time: videoTime};
-        adopted = true; tabs.current.set(tab.id, tab); changed();
+        adopted = true; tabs.current.set(tab.id, tab); touchMedia(tab); changed();
         return describe(tab);
       },
     };
   };
-  const create = (path: string, root?: string, deduplicate = false, videoTime?: number) => {
+  const create = (path: string, root?: string, deduplicate = false, videoTime?: number, expectedVersion?: MediaEvidenceVersion) => {
     if (!workspaceRef.current) {
       onNotify("无法打开文件", "文件工作区当前不可用。", "warning");
       return;
@@ -253,10 +274,10 @@ export function FilePreviewProvider({
     workspaceOwner.interact();
     const interaction = workspaceOwner.interactionVersion();
     const valid = () => connection.current === expected && workspaceRef.current?.visible === true;
-    void prepare(path, valid, root, deduplicate, videoTime).then(prepared => {
+    void prepare(path, valid, root, deduplicate, videoTime, expectedVersion).then(prepared => {
       try { const tab = prepared.adopt(); if (tab) workspaceRef.current?.publish([tab], workspaceOwner.interactionVersion() === interaction); }
       finally { prepared.release(); }
-    });
+    }).catch(error => onNotify('无法打开文件', detail(error), 'warning'));
   };
   const navigate = (tab: BrowserTab, path: string, newTab = false) => {
     const page = tab.history[tab.index];
@@ -313,12 +334,24 @@ export function FilePreviewProvider({
       for (const path of paths) open(fileUrl(path), document.body);
     } catch (error) { onNotify('无法打开文件', detail(error), 'warning'); }
   };
-  const openVideo = (path: string, time?: number) => create(fileUrl(path), undefined, true, time);
+  const openVideo = (path: string, time?: number, version?: {modified_ns: string; size?: number}) => create(fileUrl(path), undefined, true, time, version ? {...version, path} : undefined);
   const actions = useRef({ load, navigate, open, close, prepare, chooseFiles, openVideo });
   useLayoutEffect(() => {
     actions.current = { load, navigate, open, close, prepare, chooseFiles, openVideo };
   });
-  const stableOpenVideo = useCallback((path: string, time?: number) => actions.current.openVideo(path, time), []);
+  const shownMedia = useRef(new Map<string, Set<string>>());
+  useEffect(() => {
+    if (!api || !workspaceRef.current?.visible) return;
+    let seen = shownMedia.current.get(sessionId);
+    if (!seen) { seen = new Set(); shownMedia.current.set(sessionId, seen); }
+    for (const range of mediaReadStarts) {
+      const key = JSON.stringify([range.canonical_path, range.file_mtime_ns]);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      actions.current.openVideo(range.canonical_path, undefined, {modified_ns: range.file_mtime_ns});
+    }
+  }, [api, sessionId, mediaReadStarts]);
+  const stableOpenVideo = useCallback((path: string, time?: number, version?: {modified_ns: string; size?: number}) => actions.current.openVideo(path, time, version), []);
   const stablePrepare = useCallback((path: string, valid: () => boolean) => actions.current.prepare(path, valid), []);
   const stableOpen = useCallback<OpenFile>(
     (...args) => actions.current.open(...args),
@@ -346,9 +379,9 @@ export function FilePreviewProvider({
     const id = workspaceRef.current?.activeId;
     if (id) {
       const selected = tabs.current.get(id);
-      if (selected) selected.touched = Date.now();
+      if (selected) { selected.touched = Date.now(); touchMedia(selected); }
     }
-  }, [workspace?.activeId]);
+  }, [workspace?.activeId, touchMedia]);
   const describe = useCallback((tab: BrowserTab): WorkspaceTab => {
     const page = tab.history[tab.index];
     return { id: tab.id, sessionId: tab.sessionId, kind: 'file', onClose: () => actions.current.close(tab),
@@ -358,6 +391,7 @@ export function FilePreviewProvider({
           page?.path.split("/").pop() ||
           "文件",
         render: () => (
+          <MediaAnalysisContext.Provider value={{ranges: mediaRanges, annotationRevision: mediaAnnotationsRevision}}>
           <FileBrowserView
             tab={tab}
             onNotify={onNotify}
@@ -395,9 +429,10 @@ export function FilePreviewProvider({
               actions.current.navigate(tab, path, newTab)
             }
           />
+          </MediaAnalysisContext.Provider>
         ),
     };
-  }, [onNotify, changed]);
+  }, [onNotify, changed, mediaRanges, mediaAnnotationsRevision]);
   useEffect(() => {
     for (const tab of tabs.current.values()) workspaceRef.current?.update(tab.id, describe(tab));
   }, [revision, describe, ownerKey]);
@@ -449,8 +484,8 @@ function FileBrowserView({
   return (
     <FilePreviewPanel
       label={`文件预览：${file?.name ?? page?.path ?? ""}`}
-      className={file?.kind === 'video' ? 'video-file-preview' : undefined}
-      toolbar={file?.kind === 'video' ?
+      className={(file?.kind === 'video' || file?.kind === 'audio') ? 'video-file-preview' : undefined}
+      toolbar={(file?.kind === 'video' || file?.kind === 'audio') ?
         <button type="button" className="file-preview-action" disabled={!desktopHost()} onClick={onChooseFiles}><FolderOpen size={14} />从目录中打开</button> :
         <nav aria-label="文件操作">
           <button
@@ -607,6 +642,7 @@ function FileBody({
   onVisitChange,
   onNavigate,
 }: FileBodyProps) {
+  const analysis = useContext(MediaAnalysisContext);
   const [error, setError] = useState<string>();
   const [imageReady, setImageReady] = useState(false);
   const [htmlStatus, setHtmlStatus] = useState<"loading" | "ready" | "error">(
@@ -628,10 +664,13 @@ function FileBody({
         {file.notice}
       </div>
     );
-  if (file.kind === 'video' && file.content_url)
-    return <FileVideoContent src={file.content_url} name={file.name}
+  if ((file.kind === 'video' || file.kind === 'audio') && file.content_url) {
+    const span = analysis.ranges.find(range => range.canonical_path === file.path && range.file_mtime_ns === file.modified_ns);
+    return <MediaAnnotationView key={JSON.stringify([file.path, file.modified_ns])} file={file} api={api} revision={analysis.annotationRevision}>{annotations => <FileVideoContent src={file.content_url!} name={file.name} kind={file.kind as 'video' | 'audio'}
+      activeSpan={span ? {from: span.from_seconds, to: span.to_seconds} : null} annotations={annotations}
       initialState={visit?.video} previewPosition={visit?.videoPosition} onPreviewPositioned={() => onVisitChange?.({videoPosition: undefined})} onPlaybackStateChange={video => onVisitChange?.({ video })}
-      onNotify={onNotify} onRetry={onRetry} />;
+      onNotify={onNotify} onRetry={onRetry} />}</MediaAnnotationView>;
+  }
   if (file.kind === "html" && file.document_url)
     return (
       <>

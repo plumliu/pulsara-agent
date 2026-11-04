@@ -1,5 +1,5 @@
 /** Native media owns decoding; each caller releases only its own element. */
-export function releaseVideo(video: HTMLVideoElement) {
+export function releaseMedia(video: HTMLMediaElement) {
   video.pause();
   video.removeAttribute('src');
   video.querySelectorAll('source').forEach(source => source.removeAttribute('src'));
@@ -39,18 +39,21 @@ export async function videoPoster(src: string, signal: AbortSignal): Promise<str
     if (!context) throw new Error('无法绘制视频封面。');
     context.drawImage(video, 0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/png');
-  } finally { releaseVideo(video); }
+  } finally { releaseMedia(video); }
 }
 
 /** Sidebar residency may outlive its visibility; hiding never resumes playback. */
-export function pauseVideoWhenHidden(video: HTMLVideoElement) {
-  const hidden = () => { if (document.visibilityState === 'hidden') video.pause(); };
+export function pauseMediaWhenHidden(video: HTMLMediaElement, container: Element) {
+  let visible = true;
+  const hidden = () => { if (!visible || document.visibilityState === 'hidden') video.pause(); };
   const observer = typeof IntersectionObserver === 'undefined' ? undefined : new IntersectionObserver(entries => {
     const entry = entries.at(-1);
-    if (!entry?.isIntersecting || entry.intersectionRect.width <= 0 || entry.intersectionRect.height <= 0) video.pause();
+    visible = Boolean(entry?.isIntersecting && entry.intersectionRect.width > 0 && entry.intersectionRect.height > 0);
+    hidden();
   }, {threshold: Number.EPSILON});
-  observer?.observe(video);
+  observer?.observe(container);
   document.addEventListener('visibilitychange', hidden);
+  video.addEventListener('play', hidden);
   hidden();
-  return () => { observer?.disconnect(); document.removeEventListener('visibilitychange', hidden); };
+  return () => { observer?.disconnect(); document.removeEventListener('visibilitychange', hidden); video.removeEventListener('play', hidden); };
 }

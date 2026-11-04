@@ -32,7 +32,7 @@ run = ".venv/bin/python desktop/scripts/prepare_resources.py postgres"
 
 [tasks."desktop:python-dependencies"]
 depends = ["desktop:requirements"]
-sources = ["desktop/build/requirements.txt", ".python-version", "desktop/scripts/prepare_resources.py", "desktop/build/environment.json"]
+sources = ["desktop/build/requirements.txt", ".python-version", "desktop/scripts/prepare_resources.py", "desktop/assets/licenses/media-sources.json", "desktop/build/environment.json"]
 outputs = ["desktop/resources/python/bin/python3", "desktop/resources/python/lib/python3.12/site-packages/playwright/__init__.py", "desktop/resources/licenses/Python-LICENSE.txt"]
 run = ".venv/bin/python desktop/scripts/prepare_resources.py python-dependencies"
 

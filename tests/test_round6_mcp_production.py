@@ -128,7 +128,6 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
 )
 from pulsara_agent.llm.input import MessageRole, join_text_content
 from pulsara_agent.mcp_config import (
-    _parse_server,
     LocalConfiguredMcpRuntimeSource,
     McpConfiguredEffect,
     McpLocalConfigSourceKind,
@@ -4583,7 +4582,7 @@ def test_round6_does_not_expand_durable_or_protocol_oracles() -> None:
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
     # Known-Agent membership is the sole product relation added to this oracle.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
 
     root = Path(__file__).parents[1]
     mcp_root = root / "src" / "pulsara_agent" / "conversation_kernel" / "mcp"

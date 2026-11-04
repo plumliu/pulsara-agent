@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MarkdownBody } from '../../frontend/components/markdown-body';
 import { InlineVisualization, VisualizationOwnerContext } from '../../frontend/components/inline-visualization';
+import { FileMediaContext } from '../../frontend/components/file-link-context';
+import type { FilePreviewApi } from '../../frontend/lib/file-preview';
 import { visualizationLayoutMessageType } from '../../frontend/lib/visualization-frame';
 import examples from '../fixtures/visualization-markers.json';
 
@@ -504,4 +506,34 @@ it('uses the original fence path for an existing HTML snapshot and keeps its lay
   expect(files.snapshot).toHaveBeenCalledExactlyOnceWith('chart.html','<h1>original layout</h1>');
   expect(screen.getByText('本地媒体暂时无法读取，布局快照仍可查看。')).toBeTruthy();
   expect(view.container.querySelector('iframe')!.srcdoc).toContain('original layout');
+});
+
+
+it('keeps audio and HTML in declaration order, with static audio thumbs and native media reads only on selection', async () => {
+  vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {});
+  const api: FilePreviewApi = {
+    open: vi.fn(async () => ({read_token:'audio',path:'/project/speech.wav',reading_root:'/project',name:'speech.wav',kind:'audio',modified_ns:'1',size:10,notice:null,content_url:'/api/audio/content',document_url:null,images_url:null,can_open:false})),
+    close: vi.fn(async () => {}), snapshot: vi.fn(), page: vi.fn(), action: vi.fn(), annotations: vi.fn(),
+  };
+  const audio = {...item,ordinal:1,mediaType:'application/vnd.pulsara.audio-reference+json',sourceFilename:'speech.wav'};
+  const onRead = vi.fn(async (_entry: string, ordinal: number) => ordinal === 1 ? JSON.stringify({path:'/project/speech.wav'}) : '<p>Saved HTML layout</p>');
+  const thumbnail = vi.fn();
+  const view = render(<FileMediaContext.Provider value={{api,ownerKey:'media-test',sessionId:'session-test',open:vi.fn()}}><InlineVisualization entryId="entry" items={[item,audio,{...item,ordinal:2,sourceFilename:'last.html'}]} onRead={onRead} onReadThumbnail={thumbnail}/></FileMediaContext.Provider>);
+  expect([...view.container.querySelectorAll('button[data-ordinal]')].map(node => node.getAttribute('title'))).toEqual(['chart.html','speech.wav','last.html']);
+  expect(screen.getByText('speech.wav')).toBeDefined();
+  expect(api.open).not.toHaveBeenCalled();
+  expect(onRead.mock.calls.some(call => call[1] === 1)).toBe(false);
+  fireEvent.click(screen.getByRole('button',{name:'查看音频 2'}));
+  await waitFor(() => expect(view.container.querySelector('audio')).toBeTruthy());
+  expect(api.open).toHaveBeenCalledExactlyOnceWith('file:///project/speech.wav');
+  const media = view.container.querySelector('audio')!;
+  expect(media.controls).toBe(true);
+  expect(media.autoplay).toBe(false);
+  expect(view.container.querySelector('video')).toBeNull();
+  expect(thumbnail.mock.calls.some(call => call[1] === 1)).toBe(false);
+  fireEvent.click(screen.getByRole('button',{name:'查看可视化 3'}));
+  expect(media.pause).toHaveBeenCalled();
+  view.unmount();
+  expect(api.close).toHaveBeenCalledExactlyOnceWith('audio');
 });

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
-from pulsara_agent.conversation_kernel.todo_runtime import FrozenTodoSnapshot
+from pulsara_agent.conversation_kernel.current_work_runtime import FrozenTodoSnapshot
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.context import canonical_json_bytes, context_fingerprint
 

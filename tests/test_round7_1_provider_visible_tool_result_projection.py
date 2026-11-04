@@ -391,7 +391,7 @@ def test_round7_1_architecture_and_oracle_guards() -> None:
     assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
 
     production = ROOT / "src/pulsara_agent"
     definitions: list[tuple[Path, int]] = []

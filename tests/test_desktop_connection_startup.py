@@ -101,7 +101,7 @@ def test_live_control_changes_during_canonical_read_remain_in_the_same_observer_
     async def exercise():
         owner = SessionLiveControlOwner(session_id="session:test")
         host = SimpleNamespace(
-            live_control=owner, current_todo_snapshots=lambda: (),
+            live_control=owner, current_work_snapshot=lambda: SimpleNamespace(todos=(), media_ranges=()),
             current_compaction_projection=lambda: (False, None, None, None),
             root_compaction_in_progress=lambda: False,
             host_session_id="host:test", active_root_turn_id=lambda: None,

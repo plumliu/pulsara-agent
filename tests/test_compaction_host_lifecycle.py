@@ -338,7 +338,7 @@ def test_unknown_terminal_write_and_status_read_keep_original_execution_owner(
         )
         preparing, release_prepare = asyncio.Event(), asyncio.Event()
         retry_entered, release_retry, write_failed = Event(), Event(), Event()
-        finalize = session._finalize_todo_run_activation
+        finalize = session._finalize_root_work_activation
         interrupt = session.repository.interrupt_turn
         read_status = session.repository.read_turn_status
         writes, failed_reads = 0, 0
@@ -361,7 +361,7 @@ def test_unknown_terminal_write_and_status_read_keep_original_execution_owner(
                 failed_reads += 1
                 raise OSError("terminal confirmation temporarily unavailable")
             return read_status(*args, **kwargs)
-        monkeypatch.setattr(session, "_finalize_todo_run_activation", paused_finalizer)
+        monkeypatch.setattr(session, "_finalize_root_work_activation", paused_finalizer)
         monkeypatch.setattr(session.repository, "interrupt_turn", uncertain_write)
         monkeypatch.setattr(session.repository, "read_turn_status", uncertain_read)
         try:

@@ -1,6 +1,6 @@
 {
   "schema_version": "conversation_kernel_expected_catalog.v2",
-  "observed_catalog_fingerprint": "sha256:d46d6fc36909fc9f89b82e269eef0ed7103c8dfe3c7ba3298a949b7e10b224bb",
+  "observed_catalog_fingerprint": "sha256:7c29d64592b51692e84477f0cb3af1b5d66c92782289e6a6aee6de6947c1b81e",
   "required_extensions": [
     {
       "extension_name": "vector",
@@ -47,7 +47,8 @@
     "memory_embeddings",
     "blobs",
     "agent_events",
-    "history_search_documents"
+    "history_search_documents",
+    "asr_cache"
   ],
   "infrastructure_relations": [
     "public.pulsara_schema_migrations"

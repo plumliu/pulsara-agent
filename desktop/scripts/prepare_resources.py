@@ -512,6 +512,103 @@ def compile_python_stdlib(python: Path, stdlib: Path):
     ])
 
 
+def prepare_media_licenses(python: Path):
+    """Ship exact FFmpeg dependency sources, build patches and Python notices.
+
+    PyAV's wheel supplies native libraries but omits their complete notices.
+    Its v17.1.0 build pins pyav-ffmpeg 8.1.1-2; preserve that recipe and the
+    recipe's immutable source archives, rather than infer licensing from codecs.
+    """
+    manifest_path = ROOT / "assets/licenses/media-sources.json"
+    manifest = json.loads(manifest_path.read_text())
+    versions = json.loads(
+        output(
+            [
+                python,
+                "-I",
+                "-c",
+                "import av,json; from av._core import ffmpeg_version_info; print(json.dumps([av.__version__,ffmpeg_version_info.decode() if isinstance(ffmpeg_version_info,bytes) else ffmpeg_version_info]))",
+            ]
+        )
+    )
+    if versions != [manifest["pyav_version"], manifest["ffmpeg_version"]]:
+        raise RuntimeError(
+            "Update media source/licensing inputs for the locked PyAV wheel"
+        )
+    destination = RESOURCES / "licenses/media"
+    destination.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(manifest_path, destination / "sources.json")
+    for item in manifest["packages"]:
+        if sys.platform not in item["platforms"]:
+            continue
+        # Archives are corresponding upstream source, not runtime engines or
+        # weights; SHA verifies this real binary/source distribution boundary.
+        archive = download(
+            item["source_url"],
+            destination
+            / "sources"
+            / (
+                item["name"]
+                + ".tar"
+                + (
+                    ".xz"
+                    if item["source_url"].endswith(".xz")
+                    else ".bz2"
+                    if item["source_url"].endswith(".bz2")
+                    else ".gz"
+                )
+            ),
+            item["sha256"],
+        )
+        notices = destination / item["name"]
+        notices.mkdir(exist_ok=True)
+        with tarfile.open(archive) as source:
+            for member in source:
+                basename = Path(member.name).name
+                if member.isfile() and (
+                    basename.upper().startswith(
+                        ("LICENSE", "COPYING", "NOTICE", "PATENTS", "AUTHORS")
+                    )
+                ):
+                    content = source.extractfile(member)
+                    if content is not None:
+                        # Preserve source-relative notice names without trusting
+                        # archive paths as writable filesystem destinations.
+                        target = notices / (
+                            "__".join(Path(member.name).parts[1:]) or basename
+                        )
+                        target.write_bytes(content.read())
+    run(
+        [
+            python,
+            "-I",
+            "-c",
+            """
+from importlib.metadata import distributions
+from pathlib import Path
+import shutil,sys
+root=Path(sys.argv[1])
+for distribution in distributions():
+    for relative in distribution.files or ():
+        if '.dist-info/licenses/' in str(relative) or ('.dist-info/' in str(relative) and Path(relative).name.upper().startswith(('LICENSE','COPYING','NOTICE'))):
+            source=distribution.locate_file(relative)
+            parts=Path(relative).parts
+            index=next(index for index,part in enumerate(parts) if part.endswith('.dist-info'))
+            target=root/distribution.metadata['Name']/Path(*parts[index+1:])
+            target.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(source,target)
+""",
+            destination / "python",
+        ]
+    )
+    (destination / "README.txt").write_text(
+        "FFmpeg and its shared codec libraries are provided by the locked PyAV wheel. "
+        "Corresponding source archives, upstream build recipe/patches and notices are included here. "
+        "Libraries remain dynamically linked and replaceable. Python dependency notices are in python/. "
+        "The application does not include a speech recognition model.\n"
+    )
+
+
 def prepare_python_dependencies():
     target = RESOURCES / "python"
     managed = output(
@@ -550,6 +647,7 @@ def prepare_python_dependencies():
         cwd=REPO,
         env={**os.environ, "PYC_INVALIDATION_MODE": "CHECKED_HASH"},
     )
+    prepare_media_licenses(python)
     compile_python_stdlib(python, target / "lib" / "python3.12")
     if sys.platform == "linux":
         bundle_linux_dependencies(target)

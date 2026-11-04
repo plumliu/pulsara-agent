@@ -154,6 +154,7 @@ def test_late_image_canonical_charge_fits_text_base_plus_exact_image_increment()
         content=(LLMTextPart(late_body), image),
         tool_call_ordinal=0,
         tool_call_arguments=call.arguments,
+        tool_call_name=call.tool_name,
     )
     actual = (
         len(_tool_result_closure_storage_text(call.tool_call_id).encode("utf-8"))

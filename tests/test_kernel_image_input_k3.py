@@ -1224,7 +1224,8 @@ def test_typed_tool_result_canonical_charge_includes_prompt_body_and_image_bytes
         content=content.parts,
         tool_result_body_text=frozen_tool_result_public_text(content),
         tool_call_ordinal=0,
-        tool_call_arguments=freeze_json({"path": "/tmp/image.png"}),
+        tool_call_arguments=freeze_json({"target": {"kind": "PATH", "path": "/tmp/image.png"}}),
+        tool_call_name="view_image",
     )
 
     assert provider_input_item_canonical_expanded_bytes(item) == (

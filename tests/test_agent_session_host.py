@@ -250,7 +250,7 @@ def test_same_agent_uses_real_common_engine_and_retains_prefix_across_work(
             assert child.root_session_id == root.session_id
             assert child._runner is not root._runner
             assert child._tools._terminal is root._tools._terminal
-            assert child._tools.todo_owner is not root._tools.todo_owner
+            assert child._tools.current_work_owner is not root._tools.current_work_owner
             assert root.active_root_turn_id() is None
             # Ordinary ROOT final does not cancel the independently admitted turn.
             model.first_child_release.set()

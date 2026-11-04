@@ -199,6 +199,7 @@ def _mixed_results():
             tool_request_entry_id=assistant.source_entry_id,
             tool_call_ordinal=index,
             tool_call_arguments=call.arguments,
+            tool_call_name=call.tool_name,
             content=content.parts if index else (LLMTextPart(text),),
             tool_result_delivery=classify_tool_result_delivery(
                 tool_name=call.tool_name,

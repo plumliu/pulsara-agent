@@ -17,6 +17,8 @@ MCP first-request preparation and real-model acceptance follow the [MCP first-re
 
 Resources include PostgreSQL 17.9, pgvector 0.8.1, pg_search 0.26.1, Python and Playwright Chromium. The pg_search packages target macOS ARM64 Sequoia and Ubuntu Noble PG17 x86_64/ARM64.
 
+Local media decoding uses the locked PyAV wheel and its FFmpeg libraries. Pillow composes the output frames and pysubs2 decodes ASS formatting. The optional cloud client uses the OpenAI transcription protocol. Run `.venv/bin/python -m tests.dogfood.run_media_understanding_dogfood --model <saved-vision-model> --output output/media-acceptance/provider.json` on a managed desktop database to check the real Host and model connection in an isolated database and temporary home. See the [media implementation and acceptance record](PULSARA_VIDEO_UNDERSTANDING_IMPLEMENTATION_SPEC.zh.md).
+
 ## macOS
 
 From the repository root:

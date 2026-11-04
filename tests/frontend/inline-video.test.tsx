@@ -1,7 +1,7 @@
 import { StrictMode } from 'react';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { InlineVideoPage, VideoThumbnail, videoReferenceMediaType } from '../../frontend/components/inline-video';
+import { InlineMediaPage, MediaThumbnail, videoReferenceMediaType } from '../../frontend/components/inline-video';
 import { FileMediaContext } from '../../frontend/components/file-link-context';
 import type { FilePreviewApi } from '../../frontend/lib/file-preview';
 import { videoPoster } from '../../frontend/lib/video-media';
@@ -24,7 +24,7 @@ const read = async () => JSON.stringify({path:'/project/demo.mp4'});
 
 it('lazily opens native video, pauses on hide, expands with actual time and releases on unmount', async () => {
   const files = api(), open = vi.fn(), onRead = vi.fn(read);
-  const view = render(<StrictMode><FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open}}><InlineVideoPage entryId="entry" item={item} onRead={onRead} active/></FileMediaContext.Provider></StrictMode>);
+  const view = render(<StrictMode><FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open}}><InlineMediaPage entryId="entry" item={item} onRead={onRead} active/></FileMediaContext.Provider></StrictMode>);
   expect(onRead).not.toHaveBeenCalled();
   visibility(true);
   await waitFor(() => expect(view.container.querySelector('video')).toBeTruthy());
@@ -47,7 +47,7 @@ it('lazily opens native video, pauses on hide, expands with actual time and rele
 it('releases a late preview without mounting it after its owner is gone', async () => {
   const files = api(); let settle!:(value:typeof preview)=>void;
   vi.mocked(files.open).mockImplementation(() => new Promise(resolve => {settle=resolve;}));
-  const view=render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><InlineVideoPage entryId="entry" item={item} onRead={read} active/></FileMediaContext.Provider>);
+  const view=render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><InlineMediaPage entryId="entry" item={item} onRead={read} active/></FileMediaContext.Provider>);
   visibility(true); await waitFor(() => expect(files.open).toHaveBeenCalled());
   view.unmount();
   await act(async () => {settle(preview);});
@@ -57,9 +57,9 @@ it('releases a late preview without mounting it after its owner is gone', async 
 it('keeps thumbnail failure independent of playback and always marks the item as video', async () => {
   const files=api(), onRead=vi.fn(read);
   vi.mocked(files.open).mockRejectedValue(new Error('no thumbnail'));
-  const view=render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><VideoThumbnail entryId="entry" item={item} onRead={onRead} enabled={false}/></FileMediaContext.Provider>);
+  const view=render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><MediaThumbnail entryId="entry" item={item} onRead={onRead} enabled={false}/></FileMediaContext.Provider>);
   expect(onRead).not.toHaveBeenCalled();
-  view.rerender(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><VideoThumbnail entryId="entry" item={item} onRead={onRead} enabled/></FileMediaContext.Provider>);
+  view.rerender(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><MediaThumbnail entryId="entry" item={item} onRead={onRead} enabled/></FileMediaContext.Provider>);
   await waitFor(() => expect(files.open).toHaveBeenCalled());
   expect(view.container.querySelector('.inline-visualization__video-play')).toBeTruthy();
   expect(view.container.querySelector('video')).toBeNull();
@@ -92,10 +92,36 @@ it('cancels frame extraction while metadata is still pending', async () => {
 it('canceled slow thumbnail opens do not block later items and release late leases', async () => {
   const files=api(); let settle!:(value:typeof preview)=>void;
   vi.mocked(files.open).mockImplementationOnce(() => new Promise(resolve => {settle=resolve;})).mockRejectedValueOnce(new Error('second thumbnail unavailable'));
-  const mount = () => render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><VideoThumbnail entryId="entry" item={item} onRead={read} enabled/></FileMediaContext.Provider>);
+  const mount = () => render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',snapshot:vi.fn(),open:vi.fn()}}><MediaThumbnail entryId="entry" item={item} onRead={read} enabled/></FileMediaContext.Provider>);
   const first=mount(); await waitFor(() => expect(files.open).toHaveBeenCalledTimes(1));
   first.unmount(); mount();
   await waitFor(() => expect(files.open).toHaveBeenCalledTimes(2));
   await act(async () => {settle(preview);});
   expect(files.close).toHaveBeenCalledWith('video');
+});
+
+it('renders audio with native compact controls, static thumbnail and independently owned release', async () => {
+  const files = api(), open = vi.fn(), onRead = vi.fn(async () => JSON.stringify({path:'/project/speech.wav'}));
+  const audioItem = {...item, mediaType:'application/vnd.pulsara.audio-reference+json', sourceFilename:'speech.wav'};
+  vi.mocked(files.open).mockResolvedValue({...preview, kind:'audio', path:'/project/speech.wav'});
+  const thumbnail = render(<FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open}}><MediaThumbnail entryId="entry" item={audioItem} onRead={onRead} enabled/></FileMediaContext.Provider>);
+  expect(onRead).not.toHaveBeenCalled();
+  expect(files.open).not.toHaveBeenCalled();
+  expect(thumbnail.container.querySelector('video,audio,img')).toBeNull();
+  thumbnail.unmount();
+  const view = render(<StrictMode><FileMediaContext.Provider value={{api:files,ownerKey:'owner',sessionId:'session',open}}><InlineMediaPage entryId="entry" item={audioItem} onRead={onRead} active/></FileMediaContext.Provider></StrictMode>);
+  visibility(true);
+  await waitFor(() => expect(view.container.querySelector('audio')).toBeTruthy());
+  const audio = view.container.querySelector('audio')!;
+  expect(audio.controls).toBe(true);
+  expect(audio.autoplay).toBe(false);
+  expect(view.container.querySelector('video')).toBeNull();
+  Object.defineProperty(audio,'readyState',{value:2,configurable:true}); audio.currentTime=11;
+  fireEvent.click(screen.getByRole('button',{name:'扩大音频'}));
+  expect(open).toHaveBeenCalledWith('/project/speech.wav',11);
+  vi.mocked(audio.pause).mockClear();
+  visibility(false); expect(audio.pause).toHaveBeenCalled();
+  view.unmount();
+  expect(audio.getAttribute('src')).toBeNull();
+  expect(files.close).toHaveBeenCalledExactlyOnceWith('video');
 });

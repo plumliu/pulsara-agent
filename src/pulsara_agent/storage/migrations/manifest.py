@@ -40,6 +40,7 @@ CONVERSATION_KERNEL_RELATIONS = (
     "blobs",
     "agent_events",
     "history_search_documents",
+    "asr_cache",
 )
 
 CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
@@ -73,6 +74,7 @@ CONVERSATION_KERNEL_RUNTIME_PRIVILEGES = {
     "blobs": ("SELECT", "INSERT", "DELETE"),
     "agent_events": ("SELECT", "INSERT"),
     "history_search_documents": ("SELECT", "INSERT", "UPDATE", "DELETE"),
+    "asr_cache": ("SELECT", "INSERT", "UPDATE", "DELETE"),
 }
 if tuple(CONVERSATION_KERNEL_RUNTIME_PRIVILEGES) != CONVERSATION_KERNEL_RELATIONS:
     raise RuntimeError("clean runtime grant catalog is not exhaustive")

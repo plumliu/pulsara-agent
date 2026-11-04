@@ -148,6 +148,12 @@
       "INSERT",
       "UPDATE",
       "DELETE"
+    ],
+    "asr_cache": [
+      "SELECT",
+      "INSERT",
+      "UPDATE",
+      "DELETE"
     ]
   },
   "function_grants": {

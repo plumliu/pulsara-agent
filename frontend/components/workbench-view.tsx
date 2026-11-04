@@ -109,6 +109,7 @@ import { MarkdownBody, MarkdownInline, type MarkdownNotify } from './markdown-bo
 import { AnnotationBody, AnnotationReader, ResponseAnnotations } from './response-annotations';
 import { PromptComposer } from './prompt-composer';
 import { PromptContentView } from './prompt-content-view';
+import { MediaEvidenceIndex } from './media-evidence-index';
 import { WelcomeTypewriter } from './welcome-typewriter';
 import { AnimatedDisclosure } from './animated-disclosure';
 import { AnimatedPromptQueue, queuePreviewCapacity } from './animated-prompt-queue';
@@ -555,9 +556,11 @@ function TraceCard({
     && trace.outputBody?.available,
   );
   const outputUnavailable = Boolean(showRawResult && trace.outputBody?.omitted && !trace.outputBody.available);
+  const hasMediaEvidence = ['read_video_frames', 'read_transcript'].includes(trace.toolName ?? '')
+    && Boolean(trace.resultText || trace.resultContent);
   const expandable = Boolean(trace.programCalls?.length) || Boolean(
     presentation || trace.command || diffText || hasTerminalOutput || hasRawResult
-    || trace.resultContent || mcpDetail || canReadOutput || outputUnavailable
+    || trace.resultContent || mcpDetail || canReadOutput || outputUnavailable || hasMediaEvidence
   );
   const outputAtEnd = Boolean(outputPage && !outputPage.next);
   const outputIsSinglePage = Boolean(
@@ -632,6 +635,7 @@ function TraceCard({
             skills={skills} mcpToolRefs={mcpToolRefs} outputOwnerKey={outputOwnerKey}
             onReadToolOutput={onReadToolOutput} onReadPromptImage={onReadPromptImage} onNotify={onNotify} />)}
           {presentation && <PresentationResult result={presentation} onOpen={showTargets} />}
+          <MediaEvidenceIndex trace={trace} completeOutput={outputIsSinglePage ? outputPage?.text : undefined} />
           {trace.resultContent ? (
             <section className="tool-result-images" aria-label="工具读取的图片">
               <PromptContentView
@@ -2796,6 +2800,7 @@ export function WorkbenchView({
   const { latestVisible, locatedFocus, currentSessionRef, atLatestHistory, jumpingToLatest,
     revealEarlierProcess, restoreReadingPosition, loadHistory, locateAnnotation, jumpToLatest,
     canAutoCollapse, readProcessEnd, disclosureChoices } = reading;
+
 
   const insertSkill = useCallback((name: string) => {
     if (editingQueue || queueClicks.current.has('composer-edit')) return;

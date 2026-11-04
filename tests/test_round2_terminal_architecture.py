@@ -112,7 +112,7 @@ def test_round2_closed_oracles_and_no_durable_terminal_authority(
     assert len(LIVE_EVENT_TYPES) == 20
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
     terminal_names = {
         "exec_process",
         "manage_process",

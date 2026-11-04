@@ -1,24 +1,25 @@
 import { useContext, useEffect, useEffectEvent, useRef, useState, type RefObject } from 'react';
-import { Film, Maximize2, Play, RotateCcw } from 'lucide-react';
+import { AudioLines, Film, Maximize2, Play, RotateCcw } from 'lucide-react';
 import type { VisualizationOccurrence } from '../lib/pulsara-types';
 import type { FilePreview } from '../lib/file-preview';
 import { fileUrl } from '../lib/file-preview';
-import { releaseVideo, videoPoster } from '../lib/video-media';
+import { releaseMedia, videoPoster } from '../lib/video-media';
 import { readThumbnailInOrder } from '../lib/visualization-thumbnails';
 import { FileMediaContext } from './file-link-context';
 import type { ReadVisualization } from './inline-visualization';
 
 export const videoReferenceMediaType = 'application/vnd.pulsara.video-reference+json';
-export const isVideoVisualization = (item: VisualizationOccurrence) => item.mediaType === videoReferenceMediaType;
+export const audioReferenceMediaType = 'application/vnd.pulsara.audio-reference+json';
+export const isMediaVisualization = (item: VisualizationOccurrence) => item.mediaType === videoReferenceMediaType || item.mediaType === audioReferenceMediaType;
 
 async function readPath(entryId: string, item: VisualizationOccurrence, onRead: ReadVisualization, signal: AbortSignal) {
-  if (item.state !== 'READY' || !item.contentDigest || !item.contentSize) throw new Error(item.failureDetail || '视频引用不完整。');
+  if (item.state !== 'READY' || !item.contentDigest || !item.contentSize) throw new Error(item.failureDetail || '媒体引用不完整。');
   const value = await onRead(entryId, item.ordinal, item.contentDigest, item.contentSize, item, signal);
   signal.throwIfAborted();
-  if (typeof value !== 'string') throw new Error('视频引用类型不匹配。');
+  if (typeof value !== 'string') throw new Error('媒体引用类型不匹配。');
   const reference: unknown = JSON.parse(value);
   if (!reference || typeof reference !== 'object' || Object.keys(reference).length !== 1 || !('path' in reference)
-    || typeof reference.path !== 'string' || !reference.path.startsWith('/') || Array.from(reference.path).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) throw new Error('视频路径无效。');
+    || typeof reference.path !== 'string' || !reference.path.startsWith('/') || Array.from(reference.path).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) throw new Error('媒体路径无效。');
   return reference.path;
 }
 
@@ -40,15 +41,18 @@ function useVisible(ref: RefObject<HTMLDivElement | null>, active: boolean) {
   return visible && active;
 }
 
-export type VideoSource = Pick<FilePreview, 'path' | 'modified_ns'>;
-const sameSource = (a: VideoSource, b: VideoSource) => a.path === b.path && a.modified_ns === b.modified_ns;
+export type MediaSource = Pick<FilePreview, 'path' | 'modified_ns'>;
+const sameSource = (a: MediaSource, b: MediaSource) => a.path === b.path && a.modified_ns === b.modified_ns;
 
 type Props = {entryId: string; item: VisualizationOccurrence; onRead: ReadVisualization};
 
-export function InlineVideoPage({entryId, item, onRead, active, onSource}: Props & {active: boolean; onSource?: (ordinal: number, source: VideoSource) => void}) {
+export function InlineMediaPage({entryId, item, onRead, active, onSource}: Props & {active: boolean; onSource?: (ordinal: number, source: MediaSource) => void}) {
   const context = useContext(FileMediaContext);
   const page = useRef<HTMLDivElement>(null);
-  const media = useRef<HTMLVideoElement>(null);
+  const media = useRef<HTMLMediaElement>(null);
+  const audio = item.mediaType === audioReferenceMediaType;
+  const Media = audio ? 'audio' : 'video';
+  const label = audio ? '音频' : '视频';
   const visible = useVisible(page, active);
   const [started, setStarted] = useState(false);
   const [attempt, setAttempt] = useState(0);
@@ -66,35 +70,35 @@ export function InlineVideoPage({entryId, item, onRead, active, onSource}: Props
     let file: FilePreview | undefined;
     setResult({}); setMediaError(false);
     void (async () => {
-      if (!api) throw new Error('视频没有可用的文件连接。');
+      if (!api) throw new Error(`${label}没有可用的文件连接。`);
       const path = await readPath(entryId, {ordinal, state, contentDigest, contentSize, mediaType}, onRead, abort.signal);
       const opened = await api.open(fileUrl(path));
       if (abort.signal.aborted) { void api.close(opened.read_token).catch(() => undefined); return; }
       file = opened;
-      if (file.kind !== 'video' || !file.content_url) throw new Error('此文件不是可预览的视频。');
+      if (file.kind !== (audio ? 'audio' : 'video') || !file.content_url) throw new Error(`此文件不是可预览的${label}。`);
       setResult({file});
       reportSource(file);
     })().catch(error => {
       if (file) { void api?.close(file.read_token).catch(() => undefined); file = undefined; }
-      if (!abort.signal.aborted) setResult({error: error instanceof Error ? error.message : '视频暂不可用。'});
+      if (!abort.signal.aborted) setResult({error: error instanceof Error ? error.message : `${label}暂不可用。`});
     });
     return () => { abort.abort(); if (file) void api?.close(file.read_token).catch(() => undefined); };
-  }, [started, entryId, ordinal, state, contentDigest, contentSize, mediaType, onRead, api, ownerKey, sessionId, attempt]);
+  }, [started, entryId, ordinal, state, contentDigest, contentSize, mediaType, onRead, api, ownerKey, sessionId, attempt, audio, label]);
   useEffect(() => {
     const video = media.current;
     if (!video || mediaError) return;
     // StrictMode replays setup/cleanup on the same DOM node.
     if (!video.getAttribute('src') && result.file?.content_url) video.src = result.file.content_url;
-    return () => releaseVideo(video);
+    return () => releaseMedia(video);
   }, [result.file, mediaError]);
   useEffect(() => { if (!visible) media.current?.pause(); }, [visible]);
-  const error = result.error || (mediaError ? '视频无法播放，文件或编码可能不受支持。' : undefined);
-  return <div ref={page} className="inline-visualization__page inline-visualization__video-page" hidden={!active} inert={!active} aria-hidden={!active} data-visualization-ordinal={ordinal}>
-    {error ? <div className="inline-visualization__status" role="status"><Film size={20}/><div className="inline-visualization__status-copy"><strong>视频无法显示</strong><p>{error}</p><button onClick={() => setAttempt(value => value + 1)}><RotateCcw size={14}/>重试</button></div></div>
-      : result.file ? <video ref={media} controls playsInline preload="metadata" src={result.file.content_url!} aria-label={item.sourceFilename || '视频'}
+  const error = result.error || (mediaError ? `${label}无法播放，文件或编码可能不受支持。` : undefined);
+  return <div ref={page} className={`inline-visualization__page inline-visualization__video-page${audio ? ' inline-visualization__audio-page' : ''}`} hidden={!active} inert={!active} aria-hidden={!active} data-visualization-ordinal={ordinal}>
+    {error ? <div className="inline-visualization__status" role="status"><Film size={20}/><div className="inline-visualization__status-copy"><strong>{label}无法显示</strong><p>{error}</p><button onClick={() => setAttempt(value => value + 1)}><RotateCcw size={14}/>重试</button></div></div>
+      : result.file ? <Media ref={node => { media.current = node; }} controls playsInline preload="metadata" src={result.file.content_url!} aria-label={item.sourceFilename || label}
         onPlay={() => {if (!visible) media.current?.pause();}} onError={() => setMediaError(true)}/>
-        : <div role="status">正在加载视频…</div>}
-    {active && result.file && !error && <div className="inline-visualization__zoom-anchor"><button className="inline-visualization__zoom" aria-label="扩大视频" title="在侧栏打开视频" onClick={() => {
+        : <div role="status">正在加载{label}…</div>}
+    {active && result.file && !error && <div className="inline-visualization__zoom-anchor"><button className="inline-visualization__zoom" aria-label={`扩大${label}`} title={`在侧栏打开${label}`} onClick={() => {
       const video = media.current;
       video?.pause();
       const time = video && video.readyState >= HTMLMediaElement.HAVE_METADATA && Number.isFinite(video.currentTime) ? video.currentTime : undefined;
@@ -103,10 +107,11 @@ export function InlineVideoPage({entryId, item, onRead, active, onSource}: Props
   </div>;
 }
 
-export function VideoThumbnail({entryId, item, onRead, enabled, source}: Props & {enabled: boolean; source?: VideoSource}) {
+export function MediaThumbnail({entryId, item, onRead, enabled, source}: Props & {enabled: boolean; source?: MediaSource}) {
   const context = useContext(FileMediaContext);
-  const [image, setImage] = useState<VideoSource & {url: string}>();
+  const [image, setImage] = useState<MediaSource & {url: string}>();
   const [failed, setFailed] = useState(false);
+  const audio = item.mediaType === audioReferenceMediaType;
   const {ordinal, state, contentDigest, contentSize, mediaType} = item;
   const api = context?.api;
   const ownerKey = context?.ownerKey;
@@ -114,7 +119,7 @@ export function VideoThumbnail({entryId, item, onRead, enabled, source}: Props &
   const currentImage = image && (!source || sameSource(image, source)) ? image.url : undefined;
   useEffect(() => { setFailed(false); }, [source?.path, source?.modified_ns]);
   useEffect(() => {
-    if (!enabled || currentImage || failed || !api) return;
+    if (audio || !enabled || currentImage || failed || !api) return;
     const abort = new AbortController();
     void readThumbnailInOrder(async () => {
       // Same per-operation deadline as HTML thumbnails; no gallery-size bound.
@@ -140,7 +145,8 @@ export function VideoThumbnail({entryId, item, onRead, enabled, source}: Props &
       finally { signal.removeEventListener('abort', cancel); }
     }, abort.signal).then(value => {if (!abort.signal.aborted) setImage(value);}).catch(() => {if (!abort.signal.aborted) setFailed(true);});
     return () => abort.abort();
-  }, [enabled, currentImage, failed, api, ownerKey, sessionId, entryId, ordinal, state, contentDigest, contentSize, mediaType, onRead]);
+  }, [audio, enabled, currentImage, failed, api, ownerKey, sessionId, entryId, ordinal, state, contentDigest, contentSize, mediaType, onRead]);
+  if (audio) return <span className="inline-visualization__thumbnail-image inline-visualization__audio-thumbnail" aria-hidden="true"><AudioLines size={22}/><span>{item.sourceFilename || '音频'}</span></span>;
   return <span className="inline-visualization__thumbnail-image inline-visualization__video-thumbnail" aria-hidden="true">
     {currentImage ? <img src={currentImage} alt="" draggable={false}/> : <Film size={20}/>}
     <span className="inline-visualization__video-play"><Play size={14} fill="currentColor"/></span>

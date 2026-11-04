@@ -214,10 +214,10 @@ from pulsara_agent.conversation_kernel.user_control import (
 )
 
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.conversation_kernel.todo_runtime import (
-    FrozenTodoCloseProjection,
-    FrozenTodoSnapshot,
-    PreparedTodoRootRunActivation,
+from pulsara_agent.conversation_kernel.current_work_runtime import (
+    FrozenCurrentWorkCloseProjection,
+    FrozenCurrentWorkSnapshot,
+    PreparedRootWorkActivation,
     build_root_activation,
 )
 from pulsara_agent.conversation_kernel.tool_outputs import (
@@ -673,6 +673,8 @@ class KernelHostSession:
         local_mcp_configs: tuple[McpServerConfig, ...] = (),
         mcp_configs: tuple[McpServerConfig, ...] = (),
         scheduled_tasks,
+        media_cache=None,
+        media_asr_runtime=None,
         control_monotonic: Callable[[], float] = monotonic,
     ) -> None:
         self._model_runtime = model_runtime
@@ -801,6 +803,9 @@ class KernelHostSession:
             pulsara_home_resolution=pulsara_home_resolution,
             user_home_resolution=user_home_resolution,
             image_validator=image_validator,
+            media_cache=media_cache,
+            media_asr_runtime=media_asr_runtime,
+            read_media_settings=model_runtime.settings.read,
         )
         self._tools.bind_interaction_port(self._interactions)
         self._tools.bind_capability_reload_port(self)
@@ -950,7 +955,7 @@ class KernelHostSession:
             deadline_factory=self._deadlines,
             memory_projection=self._memory_tools,
             assistant_settlement_owner=self._assistant_settlements,
-            todo_admission_finalizer=self._finalize_todo_run_activation,
+            root_work_admission_finalizer=self._finalize_root_work_activation,
             compaction_owner=self._compaction,
             root_session_id=self.root_session_id,
             hook_dispatcher=self._hooks,
@@ -1625,10 +1630,8 @@ class KernelHostSession:
     def active_skill_names(self) -> frozenset[str]:
         return self._capabilities.configured_active_skill_names
 
-    def current_todo_snapshots(self) -> tuple[FrozenTodoSnapshot, ...]:
-        """Read the bounded same-Host TODO inventory for live resync."""
-
-        return self._tools.todo_owner.current_snapshots()
+    def current_work_snapshot(self) -> FrozenCurrentWorkSnapshot:
+        return self._tools.current_work_owner.current_work_snapshot()
 
     def _canonical_deadline(self) -> float:
         """Issue a fresh watchdog for one foreground canonical operation."""
@@ -2345,7 +2348,7 @@ class KernelHostSession:
                     or cancellation_intent.cause is not None
                 ):
                     raise asyncio.CancelledError
-                self._tools.todo_owner.bind_continuation(
+                self._tools.current_work_owner.bind_continuation(
                     scope_kind=self._session_scope_kind,
                     turn_id=continuation_turn_id,
                 )
@@ -2524,40 +2527,41 @@ class KernelHostSession:
             if self._active_task is task:
                 active_turn_id = self._active_turn_id
                 if active_turn_id is not None and self._active_turn_started:
-                    self._tools.offer_todo_installation(
-                        self._tools.todo_owner.mark_root_idle(exact_turn_id=active_turn_id)
+                    self._tools.offer_current_work_idle(
+                        self._tools.current_work_owner.mark_root_idle(exact_turn_id=active_turn_id),
+                        active_turn_id,
                     )
                 if active_turn_id is not None:
                     self._mark_feedback_target_ended_locked(active_turn_id)
                 self._clear_active_root_locked()
 
-    async def _finalize_todo_run_activation(
+    async def _finalize_root_work_activation(
         self,
-        prepared: PreparedTodoRootRunActivation,
+        prepared: PreparedRootWorkActivation,
         accepted: object,
     ) -> None:
         async with self._lock:
             if self._active_turn_id == accepted.turn_id:
                 self._active_turn_started = True
-            closed = self._finalize_todo_run_activation_locked(prepared, accepted)
-        self._tools.offer_todo_close(closed)
+            closed = self._finalize_root_work_activation_locked(prepared, accepted)
+        self._tools.offer_current_work_close(closed)
 
         if self.root_session_id is None:
             self._ephemeral.admitted(accepted.turn_id)
 
-    def _finalize_todo_run_activation_locked(
+    def _finalize_root_work_activation_locked(
         self,
-        prepared: PreparedTodoRootRunActivation,
+        prepared: PreparedRootWorkActivation,
         accepted: object,
-    ) -> FrozenTodoCloseProjection | None:
+    ) -> FrozenCurrentWorkCloseProjection | None:
         """Apply the common admission finalizer while the Host lock is held."""
 
         if (
             accepted.turn_id != prepared.exact_turn_id
             or accepted.entry_id != prepared.exact_initial_entry_id
         ):
-            raise RuntimeError("TODO activation does not exact-join admission")
-        return self._tools.todo_owner.activate_root_run(
+            raise RuntimeError("ROOT work activation does not exact-join admission")
+        return self._tools.current_work_owner.activate_root_run(
             prepared,
             allow_closing_predecessor=self._closing,
         )
@@ -3985,7 +3989,7 @@ class KernelHostSession:
                     and self._external_new_turn_cancellation_intent.cause is not None)
             ):
                 return False
-            self._tools.todo_owner.bind_continuation_if_present(
+            self._tools.current_work_owner.bind_continuation_if_present(
                 scope_kind=self._session_scope_kind,
                 turn_id=inspection.turn_id,
             )
@@ -4423,7 +4427,7 @@ class KernelHostSession:
                 exact_context_binding_revision_id=candidate.exact_context_binding_revision_id,
             )
             _closed, finalizer_cancelled = await self._drain_start_settlement(asyncio.create_task(
-                self._finalize_todo_run_activation(activation, accepted),
+                self._finalize_root_work_activation(activation, accepted),
                 name=f"kernel-queued-todo-finalizer:{accepted.turn_id}",
             ))
             if finalizer_cancelled or self._closing or intent.cause is not None:
@@ -6868,7 +6872,7 @@ class KernelHostSession:
             self._request_close_cancellation()
             self._presentation_notices.clear()
             self._queued_prompt_hooks.clear()
-            self._tools.todo_owner.mark_closing(
+            self._tools.current_work_owner.mark_closing(
                 scope_kind=self._session_scope_kind,
             )
             self._queue_wake.set()
@@ -7036,14 +7040,14 @@ class KernelHostSession:
                 # owner have already joined. A retained token now has no
                 # legitimate producer that can advance it, so fail closed
                 # instead of sleeping on an ownerless condition.
-                todo_closed = self._tools.todo_owner.close_run(
+                todo_closed = self._tools.current_work_owner.close_run(
                     scope_kind=self._session_scope_kind,
                 )
             except BaseException as exc:
                 todo_closed = None
                 close_error = close_error or exc
                 settlement_error = settlement_error or exc
-            self._tools.offer_todo_close(todo_closed)
+            self._tools.offer_current_work_close(todo_closed)
             self._renewal_task.cancel()
             try:
                 await self._renewal_task
@@ -7585,6 +7589,8 @@ class KernelHostCore:
         self._image_validator = HostPromptImageValidator()
         self._access: VerifiedPostgresAccessLease | None = None
         self._repository: ConversationKernelRepository | None = None
+        self._asr_cache = None
+        self._media_asr_runtime = None
         self._resource_initialization: _CoreResourceInitialization | None = None
         self._resource_operations: dict[asyncio.Task[object], float] = {}
         self._blob_store: PostgresCanonicalBlobStore | None = None
@@ -7925,6 +7931,29 @@ class KernelHostCore:
     def scheduled_tasks(self):
         return self._scheduled_tasks
 
+    async def asr_cache_owner(self):
+        """User-level cache owner; acquiring it never requires an active session."""
+        await self._ensure_resources()
+        return self._asr_cache
+
+    @_core_database_operation
+    async def touch_asr_cache_source(self, source_path: str, source_modified_ns: int, source_size: int) -> None:
+        """Record an actual, already-authorized media preview/read start."""
+        from pulsara_agent.media.asr_cache import AsrMediaKey
+        owner = await self.asr_cache_owner()
+        await asyncio.to_thread(owner.touch,
+            AsrMediaKey(self.memory_domain_id, source_path, source_modified_ns, source_size),
+            deadline_monotonic=self._canonical_deadline())
+
+    @_core_database_operation
+    async def clear_old_asr_cache(self) -> dict[str, object]:
+        owner = await self.asr_cache_owner()
+        count = await asyncio.to_thread(owner.clear_old, self.memory_domain_id,
+            deadline_monotonic=self._canonical_deadline())
+        return {"deleted_blocks": count, "message": (
+            f"已清理 {count} 个旧转写缓存块。" if count
+            else "暂无可清理的旧转写缓存")}
+
     @property
     def root_active_skill_names(self) -> frozenset[str]:
         return self._root_active_skill_names
@@ -7996,6 +8025,10 @@ class KernelHostCore:
                     raise KernelHostCoreClosing("Kernel Host shutdown won resource initialization")
                 self._access = access
                 self._repository = repository
+                from pulsara_agent.media.asr_cache import PostgresAsrCache
+                self._asr_cache = PostgresAsrCache(access.connection_provider)
+                from pulsara_agent.media.runtime import MediaAsrRuntime
+                self._media_asr_runtime = MediaAsrRuntime()
                 self._blob_store = blob_store
                 self._history_maintenance = history
                 self._blob_gc_io = io_owner
@@ -8564,6 +8597,8 @@ class KernelHostCore:
                 local_mcp_configs=local_mcp_configs,
                 mcp_configs=mcp_configs,
                 scheduled_tasks=self.scheduled_tasks,
+                media_cache=self._asr_cache,
+                media_asr_runtime=self._media_asr_runtime,
             )
             attempt.candidate_session = session
             await session.start_mcp()
@@ -8835,6 +8870,17 @@ class KernelHostCore:
             self._canonical_deadline(),
         )
         return [_kernel_session_summary(row) for row in rows]
+
+    @_core_database_operation
+    async def read_media_annotations(self, *, memory_domain_id, path, modified_ns, after):
+        from pulsara_agent.conversation_kernel.media_annotations import read_media_annotations
+
+        repository = await self._ensure_resources()
+        return await asyncio.to_thread(
+            read_media_annotations, repository, memory_domain_id=memory_domain_id,
+            path=path, modified_ns=modified_ns, after=after,
+            deadline_monotonic=self._canonical_deadline(),
+        )
 
     @_core_database_operation
     async def search_sessions(self, *, memory_domain_id: str, query: str, lifecycle: str = "ALL", cursor: str | None = None, limit: int = 20):
@@ -9320,6 +9366,11 @@ class KernelHostCore:
         # Unconfirmed physical work retains the resources it can still use.
         # This does not prevent independent maintenance owners from stopping.
         if sessions_stopped:
+            if self._media_asr_runtime is not None:
+                owner = self._media_asr_runtime
+                await close(lambda: owner.aclose(deadline_monotonic=self._canonical_deadline()))
+                if owner.physical_close_complete:
+                    self._media_asr_runtime = None
             await close(self.scheduled_tasks.aclose)
             await close(self.mcp_management.aclose)
             await close(self._bundled_skill_binding.aclose)
@@ -9329,6 +9380,7 @@ class KernelHostCore:
                              and self._agent_runtime.physical_close_complete
                              and self.scheduled_tasks.physical_close_complete
                              and self._image_validator.local_children_stopped
+                             and self._media_asr_runtime is None
                              and self._history_maintenance is None and self._blob_gc_io is None)
         if resources_stopped:
             self._blob_store = None
@@ -9336,6 +9388,7 @@ class KernelHostCore:
                 self._access.release()
                 self._access = None
             self._repository = None
+            self._asr_cache = None
             self._event_loop = None
             self._closed = True
         if not resources_stopped:

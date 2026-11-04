@@ -148,7 +148,7 @@ class KernelToolResult:
             )
             if (
                 self.state != "SUCCESS"
-                or len(images) != 1
+                or not images
                 or not any(isinstance(part, LLMTextPart) for part in self.content.parts)
             ):
                 raise ValueError("typed image content is invalid for this Tool result")
@@ -337,6 +337,7 @@ class ImageToolResourceQuotePort(Protocol):
         self,
         *,
         tool_call_id: str,
+        tool_name: str = "view_image",
         source: ViewImageSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement: ...
@@ -566,7 +567,7 @@ class AcceptedCanonicalToolResultSettlement:
             if not isinstance(self.canonical_content, FrozenPromptContent):
                 raise TypeError("canonical ToolResult content must be frozen")
             if (
-                frozen_tool_result_public_text(self.canonical_content)
+                frozen_tool_result_public_text(self.canonical_content, tool_name=self.tool_name)
                 != self.public_projection.canonical_body
             ):
                 raise ValueError(

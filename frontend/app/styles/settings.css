@@ -109,7 +109,7 @@
 .model-confirmation dl > div { display: grid; grid-template-columns: 58px minmax(0,1fr); gap: 7px; }
 .model-confirmation dt { color: var(--faint); font-size: var(--type-caption); }
 .model-confirmation dd { overflow-wrap: anywhere; margin: 0; color: var(--muted); font-family: var(--mono); font-size: var(--type-caption); }
-.model-confirmation p, .database-form > p { margin: 0; color: var(--faint); font-size: var(--type-caption); line-height: 1.55; }
+.model-confirmation p, .database-form > p, .settings-caption { margin: 0; color: var(--faint); font-size: var(--type-caption); line-height: 1.55; }
 .model-confirmation .inline-warning { display: flex; gap: 6px; color: var(--amber); }
 .form-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
 .form-actions .primary-action { border-color: var(--ink); background: var(--ink); color: var(--paper); }
@@ -224,6 +224,8 @@
   0%, 100% { background-color: transparent; }
   45% { background-color: color-mix(in srgb, var(--blue) 8%, var(--paper-raised)); }
 }
+
+.asr-cache-settings { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 14px; padding: 10px 15px; }
 
 .retrieval-spinner { display: flex; color: var(--muted); }
 .retrieval-spinner svg { animation: spin .8s linear infinite; }

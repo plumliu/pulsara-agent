@@ -85,7 +85,6 @@ from pulsara_agent.primitives.tool_result_projection import (
 )
 from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSource,
-    parse_view_image_source,
 )
 
 
@@ -463,14 +462,26 @@ def _tool_attachment_message(source: ToolAttachmentSource) -> LLMMessage:
         thawed_arguments = thaw_json(arguments)
         if not isinstance(thawed_arguments, dict):
             raise ValueError("tool attachment source arguments are invalid")
-        image_source = parse_view_image_source(thawed_arguments)
+        from pulsara_agent.tools.builtins.media import parse_image_tool_source
+
+        image_source = parse_image_tool_source(
+            member.source.tool_call_name, thawed_arguments
+        )
         assert isinstance(member.source.content, tuple)
         source_images = tuple(
             part for part in member.source.content if isinstance(part, LLMImagePart)
         )
-        if len(source_images) != 1 or member.source.tool_call_id is None:
+        if (
+            not source_images
+            or member.source.tool_call_id is None
+            or (
+                member.source.tool_call_name == "view_image" and len(source_images) != 1
+            )
+        ):
             raise ValueError("tool attachment member image is invalid")
-        images.append((member.source.tool_call_id, image_source, source_images[0]))
+        images.extend(
+            (member.source.tool_call_id, image_source, image) for image in source_images
+        )
     return tool_image_attachment_message(tuple(images))
 
 

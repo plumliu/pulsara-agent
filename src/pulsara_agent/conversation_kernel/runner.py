@@ -7,6 +7,7 @@ coroutine, interaction, terminal process, or subagent execution after a crash.
 from __future__ import annotations
 
 from pulsara_agent.capability.change_observation import FrozenCapabilityChange
+from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_tool_source
 from pulsara_agent.identity import derive_id
 
 from pulsara_agent.identity import random_id
@@ -135,7 +136,7 @@ from pulsara_agent.conversation_kernel.execution_watchdogs import (
     KernelWatchdogOwner,
 )
 from pulsara_agent.conversation_kernel.turn_admission import (
-    TodoRunAdmissionFinalizer,
+    RootWorkAdmissionFinalizer,
     TurnAdmissionCoordinator,
     root_cancellation_terminal_reason,
 )
@@ -170,7 +171,6 @@ from pulsara_agent.conversation_kernel.tool_execution import ToolBatchExecutor
 from pulsara_agent.tools.builtins.filesystem import (
     ViewImageSource,
     ViewImageSourceKind,
-    parse_view_image_source,
 )
 from pulsara_agent.conversation_kernel.repository import (
     AcceptedEntry,
@@ -470,15 +470,16 @@ class _ToolResultResourceQuoteOwner:
         self,
         *,
         tool_call_id: str,
+        tool_name: str = "view_image",
         source: ViewImageSource,
         content: FrozenPromptContent,
     ) -> FrozenImageToolResourceIncrement:
         images = tuple(part for part in content.parts if isinstance(part, LLMImagePart))
-        if len(images) != 1:
-            raise ValueError("image Tool quote requires one validated image")
-        carrier = tool_image_attachment_message(((tool_call_id, source, images[0]),))
+        if not images:
+            raise ValueError("image Tool quote requires validated images")
+        carrier = tool_image_attachment_message(tuple((tool_call_id, source, image) for image in images))
         quoted = self._quote_suffix((*self.result_suffix(
-            tool_call_id=tool_call_id, body=frozen_tool_result_public_text(content)
+            tool_call_id=tool_call_id, body=frozen_tool_result_public_text(content, tool_name=tool_name)
         ), carrier))
         return FrozenImageToolResourceIncrement(
             canonical_bytes=freeze_canonical_prompt(
@@ -1006,7 +1007,7 @@ class ConversationKernelRunner:
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
         memory_projection: MemoryContextProjectionPort | None = None,
         assistant_settlement_owner: AssistantMessageSettlementOwner | None = None,
-        todo_admission_finalizer: TodoRunAdmissionFinalizer | None = None,
+        root_work_admission_finalizer: RootWorkAdmissionFinalizer | None = None,
         compaction_owner: HostCompactionRuntimeOwner | None = None,
         root_session_id: str | None = None,
         hook_dispatcher: KernelHookDispatcher | None = None,
@@ -1109,7 +1110,7 @@ class ConversationKernelRunner:
             io_owner=self._io,
             writer_lease=writer_lease,
             deadline_factory=self._deadlines,
-            todo_finalizer=todo_admission_finalizer,
+            root_work_finalizer=root_work_admission_finalizer,
         )
         self._root_session_id = root_session_id
         self._context_source_collector = context_source_collector
@@ -2709,7 +2710,7 @@ class ConversationKernelRunner:
 
         image_calls: list[tuple[int, CompletedToolCallBlock, str]] = []
         for call_ordinal, call in enumerate(calls):
-            if plan_batch or call.tool_name != "view_image":
+            if plan_batch or call.tool_name not in IMAGE_TOOL_NAMES:
                 continue
             try:
                 binding = request.prepared_call.tool_surface.binding(call.tool_name)
@@ -2721,7 +2722,7 @@ class ConversationKernelRunner:
             if not isinstance(arguments, dict):
                 continue
             try:
-                image_source = parse_view_image_source(arguments)
+                image_source = parse_image_tool_source(call.tool_name, arguments)
             except ValueError:
                 continue
             image_calls.append(

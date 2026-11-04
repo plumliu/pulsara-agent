@@ -35,8 +35,7 @@ from pulsara_agent.conversation_kernel.tool_policy import (
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.conversation_kernel.vocabulary import LiveEventType
 from pulsara_agent.ports.live_agent_event import (
-    TodoLiveItemProjection,
-    TodoSnapshotUpdatedPayload,
+    CurrentWorkSnapshotUpdatedPayload,
 )
 from pulsara_agent.terminal_protocol.v3_gateway import (
     _live_control_snapshot_to_wire,
@@ -51,9 +50,8 @@ from pulsara_agent.tools.builtins.todo import (
     TodoValidationError,
     parse_todo_replacement,
 )
-from pulsara_agent.conversation_kernel.todo_runtime import (
-    TodoLiveDisposition,
-    TodoRunStateOwner,
+from pulsara_agent.conversation_kernel.current_work_runtime import (
+    CurrentWorkStateOwner,
     build_root_activation,
 )
 
@@ -123,21 +121,10 @@ def test_todo_item_and_aggregate_bounds_are_independent() -> None:
         }
     )
     assert near_bound.canonical_json_utf8_bytes == 3579
-    # Live framing adds transport metadata, but the sole 4 KiB product quote
-    # remains the provider-neutral ordered-item snapshot rather than the outer
-    # observation envelope.
-    TodoSnapshotUpdatedPayload(
-        todo_run_id="todo-root-run:near-bound",
-        todo_revision=1,
-        disposition="ACTIVE",
-        ordered_items=tuple(
-            TodoLiveItemProjection(item.ordinal, item.text, item.status.value)
-            for item in near_bound.ordered_items
-        ),
-        pending_count=16,
-        in_progress_count=0,
-        completed_count=0,
-    )
+    # Current work notifications contain no second copy of the checklist.
+    payload = CurrentWorkSnapshotUpdatedPayload(root_run_id=derive_id("todo-run", "test", "near-bound"))
+    assert payload.media_read_attempt_id is None
+
 
 
 @pytest.mark.parametrize(
@@ -199,8 +186,8 @@ def test_todo_invalid_candidates_fail_before_owner_mutation(
 
 
 
-def test_todo_next_root_activation_closes_old_exact_run() -> None:
-    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
+def test_next_root_work_activation_closes_old_exact_run() -> None:
+    owner = CurrentWorkStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
     first = _root_activation('turn:nzc36cttgo7xxki7bcjc7ops7a')
     owner.activate_root_run(first)
     assert owner.activate_root_run(first) is None
@@ -229,8 +216,7 @@ def test_todo_next_root_activation_closes_old_exact_run() -> None:
         )
     )
     assert closed.last_turn_id == 'turn:nzc36cttgo7xxki7bcjc7ops7a'
-    assert closed.closing_revision == 1
-    assert closed.disposition is TodoLiveDisposition.CLOSED
+    assert closed.run_identity.root_run_id == first.proposed_root_run_id
     assert (
         owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT
@@ -240,7 +226,7 @@ def test_todo_next_root_activation_closes_old_exact_run() -> None:
 
 
 def test_todo_external_continuation_tolerates_state_lost_with_host() -> None:
-    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:zgcu435qy75pmagj7jrf2g5wmi')
+    owner = CurrentWorkStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:zgcu435qy75pmagj7jrf2g5wmi')
     assert not owner.bind_continuation_if_present(
         scope_kind=ModelInputScopeKind.ROOT,
         turn_id='turn:z3y7csg3jjgexbqxsnpkynjdsu',
@@ -266,25 +252,19 @@ def test_todo_external_continuation_tolerates_state_lost_with_host() -> None:
 
 
 
-def test_todo_live_snapshot_identity_is_stable_per_revision() -> None:
+def test_current_work_notifications_have_unique_identity_and_one_run_channel() -> None:
     bus = LiveAgentEventBus()
     observer, generation, baseline = bus.subscribe()
     owner = SimpleNamespace(_live_bus=bus, _session_id="session:test")
     run_id = derive_id("todo-run", "test", "run")
-    for revision in (1, 1, 2):
-        DirectKernelToolPort._offer_todo_snapshot(
-            owner, todo_run_id=run_id, todo_revision=revision, disposition="CLEARED",
-            ordered_items=(), pending_count=0, in_progress_count=0, completed_count=0,
-            turn_id="turn:test", scope_kind=ModelInputScopeKind.ROOT,
-        )
+    for _ in range(3):
+        DirectKernelToolPort._offer_current_work_snapshot(owner, run_id, "turn:test")
     events = bus.observe(observer, after_revision=baseline, maximum_events=4).events
     assert len(events) == 3
-    assert events[0].draft_identity == events[0].block_id == events[1].draft_identity == events[1].block_id
-    assert events[0].block_id == derive_id("block", "todo-snapshot", run_id, "1")
-    assert events[2].draft_identity == events[2].block_id == derive_id("block", "todo-snapshot", run_id, "2")
-    assert events[2].block_id != events[0].block_id
-    assert {event.generation_id for event in events} == {derive_id("generation", "channel", "todo", run_id)}
-    assert all(_live_to_wire(generation, event).draft_identity == event.draft_identity for event in events)
+    assert len({event.block_id for event in events}) == 3
+    assert all(event.draft_identity == event.block_id for event in events)
+    assert {event.generation_id for event in events} == {derive_id("generation", "channel", "current-work", run_id)}
+    assert all(_live_to_wire(generation, event).payload.current_work_snapshot_updated.root_run_id == run_id for event in events)
 
 
 def test_todo_tool_installs_only_after_explicit_canonical_settlement(
@@ -299,7 +279,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
             live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
-        port.todo_owner.activate_root_run(_root_activation())
+        port.current_work_owner.activate_root_run(_root_activation())
         arguments = {
             "items": [
                 {"text": "Implement exact settlement", "status": "in_progress"},
@@ -339,7 +319,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         finally:
             borrow.close()
         assert result.process_local_settlement is not None
-        before = port.todo_owner.snapshot(
+        before = port.current_work_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
         )
         assert before is not None and before.revision == 0
@@ -348,7 +328,7 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
             ProcessLocalEffectSettlementDisposition.COMMITTED,
         )
         assert settlement.outcome is ProcessLocalEffectSettlementOutcome.INSTALLED
-        after = port.todo_owner.snapshot(
+        after = port.current_work_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
         )
         assert after is not None and after.revision == 1
@@ -360,23 +340,23 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
         assert observed.generation == generation
         assert len(observed.events) == 1
         event = observed.events[0]
-        assert event.event_type is LiveEventType.TODO_SNAPSHOT_UPDATED
-        assert isinstance(event.payload, TodoSnapshotUpdatedPayload)
-        assert event.payload.todo_revision == 1
-        expected = derive_id("block", "todo-snapshot", after.run_identity.todo_run_id, "1")
-        assert event.draft_identity == event.block_id == expected
-        assert event.generation_id == derive_id("generation", "channel", "todo", after.run_identity.todo_run_id)
+        assert event.event_type is LiveEventType.CURRENT_WORK_SNAPSHOT_UPDATED
+        assert isinstance(event.payload, CurrentWorkSnapshotUpdatedPayload)
+        assert event.payload.root_run_id == after.run_identity.work_run_id
+        assert event.payload.media_read_attempt_id is None
+        assert event.draft_identity == event.block_id
+        assert event.generation_id == derive_id("generation", "channel", "current-work", after.run_identity.work_run_id)
         projected = _live_to_wire(generation, event)
         assert projected.event_type > 0
-        assert projected.payload.WhichOneof("payload") == "todo_snapshot_updated"
+        assert projected.payload.WhichOneof("payload") == "current_work_snapshot_updated"
         assert b"sha256:" not in projected.SerializeToString(deterministic=True)
 
         resync = _live_control_snapshot_to_wire(
             LiveControlSnapshot('session:cbauiajfisf4gvpdotrq4qgxhq', 1, 0, None),
-            port.todo_owner.current_snapshots(),
+            port.current_work_owner.current_snapshots(),
         )
         assert len(resync.current_todos) == 1
-        assert resync.current_todos[0].todo_run_id == after.run_identity.todo_run_id
+        assert resync.current_todos[0].todo_run_id == after.run_identity.work_run_id
         assert resync.current_todos[0].todo_revision == 1
 
         # Exercise the production ROOT completion boundary, owner, live bus and
@@ -391,26 +371,24 @@ def test_todo_tool_installs_only_after_explicit_canonical_settlement(
             _tools=port, _mark_feedback_target_ended_locked=Mock(),
             _clear_active_root_locked=Mock())
         await KernelHostSession._settle_active_root_task(host, object())
-        assert port.todo_owner.current_snapshots()[0].ordered_items
+        assert port.current_work_owner.current_snapshots()[0].ordered_items
         await KernelHostSession._settle_active_root_task(host, active)
         host._clear_active_root_locked.assert_called_once()
-        cleared = port.todo_owner.current_snapshots()[0]
+        cleared = port.current_work_owner.current_snapshots()[0]
         assert cleared.ordered_items == () and cleared.revision == 2
         assert after.ordered_items[1].status.value == 'pending'
         events = live_bus.observe(observer, after_revision=baseline, maximum_events=4).events
         assert len(events) == 2
-        assert events[-1].draft_identity == events[-1].block_id == derive_id(
-            "block", "todo-snapshot", after.run_identity.todo_run_id, "2"
-        )
+        assert events[-1].draft_identity == events[-1].block_id
         assert events[-1].draft_identity != event.draft_identity
         assert events[-1].generation_id == event.generation_id
         wire = _live_to_wire(generation, events[-1])
-        assert wire.payload.todo_snapshot_updated.disposition == 'CLEARED'
-        assert not wire.payload.todo_snapshot_updated.ordered_items
-        assert port.todo_owner.mark_root_idle(exact_turn_id=host._active_turn_id) is None
-        port.todo_owner.bind_continuation(scope_kind=ModelInputScopeKind.ROOT,
+        assert wire.payload.current_work_snapshot_updated.root_run_id == after.run_identity.work_run_id
+        assert not wire.payload.current_work_snapshot_updated.media_read_attempt_id
+        assert port.current_work_owner.mark_root_idle(exact_turn_id=host._active_turn_id) is None
+        port.current_work_owner.bind_continuation(scope_kind=ModelInputScopeKind.ROOT,
             turn_id='turn:r32o4pzdgx4q4pytdgc6ereg3i')
-        assert not port.todo_owner.current_snapshots()[0].ordered_items
+        assert not port.current_work_owner.current_snapshots()[0].ordered_items
         await port.aclose(timeout_seconds=2)
 
     asyncio.run(exercise())
@@ -425,7 +403,7 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
             live_bus=LiveAgentEventBus(),
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
-        port.todo_owner.activate_root_run(_root_activation())
+        port.current_work_owner.activate_root_run(_root_activation())
         borrow, context = direct_tool_invocation_context(
             port,
             session_id='session:cbauiajfisf4gvpdotrq4qgxhq',
@@ -448,7 +426,7 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
         finally:
             borrow.close()
         assert result.process_local_settlement is not None
-        assert port.todo_owner.mark_closing(
+        assert port.current_work_owner.mark_closing(
             scope_kind=ModelInputScopeKind.ROOT
         )
         settlement = await port.settle_process_local_effect(
@@ -456,7 +434,7 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
             ProcessLocalEffectSettlementDisposition.COMMITTED,
         )
         assert settlement.outcome is ProcessLocalEffectSettlementOutcome.INSTALLED
-        snapshot = port.todo_owner.snapshot(
+        snapshot = port.current_work_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT
         )
         assert snapshot is not None and snapshot.revision == 1
@@ -466,7 +444,7 @@ def test_todo_canonical_full_installs_while_run_is_closing(tmp_path) -> None:
 
 
 def test_todo_close_fails_closed_for_ownerless_pending_settlement() -> None:
-    owner = TodoRunStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
+    owner = CurrentWorkStateOwner(session_id='session:cbauiajfisf4gvpdotrq4qgxhq', owner_epoch='host:umsmaqdnqz3cpmtzml56ydq7ei')
     owner.activate_root_run(_root_activation())
     prepared = owner.prepare_replace(
         scope_kind=ModelInputScopeKind.ROOT,
@@ -490,7 +468,8 @@ def test_todo_close_fails_closed_for_ownerless_pending_settlement() -> None:
     closed = owner.close_run(
         scope_kind=ModelInputScopeKind.ROOT
     )
-    assert closed is not None and closed.closing_revision == 2
+    assert closed is not None and closed.run_identity == installed.installed_snapshot.run_identity
+    assert owner.current_work_snapshot().todos == ()
     assert (
         owner.close_run(
             scope_kind=ModelInputScopeKind.ROOT
@@ -511,7 +490,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
             live_bus=live_bus,
             authorization_policy=DefaultToolDispatchAuthorizationPolicy(),
         )
-        port.todo_owner.activate_root_run(_root_activation())
+        port.current_work_owner.activate_root_run(_root_activation())
         permission = build_run_permission_snapshot(
             snapshot_id='permission:bhwqiflryq5b4avuvzyhp3xn4q',
             requested_mode=PermissionMode.READ_ONLY,
@@ -556,7 +535,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
             assistant_entry_id='entry:5qidalqvkujk5ykzzzfpwie2qy',
             permission_snapshot=permission,
         )
-        assert port.todo_owner.mark_closing(
+        assert port.current_work_owner.mark_closing(
             scope_kind=ModelInputScopeKind.ROOT
         )
         try:
@@ -573,7 +552,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
             borrow.close()
         assert result.state == "APPLICATION_ERROR"
         assert result.process_local_settlement is None
-        snapshot = port.todo_owner.snapshot(
+        snapshot = port.current_work_owner.snapshot(
             scope_kind=ModelInputScopeKind.ROOT,
         )
         assert snapshot is not None and snapshot.revision == 0
@@ -584,7 +563,7 @@ def test_todo_read_only_authorization_and_invoke_close_race_are_known(
 
 
 
-def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> None:
+def test_root_work_admission_finalizer_is_not_detached_by_waiter_cancellation() -> None:
     async def exercise() -> None:
         started = asyncio.Event()
         release = asyncio.Event()
@@ -598,11 +577,11 @@ def test_todo_admission_finalizer_is_not_detached_by_waiter_cancellation() -> No
 
         coordinator = object.__new__(TurnAdmissionCoordinator)
         coordinator._workspace_gate = None
-        coordinator._todo_finalizer = finalizer
+        coordinator._root_work_finalizer = finalizer
         from unittest.mock import AsyncMock
         coordinator.interrupt_turn = AsyncMock()
         task = asyncio.create_task(
-            coordinator._finalize_todo(
+            coordinator._finalize_root_work(
                 _root_activation(),
                 AcceptedEntry('entry:kbwuv6gdfgm4t6267hmfj2ylka', 'turn:nzc36cttgo7xxki7bcjc7ops7a', 1, 1),
                 ActiveTurnCancellationIntent('turn:nzc36cttgo7xxki7bcjc7ops7a', ModelInputScopeKind.ROOT),
@@ -652,7 +631,7 @@ def test_direct_admission_cancellation_terminalizes_full_winner_after_finalizer(
             require_provider_safe_turn=object(),
         )
         coordinator._writer_lease = SimpleNamespace(guard=object())
-        coordinator._todo_finalizer = finalizer
+        coordinator._root_work_finalizer = finalizer
         coordinator.interrupt_turn = terminalize
         intent = ActiveTurnCancellationIntent('turn:nzc36cttgo7xxki7bcjc7ops7a', ModelInputScopeKind.ROOT)
         candidate = SimpleNamespace(

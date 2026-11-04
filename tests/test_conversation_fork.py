@@ -166,7 +166,7 @@ def assert_session_aggregate_deleted(repo, guard):
         session_id=guard.session_id, memory_domain_id='u_local', closed_writer=guard,
         deadline_monotonic=monotonic()+30,
     ) == 'DELETED'
-    independent = {'workspaces', 'blobs', 'memory_facts', 'memory_relations', 'memory_embeddings'}
+    independent = {'workspaces', 'blobs', 'memory_facts', 'memory_relations', 'memory_embeddings', 'asr_cache'}
     children = set(CONVERSATION_KERNEL_RELATIONS) - independent - {'sessions', 'agent_known_sessions'}
     for table in children:
         assert rows(repo, sql.SQL('SELECT 1 FROM pulsara_v3.{} WHERE session_id=%s').format(

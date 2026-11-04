@@ -278,8 +278,8 @@ class ProtocolHost:
     def _require_open(self):
         assert not self._interactions._closed
 
-    def current_todo_snapshots(self):
-        return ()
+    def current_work_snapshot(self):
+        return SimpleNamespace(todos=(), media_ranges=())
 
     def root_compaction_in_progress(self):
         return False

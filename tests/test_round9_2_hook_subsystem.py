@@ -363,11 +363,11 @@ def test_round9_2_closed_vocabulary_inputs_outcomes_causal_arms_and_oracle() -> 
         "ToolCallStart", "ToolCallDelta", "ToolCallEnd",
         "ToolResultStart", "ToolResultDelta", "ToolResultEnd",
         "InteractionOpened", "InteractionReplaced", "InteractionClosed",
-        "TerminalProcessCompleted", "TodoSnapshotUpdated",
+        "TerminalProcessCompleted", "CurrentWorkSnapshotUpdated",
     )
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
     assert not hasattr(STAGE2_LIMITS, "model_calls_per_turn_hard")
 
 

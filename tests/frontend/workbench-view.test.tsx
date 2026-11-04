@@ -1,3 +1,5 @@
+import { FileMediaContext } from '../../frontend/components/file-link-context';
+import type { FilePreviewApi } from '../../frontend/lib/file-preview';
 import { PresentationContext } from '../../frontend/components/presentation-provider';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 import { createHash, webcrypto } from 'node:crypto';
@@ -3511,4 +3513,19 @@ it('keeps a detached live view out of canonical history targets', () => {
   const view=render(<WorkbenchView {...props({isRunning:true,activeTurnId:'turn:active',messages:[message],onHydrateEntries:hydrate})}/>);
   expect(view.container.querySelector('[data-source-entry="view:aaaaaaaaaaaaaaaaaaaaaaaaaa"]')).toBeNull();
   expect(hydrate).not.toHaveBeenCalled();
+});
+
+
+it('renders media time navigation in the actual completed result card alongside canonical images', () => {
+  const open=vi.fn();
+  const api: FilePreviewApi={open:vi.fn(),close:vi.fn(),snapshot:vi.fn(),page:vi.fn(),action:vi.fn(),annotations:vi.fn()};
+  const body=JSON.stringify({target:{kind:'PATH',path:'/project/movie.mp4'},media_version:{modified_ns:'1234567890123456789',size:200},crop:[0,0,1,1],frames:[{n:1,image:1,t:12.125}]});
+  render(<FileMediaContext.Provider value={{api,ownerKey:'owner',sessionId:'session',open}}><WorkbenchView {...props({isRunning:false,messages:[{id:'media-answer',role:'assistant',time:'现在',body:'',status:'completed',traces:[{id:'media-read',kind:'read',toolName:'read_video_frames',title:'读取画面',subtitle:'已完成',status:'completed',resultContent:{parts:[{type:'text',text:body}]}}]}]})}/></FileMediaContext.Provider>);
+  expect(open).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:'展开处理过程'}));
+  fireEvent.click(screen.getByRole('button',{name:'展开工具详情：read_video_frames'}));
+  expect(screen.getByRole('region',{name:'工具读取的图片'})).toBeDefined();
+  fireEvent.click(screen.getByRole('button',{name:'定位第 1 帧到 12.125 秒'}));
+  expect(open).toHaveBeenCalledExactlyOnceWith('/project/movie.mp4',12.125,{modified_ns:'1234567890123456789',size:200});
+  expect(api.open).not.toHaveBeenCalled();
 });

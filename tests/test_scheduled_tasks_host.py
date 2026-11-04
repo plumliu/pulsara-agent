@@ -58,7 +58,8 @@ def test_complete_core_schedule_tools_execute_and_user_management_needs_no_ui_se
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             ).executor_bindings
             names = {binding.tool_name for binding in bindings}
-            assert len(names) == 36
+            assert len(names) == 39
+            assert {"read_video_frames", "read_transcript", "annotate_media"} <= names
             assert {"query_schedules", "manage_schedule"} <= names
 
             async def invoke(name, arguments, target_session=None):

@@ -67,6 +67,12 @@ Pulsara also takes the cost of long conversations seriously. Stable prompt prefi
 
 Save preferences, project constraints, and decisions in memory for later tasks to retrieve. You can inspect, edit, or delete them on the memory page.
 
+## Review local video and audio in a source build
+
+Ask the main agent to open a local clip, find a particular screen or action, and leave a note at its timestamp. It can inspect a sparse overview, read clearer frames or replay a short sequence as ordered images. The sidebar plays the original file and shows time-stamped notes.
+
+For spoken material, Pulsara reads embedded text subtitles first. In Settings, configure the optional speech transcription endpoint, model ID and API key to transcribe uncached audio. Transcription and connection tests upload audio and may incur charges. Each read can add up to three minutes of new transcription. Previously recognized ranges remain available across sessions.
+
 ## Install it and get to work
 
 [Download Pulsara 0.1.3-alpha.1](https://github.com/plumliu/pulsara-agent/releases/tag/v0.1.3-alpha.1)

@@ -57,7 +57,7 @@ from pulsara_agent.ports.live_agent_event import (
     ThinkingDeltaPayload,
     ThinkingEndPayload,
     ThinkingStartPayload,
-    TodoSnapshotUpdatedPayload,
+    CurrentWorkSnapshotUpdatedPayload,
     ToolCallDeltaPayload,
     ToolCallEndPayload,
     ToolCallStartPayload,
@@ -109,7 +109,7 @@ from pulsara_agent.terminal_process.models import TerminalProcessInfo
 PROTOCOL_MAJOR = 6
 PROTOCOL_MINOR = 0
 PROTOCOL_SCHEMA_FINGERPRINT = (
-    "sha256:1951ca1e67b659dd6d884cd48b80b1790409e9ea392e6c1f07931d285cc76953"
+    "sha256:33f5ba9dfb5840b589be3701a533ba591029262bd35599592d8bec655f5aaa5a"
 )
 MAXIMUM_FRAME_BYTES = 8 << 20
 MAXIMUM_OBSERVATION_WAIT_MS = STAGE2_LIMITS.committed_observation_hard_wait_ms
@@ -527,13 +527,15 @@ class TerminalKernelProtocolServer:
         state.live_control_subscriber_id = subscriber_id
         state.live_control_epoch = snapshot.owner_epoch
         state.live_control_revision = snapshot.revision
+        work = state.host_session.current_work_snapshot()
         return wire.ServerFrame(
             live_control_snapshot=wire.LiveControlSnapshotResponse(
                 request_id=request.request_id,
                 snapshot=_live_control_snapshot_to_wire(
                     snapshot,
-                    state.host_session.current_todo_snapshots(),
+                    work.todos,
                     state.host_session.current_compaction_projection(),
+                    media_ranges=work.media_ranges,
                     root_compaction_in_progress=state.host_session.root_compaction_in_progress(),
                     host_session_id=state.host_session.host_session_id,
                     active_root_turn_id=state.host_session.active_root_turn_id(),
@@ -1748,25 +1750,10 @@ def _live_payload_to_wire(payload: object) -> wire.LiveEventPayload:
         if payload.exit_code is not None:
             value.exit_code = payload.exit_code
         return wire.LiveEventPayload(terminal_process_completed=value)
-    if isinstance(payload, TodoSnapshotUpdatedPayload):
+    if isinstance(payload, CurrentWorkSnapshotUpdatedPayload):
         return wire.LiveEventPayload(
-            todo_snapshot_updated=wire.LiveTodoSnapshotUpdatedPayload(
-                todo_run_id=payload.todo_run_id,
-                todo_revision=payload.todo_revision,
-                disposition=payload.disposition,
-                ordered_items=tuple(
-                    wire.LiveTodoItemProjection(
-                        ordinal=item.ordinal,
-                        text=item.text,
-                        status=item.status,
-                    )
-                    for item in payload.ordered_items
-                ),
-                pending_count=payload.pending_count,
-                in_progress_count=payload.in_progress_count,
-                completed_count=payload.completed_count,
-            )
-        )
+            current_work_snapshot_updated=wire.LiveCurrentWorkSnapshotUpdatedPayload(
+                root_run_id=payload.root_run_id, media_read_attempt_id=payload.media_read_attempt_id or ""))
     raise TypeError("live payload vocabulary is not closed")
 
 
@@ -1835,6 +1822,7 @@ def _live_control_snapshot_to_wire(
         None,
     ),
     *,
+    media_ranges: tuple[object, ...] = (),
     root_compaction_in_progress: bool = False,
     host_session_id: str = "",
     active_root_turn_id: str | None = None,
@@ -1848,7 +1836,7 @@ def _live_control_snapshot_to_wire(
         live_revision=snapshot.revision,
         current_todos=tuple(
             wire.LiveTodoRunSnapshot(
-                todo_run_id=item.run_identity.todo_run_id,
+                todo_run_id=item.run_identity.work_run_id,
                 todo_revision=item.revision,
                 scope_kind=(
                     wire.ROOT
@@ -1870,6 +1858,10 @@ def _live_control_snapshot_to_wire(
             )
             for item in todo_snapshots
         ),
+        media_ranges=tuple(wire.LiveMediaReadRange(
+            canonical_path=item.canonical_path, file_mtime_ns=item.file_mtime_ns,
+            from_seconds=item.from_seconds, to_seconds=item.to_seconds,
+            attempt_id=item.attempt_id) for item in media_ranges),
         compaction_in_progress=in_progress,
         root_compaction_in_progress=root_compaction_in_progress,
         compaction_trigger=trigger or "",

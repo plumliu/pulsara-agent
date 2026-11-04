@@ -92,6 +92,7 @@ IdentityKind = Literal[
     "skill",
     "mcp-server",
     "view",
+    "asr-cache",
 ]
 
 # A closed format vocabulary, not a registry of objects or allocation state.

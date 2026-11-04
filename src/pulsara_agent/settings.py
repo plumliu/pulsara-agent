@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import yaml
 
+from pulsara_agent.media.asr_config import AsrConnection, asr_connection_from_dict
 from pulsara_agent.retrieval.config import MemoryRetrievalSettings, connection_from_dict
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.llm.model_connections import (
@@ -99,6 +100,7 @@ class LocalSettings:
     memory_retrieval: MemoryRetrievalSettings = field(
         default_factory=MemoryRetrievalSettings
     )
+    asr: AsrConnection | None = None
     mcp_credentials: tuple[LocalMcpCredential, ...] = field(default=(), repr=False)
     mcp_oauth: tuple[LocalMcpOAuthRecord, ...] = field(default=(), repr=False)
 
@@ -122,6 +124,11 @@ class LocalSettings:
             raise ValueError(
                 "local settings model API keys do not match bearer connections"
             )
+
+        if self.asr is not None:
+            scrub = self.credential_scrub_set()
+            if scrub.contains(self.asr.endpoint) or scrub.contains(self.asr.model_id):
+                raise ValueError("转写公开配置不能包含已保存凭据。")
 
     def connection(self, connection_id) -> ModelConnectionConfig | None:
         return next(
@@ -161,6 +168,8 @@ class LocalSettings:
         scrub = ProcessCredentialScrubSet()
         for item in self.model_api_keys + self.mcp_credentials:
             scrub.observe(item.value)
+        if self.asr is not None:
+            scrub.observe(self.asr.api_key)
         for slot in ("embedding", "rerank", "decision"):
             connection = getattr(self.memory_retrieval, slot)
             if connection is not None:
@@ -223,6 +232,7 @@ def local_settings_to_dict(settings: LocalSettings) -> dict[str, object]:
             for item in settings.model_connections
         ],
         "memory_retrieval": settings.memory_retrieval.private(),
+        "asr": None if settings.asr is None else settings.asr.private(),
         "mcp_credentials": [
             {"binding": binding_to_dict(item.binding), "value": item.value}
             for item in settings.mcp_credentials
@@ -260,7 +270,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
             "本机设置版本需显式转换，请勿以空配置覆盖。"
         )
     # This optional preference defaults to enabled when the user has not set it.
-    if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled"} != {
+    if not isinstance(value, dict) or set(value) - {"input_suggestions_enabled", "asr"} != {
         "schema",
         "model_connections",
         "memory_retrieval",
@@ -292,6 +302,7 @@ def local_settings_from_dict(value: object) -> LocalSettings:
         model_connections=tuple(connections),
         model_api_keys=tuple(model_api_keys),
         memory_retrieval=MemoryRetrievalSettings.from_dict(value["memory_retrieval"]),
+        asr=asr_connection_from_dict(value.get("asr")),
         mcp_credentials=_mcp_credentials_from_dict(value["mcp_credentials"]),
         mcp_oauth=_mcp_oauth_from_dict(value["mcp_oauth"]),
     )
@@ -606,9 +617,11 @@ class LocalSettingsStore:
         return (
             LocalSettings(
                 postgres=current.postgres,
+                input_suggestions_enabled=current.input_suggestions_enabled,
                 model_connections=(*current.model_connections, connection),
                 model_api_keys=(*current.model_api_keys, *key),
                 memory_retrieval=current.memory_retrieval,
+                asr=current.asr,
                 mcp_credentials=current.mcp_credentials,
                 mcp_oauth=current.mcp_oauth,
             ),
@@ -622,6 +635,7 @@ class LocalSettingsStore:
             lambda current: (
                 LocalSettings(
                     postgres=current.postgres,
+                    input_suggestions_enabled=current.input_suggestions_enabled,
                     model_connections=tuple(
                         item
                         for item in current.model_connections
@@ -633,6 +647,7 @@ class LocalSettingsStore:
                         if item.connection_id != connection_id
                     ),
                     memory_retrieval=current.memory_retrieval,
+                    asr=current.asr,
                     mcp_credentials=current.mcp_credentials,
                     mcp_oauth=current.mcp_oauth,
                 ),
@@ -688,6 +703,43 @@ class LocalSettingsStore:
 
         updated, _ = await self._run_mutation(
             mutation, name="update-model-connection", repair=False
+        )
+        return updated
+
+    @staticmethod
+    def asr_draft(current, body):
+        if not isinstance(body, dict) or set(body) - {"connection", "key_action", "api_key"} or not {"connection", "key_action"} <= set(body):
+            raise ValueError("转写配置提交字段无效。")
+        value = body["connection"]
+        if not isinstance(value, dict) or set(value) != {"endpoint", "model_id"}:
+            raise ValueError("转写配置字段无效。")
+        action = body["key_action"]
+        if not isinstance(action, str) or action not in {"keep", "replace", "clear"} or (action == "replace") != ("api_key" in body):
+            raise ValueError("请选择有效的密钥操作。")
+        key = body.get("api_key") if action == "replace" else None
+        if any(not isinstance(value[name], str) for name in value):
+            raise ValueError("转写配置字段必须为文字。")
+        if action == "keep" and current.asr is not None:
+            if canonicalize_endpoint(value["endpoint"]) != canonicalize_endpoint(current.asr.endpoint):
+                raise ValueError("请求地址已改变，请重新填写 API key。")
+            key = current.asr.api_key
+        connection = AsrConnection(**value, api_key=key)
+        scrub = current.credential_scrub_set()
+        if scrub.contains(connection.endpoint) or scrub.contains(connection.model_id):
+            raise ValueError("转写公开配置不能包含已保存凭据。")
+        return connection
+
+    async def save_asr_connection(self, body):
+        updated, _ = await self._run_mutation(
+            lambda current: (replace(current, asr=self.asr_draft(current, body)), None),
+            name="save-asr-connection", repair=False,
+        )
+        return updated
+
+    async def clear_asr_connection(self):
+        updated, _ = await self._run_mutation(
+            lambda current: (replace(current, asr=None), None),
+            name="clear-asr-connection", repair=False,
         )
         return updated
 

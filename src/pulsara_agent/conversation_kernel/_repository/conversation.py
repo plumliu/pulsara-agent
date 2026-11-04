@@ -1848,7 +1848,7 @@ class _ConversationOperations:
             for ordinal, item in enumerate(visualizations):
                 blob_id = None
                 if item.state is VisualizationOccurrenceState.READY:
-                    assert item.html is not None or item.image is not None or item.video is not None
+                    assert item.html is not None or item.image is not None or item.video is not None or item.audio is not None
                     blob_id = PostgresCanonicalBlobStore.publish_in_connection(
                         connection,
                         workspace_id=str(turn["workspace_id"]),
@@ -2174,7 +2174,7 @@ class _ConversationOperations:
                         "assistant visualization differs from stable candidate"
                     )
                 if item.state is VisualizationOccurrenceState.READY:
-                    assert item.html is not None or item.image is not None or item.video is not None
+                    assert item.html is not None or item.image is not None or item.video is not None or item.audio is not None
                     blob_id = visualization_row["blob_id"]
                     payload = item.content
                     if item.image is not None and blob_id != item.image.image_ref:

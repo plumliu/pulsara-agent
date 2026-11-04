@@ -525,7 +525,7 @@ def test_published_html_keeps_layout_code_and_current_media_references(tmp_path)
     path = tmp_path / 'gallery.html'
     (tmp_path / 'app.js').write_text('window.published=true')
     (tmp_path / 'style.css').write_text('main{background:url(image.png)}')
-    body = b'<link rel="stylesheet" href="style.css"><script src="app.js"></script><img src="missing.png"><video src="clip.mp4" poster="poster.png"></video>'
+    body = b'<link rel="stylesheet" href="style.css"><script src="app.js"></script><img src="missing.png"><video src="clip.mp4" poster="poster.png"></video><audio src="speech.mp3"></audio>'
     async def run():
         io = KernelSessionIO()
         try:
@@ -537,6 +537,7 @@ def test_published_html_keeps_layout_code_and_current_media_references(tmp_path)
     assert elements(frozen, 'img')[0].getAttribute('src') == str(tmp_path / 'missing.png')
     assert elements(frozen, 'video')[0].getAttribute('src') == str(tmp_path / 'clip.mp4')
     assert elements(frozen, 'video')[0].getAttribute('poster') == str(tmp_path / 'poster.png')
+    assert elements(frozen, 'audio')[0].getAttribute('src') == str(tmp_path / 'speech.mp3')
     assert b'window.published=true' in decode(elements(frozen, 'script')[0].getAttribute('src'))
     assert str(tmp_path / 'image.png').encode() in decode(elements(frozen, 'link')[0].getAttribute('href'))
     item = FrozenVisualizationOccurrence('gallery.html', VisualizationOccurrenceState.READY, html=frozen, html_path=str(path))

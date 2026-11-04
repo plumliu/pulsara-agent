@@ -191,7 +191,7 @@ def test_condition_retry_checks_new_lifecycle(repo, monkeypatch):
 
 
 def test_catalog_ownership_semantic_edges_grants_and_index_coverage(repo):
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
     fks = rows(
         repo,
         """SELECT c.conrelid::regclass::text AS child,

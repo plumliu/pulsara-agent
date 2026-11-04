@@ -25,7 +25,7 @@ def test_progress_follows_root_fence_in_snapshot_and_observation(role: int, trig
         host = SimpleNamespace(
             _session_scope_kind=ModelInputScopeKind.ROOT, session_id='session:336wrfwkamrr3up6kjtsgvgcte', host_session_id='host:yinyxklzunar54s7objjdbphcy', _compaction=owner,
             live_bus=LiveAgentEventBus(), live_control=SessionLiveControlOwner(session_id='session:336wrfwkamrr3up6kjtsgvgcte'),
-            current_todo_snapshots=lambda: (), active_root_turn_id=lambda: None, active_manual_compaction_command_id=lambda: None,
+            current_work_snapshot=lambda: SimpleNamespace(todos=(), media_ranges=()), active_root_turn_id=lambda: None, active_manual_compaction_command_id=lambda: None,
             control_admission_deadline_ms=lambda: 10000, take_presentation_notices=lambda _: (),
             current_compaction_projection=owner.current_projection,
             provider_retry_observation=lambda: None,

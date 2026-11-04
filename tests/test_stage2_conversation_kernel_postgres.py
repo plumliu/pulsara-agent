@@ -817,8 +817,8 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
 ) -> None:
     # The clean-v0 catalog and bounded vocabulary share one closed owner.
     # The known-Agent relation is canonical discovery state, not a delivery receipt.
-    assert len(CONVERSATION_KERNEL_RELATIONS) == 30
-    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 30
+    assert len(CONVERSATION_KERNEL_RELATIONS) == 31
+    assert len(set(CONVERSATION_KERNEL_RELATIONS)) == 31
     assert "agent_known_sessions" in CONVERSATION_KERNEL_RELATIONS
     assert len(COMMITTED_EVENT_DESCRIPTORS) == 25
     assert LIVE_EVENT_TYPES == (
@@ -826,7 +826,7 @@ def test_stage2_schema_and_descriptor_oracles_are_exact(
         "ThinkingEnd", "DataStart", "DataDelta", "DataEnd", "ToolCallStart",
         "ToolCallDelta", "ToolCallEnd", "ToolResultStart", "ToolResultDelta",
         "ToolResultEnd", "InteractionOpened", "InteractionReplaced",
-        "InteractionClosed", "TerminalProcessCompleted", "TodoSnapshotUpdated",
+        "InteractionClosed", "TerminalProcessCompleted", "CurrentWorkSnapshotUpdated",
     )
     assert len(SUBJECT_SLOTS) == 8
     assert len(APPEND_GUARDS) == 1

@@ -9,6 +9,7 @@ export interface FilePreview {
     | "table"
     | "image"
     | "video"
+    | "audio"
     | "svg"
     | "pdf"
     | "html"
@@ -29,7 +30,16 @@ export interface FilePreviewPage {
   cursor: number;
   next_cursor: number | null;
 }
+export interface MediaNote {
+  resultId: string;
+  entryId: string;
+  sessionId: string;
+  from: number;
+  to: number;
+  text: string;
+}
 export interface FilePreviewApi {
+  annotations(token: string, after: string | null, signal: AbortSignal): Promise<{items: MediaNote[]; next: string | null}>;
   open(
     path: string,
     basePreview?: string,
@@ -43,7 +53,7 @@ export interface FilePreviewApi {
     mode: "text" | "table",
     signal: AbortSignal,
   ): Promise<FilePreviewPage>;
-  action(token: string, action: "reveal" | "open"): Promise<void>;
+  action(token: string, action: "reveal" | "open" | "activate"): Promise<void>;
 }
 export function classifyFileLink(
   href: string,

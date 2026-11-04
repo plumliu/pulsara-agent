@@ -1125,8 +1125,8 @@ describe('exact prompt projection', () => {
         observation: {
           through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '1',
           live: [{
-            live_revision: '1', event_type: 'TODO_SNAPSHOT_UPDATED', turn_id: 'turn-1',
-            scope_kind: 'ROOT', payload: { todo_snapshot_updated: {
+            live_revision: '1', event_type: 'CURRENT_WORK_SNAPSHOT_UPDATED', turn_id: 'turn-1',
+            scope_kind: 'ROOT', payload: { current_work_snapshot_updated: {
               todo_run_id: 'todo-root', todo_revision: '2', disposition: 'ACTIVE',
               ordered_items: [
                 { ordinal: 0, text: '检查契约', status: 'completed' },
@@ -1141,8 +1141,8 @@ describe('exact prompt projection', () => {
         observation: {
           through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '2',
           live: [{
-            live_revision: '2', event_type: 'TODO_SNAPSHOT_UPDATED', turn_id: 'turn-1',
-            scope_kind: 'ROOT', payload: { todo_snapshot_updated: {
+            live_revision: '2', event_type: 'CURRENT_WORK_SNAPSHOT_UPDATED', turn_id: 'turn-1',
+            scope_kind: 'ROOT', payload: { current_work_snapshot_updated: {
               todo_run_id: 'todo-root', todo_revision: '3', disposition: 'CLOSED',
               ordered_items: [], pending_count: 0, in_progress_count: 0, completed_count: 0,
             } },
@@ -2959,8 +2959,8 @@ const todoOwnerSnapshot = (run: string, revision: number, disposition = 'ACTIVE'
     ? [{ ordinal: 0, text: `${run} revision ${revision}`, status: 'IN_PROGRESS' }] : [],
 });
 const todoInvalidation = (snapshot: Record<string, unknown>) => ({
-  event_type: 'TODO_SNAPSHOT_UPDATED', scope_kind: snapshot.scope_kind,
-  payload: { todo_snapshot_updated: snapshot },
+  event_type: 'CURRENT_WORK_SNAPSHOT_UPDATED', scope_kind: snapshot.scope_kind,
+  payload: { current_work_snapshot_updated: snapshot },
 });
 
 it.each([
@@ -3451,10 +3451,10 @@ it('joins no-START tool delta and end with only the local block identity', async
   expect(traces).toEqual([expect.objectContaining({id:'block',toolName:'read_file',argumentsJson:'{"path":"x"}'})]);
 });
 
-it('reads video-reference JSON through the canonical visualization media boundary', async () => {
+it.each(['video', 'audio'])('reads %s-reference JSON through the canonical visualization media boundary', async kind => {
   vi.stubGlobal('crypto',webcrypto);
   const json='{"path":"/project/demo.mp4"}';
-  const bytes=new TextEncoder().encode(json), mediaType='application/vnd.pulsara.video-reference+json';
+  const bytes=new TextEncoder().encode(json), mediaType=`application/vnd.pulsara.${kind}-reference+json`;
   const response=contentBytes(bytes);
   const requests:unknown[]=[];
   stubRuntimeFetch(vi.fn(async (_input,init) => {
@@ -3464,4 +3464,57 @@ it('reads video-reference JSON through the canonical visualization media boundar
   const reader=new LocalHttpRuntimeAdapter().createAgentContentReader('root','agent');
   expect(await reader.readVisualizationContent('entry',2,sha256Digest(bytes),bytes.length,{ordinal:2,state:'READY',mediaType,codec:'utf-8'})).toBe(json);
   expect(requests).toEqual([expect.objectContaining({entry_id:'entry',visualization_ordinal:2})]);
+});
+
+it('restores media ranges without automatic display and opens only new actual read markers', async () => {
+  const span = (attempt: string, from = 0) => ({canonical_path:'/project/clip.mp4',file_mtime_ns:'1700000000000000001',from_seconds:from,to_seconds:from+10,attempt_id:attempt});
+  const started = (attempt?: string) => ({event_type:'CURRENT_WORK_SNAPSHOT_UPDATED',scope_kind:'ROOT',payload:{current_work_snapshot_updated:{root_run_id:'root',media_read_attempt_id:attempt}}});
+  const frames = [
+    connectPayload([], {}, [started('old')], {owner_epoch:'2',live_revision:'1',media_ranges:[{...span('old'),from_seconds:undefined}]}),
+    {observation:{through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'2',live:[started('old')]}},
+    {live_control_snapshot:{snapshot:{owner_epoch:'2',live_revision:'1',media_ranges:[span('old')]}}},
+    {observation:{through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'3',live:[started('new')]}},
+    {live_control_snapshot:{snapshot:{owner_epoch:'2',live_revision:'1',media_ranges:[span('new',20)]}}},
+    {observation:{through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'4',live:[started()]}},
+    {live_control_snapshot:{snapshot:{owner_epoch:'2',live_revision:'1',media_ranges:[]}}},
+    {observation:{through_event_sequence:'0',live_owner_epoch:'1',through_live_revision:'5',live:[started('new')]}},
+    {live_control_snapshot:{snapshot:{owner_epoch:'2',live_revision:'1',media_ranges:[]}}},
+  ];
+  const fetch = vi.fn(async () => new Response(JSON.stringify(frames.shift()),{status:200}));
+  stubRuntimeFetch(fetch);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  expect(connection.current().mediaRanges).toEqual([span('old')]);
+  expect(connection.current().mediaReadStarts).toEqual([]);
+  expect((await connection.observe()).mediaReadStarts).toEqual([]);
+  const actual = await connection.observe();
+  expect(actual.mediaRanges).toEqual([span('new',20)]);
+  expect(actual.mediaReadStarts).toEqual([span('new',20)]);
+  const idle = await connection.observe();
+  expect(idle.mediaRanges).toEqual([]);
+  expect(idle.mediaReadStarts).toEqual([]);
+  const late = await connection.observe();
+  expect(late.mediaRanges).toEqual([]);
+  expect(late.mediaReadStarts).toEqual([]);
+});
+
+it('opens archived ROOT history through cold authorized reads without attaching or restoring runtime', async () => {
+  const session='session:archived-source';
+  const fetch=vi.fn(async (input:RequestInfo|URL) => {
+    const url=String(input);
+    if(url.endsWith('/history-snapshot'))return new Response(JSON.stringify({snapshot:{snapshot:{session_id:session,entries:[],control:{},event_sequence_cut:'0'}}}));
+    throw new Error(`Unexpected mutation or attachment: ${url}`);
+  });
+  vi.stubGlobal('fetch',fetch);
+  const reader=await new LocalHttpRuntimeAdapter().openHistoryReader(session);
+  expect(reader.view).toBe('history');
+  expect(reader.sessionId).toBe(session);
+  await reader.snapshot();
+  expect(fetch.mock.calls.map(call=>String(call[0]))).toEqual([`/api/sessions/${encodeURIComponent(session)}/history-snapshot`,`/api/sessions/${encodeURIComponent(session)}/history-snapshot`]);
+  await reader.close();
+});
+it('propagates cold source access denial and rejects a foreign source snapshot identity', async () => {
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({error:{code:'NOT_FOUND',message:'Session not found'}}),{status:404})));
+  await expect(new LocalHttpRuntimeAdapter().openHistoryReader('session:foreign')).rejects.toMatchObject({code:'NOT_FOUND'});
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(new Response(JSON.stringify({snapshot:{snapshot:{session_id:'session:wrong',entries:[],control:{}}}}))));
+  await expect(new LocalHttpRuntimeAdapter().openHistoryReader('session:expected')).rejects.toMatchObject({code:'PROTOCOL_RESPONSE_INVALID'});
 });

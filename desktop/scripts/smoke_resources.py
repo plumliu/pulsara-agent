@@ -17,15 +17,20 @@ import tempfile
 
 
 def run(args, *, env, cwd, input=None):
-    return subprocess.run(
-        [str(value) for value in args],
-        env=env,
-        cwd=cwd,
-        input=input,
-        text=True,
-        check=True,
-        capture_output=True,
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            [str(value) for value in args],
+            env=env,
+            cwd=cwd,
+            input=input,
+            text=True,
+            check=True,
+            capture_output=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        print(exc.stdout)
+        print(exc.stderr)
+        raise
 
 
 def smoke(resources: Path):
@@ -133,9 +138,61 @@ SELECT 'vector=' || (embedding <-> '[1,2,3]'::vector)::text FROM documents WHERE
                     env=env,
                     cwd=root,
                 )
-        code = """
+        code = r"""
 import importlib.metadata
 import pulsara_agent.desktop_runtime
+import tempfile
+from pathlib import Path
+from fractions import Fraction
+from time import monotonic
+import av
+from PIL import Image
+from pulsara_agent.media.source import MediaSource, probe_media
+from pulsara_agent.media.audio import extract_audio
+from pulsara_agent.media.subtitles import read_subtitles
+from pulsara_agent.media.frames import FrameBudget, read_video_frames
+from pulsara_agent.media.worker import MediaWorker
+from importlib.resources import files
+async def check_media():
+    owner=MediaWorker()
+    try:
+        with tempfile.TemporaryDirectory() as temporary:
+            audio=Path(temporary).resolve()/'known speech.wav'
+            audio.write_bytes(files('pulsara_agent.media').joinpath('resources/connection-test.wav').read_bytes())
+            with MediaSource.open(audio) as source:
+                info=await owner.run(probe_media,source,deadline_monotonic=monotonic()+30)
+                assert info.audio_stream_index is not None and info.video_stream_index is None
+                extracted=await owner.run(extract_audio,source,info,0,info.duration,1000000,deadline_monotonic=monotonic()+30)
+                assert extracted.data.startswith(b'RIFF') and extracted.sound.state=='sound_present'
+            video=Path(temporary).resolve()/'real pts.mkv'
+            caption=video.with_suffix('.srt')
+            caption.write_text('1\n00:00:00,000 --> 00:00:00,200\nEmbedded subtitle\n')
+            with av.open(str(caption)) as subtitle_source, av.open(str(video),'w') as container:
+                stream=container.add_stream('ffv1',rate=25)
+                stream.width,stream.height,stream.pix_fmt=160,90,'yuv420p'
+                stream.time_base=Fraction(1,1000)
+                subtitle_stream=container.add_stream_from_template(subtitle_source.streams[0])
+                for pts,color in [(0,'red'),(40,'blue'),(160,'red')]:
+                    frame=av.VideoFrame.from_image(Image.new('RGB',(160,90),color))
+                    frame.pts,frame.time_base=pts,Fraction(1,1000)
+                    for packet in stream.encode(frame): container.mux(packet)
+                for packet in stream.encode(): container.mux(packet)
+                for packet in subtitle_source.demux():
+                    if packet.dts is not None:
+                        packet.stream=subtitle_stream
+                        container.mux(packet)
+            with MediaSource.open(video) as source:
+                info=await owner.run(probe_media,source,deadline_monotonic=monotonic()+30)
+                result=await owner.run(read_video_frames,source,info,start=0,end=info.duration,mode='overview',crop=None,budget=FrameBudget(1000000,1280*720,2,32),deadline_monotonic=monotonic()+30)
+                assert result.images and result.processed_range==(0,info.duration)
+                subtitle=await owner.run(read_subtitles,source,info,0,info.duration,maximum_text_bytes=10000,deadline_monotonic=monotonic()+30)
+                assert subtitle.usable and subtitle.entries[0].text=='Embedded subtitle'
+    finally:
+        await owner.aclose()
+    assert owner.physical_close_complete
+import asyncio
+asyncio.run(check_media())
+print('Relocated PyAV/FFmpeg decode, VFR frames, embedded text subtitles, WAV resampling, isolated media workers and bundled speech passed')
 from playwright.sync_api import sync_playwright
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(headless=True)

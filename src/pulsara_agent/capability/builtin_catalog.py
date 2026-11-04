@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pulsara_agent.tools.builtins.media import MEDIA_TOOL_NAMES, media_parameters_schema
+
 from pulsara_agent.scheduling.requests import manage_schedule_schema, query_schedules_schema
 from pulsara_agent.capability.source_query import query_input_schema
 from pulsara_agent.tools.builtins.filesystem_contracts import (
@@ -323,6 +325,13 @@ def _wait_agent_schema() -> dict[str, Any]:
 
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
+    **{name: _descriptor(name=name, description=description,
+        input_schema=media_parameters_schema(name), is_read_only=True,
+        permission_category="filesystem_read") for name, description in (
+        ("read_video_frames", "ROOT direct only. Read local video evidence as images and time indices. target alone returns a sparse full-range overview with basic media facts. Optional from/to seconds, mode overview/detail/motion, and normalized crop. Images are attached directly; sampled evidence does not prove every frame was observed. Copy complete next to continue."),
+        ("read_transcript", "ROOT direct only. Read timed original text from local video or audio. Prefer embedded text subtitles; otherwise reuse transcription cache and configured cloud ASR for gaps. Optional from/to seconds; copy the complete next call to continue and omit continuation initially. One call adds at most 180 seconds of ASR; cached/subtitle text pages may span longer. Reading does not verify subtitles against speech or understand music."),
+        ("annotate_media", "ROOT direct only. Append one annotation to a local video or audio interval. Provide target, from/to seconds and nonblank plain text. Validates source and range without reading frames, transcribing, changing playback or changing media files. Committed annotations are append-only."),
+    )},
     "open_in_pulsara": _descriptor(
         name="open_in_pulsara", description=(
             "ROOT only. Show local PATH files, URL webpages, or AGENT read-only conversations "
@@ -1395,7 +1404,7 @@ def _catalog_shape(name: str):
             both,
             "mcp",
         )
-    if name == "open_in_pulsara":
+    if name == "open_in_pulsara" or name in MEDIA_TOOL_NAMES:
         return (BuiltinToolBindingKind.FILESYSTEM, BuiltinToolAvailabilityKind.ALWAYS,
                 (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "filesystem")
     if name in _FILESYSTEM:
@@ -1528,7 +1537,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         severity = "terminal"
     elif name in {"edit_file", "write_file"}:
         severity = "bounded_write"
-    elif name in SESSION_QUERY_TOOL_NAMES or name in {
+    elif name in MEDIA_TOOL_NAMES or name in SESSION_QUERY_TOOL_NAMES or name in {
         "open_in_pulsara",
         "query_capabilities",
         "query_agents",

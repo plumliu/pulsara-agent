@@ -1,8 +1,8 @@
 # Pulsara 视频理解与音频转写实现规格
 
-推进状态：[Pulsara 工具输出与分页重构方案](PULSARA_TOOL_OUTPUT_AND_PAGINATION_REFACTOR_PLAN.zh.md) 已完成实施与验收。本文采用同一完整源页、完整 next 调用与原结果正文回读合同；read_transcript 使用 target/from/to/continuation，每次最多新增 180 秒有效范围的 ASR，已有字幕和转写缓存按输出预算分页。当前仅更新规格，不启动三个媒体理解工具的实现。具体 bundled 使用 Skill 等三个工具完成并通过行为验收后再编写。
+实施状态（2026-11-04）：三个 ROOT 直接工具已接入 Host。在隔离 PostgreSQL 会话中，已保存的视觉模型调用了三个工具，从画面中读出红色到蓝色的变化，从内嵌字幕读出不同的原文，并将批注提交到可回读的记录中。真实云端 ASR、不同操作系统安装包的验收状态分别列在文末。
 
-状态：视频文件预览、`pulsara-viz` 视频发布及 HTML 布局快照引用当前本地媒体已接入生产代码；纯音频文件预览/围栏发布与共用播放器适配、模型读取工具、当前工作范围数据、批注提交/重建、ASR 数据库缓存与云端 ASR 尚未接入。gallery 复用生产播放器，以演示数据展示后续分析界面。ASR 固定采用 OpenAI 转写协议和 0–1 个用户级模型配置；协议适配与发行边界见第 10 节。日期：2026-11-04。
+文字读取采用[工具输出与分页合同](PULSARA_TOOL_OUTPUT_AND_PAGINATION_REFACTOR_PLAN.zh.md)。每次新增识别的有效范围累计最多 180 秒；已有原文按完整输出预算分页。
 
 ## 1. 目标与范围
 
@@ -32,24 +32,15 @@ macOS、Ubuntu、WSL2 的画面处理在本地完成。`read_transcript` 优先�
 
 首版不做纯音乐理解、乐器/风格识别、音乐描述或扒谱，不增加相关模型、服务或工具。音频播放不等于模型听到音频；语音转写不证明模型理解音乐、音效或语气。只在本次实际提取音频时附带轻量静音检测，区分近乎静音与存在声音但未获转写文字，不把声音分类为音乐或噪声，见第 7.3 节。
 
-## 2. 当前代码事实与复用边界
+## 2. 生产入口与归属
 
-- 当前没有原生视频工具、视频处理 owner 或 ASR 配置。不得引用不存在的“现有语音服务”。
-- `capability/builtin_catalog.py` 是 builtin 定义、绑定、权限和分类的唯一目录；各入口按调用角色及入口筛选可用工具，三个视频理解工具只安装到 ROOT 的直接工具面，不进入 SUBAGENT 或 Code Mode 目录。
-- `tools/builtins/workspace.py` 的文件读取路径语义已经支持快速会话和项目会话。视频读取复用它，不自行建立项目外路径例外或新访问凭证。
-- `ViewImageTool`、`image_validation.py`、`FrozenPromptContent`、`LLMImagePart`、图片资源 allowance、canonical image refs 和 provider lowering 已存在。`read_video_frames` 直接复用这些图片 owner，不伪造 `view_image` 调用。
-- 当前图片工具的 admission、执行、结果分类中有针对 `view_image` 的分支。必须一起扩展为可以接收 `read_video_frames` 的同次调用多图内容；不能只在 executor 返回若干图片路径。
-- 已有 Pillow 可负责合成。容器、codec、seek、音频重采样交给 PyAV/FFmpeg。云端 ASR 的上传、HTTP 和转写协议复用 OpenAI 官方 Python SDK 及现有凭据绑定客户端，Pulsara 负责范围、缺口计划、受控 multipart 预读取、并发 admission、取消和结果校验，不复制 codec、multipart 编码、字幕协议或推理实现。
-- `LocalSettingsStore` 与进程凭据清理边界已存在，但当前没有 ASR 设置或客户端。第 10 节增加独立的 0–1 个用户级 ASR 配置，复用现有设置、HTTP/TLS/代理和秘密值清理机制；不能把 LLM/MCP 连接假装成已有语音服务，也不建设模型下载服务。
-- `desktop_app/file_preview.py`、`file_preview_http.py` 已有描述符绑定、源变化校验、短期预览和 HTTP 字节范围读取，并已接入 video 类型及媒体 MIME。视频与 HTML 内嵌本地媒体共用该 owner；HTML 只放行第 11.7 节限定的读取引用前缀，不新建媒体服务。
-- `frontend/components/inspector-panel.tsx`、`desktop-workspace.tsx`、`file-preview-panel.tsx` 已有会话侧栏与文件预览容器。播放器复用这些布局和既有 steer 入口，不引入独立浏览器扩展、悬浮聊天或播放位置上报服务。
-- `frontend/components/file-browser.tsx` 的 FilePreviewProvider 已有进程内标签 Map 和 prepare/adopt/release 生命周期；普通打开会在预览服务确认路径后，按当前会话、规范路径与 reading_root 复用可用标签。视频沿用该入口与源校验；批注按规范路径与文件修改时间关联，不另建视频标签注册表，文件预览返回修改时间供关联。
-- `frontend/components/file-video-content.tsx` 是生产与 gallery 共用的原生播放器、自定义时间轴和分析视图组件。生产文件预览当前不传 activeSpan 或 annotations，无空的模型轨道、批注轨道、列表或分隔占位；后续数据 owner 未实现。播放位置/音量/倍速仅保留在现有文件 Visit 内存中，切回标签恢复位置但不自动播放；关闭媒体视图暂停并释放媒体请求，关闭标签沿原 owner 撤销读取。
-- 当前 TODO 由 `conversation_kernel/todo_runtime.py` 的进程内 owner 持有，Host 统一激活、绑定 continuation、标记 idle 和关闭；通过 `SessionLiveControlSnapshot` 与 `frontend/lib/runtime-adapter.ts` 同步，当前快照不从历史记录重建。媒体范围复用这些生命周期入口和同步链路，所需拆分与通知扩展见第 11.3 节；当前没有可直接套用的通用媒体状态 owner。
-- 纯音频尚未接入该播放器。实现时在现有文件预览类型/MIME、读取入口、共用播放器与生命周期中补齐 audio；播放控制和清理复用 HTMLMediaElement 的标准接口，视频画面与纯音频紧凑布局分别呈现，不新建音频服务、播放器依赖或音频缓存表。当前 video-media.ts 的隐藏检测观察 video 元素，音频适配必须观察可见的播放器容器，不能把隐藏 audio 元素当作不可见而持续暂停。
-- 当前 `pulsara-viz` 的发布 owner 保存 HTML 布局/代码快照、冻结图片或轻量视频路径 JSON 引用；HTML 引用的本地媒体读取当前文件。视频不进入图片校验、HTML 截图或媒体 Base64 内嵌。混合图集复用既有 occurrence 与字节读取，原生视频的可见性、封面和释放由 inline-video.tsx 管理，读取权限与 Range 仍由文件预览 owner 管理；HTML 继续使用双层 sandbox；CSP 仅按第 11.7 节允许该次目录引用下的媒体。
-- 当前回复批注使用消息字符范围作为锚点；时间段批注使用视频源与秒数范围，不能把秒数填入字符 offset。可复用编辑/卡片样式，已提交的视频批注以成功提交的 annotate_media 调用及其 canonical 结果为真，不另建批注表或正文副本。
-- 现有 watchdog、物理执行与 cancellation settlement、原工具结果正文、canonical 图片存储、前端消息渲染继续负责它们原有的边界。本功能不建立第二套工具执行或媒体交付系统。
+- `capability/builtin_catalog.py` 提供工具定义和角色筛选。直接工具面、物理绑定和执行准入共同约束调用入口。
+- 工作区读权限核对后，`media/source.py` 绑定文件描述符和版本，PyAV 负责容器、codec、seek 与展示时间。视频取样由 `media/frames.py` 组织，Pillow 合成画面。图片进入既有校验、资源 quote、canonical 图片和 provider lowering 路径。
+- `media/transcript.py` 选择字幕或识别缓存、计算缺口并组织完整源页。`media/asr.py` 使用 OpenAI SDK、凭据绑定 HTTP 客户端和受限 multipart 请求。用户通过独立 ASR 设置配置一个完整 endpoint、模型 ID 和 API key。
+- Core 管理 PostgreSQL 中唯一的 `asr_cache` 成功块表。缓存记录服务来源和真实范围。工具正文与图片、批注的冻结参数和成功结果分别由既有会话记录保存。
+- `current_work_runtime.py` 承载当前 ROOT 工作的 TODO 和媒体范围。Host 的 live-control 快照及其失效通知通往 renderer。工作回到 idle 或关闭时清理范围。
+- `desktop_app/file_preview.py` 与 `file_preview_http.py` 负责描述符绑定、版本校验及 Range。文件浏览、普通链接、工具展示与围栏扩大共用预览标签。音频和视频共用播放器与时间轴。历史批注从可访问域内的 canonical 结果和同次调用参数按需读取。
+- HTML 保存布局与代码快照，本地媒体经受限目录引用读取。独立音视频发布项只保存规范路径引用。浏览器负责播放与解码，预览生命周期负责暂停、清源和撤销引用。
 
 ## 3. 统一输入规则
 
@@ -242,7 +233,7 @@ detail/motion 不附全片基础信息块，只返回本次范围、实际采样
 - 已观测到短暂 A→B→A 时，按第 6.2.7 节保留往返前、中、后的实际帧与真实时刻；只保留相同的首尾或单个变化峰不足以交付该过程。未采到 B 时不推断它存在或不存在。
 - 使用等尺寸、同一 crop 的有序格子或清晰分图，使帧间状态容易比较；overview 的可变格子 DP 不直接用于 motion 的连续帧排布。若为保留已观察到的快速变化而加入非均匀采样，索引必须体现实际 dt。
 - 有切点时在相邻帧间标记已观察到的切点，不将跨镜头位置变化当成同一物体连续运动。没有切点也不意味着没有事件：录屏里的菜单打开、提示变化或物体状态变化同样需要过程帧。
-- 过长范围受单次资源边界时，返回实际已处理片段和 next。不得只交付开头过程，却把请求结尾标成“结束状态”。缩小 from/to 后可提高同一资源下的时间分辨率，不引入视频总时长上限或模型 FPS 参数。
+- 过长范围或密集变化受单次显示预算限制时，按真实帧边界缩短窗口，返回可交付前缀和完整 next。不得只交付开头过程，却把请求结尾标成“结束状态”。缩小 from/to 后可提高同一资源下的时间分辨率，不引入视频总时长上限或模型 FPS 参数。
 - 回看不插值、不补帧、不修改播放时间来制造动作证据。快速闪现、精确动作次数或连续性无法由当前采样确认时，结果保留采样限制，供模型进一步缩小范围观察。
 
 ### 5.3 清晰帧与前后对照
@@ -275,7 +266,7 @@ detail/motion 不附全片基础信息块，只返回本次范围、实际采样
 
 侧栏的模型范围来自当前 ROOT 工作实际开始的最近一次读取，工具返回后继续保留，下一次读取覆盖；工作回到 idle 时与 TODO 一起清空。历史处理范围与已交付画面保留在工具证据中，不从历史恢复当前范围。主模型按内容成熟程度用 annotate_media 追加带范围的洞察；也可用普通 assistant 消息回应用户，不必把同一正文再重复输出。章节尚未结束时可以继续读取而不发言或添加批注。不要求每轮总结、固定频率回应、跟随用户播放速度或另起后台 LLM。
 
-后续 bundled 使用 Skill 只指导模型选择范围、逐步读取、局部核对和如实解释覆盖，具体内容在三个工具完成后编写；并行、缓存合并、缺口补齐和取消由 runtime 实现，不能靠提示词要求模型手工管理。播放器预览与 steer 的具体规则见第 11 节。
+bundled Skill `pulsara-media-review` 指导模型选择范围、逐步读取、局部核对和如实解释覆盖；并行、缓存合并、缺口补齐和取消由 runtime 实现，不能靠提示词要求模型手工管理。播放器预览与 steer 的具体规则见第 11 节。
 
 ## 6. read_video_frames：候选选帧与排版算法
 
@@ -415,7 +406,7 @@ motion 设本次实际处理片段首末可见源帧时刻为 a、b，从总预�
 
 | 实际响应 | 使用方式 |
 | --- | --- |
-| 有合法且非空 words | 优先使用词级时间；按已有标点、停顿和说话人变化确定性整理可读小段，起止取首末词真实时间，保留底层词数据 |
+| 有合法且非空 words | 优先使用词级时间；按句末标点、至少 0.5 秒的词间停顿及说话人变化确定性整理可读小段，起止取首末词真实时间，保留底层词数据 |
 | 无可用 words，有合法且非空 segments | 保留服务的段级粒度和可选 speaker，不把覆盖整块的一个 segment 当作一句，不补造词级时间 |
 | words 无效但 segments 合法 | 使用合法段级结果并保留词数据异常诊断，不混入未经校验的词 |
 | 有文字，没有合法时间戳 | 明确不满足时间定位要求；不按字数均摊、不将整个请求范围补成伪造的服务时间戳 |
@@ -451,6 +442,12 @@ motion 设本次实际处理片段首末可见源帧时刻为 a、b，从总预�
 已有字幕或完整转写缓存命中时不为补充声音状态重新解码音频。可复用缓存 payload 中已有、覆盖当前查询范围的声音观察；缺失或仅覆盖部分时保持未知，不把块级存在声音自动套到任意子范围。新检测若保留静音/非静音区间，则使用原媒体的真实时间边界，仍放同一成功块 payload，不另建声音表。检测失败不丢弃有效转写或伪造静音，必要诊断留原 owner。声音观察不能独立充当成功 ASR 覆盖，仍按第 9 节以实际成功处理的块为准。
 
 ## 8. 资源、取消、并发与长视频
+
+物理解码内存准入（`media/resources.py`、`media/worker.py`；行为验证见 `tests/test_media_source.py`）：所有媒体 worker owner 共用进程级标准 `threading.BoundedSemaphore`，容量复用 `foreground_io_hard_concurrency=8`，不同会话、Core 设置操作和事件循环不各自增加 8 个名额。等待者每 20ms 以非阻塞方式重试同一个物理名额，可取消；这是物理准入等待，不建立任务实体或生命周期上限。取得名额后冻结 `B=floor(A/8)`；A 为 psutil 报告的实际可用内存，Linux 再与当前 cgroup 及所有可读取祖先的 `(memory.max−memory.current)`（或 v1 对应值）取较小值。B 是本次新 worker 给宿主增加的物理内存分配，覆盖该进程整体 RSS，不是源文件大小、分辨率、总帧数或输出图片像素限制。
+
+Linux worker 在启动后以当前 VMS 为基准，将新增地址空间 allowance 设为 `max(0,B−当前RSS)` 并保留已有更严格 OS hard limit；由 RLIMIT_AS 在本次解码分配时约束。两端宿主同时每 20ms 通过 psutil 观察所属子进程 RSS；超过 B 时终止并回收该子进程，返回 RESOURCE_BOUNDARY。macOS 不把无效的 RLIMIT_RSS 当作硬保证，采用此 RSS 检测与解码前几何准入；轮询可能漏掉两次观察之间的瞬时峰值，不能宣称精确约束所有原生分配峰值。源视频解码前按 coded width/height、最多四个 16bit 分量的每像素 8 字节，计一个参考帧与两个解码/转换缓冲，再加按 SAR 扩展后的两份 RGB 展示缓冲，与当前剩余 B 比较；这只是可取得几何下的保守工作集预检，实际 codec 参考存储和后续累计仍由 RSS/OS 边界结算。通过 PyAV 的支持配置将解码器 thread_count 设为 1，避免自动帧线程复制绕开该分配。不能安全解码时明确资源边界，不静默缩小或改写源媒体。
+
+探测按用途读取元数据：批注、字幕与缓存路径不为补充声音状态或展示旋转解码音视频；只有读图需要显示变换时才解码必要首帧，时间起点优先复用容器/流事实，元数据缺失时只读取必要 packet PTS，不为获取默认时长扫描全片。测试覆盖两个独立 owner 争用同一物理名额、取消/关闭释放、真实 worker 超限回收、cgroup 祖先 headroom、SAR 几何边界及元数据路径不调用 decode。Linux 原生发行仍须在 Ubuntu/WSL2 上实测 OS 限制；macOS 的 RSS 观察限制如上，不能用模拟测试宣称另一平台验收完成。
 
 - 不新增视频总时长、文件总大小、会话累计帧数、工具调用次数或任务寿命上限。大文件按容器与流读取，不整体载入内存。
 - 单次操作受既有 tool watchdog、内存/进程 admission、图片 canonical/logical/wire/token allowance、输出容量及云服务协议限制约束。物理容量不足时排队、分批或给出明确资源边界，不增加全片处理上限；云端 ASR 不执行本地语音模型推理。
@@ -533,7 +530,7 @@ ASR 数据库成功块在重启后仍可命中；未完成的识别、派生索�
 
 ### 9.4 一键清理与最近使用
 
-用户级设置的 ASR 区域只提供一个“清理旧转写缓存”按钮。正常正文说明：“清理超过 24 小时未使用的转写缓存；会话记录和批注保留。”不增加单文件清理、全部强制清空、时间选择器、模型清理工具或刷新参数，也不创建定时清理任务。按钮可在没有活动会话时使用，由 Core 所有的用户级缓存 owner 在当前用户可管理的访问域内执行，不依赖当前会话授权或侧栏选择。
+用户级设置的 ASR 区域只提供一个“清理旧转写缓存”按钮。按钮旁沿用设置页说明样式，显示“清理超过 24 小时未使用的转写缓存。”不增加单文件清理、全部强制清空、时间选择器、模型清理工具或刷新参数，也不创建定时清理任务。按钮可在没有活动会话时使用，由 Core 所有的用户级缓存 owner 在当前用户可管理的访问域内执行，不依赖当前会话授权或侧栏选择。
 
 “最近使用”按明确动作记录，不持久化“正在看”状态：
 
@@ -576,7 +573,7 @@ ASR 客户端通过公开 HTTP 请求 hook 做受控预读取：先核对已冻�
 
 ### 10.3 用户级 0–1 配置与连接测试
 
-沿用 Embedding 的单配置卡片、LocalSettingsStore 和用户级 Settings 读取/编辑入口，ASR 独立保存为一个可空配置值：未配置为 null，配置后只有一套 endpoint/model_id/api_key。它不挂到 memory_retrieval 或聊天模型列表，不复用记忆向量重建确认、模型路由或后台维护任务，不增加独立配置 ID 或额外启用开关。
+用户级「设置 → 模型」在「输入框建议」与「记忆检索」之间显示「ASR 配置」。标题沿用输入框建议样式，单条连接沿用模型配置行，编辑弹窗沿用 Embedding 的布局。设置由 LocalSettingsStore 读写，ASR 独立保存为一个可空配置值：未配置为 null，配置后只有一套 endpoint/model_id/api_key。它不挂到 memory_retrieval 或聊天模型列表，不复用记忆向量重建确认、模型路由或后台维护任务，不增加独立配置 ID 或额外启用开关。
 
 设置页只要求三个输入字段：
 
@@ -592,7 +589,7 @@ ASR 客户端通过公开 HTTP 请求 hook 做受控预读取：先核对已冻�
 
 配置及清理按钮在没有活动会话时仍可用，由用户级设置/缓存 owner 提供读写与授权。复用现有 endpoint/凭据绑定、HTTP owner、ProcessCredentialBoundary 及精确秘密值清理；新 ASR 密钥加入现有 credential_scrub_set，公有配置仅呈现凭据是否已配置，不回传密钥。请求地址来自此配置，不直接借用 LLM/MCP 密钥，不通过环境变量、模型工具参数或任意请求头传递秘密。
 
-设置页用正常正文说明“转写和连接测试会上传音频并可能计费”，不使用灰色小字。已配置后的正常读取不逐段弹确认，凭据不进入工具结果、图片、临时文件名、缓存键、日志或 provider 历史。一次调用冻结配置，修改不改写缓存原文、已交付结果或 provider prefix。空闲时不发识别、连接测试或预取；Host 关闭时关闭客户端、取消本地请求/队列并结算。
+设置卡片在标题下方说明“转写和连接测试会上传音频并可能计费。”，沿用「输入框建议」的说明样式。弹窗中的同一提示沿用 Embedding 弹窗的费用提示样式。已配置后的正常读取不逐段弹确认，凭据不进入工具结果、图片、临时文件名、缓存键、日志或 provider 历史。一次调用冻结配置，修改不改写缓存原文、已交付结果或 provider prefix。空闲时不发识别、连接测试或预取；Host 关闭时关闭客户端、取消本地请求/队列并结算。
 
 ### 10.4 超时、重试与远端受理状态
 
@@ -605,6 +602,8 @@ ASR 客户端通过公开 HTTP 请求 hook 做受控预读取：先核对已冻�
 | 音频已开始发送、已发送完或无法确认发送阶段，随后超时/断连 | 默认不自动重新提交；报告“远端处理结果未知，可能已经计费”，保留失败范围，不将其记为已完成 |
 | 服务支持且实际提供原请求查询能力或经过验证的幂等重试 | 在同次工具生命周期内复用原请求标识与服务能力，不另建收费任务；没有这项能力时按未知受理状态处理 |
 | 缺配置、认证失败、非法参数或无效时间戳等不能靠相同请求解决的错误 | 返回明确原因，不自动重复提交相同识别 |
+
+OpenRouter 官方转写端点明确返回 HTTP 429 和结构化限流错误时，工具在原期限内复用当前音频，按退避及服务的 Retry-After 等待后重试。上传次数逐次记录。其他端点仅凭 429 不能确认相同的拒绝及计费语义。[转写计费说明](https://openrouter.ai/blog/tutorials/transcription-on-openrouter/) · [限流与 Retry-After](https://openrouter.ai/docs/api_reference/errors-and-debugging)
 
 由同一 ASR 适配入口统一物理请求与重试策略；SDK 固定 max_retries=0，安全重试按已验证的受理事实在同次适配入口执行，不能与 SDK 各自重发。安全重试仍遵守第 4.2 节单次有效缺口累计 180 秒的范围和原 watchdog，不重置额度、添加新范围或在工具结束后后台继续；实际发送、等待、服务返回和可能费用如实保留诊断。取消/Host 关闭后不再提交重试，不为这项策略增加持久请求状态、跨重启查询或恢复作业。
 
@@ -620,7 +619,7 @@ read_video_frames、read_transcript、annotate_media 仅对 ROOT 的直接工具
 
 read_video_frames 的 admission 一次为全部图片和文字联合 quote，使用现有图片校验与绑定机制，按完整结果接受或在提交前降级/分页。不得先提交文字再丢弃超额图片。扩展已有 IMAGE_ATTACHMENT 的 FULL 交付规则，不新造成功凭证或同义事件。持久结果沿用 FrozenPromptContent/LLMImagePart → canonical image refs/blob → provider lowering；重读沿用 IMAGE_REF，不给 provider 添加视频协议。
 
-模型历史的 SYSTEM、provider tools 和已有 messages 在同一 epoch 中保持不变。三个工具只在 ROOT 的新 cold epoch 或明确采用的 compaction successor 安装到直接工具面，不安装到 SUBAGENT 或 Code Mode；设置变化、媒体发现、云端完成或播放器事件均不能触发额外 rebase，也不向历史插入后台进度。后续 bundled 使用 Skill 只教阅读策略，物理并行、时间校验及缓存正确性必须由 runtime 保证，不依赖模型记住说明。
+模型历史的 SYSTEM、provider tools 和已有 messages 在同一 epoch 中保持不变。三个工具只在 ROOT 的新 cold epoch 或明确采用的 compaction successor 安装到直接工具面，不安装到 SUBAGENT 或 Code Mode；设置变化、媒体发现、云端完成或播放器事件均不能触发额外 rebase，也不向历史插入后台进度。bundled 使用 Skill 教授阅读策略，物理并行、时间校验及缓存正确性必须由 runtime 保证，不依赖模型记住说明。
 
 ### 11.2 内置播放器与文件读取
 
@@ -663,7 +662,7 @@ read_video_frames 的 admission 一次为全部图片和文字联合 quote，使
 
 不得用 media.currentTime、暂停、拖动频率、播放结束或可见标签页推断用户指令，也不要求用户播放位置与模型范围同步。预览头与模型轨道分别呈现，用户手动预览时不被模型下一次调用强行拖回；点击模型范围仅定位用户预览。steer 后是否 overview、回看或直接读字由新要求决定，overview 本身不启动 ASR；新的 read_transcript 请求同步补齐新位置缺口。
 
-同一规范媒体路径与文件修改时间的模型轨道只有 `activeSpan | null`，表示当前 ROOT 工作的最近阅读落点，不等于“工具正在执行”。两个读取工具经源与权限校验、实际开始读取并确定本次处理窗口时，覆盖该媒体的范围；参数生成、排队、校验失败、历史加载、annotate_media 和普通播放均不更新。read_transcript 的总请求可为一小时，显示仍使用本次实际窗口，不把未执行的整小时请求画成阅读范围；处理范围与已交付文字位置按第 5 节分别表达。overview 的全范围仍是稀疏观察，不表示逐帧看完全片。界面保持“模型”轨道，不增加“正在读取”状态文案、百分比或连续模型播放头。
+同一规范媒体路径与文件修改时间的模型轨道只有 `activeSpan | null`，表示当前 ROOT 工作的最近阅读落点，不等于“工具正在执行”。两个读取工具经源与权限校验、实际开始读取并确定本次处理窗口时，覆盖该媒体的范围；参数生成、排队、校验失败、历史加载、annotate_media 和普通播放均不更新。read_transcript 的总请求可为一小时，显示仍使用本次实际窗口，不把未执行的整小时请求画成阅读范围；处理范围与已交付文字位置按第 5 节分别表达。overview 和 detail 在验证窗口后、扫描和读取锚点前发布范围。motion 在确定首帧可见区间时发布首个前缀，最终按本次实际可交付的前缀更新。overview 的全范围仍是稀疏观察，不表示逐帧看完全片。界面保持“模型”轨道，不增加“正在读取”状态文案、百分比或连续模型播放头。
 
 工具成功返回后范围保留，模型理解结果、回复、调用其他工具或等待用户批准/回答时均保留；单次读取失败或取消本身也不回滚已展示的阅读落点，不据此声称已成功取证。下一次实际读取覆盖。若有并行读取，按现有执行开始顺序使用最近开始的一次，关联现有调用身份；较早调用的迟到更新、成功、失败或取消不得覆盖或清除较新的范围，较新调用结束后也不回退到较早范围。不串行化工具，不按内部 ASR 子块完成顺序改变范围。
 
@@ -767,43 +766,20 @@ HTML 的 img-src、media-src 和 base-uri 只加入该次资源前缀；脚本�
 
 成功读取但没有文字是正常结果，不与缺配置、失败或未处理范围混淆。成功处理但没有识别到讲话可以是空原文；部分块失败不能返回“全片没有台词”。有连续成功前缀时可按第 5 节返回 partial、实际范围、缺口及 next；无可交付进展时明确失败。请求尚在排队、被取消和远端限流是不同状态，不能用反复相同 next 诱导模型轮询。原始错误保留可诊断上下文，仅清理实际凭据，不整段抹掉输入、文字或服务返回体。
 
-## 13. 代码落点与实施顺序
+## 13. 实现与验证入口
 
-已完成的基础：
-
-- 侧栏视频预览：正式媒体类型、源绑定与 Range 读取、原生播放器、自定义预览轴、共用标签、自适应布局与全屏；没有分析数据时隐藏模型范围与批注区域。
-- 围栏视频发布：final answer 发布边界、轻量视频路径引用、HTML/图片/视频混合图集、原生播放控件、按需封面、扩大定位与标签复用，以及各自的暂停和释放生命周期。
-- HTML 媒体支持：布局与代码快照、受限目录引用下的当前本地图片/视频读取、动态相对媒体路径、隐藏暂停和卸载释放。源读取与 CSP 边界见第 11.7 节。
-
-剩余代码落点：
-
-| 位置 | 变化 |
+| 入口 | 职责 |
 | --- | --- |
-| capability/builtin_catalog.py、工具分类与权限目录、既有 Code Mode 目录筛选 | 三个 5/4/4 字段 schema；仅 ROOT 直接调用的可见性、绑定与执行准入，SUBAGENT 与 Code Mode 均不可见、不可调用 |
-| 新媒体内聚模块与薄工具适配 | 共用探测、字幕、音频提取/静音检测、ASR 并行/缓存差集与批注校验；按受理事实统一 SDK/外层重试，未知结果不自动重发；每次最多新增 180 秒，字幕/缓存按原预算与文本 packer 输出完整源页/continuation；视频专属选帧、时间索引和 DP，不放入巨型 executor |
-| storage 的现有 repository/clean-v0 基线、Core 资源与媒体/ASR runtime | 音视频共用一张成功块缓存表，加入 last_used_at，复用原子写入/区间查询与最近使用刷新；一键按媒体整组清理超过 24 小时未用缓存；模型/配置不参与命中或行身份，不新增媒体/最近使用表、清理 generation 或持久任务 |
-| 共享 identity 层及对应类别验收 | 为缓存行接入 `asr-cache` kind；复用原生成/校验实现，不新增 video_id、配置指纹或本地 ID 生成器 |
-| tools/builtins/workspace.py、filesystem 注册位置 | 复用读取目标、源事实与上下文，不复制路径解析 |
-| conversation_kernel/tool_surface.py、tool_execution.py、tool_runtime.py | 现有 admission、物理执行、多图 allowance、同步结果、取消与结算；批注通过同一 canonical 提交边界生效，服务配额只加必要的进程内适配 |
-| conversation_kernel/todo_runtime.py、host.py、tool_runtime.py、terminal_protocol 的 live-control 快照/通知及 frontend/lib/runtime-adapter.ts | 整理 TODO 与媒体范围共用的 ROOT 工作生命周期承载；分别保存清单与范围 Map，统一激活/延续/idle/关闭。扩展现有快照与失效通知的单一路径，不新增事件类别或媒体结算机制，保留 TODO 的原提交语义 |
-| image_validation.py、现有图片 quote/canonical owner、tool_result_projection.py | 共用 FULL 图片交付与历史 IMAGE_REF 回读，保留 view_image 行为 |
-| settings.py、用户 Settings 接口、现有凭据边界与设置页 | 参照 Embedding 的独立 0–1 ASR 配置和三字段表单，复用密钥生命周期；一次短语音连接测试检查真实时间戳，保存不联网；保留单按钮清理旧缓存，独立于活动会话 |
-| 现有 OpenAI SDK client builder、process_credential_boundary.py 及 HTTP 注入点 | ASR 客户端以公开请求 hook 对有界 SDK multipart 预读取，再走原凭据/取消检查；SDK 负责编码与传输，max_retries=0，响应按 words/segments 确定性校验 |
-| 既有 pulsara-viz 发布/渲染、inline-video.tsx 与文件预览 owner | 补齐音频轻量路径引用、原生 audio、静态图标缩略项、扩大与共用释放，不新增系统提示词或 Skill 的音频发布教学 |
-| desktop_app/file_preview.py、file_preview_http.py、renderer_bridge.py 及既有运行时观察、会话内容读取 | 在既有源/权限/Range/引用生命周期中补齐 audio 类型与 MIME，接入当前工作的模型范围与已提交批注的可丢弃投影/分页，不建立媒体或批注存储服务 |
-| frontend/components/file-browser.tsx、file-video-content.tsx、lib/video-media.ts、inspector-panel.tsx、desktop-workspace.tsx、file-preview-panel.tsx 及现有会话输入/steer 入口 | 将已有播放控制/时间轴/清理适配为音视频共用，音频采用紧凑布局与容器可见性检查；复用标签 Map、首次读取自动展示、0–1 模型范围和批注数据，保留预览与 steer 分离 |
-| pyproject.toml、uv.lock、desktop/scripts/prepare_resources.py、WSL payload 与第三方许可 | PyAV/FFmpeg、OpenAI SDK 与连接测试短语音资源；三端媒体能力、许可与签名，不增加识别权重分发 |
-| README / 开发文档 | 按实际已实现功能更新预览、工具与 ASR 配置说明；不把实验脚本或 gallery 演示写成已完成工具 |
+| `tools/builtins/media.py`、`capability/builtin_catalog.py` | PATH 与参数合同、三个 ROOT 直接工具的目录及绑定 |
+| `conversation_kernel/tool_execution.py`、`tool_runtime.py`、`media/worker.py` | 调用准入、多图预算、可取消的物理解码、结果结算 |
+| `media/source.py`、`subtitles.py`、`audio.py` | 校验源、展示时间映射、字幕原文与音频提取 |
+| `media/frames*.py` | 模式选帧、几何排版、原图及时间索引 |
+| `media/transcript*.py`、`asr.py`、`asr_cache.py` | 原文分页、成功范围复用、云端转写和用户级清理 |
+| `conversation_kernel/current_work_runtime.py`、`media_annotations.py` | 当前工作落点与可重建的 canonical 批注 |
+| `frontend/components/file-browser.tsx`、`file-video-content.tsx`、`inline-video.tsx` | 媒体标签、时间轴和围栏播放 |
+| `tests/dogfood/run_media_understanding_dogfood.py` | 生产 Host、真实视觉模型、canonical 批注和 provider 前缀验证 |
 
-以下为待启动的实施顺序；统一输出合同采用第 5 节，服务接入仍须先满足第 10 节。本次文档更新不启动工具编码：
-
-1. 补齐纯音频预览、音视频共用播放器及音频围栏发布/扩大生命周期，实施共用探测、视频读图通道、选帧/DP、主模型首次读取自动展示；接入与 TODO 共用的 ROOT 工作生命周期、当前快照和失效通知，范围覆盖更新、工具结束后保留、idle/关闭时清空。
-2. 接入音视频共用 annotate_media 的既有会话提交与批注投影。
-3. 接入已有字幕、continuation 源页与无音轨规则；实现独立 0–1 ASR 配置、OpenAI multipart/有界预读取、一次短语音测试与实际 words/segments 校验。完成每次最多新增 180 秒的分块/并行、静音检测、成功块缓存和补缺口；接入最近使用刷新与单按钮清理，验证最近 24 小时保留、未知受理不重发、缓存/字幕不受三分钟约束、换模型不重识别及未交付文字优先续交。
-4. 完成真实服务、阈值基准、证据交付、三端打包和验收。
-5. 三个工具完成并通过行为验收后，再编写具体 bundled 使用 Skill，依据真实工具行为教授概览、分段取证、局部回看和成熟洞察批注。本阶段不创建或发布调用尚不存在工具的 Skill，不提前冻结示例参数或固定阅读节拍。
-
-每步只有一个生产路径，工具安装及发布说明的模型输入遵守第 11.1 节的 epoch 边界；gallery 的分析数据仅供视觉参考。已完成的预览与媒体发布作为现有基础复用，后续模型工具、分析数据 owner 尚未接入。
+`pulsara-media-review` 随包提供工具使用指导。它使用三个实际工具的直接入口，依据原始时间和来源区分采样画面、字幕与转写。
 
 ## 14. 验收
 
@@ -874,8 +850,49 @@ HTML 的 img-src、media-src 和 base-uri 只加入该次资源前缀；脚本�
 - [Premiere 入点/出点](https://helpx.adobe.com/premiere/desktop/get-started/source-and-program-monitor-adjustments/set-in-and-out-points-in-the-source-monitor.html)、[镜头切点检测](https://helpx.adobe.com/premiere/desktop/edit-projects/change-clip-sequence/detect-edit-points-using-scene-edit-detection.html)与[视觉搜索限制](https://helpx.adobe.com/premiere/desktop/organize-media/file-organization/search-for-media-using-ai-powered-media-intelligence.html)：时间定位、候选线索与原片核对，不引入全片语义索引。
 - [IG-VLM](https://arxiv.org/abs/2403.18406)：图像网格用于视频问答的实验依据，不证明任意压缩或所有模型上都更优。
 
-当前已接入视频文件预览、围栏视频发布与封面/扩大生命周期、共享播放器及可选的前端分析视图接口；没有安装新的模型工具、引入媒体解码依赖或修改数据库。文件预览与组件检查不代表视频理解、真实模型、云端 ASR 或三端发行验收已经完成。
+## 16. 验收记录
 
-验证：228 项聚焦前端检查、139 项桌面壳层检查、后端 HTML/文件预览检查及真实 PostgreSQL 的发布/回读/fork、续轮发布边界检查通过，TypeScript、相关 ESLint/Ruff 和生产 renderer 构建通过。真实 Chromium 验证原生播放、封面、切换暂停、返回不续播、扩大定位与标签复用；实际 gallery.html 验证动态图片弹窗、H.264 视频播放与隐藏/关闭清源，卸载后读取引用全部释放。快照目录绑定、Range/源变化、撤销及缩略图目录释放已覆盖，Electron 实测主工作台全屏成功，其他权限及子 frame 仍拒绝。搬迁后的 Python/PostgreSQL/Chromium 资源检查通过，已构建并安装到本机 /Applications/Pulsara.app，严格签名校验通过，启动后本地服务连接正常，既有数据保留。此处记录 macOS 的预览与发布验证，不代表模型阅读/批注工具、云端 ASR 或 Ubuntu/WSL2 发行验收完成。
+2026-11-04，使用已保存的 `qwen3.8-flash` 连接与独立 clean-v0 数据库，三个工具均在生产 Host 提交 SUCCESS。两秒测试片的画面先红后蓝，字幕为 “Orange boat.”。模型分别报告了两个来源，批注回读保留原时间和正文。真实 provider 输入包含图片，五次模型请求间的四次比较均保持同一 epoch 的既有输入前缀。
 
-本机安装包的系统常规启动、原会话图集与受保护目录读取已验证；图片弹窗、HTML 视频播放和侧栏全屏正常。macOS 文件授权由用户确认，重签名后的授权处理见安装文档；应用不自动修改系统隐私授权记录。
+已保存的 OpenRouter 转写配置通过六秒短语音连接测试。固定工具请求驱动生产 Host、隔离 PostgreSQL 和真实 ASR 服务，180–360 秒冷读上传一次，762 个词组成 46 条，条目 JSON 共 7,149 字节，一页交付。热读零上传，150–210 秒仅补 150–180 秒；在测试环境移除 ASR 配置后仍可读取缓存。该次两条成功请求返回费用合计约 0.005833 美元。用同一份原词、1,600 字节的额外页面预算复验，九页续读拼接与整页文字完全相同，零新增上传。
+
+### 行为验收对照
+
+| 第 14 节条目 | 生产边界及验证 |
+| --- | --- |
+| 1、2、16 | 工具面测试核对 5/4/4 字段、ROOT 直接调用、SUBAGENT 及 Code Mode 拒绝、无图片能力提前拒绝。Host 的当前工作快照与既有失效通知携带范围。真实 HTTP 验证读取开始、已返回工具的保留范围、断开、重连和 idle。 |
+| 3–7、19、25 | PyAV 自制源验证真实 PTS、VFR、旋转、像素宽高比、crop、可见边界及返回图片索引。DP 与小规模穷举比较，检查整数几何和面积，二档宽度限制为画布的 1/3 至 1/2。原片细节和 motion 前缀在资源不足时按实际边界结算。 |
+| 8–10、12、26、29–31 | 字幕优先、字幕空白、成功空块、原文分片和完整 next 均由工具测试覆盖。真实 PostgreSQL 与本地 TCP 转写端点验证换模型复用、仅补相交缺口、清缓存后的原页精确读取/复制。验证同次多个缺口合计最多 180 秒，已有完整一小时缓存可超出三分钟返回。 |
+| 11、13、32 | 协议配额未知时串行准入。并发调用复用相交的在途识别；真实 Host 测试关闭最先发起读取的会话，另一会话仍收到原配置的结果。SDK 关闭自动重试。确认未发送的连接失败与符合第 10.4 节的明确限流可在原期限内重试。请求上传后断连、失败范围与可能费用保留在结果中。单次上传费用有实测记录，并发提速及配额待测。 |
+| 14、35–37 | 用户级设置在无活动会话时可独立读写、删除和显式测试。真实 SDK 向本地 TCP 端点发送标准 multipart，验证完整地址、音频字节、密钥绑定、取消及 gate 释放。响应按实际 words/segments 校验；异常 words 可降至合法 segments，保留诊断。已保存的真实服务返回合法词级时间戳。 |
+| 15、20、21、23 | 批注通过同次冻结调用及已接受结果重建。真实数据库覆盖独立相同正文、跨会话、fork 去重、访问域拒绝及路径/修改时间不匹配。时间轴选中、取消选中、展示长正文、来源定位及越界不 seek 由前端测试覆盖。 |
+| 22、24、28、38 | 文件预览与围栏共用受限读取。真实 PostgreSQL 验证音视频路径引用的提交、确认、协议回读和 fork。真实 Chromium 播放 WAV、MP3、M4A/AAC、FLAC、Ogg/Opus 样例，检验隐藏暂停、返回保持暂停、扩大定位和卸载清源。视频封面和受限 HTML 快照沿用相同预览边界。 |
+| 27 | 轨道与字幕是文件事实。成功空文字、阈值下音量、存在声音、无法获得声音观察及识别失败分别表达。音频提取在混为单声道之前检查各声道，测试包含反相样例。缓存和字幕读取独立于静音检测。 |
+| 33、34 | clean-v0 新增一张成功块表及共享 `asr-cache` kind。服务端在同一次删除语句中按域、路径、mtime 和大小分组，用 MAX(last_used_at) 与 24 小时 cutoff 严格比较。真实 SQL 验证并发刷新、只读片段保留整组、无会话清理及进行中正常回填。5,000 块测试核对实际区间查询计划，GiST 过滤候选，严格半开边界仍使用原始秒数。 |
+| 17、18 | 平台发行结果和视觉对照分别记录。已记录单次冷/热读取和成功请求费用，尚缺有真值的中英文准确率、时间戳偏差、并发配额及 P50/P95 样本。 |
+
+### 取样与真实模型对照
+
+低清特征使用保持宽高比的 64 长边 HSV 网格及四倍尺度亮度图，16 像素局部块内统计亮度差超过 12 的像素。初始突变配置为全局分数 ≥10、相邻尖峰倍数 2、间隔 0.15 秒。累计变化门槛为 90、间隔 0.1 秒，局部变化比例门槛为 0.2。往返检测分别使用偏离 1、回归 0.35 的归一化分数；detail 只在连通且与基准差异很小的候选中比较清晰度（全局 ≤3、局部 ≤0.15）。这些数值描述本实现的低清采样条件。
+
+`tools/benchmark_video_frames.py` 的 144 个有 PTS 真值的合成条件中，72 个采到中间状态并交付，36 个源有中间状态但探测未命中，36 个源没有记录该状态。已采到后被筛掉的条件数为 0。八个三档候选在 λ=1.02 时最优为两页（画面面积合计 1,843,200 像素），λ=1.5 或 2.5 时为一页（817,920 像素）。默认使用 λ=1.5。
+
+`tests/dogfood/run_media_visual_benchmark.py` 在讲座、录屏、动作、叙事四个有真值的合成片段上进行配对。每种方法分别调用同一已保存视觉模型四次；锚点加变化的两组交付相同时刻的帧。以下时间为四次 Host 对话耗时之和，夹具准备和选帧/排版耗时在逐项报告中另列。
+
+| 方案 | 正确事实 | 短暂事件定位 | 无依据回答 | 输入 / 输出 token | Host 秒 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 均匀取样、固定网格 | 8/12 | 0/4 | 0 | 89,230 / 1,022 | 37.14 |
+| 锚点加变化、固定网格 | 12/12 | 4/4 | 2 | 89,240 / 771 | 33.84 |
+| 同组帧、DP | 12/12 | 4/4 | 1 | 90,241 / 1,089 | 37.02 |
+
+`run_media_visual_behavior.py` 在真实 Host 中验证同章节的连续两窗只在最后回复，期间没有自动批注。用户在模型请求期间发送 steer，旧读取结算后模型转到指定的 [7,8) 窗口并读出对应画面。以上单次合成对照不估计自然视频总体准确率或时延分位数。
+
+另用项目的 Pulsara 演示录屏、COSCUP 讲座及 Wikitongues 人物口述做了九次自然素材固定图片对照，原始署名、授权及独立核对的原片位置保存在逐项报告。均匀网格与变化候选网格各交付 9/12 个正确事实，DP 交付 7/12；其中一轮 DP 在 1,024 输出 token 内未生成最终答案，因此不能由这一差值判断排版优劣。三种方法含素材处理的实测合计分别为 53.84、51.53 和 66.05 秒。另用正常 Host 工具回看，录屏的 detail/crop 读出了报表标题及 49.3 万、1.9 万两个数值，讲座的 detail 回看读出了 Ivan。正常 Host 中模型另取画面或借助其他工具时作为多来源观察记录，固定图片比较单列。
+
+### 发行与可复验范围
+
+macOS Apple Silicon 安装包位于 `desktop/release/Pulsara-0.1.3-alpha.1-macos-arm64.dmg`，大小为 801,963,200 字节，应用内容为 1,876,947,300 字节。DMG 通过 `hdiutil verify`。只读挂载中的应用及用 ditto 复制到独立目录的安装副本均通过 `codesign --verify --deep --strict`。资源包包含 PyAV 17.1.0、FFmpeg 8.1.1、字幕解析、SDK、固定短语音、第三方许可和对应源码。最终 DMG 的安装副本只使用随包 Python 与依赖，离线验证了 VFR 抽帧、内嵌文字字幕、WAV 转换、独立 worker 及 launcher；执行后的签名复验通过。在相同 renderer 的签名预演副本中，使用临时 home 从文件选择器打开 H.264 视频，播放到 3 秒，再用自定义时间轴实际回退至 2.9 秒。
+
+Ubuntu 和 WSL2 缺少可运行的本地安装环境。本机 Docker daemon 未启动成功，也没有可用的 Ubuntu deb 或 WSL2 实例。两端的安装大小、实际播放 codec 矩阵及安装后离线解码待验证。
+
+视频工具首次发行时，后端全套回归在独立 PostgreSQL 实例上有 5,488 项通过，另有 15 个子测试通过。20 项需要 Linux flock / ext4 的既有 WSL 专属测试在 macOS 跳过。前端全套 1,606 项通过，固定 Node.js 版本下桌面壳层 149 项通过。真实 Chromium 与真实 Host/HTTP 的组合验证了首次读取打开媒体、零秒起点、后续读取不抢焦点、重新连接不自动打开、idle 后清空，以及关闭后旧 URL 返回 409。500 条完全重叠的批注可以分页读取并选中最后一条，播放控制仍可用。

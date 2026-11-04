@@ -506,6 +506,11 @@ class LocalHttpServer:
         self._app.router.add_post(
             "/api/local-settings/postgres/reset", self._reset_postgres
         )
+        self._app.router.add_get("/api/local-settings/asr", self._read_asr)
+        self._app.router.add_put("/api/local-settings/asr", self._put_asr)
+        self._app.router.add_delete("/api/local-settings/asr", self._delete_asr)
+        self._app.router.add_post("/api/local-settings/asr/test", self._test_asr)
+        self._app.router.add_post("/api/local-settings/asr/clear-old-cache", self._clear_old_asr_cache)
         self._app.router.add_get("/api/local-settings/memory-retrieval", self._read_memory_retrieval)
         self._app.router.add_put("/api/local-settings/memory-retrieval/history-enabled", self._set_history_enabled)
         self._app.router.add_put("/api/local-settings/memory-retrieval/embedding-enabled", self._set_embedding_enabled)
@@ -1380,6 +1385,55 @@ class LocalHttpServer:
             await self.sessions.invalidate_input_suggestions()
         return web.json_response({"enabled": updated.input_suggestions_enabled})
 
+    async def _read_asr(self, _request):
+        config = self.settings.read().asr
+        return web.json_response(None if config is None else config.public())
+
+    async def _put_asr(self, request):
+        try:
+            updated = await self.settings.save_asr_connection(await self._json_body(request))
+        except ValueError as exc:
+            raise HttpPublicError("INVALID_ASR_MODEL", str(exc), status=400) from None
+        return web.json_response(updated.asr.public())
+
+    async def _delete_asr(self, _request):
+        await self.settings.clear_asr_connection()
+        return web.json_response(None)
+
+    async def _clear_old_asr_cache(self, _request):
+        return web.json_response(await self.sessions.core.clear_old_asr_cache())
+
+    async def _test_asr(self, request):
+        from pulsara_agent.media.asr import transcribe_audio
+        from pulsara_agent.settings import MAXIMUM_LOCAL_SETTINGS_BYTES
+        from importlib.resources import files
+        from time import perf_counter
+        import io
+        import wave
+        try:
+            config = self.settings.asr_draft(self.settings.read(), await self._json_body(request))
+        except ValueError as exc:
+            raise HttpPublicError("INVALID_ASR_MODEL", str(exc), status=400) from None
+        started = perf_counter()
+        try:
+            audio = await asyncio.to_thread(files("pulsara_agent.media").joinpath("resources/connection-test.wav").read_bytes)
+            with wave.open(io.BytesIO(audio)) as stream:
+                duration = stream.getnframes() / stream.getframerate()
+            # The static speech and already bounded settings document reserve this
+            # small request/response buffer; no arbitrary file or stream is read.
+            result = await transcribe_audio(config, audio, duration=duration,
+                maximum_upload_bytes=len(audio) + MAXIMUM_LOCAL_SETTINGS_BYTES,
+                maximum_response_bytes=MAXIMUM_LOCAL_SETTINGS_BYTES,
+                credential_scrub_set=self.settings.read().credential_scrub_set())
+            if not result.text.strip() or result.granularity is None:
+                raise ValueError("测试语音未获得非空原文与有效时间戳，不能确认时间定位能力。")
+        except Exception as exc:
+            message = self.settings.read().credential_scrub_set().scrub_text(str(exc))
+            message = message.replace(config.api_key, "[REDACTED]")
+            return self._error_response("ASR_TEST_FAILED", message, status=400, retryable=False)
+        return web.json_response({"status": "ready", "granularity": result.granularity,
+            "elapsed_ms": round((perf_counter() - started) * 1000, 2)})
+
     async def _read_memory_retrieval(self, _request):
         return web.json_response(self.settings.read().memory_retrieval.public())
 
@@ -1504,6 +1558,7 @@ class LocalHttpServer:
                 "state": settings_state,
                 "pulsara_home": str(require_pulsara_home()),
                 "memory_retrieval": settings.memory_retrieval.public(),
+                "asr": None if settings.asr is None else settings.asr.public(),
                 "input_suggestions_enabled": settings.input_suggestions_enabled,
             },
             "model_configurations": await self._connection_summaries(settings),

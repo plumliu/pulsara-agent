@@ -16,9 +16,9 @@ from pulsara_agent.conversation_kernel.compaction.runtime_handoff import (
     MAXIMUM_RUNTIME_HANDOFF_PCA_TOKENS,
     freeze_compaction_runtime_handoff,
 )
-from pulsara_agent.conversation_kernel.todo_runtime import (
+from pulsara_agent.conversation_kernel.current_work_runtime import (
     FrozenTodoSnapshot,
-    TodoRunIdentity,
+    RootWorkIdentity,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
 from pulsara_agent.llm.adapters.openai.chat_completions import chat_semantic_wire_group
@@ -78,7 +78,7 @@ def pca_body(handoff):
 def todo_snapshot(items):
     parsed = parse_todo_replacement({"items": items})
     return FrozenTodoSnapshot(
-        run_identity=TodoRunIdentity("root", ModelInputScopeKind.ROOT, "run", "owner"),
+        run_identity=RootWorkIdentity("root", ModelInputScopeKind.ROOT, "run", "owner"),
         revision=1,
         ordered_items=parsed.ordered_items,
         pending_count=parsed.pending_count,
@@ -314,7 +314,7 @@ def port_fixture(*, subagent=None, code_mode=None, processes=()):
     port._session_id = "session:current"
     port._terminal_owner_id = "host:current"
     port._terminal = SimpleNamespace(freeze_compaction_handoff=lambda **_: processes)
-    port._todo_owner = SimpleNamespace(freeze_compaction_handoff=lambda **_: None)
+    port._current_work_owner = SimpleNamespace(freeze_compaction_handoff=lambda **_: None)
     port._subagent = subagent
     port._code_mode = code_mode
     return port

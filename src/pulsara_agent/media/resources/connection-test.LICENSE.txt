@@ -1,0 +1,22 @@
+connection-test.wav
+
+Source: The Adventures of Sherlock Holmes (Version 2), by Sir Arthur Conan Doyle.
+Recording: LibriVox, read by Ruth Golding; opening of section 01,
+A Scandal in Bohemia, Part 1. Catalog date: 2010-07-15.
+
+Original audio:
+https://archive.org/download/adventures_sherlock_holmes_rg_librivox/adventuresholmes_01_doyle.mp3
+Catalog:
+https://librivox.org/the-adventures-of-sherlock-holmes-by-sir-arthur-conan-doyle/
+Archive metadata:
+https://archive.org/metadata/adventures_sherlock_holmes_rg_librivox
+
+The Archive metadata explicitly gives the public-domain dedication:
+http://creativecommons.org/licenses/publicdomain/
+LibriVox's public-domain policy:
+https://librivox.org/pages/public-domain/
+
+Adaptation: first 6.0 seconds, converted through PyAV/FFmpeg to mono,
+16000 Hz, signed 16-bit PCM WAV. No recognition model or downloaded runtime
+resource is required. This bundled fixed speech excerpt is used only for an
+explicit user-requested ASR connection test; it is not a user media cache.

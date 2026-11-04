@@ -2145,6 +2145,7 @@ def test_tool_image_results_share_one_ordered_carrier_per_assistant_batch() -> N
             tool_request_entry_id="entry:5kfg7huz5awr2non2ldye5t3de",
             tool_result_body_text=frozen_tool_result_public_text(content),
             tool_call_ordinal=call_ordinal,
+            tool_call_name="view_image",
             tool_call_arguments=freeze_json(
                 (
                     {
@@ -2243,6 +2244,7 @@ def test_late_tool_image_reference_uses_the_same_labelled_carrier() -> None:
         content=content.parts,
         tool_result_body_text=frozen_tool_result_public_text(content),
         tool_call_ordinal=0,
+        tool_call_name="view_image",
         tool_call_arguments=freeze_json(
             {"target": {"kind": "IMAGE_REF", "image_ref": image.image_ref}}
         ),

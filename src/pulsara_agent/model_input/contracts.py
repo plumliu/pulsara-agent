@@ -1060,6 +1060,7 @@ class FrozenProviderInputItem:
     )
     tool_call_ordinal: int | None = None
     tool_call_arguments: FrozenJsonObjectFact | None = field(default=None, repr=False)
+    tool_call_name: str | None = None
 
     def __post_init__(self) -> None:
         snapshot_kind = self.item_kind is FrozenProviderInputItemKind.CONTEXT_SNAPSHOT
@@ -1176,13 +1177,14 @@ class FrozenProviderInputItem:
             and isinstance(self.content, tuple)
             and content_has_image(self.content)
             and result_kind
-            and (self.tool_call_ordinal is None or self.tool_call_arguments is None)
+            and (self.tool_call_ordinal is None or self.tool_call_arguments is None
+                or self.tool_call_name not in {"view_image", "read_video_frames"})
         ):
             raise ValueError("image ToolResult lacks its frozen call source")
         if self.item_kind is FrozenProviderInputItemKind.TOOL_RESULT:
             assert isinstance(self.content, tuple)
             expected_body = (
-                frozen_tool_result_public_text(FrozenPromptContent(self.content))
+                frozen_tool_result_public_text(FrozenPromptContent(self.content), tool_name=self.tool_call_name)
                 if content_has_image(self.content)
                 else join_text_content(self.content)
             )
@@ -1972,7 +1974,7 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
     else:
         content = prompt_provider_parts(item.content)
 
-    return {
+    value = {
         "kind": item.item_kind.value,
         "entry_id": item.source_entry_id,
         "sequence": item.source_entry_sequence,
@@ -2030,6 +2032,10 @@ def provider_input_item_leaf(item: FrozenProviderInputItem) -> Mapping[str, obje
             "classifier_contract": item.tool_result_delivery.classifier_contract,
         },
     }
+    if item.tool_call_name == "read_video_frames":
+        value["tool_call_name"] = item.tool_call_name
+    return value
+
 
 
 def provider_input_item_logical_utf8_bytes(item: FrozenProviderInputItem) -> int:
