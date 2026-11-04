@@ -11,12 +11,12 @@ EXPECTED_BUNDLED_SKILL_NAMES = (
     "pulsara-data-analysis",
     "pulsara-docs",
     "pulsara-mcp-installer",
-    "pulsara-media-review",
     "pulsara-pdf",
     "pulsara-plugin-installer",
     "pulsara-sheets",
     "pulsara-skill-creator",
     "pulsara-skill-installer",
+    "pulsara-video-review",
 )
 if len(EXPECTED_BUNDLED_SKILL_NAMES) != len(set(EXPECTED_BUNDLED_SKILL_NAMES)):
     raise RuntimeError("bundled Skill inventory contains duplicate official names")
