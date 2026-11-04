@@ -155,7 +155,7 @@ def runtime_rows(runtime, plan, scope, *, code_direct_specs=None):
                         item.name,
                         target,
                         None,
-                        "用户通过 slash 菜单使用。" if kind == "MCP_PROMPT" else "已发现元数据；尚未读取或渲染。",
+                        "用户通过 slash 菜单使用。" if kind == "MCP_PROMPT" else "已发现。",
                         item.description,
                     )
                 )

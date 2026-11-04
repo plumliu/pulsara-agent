@@ -27,7 +27,6 @@ from pulsara_agent.memory.product_contract import (
     memory_kind_product_guide,
 )
 from pulsara_agent.memory.targets import memory_target_schema
-from pulsara_agent.code_mode.targets import cell_target_schema
 
 from pulsara_agent.capability.descriptor import (
     BuiltinToolAdvertisePolicy,
@@ -368,9 +367,20 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "query_capabilities": _descriptor(
         name="query_capabilities",
         description=(
-            "Query capabilities. Omit target for an overview or listing; optional fields: kind, scope, source_kind, parent, offset, limit. parent selects whose children to list; kind filters the catalog category. To inspect an object itself, pass only its complete target, without list filters or pagination. target.kind identifies the object type. Omit unused fields; target does not accept null. Read Skill bodies with read_file using a PATH target built from skill_path. "
-            "For MCP_TOOL, copy the listed full tool_name (mcp__<server>__<tool>), not the bare remote name. "
-            "Continue lists by copying the returned next call. description_omitted means inspect the complete target for that description. Results describe the observed catalog and its completeness. SUBAGENT callers can query only their assigned MCP runtime. For MCP tools, follow invocation.mode: DIRECT uses the listed named tool; META uses the returned input_schema and invocation.target with use_new_mcp_tool, including when an older named entry remains listed; UNAVAILABLE gives the current obstacle. Use read_mcp_resource for resource content. MCP_PROMPT queries return metadata only; users select and expand prompts in the composer slash menu."
+            "Query capabilities. List/overview: omit target; optional kind, scope, "
+            "source_kind, parent, offset, limit. parent selects children; kind filters "
+            "the catalog category. Inspect: pass only the complete target, without list "
+            "fields. target.kind identifies the object; target cannot be null. Omit "
+            "unused fields. Copy next to continue; description_omitted means inspect that "
+            "target for its description. Results reflect observed catalog completeness; "
+            "SUBAGENT sees only its assigned MCP runtime.\n"
+            "Read Skill bodies with read_file using a PATH target from skill_path; "
+            "resource content with read_mcp_resource. MCP_PROMPT returns metadata only; "
+            "users expand prompts in the composer slash menu.\n"
+            "For MCP tools, follow invocation.mode even if an older named entry remains: "
+            "DIRECT calls the listed full tool_name (mcp__<server>__<tool>); META uses "
+            "returned input_schema and invocation.target with use_new_mcp_tool; "
+            "UNAVAILABLE reports the obstacle."
         ),
         input_schema=query_input_schema(),
         is_read_only=True,
@@ -379,7 +389,49 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "manage_capability": _descriptor(
         name="manage_capability",
         description=(
-            "Install and manage capabilities requested by the user. ROOT agent only; available in every permission mode.\nSet action and send only its listed fields; fields are required unless marked optional. Copy targets from list/inspect or a management result; a known exact target can be used directly. For ADD_LOCAL_MCP, construct a LOCAL MCP_CONNECTION target with the destination scope and new server_id. Installation targets use source-local IDs, not runtime_server_id; runtime and MCP tool/resource/prompt targets are for inspection, not management.\nINSTALL_LOOSE_SKILL: scope, source_path; optional name, description. Install an independent Skill into a new destination.\nSET_LOOSE_SKILL_ENABLED: target (SKILL), enabled. Toggle an eligible independent Skill.\nREMOVE_LOOSE_SKILL: target (SKILL). Remove an eligible independent Skill directory.\nTRUST_HOOK_SOURCE: target (HOOK_SOURCE). Review and trust current Hook definitions.\nREVOKE_HOOK_TRUST: target (HOOK_SOURCE). Remove trust, keeping definitions.\nSET_HOOK_SOURCE_ENABLED: target (HOOK_SOURCE), enabled. Toggle the Hook source.\nADD_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config. Add an independent connection.\nUPDATE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional config, expected_identity. Replace an independent connection's settings.\nREMOVE_LOCAL_MCP: target (LOCAL MCP_CONNECTION); optional expected_identity. Remove the entry and dedicated local credentials, keeping the server program.\nINSTALL_PLUGIN: scope, source_path; optional replace, source_format. Install the whole Plugin disabled; enable separately.\nSET_PLUGIN_ENABLED: target (PLUGIN), enabled; optional expected_package_install_id. Toggle the whole Plugin, with component review on enable.\nREMOVE_PLUGIN: target (PLUGIN); optional expected_package_install_id. Remove the Plugin and dedicated credentials, preserving its data and original source.\nCONFIGURE_PLUGIN_MCP_CONNECTION: target (PLUGIN MCP_CONNECTION); optional overlay, expected_overlay, expected_package_install_id. Configure a Plugin connection.\nAUTHORIZE_MCP: target (LOCAL or PLUGIN MCP_CONNECTION). Authorize an already configured OAuth connection.\nCLEAR_MCP_AUTHORIZATION: target (LOCAL or PLUGIN MCP_CONNECTION). Clear local OAuth grants, keeping configuration and remote tokens.\nFor both OAuth actions, optional expected_identity applies only to LOCAL targets; optional expected_package_install_id applies only to PLUGIN targets. For MCP_CONNECTION and HOOK_SOURCE targets, LOCAL/PLUGIN selects source_kind.\nUse query_capabilities for eligibility. Plugin Skills are managed through their source Plugin; bundled Skills are read-only. Hook trust, Hook enablement and Plugin enablement are separate settings. Edit loose Skill content with file tools or terminal; pulsara-skill-creator describes authoring.\nPackage IDs in results are VISIBLE with a value or WITHHELD. Only VISIBLE.value is a real guard to copy; WITHHELD cannot be used as a guard. Optional expected_package_install_id may be omitted; the owner freezes the current identity for confirmation. The runtime collects required review and confirmation; READ_ONLY mutations use a user-submitted form. Users enter credentials privately in the editor. Wait for the result: status reports the mutation, current the resulting state, and adoption its availability for future use. A completed mutation needs no routine reload or replay."
+            "Manage user-requested capabilities. ROOT only; all permission modes. "
+            "Signatures: ? means omittable (null only where schema permits); send only "
+            "the selected action's fields.\n"
+            "Copy query/result targets or use a known exact target. ADD_LOCAL_MCP "
+            "constructs a LOCAL MCP_CONNECTION target with destination scope and new "
+            "server_id. LOCAL/PLUGIN below means target.source_kind. Use installation "
+            "identities, not runtime_server_id or MCP tool/resource/prompt targets.\n"
+            "INSTALL_LOOSE_SKILL(scope, source_path, name?, description?): install into a "
+            "new destination.\n"
+            "SET_LOOSE_SKILL_ENABLED(target:SKILL, enabled)\n"
+            "REMOVE_LOOSE_SKILL(target:SKILL): remove an eligible loose Skill directory.\n"
+            "TRUST_HOOK_SOURCE(target:HOOK_SOURCE): review/trust current definitions.\n"
+            "REVOKE_HOOK_TRUST(target:HOOK_SOURCE): keep definitions.\n"
+            "SET_HOOK_SOURCE_ENABLED(target:HOOK_SOURCE, enabled)\n"
+            "ADD_LOCAL_MCP(target:LOCAL MCP_CONNECTION, config?)\n"
+            "UPDATE_LOCAL_MCP(target:LOCAL MCP_CONNECTION, config?, expected_identity?)\n"
+            "REMOVE_LOCAL_MCP(target:LOCAL MCP_CONNECTION, expected_identity?): remove "
+            "entry/dedicated credentials, keep server program.\n"
+            "INSTALL_PLUGIN(scope, source_path, replace?, source_format?): install "
+            "disabled; enable separately.\n"
+            "SET_PLUGIN_ENABLED(target:PLUGIN, enabled, expected_package_install_id?): "
+            "enable requires component review.\n"
+            "REMOVE_PLUGIN(target:PLUGIN, expected_package_install_id?): remove "
+            "instance/dedicated credentials, keep data/source.\n"
+            "CONFIGURE_PLUGIN_MCP_CONNECTION(target:PLUGIN MCP_CONNECTION, overlay?, "
+            "expected_overlay?, expected_package_install_id?)\n"
+            "AUTHORIZE_MCP(target:MCP_CONNECTION): authorize configured OAuth.\n"
+            "CLEAR_MCP_AUTHORIZATION(target:MCP_CONNECTION): clear local grants, keep "
+            "config/remote tokens.\n"
+            "Both OAuth actions allow expected_identity? for LOCAL or "
+            "expected_package_install_id? for PLUGIN only.\n"
+            "Query eligibility. Plugin Skills use their Plugin owner; bundled Skills are "
+            "read-only. Hook trust, Hook enablement and Plugin enablement are "
+            "independent. Edit loose Skills with file tools/terminal; see "
+            "pulsara-skill-creator.\n"
+            "Copy only VISIBLE.value package guards, never WITHHELD; omitted guards are "
+            "inspected/frozen by the owner. Runtime handles required review/confirmation, "
+            "including user-submitted forms for READ_ONLY mutations. Enter credentials "
+            "privately in the editor.\n"
+            "Read status (mutation), current (state), adoption (availability); completed "
+            "mutations need no routine reload or replay. For "
+            "setup/customization/troubleshooting, read pulsara-mcp-installer, "
+            "pulsara-plugin-installer or pulsara-skill-installer as applicable."
         ),
         input_schema=capability_management_input_schema(),
         is_read_only=False,

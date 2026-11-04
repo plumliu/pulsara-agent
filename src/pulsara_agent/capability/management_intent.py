@@ -140,69 +140,72 @@ def capability_management_input_schema() -> dict[str, object]:
         "scope": {
             "type": "string",
             "enum": ["USER", "WORKSPACE"],
-            "description": "Installation destination: USER is the Host home; WORKSPACE is the GUI "
-            "project directory.",
+            "description": "Install in USER (Host home) or WORKSPACE (GUI project).",
         },
         "source_path": {
             "type": "string",
             "minLength": 1,
-            "description": "Absolute local source directory containing SKILL.md or the Plugin "
-            "distribution root; download it first.",
+            "description": (
+                "Absolute local directory containing SKILL.md or the Plugin distribution "
+                "root; download first."
+            ),
         },
         "name": {
             "type": "string",
             "minLength": 1,
-            "description": "Override the installed loose Skill name; omission keeps its source "
-            "name.",
+            "description": "Loose Skill name override; omission keeps its source name.",
         },
         "description": {
             "type": "string",
             "minLength": 1,
-            "description": "Override the installed loose Skill description; omission keeps "
-            "its source description.",
+            "description": (
+                "Loose Skill description override; omission keeps its source description."
+            ),
         },
         "enabled": {"type": "boolean"},
         "config": {
             "type": "object",
-            "description": "Omit to open the connection editor, prefilled for UPDATE. An object "
-            "replaces the complete native entry. Public fields are documented in "
-            "pulsara-mcp-installer; use the editor for credentials or unknown "
-            "settings.",
+            "description": (
+                "Omit for editor (UPDATE prefilled). Object replaces the complete native "
+                "entry. Public fields: pulsara-mcp-installer; credentials/unknown settings: "
+                "editor."
+            ),
         },
         "expected_identity": {
             "type": "string",
             "minLength": 1,
-            "description": "Optional observed local MCP configuration guard; omit for "
-            "automatic inspection.",
+            "description": (
+                "Observed local MCP config guard; omit for owner inspection."
+            ),
         },
         "replace": {
             "type": "boolean",
-            "description": "Omitted means false; true replaces the Plugin instance when requested "
-            "by the user.",
+            "description": "Defaults false; replace only when user-requested.",
         },
         "source_format": {
             "type": "string",
             "enum": ["native", "claude", "codex", "cursor"],
-            "description": "Plugin distribution format; omitted means native.",
+            "description": "Plugin format; defaults to native.",
         },
         "expected_package_install_id": {
             "type": "string",
             "minLength": 1,
-            "description": "Optional observed Plugin installation guard; omit "
-            "for automatic inspection.",
+            "description": "Observed Plugin install guard; omit for owner inspection.",
         },
         "overlay": {
             "type": ["object", "null"],
-            "description": "Omit for the prefilled Plugin connection editor; null restores "
-            "package/input defaults. An object replaces the complete native "
-            "overlay. It configures endpoint, public headers/environment and "
-            "authentication; package-owned command, args, cwd and transport stay "
-            "fixed. Use the editor for credentials or unknown fields.",
+            "description": (
+                "Omit for prefilled editor; null restores package/input defaults; object "
+                "replaces the complete native overlay. Endpoint, public headers/env and auth "
+                "only; package command/args/cwd/transport stay fixed. Credentials/unknown "
+                "fields: editor."
+            ),
         },
         "expected_overlay": {
             "type": ["object", "null"],
-            "description": "Optional observed prior overlay guard; omit for automatic "
-            "inspection. null asserts that no override exists.",
+            "description": (
+                "Observed overlay guard; omit for owner inspection; null asserts no override."
+            ),
         },
     }
     branches = []

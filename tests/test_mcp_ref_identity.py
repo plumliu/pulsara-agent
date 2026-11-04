@@ -67,6 +67,11 @@ def test_canonical_ref_is_copied_from_inspection_and_keeps_installation_and_scop
     assert repeated.ref is prepared.ref
     owner.settle(prepared=repeated, committed=False)
     inspected = json.loads(render_inspected_new_mcp_tool_provider_result(inspection_values(), tool_ref=token))
+    assert "permission_notice" not in inspected
+    assert inspected["invocation_notice"] == "invoke only with use_new_mcp_tool"
+    assert inspected["invocation"]["mode"] == "META"
+    assert inspected["input_schema"] == {"type": "object"}
+    assert inspected["effect_kind"] == "READ_ONLY"
     arguments = {'target': inspected['invocation']['target'], 'arguments': {}}
     validator = Draft202012Validator(thaw_json(builtin_tool_catalog_entry('use_new_mcp_tool').descriptor.input_schema))
     validator.validate(arguments)

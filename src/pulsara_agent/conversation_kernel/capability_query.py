@@ -185,7 +185,7 @@ class CapabilitySourceQuery:
             self.diagnostics.append(
                 {
                     "code": "CAPABILITY_SELECTION_UNKNOWN",
-                    "message": "Some source declarations were observed, but their composition or selection could not be verified.",
+                    "message": "Capability composition or selection is unknown.",
                 }
             )
         return result
@@ -240,7 +240,7 @@ class CapabilitySourceQuery:
                     path.parent.name,
                     target,
                     source,
-                    disabled + "定义无效；不能作为 Skill 使用。",
+                    disabled + "定义无效。",
                 ),
                 {
                     "target": target,
@@ -314,7 +314,7 @@ class CapabilitySourceQuery:
                 detail["diagnostics"].append(
                     {
                         "code": "MCP_RUNTIME_NOT_ASSOCIATED",
-                        "message": "No current runtime catalog is precisely associated with this installed declaration; its remote inventory is unknown.",
+                        "message": "No runtime catalog is associated with this connection; remote inventory is unknown.",
                     }
                 )
             self._add(
@@ -343,7 +343,7 @@ class CapabilitySourceQuery:
                 detail["diagnostics"].append(
                     {
                         "code": "PLUGIN_DISABLED",
-                        "message": "The source Plugin is disabled; trusting these definitions does not enable the Plugin.",
+                        "message": "The source Plugin is disabled.",
                     }
                 )
             self.details[self._key(target)] = detail
@@ -428,7 +428,7 @@ class CapabilitySourceQuery:
                 definition["diagnostics"] = [
                     {
                         "code": "HOOK_MATCHER_NO_CURRENT_TOOL",
-                        "message": "This matcher does not match a tool in the current observed tool inventory; external tool-name aliases do not translate script parameters.",
+                        "message": "This matcher matches no tool in the current observed catalog.",
                     }
                 ]
         status = (
@@ -588,7 +588,7 @@ class CapabilitySourceQuery:
                             Path(issue["path"]).parent.name,
                             target,
                             source,
-                            "定义无效；不能作为 Skill 使用。",
+                            "定义无效。",
                         ),
                         {
                             "target": target,
@@ -661,7 +661,7 @@ class CapabilitySourceQuery:
                     self.diagnostics.append(
                         {
                             "code": "MCP_CONFIG_UNAVAILABLE",
-                            "message": "MCP configuration cannot be parsed; entry presence and availability are unknown." if isinstance(exc, YAMLError) else str(exc),
+                            "message": "MCP configuration could not be parsed." if isinstance(exc, YAMLError) else str(exc),
                             "path": str(
                                 self.service.mcp.path(LocalMcpTarget("inventory", root))
                             ),
@@ -957,7 +957,7 @@ class CapabilitySourceQuery:
                             self.diagnostics.append(
                                 {
                                     "code": "MCP_CATALOG_NOT_DISCOVERED",
-                                    "message": "This visible server's remote catalog has not been observed; its contents are unknown.",
+                                    "message": "Remote catalog not yet observed.",
                                 }
                             )
                         if runtime_diagnostics or (
@@ -996,7 +996,7 @@ class CapabilitySourceQuery:
                         self.diagnostics.append(
                             {
                                 "code": "MCP_RUNTIME_NOT_ASSOCIATED",
-                                "message": "No runtime catalog is precisely associated; an empty page does not establish an empty remote inventory.",
+                                "message": "No runtime catalog is associated with this connection; remote inventory is unknown.",
                             }
                         )
                     rows = [
@@ -1010,7 +1010,7 @@ class CapabilitySourceQuery:
                         self.diagnostics.append(
                             {
                                 "code": "MCP_CATALOG_NOT_DISCOVERED",
-                                "message": "The remote catalog has not been observed; its contents are unknown.",
+                                "message": "Remote catalog not yet observed.",
                             }
                         )
             elif kind is None:
@@ -1133,7 +1133,7 @@ class CapabilitySourceQuery:
                     *detail["diagnostics"],
                     {
                         "code": "MCP_CONFIG_SUMMARY_UNAVAILABLE",
-                        "message": "The exact runtime configuration summary could not be verified.",
+                        "message": "Runtime configuration summary unavailable.",
                     },
                 ]
         return detail

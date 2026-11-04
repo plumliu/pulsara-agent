@@ -15,7 +15,6 @@ from pulsara_agent.primitives.tool_result_projection import (
 )
 
 
-MCP_INSPECT_PERMISSION_NOTICE = "availability does not grant permission"
 MCP_INSPECT_INVOCATION_NOTICE = "invoke only with use_new_mcp_tool"
 _CONSERVATIVE_INSPECT_TOOL_REF = derive_id("mcpref", "inspection-output-budget")
 MAXIMUM_NEW_MCP_TOOL_REF_CHARACTERS = len(_CONSERVATIVE_INSPECT_TOOL_REF)
@@ -58,7 +57,6 @@ def mcp_inspection_descriptor_payload_fingerprint(
             "input_schema": values.input_schema,
             "output_schema": values.output_schema,
             "effect_kind": values.effect_kind,
-            "permission_notice": MCP_INSPECT_PERMISSION_NOTICE,
             "invocation_notice": MCP_INSPECT_INVOCATION_NOTICE,
         },
     )
@@ -86,7 +84,6 @@ def render_inspected_new_mcp_tool_provider_result(
             "input_schema": values.input_schema,
             "invocation_notice": MCP_INSPECT_INVOCATION_NOTICE,
             "output_schema": values.output_schema,
-            "permission_notice": MCP_INSPECT_PERMISSION_NOTICE,
         }
     ).decode("utf-8")
 
@@ -107,7 +104,6 @@ def conservative_mcp_inspection_logical_utf8_bytes(
 __all__ = [
     "MAXIMUM_NEW_MCP_TOOL_REF_CHARACTERS",
     "MCP_INSPECT_INVOCATION_NOTICE",
-    "MCP_INSPECT_PERMISSION_NOTICE",
     "McpInspectionDescriptorValues",
     "conservative_mcp_inspection_logical_utf8_bytes",
     "mcp_inspection_descriptor_payload_fingerprint",
