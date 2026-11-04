@@ -164,7 +164,7 @@ def test_detail_real_endpoints_crop_and_single_frame(tmp_path):
         assert result.images[0].width == 1280 and result.images[0].height == 720
         times.extend(frame["t"] for frame in body["frames"])
     assert sorted(times) == pytest.approx([0, 0.15, 0.29])
-    assert times[:2] == pytest.approx([0, 0.29])
+    assert times == pytest.approx([0, 0.15, 0.29])
     assert pages[-1][1]["complete"]
     single = video(tmp_path / "single.mkv", ["red"])
     assert len(json.loads(read(single, "detail").text)["frames"]) == 1
@@ -356,7 +356,7 @@ def test_readable_floor_and_dp_cancel():
         pack_rows(rows, 1280, 720, cancelled=lambda: True)
 
 
-def test_detail_does_not_cap_supplementary_local_states_at_three(tmp_path):
+def test_detail_samples_exact_grid_without_appending_nearby_changes(tmp_path):
     colors = ["red"] * 100
     colors[1:4] = ["blue", "green", "yellow"]
     colors[48:52] = ["blue", "green", "yellow", "purple"]
@@ -365,7 +365,7 @@ def test_detail_does_not_cap_supplementary_local_states_at_three(tmp_path):
     with MediaSource.open(path) as source:
         info = probe_media(source)
         plan = prepare_frame_plan(source, info, start=0, end=info.duration, mode="detail")
-    assert plan.observation_count > 3
+    assert [float(frame.t) for frame in plan.priority] == pytest.approx([0, 0.5, 0.99])
     pages = read_pages(path, "detail", budget=FrameBudget(
         8_000_000, 1280 * 720 * 4, 12, FRAME_ANALYSIS_FRAMES))
     times = [frame["t"] for _, body in pages for frame in body["frames"]]
@@ -450,7 +450,7 @@ def test_aba_three_cell_pages_never_remove_the_excursion_or_return(tmp_path):
     assert error.value.code == "RESOURCE_BOUNDARY"
 
 
-def test_detail_clarity_search_stays_near_each_endpoint(tmp_path):
+def test_detail_keeps_exact_times_when_nearby_frames_are_sharper(tmp_path):
     sharp = Image.new("RGB", (320, 180), "white")
     ImageDraw.Draw(sharp).text((10, 30), "A", fill="black")
     blur = sharp.filter(ImageFilter.GaussianBlur(1))
@@ -459,6 +459,6 @@ def test_detail_clarity_search_stays_near_each_endpoint(tmp_path):
     pages = read_pages(path, "detail", budget=FrameBudget(
         1_000_000, 1280 * 720, 1, FRAME_ANALYSIS_FRAMES))
     times = sorted(frame["t"] for _, body in pages for frame in body["frames"])
-    assert times[0] == pytest.approx(0.01)
-    assert times[-1] == pytest.approx(0.18)
-    assert len(times) == 3
+    assert times[0] == 0
+    assert times[-1] == pytest.approx(0.19)
+    assert times == pytest.approx([0, 0.1, 0.19])

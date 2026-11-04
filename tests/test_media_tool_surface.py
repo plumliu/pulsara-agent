@@ -174,7 +174,7 @@ def test_media_hidden_subagent_code_mode_and_forged_entry_denied(tmp_path):
 
 
 def test_real_frames_and_annotation_use_production_dispatch(tmp_path):
-    path = video(tmp_path / "states.mkv", ["red"] * 4 + ["blue"] * 4 + ["red"] * 12)
+    path = video(tmp_path / "states.mkv", ["red"] * 4 + ["blue"] * 4 + ["red"] * 12, rate=10)
 
     async def run():
         validator = HostPromptImageValidator()
@@ -190,7 +190,7 @@ def test_real_frames_and_annotation_use_production_dispatch(tmp_path):
             assert isinstance(frames.content, FrozenPromptContent)
             assert (
                 len([p for p in frames.content.parts if isinstance(p, LLMImagePart)])
-                >= 2
+                == 2
             )
             body = json.loads(
                 frozen_tool_result_public_text(
@@ -204,6 +204,8 @@ def test_real_frames_and_annotation_use_production_dispatch(tmp_path):
             }
             assert body["frames"][0]["t"] == 0
             assert body["frames"][-1]["t"] > 0
+            assert [frame["t"] for frame in body["frames"]] == [0, 0.5, 1, 1.5, 1.9]
+            assert [frame["image"] for frame in body["frames"]] == [1, 2, 1, 1, 1]
             annotation = await invoke(
                 port,
                 "annotate_media",

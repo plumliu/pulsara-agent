@@ -19,27 +19,25 @@ from PIL import Image, ImageDraw
 from pulsara_agent.llm.input import MAXIMUM_PROMPT_IMAGE_PIXELS
 from .source import FramePosition, MediaError, MediaInfo, MediaSource
 from .frames_decode import FrameTarget, VideoDecoder
+from .frames_detail import DetailGrid
 from .frames_layout import Cell, Layout, maximum_cell_width, pack_rows, row_candidates
 from .frames_selection import (
     Sample,
     detect_changes,
-    distance,
-    features,
     overview_priority,
-    sharpness,
 )
 
 FrameMode = Literal["overview", "detail", "motion"]
 # This policy changes only at a declared selection-contract revision. Its
 # physical analysis slots reuse the existing total image-raster allocation;
 # neither provider remaining allowance nor the current page changes the plan.
-FRAME_SELECTION_REVISION = "frames-v1"
+FRAME_SELECTION_REVISION = "frames-v2"
 FRAME_ANALYSIS_FRAMES = max(3, MAXIMUM_PROMPT_IMAGE_PIXELS // (256 * 256))
 
 
 @dataclass(frozen=True)
 class FrameBudget:
-    """Call-local physical render and low-resolution working-set admission."""
+    """Call-local physical render and source-observation admission."""
 
     maximum_bytes: int
     image_pixels: int
@@ -81,6 +79,8 @@ class FrameObservation:
     t: Fraction
     end: Fraction | None
     representative_range: tuple[Fraction, Fraction] | None = None
+    detail_grid_ordinal: int | None = None
+    detail_next_grid_ordinal: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +98,8 @@ class FramePlan:
     observed_cut_times: tuple[Fraction, ...] = ()
     probe_count: int = 0
     max_probe_gap: float = 0.0
+    detail_grid_start: int | None = None
+    detail_grid_count: int | None = None
 
     @property
     def observation_count(self) -> int:
@@ -191,6 +193,68 @@ def _validate_request(start, end, mode, crop):
         )
 
 
+def _prepare_detail_plan(
+    source, info, *, start_time, requested_end, end_time, crop, grid_start,
+    capacity, cancelled, progress,
+) -> FramePlan:
+    """Resolve an exact global-grid prefix without retaining source rasters."""
+    effective_start = (
+        max(start_time, info.video_start)
+        if info.video_start is not None else start_time
+    )
+    grid = DetailGrid(effective_start, end_time)
+    first_target = grid.target(grid_start)
+    published = False
+    if progress is not None and first_target.t < end_time:
+        progress((float(first_target.t), float(end_time)))
+        published = True
+    observations = []
+    ordinal = grid_start
+    aspect = None
+    with VideoDecoder(source, info, cancelled=cancelled) as decoder:
+        while ordinal < grid.count and len(observations) < capacity:
+            _check(cancelled)
+            target = grid.target(ordinal)
+            frames = decoder.visible_many((target,), range_end=end_time)
+            visible = next(frames)
+            if visible.end is None:
+                raise MediaError(
+                    "MEDIA_TIMESTAMP_UNAVAILABLE",
+                    "Detail sampling cannot advance without a verified source presentation interval",
+                )
+            if aspect is None:
+                image = _crop(visible.image, crop)
+                aspect = Fraction(image.width, image.height)
+                del image
+                if progress is not None and not published:
+                    progress((float(max(effective_start, visible.t)), float(end_time)))
+            following = grid.after_interval(ordinal, visible.end)
+            observations.append(FrameObservation(
+                visible.position, visible.t, visible.end,
+                detail_grid_ordinal=ordinal, detail_next_grid_ordinal=following,
+            ))
+            ordinal = following
+            del visible
+            # Close the one-target iterator before the decoder is reused.
+            frames.close()
+    if not observations or aspect is None:
+        raise MediaError("MEDIA_DECODE_FAILED", "No visible source frames in requested interval")
+    source.assert_unchanged()
+    return FramePlan(
+        priority=tuple(observations),
+        requested_range=(float(start_time), float(requested_end)),
+        processed_range=(max(effective_start, observations[0].t), min(end_time, observations[-1].end)),
+        mode="detail", crop=crop, display_aspect=aspect,
+        complete=ordinal == grid.count, video_ended=end_time < requested_end,
+        probe_count=len(observations),
+        max_probe_gap=max(
+            (float(b.t - a.t) for a, b in zip(observations, observations[1:])),
+            default=0.0,
+        ),
+        detail_grid_start=grid_start, detail_grid_count=grid.count,
+    )
+
+
 def prepare_frame_plan(
     source: MediaSource,
     info: MediaInfo,
@@ -200,6 +264,7 @@ def prepare_frame_plan(
     mode: FrameMode = "overview",
     crop: tuple[float, float, float, float] | None = None,
     window_start: FramePosition | None = None,
+    detail_grid_start: int = 0,
     analysis_frames: int = FRAME_ANALYSIS_FRAMES,
     cancelled: Callable[[], bool] | None = None,
     progress: Callable[[tuple[float, float]], None] | None = None,
@@ -232,6 +297,13 @@ def prepare_frame_plan(
         )
     video_ended = end_time < requested_end
     crop = tuple(crop) if crop is not None else None
+    if mode == "detail":
+        return _prepare_detail_plan(
+            source, info, start_time=start_time, requested_end=requested_end,
+            end_time=end_time, crop=crop, grid_start=detail_grid_start,
+            capacity=min(analysis_frames, FRAME_ANALYSIS_FRAMES),
+            cancelled=cancelled, progress=progress,
+        )
     samples: list[Sample] = []
     observations: dict[Fraction, FrameObservation] = {}
     analysis_images: dict[Fraction, Image.Image] = {}
@@ -241,7 +313,7 @@ def prepare_frame_plan(
         if progress is not None:
             progress((float(span[0]), float(span[1])))
 
-    def take(visible, window=0, required=()):
+    def take(visible, window=0):
         nonlocal display_aspect
         _check(cancelled)
         if visible.t not in analysis_images:
@@ -250,9 +322,7 @@ def prepare_frame_plan(
             if display_aspect is None:
                 display_aspect = Fraction(image.width, image.height)
             analysis_images[visible.t] = _analysis_view(image)
-        sample = Sample(
-            visible.t, analysis_images[visible.t], window, visible.end, required
-        )
+        sample = Sample(visible.t, analysis_images[visible.t], window, visible.end)
         observations[visible.t] = FrameObservation(
             visible.position, visible.t, visible.end
         )
@@ -355,112 +425,6 @@ def prepare_frame_plan(
                     video_ended = True
                 scanned.append((max(scan_start, samples[0].t), processed_end))
             priority = tuple(range(len(samples)))
-        else:
-            publish((start_time, end_time))
-            base_samples = []
-            roles = (0, 1, 2)
-            targets = (
-                FrameTarget(start_time),
-                FrameTarget((start_time + end_time) / 2),
-                FrameTarget(end_time, before=True),
-            )
-            base_frames = iter(decoder.visible_many(targets, range_end=end_time))
-            for role in roles:
-                visible = next(base_frames)
-                base_samples.append((role, take(visible, role + 1)))
-                del visible
-            if next(base_frames, None) is not None:
-                raise RuntimeError(
-                    "Decoder returned more detail observations than requested"
-                )
-            per_position = max(1, FRAME_ANALYSIS_FRAMES // len(base_samples))
-            combined = {}
-            for role, base in base_samples:
-                duration = base.end - base.t if base.end is not None else Fraction(0)
-                radius = min(
-                    (end_time - start_time) / 6, duration * max(1, per_position // 2)
-                )
-                left = max(start_time, base.t - radius)
-                right = min(end_time, max(base.end or base.t, base.t + radius))
-                nearby = {}
-                if left < right:
-                    # The independently resolved base owns one of this location's
-                    # slots even when dense pre-roll consumes the scan prefix.
-                    for visible in decoder.scan(left, right, max(1, per_position - 1)):
-                        nearby[visible.t] = take(visible, role + 1)
-                        del visible
-                    if nearby:
-                        last = nearby[max(nearby)]
-                        scanned.append(
-                            (max(left, min(nearby)), min(right, last.end or last.t))
-                        )
-                nearby[base.t] = base
-                if len(nearby) > per_position:
-                    del nearby[
-                        max(
-                            (t for t in nearby if t != base.t),
-                            key=lambda t: abs(t - base.t),
-                        )
-                    ]
-                ordered = sorted(nearby.values(), key=lambda sample: sample.t)
-                center = next(
-                    i for i, sample in enumerate(ordered) if sample.t == base.t
-                )
-                stable = {center}
-                base_view = features(base.image)
-                for step in (-1, 1):
-                    position = center + step
-                    while 0 <= position < len(ordered):
-                        global_change, local_change = distance(
-                            base_view, features(ordered[position].image)
-                        )
-                        before, after = sorted(
-                            (ordered[position], ordered[position - step]),
-                            key=lambda sample: sample.t,
-                        )
-                        if (
-                            before.end is None
-                            or before.end < after.t
-                            or global_change > 3
-                            or local_change > 0.15
-                        ):
-                            break
-                        stable.add(position)
-                        position += step
-                best = max(
-                    stable,
-                    key=lambda i: (
-                        sharpness(ordered[i].image),
-                        -abs(ordered[i].t - base.t),
-                        -ordered[i].t,
-                    ),
-                )
-                ordered[best] = replace(ordered[best], required=(role,))
-                for sample in ordered:
-                    previous = combined.get(sample.t)
-                    if previous is None:
-                        combined[sample.t] = sample
-                    elif sample.required:
-                        combined[sample.t] = replace(
-                            previous,
-                            required=tuple(
-                                sorted(set(previous.required + sample.required))
-                            ),
-                        )
-                admit_count(len(combined))
-            samples = sorted(combined.values(), key=lambda sample: sample.t)
-            changes = detect_changes(samples)
-            required = {
-                role: i for i, sample in enumerate(samples) for role in sample.required
-            }
-            selected = []
-            for role in (0, 2, 1):
-                if role in required and required[role] not in selected:
-                    selected.append(required[role])
-            for i in changes.candidates:
-                if i not in selected:
-                    selected.append(i)
-            priority = tuple(selected)
     if not samples or display_aspect is None:
         raise MediaError(
             "MEDIA_DECODE_FAILED", "No visible source frames in requested interval"
@@ -481,7 +445,7 @@ def prepare_frame_plan(
             replace(observation, representative_range=ranges[observation.t])
             for observation in ordered_observations
         ]
-    changes = detect_changes(samples) if mode != "overview" else None
+    changes = detect_changes(samples) if mode == "motion" else None
     source.assert_unchanged()
     return FramePlan(
         priority=tuple(ordered_observations),
@@ -514,26 +478,6 @@ def _layout_page(plan, observations, budget, floor, cancelled):
         raise MediaError(
             "INVALID_ARGUMENTS",
             "Scene-floor degradation is only permitted for a single observation",
-        )
-    if plan.mode == "detail" and not floor:
-        # Spatial detail uses the original clear-image target, not scene-only
-        # collage cells; pagination preserves each endpoint independently.
-        width, height = _canvas(aspect)
-        if width < minimum[0] or height < minimum[1]:
-            raise MediaError(
-                "RESOURCE_BOUNDARY",
-                "Clear detail images do not fit the physical page allocation",
-            )
-        if count > budget.maximum_images:
-            raise MediaError(
-                "RESOURCE_BOUNDARY",
-                "Detail image count exceeds the physical page allocation",
-            )
-        return Layout(
-            tuple(Cell(i, i, (0, 0, width, height)) for i in range(count)),
-            tuple((width, height) for _ in range(count)),
-            0,
-            count * width * height,
         )
     if count == 1:
         width, height = minimum
@@ -628,6 +572,10 @@ def frame_page_fits_geometry(
         or not 0 <= offset < offset + count <= plan.observation_count
     ):
         return False
+    if plan.mode == "detail":
+        # Several source observations can share one exact rendered image.
+        # Only the actual renderer can establish the unique raster allocation.
+        return not floor
     try:
         layout = _layout_page(
             plan, plan.priority[offset : offset + count], budget, floor, None
@@ -640,32 +588,7 @@ def frame_page_fits_geometry(
     )
 
 
-def render_frame_page(
-    source: MediaSource,
-    info: MediaInfo,
-    plan: FramePlan,
-    *,
-    offset: int,
-    count: int,
-    budget: FrameBudget,
-    floor: bool = False,
-    cancelled: Callable[[], bool] | None = None,
-) -> FrameReadResult:
-    """Render only the given priority slice; never select or analyze again."""
-    _check(cancelled)
-    source.assert_unchanged()
-    if (
-        type(offset) is not int
-        or type(count) is not int
-        or count < 1
-        or not 0 <= offset < offset + count <= plan.observation_count
-    ):
-        raise MediaError(
-            "INVALID_ARGUMENTS", "Frame page is outside the fixed selection plan"
-        )
-    selected = sorted(
-        plan.priority[offset : offset + count], key=lambda observation: observation.t
-    )
+def _render_layout_images(source, info, plan, selected, *, budget, floor, cancelled):
     try:
         layout = _layout_page(plan, selected, budget, floor, cancelled)
     except ValueError as exc:
@@ -749,12 +672,53 @@ def render_frame_page(
             "RESOURCE_BOUNDARY",
             "Encoded frame page exceeds the physical byte allocation",
         )
+    return tuple(images), index
+
+
+def render_frame_page(
+    source: MediaSource,
+    info: MediaInfo,
+    plan: FramePlan,
+    *,
+    offset: int,
+    count: int,
+    budget: FrameBudget,
+    floor: bool = False,
+    cancelled: Callable[[], bool] | None = None,
+) -> FrameReadResult:
+    """Render the given slice, admitting a detail prefix at physical limits."""
+    _check(cancelled)
+    source.assert_unchanged()
+    if (
+        type(offset) is not int
+        or type(count) is not int
+        or count < 1
+        or not 0 <= offset < offset + count <= plan.observation_count
+    ):
+        raise MediaError(
+            "INVALID_ARGUMENTS", "Frame page is outside the fixed selection plan"
+        )
+    selected = sorted(
+        plan.priority[offset : offset + count], key=lambda observation: observation.t
+    )
+    if plan.mode == "detail":
+        if floor:
+            raise MediaError("INVALID_ARGUMENTS", "Detail does not permit scene-floor images")
+        from .frames_detail_render import render_detail_images
+
+        images, index = render_detail_images(
+            source, info, plan, selected, budget=budget, cancelled=cancelled,
+        )
+    else:
+        images, index = _render_layout_images(
+            source, info, plan, selected, budget=budget, floor=floor, cancelled=cancelled,
+        )
     limitations = [
         "Sampling does not rule out unobserved brief changes; ordered does not mean every source frame."
     ]
     if plan.mode == "detail":
         limitations.append(
-            "Local sharpness is a pixel proxy; unselected pages and text are not fully read."
+            "Detail uses exact half-second targets, or start/middle/end for short ranges; sampled frames may be blurred and intervening pages or text are not fully read. Identical rendered images can share one image number while retaining their distinct observation times."
         )
     if info.video_start is not None and info.video_start > _fraction(
         plan.requested_range[0]
@@ -823,6 +787,7 @@ def read_video_frames(
     from .frames_paging import (
         FramePagePosition,
         read_frame_continuation,
+        trim_detail_page,
         with_frame_page_continuation,
     )
 
@@ -848,6 +813,7 @@ def read_video_frames(
         mode=mode,
         crop=crop,
         window_start=position.window_start,
+        detail_grid_start=position.next_global_grid_ordinal or 0,
         analysis_frames=budget.analysis_frames,
         cancelled=cancelled,
         progress=progress,
@@ -858,7 +824,10 @@ def read_video_frames(
             "INVALID_ARGUMENTS",
             "Frame continuation is outside the fixed selection plan",
         )
-    for count in range(remaining, 0, -1):
+    count = remaining
+    detail_candidate = None
+    while count:
+        retry_singleton = False
         for floor in (False, True) if count == 1 and mode == "overview" else (False,):
             if not frame_page_fits_geometry(
                 plan,
@@ -869,20 +838,39 @@ def read_video_frames(
             ):
                 continue
             try:
-                candidate = render_frame_page(
-                    source,
-                    info,
-                    plan,
-                    offset=position.next_observation,
-                    count=count,
-                    budget=budget,
-                    floor=floor,
-                    cancelled=cancelled,
-                )
+                if detail_candidate is not None:
+                    candidate = trim_detail_page(detail_candidate, count)
+                else:
+                    candidate = render_frame_page(
+                        source,
+                        info,
+                        plan,
+                        offset=position.next_observation,
+                        count=count,
+                        budget=budget,
+                        floor=floor,
+                        cancelled=cancelled,
+                    )
             except MediaError as exc:
                 if exc.code == "RESOURCE_BOUNDARY":
+                    if mode == "detail":
+                        # A resource failure may come from outside the prefix
+                        # renderer. Try the exact singleton once, without
+                        # guessing from an error message or replaying every size.
+                        if count > 1:
+                            count = 1
+                            retry_singleton = True
+                            break
+                        raise
                     continue
                 raise
+            if mode == "detail":
+                actual_frames = json.loads(candidate.text).get("frames")
+                if not isinstance(actual_frames, list) or not 1 <= len(actual_frames) <= count:
+                    raise ValueError("Detail rendering must return a nonempty selected prefix")
+                count = len(actual_frames)
+                if detail_candidate is None:
+                    detail_candidate = candidate
             candidate = with_frame_page_continuation(
                 candidate,
                 source=source,
@@ -894,6 +882,9 @@ def read_video_frames(
             )
             if accepts is None or accepts(candidate):
                 return candidate
+        if retry_singleton:
+            continue
+        count -= 1
     raise MediaError(
         "RESOURCE_BOUNDARY",
         "One readable source frame, its complete index and continuation do not fit this call",

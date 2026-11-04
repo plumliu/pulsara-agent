@@ -67,7 +67,9 @@
 
 view_image、read_video_frames 等真实图片结果分支同样执行 ToolResultPageBudget 的完整外层文字检查，并复用图片 owner 已有的实际图文联合 provider quote。单条消息 canonical/logical 容量、实际 wire 和 token 均须通过；不按历史累计字节缩减本次消息容量，同一份文字不能重复计费。FrozenPromptContent 不形成跳过文字预算的例外。
 
-read_video_frames 的页面包含实际图片、对应完整索引、必要控制事实和完整 next；先联合检查再接受，不能只分页索引、先提交文字后丢图片，或保存成功后才发现模型无法取得最小页。C/P 仅包含本次接受页，无隐藏图文后缀。来源工具拥有稳定代表序列和 continuation，通用层只验证，不重选帧。预算只改变页切分与排版；减少本页末尾观察后用实际 quote 重排，不能假设 JPEG/DP 字节单调。最小原子证据为一帧及其对应索引；端点或已选中间过程可以跨页，但必须披露未完成并保留 next，不能删除中间状态。
+read_video_frames 的页面包含实际图片、对应完整索引、必要控制事实和完整 next；先联合检查再接受，不能只分页索引、先提交文字后丢图片，或保存成功后才发现模型无法取得最小页。C/P 仅包含本次接受页，无隐藏图文后缀。来源工具拥有稳定代表序列和 continuation，通用层只验证，不重选帧。预算只改变页切分与排版；减少本页末尾观察后用实际 quote 重排，不能假设 JPEG/DP 字节单调。最小原子证据为一帧及其对应索引；选定观察可以跨页，但必须披露未完成并保留 next，不能删除中间状态。detail 使用 `frames-v2` 半秒全局精确采样，≤一秒保首中尾，其余按有效起点每 0.5 秒铺格并补 strict-before 终目标；五秒通常十一处。任意总范围可继续，不固定全请求帧数，不拒绝总时长。每次惰性准备至多既有 256 个不同源观察，continuation 仅为下一未交付全局目标 ordinal，按最后交付帧的已证展示区间跳格，不能按准备尾推进。物理批可变，不建立独立窗口游标或持久计划。请求 to 超出 video_end 时，有效格点耗尽仍可 next=null/complete=false，明确原请求尾部无视频；null 不能独自证明完整覆盖。
+
+detail 仅在当前候选页中对目标尺寸、未烧号 RGB 完全一致的栅格共享图片，每个不同源观察仍保留 n/t/visible_range/image/cell_rect；烧唯一 image 序号，不按低清相似或同文字猜测删观察。几何准入区分观察数与唯一图数；增量渲染只保留物理准入允许的唯一图及当前栅格，不一次物化全部准备批原图。精确共享也可能由完整时间索引的文字预算分页；不同像素、滚动和噪声可正常多图。物理渲染返回实际接纳的非空前缀；后续图文 quote 缩页可在本调用内截取该未接受编码页的 frame/image 前缀，保留图片字节与烧号并重算完整 next，不重选源证据、不跨调用存储。
 
 read_file(SESSION_ENTRY) 只读取既有 UTF-8 正文，不能充当多模态源续读或取得尚未交付图片的入口；历史图片沿已有 IMAGE_REF。图文 continuation 不建立 hash、HMAC、实体 ID、注册表、持久分页计划或后台作业。
 
@@ -194,7 +196,7 @@ Pulsara 驻留为页、argv/路径批次、管道缓存和**最大单条 rg JSON
 | exec_cell / query_cells / manage_cell | 接纳/控制短回执；冻结源码页用完整 Q 与 next | 正式输出仍由既有队列接受；普通内部结果不自动向 ROOT 披露；不消费输出来查询状态 |
 | open_in_pulsara | 整份展示控制执行前准入，不给展示效果做结果分页 | 顺序、逐项 errors、最终选中目标；不新增任意 maxItems |
 | view_image | 沿原图片 owner 和共享完整工具文字预算联合准入 | IMAGE_REF、精确附件、完整成功/错误分支和实际图文 quote，不变成 Base64 文本 |
-| read_video_frames | 固定代表计划的完整图文源页与原工具 continuation | 六参数 ROOT 直接工具，图文索引一一对应；预算不重选帧，当前页压缩保护和完整 next，不用 read_file 代替多模态源续读 |
+| read_video_frames | 确定性源序列的完整图文页与原工具 continuation | 六参数 ROOT 直接工具；detail 半秒格点/单 ordinal/页内 exact RGB 共享，多个时间观察可指同一 image；预算不重选帧，当前页压缩保护和完整 next，不用 read_file 代替多模态源续读 |
 | todo | 原计数短回执，安装前检查 | 原 checklist 及安装/取消结算，不新增持久状态 |
 | enter_plan / ask_plan_question / exit_plan | 原短控制结果，C/facts 为公开投影 | 独占执行、批准/修订/取消、完整答案及 continuation；不把内部 storage carrier 当公开正文 |
 
@@ -232,9 +234,19 @@ Pulsara 驻留为页、argv/路径批次、管道缓存和**最大单条 rg JSON
 
 实施使用原 8 个 gpt-6.1-sol / high 代理分别负责 core/CodeMode、filesystem/search、terminal、capability/MCP、history、agent/schedule、memory/runtime、frontend/protocol。root 负责公共预算、执行集成与最终逐条严格审计。视频图文页按第 2.2.1 节和视频实现规格的六参数接口共同验收。
 
-## 7. 本轮验收记录
+## 7. 验收记录
 
-- 真实视觉模型专项共 20 次请求：自然 hello、三页工具返回后压缩、preaccept 真实重新预算后的整页/缩页、固定图对照与 detail/crop。当前页原图、完整索引和 tool-call 归属保留，next 逐观察无重漏；七对同 epoch 前缀连续。最小页不适配由真实 Host typed-boundary 测试核对。固定图对照出现小字误读，不能据此宣布理解质量占优；原始输入/回答/usage 保存在 output/video-implementation-acceptance/。
+当前 detail `frames-v2` 已通过源序列、全局续读、页内精确共享与真实图文联合分页验收。旧路径的回归和发行基线分别保留，不能用旧 provider 回答替代新路径的验收。
+
+### 当前 detail 验收
+
+- 本轮真实视觉模型经四页 detail 和强制压缩，读对全部七个时刻的字符，验证三页共享图片、完整 next、全局 ordinal、压缩后完整当前图文及三个同 epoch 前缀比较。首次模型漏抄游标字段的失败记录保留，定向增强复制指令后严格复验通过；证据为 output/detail-adversarial/real-visual-recheck/。
+- 本轮后端全量 5,661 项通过、20 项既有 WSL 跳过、15 subtests 通过；唯一测试辅助代码失败在冻结后的 11 项专项中复验通过，合计核验 5,662 个用例。共享图片的前端时间定位专项 7 项通过，Ruff 与 diff 检查通过。
+- 同次真实复验经 overview 定位及多次 crop 调整，读取 hello 原帧数字 49.3/1.9/3.8 正确。两项合计 11 次请求、七对同 epoch 前缀比较通过，隔离数据库已删除；不据此推断通用文字准确率或采样最优性。本轮未构建安装。
+
+### 其他路径与发行基线
+
+- 既有真实视觉模型专项共 20 次请求：自然 hello、三页工具返回后压缩、preaccept 真实重新预算后的整页/缩页、固定图对照与 detail/crop。当前页原图、完整索引和 tool-call 归属保留，next 逐观察无重漏；七对同 epoch 前缀连续。最小页不适配由真实 Host typed-boundary 测试核对。固定图对照出现小字误读，不能据此宣布理解质量占优；原始输入/回答/usage 保存在 output/video-implementation-acceptance/。
 - 完整 Python 回归：5621 通过、0 失败、20 个既有 Linux/WSL 环境跳过、15 subtests 通过；未新增 skip/xfail。
 - 前端 1606 项、desktop 使用项目 Node 22 的 149 项已通过；本轮未改它们的生产代码/CSS，真实 Chromium 行为测试由完整 Python 回归覆盖。
 - 工具输出完整真实 provider 验证覆盖大结果、准确 source copy、Code Mode bridge 和明确 compaction；当前行为收尾另以 3 次真实调用验证 next 与两对 prefix 连续性。

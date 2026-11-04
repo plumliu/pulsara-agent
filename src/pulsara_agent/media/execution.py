@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from time import monotonic
 
 from pulsara_agent.conversation_kernel.io import PhysicalToolInvocationDisposition
@@ -40,6 +41,7 @@ from .frames import (
 from .frames_paging import (
     FramePagePosition,
     read_frame_continuation,
+    trim_detail_page,
     with_frame_page_continuation,
 )
 from .source import MediaError, MediaSource, probe_media, validate_range
@@ -253,12 +255,15 @@ async def execute_media(
             prepare_frame_plan, source, info,
             start=span.start, end=span.end, mode=mode, crop=crop,
             window_start=position.window_start,
+            detail_grid_start=position.next_global_grid_ordinal or 0,
             analysis_frames=FRAME_ANALYSIS_FRAMES,
             deadline_monotonic=deadline,
             on_progress=begin_frames_range,
             on_started=begin_frames,
         )
-        if position.next_observation >= plan.observation_count:
+        if plan.observation_count == 0 or (
+            mode != "detail" and position.next_observation >= plan.observation_count
+        ):
             raise MediaError("INVALID_ARGUMENTS", "Frame continuation is outside the selection plan")
         content = await render_prepared_frame_page(
             source=source, info=info, plan=plan, position=position,
@@ -301,22 +306,26 @@ async def render_prepared_frame_page(
 ) -> FrozenPromptContent:
     """Quote complete slices of one prepared plan; never reselect or reanalyse.
 
-    Encoding/layout cost is not monotone. A finite trailing removal reaches
-    the actual indexed singleton boundary without assuming binary search fits.
-    The one-shot render worker may decode again; only bounded low-res plan
-    values survive between attempts.
+    Detail retains one physically admitted encoded candidate and projects its
+    prefixes for joint quotes. Other modes may render smaller slices because
+    their changing collage geometry makes encoded cost non-monotone. Every
+    mode can reach the actual indexed singleton boundary without reselecting.
     """
-    count = plan.observation_count - position.next_observation
+    offset = 0 if plan.mode == "detail" else position.next_observation
+    count = plan.observation_count - offset
     if count < 1:
         raise MediaError("INVALID_ARGUMENTS", "Frame continuation has no remaining observation")
     floor = False
     refresh_attempted = False
+    raw_detail_candidate = None
     while True:
         source.assert_unchanged()
         if not frame_page_fits_geometry(
-            plan, offset=position.next_observation, count=count,
+            plan, offset=offset, count=count,
             budget=budget, floor=floor,
         ):
+            if plan.mode == "detail":
+                raise MediaError("RESOURCE_BOUNDARY", "The minimum detail geometry exceeds the physical allocation")
             if count > 1:
                 count -= 1
                 continue
@@ -325,13 +334,25 @@ async def render_prepared_frame_page(
                 continue
             raise MediaError("RESOURCE_BOUNDARY", "The minimum frame geometry exceeds the physical allocation")
         try:
-            candidate = await worker.run(
-                render_frame_page, source, info, plan,
-                offset=position.next_observation, count=count, budget=budget,
-                floor=floor, deadline_monotonic=deadline,
+            candidate = (
+                trim_detail_page(raw_detail_candidate, count)
+                if raw_detail_candidate is not None else
+                await worker.run(
+                    render_frame_page, source, info, plan,
+                    offset=offset, count=count, budget=budget,
+                    floor=floor, deadline_monotonic=deadline,
+                )
             )
         except MediaError as exc:
             if exc.code != "RESOURCE_BOUNDARY":
+                raise
+            if plan.mode == "detail":
+                # A worker-wide memory/serialization boundary may happen before
+                # the renderer can return its admitted prefix. Try the actual
+                # singleton atom rather than rerendering every trailing removal.
+                if count > 1:
+                    count = 1
+                    continue
                 raise
             if count > 1:
                 count -= 1
@@ -340,6 +361,16 @@ async def render_prepared_frame_page(
                 floor = True
                 continue
             raise
+        if plan.mode == "detail":
+            # Exact RGB sharing determines physical image cost only while
+            # rendering. A full requested slice may therefore yield its
+            # actually admitted prefix; quote and continue from that prefix.
+            rendered = json.loads(candidate.text).get("frames")
+            if not isinstance(rendered, list) or not 1 <= len(rendered) <= count:
+                raise ValueError("Rendered detail page is not a nonempty requested prefix")
+            count = len(rendered)
+            if raw_detail_candidate is None:
+                raw_detail_candidate = candidate
         candidate = with_frame_page_continuation(
             candidate, source=source, info=info, plan=plan, position=position,
             count=count, selection_revision=FRAME_SELECTION_REVISION,
@@ -384,7 +415,8 @@ async def render_prepared_frame_page(
                 ):
                     source.assert_unchanged()
                     return content
-        # Do not retain a rejected encoded page while the next child renders.
+        # Detail retries project its one admitted raw encoded prefix. Other
+        # modes release rejected pages before the next child renders.
         del content, candidate
         if count > 1:
             count -= 1

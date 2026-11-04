@@ -74,12 +74,15 @@ def _delivered_page(request, call_id):
 
 
 class _FramePagingModel(_Model):
-    def __init__(self, runtime, path):
+    def __init__(self, runtime, path, *, mode="overview"):
         super().__init__()
         self._model_runtime = runtime
         self._preparer = DirectKernelModelPort(model_runtime=runtime)
         self.path = path
+        self.mode = mode
         self.rendered = {}
+        self.pages = []
+        self.observations = []
         self.last_call = None
         self.positions = []
         self.normal_after_page = []
@@ -95,7 +98,7 @@ class _FramePagingModel(_Model):
             self.last_call = random_id("call")
             events = _tool_call("read_video_frames", self.last_call, {
                 "target": {"kind": "PATH", "path": str(self.path)},
-                "from": 0, "to": 22, "mode": "overview",
+                "from": 0, "to": 22, "mode": self.mode,
             })
         else:
             text, body, images = _delivered_page(request, self.last_call)
@@ -105,41 +108,73 @@ class _FramePagingModel(_Model):
             assert self.summary.calls, "No compaction occurred between the actual page and its normal request"
             assert request.cut.context_binding_revision_id != self.first_binding
             self.normal_after_page.append(request)
+            self.pages.append(body)
+            if self.mode == "detail":
+                assert body["sampling"] == "ordered"
+                assert body["scanned_ranges"] == body["observed_cut_times"] == []
+                assert body["grid_delivery"]["targets"] == 45
+                assert body["grid_delivery"]["position"] == len(self.observations)
+                assert body["frames"][0]["observation_position"] == body["grid_delivery"]["position"]
             # Subsequent source pages exercise copied-next delivery rather than
             # repeatedly compacting already consumed pages.
             self.root._compaction.policy = replace(self.root._compaction.policy, automatic_enabled=False)
             for frame in body["frames"]:
                 assert frame["observation_position"] not in self.positions
                 self.positions.append(frame["observation_position"])
+                if self.mode == "detail":
+                    self.observations.append((frame["t"], frame["observation_position"], frame["visible_range"]))
             if body["next"] is not None:
                 assert not body["complete"]
                 assert body["next"]["tool"] == "read_video_frames"
+                if self.mode == "detail":
+                    arguments = body["next"]["arguments"]
+                    assert arguments["mode"] == "detail"
+                    assert (arguments["from"], arguments["to"]) == (0, 22)
+                    assert arguments["target"] == {"kind": "PATH", "path": str(self.path)}
+                    assert arguments["continuation"]["position"] == {
+                        "next_global_grid_ordinal": body["grid_delivery"]["next_position"],
+                    }
+                    assert body["grid_delivery"]["next_position"] == len(self.observations)
                 self.last_call = random_id("call")
                 events = _tool_call(body["next"]["tool"], self.last_call, body["next"]["arguments"])
             else:
                 assert body["complete"]
+                if self.mode == "detail":
+                    # The final source frame also covers strict-before(22),
+                    # so its one observation consumes the terminal grid role.
+                    assert body["grid_delivery"]["next_position"] == 45
                 self.finished = True
                 events = _text("FRAME_PAGES_RETAINED_AND_DRAINED")
         for event in events:
             yield event
 
 
+@pytest.mark.parametrize("mode", ["overview", "detail"])
 def test_host_compaction_keeps_the_real_current_page_and_copied_next(
-    tmp_path, monkeypatch, isolated_migrated_postgres_database,
+    tmp_path, monkeypatch, isolated_migrated_postgres_database, mode,
 ):
     import pulsara_agent.conversation_kernel.host as host_module
     import pulsara_agent.media.execution as execution_module
     import pulsara_agent.primitives.tool_result_budget as budget_module
 
-    path = make_video(tmp_path / "map.mkv", [
-        (i * 47 % 256, i * 83 % 256, i * 131 % 256) for i in range(22)
-    ], rate=1)
+    if mode == "detail":
+        # Four distinct half-second source positions have exactly equal pixels.
+        # The 22-second range still has 44 actual source observations, while
+        # strict-before(end) gives the global grid its 45th target.
+        path = make_video(tmp_path / "detail.mkv", [
+            ((i // 4) * 47 % 256, (i // 4) * 83 % 256, (i // 4) * 131 % 256)
+            for i in range(44)
+        ], rate=2)
+    else:
+        path = make_video(tmp_path / "map.mkv", [
+            (i * 47 % 256, i * 83 % 256, i * 131 % 256) for i in range(22)
+        ], rate=1)
     frame_budget = frames.FrameBudget(8_000_000, 8 * 1280 * 720, 16, frames.FRAME_ANALYSIS_FRAMES)
     with MediaSource.open(path) as source:
         info = probe_media(source)
-        plan = frames.prepare_frame_plan(source, info, start=0, end=22)
-        full = frames.read_video_frames(source, info, start=0, end=22, budget=frame_budget)
-        one = frames.read_video_frames(source, info, start=0, end=22, budget=frame_budget,
+        plan = frames.prepare_frame_plan(source, info, start=0, end=22, mode=mode)
+        full = frames.read_video_frames(source, info, start=0, end=22, mode=mode, budget=frame_budget)
+        one = frames.read_video_frames(source, info, start=0, end=22, mode=mode, budget=frame_budget,
                                       accepts=lambda result: len(json.loads(result.text)["frames"]) == 1)
     call_id = random_id("call")
     full_cost = conservative_tool_result_page_logical_utf8_bytes(
@@ -159,7 +194,7 @@ def test_host_compaction_keeps_the_real_current_page_and_copied_next(
         runtime = model_runtime(postgres_dsn=isolated_migrated_postgres_database.runtime_dsn,
                                 model_id="test-pro", wire_api="openai_chat_completions",
                                 input_modalities=("text", "image"))
-        model = _FramePagingModel(runtime, path)
+        model = _FramePagingModel(runtime, path, mode=mode)
         monkeypatch.setattr(host_module, "DirectKernelModelPort", lambda **_: model)
         monkeypatch.setattr(host_module.LocalMcpManagementService, "load_configs", lambda *_a, **_k: ())
         core = KernelHostCore.production(model_runtime=runtime)
@@ -202,9 +237,24 @@ def test_host_compaction_keeps_the_real_current_page_and_copied_next(
             assert len(model.summary.calls) == 1
             assert len(model.rendered) == len(model.normal_after_page) > 1
             assert sorted(model.positions) == list(range(plan.observation_count))
+            if mode == "detail":
+                assert model.positions == list(range(44))
+                assert model.observations == [
+                    (i / 2, i, [i / 2, (i + 1) / 2]) for i in range(44)
+                ]
+                # This is the page that actually crosses the compaction cut.
+                # Sharing must survive without collapsing its independent PTS.
+                first = model.pages[0]
+                first_images = next(iter(model.rendered.values()))[1]
+                assert len(first["frames"]) > len(first_images)
+                assert first["frames"][0]["image"] == first["frames"][1]["image"] == 1
+                assert [frame["t"] for frame in first["frames"][:2]] == [0, 0.5]
+                assert [frame["observation_position"] for frame in first["frames"][:2]] == [0, 1]
+                assert first["next"] is not None and not first["complete"]
             results = _rows(root, "SELECT tool_call_id,result_state FROM pulsara_v3.tool_results WHERE session_id=%s",
                             (root.session_id,))
             assert {row["tool_call_id"] for row in results} == set(model.rendered)
+            assert len(results) == len(model.rendered)
             assert all(row["result_state"] == "SUCCESS" for row in results)
         finally:
             model.summary.release.set()

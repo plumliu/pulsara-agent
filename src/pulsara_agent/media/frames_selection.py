@@ -16,7 +16,6 @@ class Sample:
     image: Image.Image
     window: int
     end: float | None = None
-    required: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)

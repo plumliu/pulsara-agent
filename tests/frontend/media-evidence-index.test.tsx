@@ -37,3 +37,18 @@ it('does not show generated parameters or a running tool as delivered evidence',
   mount({...trace,status:'running'});
   expect(screen.queryByRole('navigation')).toBeNull();
 });
+
+it('keeps independent seek times when detail observations share one image', () => {
+  const {open}=mount(trace);
+  const first=screen.getByRole('button',{name:'定位第 1 帧到 3.123456789 秒'});
+  const second=screen.getByRole('button',{name:'定位第 2 帧到 9.75 秒'});
+  expect(first.getAttribute('title')).toContain('图 1');
+  expect(second.getAttribute('title')).toContain('图 1');
+  fireEvent.click(first);
+  fireEvent.click(second);
+  expect(open.mock.calls).toEqual([
+    [page.target.path,3.123456789,page.media_version],
+    [page.target.path,9.75,page.media_version],
+  ]);
+  expect(api.open).not.toHaveBeenCalled();
+});
