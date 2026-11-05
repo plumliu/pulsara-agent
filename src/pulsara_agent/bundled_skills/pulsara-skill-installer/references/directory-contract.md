@@ -1,13 +1,11 @@
 # Pulsara Loose Local Skill Directory Contract
 
-Official destinations are:
+Choose `WORKSPACE` to install for the current project or `USER` to install for
+the current user. The installer selects the destination and returns the absolute
+`identity.skill_path`. Use that path to read or edit the installed Skill; resolve
+its scripts, references and assets relative to the directory containing `SKILL.md`.
 
-```text
-<workspace>/.pulsara/skills/<skill-name>/SKILL.md
-${PULSARA_HOME}/skills/<skill-name>/SKILL.md
-```
-
-The Runtime discovers these roots together with workspace and user `.agents/skills` roots. Loose Skills are ordinary files, with no receipt or ownership marker. Models may edit their installed contents in place under ordinary file permissions; see `pulsara-skill-creator`. Direct user copy, edit, rename and deletion remain supported.
+The Runtime also discovers workspace and user `.agents/skills` roots. Loose Skills are ordinary files, with no receipt or ownership marker. Models may edit their installed contents in place under ordinary file permissions; see `pulsara-skill-creator`. Direct user copy, edit, rename and deletion remain supported.
 
 ## Skill Folder Rules
 

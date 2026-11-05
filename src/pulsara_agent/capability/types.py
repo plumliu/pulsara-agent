@@ -233,7 +233,7 @@ def skill_origin_label(origin: SkillDefinitionOrigin) -> str:
     return {
         LocalSkillRootKind.WORKSPACE_PULSARA: "workspace:.pulsara/skills",
         LocalSkillRootKind.WORKSPACE_AGENTS: "workspace:.agents/skills",
-        LocalSkillRootKind.USER_PULSARA: "user:${PULSARA_HOME}/skills",
+        LocalSkillRootKind.USER_PULSARA: "user:pulsara",
         LocalSkillRootKind.USER_AGENTS: "user:~/.agents/skills",
     }[origin.root_kind]
 

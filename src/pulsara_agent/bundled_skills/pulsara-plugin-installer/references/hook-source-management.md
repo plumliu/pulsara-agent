@@ -3,7 +3,7 @@
 Observation uses `query_capabilities`; mutation examples are
 objects for `manage_capability`, not terminal commands. Reuse
 the chosen uppercase scope. `WORKSPACE` is the current GUI project;
-`USER` is the Host's frozen Pulsara home. A quick/transient session cannot manage
+`USER` manages the current user's Hook sources. A quick/transient session cannot manage
 a WORKSPACE Hook source; do not silently switch to USER.
 
 ## Observe and identify the source
@@ -14,9 +14,7 @@ a WORKSPACE Hook source; do not silently switch to USER.
 
 Pass this to `query_capabilities`. It returns `config_path`, diagnostics,
 authorization for the current observed definitions and their execution content.
-It does not return trust digests or internal review data. An unavailable observation is unknown, not empty; unknown adoption does not erase declared definitions. Local paths are the project's
-`.pulsara/hooks.json` or the effective user home `hooks.json`; use the observed
-absolute path for file editing rather than guessing cwd or a custom home.
+It does not return trust digests or internal review data. An unavailable observation is unknown, not empty; unknown adoption does not erase declared definitions. Use the returned absolute `config_path` for file editing.
 Call `query_capabilities` with `kind="HOOK_SOURCE"` and the chosen `scope`, omitting `source_kind` to observe both local and Plugin sources; copy a returned target into `query_capabilities.target`.
 To select a Plugin source use `source_kind:"PLUGIN"` and its `plugin_id`.
 

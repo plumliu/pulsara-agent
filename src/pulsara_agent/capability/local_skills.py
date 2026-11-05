@@ -55,7 +55,6 @@ from pulsara_agent.primitives.context import canonical_json_bytes, context_finge
 WORKSPACE_PRODUCT_SKILL_ROOT_PARTS = (".pulsara", "skills")
 WORKSPACE_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
 USER_AGENTS_SKILL_ROOT_PARTS = (".agents", "skills")
-USER_PRODUCT_LOCATION_PREFIX = "${PULSARA_HOME}/skills"
 SKILL_FILE_NAME = "SKILL.md"
 
 AGENT_SKILLS_CONTRACT_ID = "pulsara.agent-skills-core.v1"
@@ -119,12 +118,6 @@ LOOSE_SKILL_ROOT_ORDER = (
     LocalSkillRootKind.USER_PULSARA,
     LocalSkillRootKind.USER_AGENTS,
 )
-LOOSE_SKILL_LOCATION_PREFIX = {
-    LocalSkillRootKind.WORKSPACE_PULSARA: ".pulsara/skills",
-    LocalSkillRootKind.WORKSPACE_AGENTS: ".agents/skills",
-    LocalSkillRootKind.USER_PULSARA: USER_PRODUCT_LOCATION_PREFIX,
-    LocalSkillRootKind.USER_AGENTS: "~/.agents/skills",
-}
 _ROOT_POLICY_CONSTRUCTOR = object()
 _DIRECTORY_FLAGS = (
     os.O_RDONLY
@@ -203,7 +196,6 @@ class PreparedSkillRootBinding:
     root_kind: LocalSkillRootKind
     path: Path
     containment_root: Path
-    location_prefix: str
     precedence_ordinal: int
     _owner_authority: object = field(repr=False, compare=False)
 
@@ -213,7 +205,6 @@ class PreparedSkillRootBinding:
         root_kind: LocalSkillRootKind,
         path: Path,
         containment_root: Path,
-        location_prefix: str,
         precedence_ordinal: int,
         _owner_authority: object,
         _constructor: object,
@@ -223,7 +214,6 @@ class PreparedSkillRootBinding:
         object.__setattr__(self, "root_kind", root_kind)
         object.__setattr__(self, "path", path)
         object.__setattr__(self, "containment_root", containment_root)
-        object.__setattr__(self, "location_prefix", location_prefix)
         object.__setattr__(self, "precedence_ordinal", precedence_ordinal)
         object.__setattr__(self, "_owner_authority", _owner_authority)
         self.__post_init__()
@@ -233,8 +223,6 @@ class PreparedSkillRootBinding:
             raise TypeError("Skill root kind is not closed")
         if not self.path.is_absolute() or not self.containment_root.is_absolute():
             raise ValueError("Skill root binding is not absolute")
-        if self.location_prefix != LOOSE_SKILL_LOCATION_PREFIX[self.root_kind]:
-            raise ValueError("Skill root location prefix conflicts")
         if self.precedence_ordinal != LOOSE_SKILL_ROOT_ORDER.index(self.root_kind):
             raise ValueError("Skill root precedence conflicts")
 
@@ -747,7 +735,6 @@ class LooseSkillDefinitionProducer:
             root_kind=root_kind,
             path=path,
             containment_root=containment,
-            location_prefix=LOOSE_SKILL_LOCATION_PREFIX[root_kind],
             precedence_ordinal=LOOSE_SKILL_ROOT_ORDER.index(root_kind),
             _owner_authority=self._owner_authority,
             _constructor=_ROOT_POLICY_CONSTRUCTOR,
@@ -1196,7 +1183,7 @@ def check_skill_deadline(
 def public_skill_path(path: Path, *, root: PreparedSkillRootBinding) -> str:
     if path.name != SKILL_FILE_NAME or path.parent.parent != root.path:
         raise ValueError("Skill candidate does not match its frozen lexical root")
-    return f"{root.location_prefix}/{path.relative_to(root.path).as_posix()}"
+    return str(path)
 
 
 def diagnostic_at(item: SkillDiagnostic, path: Path) -> SkillDiagnostic:
@@ -1566,7 +1553,6 @@ __all__ = [
     "FrozenLooseSkillDefinitions",
     "HeldSkillChild",
     "HeldSkillRoot",
-    "LOOSE_SKILL_LOCATION_PREFIX",
     "LOOSE_SKILL_ROOT_ORDER",
     "LooseSkillDefinitionProducer",
     "LooseSkillDefinitionsDisposition",

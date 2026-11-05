@@ -13,7 +13,6 @@ import pytest
 
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
-    PulsaraHomeResolution,
     UserHomeResolution,
 )
 from pulsara_agent.message import ToolResultState
@@ -1006,25 +1005,18 @@ def test_view_image_applies_the_frozen_read_bound_before_validation(
 def test_view_image_reuses_the_frozen_read_path_owner(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     user_home = tmp_path / "user-home"
-    pulsara_home = tmp_path / "pulsara-home"
     workspace.mkdir()
     user_home.mkdir()
-    pulsara_home.mkdir()
     output = BytesIO()
     Image.new("RGB", (3, 2), (12, 34, 56)).save(output, "PNG")
     payload = output.getvalue()
     relative = workspace / "relative.png"
     absolute = tmp_path / "absolute.png"
     user = user_home / "user.png"
-    pulsara = pulsara_home / "state.png"
-    for path in (relative, absolute, user, pulsara):
+    for path in (relative, absolute, user):
         path.write_bytes(payload)
     tool = ViewImageTool(
         workspace,
-        pulsara_home_resolution=PulsaraHomeResolution(
-            PulsaraHomeDisposition.RESOLVED,
-            path=pulsara_home.resolve(),
-        ),
         user_home_resolution=UserHomeResolution(
             PulsaraHomeDisposition.RESOLVED,
             path=user_home.resolve(),
@@ -1036,7 +1028,6 @@ def test_view_image_reuses_the_frozen_read_path_owner(tmp_path: Path) -> None:
         "../absolute.png",
         str(absolute),
         "~/user.png",
-        "${PULSARA_HOME}/state.png",
     )
     for index, path in enumerate(requested):
         result = tool.read_bounded(

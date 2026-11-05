@@ -43,9 +43,7 @@ from pulsara_agent.capability.builtin_catalog import (
     builtin_tool_catalog_entry,
 )
 from pulsara_agent.capability.pulsara_home import (
-    PulsaraHomeResolution,
     UserHomeResolution,
-    resolve_pulsara_home,
     resolve_user_home,
 )
 from pulsara_agent.capability.mcp_compatibility import NativeMcpCompatibility, native_mcp_compatibility
@@ -707,7 +705,6 @@ class DirectKernelToolPort:
         result_source_reader: ToolOutputReadPort | None = None,
         image_reference_read_port: CanonicalImageReferenceReadPort | None = None,
         deadline_factory: KernelExecutionDeadlineFactory | None = None,
-        pulsara_home_resolution: PulsaraHomeResolution | None = None,
         user_home_resolution: UserHomeResolution | None = None,
         image_validator: HostPromptImageValidator | None = None,
         scheduled_tasks,
@@ -719,9 +716,6 @@ class DirectKernelToolPort:
     ) -> None:
         root = workspace_root.expanduser().resolve()
         frozen_user_home = user_home_resolution or resolve_user_home()
-        frozen_pulsara_home = pulsara_home_resolution or resolve_pulsara_home(
-            user_home_resolution=frozen_user_home
-        )
         self._host_owner_id = host_owner_id
         self._session_id = session_id
         self._memory_domain_id = memory_domain_id
@@ -753,38 +747,31 @@ class DirectKernelToolPort:
             ReadFileTool(
                 root,
                 result_source_reader=result_source_reader,
-                pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
             ViewImageTool(
                 root,
-                pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
             SearchContentTool(
                 root,
-                pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
             FindFilesTool(
                 root,
-                pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
             EditFileTool(
                 root,
-                pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
             WriteFileTool(
                 root,
                 result_source_reader=result_source_reader,
-                pulsara_home_resolution=frozen_pulsara_home,
                 user_home_resolution=frozen_user_home,
             ),
-            OpenInPulsaraTool(root, pulsara_home_resolution=frozen_pulsara_home, user_home_resolution=frozen_user_home, host_session_id=host_owner_id, root_session_id=session_id),
-            *(MediaTool(root, pulsara_home_resolution=frozen_pulsara_home,
-                user_home_resolution=frozen_user_home, name=name) for name in sorted(MEDIA_TOOL_NAMES)),
+            OpenInPulsaraTool(root, user_home_resolution=frozen_user_home, host_session_id=host_owner_id, root_session_id=session_id),
+            *(MediaTool(root, user_home_resolution=frozen_user_home, name=name) for name in sorted(MEDIA_TOOL_NAMES)),
             TodoTool(),
             _DirectTerminalTool(self._terminal, self._terminal_owner_id),
             _DirectTerminalProcessTool(self._terminal, self._terminal_owner_id),

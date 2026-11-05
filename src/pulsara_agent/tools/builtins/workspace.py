@@ -9,11 +9,8 @@ from typing import Any
 
 from pulsara_agent.capability.pulsara_home import (
     PulsaraHomeDisposition,
-    PulsaraHomeResolution,
-    PulsaraHomeResolutionError,
     UserHomeResolution,
     UserHomeResolutionError,
-    resolve_pulsara_home,
     resolve_user_home,
 )
 from pulsara_agent.message import ToolResultState
@@ -22,9 +19,6 @@ from pulsara_agent.ports.tool_execution import (
     ToolExecutionResult,
     ToolOutputSourceFormatHint,
 )
-
-
-_PULSARA_HOME_READ_PREFIX = "${PULSARA_HOME}"
 
 
 class WritePathScope(StrEnum):
@@ -37,17 +31,12 @@ class WorkspaceTool:
     """Base class for tools constrained to a workspace root."""
 
     workspace_root: Path
-    pulsara_home_resolution: PulsaraHomeResolution | None = None
     user_home_resolution: UserHomeResolution | None = None
 
     def __post_init__(self) -> None:
         self.workspace_root = self.workspace_root.expanduser().resolve()
         if self.user_home_resolution is None:
             self.user_home_resolution = resolve_user_home()
-        if self.pulsara_home_resolution is None:
-            self.pulsara_home_resolution = resolve_pulsara_home(
-                user_home_resolution=self.user_home_resolution
-            )
 
     def _resolve_path(
         self,
@@ -97,19 +86,6 @@ class WorkspaceTool:
         if not raw_path or not raw_path.strip():
             raise ValueError("path is required")
         raw = raw_path.strip()
-        if raw == _PULSARA_HOME_READ_PREFIX or raw.startswith(
-            _PULSARA_HOME_READ_PREFIX + "/"
-        ):
-            resolution = self.pulsara_home_resolution
-            if resolution is None:  # pragma: no cover - frozen in post-init
-                raise RuntimeError("Pulsara home binding is absent")
-            if resolution.disposition is not PulsaraHomeDisposition.RESOLVED:
-                raise PulsaraHomeResolutionError(resolution)
-            base = resolution.path
-            if base is None:  # pragma: no cover - closed resolution invariant
-                raise RuntimeError("Pulsara home binding has no path")
-            suffix = raw[len(_PULSARA_HOME_READ_PREFIX) :].lstrip("/")
-            return base / suffix
         if raw == "~" or raw.startswith("~/"):
             resolution = self.user_home_resolution
             if resolution is None:  # pragma: no cover - frozen in post-init

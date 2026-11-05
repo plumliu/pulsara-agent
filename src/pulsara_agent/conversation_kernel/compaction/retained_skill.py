@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import re
 from pulsara_agent.identity import REVISION_PATTERN
 import json
@@ -439,7 +440,7 @@ def _exact_historical_read(
     if not (
         payload.get("status") == "ok"
         and target.get("path")
-        == _project_historical_public_path(catalog_row["skill_path"], root_policy)
+        == _skill_read_result_path(catalog_row["skill_path"], root_policy)
         and payload.get("position") == {"line": 1, "char_offset": 0}
         and isinstance(total_lines, int)
         and isinstance(payload.get("file_size"), int)
@@ -478,25 +479,19 @@ def _exact_historical_read(
     return parsed.parsed.body
 
 
-def _project_historical_public_path(skill_path: str, root_policy) -> str:
-    if skill_path.startswith(".pulsara/skills/") or skill_path.startswith(
-        ".agents/skills/"
-    ):
-        return skill_path
-    by_kind = {item.root_kind: item for item in root_policy.roots}
-    if skill_path.startswith("${PULSARA_HOME}/skills/"):
-        root = by_kind.get(LocalSkillRootKind.USER_PULSARA)
-        if root is None:
-            return ""
-        suffix = skill_path.removeprefix("${PULSARA_HOME}/skills/")
-        return str(root.path / suffix)
-    if skill_path.startswith("~/.agents/skills/"):
-        root = by_kind.get(LocalSkillRootKind.USER_AGENTS)
-        if root is None:
-            return ""
-        suffix = skill_path.removeprefix("~/.agents/skills/")
-        return str(root.path / suffix)
-    return skill_path if skill_path.startswith("/") else ""
+def _skill_read_result_path(skill_path: str, root_policy) -> str:
+    """Match read_file's workspace-relative presentation of an absolute path."""
+    path = Path(skill_path)
+    if not path.is_absolute():
+        return ""
+    workspace_root = next(
+        (root.containment_root for root in root_policy.roots
+         if root.root_kind is LocalSkillRootKind.WORKSPACE_PULSARA),
+        None,
+    )
+    if workspace_root is not None and path.is_relative_to(workspace_root):
+        return path.relative_to(workspace_root).as_posix()
+    return str(path)
 
 
 def _installed_retained_items(

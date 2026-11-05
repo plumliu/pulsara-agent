@@ -1635,17 +1635,19 @@ class LocalSessionController:
     async def _capture_capability_notice_scrub(self) -> ProcessCredentialScrubSet | None:
         from pulsara_agent.settings import LocalSettingsUnavailable
 
-        def capture():
+        def capture(deadline_monotonic: float):
             scrub = self.core.mcp_management.settings.read().credential_scrub_set()
             process = self.core._credential_boundary.capture_scrub_set(
-                deadline_monotonic=self.core._canonical_deadline()
+                deadline_monotonic=deadline_monotonic
             )
             for value in process.values:
                 scrub.observe(value)
             return scrub
 
         try:
-            return await asyncio.to_thread(capture)
+            # Resolve the task-owned deadline on the event loop before worker I/O.
+            deadline = self.core._canonical_deadline()
+            return await asyncio.to_thread(capture, deadline)
         except (LocalSettingsUnavailable, OSError, ValueError, TimeoutError):
             # Advisory projection failure must neither gate native management
             # nor publish an identity whose secret safety cannot be observed.

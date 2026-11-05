@@ -346,8 +346,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
                                                                                         'path; '
                                                                                         'workspace-relative, '
                                                                                         'absolute, '
-                                                                                        '~ and '
-                                                                                        '${PULSARA_HOME} '
+                                                                                        'and ~ '
                                                                                         'paths are '
                                                                                         'supported.',
                                                                          'minLength': 1,

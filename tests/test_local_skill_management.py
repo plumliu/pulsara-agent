@@ -1709,7 +1709,7 @@ def test_cli_four_loose_commands_project_typed_service_outcomes(
         assert installed == [{
             "name": "cli-skill",
             "description": "Portable local Skill.",
-            "skill_path": (destination / "SKILL.md").relative_to(workspace).as_posix(),
+            "skill_path": str(destination / "SKILL.md"),
             "source": "workspace",
             "origin_label": "workspace:.pulsara/skills",
         }]

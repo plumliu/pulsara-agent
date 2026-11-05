@@ -593,7 +593,6 @@ def _skill_inspection_payload(inspection, *, doctor: bool) -> dict[str, object]:
             {
                 "root_kind": item.root_kind.value,
                 "path": str(item.path),
-                "location_prefix": item.location_prefix,
                 "precedence_ordinal": item.precedence_ordinal,
             }
             for item in inspection.root_policy.roots

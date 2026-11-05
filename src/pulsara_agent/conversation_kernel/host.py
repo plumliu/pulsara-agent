@@ -800,7 +800,6 @@ class KernelHostSession:
             session_content_query=SessionContentQuery(repository, session_id=session_id,
                                   memory_domain_id=workspace.memory_domain.memory_domain_id),
             deadline_factory=self._deadlines,
-            pulsara_home_resolution=pulsara_home_resolution,
             user_home_resolution=user_home_resolution,
             image_validator=image_validator,
             media_cache=media_cache,

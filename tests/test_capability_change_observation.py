@@ -549,6 +549,51 @@ def test_local_hook_damage_reuses_disable_and_revoke_without_granting_trust(
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("kind", ["mcp", "skill"])
+def test_user_capability_toggles_use_the_real_core_deadline(tmp_path, monkeypatch, kind):
+    from pathlib import Path
+    from pulsara_agent.capability.mcp_management import LocalMcpTarget, config_guard, config_to_entry
+    from pulsara_agent.capability.user_skill_config import load_user_skill_config
+    from tests.test_project_capability_management import _controller_with_sessions
+
+    home = tmp_path / "user"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "pulsara"))
+    skill = home / ".agents/skills/demo/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\ndescription: Installed user skill.\n---\nRead the supplied material.\n")
+
+    async def run():
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        controller, _, host, sibling, other = _controller_with_sessions(workspace, tmp_path / "other")
+        controller.inspect_user_capabilities = AsyncMock(return_value={})
+        manager = controller.core.mcp_management
+        target = LocalMcpTarget("demo")
+        try:
+            if kind == "mcp":
+                await manager.create(target, {"transport": {"type": "streamable_http", "endpoint": "https://example.org/mcp"}})
+            for enabled in (False, True):
+                if kind == "mcp":
+                    current = manager.inspect(target)
+                    entry = {**config_to_entry(current), "enabled": enabled}
+                    outcome = await controller.update_user_mcp_server(
+                        server_id=target.server_id, config=entry, expected=config_guard(current),
+                    )
+                    assert manager.inspect(target).enabled is enabled
+                else:
+                    outcome = await controller.set_user_skill_enabled(skill_path=str(skill), enabled=enabled)
+                    assert load_user_skill_config().enabled_for(skill) is enabled
+                assert outcome["operation"]["success"]
+                assert outcome["adoption"]["pending_sessions"] == 3
+            assert (host.refresh_requests, sibling.refresh_requests, other.refresh_requests) == (2, 2, 2)
+            assert manager.settings.credential_mutation_scrub is None
+        finally:
+            await manager.aclose()
+
+    asyncio.run(run())
+
+
 def test_gui_notice_scrubs_saved_secrets_before_and_after_native_mcp_removal(tmp_path, monkeypatch):
     from pulsara_agent.capability.mcp_management import (
         LocalMcpTarget, McpSecretMutation, config_guard,

@@ -108,9 +108,9 @@ class _Session:
 
 
 def _refresh_core(sessions=()):
-    from time import monotonic
     from pulsara_agent.process_credential_boundary import ProcessCredentialBoundary
     from pulsara_agent.conversation_kernel.host import KernelHostCore
+    from pulsara_agent.conversation_kernel.execution_watchdogs import KernelExecutionDeadlineFactory
     core = object.__new__(KernelHostCore)
     core._lock = asyncio.Lock()
     core._closing = False
@@ -119,7 +119,8 @@ def _refresh_core(sessions=()):
     core._suspended_agent_roots = set()
     core._agent_runtime = SimpleNamespace(wake_agent_requests=AsyncMock())
     core._credential_boundary = ProcessCredentialBoundary()
-    core._canonical_deadline = lambda: monotonic() + 5
+    core._deadlines = KernelExecutionDeadlineFactory()
+    core._resource_operations = {}
     core._workspace_capability_revisions = {session.workspace.workspace_root.resolve(): 0 for session in sessions}
     return core
 

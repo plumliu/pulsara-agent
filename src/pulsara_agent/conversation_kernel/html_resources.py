@@ -86,7 +86,7 @@ class _BoundedText:
 
 def _path(value, base):
     # Check URL syntax before decoding. Decoded names are filesystem names,
-    # never reinterpreted as schemes or ~ / ${PULSARA_HOME} expansions.
+    # never reinterpreted as schemes or shell expansions.
     if value.lower().startswith("data:"):
         return None
     if (

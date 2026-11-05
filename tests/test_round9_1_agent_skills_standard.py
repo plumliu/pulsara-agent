@@ -441,22 +441,33 @@ def test_round9_1_read_file_repeats_current_bytes_with_2000_line_window(
     assert "content_returned" not in second_payload
 
 
-def test_round9_1_pulsara_home_catalog_location_is_ordinary_readable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("custom_home", [False, True])
+def test_round9_1_user_skill_paths_support_reads_and_scripts_without_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, custom_home: bool
 ) -> None:
-    pulsara_home = tmp_path / "custom-pulsara-home"
+    import subprocess
+
+    user_home = tmp_path / "user"
+    monkeypatch.setattr(Path, "home", lambda: user_home)
+    monkeypatch.delenv("PULSARA_HOME", raising=False)
+    pulsara_home = tmp_path / "custom app data" if custom_home else user_home / ".pulsara"
     skill_path = pulsara_home / "skills" / "home-skill" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text(_document("home-skill"), encoding="utf-8")
-    monkeypatch.setenv("PULSARA_HOME", str(pulsara_home))
+    if custom_home:
+        monkeypatch.setenv("PULSARA_HOME", str(pulsara_home))
+    script = skill_path.parent / "scripts" / "check.sh"
+    script.parent.mkdir()
+    script.write_text("printf 'skill-resource-ok'\n", encoding="utf-8")
 
     workspace = tmp_path / "workspace"
+    workspace.mkdir()
     producer = LooseSkillDefinitionProducer(
         user_agents_skills_root=tmp_path / "empty-agents" / "skills"
     )
     result = producer.observe(_policy(producer, workspace))
     home_skill = next(item for item in result.candidates if item.name == "home-skill")
-    assert home_skill.skill_path == "${PULSARA_HOME}/skills/home-skill/SKILL.md"
+    assert home_skill.skill_path == str(skill_path)
 
     read = ReadFileTool(workspace).execute(
         ToolCall(
@@ -467,6 +478,13 @@ def test_round9_1_pulsara_home_catalog_location_is_ordinary_readable(
     )
     assert read.status is ToolResultState.SUCCESS
     assert "home-skill" in read.output
+    process = subprocess.run(
+        ["/bin/sh", str(Path(home_skill.skill_path).parent / "scripts" / "check.sh")],
+        cwd=workspace,
+        env={key: value for key, value in os.environ.items() if key != "PULSARA_HOME"},
+        check=True, capture_output=True, text=True,
+    )
+    assert process.stdout == "skill-resource-ok"
 
 
 def test_round9_1_production_has_no_fifth_root_or_skill_execution_authority() -> None:

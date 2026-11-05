@@ -2253,8 +2253,9 @@ def test_round5b_retained_skill_drops_body_already_full_in_successor_tail() -> N
     assert reduced.estimated_tokens == 0
 
 
+@pytest.mark.parametrize("in_workspace", [False, True])
 def test_round5b_retained_skill_proves_older_full_from_installed_message(
-    tmp_path,
+    tmp_path, in_workspace,
 ) -> None:
     from dataclasses import replace
     timing_values = {
@@ -2441,11 +2442,18 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
     # Exercise the real producer contract, including its required content_revision.
     from pulsara_agent.tools.builtins.filesystem import ReadFileTool
     from pulsara_agent.ports.tool_execution import ToolCall
+    from pulsara_agent.capability.local_skills import LooseSkillDefinitionProducer
 
-    skill_path = tmp_path / "inspect" / "SKILL.md"
-    skill_path.parent.mkdir()
+    workspace = tmp_path / "workspace"
+    skill_root = workspace / ".agents" / "skills" if in_workspace else tmp_path / "user-skills"
+    skill_path = skill_root / "inspect" / "SKILL.md"
+    skill_path.parent.mkdir(parents=True)
     skill_path.write_text(document)
-    actual = ReadFileTool(tmp_path / "workspace").execute(
+    root_policy = LooseSkillDefinitionProducer(
+        user_product_skills_root=tmp_path / "user-skills",
+        user_agents_skills_root=tmp_path / "user-agents",
+    ).prepare_root_policy(workspace)
+    actual = ReadFileTool(workspace).execute(
         ToolCall(
             "read:actual",
             "read_file",
@@ -2460,7 +2468,7 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
     actual_row = {**row, "skill_path": str(skill_path)}
     assert (
         _exact_historical_read(
-            actual_item, catalog_row=actual_row, root_policy=SimpleNamespace(roots=())
+            actual_item, catalog_row=actual_row, root_policy=root_policy
         )
         == "Retained body"
     )
@@ -2474,7 +2482,7 @@ def test_round5b_retained_skill_proves_older_full_from_installed_message(
                 tool_result_body_text=json.dumps(malformed),
             ),
             catalog_row=actual_row,
-            root_policy=SimpleNamespace(roots=()),
+            root_policy=root_policy,
         )
         is None
     )
