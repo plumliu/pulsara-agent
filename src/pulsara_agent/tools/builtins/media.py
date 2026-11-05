@@ -34,14 +34,18 @@ def media_parameters_schema(name: str) -> dict:
     }
     required = ["target"]
     if name == "read_video_frames":
+        properties["from"]["description"] = "Start in seconds (decimals supported). Defaults to 0 for overview/motion; required for detail."
+        properties["to"]["description"] = "Exclusive end in seconds. Defaults to media end for overview/motion; detail requires an explicit end at most 2 seconds after from."
         properties.update(
             mode={
                 "type": "string",
                 "enum": ["overview", "detail", "motion"],
                 "default": "overview",
+                "description": "overview locates content; detail reads start/middle/end within an explicit range of at most 2 seconds; motion examines changes and order.",
             },
             crop={
                 "type": "array",
+                "description": "Normalized [left, top, right, bottom] corners of the displayed frame: 0 <= left < right <= 1 and 0 <= top < bottom <= 1.",
                 "items": {"type": "number", "minimum": 0, "maximum": 1},
                 "minItems": 4,
                 "maxItems": 4,
@@ -95,6 +99,10 @@ def validate_media_arguments(name: str, arguments: Mapping[str, object]) -> None
         mode = arguments.get("mode", "overview")
         if not isinstance(mode, str) or mode not in {"overview", "detail", "motion"}:
             raise ValueError("INVALID_ARGUMENTS: invalid mode")
+        if mode == "detail":
+            from pulsara_agent.media.frames_detail import validate_detail_range
+
+            validate_detail_range(arguments.get("from"), arguments.get("to"))
         if "crop" in arguments:
             crop = arguments["crop"]
             if (

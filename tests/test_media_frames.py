@@ -356,7 +356,7 @@ def test_readable_floor_and_dp_cancel():
         pack_rows(rows, 1280, 720, cancelled=lambda: True)
 
 
-def test_detail_samples_exact_grid_without_appending_nearby_changes(tmp_path):
+def test_detail_samples_three_targets_without_appending_nearby_changes(tmp_path):
     colors = ["red"] * 100
     colors[1:4] = ["blue", "green", "yellow"]
     colors[48:52] = ["blue", "green", "yellow", "purple"]

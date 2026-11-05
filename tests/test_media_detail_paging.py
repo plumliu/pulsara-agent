@@ -1,4 +1,4 @@
-"""Detail source-grid positions progress from delivered evidence, not preparation."""
+"""Finite detail pages retain source observations through admission and continuation."""
 
 import asyncio
 import copy
@@ -26,26 +26,21 @@ from pulsara_agent.media.source import MediaError, MediaInfo, MediaSource
 @pytest.fixture
 def source_info(tmp_path):
     path = tmp_path / "detail.mkv"
-    path.write_bytes(b"source descriptor for grid continuation")
+    path.write_bytes(b"source descriptor for detail continuation")
     with MediaSource.open(path) as source:
         yield source, MediaInfo(10, Fraction(0), 0, None, (), 1280, 720)
 
 
 def _query(source, info):
-    return dict(source=source, info=info, start=0.0, end=10.0, mode="detail",
-                crop=None, selection_revision="detail-grid-test")
+    return dict(source=source, info=info, start=0.0, end=2.0, mode="detail",
+                crop=None, selection_revision="frames-v3")
 
 
-def _plan(*, start=4, complete=False):
-    observations = tuple(
-        SimpleNamespace(t=Fraction(t), detail_grid_ordinal=ordinal,
-                        detail_next_grid_ordinal=following)
-        for t, ordinal, following in ((2, 4, 8), (4, 8, 10), (5, 10, 21))
-    )
+def _plan():
+    observations = tuple(SimpleNamespace(t=Fraction(t)) for t in (0, 1, Fraction(7, 4)))
     return SimpleNamespace(
-        priority=observations, observation_count=len(observations), mode="detail",
-        crop=None, requested_range=(0.0, 10.0), next_window_start=None,
-        detail_grid_start=start, detail_grid_count=21, complete=complete,
+        priority=observations, observation_count=3, mode="detail", crop=None,
+        requested_range=(0.0, 2.0), next_window_start=None, complete=True,
         video_ended=False, display_aspect=Fraction(16, 9),
     )
 
@@ -56,32 +51,33 @@ def _candidate(observations, payload=b"encoded image"):
         json.dumps({"video_frames": True, "frames": [
             {"n": n, "t": float(item.t), "image": 1}
             for n, item in enumerate(observations, 1)
-        ]}), (2, 10), False,
+        ]}), (0, 2), False,
     )
 
 
-def test_detail_cursor_contains_only_global_grid_position_and_rejects_old_shape(source_info):
+def test_detail_cursor_uses_finite_observation_and_rejects_old_shape(source_info):
     source, info = source_info
     query = _query(source, info)
-    call = make_frame_next(**query, position=FramePagePosition(next_global_grid_ordinal=8))
-    cursor = call["arguments"]["continuation"]
-    assert cursor["position"] == {"next_global_grid_ordinal": 8}
-    assert read_frame_continuation(cursor, **query) == FramePagePosition(next_global_grid_ordinal=8)
-    for position in ({"next_observation": 8}, {"next_global_grid_ordinal": 8, "window_start": None},
-                     {"next_global_grid_ordinal": 0}, {"next_global_grid_ordinal": True},
-                     {"next_global_grid_ordinal": None}, {"next_global_grid_ordinal": "8"}):
-        changed = dict(cursor, position=position)
+    cursor = make_frame_next(**query, position=FramePagePosition(1))["arguments"]["continuation"]
+    assert cursor["position"] == {"next_observation": 1}
+    assert read_frame_continuation(cursor, **query) == FramePagePosition(1)
+    for position in ({"next_global_grid_ordinal": 1}, {"next_observation": 1, "window_start": None},
+                     {"next_observation": 0}, {"next_observation": True},
+                     {"next_observation": None}, {"next_observation": "1"}):
         with pytest.raises(MediaError) as failure:
-            read_frame_continuation(changed, **query)
+            read_frame_continuation(dict(cursor, position=position), **query)
         assert failure.value.code == "INVALID_ARGUMENTS"
+    with pytest.raises(MediaError) as failure:
+        read_frame_continuation(dict(cursor, selection_revision="frames-v2"), **query)
+    assert failure.value.code == "FRAME_CONTINUATION_UNAVAILABLE"
 
 
 @pytest.mark.parametrize("change", ["range", "crop", "mode", "stream", "revision", "source"])
-def test_detail_grid_position_retains_full_query_and_source_binding(source_info, change):
+def test_detail_position_retains_full_query_and_source_binding(source_info, change):
     source, info = source_info
     query = _query(source, info)
     cursor = copy.deepcopy(make_frame_next(
-        **query, position=FramePagePosition(next_global_grid_ordinal=8),
+        **query, position=FramePagePosition(1),
     )["arguments"]["continuation"])
     if change == "range":
         query["end"] = 9.0
@@ -103,34 +99,33 @@ def test_detail_grid_position_retains_full_query_and_source_binding(source_info,
     )
 
 
-def test_next_uses_last_delivered_source_interval_not_prepared_tail(source_info):
+def test_next_uses_delivered_observation_not_prepared_tail(source_info):
     source, info = source_info
     plan = _plan()
     page = with_frame_page_continuation(
         _candidate(plan.priority[:1]), source=source, info=info, plan=plan,
-        position=FramePagePosition(next_global_grid_ordinal=4), count=1,
-        selection_revision="detail-grid-test",
+        position=FramePagePosition(), count=1,
+        selection_revision="frames-v3",
     )
     body = json.loads(page.text)
-    assert body["frames"] == [{"n": 1, "t": 2.0, "image": 1, "observation_position": 4}]
-    assert body["next"]["arguments"]["continuation"]["position"] == {"next_global_grid_ordinal": 8}
-    assert body["grid_delivery"] == {"position": 4, "next_position": 8, "targets": 21}
-    assert "plan_delivery" not in body
+    assert body["frames"] == [{"n": 1, "t": 0.0, "image": 1, "observation_position": 0}]
+    assert body["next"]["arguments"]["continuation"]["position"] == {"next_observation": 1}
+    assert body["plan_delivery"] == {"position": 0, "next_position": 1, "observations": 3, "window_complete": False}
     assert not body["complete"]
 
 
-def test_final_detail_page_keeps_each_time_for_shared_image_and_closes_grid(source_info):
+def test_final_detail_page_keeps_each_time_for_shared_image_and_completes_plan(source_info):
     source, info = source_info
-    plan = _plan(complete=True)
+    plan = _plan()
     page = with_frame_page_continuation(
         _candidate(plan.priority), source=source, info=info, plan=plan,
-        position=FramePagePosition(next_global_grid_ordinal=4), count=3,
-        selection_revision="detail-grid-test",
+        position=FramePagePosition(), count=3,
+        selection_revision="frames-v3",
     )
     body = json.loads(page.text)
     assert len(page.images) == 1
-    assert [item["t"] for item in body["frames"]] == [2.0, 4.0, 5.0]
-    assert [item["observation_position"] for item in body["frames"]] == [4, 8, 10]
+    assert [item["t"] for item in body["frames"]] == [0.0, 1.0, 1.75]
+    assert [item["observation_position"] for item in body["frames"]] == [0, 1, 2]
     assert body["complete"] and body["next"] is None
 
 
@@ -152,7 +147,7 @@ def test_encoded_detail_trim_preserves_image_numbers_times_and_raw_limitations()
     assert json.loads(trimmed.text)["limitations"] == ["raw sampling limitation"]
     assert len(json.loads(raw.text)["frames"]) == 4
     for body in (dict(json.loads(raw.text), next={"tool": "read_video_frames"}),
-                 dict(json.loads(raw.text), grid_delivery={"position": 0})):
+                 dict(json.loads(raw.text), plan_delivery={"position": 0})):
         with pytest.raises(ValueError, match="unbound"):
             trim_detail_page(FrameReadResult(raw.images, json.dumps(body), (0, 2), False), 1)
 
@@ -203,7 +198,7 @@ def test_resource_requote_shrinks_detail_prefix_without_advancing_prepared_tail(
     async def run():
         return await render_prepared_frame_page(
             source=source, info=info, plan=plan,
-            position=FramePagePosition(next_global_grid_ordinal=4),
+            position=FramePagePosition(),
             budget=FrameBudget(1 << 20, 1280 * 720, 1, 256), allowance=allowance,
             page_budget=ToolResultPageBudget("detail-call"),
             image_source=ViewImageSource(ViewImageSourceKind.PATH, str(source.path)),
@@ -224,11 +219,11 @@ def test_resource_requote_shrinks_detail_prefix_without_advancing_prepared_tail(
         [3, 2, 1] if physical_prefix is None else [2, 1] if physical_prefix == 2 else [1]
     )
     assert all(len(quote["limitations"]) == int(quote["next"] is not None) for quote in quotes)
-    assert body["next"]["arguments"]["continuation"]["position"] == {"next_global_grid_ordinal": 8}
-    assert body["frames"][0]["observation_position"] == 4
+    assert body["next"]["arguments"]["continuation"]["position"] == {"next_observation": 1}
+    assert body["frames"][0]["observation_position"] == 0
 
 
-def test_real_low_fps_continuation_skips_same_source_grid_targets_without_missing_distinct_pts(tmp_path):
+def test_real_low_fps_continuation_delivers_three_distinct_source_observations(tmp_path):
     from pulsara_agent.media.frames import read_video_frames
     from pulsara_agent.media.source import probe_media
 
@@ -250,7 +245,7 @@ def test_real_low_fps_continuation_skips_same_source_grid_targets_without_missin
         info = probe_media(source)
         while True:
             result = read_video_frames(
-                source, info, start=0, end=4, mode="detail",
+                source, info, start=0.5, end=2.5, mode="detail",
                 continuation=arguments.get("continuation"),
                 budget=FrameBudget(1 << 20, 1280 * 720, 1, 256),
             )
@@ -259,109 +254,13 @@ def test_real_low_fps_continuation_skips_same_source_grid_targets_without_missin
             assert body["frames"][0]["n"] == 1
             delivered.append(body["frames"][0]["t"])
             positions.append(body["frames"][0]["observation_position"])
-            next_positions.append(body["grid_delivery"]["next_position"])
+            next_positions.append(body["plan_delivery"]["next_position"])
             if body["next"] is None:
                 assert body["complete"]
                 break
             assert not body["complete"]
             arguments = body["next"]["arguments"]
-            assert set(arguments["continuation"]["position"]) == {"next_global_grid_ordinal"}
-    assert delivered == [0.0, 1.0, 2.0, 3.0]
-    assert positions == [0, 2, 4, 6]
-    assert next_positions == [2, 4, 6, 9]
-
-
-def test_full_256_observation_candidate_crossing_logical_boundary_renders_only_once(source_info):
-    from pulsara_agent.conversation_kernel.tool_contracts import (
-        FrozenImageToolResourceAllowance, FrozenImageToolResourceIncrement,
-    )
-    from pulsara_agent.identity import derive_id
-    from pulsara_agent.llm.input import FrozenPromptContent, LLMImagePart, LLMTextPart
-    from pulsara_agent.media.execution import render_prepared_frame_page
-    from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
-    from pulsara_agent.tools.builtins.filesystem import ViewImageSource, ViewImageSourceKind
-
-    source, _ = source_info
-    info = MediaInfo(3600, Fraction(0), 0, None, (), 1280, 720)
-    observations = tuple(
-        SimpleNamespace(t=Fraction(7 * ordinal // 2, 7), detail_grid_ordinal=ordinal,
-                        detail_next_grid_ordinal=ordinal + 1)
-        for ordinal in range(256)
-    )
-    plan = SimpleNamespace(
-        priority=observations, observation_count=256, mode="detail", crop=None,
-        requested_range=(0.0, 3600.0), next_window_start=None,
-        detail_grid_start=0, detail_grid_count=7201, complete=False,
-        video_ended=False, display_aspect=Fraction(16, 9),
-    )
-    index = [
-        {"n": ordinal + 1, "t": float(observation.t), "image": 1,
-         "cell_rect": [0.0, 0.0, 1.0, 1.0],
-         "visible_range": [float(observation.t), float(observation.t + Fraction(1, 7))],
-         **({"dt": float(observation.t - observations[ordinal - 1].t)} if ordinal else {})}
-        for ordinal, observation in enumerate(observations)
-    ]
-    encoded = io.BytesIO()
-    Image.new("RGB", (1280, 720), "blue").save(encoded, format="PNG")
-    payload = encoded.getvalue()
-    raw = FrameReadResult(
-        (FrameImage(payload, "image/png", 1280, 720),),
-        json.dumps({
-            "video_frames": True, "frames": index, "next": None,
-            "target": {"kind": "PATH", "path": str(source.path)},
-            "requested_range": [0.0, 3600.0], "processed_range": [0.0, 128.0],
-            "display_size": [1280, 720], "crop": [0, 0, 1, 1],
-            "sampling": "ordered", "probe_count": 256, "maximum_probe_gap": 4 / 7,
-            "scanned_ranges": [], "observed_cut_times": [],
-            "limitations": [
-                "Sampling does not rule out unobserved brief changes; ordered does not mean every source frame.",
-                "Detail uses exact half-second targets, or start/middle/end for short ranges; sampled frames may be blurred and intervening pages or text are not fully read. Identical rendered images can share one image number while retaining their distinct observation times.",
-            ],
-        }, separators=(",", ":")), (0, 128), False,
-    )
-    attempts, logical_quotes = [], []
-
-    class Worker:
-        async def run(self, operation, actual_source, actual_info, actual_plan, **kwargs):
-            attempts.append(kwargs["count"])
-            assert kwargs["offset"] == 0
-            return raw
-
-    class Validator:
-        async def freeze(self, prompt, **kwargs):
-            return FrozenPromptContent((LLMTextPart(prompt.parts[0].text),
-                                        LLMImagePart("image/png", payload, 1280, 720)))
-
-    class Quote:
-        def quote(self, **kwargs):
-            return FrozenImageToolResourceIncrement(0, 0, 0, 0)
-
-    class RecordingBudget(ToolResultPageBudget):
-        def fits_logical(self, body, **kwargs):
-            accepted = super().fits_logical(body, **kwargs)
-            logical_quotes.append((len(json.loads(body)["frames"]), accepted))
-            return accepted
-
-    allowance = FrozenImageToolResourceAllowance(
-        0, "detail-call", "binding", 100000, 100000, 0, 100000, Quote(),
-    )
-
-    async def run():
-        return await render_prepared_frame_page(
-            source=source, info=info, plan=plan, position=FramePagePosition(),
-            budget=FrameBudget(1 << 20, 1280 * 720, 1, 256), allowance=allowance,
-            page_budget=RecordingBudget("detail-call"),
-            image_source=ViewImageSource(ViewImageSourceKind.PATH, str(source.path)),
-            workspace_id=derive_id("workspace", "test", "detail-logical-prefix"),
-            worker=Worker(), image_validator=Validator(), deadline=monotonic() + 30,
-        )
-
-    body = json.loads(asyncio.run(run()).parts[0].text)
-    assert logical_quotes[0] == (256, False)
-    assert attempts == [256]
-    assert 0 < len(body["frames"]) < 256
-    assert body["frames"][-1]["observation_position"] == len(body["frames"]) - 1
-    assert body["next"]["arguments"]["continuation"]["position"] == {
-        "next_global_grid_ordinal": len(body["frames"]),
-    }
-    assert len(body["limitations"]) == 3
+            assert set(arguments["continuation"]["position"]) == {"next_observation"}
+    assert delivered == [0.0, 1.0, 2.0]
+    assert positions == [0, 1, 2]
+    assert next_positions == [1, 2, 3]

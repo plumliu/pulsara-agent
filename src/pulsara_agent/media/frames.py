@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 from pulsara_agent.llm.input import MAXIMUM_PROMPT_IMAGE_PIXELS
 from .source import FramePosition, MediaError, MediaInfo, MediaSource
 from .frames_decode import FrameTarget, VideoDecoder
-from .frames_detail import DetailGrid
+from .frames_detail import validate_detail_range
 from .frames_layout import Cell, Layout, maximum_cell_width, pack_rows, row_candidates
 from .frames_selection import (
     Sample,
@@ -31,7 +31,7 @@ FrameMode = Literal["overview", "detail", "motion"]
 # This policy changes only at a declared selection-contract revision. Its
 # physical analysis slots reuse the existing total image-raster allocation;
 # neither provider remaining allowance nor the current page changes the plan.
-FRAME_SELECTION_REVISION = "frames-v2"
+FRAME_SELECTION_REVISION = "frames-v3"
 FRAME_ANALYSIS_FRAMES = max(3, MAXIMUM_PROMPT_IMAGE_PIXELS // (256 * 256))
 
 
@@ -79,8 +79,6 @@ class FrameObservation:
     t: Fraction
     end: Fraction | None
     representative_range: tuple[Fraction, Fraction] | None = None
-    detail_grid_ordinal: int | None = None
-    detail_next_grid_ordinal: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,8 +96,6 @@ class FramePlan:
     observed_cut_times: tuple[Fraction, ...] = ()
     probe_count: int = 0
     max_probe_gap: float = 0.0
-    detail_grid_start: int | None = None
-    detail_grid_count: int | None = None
 
     @property
     def observation_count(self) -> int:
@@ -194,64 +190,57 @@ def _validate_request(start, end, mode, crop):
 
 
 def _prepare_detail_plan(
-    source, info, *, start_time, requested_end, end_time, crop, grid_start,
+    source, info, *, start_time, requested_end, end_time, crop,
     capacity, cancelled, progress,
 ) -> FramePlan:
-    """Resolve an exact global-grid prefix without retaining source rasters."""
+    """Resolve the complete local start/middle/end plan before page sizing."""
     effective_start = (
         max(start_time, info.video_start)
         if info.video_start is not None else start_time
     )
-    grid = DetailGrid(effective_start, end_time)
-    first_target = grid.target(grid_start)
-    published = False
-    if progress is not None and first_target.t < end_time:
-        progress((float(first_target.t), float(end_time)))
-        published = True
+    if progress is not None:
+        progress((float(effective_start), float(end_time)))
+    targets = (
+        FrameTarget(effective_start),
+        FrameTarget((effective_start + end_time) / 2),
+        FrameTarget(end_time, before=True),
+    )
     observations = []
-    ordinal = grid_start
     aspect = None
     with VideoDecoder(source, info, cancelled=cancelled) as decoder:
-        while ordinal < grid.count and len(observations) < capacity:
+        for visible in decoder.visible_many(targets, range_end=end_time):
             _check(cancelled)
-            target = grid.target(ordinal)
-            frames = decoder.visible_many((target,), range_end=end_time)
-            visible = next(frames)
             if visible.end is None:
                 raise MediaError(
                     "MEDIA_TIMESTAMP_UNAVAILABLE",
-                    "Detail sampling cannot advance without a verified source presentation interval",
+                    "Detail needs a verified source presentation interval",
                 )
-            if aspect is None:
-                image = _crop(visible.image, crop)
-                aspect = Fraction(image.width, image.height)
-                del image
-                if progress is not None and not published:
-                    progress((float(max(effective_start, visible.t)), float(end_time)))
-            following = grid.after_interval(ordinal, visible.end)
-            observations.append(FrameObservation(
-                visible.position, visible.t, visible.end,
-                detail_grid_ordinal=ordinal, detail_next_grid_ordinal=following,
-            ))
-            ordinal = following
+            if not observations or observations[-1].position != visible.position:
+                if len(observations) >= capacity:
+                    raise MediaError(
+                        "RESOURCE_BOUNDARY",
+                        "The detail plan exceeds this call's observation allocation",
+                    )
+                if aspect is None:
+                    image = _crop(visible.image, crop)
+                    aspect = Fraction(image.width, image.height)
+                    del image
+                observations.append(
+                    FrameObservation(visible.position, visible.t, visible.end)
+                )
             del visible
-            # Close the one-target iterator before the decoder is reused.
-            frames.close()
-    if not observations or aspect is None:
-        raise MediaError("MEDIA_DECODE_FAILED", "No visible source frames in requested interval")
     source.assert_unchanged()
     return FramePlan(
         priority=tuple(observations),
         requested_range=(float(start_time), float(requested_end)),
-        processed_range=(max(effective_start, observations[0].t), min(end_time, observations[-1].end)),
+        processed_range=(effective_start, end_time),
         mode="detail", crop=crop, display_aspect=aspect,
-        complete=ordinal == grid.count, video_ended=end_time < requested_end,
+        complete=effective_start == start_time, video_ended=end_time < requested_end,
         probe_count=len(observations),
         max_probe_gap=max(
             (float(b.t - a.t) for a, b in zip(observations, observations[1:])),
             default=0.0,
         ),
-        detail_grid_start=grid_start, detail_grid_count=grid.count,
     )
 
 
@@ -264,7 +253,6 @@ def prepare_frame_plan(
     mode: FrameMode = "overview",
     crop: tuple[float, float, float, float] | None = None,
     window_start: FramePosition | None = None,
-    detail_grid_start: int = 0,
     analysis_frames: int = FRAME_ANALYSIS_FRAMES,
     cancelled: Callable[[], bool] | None = None,
     progress: Callable[[tuple[float, float]], None] | None = None,
@@ -273,6 +261,8 @@ def prepare_frame_plan(
     _check(cancelled)
     source.assert_unchanged()
     _validate_request(start, end, mode, crop)
+    if mode == "detail":
+        validate_detail_range(start, end)
     if type(analysis_frames) is not int or analysis_frames < 1:
         raise ValueError("analysis admission must be positive")
     if info.video_stream_index is None:
@@ -300,8 +290,7 @@ def prepare_frame_plan(
     if mode == "detail":
         return _prepare_detail_plan(
             source, info, start_time=start_time, requested_end=requested_end,
-            end_time=end_time, crop=crop, grid_start=detail_grid_start,
-            capacity=min(analysis_frames, FRAME_ANALYSIS_FRAMES),
+            end_time=end_time, crop=crop, capacity=analysis_frames,
             cancelled=cancelled, progress=progress,
         )
     samples: list[Sample] = []
@@ -714,12 +703,12 @@ def render_frame_page(
             source, info, plan, selected, budget=budget, floor=floor, cancelled=cancelled,
         )
     limitations = [
-        "Sampling does not rule out unobserved brief changes; ordered does not mean every source frame."
+        "Detail samples the start, midpoint and just before the end. Use crop for small text or motion for changes between samples."
+        if plan.mode == "detail" else
+        "Overview provides sparse representative frames. Use detail for small text or motion to examine a sequence."
+        if plan.mode == "overview" else
+        "Motion frames are ordered by their actual source timestamps."
     ]
-    if plan.mode == "detail":
-        limitations.append(
-            "Detail uses exact half-second targets, or start/middle/end for short ranges; sampled frames may be blurred and intervening pages or text are not fully read. Identical rendered images can share one image number while retaining their distinct observation times."
-        )
     if info.video_start is not None and info.video_start > _fraction(
         plan.requested_range[0]
     ):
@@ -740,7 +729,7 @@ def render_frame_page(
         "media_version": {"modified_ns": str(source.modified_ns), "size": source.size},
         "requested_range": list(plan.requested_range),
         "processed_range": list(map(float, plan.processed_range)),
-        "sampling": "sparse" if plan.mode == "overview" else "ordered",
+        "sampling": "ordered" if plan.mode == "motion" else "sparse",
         "complete": False,
         "display_size": [info.width, info.height],
         "crop": list(plan.crop) if plan.crop else [0, 0, 1, 1],
@@ -813,7 +802,6 @@ def read_video_frames(
         mode=mode,
         crop=crop,
         window_start=position.window_start,
-        detail_grid_start=position.next_global_grid_ordinal or 0,
         analysis_frames=budget.analysis_frames,
         cancelled=cancelled,
         progress=progress,

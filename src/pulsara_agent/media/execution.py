@@ -73,7 +73,6 @@ async def execute_media(
     reserve_read,
     observe_read,
 ) -> MediaExecutionResult:
-    validate_media_arguments(tool.name, arguments)
     source = None
 
     def result(state, body):
@@ -98,6 +97,7 @@ async def execute_media(
         )
 
     try:
+        validate_media_arguments(tool.name, arguments)
         if (
             tool.name == "read_video_frames"
             and context.input_modalities is not None
@@ -255,15 +255,12 @@ async def execute_media(
             prepare_frame_plan, source, info,
             start=span.start, end=span.end, mode=mode, crop=crop,
             window_start=position.window_start,
-            detail_grid_start=position.next_global_grid_ordinal or 0,
             analysis_frames=FRAME_ANALYSIS_FRAMES,
             deadline_monotonic=deadline,
             on_progress=begin_frames_range,
             on_started=begin_frames,
         )
-        if plan.observation_count == 0 or (
-            mode != "detail" and position.next_observation >= plan.observation_count
-        ):
+        if position.next_observation >= plan.observation_count:
             raise MediaError("INVALID_ARGUMENTS", "Frame continuation is outside the selection plan")
         content = await render_prepared_frame_page(
             source=source, info=info, plan=plan, position=position,
@@ -311,7 +308,7 @@ async def render_prepared_frame_page(
     their changing collage geometry makes encoded cost non-monotone. Every
     mode can reach the actual indexed singleton boundary without reselecting.
     """
-    offset = 0 if plan.mode == "detail" else position.next_observation
+    offset = position.next_observation
     count = plan.observation_count - offset
     if count < 1:
         raise MediaError("INVALID_ARGUMENTS", "Frame continuation has no remaining observation")

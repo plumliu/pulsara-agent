@@ -218,13 +218,13 @@ def test_detail_geometry_admits_many_observations_that_share_one_image(tmp_path)
     with MediaSource.open(path) as source:
         info = probe_media(source)
         result = read_video_frames(
-            source, info, start=0, end=info.duration, mode="detail",
+            source, info, start=0, end=2, mode="detail",
             budget=FrameBudget(1 << 20, 1280 * 720, 1, FRAME_ANALYSIS_FRAMES),
         )
     body = json.loads(result.text)
     assert len(result.images) == 1
-    assert len(body["frames"]) == 25
-    assert [item["observation_position"] for item in body["frames"]] == list(range(25))
+    assert len(body["frames"]) == 3
+    assert [item["observation_position"] for item in body["frames"]] == [0, 1, 2]
     assert body["complete"] and body["next"] is None
 
 
@@ -238,7 +238,7 @@ def test_unique_image_boundaries_shrink_only_the_delivery_prefix(tmp_path):
         info = probe_media(source)
         while True:
             result = read_video_frames(
-                source, info, start=0, end=info.duration, mode="detail",
+                source, info, start=0, end=2, mode="detail",
                 continuation=continuation,
                 budget=FrameBudget(1 << 20, 1280 * 720, 1, FRAME_ANALYSIS_FRAMES),
             )
@@ -250,6 +250,6 @@ def test_unique_image_boundaries_shrink_only_the_delivery_prefix(tmp_path):
                 assert body["complete"]
                 break
             continuation = body["next"]["arguments"]["continuation"]
-    assert page_observations == [2, 1, 1]
+    assert page_observations == [1, 1, 1]
     assert image_counts == [1, 1, 1]
-    assert delivered == [(0, 0), (0.5, 1), (1, 2), (1.5, 3)]
+    assert delivered == [(0, 0), (1, 1), (1.5, 2)]

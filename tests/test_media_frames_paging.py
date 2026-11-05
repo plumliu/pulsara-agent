@@ -88,20 +88,21 @@ def assert_image_index_consistent(result):
 def test_changing_page_allowances_deliver_the_same_real_observations_once(tmp_path, mode):
     colors = [(i * 47 % 256, i * 83 % 256, i * 131 % 256) for i in range(45)]
     path = make_video(tmp_path / f"{mode}.mkv", colors)
+    end = 2 if mode == "detail" else 4.5
     with MediaSource.open(path) as source:
         info = probe_media(source)
-        plan = frames.prepare_frame_plan(source, info, start=0, end=info.duration, mode=mode)
+        plan = frames.prepare_frame_plan(source, info, start=0, end=end, mode=mode)
     expected = {float(observation.t) for observation in plan.priority}
     expected_ranges = {
         float(observation.t): [float(value) for value in observation.representative_range]
         if observation.representative_range is not None else None
         for observation in plan.priority
     }
-    full = read(path, mode=mode)
+    full = read(path, mode=mode, arguments={"from": 0, "to": end})
     whole, _ = assert_image_index_consistent(full)
     assert {frame["t"] for frame in whole["frames"]}.issubset(expected)
     assert len(expected) > 2
-    arguments = {"mode": mode}
+    arguments = {"mode": mode, "from": 0, "to": end}
     observed = []
     positions = []
     continuation_values = []
@@ -133,7 +134,7 @@ def test_changing_page_allowances_deliver_the_same_real_observations_once(tmp_pa
         assert next_call["tool"] == "read_video_frames"
         assert next_call["arguments"]["mode"] == mode
         assert next_call["arguments"]["from"] == 0
-        assert next_call["arguments"]["to"] == pytest.approx(4.5)
+        assert next_call["arguments"]["to"] == pytest.approx(end)
         cursor = next_call["arguments"]["continuation"]
         assert cursor not in continuation_values
         continuation_values.append(cursor)

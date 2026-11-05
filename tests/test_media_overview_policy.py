@@ -95,18 +95,23 @@ def test_delayed_video_track_does_not_probe_or_claim_scanning_the_empty_head(tmp
         # would establish this common origin; no fabricated video is inserted.
         info = replace(probe_media(source), timeline_origin=Fraction(0),
                        video_start=Fraction(90), video_end=Fraction(100), duration=100)
-        plan = frames.prepare_frame_plan(source, info, start=0, end=100, mode=mode)
+        start, end = (89, 91) if mode == "detail" else (0, 100)
+        plan = frames.prepare_frame_plan(source, info, start=start, end=end, mode=mode)
         result = frames.read_video_frames(
-            source, info, start=0, end=100, mode=mode,
+            source, info, start=start, end=end, mode=mode,
             budget=frames.FrameBudget(8_000_000, 8 * 1280 * 720, 16, frames.FRAME_ANALYSIS_FRAMES),
         )
     body = json.loads(result.text)
-    assert body["requested_range"] == [0, 100]
+    assert body["requested_range"] == [start, end]
     assert all(90 <= frame["t"] < 100 for frame in body["frames"])
     assert all(90 <= start < end <= 100 for start, end in body["scanned_ranges"])
     if mode == "overview":
         assert plan.probe_count == 10
         assert body["scanned_ranges"] == []
+    elif mode == "detail":
+        assert [frame["t"] for frame in body["frames"]] == [90]
+        assert body["scanned_ranges"] == []
+        assert body["next"] is None and not body["complete"]
 
 
 def test_gradual_drift_does_not_chain_all_observations_into_one_group(tmp_path):
@@ -153,7 +158,7 @@ def test_local_dialog_at_a_probe_survives_while_text_has_no_completeness_claim(t
     assert "transcript" not in body and "chapters" not in body
 
 
-def test_tiny_text_changes_keep_the_sparse_evidence_limitation(tmp_path):
+def test_tiny_text_overview_keeps_sparse_index_and_guides_closer_reading(tmp_path):
     images = []
     for numeral in ("1", "2", "1"):
         image = Image.new("RGB", (320, 180), "white")
@@ -165,7 +170,8 @@ def test_tiny_text_changes_keep_the_sparse_evidence_limitation(tmp_path):
     assert times[0] == 0 and times[-1] == pytest.approx(0.2)
     assert all(any(math.isclose(time, actual) for actual in (0, 0.1, 0.2)) for time in times)
     assert body["sampling"] == "sparse" and body["scanned_ranges"] == []
-    assert any("unobserved" in limitation.lower() for limitation in body["limitations"])
+    assert any("sparse" in note and "detail" in note and "motion" in note
+               for note in body["limitations"])
     assert "transcript" not in body and "chapters" not in body
 
 

@@ -98,7 +98,7 @@ class _FramePagingModel(_Model):
             self.last_call = random_id("call")
             events = _tool_call("read_video_frames", self.last_call, {
                 "target": {"kind": "PATH", "path": str(self.path)},
-                "from": 0, "to": 22, "mode": self.mode,
+                "from": 0, "to": 2 if self.mode == "detail" else 22, "mode": self.mode,
             })
         else:
             text, body, images = _delivered_page(request, self.last_call)
@@ -110,11 +110,11 @@ class _FramePagingModel(_Model):
             self.normal_after_page.append(request)
             self.pages.append(body)
             if self.mode == "detail":
-                assert body["sampling"] == "ordered"
+                assert body["sampling"] == "sparse"
                 assert body["scanned_ranges"] == body["observed_cut_times"] == []
-                assert body["grid_delivery"]["targets"] == 45
-                assert body["grid_delivery"]["position"] == len(self.observations)
-                assert body["frames"][0]["observation_position"] == body["grid_delivery"]["position"]
+                assert body["plan_delivery"]["observations"] == 3
+                assert body["plan_delivery"]["position"] == len(self.observations)
+                assert body["frames"][0]["observation_position"] == body["plan_delivery"]["position"]
             # Subsequent source pages exercise copied-next delivery rather than
             # repeatedly compacting already consumed pages.
             self.root._compaction.policy = replace(self.root._compaction.policy, automatic_enabled=False)
@@ -129,20 +129,18 @@ class _FramePagingModel(_Model):
                 if self.mode == "detail":
                     arguments = body["next"]["arguments"]
                     assert arguments["mode"] == "detail"
-                    assert (arguments["from"], arguments["to"]) == (0, 22)
+                    assert (arguments["from"], arguments["to"]) == (0, 2)
                     assert arguments["target"] == {"kind": "PATH", "path": str(self.path)}
                     assert arguments["continuation"]["position"] == {
-                        "next_global_grid_ordinal": body["grid_delivery"]["next_position"],
+                        "next_observation": body["plan_delivery"]["next_position"],
                     }
-                    assert body["grid_delivery"]["next_position"] == len(self.observations)
+                    assert body["plan_delivery"]["next_position"] == len(self.observations)
                 self.last_call = random_id("call")
                 events = _tool_call(body["next"]["tool"], self.last_call, body["next"]["arguments"])
             else:
                 assert body["complete"]
                 if self.mode == "detail":
-                    # The final source frame also covers strict-before(22),
-                    # so its one observation consumes the terminal grid role.
-                    assert body["grid_delivery"]["next_position"] == 45
+                    assert body["plan_delivery"]["next_position"] == 3
                 self.finished = True
                 events = _text("FRAME_PAGES_RETAINED_AND_DRAINED")
         for event in events:
@@ -158,23 +156,19 @@ def test_host_compaction_keeps_the_real_current_page_and_copied_next(
     import pulsara_agent.primitives.tool_result_budget as budget_module
 
     if mode == "detail":
-        # Four distinct half-second source positions have exactly equal pixels.
-        # The 22-second range still has 44 actual source observations, while
-        # strict-before(end) gives the global grid its 45th target.
-        path = make_video(tmp_path / "detail.mkv", [
-            ((i // 4) * 47 % 256, (i // 4) * 83 % 256, (i // 4) * 131 % 256)
-            for i in range(44)
-        ], rate=2)
+        # Start and midpoint share pixels, while the tail is a different image.
+        path = make_video(tmp_path / "detail.mkv", ["red"] * 7 + ["blue"], rate=4)
     else:
         path = make_video(tmp_path / "map.mkv", [
             (i * 47 % 256, i * 83 % 256, i * 131 % 256) for i in range(22)
         ], rate=1)
+    end = 2 if mode == "detail" else 22
     frame_budget = frames.FrameBudget(8_000_000, 8 * 1280 * 720, 16, frames.FRAME_ANALYSIS_FRAMES)
     with MediaSource.open(path) as source:
         info = probe_media(source)
-        plan = frames.prepare_frame_plan(source, info, start=0, end=22, mode=mode)
-        full = frames.read_video_frames(source, info, start=0, end=22, mode=mode, budget=frame_budget)
-        one = frames.read_video_frames(source, info, start=0, end=22, mode=mode, budget=frame_budget,
+        plan = frames.prepare_frame_plan(source, info, start=0, end=end, mode=mode)
+        full = frames.read_video_frames(source, info, start=0, end=end, mode=mode, budget=frame_budget)
+        one = frames.read_video_frames(source, info, start=0, end=end, mode=mode, budget=frame_budget,
                                       accepts=lambda result: len(json.loads(result.text)["frames"]) == 1)
     call_id = random_id("call")
     full_cost = conservative_tool_result_page_logical_utf8_bytes(
@@ -183,11 +177,15 @@ def test_host_compaction_keeps_the_real_current_page_and_copied_next(
     atom_cost = conservative_tool_result_page_logical_utf8_bytes(
         tool_call_id=call_id, body=one.text, model_visible_memory_ids=(),
     )
-    assert atom_cost < full_cost
-    # Exercise the existing logical result-boundary owner with a smaller test
-    # resource boundary; do not replace the decoder or invent a paging output.
-    monkeypatch.setattr(budget_module, "MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES",
-                        (atom_cost + full_cost) // 2)
+    if mode == "detail":
+        # One physical image admits the first two shared observations, then next
+        # delivers the third. Real source/rendering and provider quote remain.
+        monkeypatch.setattr(execution_module, "MAXIMUM_PROMPT_IMAGE_PIXELS", 1280 * 720)
+    else:
+        assert atom_cost < full_cost
+        monkeypatch.setattr(budget_module, "MODEL_VISIBLE_TOOL_RESULT_MAX_LOGICAL_UTF8_BYTES",
+                            (atom_cost + full_cost) // 2)
+
 
     async def scenario():
         monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
@@ -238,9 +236,9 @@ def test_host_compaction_keeps_the_real_current_page_and_copied_next(
             assert len(model.rendered) == len(model.normal_after_page) > 1
             assert sorted(model.positions) == list(range(plan.observation_count))
             if mode == "detail":
-                assert model.positions == list(range(44))
+                assert model.positions == [0, 1, 2]
                 assert model.observations == [
-                    (i / 2, i, [i / 2, (i + 1) / 2]) for i in range(44)
+                    (t, i, [t, t + 0.25]) for i, t in enumerate((0, 1, 1.75))
                 ]
                 # This is the page that actually crosses the compaction cut.
                 # Sharing must survive without collapsing its independent PTS.
@@ -248,7 +246,7 @@ def test_host_compaction_keeps_the_real_current_page_and_copied_next(
                 first_images = next(iter(model.rendered.values()))[1]
                 assert len(first["frames"]) > len(first_images)
                 assert first["frames"][0]["image"] == first["frames"][1]["image"] == 1
-                assert [frame["t"] for frame in first["frames"][:2]] == [0, 0.5]
+                assert [frame["t"] for frame in first["frames"][:2]] == [0, 1]
                 assert [frame["observation_position"] for frame in first["frames"][:2]] == [0, 1]
                 assert first["next"] is not None and not first["complete"]
             results = _rows(root, "SELECT tool_call_id,result_state FROM pulsara_v3.tool_results WHERE session_id=%s",

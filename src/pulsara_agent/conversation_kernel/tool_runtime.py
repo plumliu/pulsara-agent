@@ -1969,11 +1969,14 @@ class DirectKernelToolPort:
                 f"invalid tool arguments: {exc.message}",
             )
         if tool_name in MEDIA_TOOL_NAMES:
+            from pulsara_agent.media.source import MediaError
+
             try:
                 validate_media_arguments(tool_name, arguments)
             except ValueError as exc:
                 return KernelToolAuthorization(KernelToolAuthorizationKind.INVALID_ARGUMENTS,
-                    "media:invalid-arguments", str(exc))
+                    "media:invalid-arguments",
+                    f"{exc.code}: {exc}" if isinstance(exc, MediaError) else str(exc))
         if tool_name == "open_in_pulsara" and surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT:
             return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED, "open_in_pulsara_root_only", "open_in_pulsara requires ROOT scope")
         if tool_name in {"view_image", "exec_process", "manage_process", "query_processes", "exec_cell", "query_cells", "manage_cell"}:

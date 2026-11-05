@@ -129,6 +129,11 @@ def test_closed_media_fields_and_root_only_catalog():
             "annotate_media",
             {"target": {"kind": "PATH", "path": "x"}, "from": 0, "to": 1, "text": "  "},
         )
+    detail = {"target": {"kind": "PATH", "path": "x"}, "mode": "detail"}
+    for bounds in ({}, {"from": 0}, {"to": 1}, {"from": 12.32, "to": 14.320001}):
+        with pytest.raises(ValueError, match="2 seconds"):
+            validate_media_arguments("read_video_frames", dict(detail, **bounds))
+    validate_media_arguments("read_video_frames", dict(detail, **{"from": 12.32, "to": 14.32}))
     for name in ("read_video_frames", "read_transcript"):
         for value in [None, {}]:
             with pytest.raises(ValueError):
@@ -180,10 +185,20 @@ def test_real_frames_and_annotation_use_production_dispatch(tmp_path):
         validator = HostPromptImageValidator()
         port = port_at(tmp_path, validator)
         try:
+            for bounds in ({}, {"from": 0}, {"to": 1}, {"from": 0, "to": 5}):
+                rejected = await invoke(port, "read_video_frames", {
+                    "target": {"kind": "PATH", "path": str(tmp_path / "unopened.mkv")},
+                    "mode": "detail", **bounds,
+                }, image=True)
+                assert rejected.state == "APPLICATION_ERROR"
+                error = json.loads(rejected.content)
+                assert error["error"] == "INVALID_RANGE"
+                assert "2 seconds" in error["message"]
+                assert "overview" in error["message"] and "motion" in error["message"]
             frames = await invoke(
                 port,
                 "read_video_frames",
-                {"target": {"kind": "PATH", "path": str(path)}, "mode": "detail"},
+                {"target": {"kind": "PATH", "path": str(path)}, "mode": "detail", "from": 0, "to": 1},
                 image=True,
             )
             assert frames.state == "SUCCESS", frames.content
@@ -204,8 +219,8 @@ def test_real_frames_and_annotation_use_production_dispatch(tmp_path):
             }
             assert body["frames"][0]["t"] == 0
             assert body["frames"][-1]["t"] > 0
-            assert [frame["t"] for frame in body["frames"]] == [0, 0.5, 1, 1.5, 1.9]
-            assert [frame["image"] for frame in body["frames"]] == [1, 2, 1, 1, 1]
+            assert [frame["t"] for frame in body["frames"]] == [0, 0.5, 0.9]
+            assert [frame["image"] for frame in body["frames"]] == [1, 2, 1]
             annotation = await invoke(
                 port,
                 "annotate_media",
@@ -437,7 +452,7 @@ def test_media_settings_freeze_once_off_main_loop_only_for_transcript(tmp_path):
             frames = await invoke(
                 port,
                 "read_video_frames",
-                {"target": {"kind": "PATH", "path": str(path)}, "mode": "detail"},
+                {"target": {"kind": "PATH", "path": str(path)}, "mode": "detail", "from": 0, "to": 0.05},
                 image=True,
             )
             assert frames.state == "SUCCESS", frames.content
