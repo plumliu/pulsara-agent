@@ -73,8 +73,6 @@ from pulsara_agent.llm.provider_replay import (
     RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS,
     RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS,
     RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES,
-    RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS,
-    RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS,
 )
 from pulsara_agent.llm.resolution import ResolvedModelCall, resolve_wire_output_tokens
 from pulsara_agent.llm.model_target import reasoning_wire_fields
@@ -798,9 +796,10 @@ class ResponsesCompletionAccumulator:
     _output_item_added: dict[int, str] = field(default_factory=dict)
     _output_item_done: dict[int, FrozenJsonObjectFact] = field(default_factory=dict)
     _content_part_added: dict[tuple[int, int], str] = field(default_factory=dict)
-    _content_part_done: dict[tuple[int, int], str] = field(default_factory=dict)
+    _content_part_done: dict[tuple[int, int], tuple[object, FrozenJsonObjectFact]] = field(default_factory=dict)
     _stream_item_index_invalid: bool = False
     _done_output_aggregate_bytes: int = 2
+    _done_content_aggregate_bytes: int = 2
 
     def apply(self, raw_event: Any) -> list[ProviderAdapterStreamItem]:
         event = sdk_event_to_dict(raw_event)
@@ -1056,21 +1055,37 @@ class ResponsesCompletionAccumulator:
                 "Responses content-part identity changed before done",
                 reason_code="transport_responses_output_mismatch",
             )
+        # Retain the actual settled part for field-wise reconciliation. A hash
+        # cannot distinguish absent metadata from conflicting semantic content.
+        item_id = event.get("item_id")
+        if item_id is not None and (not isinstance(item_id, str) or not item_id):
+            raise LLMTransportContractError(
+                "Responses content part item ID is invalid",
+                reason_code="transport_responses_event_invalid",
+            )
+        additional_bytes = len(canonical_json_bytes({"item_id": item_id, "part": part})) + (1 if self._content_part_done else 0)
+        if self._done_content_aggregate_bytes + additional_bytes > MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES:
+            raise LLMTransportContractError(
+                "Responses content_part.done aggregate exceeds its byte bound",
+                reason_code="transport_source_payload_limit_exceeded",
+            )
+        frozen = freeze_json(part)
+        if not isinstance(frozen, FrozenJsonObjectFact):
+            raise AssertionError("Responses content part did not freeze")
         self._content_part_added.pop(key, None)
-        self._content_part_done[key] = _response_content_part_fingerprint(
-            item_id=event.get("item_id"), part=part
-        )
+        self._content_part_done[key] = (item_id, frozen)
+        self._done_content_aggregate_bytes += additional_bytes
 
     def _select_completed_output(
         self, response: dict[str, Any]
     ) -> list[dict[str, Any]]:
         raw_output = response.get("output")
-        if not isinstance(raw_output, list):
+        if raw_output is not None and not isinstance(raw_output, list):
             raise LLMTransportContractError(
                 "completed Responses output is absent",
                 reason_code="transport_responses_output_invalid",
             )
-        if len(raw_output) > MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS:
+        if raw_output is not None and len(raw_output) > MAXIMUM_PROVIDER_REPLAY_RESPONSES_ITEMS:
             raise LLMTransportContractError(
                 "completed Responses output exceeds its item bound",
                 reason_code="transport_source_item_limit_exceeded",
@@ -1085,8 +1100,8 @@ class ResponsesCompletionAccumulator:
             return self._validate_streamed_completion(output)
 
         # Some Responses-compatible transports emit the complete ordered
-        # output exclusively through output_item.done and leave the terminal
-        # response.output array empty.  Adopt that sequence only when it can
+        # output exclusively through output_item.done and leave terminal
+        # response.output empty, null or absent. Adopt that sequence only when it can
         # prove the same closed, contiguous, fully-settled response that a
         # non-empty terminal snapshot would have supplied.
         if response.get("status") != "completed":
@@ -1144,9 +1159,14 @@ class ResponsesCompletionAccumulator:
             ]
         else:
             output = terminal_output
+            expected_indexes = set(range(len(output)))
+            if not set(self._output_item_added).issubset(expected_indexes):
+                raise LLMTransportContractError(
+                    "terminal Responses output omits a streamed output item",
+                    reason_code="transport_responses_output_mismatch",
+                )
             if self._output_item_done:
-                expected_indexes = set(range(len(output)))
-                if set(self._output_item_done) != expected_indexes:
+                if not set(self._output_item_done).issubset(expected_indexes):
                     raise LLMTransportContractError(
                         "terminal Responses output differs from streamed items",
                         reason_code="transport_responses_output_mismatch",
@@ -1158,8 +1178,11 @@ class ResponsesCompletionAccumulator:
                             "Responses output item is not an object",
                             reason_code="transport_responses_output_invalid",
                         )
+                    if index not in self._output_item_done:
+                        selected_output.append(item)
+                        continue
                     streamed = _thaw_frozen_object(self._output_item_done[index])
-                    selected = _select_terminal_or_streamed_output_item(
+                    selected = _join_response_output_item(
                         terminal=item,
                         streamed=streamed,
                     )
@@ -1176,6 +1199,12 @@ class ResponsesCompletionAccumulator:
             raise LLMTransportContractError(
                 "Responses output item is not an object",
                 reason_code="transport_responses_output_invalid",
+            )
+        # Each source may fit independently while its field union does not.
+        if len(canonical_json_bytes(output)) > MAX_COMPLETED_PROVIDER_RESPONSE_AGGREGATE_BYTES:
+            raise LLMTransportContractError(
+                "Merged Responses output aggregate exceeds its byte bound",
+                reason_code="transport_source_payload_limit_exceeded",
             )
         return [item for item in output if isinstance(item, dict)]
 
@@ -1210,7 +1239,7 @@ class ResponsesCompletionAccumulator:
         for (
             output_index,
             content_index,
-        ), part_fingerprint in self._content_part_done.items():
+        ), (part_item_id, frozen_part) in self._content_part_done.items():
             if output_index >= len(output):
                 raise LLMTransportContractError(
                     "Responses content part has no final output item",
@@ -1231,14 +1260,22 @@ class ResponsesCompletionAccumulator:
                     "Responses content part is absent from its final message",
                     reason_code="transport_responses_output_mismatch",
                 )
-            final_fingerprint = _response_content_part_fingerprint(
-                item_id=item.get("id"), part=content[content_index]
+            if part_item_id is not None and item.get("id") is not None and part_item_id != item["id"]:
+                raise LLMTransportContractError(
+                    "final Responses content belongs to a different item",
+                    reason_code="transport_responses_output_mismatch",
+                )
+            joined = _join_response_part(
+                terminal=content[content_index], streamed=_thaw_frozen_object(frozen_part)
             )
-            if final_fingerprint != part_fingerprint:
+            if joined is None:
                 raise LLMTransportContractError(
                     "final Responses content differs from content_part.done",
                     reason_code="transport_responses_output_mismatch",
                 )
+            if item.get("id") is None and part_item_id is not None:
+                item["id"] = part_item_id
+            content[content_index] = joined
 
     def finish(self) -> ProviderAdapterTerminal | ProviderStreamFailure:
         if self.failure is not None:
@@ -1328,6 +1365,11 @@ def _normalize_response_output_item(item: dict[str, Any]) -> dict[str, Any]:
     # authority.  This is a field contract shared by every Responses endpoint,
     # not a provider-name branch.
     normalized = dict(item)
+    # Reconciliation may enrich a content part. Never mutate an SDK event or
+    # a caller's captured terminal snapshot while preparing the new replay.
+    for field_name in ("content", "summary"):
+        if isinstance(normalized.get(field_name), list):
+            normalized[field_name] = list(normalized[field_name])
     for field_name in RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS:
         normalized.pop(field_name, None)
     if normalized.get("type") == "message":
@@ -1341,63 +1383,93 @@ def _normalize_response_output_item(item: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _select_terminal_or_streamed_output_item(
+def _join_response_output_item(
     *,
     terminal: dict[str, Any],
     streamed: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Join one terminal item to its richer exact-settled stream carrier."""
+    """Union settled facts without overwriting conflicting public content.
 
-    if terminal == streamed:
-        return terminal
-    terminal_keys = set(terminal)
-    streamed_keys = set(streamed)
-    if terminal_keys.difference(streamed_keys):
+    The SDK owns wire decoding. This join is Pulsara's manual-history policy,
+    shared by all Responses endpoints. Encrypted reasoning is opaque: OpenAI
+    specifies the completed item.done carrier for subsequent requests, and
+    may encrypt the same item again in response.completed.
+    """
+    item_type = terminal.get("type")
+    if item_type != streamed.get("type"):
         return None
-    omitted = streamed_keys.difference(terminal_keys)
-    if not omitted or not omitted.issubset(
-        RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS
+    if item_type == "reasoning" and any(
+        item.get("encrypted_content") is not None
+        and not isinstance(item["encrypted_content"], str)
+        for item in (streamed, terminal)
     ):
         return None
-    for key in terminal_keys:
-        if terminal[key] == streamed[key]:
+    joined = dict(streamed)
+    for key, value in terminal.items():
+        if key not in joined:
+            joined[key] = value
             continue
-        if key != "content" or terminal.get("type") != "message":
-            return None
-        if not _message_content_differs_only_by_empty_operational_elision(
-            terminal[key], streamed[key]
+        previous = joined[key]
+        if previous == value:
+            continue
+        if item_type == "reasoning" and key == "encrypted_content":
+            joined[key] = previous or value
+        elif key in {"id", "status", "phase", "format"} and (
+            previous is None or value is None
         ):
+            joined[key] = value if previous is None else previous
+        elif key == "content" or (item_type == "reasoning" and key == "summary"):
+            if item_type == "reasoning" and (previous is None or value is None):
+                joined[key] = value if previous is None else previous
+                continue
+            parts = _join_response_parts(terminal=value, streamed=previous)
+            if parts is None:
+                return None
+            joined[key] = parts
+        else:
             return None
-    return streamed
+    return joined
 
 
-def _message_content_differs_only_by_empty_operational_elision(
-    terminal: object,
-    streamed: object,
-) -> bool:
-    if (
-        not isinstance(terminal, list)
-        or not isinstance(streamed, list)
-        or len(terminal) != len(streamed)
+def _join_response_parts(*, terminal: object, streamed: object) -> list[dict[str, Any]] | None:
+    if not isinstance(terminal, list) or not isinstance(streamed, list):
+        return None
+    if not terminal or not streamed:
+        parts = terminal or streamed
+        return [dict(part) for part in parts] if all(isinstance(part, dict) for part in parts) else None
+    if len(terminal) != len(streamed):
+        return None
+    joined = []
+    for final, previous in zip(terminal, streamed, strict=True):
+        part = _join_response_part(terminal=final, streamed=previous)
+        if part is None:
+            return None
+        joined.append(part)
+    return joined
+
+
+def _join_response_part(*, terminal: object, streamed: object) -> dict[str, Any] | None:
+    if not isinstance(terminal, dict) or not isinstance(streamed, dict):
+        return None
+    if any(
+        part.get(key) is not None and not isinstance(part[key], list)
+        for part in (terminal, streamed) for key in ("annotations", "logprobs")
     ):
-        return False
-    for terminal_part, streamed_part in zip(terminal, streamed, strict=True):
-        if not isinstance(terminal_part, dict) or not isinstance(streamed_part, dict):
-            return False
-        terminal_keys = set(terminal_part)
-        streamed_keys = set(streamed_part)
-        if terminal_keys.difference(streamed_keys):
-            return False
-        omitted = streamed_keys.difference(terminal_keys)
-        if not omitted.issubset(
-            RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS
-        ):
-            return False
-        if any(streamed_part[key] != [] for key in omitted):
-            return False
-        if any(terminal_part[key] != streamed_part[key] for key in terminal_keys):
-            return False
-    return True
+        return None
+    joined = dict(streamed)
+    for key, value in terminal.items():
+        if key not in joined:
+            joined[key] = value
+        elif joined[key] != value:
+            # Metadata can be absent or unpopulated, but two nonempty arrays
+            # cannot be combined without guessing citation/probability order.
+            if key not in {"annotations", "logprobs"}:
+                return None
+            if joined[key] in (None, []):
+                joined[key] = value
+            elif value not in (None, []):
+                return None
+    return joined
 
 
 def _response_output_item_identity_fingerprint(item: dict[str, Any]) -> str:
@@ -1428,13 +1500,6 @@ def _response_content_part_identity_fingerprint(
         "type": part.get("type"),
     }
     return context_fingerprint("pulsara.responses-content-part-identity:v1", identity)
-
-
-def _response_content_part_fingerprint(*, item_id: object, part: object) -> str:
-    return context_fingerprint(
-        "pulsara.responses-content-part:v1",
-        {"item_id": item_id, "part": part},
-    )
 
 
 def _thaw_frozen_object(value: FrozenJsonObjectFact) -> dict[str, Any]:
@@ -1785,6 +1850,12 @@ def _response_message_text(item: dict[str, Any]) -> str:
         if set(block).difference({"type", "text", "annotations", "logprobs"}):
             raise LLMTransportContractError(
                 "Responses message content contains unsupported fields",
+                reason_code="transport_responses_output_invalid",
+            )
+        if any(block.get(key) is not None and not isinstance(block[key], list)
+               for key in ("annotations", "logprobs")):
+            raise LLMTransportContractError(
+                "Responses message annotations or logprobs are not arrays",
                 reason_code="transport_responses_output_invalid",
             )
         text = block.get("text")

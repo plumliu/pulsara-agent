@@ -38,14 +38,8 @@ RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS = frozenset(
 )
 RESPONSES_NON_REPLAY_EMPTY_MESSAGE_ITEM_FIELDS = frozenset({"summary"})
 RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS = frozenset({"namespace"})
-RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS = frozenset(
-    {"id", "status", "phase"}
-)
-RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS = frozenset(
-    {"annotations", "logprobs"}
-)
 RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT = (
-    "terminal-output-or-contiguous-settled-item-done-with-operational-elision:v6"
+    "completed-terminal-and-settled-item-done-field-union:v7"
 )
 
 PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION = (
@@ -101,12 +95,6 @@ def provider_replay_contract_fingerprint(
             ),
             "excluded_null_function_call_item_fields": tuple(
                 sorted(RESPONSES_NON_REPLAY_NULL_FUNCTION_CALL_ITEM_FIELDS)
-            ),
-            "terminal_elidable_operational_item_fields": tuple(
-                sorted(RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS)
-            ),
-            "terminal_elidable_empty_message_content_fields": tuple(
-                sorted(RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS)
             ),
             "canonical_array": "pulsara.canonical-json.v1",
         }
@@ -732,8 +720,6 @@ __all__ = [
     "PROVIDER_REPLAY_COMPATIBILITY_CONTRACT_VERSION",
     "RESPONSES_COMPLETED_OUTPUT_SOURCE_CONTRACT",
     "RESPONSES_NON_REPLAY_OPERATIONAL_ITEM_FIELDS",
-    "RESPONSES_TERMINAL_ELIDABLE_OPERATIONAL_ITEM_FIELDS",
-    "RESPONSES_TERMINAL_ELIDABLE_EMPTY_MESSAGE_CONTENT_FIELDS",
     "RESPONSES_REPLAYABLE_OUTPUT_ITEM_TYPES",
     "PreparedDurableProviderAssistantReplay",
     "ProviderAssistantReplayFragment",

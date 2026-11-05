@@ -2089,7 +2089,7 @@ def test_responses_terminal_may_elide_closed_message_phase(phase: str) -> None:
     ) == (streamed,)
 
 
-def test_responses_terminal_cannot_elide_nonempty_message_annotations() -> None:
+def test_responses_terminal_elision_preserves_nonempty_message_annotations() -> None:
     accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
     streamed = {
         "type": "message",
@@ -2113,18 +2113,16 @@ def test_responses_terminal_cannot_elide_nonempty_message_annotations() -> None:
             "item": streamed,
         }
     )
-    with pytest.raises(LLMTransportContractError, match="differs from item.done"):
-        accumulator.apply(
-            _completed_response(
-                [
-                    {
-                        "type": "message",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "done"}],
-                    }
-                ]
-            )
+    accumulator.apply(
+        _completed_response(
+            [{"type": "message", "role": "assistant",
+              "content": [{"type": "output_text", "text": "done"}]}]
         )
+    )
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert tuple(thaw_json(item) for item in terminal.completed_replay_payload.ordered_items) == (streamed,)
 
 
 def test_responses_terminal_phase_conflict_still_fails_closed() -> None:
@@ -2170,6 +2168,7 @@ def test_responses_terminal_phase_conflict_still_fails_closed() -> None:
         },
         {
             "type": "function_call",
+            "call_id": "",
             "name": "virtual",
             "arguments": "{}",
         },
@@ -2935,7 +2934,7 @@ def test_responses_reasoning_format_may_materialize_at_item_done() -> None:
     ) == (final_item,)
 
 
-def test_responses_late_reasoning_format_still_matches_terminal_snapshot() -> None:
+def test_responses_late_reasoning_format_survives_terminal_omission() -> None:
     initial_item = {
         "type": "reasoning",
         "id": "reasoning:late-format",
@@ -2963,26 +2962,15 @@ def test_responses_late_reasoning_format_still_matches_terminal_snapshot() -> No
         }
     )
 
-    with pytest.raises(
-        LLMTransportContractError,
-        match="terminal Responses output differs from item.done",
-    ):
-        accumulator.apply(
-            {
-                "type": "response.completed",
-                "response": {
-                    "id": "response:test",
-                    "status": "completed",
-                    "output": [
-                        {
-                            key: value
-                            for key, value in done_item.items()
-                            if key != "format"
-                        }
-                    ],
-                },
-            }
-        )
+    accumulator.apply({
+        "type": "response.completed",
+        "response": {"id": "response:test", "status": "completed",
+                     "output": [{key: value for key, value in done_item.items() if key != "format"}]},
+    })
+    terminal = accumulator.finish()
+    assert isinstance(terminal, ProviderAdapterTerminal)
+    assert terminal.completed_replay_payload is not None
+    assert tuple(thaw_json(item) for item in terminal.completed_replay_payload.ordered_items) == (done_item,)
 
 
 @pytest.mark.parametrize("initial_phase", (None, "final_answer", "commentary"))

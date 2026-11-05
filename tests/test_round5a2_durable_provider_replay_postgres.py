@@ -75,6 +75,7 @@ def _open_turn(repository: ConversationKernelRepository, lease):
 
 def _native_candidate(
     *, session_id: str, workspace_id: str, entry_id: str, detail_count: int = 0,
+    wire_api: str = "openai_chat_completions",
 ):
     message: dict[str, object] = {
         "role": "assistant",
@@ -87,8 +88,23 @@ def _native_candidate(
         ]
     frozen = freeze_json(message)
     assert isinstance(frozen, FrozenJsonObjectFact)
+    items = (frozen,)
+    if wire_api == "openai_responses":
+        from pulsara_agent.llm.adapters.openai.events import ProviderLiveItemBuilder
+        from pulsara_agent.llm.adapters.openai.responses import ResponsesCompletionAccumulator
+
+        accumulator = ResponsesCompletionAccumulator(builder=ProviderLiveItemBuilder())
+        reasoning = {"type": "reasoning", "id": "rs_provider", "summary": [], "encrypted_content": "done-opaque"}
+        answer = {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]}
+        for index, item in enumerate((reasoning, answer)):
+            accumulator.apply({"type": "response.output_item.done", "output_index": index, "item": item})
+        accumulator.apply({"type": "response.completed", "response": {"status": "completed", "output": [
+            {**reasoning, "encrypted_content": "different-terminal-opaque"},
+            {**answer, "id": "msg_provider", "phase": "final_answer"},
+        ]}})
+        items = accumulator.finish().completed_replay_payload.ordered_items
     target = build_test_provider_replay_target(
-        transport_binding_id="openai_chat_completions",
+        wire_api=wire_api, transport_binding_id=wire_api,
     )
     return build_prepared_durable_provider_assistant_replay(
         session_id=session_id,
@@ -100,11 +116,12 @@ def _native_candidate(
                 text="answer", tool_calls=()
             )
         ),
-        ordered_items=(frozen,),
+        ordered_items=items,
     )
 
 
-def _commit_arguments(repository, lease, *, workspace_id: str, detail_count: int = 0):
+def _commit_arguments(repository, lease, *, workspace_id: str, detail_count: int = 0,
+                      wire_api: str = "openai_chat_completions"):
     _turn_id, cut = _open_turn(repository, lease)
     entry_id = _name("entry")
     content = InlineContent.from_bytes(b"answer")
@@ -114,6 +131,7 @@ def _commit_arguments(repository, lease, *, workspace_id: str, detail_count: int
         workspace_id=workspace_id,
         entry_id=entry_id,
         detail_count=detail_count,
+        wire_api=wire_api,
     )
     occurred_at = datetime.now(timezone.utc)
     return {
@@ -128,9 +146,11 @@ def _commit_arguments(repository, lease, *, workspace_id: str, detail_count: int
     }
 
 
-@pytest.mark.parametrize("detail_count", (0, 65_537))
+@pytest.mark.parametrize("wire_api,detail_count", (
+    ("openai_chat_completions", 0), ("openai_chat_completions", 65_537), ("openai_responses", 0),
+))
 def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
-    stage2_migrated_postgres_database, detail_count: int,
+    stage2_migrated_postgres_database, detail_count: int, wire_api: str,
 ) -> None:
     provider = verified_postgres_provider(stage2_migrated_postgres_database.runtime_dsn)
     repository = ConversationKernelRepository(provider)
@@ -146,6 +166,7 @@ def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
     )
     arguments = _commit_arguments(
         repository, lease, workspace_id=workspace_id, detail_count=detail_count,
+        wire_api=wire_api,
     )
     assert (
         repository.confirm_assistant_message_winner(
@@ -189,6 +210,13 @@ def test_round5a2_native_composite_confirms_exact_and_is_runtime_immutable(
         manifest=manifest, payload_bytes=payload_bytes,
     )
     assert decoded.payload_bytes == arguments["provider_replay"].payload_bytes
+    if wire_api == "openai_responses":
+        import json
+        assert json.loads(decoded.payload_bytes) == [
+            {"type": "reasoning", "id": "rs_provider", "summary": [], "encrypted_content": "done-opaque"},
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}],
+             "id": "msg_provider", "phase": "final_answer"},
+        ]
     with pytest.raises(ConversationKernelConflict):
         repository.confirm_assistant_message_winner(
             lease.guard,
