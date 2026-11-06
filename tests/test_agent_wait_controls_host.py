@@ -39,6 +39,7 @@ class WaitControlModel(_DetachedDraftModel):
         self.release = asyncio.Event()
         self.other_id = None
         self.control_requests = []
+        self.control_cell = None
 
     async def stream(self, request):
         self.requests.append(request)
@@ -48,34 +49,39 @@ class WaitControlModel(_DetachedDraftModel):
             if not self.control:
                 events = (
                     _tool_call(
-                        "run_agent",
+                        "exec_cell",
                         random_id("call"),
-                        {"instruction": "SELECTED_WORK" if step == 0 else "OTHER_WORK"},
+                        {"code": "await tools.run_agent(" + json.dumps({
+                            "instruction": "SELECTED_WORK" if step == 0 else "OTHER_WORK"
+                        }) + ");"},
                     )
                     if step < 2
                     else _text("ROOT_READY")
                 )
             else:
                 self.control_requests.append(request)
-                if step == 0 and self.mode == "code":
-                    import json
-
-                    code = (
-                        "await tools.wait_agent.works({targets:["
-                        + json.dumps(self.selected_work)
-                        + ']}); console.log("UNREACHABLE_AFTER_STOP");'
-                    )
-                    events = _tool_call(
-                        "exec_cell", random_id("call"), {"code": code}
-                    )
-                elif step == 0:
-                    events = _tool_call(
-                        "wait_agent",
-                        random_id("call"),
-                        {"targets": [self.selected_agent], "timeout_seconds": 300},
-                    )
+                if step == 0:
+                    operation = "wait_agent.works" if self.mode == "work" else "wait_agent"
+                    arguments = {"targets": [self.selected_work if self.mode == "work" else self.selected_agent]}
+                    if self.mode == "agent":
+                        arguments["timeout_seconds"] = 300
+                    code = "const outcome=await tools." + operation + "(" + json.dumps(arguments) + ");"
+                    code += ('console.log("UNREACHABLE_AFTER_STOP");' if self.mode == "work"
+                             else 'console.log(outcome);')
+                    events = _tool_call("exec_cell", random_id("call"), {"code": code})
+                elif step == 1:
+                    message = next(m for m in reversed(request.compiled_input.messages)
+                                   if m.role is MessageRole.TOOL_RESULT)
+                    accepted = json.loads(decode_tool_result_observation(text_part_values(message.content)[0])["body"])
+                    self.control_cell = accepted["target"]
+                    # Keep ROOT active in a real native observation while the Cell
+                    # waits; unrelated messages must not complete either wait.
+                    events = (_tool_call("manage_cell", random_id("call"),
+                        {"action": "wait", "target": self.control_cell, "yield_time_ms": 30_000})
+                        if self.mode == "agent" else _text("ROOT_CONTROL_FINISHED"))
                 else:
                     events = _text("ROOT_CONTROL_FINISHED")
+
         else:
             rendered = "\n".join(
                 text
@@ -105,7 +111,7 @@ class WaitControlModel(_DetachedDraftModel):
             yield event
 
 
-@pytest.mark.parametrize("mode", ["code", "native"])
+@pytest.mark.parametrize("mode", ["work", "agent"])
 def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_input(
     mode,
     tmp_path,
@@ -178,18 +184,16 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                             """SELECT a.id FROM pulsara_v3.tool_execution_attempts a
                             JOIN pulsara_v3.tool_invocations i ON i.id=a.invocation_id AND i.session_id=a.session_id
                             LEFT JOIN pulsara_v3.tool_results r ON r.session_id=a.session_id AND r.attempt_id=a.id
-                            WHERE a.session_id=%s AND (i.tool_name='wait_agent.works' OR
-                              (i.source_kind='MODEL_TOOL_CALL' AND i.tool_call_id IN
-                               (SELECT tool_call_id FROM pulsara_v3.assistant_message_blocks WHERE session_id=%s AND tool_name='wait_agent')))
-                            AND r.id IS NULL""",
-                            (root.session_id, root.session_id),
+                            WHERE a.session_id=%s AND i.source_kind='CODE_MODE_CALL'
+                            AND i.tool_name IN ('wait_agent.works','wait_agent') AND r.id IS NULL""",
+                            (root.session_id,),
                         ).fetchone()
                         return row is not None
 
                 return await root._io.run(read, deadline_monotonic=monotonic() + 10)
 
             await eventually(wait_admitted)
-            if mode == "code":
+            if mode == "work":
                 await asyncio.wait_for(control, 10)
                 cell = root.code_mode_cells()[0]
                 assert cell["pending_calls"] == 1
@@ -206,10 +210,13 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                 assert not any("UNREACHABLE_AFTER_STOP" in record.get("text", "")
                                for _, record in await asyncio.to_thread(_formal_cell_rows, root))
             else:
+                async def root_waiting():
+                    return len(model.control_requests) == 2 and model.control_cell is not None
+                await eventually(root_waiting)
                 model.other_send.set()
                 await asyncio.wait_for(model.other_message_done.wait(), 10)
                 assert not control.done()
-                assert len(model.control_requests) == 1
+                assert len(model.control_requests) == 2
                 outcome = await root.steer_active_turn(
                     command_id=random_id("command"),
                     content=PromptContent.text("HUMAN_STEER_CONTROL"),
@@ -217,10 +224,10 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                 )
                 assert outcome.status in {"PENDING", "SUCCEEDED"}
                 assert not control.done()
-                assert len(model.control_requests) == 1
+                assert len(model.control_requests) == 2
                 model.release.set()
                 await asyncio.wait_for(control, 10)
-                assert len(model.control_requests) == 2
+                assert len(model.control_requests) == 3
                 final_input = model.control_requests[-1].compiled_input
                 rendered = "\n".join(
                     text
@@ -238,14 +245,18 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                     for message in final_input.messages
                     if message.role is MessageRole.TOOL_RESULT
                 ]
-                assert any(json.loads(body).get("state") == "settled" for body in bodies)
+                assert any(json.loads(body).get("state") == "completed" for body in bodies)
+                from tests.test_agent_code_mode_execution import _formal_cell_rows
+                records = [record for _, record in await asyncio.to_thread(_formal_cell_rows, root)]
+                assert any(record.get("kind") == "log" and json.loads(record["text"]).get("state") == "settled"
+                           for record in records)
             actual = await root._io.run(
                 root.repository.query_agent_work,
                 root_session_id=root.session_id,
                 work_id=model.selected_work["work_id"],
                 deadline_monotonic=monotonic() + 10,
             )
-            assert actual["status"] == ("running" if mode == "code" else "completed")
+            assert actual["status"] == ("running" if mode == "work" else "completed")
         finally:
             model.release.set()
             model.other_send.set()

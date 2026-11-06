@@ -279,7 +279,8 @@ def test_live_cell_changes_do_not_change_environment_facts(tmp_path):
                 source="console.log('keep'); await tools.read_file({});",
                 source_exec_attempt_id=derive_id("attempt", "environment-facts"),
                 turn_id=derive_id("turn", "environment-facts"),
-                snapshot=object(), tool_catalog={"read_file": {}}, invoke=invoke,
+                snapshot=object(), tool_catalog={"decide": {}, "read_file": {}}, invoke=invoke,
+                decision_available=False,
             )
             await asyncio.wait_for(started.wait(), 5)
             running = KernelHostSession.code_mode_cells(session)

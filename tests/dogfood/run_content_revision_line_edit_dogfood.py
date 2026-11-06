@@ -89,7 +89,10 @@ def _tool_trace(session) -> list[dict[str, object]]:
             SELECT request_entry.entry_sequence AS request_sequence,
                    result_entry.entry_sequence AS result_sequence,
                    b.tool_call_id, b.tool_name, b.tool_arguments,
-                   r.result_state, result_entry.inline_content AS result_content
+                   r.result_state, result_entry.inline_content AS result_content,
+                   'MODEL_TOOL_CALL'::text AS source_kind,
+                   NULL::text AS source_exec_attempt_id,
+                   NULL::bigint AS call_sequence, b.block_ordinal
             FROM pulsara_v3.assistant_message_blocks AS b
             JOIN pulsara_v3.transcript_entries AS request_entry
               ON request_entry.session_id = b.session_id
@@ -102,9 +105,34 @@ def _tool_trace(session) -> list[dict[str, object]]:
               ON result_entry.session_id = r.session_id
              AND result_entry.id = r.result_entry_id
             WHERE b.session_id = %s AND b.block_kind = 'TOOL_CALL'
-            ORDER BY request_entry.entry_sequence, b.block_ordinal
+            UNION ALL
+            SELECT request_entry.entry_sequence AS request_sequence,
+                   result_entry.entry_sequence AS result_sequence,
+                   i.id AS tool_call_id, i.tool_name,
+                   i.original_arguments AS tool_arguments,
+                   r.result_state, result_entry.inline_content AS result_content,
+                   i.source_kind, i.source_exec_attempt_id,
+                   i.call_sequence, b.block_ordinal
+            FROM pulsara_v3.tool_invocations AS i
+            JOIN pulsara_v3.tool_execution_attempts AS source
+              ON source.session_id = i.session_id
+             AND source.id = i.source_exec_attempt_id
+            JOIN pulsara_v3.assistant_message_blocks AS b
+              ON b.session_id = source.session_id
+             AND b.assistant_entry_id = source.assistant_entry_id
+             AND b.tool_call_id = source.tool_call_id
+            JOIN pulsara_v3.transcript_entries AS request_entry
+              ON request_entry.session_id = b.session_id
+             AND request_entry.id = b.assistant_entry_id
+            JOIN pulsara_v3.tool_results AS r
+              ON r.session_id = i.session_id AND r.invocation_id = i.id
+            JOIN pulsara_v3.transcript_entries AS result_entry
+              ON result_entry.session_id = r.session_id
+             AND result_entry.id = r.result_entry_id
+            WHERE i.session_id = %s AND i.source_kind = 'CODE_MODE_CALL'
+            ORDER BY request_sequence, block_ordinal, call_sequence NULLS FIRST
             """,
-            (session.session_id,),
+            (session.session_id, session.session_id),
         ).fetchall()
     trace: list[dict[str, object]] = []
     for row in rows:
@@ -119,12 +147,77 @@ def _tool_trace(session) -> list[dict[str, object]]:
                 "result_sequence": row["result_sequence"],
                 "tool_call_id": row["tool_call_id"],
                 "tool_name": row["tool_name"],
+                "source_kind": row["source_kind"],
+                "source_exec_attempt_id": row["source_exec_attempt_id"],
+                "call_sequence": row["call_sequence"],
                 "arguments": row["tool_arguments"],
                 "result_state": row["result_state"],
                 "result": result,
             }
         )
     return trace
+
+
+def _phase_cell_outputs(session, cell_ids):
+    from pulsara_agent.conversation_kernel._repository.prompts import _cell_body_in_connection
+    from pulsara_agent.ports.terminal_observation import CellOutputContent
+
+    with session.repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+        deadline_monotonic=monotonic() + 30,
+    ) as connection:
+        rows = connection.execute(
+            "SELECT * FROM pulsara_v3.prompt_queue_items WHERE session_id=%s "
+            "AND input_origin='CELL_OUTPUT' ORDER BY queue_sequence",
+            (session.session_id,),
+        ).fetchall()
+        outputs = []
+        for row in rows:
+            value = CellOutputContent.from_bytes(_cell_body_in_connection(connection, row))
+            if value.cell_id in cell_ids:
+                outputs.append({"status": row["status"], **value.canonical_mapping()})
+        return outputs
+
+
+async def _settle_code_mode_phase(session, *, trace_start):
+    """Wait within the caller's diagnostic deadline; never dispatch more work."""
+    while True:
+        if session._closing or session._closed:
+            raise RuntimeError("Host closed before dogfood Cell output settled")
+        # _active_task includes starting and finalizing turns, where the
+        # currently bound turn ID can already be absent.
+        if session._code_mode.snapshot_cell_index() or session._active_task is not None:
+            await asyncio.sleep(0.01)
+            continue
+        trace = (await asyncio.to_thread(_tool_trace, session))[trace_start:]
+        cell_ids = {
+            row["result"]["target"]["cell_id"]
+            for row in trace
+            if row["tool_name"] == "exec_cell"
+            and row["result_state"] == "SUCCESS"
+            and isinstance(row["result"], dict)
+            and row["result"].get("accepted") is True
+        }
+        outputs = await asyncio.to_thread(_phase_cell_outputs, session, cell_ids)
+        if session._closing or session._closed:
+            raise RuntimeError("Host closed before dogfood Cell output settled")
+        # Read formal output after physical settlement, then recheck the live
+        # owners: delivery can have started a ROOT turn during either DB read.
+        if session._code_mode.snapshot_cell_index() or session._active_task is not None:
+            continue
+        failures = [output for output in outputs if output["record"]["kind"] == "error"
+                    or output["status"] not in {"PENDING", "CONSUMED"}]
+        if failures:
+            raise AssertionError(f"dogfood Cell output failed: {failures!r}")
+        delivered = {output["cell_id"] for output in outputs
+                     if output["status"] == "CONSUMED"
+                     and output["record"]["kind"] == "log"}
+        pending = any(output["status"] == "PENDING" for output in outputs)
+        if cell_ids <= delivered and not pending:
+            return outputs
+        if not pending:
+            raise AssertionError(f"settled Cells did not publish their required console output: {cell_ids - delivered!r}")
+        await asyncio.sleep(0.01)
 
 
 def _require_sequence(

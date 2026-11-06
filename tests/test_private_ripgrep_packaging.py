@@ -136,7 +136,8 @@ async def main():
     try:
         cell_id = await host.start(source='return await tools.read_file({});',
             source_exec_attempt_id=random_id('attempt'), turn_id=random_id('turn'),
-            snapshot=object(), tool_catalog={'read_file': {}}, invoke=invoke)
+            snapshot=object(), tool_catalog={'decide': {}, 'read_file': {}}, invoke=invoke,
+            decision_available=False)
         cell = host._cells[cell_id]
         async with asyncio.timeout(15):
             while True:

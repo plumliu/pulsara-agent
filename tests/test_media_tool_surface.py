@@ -1,4 +1,5 @@
 from __future__ import annotations
+from pulsara_agent.primitives.permission import PermissionMode
 
 import asyncio
 from dataclasses import replace
@@ -19,7 +20,6 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     DefaultToolDispatchAuthorizationPolicy,
 )
 from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-from pulsara_agent.conversation_kernel.tool_surface import CodeModeToolDirectory
 from pulsara_agent.identity import derive_id
 from pulsara_agent.llm.input import (
     FrozenPromptContent,
@@ -155,7 +155,7 @@ def test_media_hidden_subagent_code_mode_and_forged_entry_denied(tmp_path):
         assert MEDIA_TOOL_NAMES <= {s.name for s in root.model_surface.tool_specs}
         assert not MEDIA_TOOL_NAMES & {s.name for s in sub.model_surface.tool_specs}
         assert not MEDIA_TOOL_NAMES & {
-            s.name for s in CodeModeToolDirectory.freeze(root).tool_specs
+            s.name for s in port.freeze_code_mode_tool_directory(root, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS).tool_specs
         }
         borrow = port.borrow_tool_surface(sub)
         try:

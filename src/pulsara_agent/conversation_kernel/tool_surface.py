@@ -239,7 +239,7 @@ CODE_MODE_SHARED_TOOL_NAMES = frozenset({
     "search_sessions", "search_session_content", "read_session_content",
     "query_capabilities", "use_new_mcp_tool", "read_mcp_resource",
     "run_agent", "query_agents", "send_agent_message",
-    "wait_agent", "stop_agent",
+    "wait_agent", "stop_agent", "decide",
 })
 
 
@@ -258,13 +258,14 @@ class CodeModeToolDirectory:
                 return binding
         raise KeyError(tool_name)
 
-    @classmethod
-    def freeze(cls, prepared: PreparedKernelToolSurface):
-        specs = tuple(spec for spec in prepared.model_surface.tool_specs
-            if spec.name in CODE_MODE_SHARED_TOOL_NAMES or (
-                isinstance(prepared.binding(spec.name), PreparedToolExecutionBinding)
-                and isinstance(prepared.binding(spec.name).execution_policy, McpToolExecutionPolicyFact)))
-        return cls(specs, tuple(prepared.binding(spec.name) for spec in specs), prepared.access)
+    def __post_init__(self) -> None:
+        if tuple(spec.name for spec in self.tool_specs) != tuple(
+            binding.tool_name for binding in self.execution_bindings
+        ):
+            raise ValueError("Code Mode directory bindings do not join specs")
+        if any(spec.descriptor_fingerprint != binding.descriptor_fingerprint
+               for spec, binding in zip(self.tool_specs, self.execution_bindings, strict=True)):
+            raise ValueError("Code Mode directory descriptor does not exact-join")
 
 
 @dataclass(slots=True)

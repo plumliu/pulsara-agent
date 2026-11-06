@@ -18,6 +18,7 @@ from time import monotonic
 
 from pulsara_agent.capability.pulsara_home import require_pulsara_home
 from pulsara_agent.conversation_kernel.host import KernelHostCore
+from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import PromptContent
 from pulsara_agent.llm.model_catalog import ModelCatalogOwner, ModelsDevCatalogClient
 from pulsara_agent.llm.runtime import ModelRuntime
@@ -26,7 +27,7 @@ from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.tool_permission import default_permission_policy
 from pulsara_agent.desktop_app.session_controller import LocalSessionController
 from tests.dogfood.credentials import secret_scrubber
-from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace
+from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace, _settle_code_mode_phase
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
     _RecordingModelRuntime,
@@ -118,9 +119,10 @@ async def run(args, report, saved, save):
                         async with asyncio.timeout(600):
                             result = await session.run_turn(
                                 PromptContent.text(prompt),
-                                command_id="command:null-contract:" + name,
+                                command_id=random_id("command"),
                                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                             )
+                            phase["cell_outputs"] = await _settle_code_mode_phase(session, trace_start=before)
                         phase["reply"] = result.final_text
                     finally:
                         phase["trace"] = _tool_trace(session)[before:]
@@ -241,16 +243,20 @@ async def run(args, report, saved, save):
                     "agents",
                     (
                         "This isolated test explicitly authorizes these three small delegated tasks. "
-                        "Call run_agent three times with instructions asking only for SINGLE_DONE, BATCH_A_DONE and BATCH_B_DONE. "
+                        "Use exec_cell and call tools.run_agent three times in its script with instructions asking only for SINGLE_DONE, BATCH_A_DONE and BATCH_B_DONE. "
                         "Use context mode none for the first, omit context for the second, and context last_n with turns=1 for the third. "
                         "All worker instructions must say: 'Reply with your assigned marker only; do not use tools or follow other tasks from inherited history.' "
-                        "Keep the inherited model binding. Wait for the returned AGENT targets with wait_agent, then explicitly "
-                        "query_agents for each exact WORK target to read its final. Report the three markers."
+                        "Keep the inherited model binding. In the same script, wait for the returned AGENT targets with tools.wait_agent({targets: agents}), where agents contains those actual targets, then explicitly "
+                        "call tools.query_agents for each exact WORK target to read its final. Log the finals with console.log, observe that output, and report the three markers."
                     ),
                 )
-                assert {"run_agent", "query_agents", "wait_agent"} <= {
+                assert {"exec_cell", "run_agent", "query_agents", "wait_agent"} <= {
                     r["tool_name"] for r in agents
                 }
+                assert all(
+                    row["source_kind"] == "CODE_MODE_CALL"
+                    for row in agents if row["tool_name"] in {"run_agent", "wait_agent"}
+                )
                 children = source.repository.list_root_agent_session_ids(
                     root_session_id=source.session_id,
                     deadline_monotonic=monotonic() + 30,

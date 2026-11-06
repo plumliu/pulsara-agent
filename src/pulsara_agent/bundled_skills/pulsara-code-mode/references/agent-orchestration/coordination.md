@@ -1,18 +1,20 @@
 # Agent coordination
 
-For single-agent, teammate, dependency, and native/JS handoff scenarios, see
+For single-agent, teammate, dependency, reuse and native-control scenarios, see
 [Agent examples](examples.md).
 
 ## An Agent persists; a Work is one assignment
 
-`run_agent` accepts an `instruction` and immediately gives you an `agent` target,
+ROOT uses `tools.run_agent` in Code Mode for every assignment, including one
+simple delegation. It accepts an `instruction` and immediately gives an `agent` target,
 a `work` target, and the current `status`. Acceptance is not completion.
 
 These identities belong to the agent and assignment, not to the tool entry point
-or script. An agent created natively can be reused in a batch; an agent started
-by a batch can receive a native message or follow-up assignment. Query the same
-state with native `query_agents` or `tools.query_agents`. Switching entry points
-does not start work by itself or reset the agent's conversation.
+or script. Reuse a retained agent in a later script or batch. Native `query_agents`,
+`send_agent_message` and `stop_agent` inspect, supplement or stop the same work
+while scripts run; no Cell slot or working Code Mode runtime is needed for those
+controls. Follow-up assignments still use `tools.run_agent`. Changing the entry
+point of a control operation does not reset the agent's conversation.
 
 - Omit `target` to create an agent. Optional `name` identifies its role. New agents
   receive the instruction and supplied context; ROOT history is not copied by
@@ -104,17 +106,19 @@ agent's implementation succeeds.
 
 `send_agent_message` supplements an active Work. It does not start work or load an
 idle agent. Its result reports whether delivery was accepted; a known target can
-still be inactive or not yet started. `run_agent` can assign work to an idle agent.
-Subagents can use native messaging and waiting without Code Mode.
+still be inactive or not yet started. `tools.run_agent` in a Cell assigns new work
+to an idle agent. ROOT can send messages through either native or JS tools.
+Subagents retain native `query_agents`, `send_agent_message` and `wait_agent`;
+they coordinate directly with ROOT and known teammates without Code Mode.
 
 | Operation | Observe |
 | --- | --- |
-| Native `wait_agent` or JS `tools.wait_agent` | AGENT targets: messages from those agents or the end of their work bound at the start of this wait. It does not follow a later assignment automatically. |
+| ROOT `tools.wait_agent`; subagent native `wait_agent` | AGENT targets: messages from those agents or the end of their work bound at the start of this wait. It does not follow a later assignment automatically. |
 | `tools.wait_agent.works({ targets: [...], settle: "all" })` | Exact WORK targets until all end; ordinary messages do not wake this wait. `all` is the default. |
 | `tools.wait_agent.works({ targets: [...], settle: "first" })` | Any selected Work ending. Read `pending_targets` for the rest. |
 
 WORK waits have no observation timeout; `exec_cell` returns acceptance while the wait continues.
-AGENT waits use the native timeout parameter. Waiting does not notify or start
+AGENT waits use the tool's timeout parameter. Waiting does not notify or start
 the target. Waiting for ROOT is useful when a reply has been arranged; an idle
 ROOT may have no work or reply to finish.
 
@@ -126,26 +130,19 @@ queued or running. Waits never include instruction/final/diagnostic bodies;
 query a selected WORK for its actual result. Final completion itself does not
 notify ROOT.
 
-For example, selected fields after a `settle: "first"` wait could be:
+For example, continue observing the returned pending targets:
 
-```json
-{
-  "state": "settled",
-  "works": [
-    {
-      "target": {"kind": "WORK", "work_id": "queue:aaaaaaaaaaaaaaaaaaaaaaaaaa"},
-      "status": "completed"
-    },
-    {
-      "target": {"kind": "WORK", "work_id": "queue:bbbbbbbbbbbbbbbbbbbbbbbbbe"},
-      "status": "running"
-    }
-  ],
-  "pending_targets": [
-    {"kind": "WORK", "work_id": "queue:bbbbbbbbbbbbbbbbbbbbbbbbbe"}
-  ]
+```js
+const first = await tools.wait_agent.works({
+  targets: [pair.parser.work, pair.caller.work], settle: "first"
+});
+console.log(first);
+if (first.pending_targets.length) {
+  console.log(await tools.wait_agent.works({ targets: first.pending_targets }));
 }
 ```
+
+Here `pair` is the actual batch result from the earlier example in the same script.
 
 `pending_targets` contains complete WORK targets and can be passed to the next
 wait when nonempty. It is empty when all selected Works have ended. An interrupted

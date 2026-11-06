@@ -68,6 +68,29 @@ Explicit Stop keeps real effects readable without using late results to wake the
 stopped execution. Ordinary results already delivered to JS stay inside the script
 unless it explicitly outputs them.
 
+Agent work belongs to the collaboration owner, not the Cell. After a script fails
+or stops, use native `query_agents` to inspect actual Agent/Work state, native
+`send_agent_message` to supplement active work, or native `stop_agent` to stop it.
+These controls work independently of Cell slots and the Code Mode runtime. Resume
+assignments or waits in a new script using the existing targets; reuse completed
+results rather than dispatching them again.
+
+## Decision availability and failures
+
+`tools.decide.available()` is a local configuration check frozen for the Cell,
+not a network health check. A false value leaves the semantic question unanswered:
+send the condition, material and relevant Agent/Work references to ROOT, and
+continue the task through the existing tools. Configuration is optional; explain
+the Jev-like Decision setting when the user explicitly wants to use or configure it.
+
+An actual `tools.decide` call can fail through the normal `ToolError` path even
+after an available check, for example if settings change or the service fails.
+Preserve its concrete error, or adjust the call when the cause is understood.
+Never substitute a false array for an error. A successful result covers every
+input in order; failure does not supply a usable partial decisions array.
+Resource diagnostics identify an oversized input when applicable: reduce that
+material or condition, or process appropriate source pages in separate calls.
+
 ## Show an image through the native tool
 
 JavaScript does not have `tools.view_image`. Use tools to create the image file,

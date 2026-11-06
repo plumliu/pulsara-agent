@@ -209,7 +209,8 @@ async def check_vm():
         raise AssertionError('unexpected tool dispatch')
     try:
         cell=await owner.start(source="return 'relocated QuickJS';", source_exec_attempt_id=random_id('attempt'),
-            turn_id=random_id('turn'), snapshot=None, tool_catalog={}, invoke=no_tool)
+            turn_id=random_id('turn'), snapshot=None, tool_catalog={'decide': {}}, invoke=no_tool,
+            decision_available=False)
         records=[]
         async with asyncio.timeout(10):
             state=await owner.wait_state(cell,10_000)

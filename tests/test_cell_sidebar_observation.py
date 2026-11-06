@@ -13,7 +13,7 @@ async def _start(host):
         return CodeModeToolResult(value={})
     return await host.start(source="console.log('available');",
         source_exec_attempt_id=random_id("attempt"), turn_id=random_id("turn"),
-        snapshot=object(), tool_catalog={}, invoke=invoke)
+        snapshot=object(), tool_catalog={"decide": {}}, invoke=invoke, decision_available=False)
 
 
 async def _terminal(host, cell_id):

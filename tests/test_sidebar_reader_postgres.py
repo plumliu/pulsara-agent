@@ -17,8 +17,8 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.terminal_protocol.v3_gateway import TerminalKernelProtocolServer
 from pulsara_agent.terminal_protocol.canonical_v3 import CanonicalProtocolReader
 from pulsara_agent.tool_permission import preset_to_policy
-from tests.test_agent_session_host import AgentModel, eventually
-from tests.test_round4_plan_host import _open_test_session, _tool_call, _text
+from tests.test_agent_session_host import AgentModel, eventually, _delegate, _delegation_progress
+from tests.test_round4_plan_host import _open_test_session, _text
 from tests.test_agent_requests_persistence import source as source
 
 pytestmark = pytest.mark.postgres
@@ -34,15 +34,19 @@ def test_reader_attaches_existing_agent_without_resuming_and_recovers_cold(
                     yield event
                 return
             self.requests.append(request)
+            if progress := _delegation_progress(self, request):
+                for event in progress:
+                    yield event
+                return
             index = self.root_turns.get(request.turn_id, 0)
             self.root_turns[request.turn_id] = index + 1
             if index:
                 events = _text('ROOT_FINISHED')
             elif self.agent_id is None:
-                events = _tool_call('run_agent', random_id('call'), {
+                events = _delegate(self, random_id('call'), {
                     'instruction': 'CHILD_FIRST', 'context': {'mode': 'last_n', 'turns': 1}})
             else:
-                events = _tool_call('run_agent', random_id('call'), {
+                events = _delegate(self, random_id('call'), {
                     'instruction': 'CHILD_SECOND', 'target': {'kind': 'AGENT', 'agent_id': self.agent_id}})
             for event in events:
                 yield event

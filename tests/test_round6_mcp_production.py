@@ -319,6 +319,8 @@ def _seal_mcp_test_port(port: DirectKernelToolPort) -> None:
         )
     if port._capability_reload is None:  # noqa: SLF001
         port.bind_capability_reload_port(object())  # type: ignore[arg-type]
+    from tests.support.round3 import _UnavailableTestDecisionPort
+    port.bind_decision_port(_UnavailableTestDecisionPort())
     port.seal_builtin_composition()
 
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
+from tests.test_agent_code_mode_execution import _settled_formal_records
 
 pytestmark = pytest.mark.postgres
 
@@ -47,16 +49,20 @@ def _assert_root_outcomes(dsn, session_id):
             "SELECT status FROM pulsara_v3.turns WHERE session_id=%s ORDER BY accepted_at",
             (session_id,),
         ).fetchall()
-        assert rows == [("INTERRUPTED",), ("COMPLETED",)]
+        # Source Cell acceptance, formal Cell error delivery, then queued recovery.
+        assert rows == [("COMPLETED",), ("COMPLETED",), ("COMPLETED",)]
 
 
 def _assert_no_result(dsn, session_id, attempt_id):
     assert attempt_id is not None
     with psycopg.connect(dsn) as connection:
         assert connection.execute(
-            "SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s AND id=%s",
+            "SELECT i.source_kind, i.tool_name, i.call_sequence "
+            "FROM pulsara_v3.tool_execution_attempts a "
+            "JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id "
+            "WHERE a.session_id=%s AND a.id=%s",
             (session_id, attempt_id),
-        ).fetchone() == (1,)
+        ).fetchall() == [("CODE_MODE_CALL", "run_agent", 2)]
         assert connection.execute(
             "SELECT count(*) FROM pulsara_v3.tool_results WHERE session_id=%s AND attempt_id=%s",
             (session_id, attempt_id),
@@ -78,6 +84,8 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
     root_calls = 0
     session = None
     release_child = asyncio.Event()
+    release_failure = threading.Event()
+    recovery_requested = False
     recovered = asyncio.Event()
     conflict_injected = False
     failed_attempt = None
@@ -105,6 +113,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
         # dependent Work admission while retaining the first admitted Work.
         nonlocal conflict_injected, failed_attempt, first_work
         if any(request.depends_on for request in requests):
+            assert release_failure.wait(timeout=10)
             conflict_injected = True
             failed_attempt = source_tool_attempt_id
             raise ConversationKernelConflict("injected dependent Work admission conflict")
@@ -120,7 +129,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
         postgres_dsn=isolated_migrated_postgres_database.runtime_dsn,
     )
 
-    class NativeWorkModel(DirectKernelModelPort):
+    class CodeModeWorkModel(DirectKernelModelPort):
         """Exercise real ROOT wire planning, replay persistence and epoch install."""
         def __init__(self):
             super().__init__(model_runtime=runtime)
@@ -136,18 +145,11 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
                 return self.child.preflight_execution(request, **kwargs)
             self.requests.append(request)
             root_calls += 1
-            if root_calls <= 2:
-                arguments = {
-                    "instruction": "wait for release",
-                    "context": {"mode": "none"},
-                }
-                if root_calls == 2:
-                    assert first_work is not None
-                    arguments = {
-                        "instruction": "use predecessor",
-                        "depends_on": [{"kind": "WORK", "work_id": first_work}],
-                        "context": {"mode": "none"},
-                    }
+            if root_calls == 1:
+                arguments = {"code": (
+                    'const first = await tools.run_agent({instruction:"wait for release",context:{mode:"none"}});'
+                    'await tools.run_agent({instruction:"use predecessor",depends_on:[first.work],context:{mode:"none"}});'
+                )}
                 delta = {
                     "reasoning_content": "delegate safely",
                     "tool_calls": [
@@ -156,15 +158,17 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
                             "id": f"call:batch:{root_calls}",
                             "type": "function",
                             "function": {
-                                "name": "run_agent",
+                                "name": "exec_cell",
                                 "arguments": json.dumps(arguments),
                             },
                         }
                     ],
                 }
-            else:
+            elif recovery_requested:
                 recovered.set()
                 delta = {"content": "RECOVERED"}
+            else:
+                delta = {"content": "CELL_ACCEPTED" if root_calls == 2 else "CELL_FAILURE_OBSERVED"}
             request.prepared_call.call.target.transport._adapter._mock_chunks = [
                 {"choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
                 {
@@ -173,7 +177,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
                             "index": 0,
                             "delta": {},
                             "finish_reason": "tool_calls"
-                            if root_calls <= 2
+                            if root_calls == 1
                             else "stop",
                         }
                     ]
@@ -181,7 +185,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             ]
             return super().preflight_execution(request, **kwargs)
 
-    model = NativeWorkModel()
+    model = CodeModeWorkModel()
     monkeypatch.setattr(kernel_host, "DirectKernelModelPort", lambda **_: model)
     monkeypatch.setattr(
         kernel_host.LocalMcpManagementService, "load_configs", lambda *_a, **_kw: ()
@@ -191,7 +195,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
     )
 
     async def scenario():
-        nonlocal session
+        nonlocal session, recovery_requested
         core = KernelHostCore.production(model_runtime=runtime)
         session = await core.open_session(
             HostWorkspaceInput(workspace_kind="project", workspace_root=workspace)
@@ -204,19 +208,37 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
 
-            async def wait_failed():
+            # The accepted Cell outlives its source turn. Release the injected
+            # admission failure only after that turn has canonically completed.
+            async def wait_source_completed():
                 while root_calls < 2 or session._active_task is not None:
                     if session._delivery_task.done():
                         session._delivery_task.result()
                     await asyncio.sleep(0.01)
 
-            await asyncio.wait_for(wait_failed(), timeout=10)
+            await asyncio.wait_for(wait_source_completed(), timeout=10)
+            release_failure.set()
+            records = await _settled_formal_records(session, expected=1)
+            assert len(records) == 1
+            assert records[0]["kind"] == "error"
+            assert records[0]["error"]["code"] == "bridge_error"
+            assert "injected dependent Work admission conflict" in records[0]["error"]["message"]
+
+            async def wait_failure_delivered():
+                while root_calls < 3 or session._active_task is not None:
+                    if session._delivery_task.done():
+                        session._delivery_task.result()
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(wait_failure_delivered(), timeout=10)
+            assert root_calls == 3
             assert conflict_injected
             scope = ProviderInputContinuityScope(
                 session.session_id, ModelInputScopeKind.ROOT
             )
             prior_view = session._input_continuity.current_view(scope)
             assert prior_view is not None
+            recovery_requested = True
             await session.submit_prompt(
                 command_id=random_id("command"),
                 content=PromptContent.text("continue normally"),
@@ -244,7 +266,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             )
             assert accepted_works == [first_work]
             assert child_calls == 1
-            assert root_calls == 3
+            assert root_calls == 4
             with psycopg.connect(isolated_migrated_postgres_database.runtime_dsn) as connection:
                 assert connection.execute(
                     "SELECT count(*) FROM pulsara_v3.prompt_queue_items q "
@@ -255,8 +277,8 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             next_view = session._input_continuity.current_view(scope)
             assert next_view is not None
             assert next_view.epoch_nonce == prior_view.epoch_nonce
-            before = model.requests[1].wire_input_plan.materialization
-            after = model.requests[2].wire_input_plan.materialization
+            before = model.requests[2].wire_input_plan.materialization
+            after = model.requests[3].wire_input_plan.materialization
             assert after.root_policy_value == before.root_policy_value
             assert after.tool_items == before.tool_items
             assert (
@@ -264,6 +286,7 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
                 == before.ordered_input_items
             )
         finally:
+            release_failure.set()
             release_child.set()
             await core.close_session(session.host_session_id)
             await core.shutdown()

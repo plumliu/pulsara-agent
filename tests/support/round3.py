@@ -1255,6 +1255,13 @@ class _EmptyTestMcpCapabilityOwner:
         )
 
 
+class _UnavailableTestDecisionPort:
+    tool_names = frozenset({"decide"})
+
+    def available(self):
+        return False
+
+
 def seal_test_direct_tool_port(
     port: DirectKernelToolPort, *, interaction=None, capability_reload=None
 ) -> None:
@@ -1271,6 +1278,7 @@ def seal_test_direct_tool_port(
     port.bind_memory_port(  # type: ignore[arg-type]
         type("_EmptyMemoryPort", (), {"tool_names": ()})()
     )
+    port.bind_decision_port(_UnavailableTestDecisionPort())
     port.bind_mcp_supervisor(_EmptyTestMcpCapabilityOwner())  # type: ignore[arg-type]
     port.bind_capability_reload_port(
         capability_reload if capability_reload is not None else object()
@@ -1365,6 +1373,8 @@ def prepare_test_direct_tool_surface(
             port.bind_memory_port(  # type: ignore[arg-type]
                 type("_EmptyMemoryPort", (), {"tool_names": ()})()
             )
+        if port._decision is None:  # noqa: SLF001
+            port.bind_decision_port(_UnavailableTestDecisionPort())
         if port._mcp_supervisor is None:  # noqa: SLF001
             port.bind_mcp_supervisor(  # type: ignore[arg-type]
                 _EmptyTestMcpCapabilityOwner()

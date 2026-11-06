@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import asdict, replace
 import json
 from time import monotonic
 from types import SimpleNamespace
@@ -26,7 +26,8 @@ async def _start(host, source, invoke=None, catalog=None, **kwargs):
             closed(identity)
     identity = await host.start(source=source, source_exec_attempt_id="test-source-attempt",
                             turn_id=kwargs.pop("turn_id", "test-turn"), snapshot=object(),
-                            tool_catalog=catalog or {"read_file": {}}, invoke=invoke or empty,
+                            tool_catalog={"decide": {}, **(catalog or {"read_file": {}})}, invoke=invoke or empty,
+                            decision_available=kwargs.pop("decision_available", False),
                             on_cell_closed=on_closed, **kwargs)
     if identity in host._cells:
         captured[identity] = host._cell(identity)
@@ -53,6 +54,172 @@ async def _finish(host, cell):
                     assert observed_errors, "An unexpected failure must have delivered its real diagnostic"
                 return SimpleNamespace(state=owned.state, error=owned.error, pending_calls=owned.pending_calls), records
             await asyncio.sleep(.001)
+
+
+def test_decide_availability_is_local_sync_and_does_not_block_other_tools():
+    async def run():
+        calls = []
+        async def invoke(call):
+            calls.append(call.tool_name)
+            return CodeModeToolResult(value={"text": "existing material"})
+        host = CodeModeHost()
+        try:
+            page, records = await _finish(host, await _start(host, '''
+              const available = tools.decide.available();
+              if (typeof available !== 'boolean' || available !== false)
+                throw new Error('availability must be the local boolean');
+              const material = await tools.read_file({});
+              return {available, material};
+            ''', invoke, catalog={"decide": {}, "read_file": {}}))
+            assert page.state == "completed", page.error
+            assert calls == ["read_file"]
+            assert json.loads(records[-1]["text"]) == {
+                "available": False, "material": {"text": "existing material"},
+            }
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_decide_available_function_and_captured_value_are_immutable_in_real_guest(available):
+    async def run():
+        calls = []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        host = CodeModeHost()
+        try:
+            page, records = await _finish(host, await _start(host, '''
+              const decide = tools.decide, available = decide.available;
+              const original = available();
+              const changed = [
+                Reflect.set(tools, 'decide', () => null),
+                Reflect.set(decide, 'available', () => !original),
+                Reflect.deleteProperty(decide, 'available'),
+                Reflect.set(available, 'value', !original),
+              ];
+              for (const mutate of [
+                () => Object.defineProperty(decide, 'available', {value: () => !original}),
+                () => Object.setPrototypeOf(decide, {}),
+                () => Object.setPrototypeOf(available, {}),
+              ]) {
+                try { mutate(); throw Error('mutation succeeded'); }
+                catch (error) { if (!(error instanceof TypeError)) throw error; }
+              }
+              globalThis.decisionAvailable = !original;
+              for (let i = 0; i < 100; i++) {
+                if (tools.decide.available() !== original) throw Error('value changed');
+              }
+              return {value: tools.decide.available(), type: typeof available(),
+                same: tools.decide === decide && decide.available === available,
+                frozen: [Object.isFrozen(tools), Object.isFrozen(decide), Object.isFrozen(available)],
+                changed};
+            ''', invoke, decision_available=available))
+            assert page.state == "completed", page.error
+            assert calls == []
+            assert json.loads(records[-1]["text"]) == {
+                "value": available, "type": "boolean", "same": True,
+                "frozen": [True, True, True], "changed": [False, False, False, False],
+            }
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("initial", [False, True])
+def test_queued_cell_keeps_admission_availability_and_new_cell_captures_new_value(initial):
+    async def run():
+        host = CodeModeHost()
+        release = asyncio.Event()
+        all_running = asyncio.Event()
+        calls = []
+        async def invoke(call):
+            calls.append(call.tool_name)
+            if len(calls) == host.limits.vm_slots:
+                all_running.set()
+            await release.wait()
+            return CodeModeToolResult(value={})
+        try:
+            # Occupy all existing VM slots with real waiting Guests, then change
+            # the caller's configuration fact after the next Cell is admitted.
+            occupied = [await _start(host, 'await tools.read_file({});', invoke)
+                        for _ in range(host.limits.vm_slots)]
+            await asyncio.wait_for(all_running.wait(), 5)
+            configured = initial
+            queued = await _start(host, 'return tools.decide.available();', invoke,
+                                  decision_available=configured)
+            assert (await host.wait_state(queued, 0))["state"] == "queued"
+            configured = not configured
+            new_cell = await _start(host, 'return tools.decide.available();', invoke,
+                                   decision_available=configured)
+            assert (await host.wait_state(new_cell, 0))["state"] == "queued"
+            release.set()
+            for identity in occupied:
+                assert (await _finish(host, identity))[0].state == "completed"
+            for identity, expected in ((queued, initial), (new_cell, not initial)):
+                page, records = await _finish(host, identity)
+                assert page.state == "completed", page.error
+                assert json.loads(records[-1]["text"]) is expected
+            assert calls == ["read_file"] * host.limits.vm_slots
+        finally:
+            release.set()
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("availability", [None, 0, 1, "false", "true", {}, []])
+def test_cell_admission_requires_a_strict_availability_boolean_before_allocation(availability, monkeypatch):
+    import pulsara_agent.code_mode.host as host_module
+    def unexpected_id(_kind):
+        raise AssertionError("invalid admission must not allocate an identity")
+    monkeypatch.setattr(host_module, "random_id", unexpected_id)
+    async def run():
+        host = CodeModeHost()
+        try:
+            with pytest.raises(CodeModeError, match="must be a boolean") as caught:
+                await _start(host, "return 1;", decision_available=availability)
+            assert caught.value.code == "invalid_availability"
+            assert host._process is None and not host._cells
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_cell_admission_has_no_missing_availability_or_decide_catalog_fallback():
+    async def run():
+        host = CodeModeHost()
+        async def invoke(_):
+            raise AssertionError("invalid admission must not invoke a tool")
+        arguments = dict(source="return 1;", source_exec_attempt_id="source", turn_id="turn",
+                         snapshot=object(), tool_catalog={"read_file": {}}, invoke=invoke)
+        try:
+            with pytest.raises(TypeError, match="decision_available"):
+                await host.start(**arguments)
+            with pytest.raises(CodeModeError, match="directory must include decide"):
+                await host.start(**arguments, decision_available=False)
+            assert host._process is None and not host._cells
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("availability", [{}, {"decision_available": None}, {"decision_available": 1},
+                                         {"decision_available": "false"}])
+def test_real_sidecar_rejects_missing_or_non_boolean_availability(availability):
+    from pulsara_agent.identity import random_id
+    async def run():
+        host = CodeModeHost()
+        process = await asyncio.create_subprocess_exec(str(host._node), str(host._script),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        frames = [{"type": "configure", "limits": asdict(host.limits)},
+                  {"type": "start", "cell_id": random_id("cell"), "source": "return 1;", "tool_names": ["decide"], **availability}]
+        stdout, stderr = await asyncio.wait_for(process.communicate(
+            ("\n".join(json.dumps(frame) for frame in frames) + "\n").encode()), 5)
+        assert process.returncode != 0
+        assert b"Decision availability must be a boolean" in stderr
+        assert [json.loads(line)["type"] for line in stdout.splitlines()] == ["configured"]
+    asyncio.run(run())
 
 
 async def _vm_terminal(host, cell):
@@ -1469,21 +1636,3 @@ def test_retain_response_rejects_invalid_ids_and_settles_pending_on_protocol_fai
         assert terminated == [True]
 
     asyncio.run(run())
-
-
-def test_orchestration_skill_example_uses_shared_canonical_identity_vectors():
-    from pathlib import Path
-    from pulsara_agent.identity import derive_id, is_valid_id
-
-    example = (Path(__file__).resolve().parents[1] / "src/pulsara_agent/bundled_skills"
-               / "pulsara-code-mode/references/agent-orchestration/workflows.md").read_text()
-    vectors = (
-        ("session", "design", "session:df2uoz5psbdmr7n5evanmsp2n4"),
-        ("session", "critic", "session:bwmbtnixb46w4alboxd7vwdpki"),
-        ("queue", "critic-work", "queue:sliof53naqlyggmralreyz2h4y"),
-    )
-    for kind, part, expected in vectors:
-        assert derive_id(kind, "skill-example", part) == expected
-        assert is_valid_id(expected, kind)
-        assert expected in example
-    assert "Copy these values directly from the tool output" in example

@@ -42,7 +42,7 @@ from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.dogfood.credentials import secret_scrubber
 from tests.dogfood.run_compaction_request_start_dogfood import _rows
-from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace
+from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace, _settle_code_mode_phase
 from tests.dogfood.run_model_switch_handover_dogfood import (
     _ReadOnlySettingsStore,
     _RecordingModelRuntime,
@@ -179,7 +179,7 @@ async def run(admin_root, runtime_root, selected_wire=None):
             "B_HOLD_ACTIVE_MARKER"
             in json.dumps(record["provider_input"], ensure_ascii=False)
             and record["purpose"] != "context_compaction_summary"
-            and not any(tool.name == "run_agent" for tool in context.tools)
+            and not any(tool.name == "exec_cell" for tool in context.tools)
             and not gate.is_set()
             and not held_case["held"]
         ):
@@ -238,11 +238,16 @@ async def run(admin_root, runtime_root, selected_wire=None):
                             await root.update_model_call_binding(binding)
 
                             async def turn(text):
-                                return await root.run_turn(
+                                trace_start = len(await asyncio.to_thread(_tool_trace, root))
+                                result = await root.run_turn(
                                     PromptContent.text(text),
                                     command_id=random_id("command"),
                                     requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                                 )
+                                case.setdefault("cell_outputs", []).extend(
+                                    await _settle_code_mode_phase(root, trace_start=trace_start)
+                                )
+                                return result
 
                             async def ids():
                                 return await root._io.run(
@@ -252,29 +257,16 @@ async def run(admin_root, runtime_root, selected_wire=None):
                                 )
 
                             async def create(name, instruction):
-                                for attempt in range(2):
-                                    before = set(await ids())
-                                    result = await turn(
-                                        f"Use the native run_agent tool exactly once to create an agent named {name}. Its exact instruction is: {instruction} After acceptance, reply briefly."
-                                    )
-                                    after = set(await ids())
-                                    case.setdefault("creation_attempts", []).append(
-                                        {
-                                            "name": name,
-                                            "attempt": attempt + 1,
-                                            "reply": result.final_text,
-                                            "new_agents": list(after - before),
-                                        }
-                                    )
-                                    if len(after - before) == 1:
-                                        return (after - before).pop()
-                                    if len(after - before) != 0:
-                                        raise AssertionError(
-                                            f"{name}: unexpected new agents {list(after - before)}"
-                                        )
-                                raise AssertionError(
-                                    f"{name}: no agent was created after retry"
+                                before = set(await ids())
+                                result = await turn(
+                                    f"Use exec_cell to call tools.run_agent exactly once to create an agent named {name}. Its exact instruction is: {instruction} Log the returned Agent/Work targets with console.log, observe that output, then reply briefly after acceptance. Do not wait for the child to finish."
                                 )
+                                after = set(await ids())
+                                case.setdefault("creation_attempts", []).append(
+                                    {"name": name, "reply": result.final_text, "new_agents": list(after - before)}
+                                )
+                                assert len(after - before) == 1, f"{name}: expected one admitted Agent, got {list(after - before)}"
+                                return (after - before).pop()
 
                             c = await create(
                                 "Independent_C",
@@ -362,7 +354,7 @@ async def run(admin_root, runtime_root, selected_wire=None):
                                 "Send that teammate an actual native send_agent_message saying HANDOFF_HELLO. Also use the returned ROOT alias to send ROOT the message ROOT_ALIAS_HELLO. Reply briefly after the tool results."
                             )
                             await turn(
-                                f"Use native run_agent exactly once to assign a new Work to the existing agent {a}. Its exact instruction is: {followup} After acceptance, reply briefly."
+                                f"Use exec_cell to call tools.run_agent exactly once with target {{kind: 'AGENT', agent_id: '{a}'}} to assign a new Work to that existing agent. Its exact instruction is: {followup} Log the returned Agent/Work targets with console.log, observe that output, then reply briefly after acceptance."
                             )
 
                             async def second_done():

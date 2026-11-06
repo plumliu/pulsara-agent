@@ -5,6 +5,7 @@ from __future__ import annotations
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 
 import asyncio
+import json
 from dataclasses import replace
 from time import monotonic
 from types import SimpleNamespace
@@ -103,7 +104,7 @@ class _Model(CallbackScriptedKernelModel):
         else:
             self.root_requests.append(request)
             if len(self.root_requests) == 1:
-                events = _tool_call("run_agent", random_id("call"), {
+                events = _delegate_in_cell({
                     "instruction": "Wait for the independent investigation to finish.",
                 })
             elif len(self.root_requests) == 2:
@@ -112,6 +113,15 @@ class _Model(CallbackScriptedKernelModel):
                 events = _text("CURRENT_FINISHED")
         for event in events:
             yield event
+
+
+def _delegate_in_cell(arguments):
+    # The test keeps the child running across a compaction barrier. Await only
+    # assignment admission, not its completion, and do not publish Cell output
+    # that would create a separate ROOT input during that barrier.
+    return _tool_call("exec_cell", random_id("call"), {
+        "code": "await tools.run_agent(" + json.dumps(arguments) + ");",
+    })
 
 
 async def _eventually(predicate):
@@ -376,7 +386,7 @@ class _WorkModel(_Model):
                 if self.agent_id is not None and not self.create_other:
                     arguments.update(target={"kind": "AGENT", "agent_id": self.agent_id},
                         materials=[{"kind": "WORK", "work_id": self.first_work_id}])
-                events = _tool_call("run_agent", random_id("call"), arguments)
+                events = _delegate_in_cell(arguments)
             else:
                 events = _text("ROOT_DELEGATED")
         for event in events:
@@ -437,6 +447,11 @@ def test_subagent_first_summary_uses_full_initial_group_and_current_work(
             model.create_other = True
             await root.run_turn(PromptContent.text('Create an independent Agent during the summary.'),
                 command_id=random_id('command'), requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            async def other_admitted():
+                ids = await root._io.run(root.repository.list_root_agent_session_ids,
+                    root_session_id=root.session_id, deadline_monotonic=monotonic()+10)
+                return len(ids) == 2
+            await _eventually(other_admitted)
             ids = await root._io.run(root.repository.list_root_agent_session_ids,
                 root_session_id=root.session_id, deadline_monotonic=monotonic()+10)
             other, = (identity for identity in ids if identity != child.session_id)

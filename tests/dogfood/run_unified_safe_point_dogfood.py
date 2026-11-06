@@ -44,7 +44,7 @@ from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
 from pulsara_agent.workspace_identity import HostWorkspaceInput
 from tests.dogfood.credentials import secret_scrubber
 from tests.dogfood.run_compaction_request_start_dogfood import _rows
-from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace
+from tests.dogfood.run_content_revision_line_edit_dogfood import _tool_trace, _settle_code_mode_phase
 from tests.dogfood.run_known_agents_handoff_dogfood import (
     HeldExecution,
     eventually,
@@ -167,7 +167,7 @@ async def run(admin_dsn, runtime_dsn, label):
             current.get("sender_gate") is not None
             and not current.get("sender_held")
             and SENDER in json.dumps(record["provider_input"], ensure_ascii=False)
-            and not any(tool.name == "run_agent" for tool in context.tools)
+            and not any(tool.name == "exec_cell" for tool in context.tools)
         ):
             current["sender_held"] = True
             record["diagnostic_sender_read_gate"] = True
@@ -285,18 +285,20 @@ async def run(admin_dsn, runtime_dsn, label):
                                         "name": "Sender",
                                         "instruction": sender_instruction,
                                     }
+                                    trace_start = len(await asyncio.to_thread(_tool_trace, root))
                                     result = await root.run_turn(
                                         PromptContent.text(
-                                            "Call native run_agent exactly once using the following exact JSON object as its arguments. "
+                                            "Use exec_cell to call tools.run_agent exactly once using the following exact JSON object as its arguments. "
                                             "Copy the entire instruction string verbatim; do not abbreviate or execute it yourself. "
                                             + json.dumps(
                                                 create_arguments, ensure_ascii=False
                                             )
-                                            + " After acceptance reply briefly."
+                                            + " Log the returned Agent/Work targets with console.log, observe that output, then reply briefly after acceptance. Do not wait for the child to finish."
                                         ),
                                         command_id=random_id("command"),
                                         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
                                     )
+                                    case["creation_cell_outputs"] = await _settle_code_mode_phase(root, trace_start=trace_start)
                                     case["creation_reply"] = result.final_text
                                     children = await root._io.run(
                                         root.repository.list_root_agent_session_ids,

@@ -7,7 +7,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from pulsara_agent.capability.builtin_catalog import (
-    builtin_tool_catalog, builtin_tool_catalog_entry,
+    builtin_tool_catalog_entry,
     BuiltinToolAvailabilityKind, BuiltinTerminalPermissionRuleKind,
 )
 from pulsara_agent.capability.call_classifier import DefaultBuiltinToolCallClassifier
@@ -16,8 +16,6 @@ from pulsara_agent.capability.result_contracts import (
     terminal_result_render_contract,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
-    BuiltinExecutionPolicyRef, CodeModeToolDirectory, PreparedKernelToolSurface,
-    PreparedToolExecutionBinding, ProcessLocalToolSurfaceAccess,
     tool_observation_origin_for_binding,
 )
 from pulsara_agent.identity import derive_id
@@ -26,10 +24,9 @@ from pulsara_agent.llm.adapters.openai.function_tools import (
     openai_chat_function_tool, openai_responses_function_tool,
 )
 from pulsara_agent.model_input.contracts import (
-    FrozenModelToolSurface, FrozenToolSpec, ModelInputScopeKind, model_tool_surface_fingerprint,
+    ModelInputScopeKind,
 )
 from pulsara_agent.ports.tool_execution import ToolCall, ToolInvocationOwnerKind, thaw_tool_json_object
-from pulsara_agent.primitives.context import freeze_json
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.tool_observation import ToolObservationOrigin
 from pulsara_agent.primitives.tool_result_projection import (
@@ -193,26 +190,26 @@ def test_terminal_queries_keep_terminal_access_requirement(tmp_path):
         assert decision.kind is PermissionDecisionKind.DENY
 
 
-def _prepared_catalog():
-    entries = builtin_tool_catalog()
-    specs = tuple(FrozenToolSpec(entry.name, entry.descriptor.description,
-        freeze_json(thaw_tool_json_object(entry.descriptor.input_schema)), entry.descriptor.fingerprint()) for entry in entries)
-    surface = FrozenModelToolSurface(ModelInputScopeKind.ROOT, specs,
-        model_tool_surface_fingerprint(ModelInputScopeKind.ROOT, specs))
-    bindings = tuple(PreparedToolExecutionBinding(entry.name, entry.descriptor.fingerprint(), "test-executor",
-        BuiltinExecutionPolicyRef(entry.name, entry.entry_fingerprint)) for entry in entries)
-    access = ProcessLocalToolSurfaceAccess(1, 1, ModelInputScopeKind.ROOT, object())
-    return PreparedKernelToolSurface(surface, bindings, access)
+def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners(tmp_path):
+    from tests.test_code_mode_entry_admission import _port
+    from tests.support.round3 import prepare_test_direct_tool_surface
 
-
-def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners():
-    prepared = _prepared_catalog()
-    directory = CodeModeToolDirectory.freeze(prepared)
-    names = {spec.name for spec in directory.tool_specs}
-    assert {"query_capabilities", "query_agents", "exec_process", "query_processes", "manage_process", "read_file", "write_file"} <= names
-    assert not names & {"exec_cell", "query_cells", "manage_cell", "query_monitors", "manage_monitor", "query_schedules", "manage_schedule", "search_memory", "get_memory"}
-    for name in names:
-        assert directory.binding(name) is prepared.binding(name)
+    async def scenario():
+        port = _port(tmp_path)
+        try:
+            prepared = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            directory = port.freeze_code_mode_tool_directory(prepared,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            names = {spec.name for spec in directory.tool_specs}
+            assert {"query_capabilities", "query_agents", "exec_process", "query_processes", "manage_process", "read_file", "write_file", "decide", "run_agent", "wait_agent"} <= names
+            assert not names & {"exec_cell", "query_cells", "manage_cell", "query_monitors", "manage_monitor", "query_schedules", "manage_schedule", "search_memory", "get_memory"}
+            for name in names & {spec.name for spec in prepared.model_surface.tool_specs}:
+                assert directory.binding(name) == prepared.binding(name)
+            for name in ("exec_process", "query_processes", "manage_process"):
+                assert tool_observation_origin_for_binding(prepared.binding(name)) is ToolObservationOrigin.TERMINAL_PROCESS
+        finally:
+            await port.aclose()
+    asyncio.run(scenario())
     for name in ("exec_cell", "query_cells", "manage_cell"):
         entry = builtin_tool_catalog_entry(name)
         assert entry.availability_requirement.allowed_invocation_owners == (ToolInvocationOwnerKind.HOST_MAIN_RUN,)
@@ -223,8 +220,6 @@ def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners():
     assert set(query.availability_requirement.allowed_invocation_owners) == {
         ToolInvocationOwnerKind.HOST_MAIN_RUN, ToolInvocationOwnerKind.SUBAGENT,
     }
-    for name in ("exec_process", "query_processes", "manage_process"):
-        assert tool_observation_origin_for_binding(prepared.binding(name)) is ToolObservationOrigin.TERMINAL_PROCESS
 
 
 @pytest.mark.parametrize("name", ["list_capabilities", "inspect_capability", "list_agents", "inspect_agent", "terminal", "terminal_process", "terminal_monitor", "manage_monitor", "query_monitors", "scheduled_tasks", "exec", "wait_exec", "stop_exec", "artifact_read", "artifact_export", "memory_get", "memory_search"])

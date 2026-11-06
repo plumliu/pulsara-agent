@@ -570,7 +570,7 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
         else:
             root_calls += 1
             if root_calls == 1:
-                code = 'try { const admitted=await tools.run_agent.batch({first:{instruction:"first work"},second:{instruction:"second work"}});console.log(admitted); } catch(error) { console.log({rejected:error.code}); }'
+                code = 'try { const admitted=await tools.run_agent.batch({first:{instruction:"first work"},second:{instruction:"second work"}});const finished=await tools.wait_agent.works({targets:Object.values(admitted).map(item=>item.work)});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
                 payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
             else:
                 if root_calls == 2:
@@ -595,7 +595,7 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
             await session.update_model_call_binding(test_model_binding(runtime))
             result = await session.run_turn(PromptContent.text('admit a batch'),requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             assert result.final_text == 'BATCH_ACCEPTED'
-            records = await _settled_formal_records(session, expected=1)
+            records = await _settled_formal_records(session, expected=2 if rewrite == 'valid' else 1)
             batch = json.loads(next(record['text'] for record in records if record['kind']=='log'))
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,deadline_monotonic=monotonic()+10) as connection:
                 rows = connection.execute("SELECT r.result_state,r.attempt_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent.batch'",(root_session_id,)).fetchall()
@@ -640,7 +640,7 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
             surface = prepare_test_direct_tool_surface(port,conversation_scope_kind=ModelInputScopeKind.ROOT,
                 effective_permission_mode=mode)
             names = {item.name for item in surface.model_surface.tool_specs}
-            assert names.intersection(operations) == (operations if mode is PermissionMode.BYPASS_PERMISSIONS else set())
+            assert names.intersection(operations) == (operations - {'run_agent', 'wait_agent'} if mode is PermissionMode.BYPASS_PERMISSIONS else set())
             if mode is not PermissionMode.BYPASS_PERMISSIONS:
                 # A retained epoch may still carry these exact schemas. The
                 # new turn's execution permission rejects every operation.
@@ -659,7 +659,7 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
                         authorization = await port.authorize(tool_name=name,arguments=arguments[name],tool_call_id=random_id('call'),
                             turn_id=random_id('turn'),assistant_entry_id=random_id('entry'),permission_snapshot=permission,
                             surface_borrow=borrow,memory_context=FrozenModelCallMemoryContext())
-                        assert authorization.kind is KernelToolAuthorizationKind.PERMISSION_DENIED
+                        assert authorization.kind is (KernelToolAuthorizationKind.TOOL_UNAVAILABLE if name in {'run_agent', 'wait_agent'} else KernelToolAuthorizationKind.PERMISSION_DENIED)
                     assert tuple(item.canonical_bytes for item in retained.model_surface.tool_specs) == prefix
                 finally:
                     borrow.close()
@@ -678,3 +678,58 @@ def test_delayed_read_never_replaces_newer_observation_when_file_reverts(tmp_pat
     path.write_text('old revision\n')
     delayed.delivery_succeeded()
     assert _state_for_workspace(tmp_path).observation(path.resolve()).content_revision == newer['content_revision']
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize('name,arguments', [('run_agent', {'instruction': 'must not create work'}),
+    ('wait_agent', {'targets': []}), ('decide', {'condition': 'x', 'inputs': []})])
+def test_new_root_schema_rejects_native_code_only_call_and_continues(name, arguments, tmp_path, monkeypatch, stage2_migrated_postgres_database):
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.conversation_kernel.host import KernelHostCore
+    from pulsara_agent.llm.input import PromptContent, MessageRole, text_part_values
+    from pulsara_agent.model_input.lowering import decode_tool_result_observation
+    from pulsara_agent.primitives.permission import PermissionMode
+    from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
+    from pulsara_agent.workspace_identity import HostWorkspaceInput
+    from tests.support.model_config import test_model_runtime, test_model_binding
+    from tests.support.round3 import CallbackScriptedKernelModel
+    from tests.support.model_stream import _tool_call, _text
+    from time import monotonic
+    import pulsara_agent.conversation_kernel.host as kernel_host
+    observed = []
+
+    async def stream(request):
+        if len(model.requests) == 1:
+            events = _tool_call(name, random_id('call'), arguments)
+        else:
+            message = next(m for m in reversed(request.compiled_input.messages) if m.role is MessageRole.TOOL_RESULT)
+            observed.append(decode_tool_result_observation(text_part_values(message.content)[0]))
+            events = _text(random_id('block'), 'CONTINUED_AFTER_UNAVAILABLE')
+        for event in events:
+            yield event
+    model = CallbackScriptedKernelModel(stream)
+    monkeypatch.setattr(kernel_host, 'DirectKernelModelPort', lambda **_: model)
+    monkeypatch.setattr(kernel_host.LocalMcpManagementService, 'load_configs', lambda *_a, **_kw: ())
+    runtime = test_model_runtime(model_id='test-pro', wire_api='openai_chat_completions',
+        postgres_dsn=stage2_migrated_postgres_database.runtime_dsn)
+
+    async def scenario():
+        core = KernelHostCore.production(model_runtime=runtime)
+        session = await core.open_session(HostWorkspaceInput(workspace_kind='project', workspace_root=tmp_path))
+        try:
+            await session.update_model_call_binding(test_model_binding(runtime))
+            result = await session.run_turn(PromptContent.text('try the removed native entry'),
+                requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            assert result.final_text == 'CONTINUED_AFTER_UNAVAILABLE'
+            assert len(observed) == 1 and 'exec_cell' in str(observed[0]['body'])
+            with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
+                    deadline_monotonic=monotonic()+10) as connection:
+                assert connection.execute('SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s',
+                    (session.session_id,)).fetchone()[0] == 0
+                assert connection.execute('SELECT count(*) FROM pulsara_v3.sessions WHERE root_session_id=%s',
+                    (session.session_id,)).fetchone()[0] == 0
+                assert connection.execute('SELECT result_state FROM pulsara_v3.tool_results WHERE session_id=%s',
+                    (session.session_id,)).fetchone()[0] == 'TOOL_UNAVAILABLE'
+        finally:
+            await core.shutdown()
+    asyncio.run(scenario())

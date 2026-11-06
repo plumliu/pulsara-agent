@@ -24,6 +24,7 @@ def _runtime(host, read_source):
     port._code_mode_read_source = read_source
     port._validate_surface_borrow = lambda *args: None
     borrow = SimpleNamespace(
+        code_cell_id=None,
         prepared=SimpleNamespace(access=SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)),
         execution_binding=lambda name: SimpleNamespace(tool_name=name, execution_policy=BuiltinExecutionPolicyRef(name, "test-bound-catalog")),
     )
@@ -62,7 +63,8 @@ def test_cell_source_query_dispatch_pages_unicode_without_taking_output_owner():
         try:
             cell_id = await host.start(
                 source=frozen_source, source_exec_attempt_id=source_attempt,
-                turn_id=context.turn_id, snapshot=object(), tool_catalog={}, invoke=no_tools,
+                turn_id=context.turn_id, snapshot=object(), tool_catalog={"decide": {}}, invoke=no_tools,
+                decision_available=False,
             )
             async with asyncio.timeout(5):
                 while host.capture_cell(cell_id).state not in {"completed", "failed", "terminated"}:
@@ -133,7 +135,8 @@ def test_source_read_failure_preserves_live_metadata_and_manage_stop_does_not_re
             cell_id = await host.start(
                 source="console.log('keep'); await tools.read_file({});",
                 source_exec_attempt_id=random_id("attempt"), turn_id=context.turn_id,
-                snapshot=object(), tool_catalog={"read_file": {}}, invoke=invoke,
+                snapshot=object(), tool_catalog={"decide": {}, "read_file": {}}, invoke=invoke,
+                decision_available=False,
             )
             await asyncio.wait_for(started.wait(), 5)
             target = {"kind": "CELL", "cell_id": cell_id}

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from pathlib import Path
 import sys
+
+import pytest
 
 from pulsara_agent.capability.bundled_skills import (
     EXPECTED_BUNDLED_SKILL_NAMES,
@@ -518,6 +522,193 @@ def test_installed_bundled_inventory_is_exact_and_ordinary_readable(
         assert resource_read.status is ToolResultState.SUCCESS
         assert json.loads(resource_read.output)["target"]["path"] == str(resource)
 
+
+
+@pytest.mark.parametrize("available,decision,stopped_phase", [
+    (False, False, None), (True, False, None), (True, True, None),
+    (True, True, 1), (True, True, 2),
+])
+def test_code_mode_workflow_example_reuses_real_targets_and_guards_decision(
+    available: bool, decision: bool, stopped_phase: int | None,
+) -> None:
+    from pulsara_agent.code_mode import CodeModeToolResult
+    from pulsara_agent.identity import is_valid_id, random_id
+
+    source = _code_mode_example("agent-orchestration/workflows.md", 0)
+    calls = []
+    batches = []
+    readme = {"target": {"kind": "PATH", "path": "README.md"}, "content": "Project context"}
+    fix_work = {"kind": "WORK", "work_id": random_id("queue")}
+
+    async def invoke(call):
+        calls.append(call)
+        if call.tool_name == "read_file":
+            assert call.arguments == {"target": readme["target"], "limit": 160}
+            value = readme
+        elif call.tool_name == "run_agent.batch":
+            members = call.arguments["members"]
+            value = {
+                member["key"]: {
+                    "agent": {"kind": "AGENT", "agent_id": member["agent_id"]},
+                    "work": {"kind": "WORK", "work_id": member["work_id"]},
+                }
+                for member in members
+            }
+            assert all(is_valid_id(item["agent"]["agent_id"], "session") for item in value.values())
+            assert all(is_valid_id(item["work"]["work_id"], "queue") for item in value.values())
+            if batches:
+                revision, implementation, review = members
+                assert revision["parameters"]["target"] == batches[0]["design"]["agent"]
+                assert revision["parameters"]["materials"] == [batches[0]["critic"]["work"]]
+                assert review["parameters"]["target"] == batches[0]["critic"]["agent"]
+                assert implementation["parameters"]["depends_on"] == [value["revision"]["work"]]
+                assert review["parameters"]["depends_on"] == [
+                    value["revision"]["work"], value["implementation"]["work"],
+                ]
+            batches.append(value)
+        elif call.tool_name == "wait_agent.works":
+            value = {"state": "settled", "works": [], "pending_targets": []}
+        elif call.tool_name == "query_agents":
+            stopped = stopped_phase == len(batches)
+            value = {
+                "target": call.arguments["target"],
+                "status": "stopped" if stopped else "completed",
+                "final": None if stopped else "Concrete review",
+                "diagnostic": "Stopped by user" if stopped else None,
+            }
+        elif call.tool_name == "decide":
+            assert available
+            assert set(call.arguments) == {"condition", "inputs"}
+            assert json.loads(call.arguments["inputs"][0]) == {
+                "project_context": readme["content"], "review": "Concrete review",
+            }
+            value = {"decisions": [decision]}
+        elif call.tool_name == "run_agent":
+            assert available and decision
+            assert call.arguments["target"] == batches[1]["implementation"]["agent"]
+            assert call.arguments["materials"] == [batches[1]["review"]["work"]]
+            value = {"agent": call.arguments["target"], "work": fix_work}
+        else:
+            raise AssertionError(call.tool_name)
+        return CodeModeToolResult(value=value)
+
+    output = asyncio.run(_execute_code_mode_example(source, invoke, available))
+    names = [call.tool_name for call in calls]
+    if stopped_phase is not None:
+        assert len(batches) == stopped_phase
+        assert names == ["read_file"] + [
+            "run_agent.batch", "wait_agent.works", "query_agents",
+        ] * stopped_phase
+        stopped_review = output[-1]["proposalReview" if stopped_phase == 1 else "codeReview"]
+        assert stopped_review == {
+            "target": batches[-1]["critic" if stopped_phase == 1 else "review"]["work"],
+            "status": "stopped", "final": None, "diagnostic": "Stopped by user",
+        }
+        return
+    assert len(batches) == 2
+    assert names == [
+        "read_file", "run_agent.batch", "wait_agent.works", "query_agents",
+        "run_agent.batch", "wait_agent.works", "query_agents",
+        *(["decide"] if available else []),
+        *(["run_agent", "wait_agent.works", "query_agents"] if available and decision else []),
+    ]
+    assert output[0]["phase1"] == batches[0]
+    assert output[1]["phase2"] == batches[1]
+    if not available:
+        assert output[-1]["condition"]
+        assert json.loads(output[-1]["inputs"][0])["review"] == "Concrete review"
+        assert output[-1]["source"] == readme
+        assert output[-1]["phase2"] == batches[1]
+        assert output[-1]["codeReview"]["target"] == batches[1]["review"]["work"]
+    elif decision:
+        assert output[-1]["target"] == fix_work
+    else:
+        assert output[-1]["codeReview"]["target"] == batches[1]["review"]["work"]
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_code_mode_history_example_preserves_sources_and_positional_judgments(
+    available: bool,
+) -> None:
+    from pulsara_agent.code_mode import CodeModeToolResult
+    from pulsara_agent.identity import random_id
+
+    from pulsara_agent.ports.session_content import session_entry_target
+
+    candidates = []
+    for text in ("Keep Skill guidance concrete", "Install this Skill", "Keep Skill guidance concrete"):
+        target = session_entry_target(random_id("session"), random_id("entry"))
+        candidates.append({
+            "target": target, "title": "Skill discussion", "score": 1.0,
+            "messages": [{
+                "role": "user", "label": "user", "at": "2026-11-07T10:00:00Z", "text": text,
+                "target": target,
+                "read": {"tool": "read_session_content", "arguments": {"target": target, "limit": 1}},
+            }],
+        })
+    source = "const page = " + json.dumps({"items": candidates}) + ";\n"
+    source += _code_mode_example("tool-calling/examples.md", 3)
+    calls = []
+
+    async def invoke(call):
+        calls.append(call)
+        assert available and call.tool_name == "decide"
+        assert set(call.arguments) == {"condition", "inputs"}
+        inputs = [json.loads(item) for item in call.arguments["inputs"]]
+        assert inputs == [
+            [{key: message[key] for key in ("role", "at", "text")} for message in item["messages"]]
+            for item in candidates
+        ]
+        return CodeModeToolResult(value={"decisions": [True, False, True]})
+
+    output = asyncio.run(_execute_code_mode_example(source, invoke, available))
+    assert len(output) == 1
+    if available:
+        assert len(calls) == 1
+        assert output == [{"matches": [candidates[0], candidates[2]]}]
+    else:
+        assert calls == []
+        assert output[0]["condition"]
+        assert len(output[0]["inputs"]) == 3
+        assert output[0]["candidates"] == candidates
+
+
+def _code_mode_example(reference: str, index: int) -> str:
+    with BundledSkillDistributionBindingOwner() as owner:
+        inventory = BundledSkillDefinitionProducer(owner).observe()
+        skill = next(item for item in inventory.candidates if item.name == "pulsara-code-mode")
+        text = (skill.base_dir / "references" / reference).read_text(encoding="utf-8")
+    return re.findall(r"```js\n(.*?)\n```", text, re.DOTALL)[index]
+
+
+async def _execute_code_mode_example(source, invoke, available):
+    from pulsara_agent.code_mode import CodeModeHost
+    from pulsara_agent.identity import random_id
+
+    host = CodeModeHost()
+    output = []
+    try:
+        cell_id = await host.start(
+            source=source, source_exec_attempt_id=random_id("attempt"),
+            turn_id=random_id("turn"), snapshot=object(),
+            tool_catalog={name: {} for name in ("read_file", "run_agent", "wait_agent", "query_agents", "decide")},
+            invoke=invoke, decision_available=available,
+        )
+        cell = host._cell(cell_id)
+        async with asyncio.timeout(15):
+            while True:
+                lease = await host.lease_output(cell_id) if cell_id in host._cells else None
+                if lease is not None:
+                    assert lease.record["kind"] == "log", lease.record
+                    output.append(json.loads(lease.record["text"]))
+                    await host.acknowledge_output(lease)
+                elif cell.state in {"completed", "failed", "terminated"} and not cell.pending and not cell.output:
+                    assert cell.state == "completed", cell.error
+                    return output
+                else:
+                    await asyncio.sleep(0.001)
+    finally:
+        await host.aclose()
 
 def _inspect(
     workspace: Path,

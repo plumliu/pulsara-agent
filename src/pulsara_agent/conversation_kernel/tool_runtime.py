@@ -23,6 +23,7 @@ from pulsara_agent.code_mode.contracts import CellParticipationObserver
 
 if TYPE_CHECKING:
     from pulsara_agent.code_mode.host import CodeModeHost
+    from pulsara_agent.conversation_kernel.decision_tools import KernelDecisionToolPort
 
 
 from .capability_management import CapabilityManagementPreparation
@@ -214,6 +215,7 @@ from pulsara_agent.conversation_kernel.tool_policy import (
     ToolDispatchDecisionKind,
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
+    CODE_MODE_SHARED_TOOL_NAMES,
     CodeModeToolDirectory,
     BuiltinExecutionPolicyRef,
     DirectToolAccessLeaf,
@@ -829,6 +831,7 @@ class DirectKernelToolPort:
         self._code_mode_freeze_source = None
         self._code_mode_read_source = None
         self._memory: KernelMemoryToolPort | None = None
+        self._decision: KernelDecisionToolPort | None = None
         self._interaction: KernelToolInteractionPort | None = None
         self._capability_reload: KernelCapabilityReloadPort | None = None
         self._capability_management = None
@@ -882,6 +885,22 @@ class DirectKernelToolPort:
         self._code_mode_invoke = invoke
         self._code_mode_freeze_source = freeze_source
         self._code_mode_read_source = read_source
+
+    def bind_decision_port(self, port: KernelDecisionToolPort) -> None:
+        with self._surface_lock:
+            self._require_builtin_composition_preparing_locked()
+            if self._decision is not None:
+                raise RuntimeError("Decision tool port is already bound")
+            self._decision = port
+            self._surface_generation += 1
+
+    def decision_available(self) -> bool:
+        if self._decision is None:
+            raise RuntimeError("Decision tool port is not bound")
+        value = self._decision.available()
+        if type(value) is not bool:
+            raise TypeError("Decision availability must be a boolean")
+        return value
 
     def bind_code_mode_port(self, port: CodeModeHost) -> None:
         with self._surface_lock:
@@ -953,6 +972,7 @@ class DirectKernelToolPort:
                     self._interaction,
                     self._subagent,
                     self._memory,
+                    self._decision,
                     self._mcp_supervisor,
                     self._capability_reload,
                 )
@@ -977,6 +997,13 @@ class DirectKernelToolPort:
             assert self._sealed_builtin_bindings is not None
             assert self._builtin_composition_seal is not None
             bindings = self._sealed_builtin_bindings
+            # Provider selection is distinct from the sealed execution catalog.
+            # Existing epoch schemas are still realized by prepare_planned_tool_surface;
+            # actual invocation admission rejects their removed native entry points.
+            hidden = {"decide"}
+            if conversation_scope_kind is ModelInputScopeKind.ROOT:
+                hidden.update({"run_agent", "wait_agent"})
+            bindings = tuple(item for item in bindings if item.tool_name not in hidden)
             if conversation_scope_kind is ModelInputScopeKind.ROOT and effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
                 bindings = tuple(item for item in bindings if item.tool_name not in {
                     "exec_cell", "query_cells", "manage_cell", "run_agent", "query_agents", "send_agent_message", "wait_agent", "stop_agent",
@@ -1223,6 +1250,11 @@ class DirectKernelToolPort:
                 if name in identities:
                     raise RuntimeError("production builtin has multiple executors")
                 identities[name] = _qualified_executor_identity(self._memory, name)
+        if self._decision is not None:
+            for name in self._decision.tool_names:
+                if name in identities:
+                    raise RuntimeError("production builtin has multiple executors")
+                identities[name] = _qualified_executor_identity(self._decision, name)
         return tuple(
             _production_executor_binding(name, identities[name])
             for name in sorted(identities)
@@ -1235,6 +1267,56 @@ class DirectKernelToolPort:
 
     def snapshot_workspace_root(self) -> Path:
         return self._terminal.workspace_root
+
+    def freeze_code_mode_tool_directory(
+        self, prepared: PreparedKernelToolSurface, *, effective_permission_mode: PermissionMode,
+    ) -> CodeModeToolDirectory:
+        """Freeze Cell capabilities from sealed owners, retaining only authorized MCP leaves."""
+        if (prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
+            or effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS):
+            raise PermissionError("Code Mode requires ROOT bypass-permissions mode")
+        with self._surface_lock:
+            self._require_prepared_surface_locked(prepared)
+            if self._builtin_composition_state is not BuiltinCompositionState.SEALED:
+                raise RuntimeError("Code Mode requires sealed execution capabilities")
+            assert self._sealed_builtin_bindings is not None
+            specs, bindings = [], []
+            for owner in self._sealed_builtin_bindings:
+                if owner.tool_name not in CODE_MODE_SHARED_TOOL_NAMES:
+                    continue
+                entry = owner.catalog_entry
+                spec = FrozenToolSpec(name=owner.tool_name, description=entry.descriptor.description,
+                    parameters=freeze_json(_json_schema_value(entry.descriptor.input_schema)),
+                    descriptor_fingerprint=entry.descriptor.fingerprint())
+                specs.append(spec)
+                bindings.append(PreparedToolExecutionBinding(tool_name=spec.name,
+                    descriptor_fingerprint=spec.descriptor_fingerprint,
+                    executor_binding_fingerprint=production_builtin_executor_binding_identity_fingerprint(owner),
+                    execution_policy=BuiltinExecutionPolicyRef(tool_name=spec.name,
+                        catalog_entry_fingerprint=entry.entry_fingerprint)))
+            # MCP discovery/authorization remains owned by the prepared capability cut.
+            # Never enumerate the supervisor's entire inventory to build a Cell catalog.
+            for spec in prepared.model_surface.tool_specs:
+                binding = prepared.binding(spec.name)
+                if (isinstance(binding, PreparedToolExecutionBinding)
+                    and isinstance(binding.execution_policy, McpToolExecutionPolicyFact)):
+                    specs.append(spec)
+                    bindings.append(binding)
+            return CodeModeToolDirectory(tuple(specs), tuple(bindings), prepared.access)
+
+    @staticmethod
+    def _entry_unavailable(tool_name: str, borrow: ProcessLocalToolSurfaceBorrow) -> str | None:
+        scope = borrow.prepared.access.conversation_scope_kind
+        source = current_tool_invocation.get()
+        code = (borrow.code_cell_id is not None and source is not None
+            and source.kind is ToolInvocationSourceKind.CODE_MODE_CALL
+            and source.tool_name == tool_name and scope is ModelInputScopeKind.ROOT)
+        if tool_name in {"decide", "run_agent.batch", "wait_agent.works"} or (
+            scope is ModelInputScopeKind.ROOT and tool_name in {"run_agent", "wait_agent"}
+        ):
+            if not code:
+                return f"{tool_name} requires ROOT Code Mode; use exec_cell with tools.{tool_name}(...)"
+        return None
 
     def prepare_resolved_invocation(
         self,
@@ -1262,6 +1344,9 @@ class DirectKernelToolPort:
                 KernelToolAuthorization(kind, reference, message),
             )
 
+        entry_error = self._entry_unavailable(tool_name, surface_borrow)
+        if entry_error:
+            return reject(KernelToolAuthorizationKind.TOOL_UNAVAILABLE, "tool-entry:code-mode-only", entry_error)
         if tool_name in MEDIA_TOOL_NAMES and (
             surface_borrow.code_cell_id is not None
             or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
@@ -1272,7 +1357,7 @@ class DirectKernelToolPort:
                 "media:root-direct-only", "Media tools require a direct ROOT call")
         try:
             binding = self._validate_surface_borrow(surface_borrow, tool_name)
-        except RuntimeError:
+        except (RuntimeError, KeyError):
             return reject(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "tool-surface:revoked",
@@ -1295,6 +1380,12 @@ class DirectKernelToolPort:
             error = self._subagent.validate_arguments(tool_name=tool_name, arguments=arguments)
             if error:
                 return reject(KernelToolAuthorizationKind.INVALID_ARGUMENTS, "agent-arguments", error)
+        if tool_name == "decide":
+            from pulsara_agent.conversation_kernel.decision_tools import validate_decision_arguments
+            try:
+                validate_decision_arguments(arguments)
+            except ValueError as exc:
+                return reject(KernelToolAuthorizationKind.INVALID_ARGUMENTS, "decision-arguments", str(exc))
         entry = (
             builtin_tool_catalog_entry(tool_name) if tool_name in self._tools else None
         )
@@ -1874,6 +1965,10 @@ class DirectKernelToolPort:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         memory_context: FrozenModelCallMemoryContext,
     ) -> KernelToolAuthorization:
+        entry_error = self._entry_unavailable(tool_name, surface_borrow)
+        if entry_error:
+            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "tool-entry:code-mode-only", entry_error)
         if tool_name in MEDIA_TOOL_NAMES and (
             surface_borrow.code_cell_id is not None
             or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
@@ -1884,7 +1979,7 @@ class DirectKernelToolPort:
                 "media:root-direct-only", "Media tools require a direct ROOT call")
         try:
             binding = self._validate_surface_borrow(surface_borrow, tool_name)
-        except RuntimeError:
+        except (RuntimeError, KeyError):
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "tool-surface:revoked",
@@ -1918,7 +2013,8 @@ class DirectKernelToolPort:
         tool = self._tools.get(tool_name)
         subagent = self._subagent is not None and tool_name in self._subagent.tool_names
         memory = self._memory is not None and tool_name in self._memory.tool_names
-        if (tool is None and not subagent and not memory) or self._closed:
+        decision = self._decision is not None and tool_name in self._decision.tool_names
+        if (tool is None and not subagent and not memory and not decision) or self._closed:
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "tool-surface:unavailable",
@@ -1955,6 +2051,16 @@ class DirectKernelToolPort:
                 f"descriptor:{entry.descriptor.id}",
                 f"invalid tool arguments: {exc.message}",
             )
+        if decision:
+            if permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS:
+                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
+                    "decision:root-bypass-required", "decide requires ROOT bypass-permissions mode")
+            from pulsara_agent.conversation_kernel.decision_tools import validate_decision_arguments
+            try:
+                validate_decision_arguments(arguments)
+            except ValueError as exc:
+                return KernelToolAuthorization(KernelToolAuthorizationKind.INVALID_ARGUMENTS,
+                    "decision-arguments", str(exc))
         if tool_name in MEDIA_TOOL_NAMES:
             from pulsara_agent.media.source import MediaError
 
@@ -3241,6 +3347,7 @@ class DirectKernelToolPort:
                     cell_id = await self._code_mode.start(
                         source=source, source_exec_attempt_id=context.attempt_id,
                         turn_id=context.turn_id, snapshot=context.code_mode_snapshot,
+                        decision_available=context.code_mode_snapshot.decision_available,
                         tool_catalog=catalog, invoke=self._code_mode_invoke,
                         page_budget=_invocation_page_budget(context),
                         on_cell_closed=self.release_code_cell_mcp_refs)
@@ -3302,6 +3409,11 @@ class DirectKernelToolPort:
         ):
             raise RuntimeError("tool invocation surface binding does not exact-join")
         self._validate_surface_borrow(invocation_context.surface_borrow, tool_name)
+        entry_error = self._entry_unavailable(tool_name, invocation_context.surface_borrow)
+        if entry_error:
+            raise RuntimeError(entry_error)
+        if tool_name == "decide" and invocation_context.effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
+            raise RuntimeError("decide requires ROOT bypass-permissions mode")
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
@@ -3696,6 +3808,10 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
+        if self._decision is not None and tool_name in self._decision.tool_names:
+            result = await self._decision.invoke(arguments=arguments, invocation_context=invocation_context)
+            return replace(result, physical_observation=_freeze_physical_observation(
+                invocation_started, observation_origin))
         if self._memory is not None and tool_name in self._memory.tool_names:
             result = await self._memory.invoke(
                 tool_name=tool_name,

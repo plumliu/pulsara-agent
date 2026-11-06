@@ -1,6 +1,7 @@
 // Evaluated only by QuickJS; potentially user-controlled getters/toJSON stay timed.
-((invokeHost, prepareHost, discardHost, outputHost, names, valueLimit, diagnosticChars) => {
+((invokeHost, prepareHost, discardHost, outputHost, names, valueLimit, diagnosticChars, decisionAvailable) => {
   'use strict';
+  if (typeof decisionAvailable !== 'boolean') throw new TypeError('Code Mode Decision availability must be a boolean');
   const stringify = JSON.stringify, parse = JSON.parse, apply = Reflect.apply;
   const entries = Object.entries, keys = Object.keys, ownKeys = Reflect.ownKeys;
   const getPrototypeOf = Object.getPrototypeOf, create = Object.create;
@@ -91,6 +92,7 @@
   }
   const tools = create(null);
   each(names, name => tools[name] = parameters => call(name, parameters));
+  defineProperty(tools.decide, 'available', {value: freeze(() => decisionAvailable), enumerable: true});
   if(tools.run_agent) {
     tools.run_agent.batch = function(specs) {
       if(preparing) throw new NativeTypeError('Tool calls are forbidden in batch parameter functions');

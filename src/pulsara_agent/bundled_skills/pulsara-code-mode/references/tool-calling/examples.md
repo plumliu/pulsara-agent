@@ -96,3 +96,75 @@ are never overwritten. Saving can be done without reading a page first.
 The created file and read pages preserve the source coverage. They cannot recover
 content absent from the original result. Reading or saving does not repeat the
 command or remote action. See [Results and errors](results-and-errors.md).
+
+## 4. Identify requirements in saved discussions
+
+**Situation:** The user asks which requirements they previously gave for writing
+Skills. Search supplies candidates; a semantic condition distinguishes a writing
+requirement from an installation request or a report that a Skill failed. ROOT
+then synthesizes the actual requirements and later corrections from their sources.
+
+Find relevant sessions with `tools.search_sessions({ query: "Skill" })`, then pass
+a selected item's actual `target` to `tools.search_session_content` with the search
+query. The example below processes one actual content-search `page`. If a message
+omits context needed for the judgment, first expand its returned `read` with
+`tools.read_session_content(message.read.arguments)`, following its `next` as needed.
+Keep the preceding proposal with replies such as “yes, use that wording.”
+
+```js
+const candidates = page.items;
+const condition = "Does the user explicitly state a requirement about Skill content, writing style or usage guidance in this discussion?";
+const inputs = candidates.map(item => JSON.stringify(
+  item.messages.map(({ role, at, text }) => ({ role, at, text }))
+));
+if (tools.decide.available()) {
+  const { decisions } = await tools.decide({ condition, inputs });
+  const matches = candidates.filter((_, i) => decisions[i]);
+  if (matches.length) console.log({ matches });
+} else {
+  console.log({ condition, inputs, candidates });
+}
+```
+
+**How it works:** The condition applies independently to each complete discussion
+unit, including speakers and relevant context. “Install this Skill” is different
+from “Keep the bundled Skill's guidance concrete and concise.” The returned flags
+select original objects, preserving message targets and read calls. ROOT reads and
+organizes the matching requirements; Decision does not extract or rewrite them.
+
+**Continue:** Copy the content search's actual `next` call for another source page
+when relevant. Unavailable Decision leaves the same candidates and their sources
+for ROOT to judge; the search and ordinary task continue without configuration.
+
+## 5. Choose a next tool call from document meaning
+
+**Situation:** The task is to check whether the README explains installing the
+project's dependencies. This sample uses one text input, then chooses a further
+source lookup when the instructions are absent. Use a read range that includes
+the relevant document context, following `next` before judging if needed.
+
+```js
+const readme = await tools.read_file({
+  target: { kind: "PATH", path: "README.md" }, limit: 200
+});
+const condition = "Does this document explain how to install this project's dependencies?";
+const inputs = [readme.content];
+if (tools.decide.available()) {
+  const { decisions } = await tools.decide({ condition, inputs });
+  if (decisions[0]) {
+    console.log({ installation_source: readme });
+  } else {
+    const candidates = await tools.search_content({
+      pattern: "install", file_glob: "*.md", output_mode: "content", limit: 10
+    });
+    console.log({ readme, installation_candidates: candidates });
+  }
+} else {
+  console.log({ condition, inputs, source: readme });
+}
+```
+
+**How it works:** The boolean controls an ordinary tool call in the same script.
+The unavailable branch preserves the question and source for ROOT instead of
+treating missing configuration as a negative judgment. The same interface can
+combine file text and agent reports, as in [Workflows](../agent-orchestration/workflows.md).

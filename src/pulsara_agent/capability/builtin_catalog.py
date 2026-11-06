@@ -896,6 +896,28 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
+    "decide": _descriptor(
+        name="decide",
+        description=(
+            "Evaluate one natural-language yes/no condition independently for each supplied text "
+            "using the configured Jev-like Decision model. Returns {decisions: boolean[]} in input "
+            "order. Compose with any tools or agent operations for filtering, branching, loops or "
+            "further calls. Include needed context in each input. Guard calls with "
+            "if (tools.decide.available()); this local synchronous method reports configuration "
+            "availability captured at Cell startup. Otherwise pass the condition and material to "
+            "ROOT to continue. Use JavaScript for exact comparisons. Empty inputs return an empty "
+            "array. Service failures reject the call. Decision configuration is independent of "
+            "memory reranking."
+        ),
+        input_schema=object_schema(properties={
+            "condition": {"type": "string", "minLength": 1,
+                "description": "One explicit yes/no condition to evaluate independently for each input."},
+            "inputs": {"type": "array", "items": {"type": "string"},
+                "description": "Texts to judge in order. Include the context needed for each judgment in that text."},
+        }, required=["condition", "inputs"]),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=True, permission_category="subagent_runtime",
+    ),
     "exec_cell": _descriptor(
         name="exec_cell",
         description="Start an independent JavaScript script and immediately return accepted with its CELL target. Pass exactly one of code or path. Top-level await is supported. Each console.log actively sends one selected input to ROOT; script tool results stay inside JavaScript. ROOT with bypass permissions only.",
@@ -1124,6 +1146,7 @@ class BuiltinToolBindingKind(StrEnum):
     TODO_LOCAL_STATE = "todo_local_state"
     SUBAGENT_CONTROL = "subagent_control"
     CODE_MODE = "code_mode"
+    DECISION = "decision"
     MCP_CATALOG = "mcp_catalog"
     PLUGIN_CONTROL = "plugin_control"
 
@@ -1139,6 +1162,7 @@ class BuiltinToolAvailabilityKind(StrEnum):
     REQUIRES_MAIN_SUBAGENT_CONTROL = "requires_main_subagent_control"
     REQUIRES_SHARED_AGENT_CONTROL = "requires_shared_agent_control"
     REQUIRES_CODE_MODE = "requires_code_mode"
+    REQUIRES_DECISION_PORT = "requires_decision_port"
     REQUIRES_MCP_PORT = "requires_mcp_port"
 
 
@@ -1480,6 +1504,10 @@ def _catalog_shape(name: str):
             both,
             "subagent_shared",
         )
+    if name == "decide":
+        return (BuiltinToolBindingKind.DECISION,
+                BuiltinToolAvailabilityKind.REQUIRES_DECISION_PORT,
+                (ToolInvocationOwnerKind.HOST_MAIN_RUN,), "code_mode")
     if name in _CODE_MODE:
         return (BuiltinToolBindingKind.CODE_MODE,
                 BuiltinToolAvailabilityKind.REQUIRES_CODE_MODE,
@@ -1543,6 +1571,7 @@ def _recovery_contract(name: str) -> BuiltinToolRecoveryContract:
         "query_processes",
         "query_schedules",
         "query_cells",
+        "decide",
         "read_file",
         "view_image",
         "read_mcp_resource",

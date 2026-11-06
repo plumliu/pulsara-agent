@@ -86,6 +86,7 @@ from pulsara_agent.retrieval.config import (
 )
 from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
 from pulsara_agent.retrieval.embedding.protocol import EmbeddingProvider
+from pulsara_agent.retrieval.decision import DecisionService
 from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
 from pulsara_agent.retrieval.rerank.protocol import RerankProvider, RerankPurpose
 from pulsara_agent.settings import LocalSettingsStore, LocalSettingsUnavailable
@@ -134,6 +135,7 @@ class KernelMemoryToolPort:
         rerank_provider: RerankProvider | None = None,
         io_owner: KernelSessionIO,
         settings: LocalSettingsStore,
+        decision_service: DecisionService | None = None,
     ) -> None:
         self._repository = repository
         self._session_id = session_id
@@ -148,6 +150,7 @@ class KernelMemoryToolPort:
         self._deadline_factory_bound = False
         self._embedding = embedding_provider
         self._rerank = rerank_provider
+        self._decision_service = decision_service
         self._embedding_gate = asyncio.Semaphore(embedding_config.max_concurrent)
         self._rerank_gate = asyncio.Semaphore(self._rerank_config.max_concurrent)
         self._remote_tasks: set[asyncio.Task[object]] = set()
@@ -692,6 +695,7 @@ class KernelMemoryToolPort:
             getattr(retrieval, retrieval.ranking_mode),
             config=self._rerank_config,
             semaphore=self._rerank_gate,
+            decision_service=self._decision_service,
         )
 
     async def _frozen_query_embedding(self, provider, text):
@@ -1233,7 +1237,9 @@ class KernelMemoryToolPort:
         for task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            cancellation = await _join_remote_tasks(tasks)
+            if cancellation is not None:
+                raise cancellation
 
     async def _run_remote_exact(
         self,
@@ -1253,11 +1259,11 @@ class KernelMemoryToolPort:
                     return await asyncio.shield(task)
             except TimeoutError:
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await _join_remote_tasks((task,))
                 raise
             except asyncio.CancelledError:
                 task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+                await _join_remote_tasks((task,))
                 raise
         finally:
             self._remote_tasks.discard(task)
@@ -1898,6 +1904,19 @@ __all__ = [
     "MEMORY_TOOL_NAMES",
     "MEMORY_WRITE_TOOL_NAMES",
 ]
+
+
+async def _join_remote_tasks(tasks) -> asyncio.CancelledError | None:
+    """Keep this owner's calls attached through SDK cleanup and repeated Stop."""
+    joining = asyncio.gather(*tasks, return_exceptions=True)
+    cancellation = None
+    while not joining.done():
+        try:
+            await asyncio.shield(joining)
+        except asyncio.CancelledError as error:
+            cancellation = cancellation or error
+    joining.result()
+    return cancellation
 
 
 def _elastic_candidates(memory, history, memory_quota, history_quota):

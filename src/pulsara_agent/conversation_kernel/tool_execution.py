@@ -355,8 +355,13 @@ class CodeModeExecutionSnapshot:
     agent_invocation_snapshot: FrozenAgentInvocationSnapshot | None
     continuity_scope: ProviderInputContinuityScope
     tool_directory: CodeModeToolDirectory
+    decision_available: bool
     hook_scope: HookDispatchScopeRef | None
     hook_epoch_nonce: object
+
+    def __post_init__(self) -> None:
+        if type(self.decision_available) is not bool:
+            raise TypeError("Cell Decision availability must be a boolean")
 
 
 _tool_hook_epoch: ContextVar[object | None] = ContextVar("tool_invocation_hook_epoch", default=None)
@@ -422,7 +427,10 @@ class ToolBatchExecutor:
         facts = values.pop("canonical_facts")
         target = request.prepared_call.call.target.fact
         prepared = values.pop("prepared_surface")
-        return CodeModeExecutionSnapshot(**values, tool_directory=CodeModeToolDirectory.freeze(prepared),
+        return CodeModeExecutionSnapshot(**values,
+            tool_directory=self._tools.freeze_code_mode_tool_directory(prepared,
+                effective_permission_mode=facts.run_permission_snapshot.effective_mode),
+            decision_available=self._tools.decision_available(),
             request=CodeModeToolRequest(request.session_id, target.model_id,
                 target.input_modalities, request.memory_context),
             canonical_facts=CodeModeCallFacts(facts.run_permission_snapshot, self._session_content_range(facts)),
@@ -1080,7 +1088,10 @@ class ToolBatchExecutor:
                 result_entry_id = derive_id('entry', 'tool-result', result_id)
                 if surface_borrow is None:
                     raise RuntimeError("model response lost its tool surface borrow")
-                binding = None if cell_cancelled else surface_borrow.execution_binding(call.tool_name)
+                # Entry/argument rejection does not need a physical executor.
+                # Removed native entries can still be returned by a provider;
+                # settle their ordinary unavailable result before resolving a binding.
+                binding = None
                 hook_view = (
                     self._hooks.capture_view()
                     if not workspace_blocked and not cell_cancelled and self._hooks is not None and hook_scope is not None
@@ -1330,6 +1341,7 @@ class ToolBatchExecutor:
                         advertised_binding = surface_borrow.execution_binding(
                             call.tool_name
                         )
+                        binding = advertised_binding
                         binding_fingerprint = (
                             advertised_binding.executor_binding_fingerprint
                         )

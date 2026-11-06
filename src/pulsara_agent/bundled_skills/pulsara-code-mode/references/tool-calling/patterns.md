@@ -3,7 +3,7 @@
 For complete scenarios with inputs and result handling, see
 [Ordinary tool examples](examples.md).
 
-## Use the native arguments
+## Use each tool's arguments
 
 `tools.read_file(args)` and native `read_file` are two entry points to the same
 operation, with the same argument contract and workspace state. This also lets
@@ -12,7 +12,7 @@ read a formally published script-output entry with native read_file. Consult eac
 for its fields. JavaScript adds variables, conditions, loops, and Promise
 composition; it does not add a common response wrapper or a separate workspace.
 
-The JS subset is:
+The JS directory includes:
 
 | Purpose | Tools |
 | --- | --- |
@@ -22,11 +22,45 @@ The JS subset is:
 | Capability discovery | `query_capabilities` |
 | MCP | `use_new_mcp_tool`, `read_mcp_resource`, and direct MCP tools in the script's initial directory |
 | Agents | `run_agent`, `query_agents`, `send_agent_message`, `wait_agent`, `stop_agent` |
+| Semantic conditions | `decide`, with its local synchronous `available()` method |
 
 JS also has `tools.run_agent.batch(...)` and `tools.wait_agent.works(...)`, described
-in [Coordination](../agent-orchestration/coordination.md). Other native tools,
+in [Coordination](../agent-orchestration/coordination.md). ROOT assigns, continues
+and waits for agent work through these JS operations, including single calls.
+Native `query_agents`, `send_agent_message` and `stop_agent` remain independent
+controls for the same work. Subagents use native query, message and wait tools.
+`decide` is a Code Mode tool; `available()` is a local method, not another tool call.
+Other native tools,
 including `view_image`, memory, Plan, capability management,
 and the `exec_cell`, `query_cells`, and `manage_cell` controls, are called outside the script.
+
+## Semantic conditions
+
+```ts
+tools.decide({ condition: string, inputs: string[] }): Promise<{ decisions: boolean[] }>
+tools.decide.available(): boolean
+```
+
+Give one explicit yes/no condition and an ordered array of text, including the
+context needed for each item. A single input uses the same array interface.
+Only `condition` and `inputs` are accepted. `decisions[i]` corresponds to
+`inputs[i]`; values are booleans, without scores or explanations. Empty inputs
+return an empty decisions array without a model request. Empty strings and
+duplicate inputs retain their positions. Format structured material explicitly,
+for example with `JSON.stringify`, keeping speakers and relevant context.
+
+Guard every call with `if (tools.decide.available())`. The method is synchronous,
+does not invoke a tool or network request, and returns configuration availability
+captured when the Cell started. The configured Jev-like Decision connection is
+independent of memory reranking. New Cells read updated availability; an actual
+call still uses the current settings and may fail if they changed.
+
+Use the returned booleans to select any next computation, tool or agent operation.
+For exact counts, field checks, dates and string matches, use JavaScript instead.
+Keep source targets and Work references with the original objects. If unavailable,
+output the condition and material with those references for ROOT to continue;
+ordinary tasks do not need Decision configuration to proceed. Do not treat missing
+configuration or a failed call as a semantic `false`.
 
 ## Sequential and parallel calls
 

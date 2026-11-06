@@ -845,6 +845,8 @@ class KernelHostSession:
             host_workspace_id=workspace.workspace_key,
         )
         retrieval = RetrievalConfig()
+        from pulsara_agent.retrieval.decision import DecisionService
+        self._decision_service = DecisionService()
         self._memory_tools = KernelMemoryToolPort(
             repository=repository,
             session_id=session_id,
@@ -854,6 +856,7 @@ class KernelHostSession:
             feature_config=retrieval.memory,
             io_owner=self._io,
             settings=model_runtime.settings,
+            decision_service=self._decision_service,
         )
         self._memory_tools.bind_deadline_factory(self._deadlines)
         self._memory_embedding_maintainer = MemoryEmbeddingMaintainer(
@@ -879,6 +882,14 @@ class KernelHostSession:
         from pulsara_agent.code_mode.host import CodeModeHost
         self._code_mode = CodeModeHost()
         self._tools.bind_code_mode_port(self._code_mode)
+        from pulsara_agent.conversation_kernel.decision_tools import KernelDecisionToolPort
+        self._decision_tools = KernelDecisionToolPort(
+            settings=model_runtime.settings,
+            decision_service=self._decision_service,
+            deadline_factory=self._deadlines,
+            max_value_bytes=self._code_mode.limits.value_bytes,
+        )
+        self._tools.bind_decision_port(self._decision_tools)
         self._tools.seal_builtin_composition()
         pulsara_home_path = pulsara_home_resolution.path
         if pulsara_home_path is None:
@@ -6867,6 +6878,7 @@ class KernelHostSession:
     async def _stop_close_admission(self) -> None:
         async with self._lock:
             self._closing = True
+            self._decision_service.stop_admission()
             self._tools.stop_local_process_admission()
             self._request_close_cancellation()
             self._presentation_notices.clear()
@@ -6893,12 +6905,17 @@ class KernelHostSession:
                 else deadline_monotonic
             )
             self._closing = True
+            self._decision_service.stop_admission()
             self._tools.stop_local_process_admission()
             self._request_close_cancellation()
             close_error: BaseException | None = None
             settlement_error: BaseException | None = None
             code_close_task = asyncio.create_task(self._code_mode.aclose(),
                                                 name=f"kernel-code-mode-close:{self.host_session_id}")
+            decision_close_task = asyncio.create_task(
+                self._decision_service.aclose(deadline_monotonic=deadline),
+                name=f"kernel-decision-close:{self.host_session_id}",
+            )
             terminal_stop_task = asyncio.create_task(
                 self._tools.stop_terminal_physical_owners(timeout_seconds=max(0.001, deadline - monotonic())),
                 name=f"kernel-terminal-stop:{self.host_session_id}",
@@ -7125,6 +7142,11 @@ class KernelHostSession:
             except BaseException as exc:
                 close_error = close_error or exc
             try:
+                if await _join_close_task(decision_close_task, deadline_monotonic=deadline):
+                    close_error = close_error or TimeoutError("Decision requests exited after close deadline")
+            except BaseException as exc:
+                close_error = close_error or exc
+            try:
                 if await _join_close_task(code_close_task, deadline_monotonic=deadline):
                     close_error = close_error or TimeoutError("Code Mode exited after close deadline")
             except BaseException as exc:
@@ -7172,6 +7194,7 @@ class KernelHostSession:
             self._physical_close_complete = all(owner.physical_close_complete for owner in (
                 self._code_mode, self._tools, self._mcp_supervisor, self._hooks,
                 self._ephemeral, self._memory_embedding_maintainer, self._memory_tools,
+                self._decision_service,
                 self.extensions, self._io,
                 self._compaction, self._plan_continuations, self._assistant_settlements,
             ))

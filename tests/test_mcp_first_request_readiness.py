@@ -478,12 +478,12 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
             if call.fact.purpose is ModelCallPurpose.AGENT_MODEL_LOOP:
                 payload = build_chat_completions_payload(call=call, context=context)
                 names = {item['function']['name'] for item in payload['tools']}
-                if 'run_agent' in names:
+                if 'exec_cell' in names:
                     root_requests.append(payload)
                     if len(root_requests) == 1:
                         chunks = [{'choices': [{'index': 0, 'delta': {'tool_calls': [{
                             'index': 0, 'id': 'delegate_child', 'type': 'function',
-                            'function': {'name': 'run_agent', 'arguments': json.dumps({'instruction': 'CHILD_MCP_ONLY'})},
+                            'function': {'name': 'exec_cell', 'arguments': json.dumps({'code': 'await tools.run_agent({instruction: "CHILD_MCP_ONLY"});'})},
                         }]}}]}, {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]}]
                 else:
                     child_requests.append(payload)
@@ -514,6 +514,9 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
             assert child._input_continuity.current_view(scope) is None
             assert child_requests == []
             assert len(root_requests) == 2
+            root_names = {item['function']['name'] for item in root_requests[0]['tools']}
+            assert {'exec_cell', 'query_agents', 'send_agent_message', 'stop_agent'} <= root_names
+            assert not {'run_agent', 'wait_agent'} & root_names
             release.set()
             await asyncio.wait_for(child_sent.wait(), 10)
             assert len(child_requests) == 1

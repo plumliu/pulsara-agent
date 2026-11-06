@@ -1499,6 +1499,9 @@ class LocalHttpServer:
         return web.json_response(updated.memory_retrieval.public())
 
     async def _test_memory_model(self, request):
+        from pulsara_agent.conversation_kernel.decision_tools import decision_request
+        from pulsara_agent.conversation_kernel.execution_watchdogs import KernelExecutionDeadlineFactory, KernelWatchdogOwner
+        from pulsara_agent.retrieval.decision import DecisionService
         from pulsara_agent.retrieval.embedding.factory import build_embedding_provider
         from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
         from time import perf_counter
@@ -1507,12 +1510,21 @@ class LocalHttpServer:
             connection = self.settings.retrieval_draft(self.settings.read(), slot, await self._json_body(request))
         except ValueError as exc:
             raise self._memory_settings_error(exc) from None
-        provider = build_embedding_provider(connection) if slot == "embedding" else build_rerank_provider(connection)
+        provider = (DecisionService() if slot == "decision" else
+                    build_embedding_provider(connection) if slot == "embedding" else build_rerank_provider(connection))
         started = perf_counter()
         try:
             if slot == "embedding":
                 vector = await provider.embed("A short memory about using PostgreSQL.")
                 detail = {"dimensions": len(vector)}
+            elif slot == "decision":
+                inputs = ("The project uses PostgreSQL.", "The user prefers green tea.")
+                batches = provider.prepare_batches(connection, item_count=len(inputs),
+                    build_request=lambda start, end: decision_request(
+                        "Does this text say the project uses PostgreSQL?", inputs, start, end))
+                probabilities = await provider.evaluate(batches, deadline_monotonic=KernelExecutionDeadlineFactory().deadline(
+                    KernelWatchdogOwner.NONTERMINAL_TOOL_INVOCATION))
+                detail = {"result_count": len(probabilities)}
             else:
                 rows = await provider.rerank("Which database does the project use?", [
                     "The project uses PostgreSQL.", "The user prefers green tea."], candidate_ids=("m1", "m2"))

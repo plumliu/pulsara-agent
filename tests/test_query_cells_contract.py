@@ -64,8 +64,8 @@ async def _start(host, source, invoke=None):
     async def empty(_):
         return CodeModeToolResult(value={})
     return await host.start(source=source, source_exec_attempt_id=random_id("attempt"),
-        turn_id=random_id("turn"), snapshot=object(), tool_catalog={"read_file": {}},
-        invoke=invoke or empty)
+        turn_id=random_id("turn"), snapshot=object(), tool_catalog={"decide": {}, "read_file": {}},
+        invoke=invoke or empty, decision_available=False)
 
 
 async def _terminal(host, cell_id):

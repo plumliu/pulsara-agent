@@ -11,7 +11,7 @@ from pulsara_agent.llm.adapters.openai import client as openai_client
 from pulsara_agent.process_credential_boundary import ProcessCredentialBoundHttpx2Client
 from pulsara_agent.retrieval.config import RetrievalConnection
 from pulsara_agent.retrieval.embedding.openai_compatible import HttpEmbeddingProvider
-from pulsara_agent.retrieval.rerank.http import HttpRerankProvider
+from pulsara_agent.retrieval.rerank.factory import build_rerank_provider
 from pulsara_agent.retrieval.rerank.decision_prompt import decision_question
 from pulsara_agent.retrieval.errors import EmbeddingServiceError, RerankServiceError
 from pulsara_agent.conversation_kernel.memory_tools import (
@@ -96,7 +96,7 @@ def test_twenty_truncated_projections_remain_valid_on_each_sdk_wire(monkeypatch,
     observed = install_transport(monkeypatch, response)
     endpoint = "https://provider.example/decisions" if shape == "openai_decisions" else "https://provider.example/ranking"
     connection = RetrievalConnection(endpoint, "fixture", shape, "none")
-    result = asyncio.run(HttpRerankProvider(connection).rerank(query, documents, candidate_ids=names))
+    result = asyncio.run(build_rerank_provider(connection).rerank(query, documents, candidate_ids=names))
     assert len(observed) == 1
     assert [item.index for item in result] == list(range(20))
     body = json.loads(observed[0].content)
@@ -151,7 +151,7 @@ def test_rerank_requests_have_only_subject_fields(
         "fixture-key" if authentication != "none" else None,
     )
     result = asyncio.run(
-        HttpRerankProvider(connection).rerank(
+        build_rerank_provider(connection).rerank(
             "query", ["first", "second"], candidate_ids=("a", "b"), purpose=purpose
         )
     )
@@ -189,7 +189,7 @@ def test_decisions_batch_named_candidates_native_or_public_sdk(
     # Exercise purpose/candidate routing and both wire formats independently of
     # the editorial wording owned by decision_prompt.
     monkeypatch.setattr(
-        "pulsara_agent.retrieval.rerank.http.decision_question",
+        "pulsara_agent.retrieval.rerank.decision.decision_question",
         question_for_candidate,
     )
     response = {
@@ -218,7 +218,7 @@ def test_decisions_batch_named_candidates_native_or_public_sdk(
         "fixture-key" if authentication != "none" else None,
     )
     result = asyncio.run(
-        HttpRerankProvider(connection).rerank(
+        build_rerank_provider(connection).rerank(
             "query", ["first", "second"], candidate_ids=("a", "b"), purpose=purpose
         )
     )
@@ -300,7 +300,7 @@ def test_invalid_rerank_fails_whole_call_without_retry(monkeypatch, response):
         "https://provider.example/rerank", "fixture", "flat_rerank", "none"
     )
     with pytest.raises(RerankServiceError):
-        asyncio.run(HttpRerankProvider(connection).rerank("query", ["first", "second"]))
+        asyncio.run(build_rerank_provider(connection).rerank("query", ["first", "second"]))
     assert len(observed) == 1
 
 
@@ -332,7 +332,7 @@ def test_invalid_decision_identity_and_probability_fail(monkeypatch, shape, answ
     )
     with pytest.raises(RerankServiceError):
         asyncio.run(
-            HttpRerankProvider(
+            build_rerank_provider(
                 RetrievalConnection(endpoint, "fixture", shape, "none")
             ).rerank("query", ["first", "second"], candidate_ids=("a", "b"))
         )
@@ -350,7 +350,7 @@ def test_response_byte_and_duplicate_key_boundaries_precede_sdk_parsing(
     )
     with pytest.raises(RerankServiceError):
         asyncio.run(
-            HttpRerankProvider(
+            build_rerank_provider(
                 RetrievalConnection(
                     "https://provider.example/rerank", "fixture", "flat_rerank", "none"
                 )
@@ -434,7 +434,7 @@ def test_compressed_response_is_bounded_after_httpx2_decompression(monkeypatch):
     )
     with pytest.raises(RerankServiceError, match="byte bound"):
         asyncio.run(
-            HttpRerankProvider(
+            build_rerank_provider(
                 RetrievalConnection(
                     "https://provider.example/rerank", "fixture", "flat_rerank", "none"
                 )

@@ -254,6 +254,25 @@ class RerankBackendConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionBackendConfig:
+    """Per-request bounds shared by memory and Code Mode Decision consumers."""
+
+    timeout_seconds: float = 4.0
+    batch_size: int = 20
+    max_concurrent: int = 1
+    maximum_request_bytes: int = 192 * 1024
+    maximum_response_bytes: int = 256 * 1024
+
+    def __post_init__(self):
+        if self.timeout_seconds <= 0 or any(
+            type(value) is not int or value < 1
+            for value in (self.batch_size, self.max_concurrent,
+                          self.maximum_request_bytes, self.maximum_response_bytes)
+        ):
+            raise ValueError("Decision physical boundaries must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class AdvisoryMemoryFeatureConfig:
     automatic_dense: bool = True
     explicit_rerank: bool = True

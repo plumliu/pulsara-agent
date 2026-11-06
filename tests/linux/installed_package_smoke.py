@@ -69,7 +69,7 @@ async def exercise(root: Path) -> None:
     try:
         cell_id = await code_mode.start(source="console.log('offline QuickJS');return 42;",
             source_exec_attempt_id="installed-smoke-attempt", turn_id="installed-smoke-turn",
-            snapshot=None, tool_catalog={}, invoke=never_called)
+            snapshot=None, tool_catalog={"decide": {}}, invoke=never_called, decision_available=False)
         owned = code_mode._cells[cell_id]
         records = []
         async with asyncio.timeout(10):

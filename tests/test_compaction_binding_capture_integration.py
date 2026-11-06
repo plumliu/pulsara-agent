@@ -38,12 +38,13 @@ from tests.support.model_config import (
 )
 from tests.test_compaction_request_start_integration import (
     _Model,
+    _delegate_in_cell,
     _eventually,
     _render,
     _rows,
     _wait_summary,
 )
-from tests.test_round4_plan_host import _text, _tool_call
+from tests.test_round4_plan_host import _text
 
 pytestmark = pytest.mark.postgres
 
@@ -84,7 +85,7 @@ class _CaptureModel(_Model):
                 }
                 if self.reused_agent is not None:
                     args["target"] = {"kind": "AGENT", "agent_id": self.reused_agent}
-                events = _tool_call("run_agent", random_id("call"), args)
+                events = _delegate_in_cell(args)
             else:
                 events = _text("REQUEST_FINISHED")
         for event in events:
@@ -460,6 +461,13 @@ def test_waiting_work_keeps_accepted_binding_after_parent_selection_changes(
                 command_id=random_id("command"),
                 requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
             )
+            async def second_admitted():
+                return len(_rows(
+                    root,
+                    "SELECT id FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_INSTRUCTION'",
+                    (child,),
+                )) == 2
+            await _eventually(second_admitted)
             rows = _rows(
                 root,
                 "SELECT status,model_call_binding FROM pulsara_v3.prompt_queue_items WHERE session_id=%s AND input_origin='AGENT_INSTRUCTION' ORDER BY queue_sequence",

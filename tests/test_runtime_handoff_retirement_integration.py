@@ -5,16 +5,10 @@ import asyncio
 from dataclasses import replace
 import json
 import os
-from pathlib import Path
 import shlex
-import subprocess
 import sys
 from time import monotonic
-from uuid import uuid4
 
-import psycopg
-from psycopg import sql
-from psycopg.conninfo import make_conninfo
 import pytest
 
 from pulsara_agent.code_mode import CodeModeToolResult
@@ -36,14 +30,9 @@ from pulsara_agent.primitives.context import canonical_json_bytes, freeze_json, 
 from pulsara_agent.ports.live_agent_event import TextEndPayload, ToolCallEndPayload
 from pulsara_agent.ports.provider_stream import freeze_provider_adapter_completed_replay_payload
 from pulsara_agent.primitives.permission import PermissionMode
-from pulsara_agent.capability.pulsara_home import require_pulsara_home
-from pulsara_agent.settings import LocalPostgresConfig, LocalSettingsStore
-from pulsara_agent.desktop_runtime import validate_managed_postgres
-from pulsara_agent.storage.migrations.runner import PostgresMigrationRunner
 from pulsara_agent.terminal_process.models import TerminalProcessOrigin, TerminalRequest
 from pulsara_agent.tools.builtins.todo import parse_todo_replacement
 from pulsara_agent.workspace_identity import HostWorkspaceInput
-from tests.dogfood.run_model_switch_handover_dogfood import _require_disposable_local_root
 from tests.support.model_config import test_model_binding, test_model_limits, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel
 from tests.support.model_stream import _text, _tool_call
@@ -54,55 +43,9 @@ pytestmark = pytest.mark.postgres
 
 
 @pytest.fixture(scope="module")
-def handoff_database():
-    # Read the ordinary saved configuration before individual tests select an
-    # isolated home. Validate both configured endpoints before creating the
-    # uniquely named disposable database; unknown/remote endpoints are errors.
-    saved = LocalSettingsStore(require_pulsara_home() / "local-settings.yaml").read()
-    postgres = saved.postgres
-    if postgres is None:
-        # The desktop normally supplies its managed private-socket database as
-        # an in-memory production override. Ask that same owner for the value;
-        # an absent YAML postgres section is not a credential fallback.
-        code = """
-const {BundledPostgres}=require('./desktop/dist/postgres.js');
-const {createPosixPostgresOperations}=require('./desktop/dist/postgres-posix.js');
-(async()=>{
- const pg=new BundledPostgres(createPosixPostgresOperations('',process.argv[1]));
- const instance=await pg.operations.readInstance('resolved');
- if(instance.directory!==pg.directory||instance.socket!==pg.socket)throw new Error('managed instance mismatch');
- console.log(JSON.stringify(pg.settings()));
-})().catch(e=>{console.error(e);process.exit(1)});
-"""
-        postgres = LocalPostgresConfig(**json.loads(subprocess.check_output(
-            ["node", "-e", code, os.fspath(require_pulsara_home())], text=True,
-            cwd=Path(__file__).resolve().parents[1])))
-        validate_managed_postgres(postgres)
-        with psycopg.connect(postgres.admin_dsn) as connection:
-            actual = connection.execute("SELECT current_database(), current_user, current_setting('data_directory'), inet_server_addr()").fetchone()
-        assert actual == ("pulsara", "pulsara_admin", os.fspath(require_pulsara_home() / "desktop" / "postgres"), None)
-    else:
-        if postgres.admin_dsn is None:
-            raise RuntimeError("saved local PostgreSQL admin DSN is required")
-        for label, dsn in (("admin DSN", postgres.admin_dsn), ("runtime DSN", postgres.runtime_dsn)):
-            _require_disposable_local_root(dsn, label=label)
-        for dsn in (postgres.admin_dsn, postgres.runtime_dsn):
-            with psycopg.connect(dsn) as connection:
-                actual = connection.execute("SELECT current_database(), inet_server_addr()::text").fetchone()
-            assert actual is not None and actual[0] == "pulsara" and actual[1] in {"127.0.0.1", "::1"}, "configured PostgreSQL did not resolve to local pulsara"
-    assert postgres.admin_dsn
-    name = "pulsara_handoff_integration_" + uuid4().hex[:12]
-    admin = make_conninfo(postgres.admin_dsn, dbname=name)
-    runtime = make_conninfo(postgres.runtime_dsn, dbname=name)
-    with psycopg.connect(postgres.admin_dsn, autocommit=True) as connection:
-        connection.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
-    try:
-        migration = PostgresMigrationRunner(admin_dsn=admin, runtime_dsn=runtime).migrate(deadline_monotonic=monotonic() + 240)
-        assert migration.applied_versions == (0,)
-        yield runtime, admin
-    finally:
-        with psycopg.connect(postgres.admin_dsn, autocommit=True) as connection:
-            connection.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+def handoff_database(stage2_migrated_postgres_database):
+    database = stage2_migrated_postgres_database
+    return database.runtime_dsn, database.admin_dsn
 
 
 def _observations(request):
@@ -272,7 +215,8 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         cells = session._code_mode
         active = await cells.start(source="await tools.read_file({});",
             source_exec_attempt_id=random_id("attempt"), turn_id=request.turn_id,
-            snapshot=object(), tool_catalog={"read_file": {}}, invoke=invoke)
+            snapshot=object(), tool_catalog={"decide": {}, "read_file": {}}, invoke=invoke,
+            decision_available=False)
         await asyncio.wait_for(cell_started.wait(), 10)
         self.resources.update(running=running, ended=ended.process_id,
             active=active, cell_release=cell_release, release_path=release_path,
@@ -302,7 +246,7 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         self.root_calls.append(request)
         index = len(self.root_calls)
         if index == 1 and self.variant == "large_todo":
-            events = _tool_call("run_agent", "call:existing-agent", {"instruction": "Keep this existing Work active."})
+            events = _tool_call("exec_cell", "call:existing-agent", {"code": 'console.log(await tools.run_agent({"instruction": "Keep this existing Work active."}));'})
         elif index == (2 if self.variant == "large_todo" else 1):
             if self.variant == "large_todo":
                 await asyncio.wait_for(self.child_started.wait(), 20)
@@ -518,11 +462,11 @@ class _SubagentCompactionModel(_HostCompactionModel):
         root = request.session_id == self.session.session_id
         if root:
             if index == 1:
-                events = _tool_call("run_agent", "call:sibling", {"instruction": "OTHER_WORK: remain active until released."})
+                events = _tool_call("exec_cell", "call:sibling", {"code": 'console.log(await tools.run_agent({"instruction": "OTHER_WORK: remain active until released."}));'})
             elif index == 2:
                 await asyncio.wait_for(self.sibling_ready.wait(), 20)
                 await self._process_for(self.session, request)
-                events = _tool_call("run_agent", "call:compact-child", {"instruction": "CURRENT_WORK: inspect with mid-turn compaction."})
+                events = _tool_call("exec_cell", "call:compact-child", {"code": 'console.log(await tools.run_agent({"instruction": "CURRENT_WORK: inspect with mid-turn compaction."}));'})
             else:
                 await asyncio.wait_for(self.target_finished.wait(), 60)
                 events = _text("text:root-finished", "ROOT_SCOPE_FINISHED")

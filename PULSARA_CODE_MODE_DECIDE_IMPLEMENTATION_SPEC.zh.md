@@ -1,12 +1,25 @@
 # Pulsara Code Mode 语义判断与代理工具入口实现规范
 
-日期：2026-11-07。状态：待实施。
+日期：2026-11-07。状态：已实施；本文规定当前工作树的接口、暴露矩阵与验收合同，验证结果见第 12 节。
 
 本文规定 Code Mode 中 `tools.decide` 的批量真假判断合同、现有 Decision 配置与调用实现的复用方式，以及 ROOT 和子代理各自的工具入口。ROOT 的工作派发与等待统一使用 Code Mode，原生查询、通信与停止入口保持独立可用；bundled Code Mode Skill 和系统提示同步描述这一完整合同。
 
-上述功能在同一个实现提交中完成：包括生产实现、工具暴露与准入、设置界面、系统提示、bundled Skill 和必要测试。本次交付仍然仅为规范，不修改实现或创建提交。
+上述功能在同一个实现提交中完成：包括生产实现、工具暴露与准入、设置界面、系统提示、bundled Skill 和必要测试。
 
 本文涉及的新增行为以本文为准。现有 Code Mode 执行、工具结果结算、记忆检索、内核生命周期和 provider 输入连续性合同在未涉及处保持有效。
+
+## 0. 当前实现与所有权
+
+| 位置 | 当前合同 |
+| --- | --- |
+| `capability/builtin_catalog.py`、`tool_runtime.py`、`tool_execution.py` | ROOT 原生 `run_agent`／`wait_agent`／`decide` 不暴露且拒绝执行；拒绝先于物理 binding 读取，模型误用不会令整轮异常退出 |
+| `tool_surface.py` 与 `freeze_code_mode_tool_directory` | JS builtin 目录来自已封存、已授权的执行能力；MCP 目录沿用 prepared 授权范围，provider specs／bindings 仍严格对应 |
+| `retrieval/decision.py`、`retrieval/rerank/decision.py`、`conversation_kernel/decision_tools.py` | 唯一共用协议服务分别接受记忆用途与通用谓词适配；普通重排保留自己的 HTTP 路径 |
+| `KernelHostSession` | 每会话持有一个 Decision 服务和共享闸门，注入 memory 与 decide；Host 关闭同步封准入并等待物理清理完成 |
+| `code_mode/host.py → node/sidecar.mjs → node/worker.mjs → node/guest.js` | 可用性 boolean 随 Cell 准入冻结，排队时保留；Guest 的 `available()` 同步、本地、不可改写 |
+| `KernelToolInvocationContext.cell_cancel_event` 与共用 Decision 服务 | 主动观察 Cell Stop；全调用 deadline 只创建一次，排队、各子批及 SDK 清理沿用现有取消和关闭合同 |
+
+实现保留 [停止链路方案](PULSARA_STOP_CHAIN_AUDIT_AND_IMPLEMENTATION_PLAN.zh.md) 的取消传播、精确结算和关闭汇合合同；Decision 的 HTTP 生命周期由现有 SDK 负责。
 
 ## 1. 产品目标与范围
 
@@ -241,11 +254,13 @@ Decision 配置卡应独立于“启用重排”的展开状态，关闭重排�
 
 ### 4.3 资源所有权
 
-在现有 Kernel Host 组装阶段创建一个进程内 Decision 服务，并注入该 Host 的记忆重排和 `decide` owner；在工具组合封存前完成绑定。裸内核和桌面使用同一路径。
+在 `KernelHostSession` 现有服务组装阶段创建一个进程内 Decision 服务，并注入该会话 Host 的记忆重排和 `decide` owner；在工具组合封存前完成绑定。这里的 Host 指会话运行实例，不是管理多个会话的 `KernelHostCore`。裸内核和桌面使用同一路径。
 
 同一 Host 的两种用途共用 Decision 请求并发闸门，初始并发数沿用现有值 `1`。超出的请求等待，不因“正在判断”拒绝新逻辑工作。每个物理子批结束即释放闸门，长数组不在整个调用期间占住连接名额。普通 Rerank 保留自己的既有执行边界。
 
 服务跟随 Host 关闭，关闭封住新准入并清理正在执行或等待的调用；停止一个 Cell 只取消该 Cell 的调用，不关闭其他消费者共享的服务。设置页连接测试复用同一适配器，在用户级设置服务内管理自己的短期调用，不借用活动会话。
+
+共享服务是 Decision 请求及其闸门的唯一资源 owner。现有 memory port 保留自身查询和业务 task 的生命周期，只取消／汇合自己发起的调用；不能由 memory port 提前关闭其他 Cell 仍使用的服务。Host 关闭须汇合这些调用及 SDK 关闭，不能仅把正在等待的 task 从集合删除便宣告物理结束。不同会话的关闭互不影响。
 
 不引入全局连接注册表、持久任务、逐项事件、缓存、恢复检查点或新的 fingerprint。协议、业务结果和错误沿用已有调用记录，保留实际输入输出以便诊断；仅按现有凭证 owner 清除实际秘密值。
 
@@ -270,10 +285,12 @@ Decision 配置卡应独立于“启用重排”的展开状态，关闭重排�
 
 1. 发送前完成全部参数校验，并确认每一项能与 condition、固定指令及所选协议封装共同装入一个物理请求。超限项明确报错，不先发送前面部分再发现已知的输入问题。
 2. 按输入顺序，以 20 项和实际序列化 UTF-8 字节数共同决定每个子批。保留文本原样，不按估算字符数截断，不把同一条文本拆成多个真假判断再合并。
-3. 逐批等待共享并发名额。取得名额前和发送前检查调用是否已取消，执行及等待均服从既有工具截止时间。
+3. 工具 owner 在本次非空调用的执行准入处，从既有 deadline factory 取得一次 `NONTERMINAL_TOOL_INVOCATION` 截止时间，后续子批共用，不在每批重置。逐批等待共享并发名额；取得名额前和发送前检查取消。排队和 HTTP 执行都观察该截止时间；4 秒 provider 超时只在取得名额后开始，受剩余工具时间约束。
 4. 每个子批校验完整响应后，将概率放回原始数组位置。所有子批成功后一次性交付结果。
 5. 沿用现有 SDK `max_retries=0`。失败返回正常工具错误，不在服务内增加自动重试链。
-6. Stop／取消后停止后续子批，取消可取消的 HTTP 操作并释放名额；远端已接收请求按实际情况结算，不启动新的补偿判断。
+6. 明确接入 `KernelToolInvocationContext.cell_cancel_event`、调用者取消及服务关闭：排队时可退出且不发请求；HTTP 在途时取消可取消的 SDK 操作并等待其关闭；批次之间不再派发。停止一个 Cell 不取消其他 Cell 或记忆消费者。远端已接收请求按实际情况结算，不启动新的补偿判断。
+
+当前 `tool_execution.py` 对异步工具执行叶直接 await，并不会自动为每个异步 owner 安装上述 timeout 或监听 Cell 事件。这些连接必须在新 Decision owner 中实现，复用现有 deadline、事件和 SDK 生命周期，不另造停止协议。关闭过程中重复取消仍须汇合同一次关闭，再释放并发名额；保留已有主异常和实际失败诊断。已取得的结果沿既有工具结算规则处理，Cell 已终止时不能据此恢复脚本或启动下一子批。
 
 完整布尔数组的最大编码体积可以在发送前计算。准备阶段应按既有工具结果及 bridge 预算检查能否交付任意合法结果，计入对象封装和布尔数组的最长表示。确定无法交付时，沿现有资源边界报错并提示按来源页拆分调用，不支付模型请求后再发现已知的输出容量问题。这里不设置独立的 `maxItems`，不截掉尾部结果，也不为 `decide` 新建结果分页协议。其他交付故障继续使用既有已接受结果的保存和读取路径。
 
@@ -286,6 +303,8 @@ Decision 配置卡应独立于“启用重排”的展开状态，关闭重排�
 初版只在 Code Mode 目录公开 `decide`。不要为了让现有“从原生工具取子集”的目录构造碰巧包含它，而把它顺带加入 provider 原生工具表；应显式将该 Code Mode 专用 schema 和 owner 绑定纳入现有目录构造。继续使用共同的权限校验和执行结算，直接原生调用或子代理调用按不可用处理。
 
 Code Mode 目录始终包含 `decide` 的 schema 和真实执行 binding。每次创建 Cell 时，宿主从当前 Decision 设置取得配置完整性，随启动数据传给 Guest 一个 boolean。在 `guest.js` 冻结工具函数前，将本地 `available()` 方法挂到 `tools.decide` 上，方法和工具函数均冻结；方法只返回这个 boolean。
+
+该 boolean 在 Python Cell 准入时与目录一起冻结，经过 `CodeModeHost.start` 的现有 start 消息、sidecar 排队数据和 worker 的 Guest 安装参数传递。排队等待 VM 的同一个 Cell 不在获得名额时重新读取设置；下一 Cell 才取得新的可用性。只传严格的 boolean，不把连接对象或凭据带入 Node／Guest；所有层保持同一值，不添加缺字段默认值或旧新启动格式兼容分支。
 
 `available()` 不登记为另一个宿主工具，不经过 `invokeHost`，也不另建可用性查询接口、配置缓存服务或能力注册表。复用现有工具函数可携带方法的 Guest 形式，增加本地的只读查询即可。
 
@@ -344,6 +363,8 @@ ROOT 同时保留原生查询、发消息和停止能力。正在运行的脚本
 6. MCP 的冻结签名、实际权限、consumer 绑定和调用引用保持现有合同。目录构造调整不能顺带让未授权的 MCP 或其他工具进入 JS。
 
 通过现有 catalog、surface 与执行准入表达这一矩阵，不新建第二套工具注册表、工具执行器、权限框架或代理调度器。配置、代理发现、运行中的控制操作均不重建 provider 输入根。
+
+`PreparedKernelToolSurface.__post_init__` 当前要求 provider specs 与 execution bindings 名称、顺序和 descriptor 逐项对应。保留这一不变量：不能向这个 provider surface 私塞隐藏的 JS binding，也不能仅从 specs 删除名字。两种目录从同一 sealed builtin composition／实际授权能力选择；JS 目录持有自己的冻结 schema 与原执行 binding，复用现有 access、borrow 和权限检查。`borrow_code_mode_surface` 为两个 helper 派生 binding 时仍须找到实际 `run_agent`／`wait_agent` owner。来源判断使用宿主建立的 invocation source 和 Cell borrow，不接受参数中自报“来自 Code Mode”。
 
 ### 7.4 控制入口的独立可用性
 
@@ -478,10 +499,10 @@ ROOT 系统提示移除“简单 subagent 调用用 native，复杂流程才读�
 
 ```js
 const candidates = page.items;
+const condition = "这段讨论中，用户是否明确提出了关于 Skill 内容、写法或使用指导的要求？";
 if (tools.decide.available()) {
   const { decisions } = await tools.decide({
-    condition:
-      "这段讨论中，用户是否明确提出了关于 Skill 内容、写法或使用指导的要求？",
+    condition,
     inputs: candidates.map(item => JSON.stringify(
       item.messages.map(({ role, at, text }) => ({ role, at, text }))
     ))
@@ -490,7 +511,7 @@ if (tools.decide.available()) {
   const selected = candidates.filter((_, i) => decisions[i]);
   if (selected.length) console.log({ matches: selected });
 } else {
-  console.log({ candidates }); // ROOT 按页阅读并判断，保留各项来源。
+  console.log({ condition, candidates }); // ROOT 按页阅读并判断，保留各项来源。
 }
 ```
 
@@ -524,20 +545,20 @@ Code Mode 运行时不可用时，上述原生查询和控制仍直接使用已�
 
 | 位置 | 必要改动 |
 | --- | --- |
-| `retrieval/rerank/http.py`、factory、protocol 与 `decision_prompt.py` | 抽出唯一 Decision 协议实现，保留记忆用途适配及普通重排路径 |
+| `retrieval/decision.py`、`retrieval/rerank/decision.py`、`http.py` 与 factory | 唯一 Decision 协议实现、记忆用途适配及普通重排路径 |
 | `retrieval/http.py` 与现有 SDK client owner | 复用认证、请求准入、超时、凭证和响应边界 |
 | `retrieval/config.py` | 保留唯一连接保存位置；将共用 Decision 物理配置归到唯一 owner |
-| `conversation_kernel/host.py`、`memory_tools.py` | 注册前完成共用服务组装和注入，保留记忆业务规则及关闭合同 |
+| `conversation_kernel/host.py`、`memory_tools.py`、`decision_tools.py` | 注册前完成共用服务组装和注入，保留记忆业务规则及关闭合同 |
 | `capability/builtin_catalog.py` 与现有暴露规则 | 表达角色和入口矩阵，保留共用 schema、执行 owner 与权限合同 |
 | `conversation_kernel/tool_surface.py`、`tool_runtime.py`、`tool_execution.py` 与 Code Mode 目录 | 从执行能力构造原生／JS 各自目录，保证 ROOT 原生派发／等待拒绝而 JS 正常执行；加入 `decide` 分支，复用原执行叶 |
 | `conversation_kernel/subagents/collaboration_api.py` 及相关准入 owner | 保留唯一协作执行路径、子代理通信、Work 生命周期和独立原生控制；不经 Code Mode 转发控制请求 |
-| `code_mode/contracts.py`、`host.py` 与 `node/guest.js` | 在 Cell 启动时传递只读配置可用性，为 `tools.decide` 提供本地同步的 `available()` 方法 |
+| `code_mode/host.py`、`node/sidecar.mjs`、`node/worker.mjs` 与 `node/guest.js` | 在 Cell 准入、排队和 Guest 安装全链路传递冻结 boolean，为 `tools.decide` 提供本地同步的 `available()` 方法 |
 | `desktop_app/http_server.py`、现有设置服务与 `frontend/components/memory-retrieval-settings.tsx` | 复用保存接口及配置，拆开 Decision 卡与记忆重排展开状态，测试连接走共用适配器 |
 | `ports/system_prompt.py` 与 bundled `pulsara-code-mode` | 同步 ROOT 派发／等待入口、独立控制、子代理通信、通用语义判断和全部相关参考示例 |
 
 无需新增数据库表、事件种类、持久 job、恢复协议、公开 target 或独立配置存储。需要的普通调用身份、执行事实和输出使用现有 owner。模型提示、公开接口和设置说明只描述本规范确定的单一路径。
 
-该实现提交必须同时完成 `decide` 与代理工具入口调整，不能仅隐藏原生工具而遗漏 JS 目录，也不能发布新入口而保留要求模型走已移除路径的提示和示例。本次文档阶段不提前提交部分实现。
+该实现提交必须同时完成 `decide` 与代理工具入口调整，不能仅隐藏原生工具而遗漏 JS 目录，也不能发布新入口而保留要求模型走已移除路径的提示和示例。
 
 ## 11. 验收与验证范围
 
@@ -556,6 +577,30 @@ Code Mode 运行时不可用时，上述原生查询和控制仍直接使用已�
 9. **入口硬切与连续性**：保留已安装旧 schema 的测试中，SYSTEM/tools 字节不变，ROOT 原生 `run_agent`／`wait_agent` 调用被拒绝且不产生新 Work；JS 同名调用及子代理原生等待正常。新合法构建的 ROOT 工具表符合矩阵；执行能力与 JS 目录不依赖这两个原生条目的存在。所有调用继续复用同一结果结算和身份 owner。
 10. **提示与文档一致性**：活动系统提示、Skill 正文及参考文件不再指导 ROOT 原生创建／续派／等待；保留子代理原生等待的正确示例。简单委派使用短脚本，原生控制不要求先停脚本；正常任务不因未配置 Decision 而要求用户设置。
 
+对实施接缝补充以下集成断言，纳入上述用例而不另建框架：
+
+- 用真实 Node／worker／Guest 路径验证 `available()` 传递和冻结；Cell 排队期间修改配置，原 Cell 保持准入时的 boolean，新 Cell 使用新值，实际请求仍按调用时配置处理。
+- ROOT provider 表缺少 `run_agent`／`wait_agent` 时，真实 Cell 仍能调用两者及其 helper；新旧 provider 表上的 native 尝试均不能伪造调用来源。保持 provider surface specs／binding 对应约束及 MCP 授权回归。
+- Decision 排队、HTTP 在途、两子批之间分别触发 Cell Stop；没有后续子批，SDK 关闭只汇合一次，共享名额在关闭后释放，其他消费者继续执行。另覆盖重复取消和关闭失败，不能把失败包装成成功或复活已终止 Cell。
+- 同一非空调用的工具截止时间贯穿全部子批和等待；多批不能续期，也不能将单次 4 秒 HTTP timeout 错用于整个逻辑数组。会话 Host 关闭只影响其服务，最终无未汇合请求。
+- 保持停止链路的既有 IO、provider cleanup、Host 与 Cell 取消回归通过；本文真实 Decision 验收必须独立完成，不能用之前 DeepSeek 主模型停止验收替代。
+
 实施完成后，使用用户已保存的 Decision 连接，经真实 Code Mode 工具路径运行一次上述小型正反样本批次，检查实际布尔结果、来源筛选和错误可见性，并记录实际耗时。配置只读，复用生产 settings 和凭证 owner；若缺少配置，明确记录缺少的设置，不改用其他模型冒充验证。测试不要求对相同模型反复采样或添加任意性能门槛。
 
-规范编写阶段只核对文档、引用和工作区改动范围，不运行上述实施验收，不修改或安装桌面应用。
+## 12. 实施验证
+
+验证日期：2026-11-07。Python 使用仓库 `.venv`；数据库用独立创建的本地 PostgreSQL 集群，`CI=1` 下执行，不以数据库缺失跳过集成测试。前端使用真实 Node 工具链。
+
+- 核心组合回归：751 passed。覆盖 Decision 两协议、工具与设置 owner、真实 Host／Node／Guest、记忆重排、MCP、共享生命周期、停止链路与 handoff。
+- 代理与入口广范围回归：263 passed、15 subtests passed。覆盖派发／等待、持久确认、权限与 prefix、进程恢复、MCP readiness、压缩、FIFO、Cell 失败后续行、sidebar 与 hook；与核心组有部分重叠，不累计为独立用例总数。
+- dogfood 异步结算专项：1 passed，并经独立复跑。真实 Host／QuickJS 覆盖源 ROOT 先完成、派工仍未受理、输出交付触发的新 ROOT turn 仍在运行等窗口；最终严格只有一个 Agent／Work，等待验收脚本不等待子代理结束，也不重复派工。
+- 前端全套：102 个文件、1660 passed；TypeScript 检查、修改组件 ESLint 与桌面构建通过。构建保留现有大 chunk 提示。
+- 系统提示与 bundled Skill 的可执行示例通过真实 Guest 验证；代理集成使用真实 `exec_cell → tools.run_agent`，保留 Work 身份、消息隔离、压缩连续性、hook 来源和关闭结算断言。
+
+真实 Decision 验收由 `tests/dogfood/run_code_mode_decide_dogfood.py` 执行，本地报告为 `output/decide-dogfood/report.json`。使用只读保存的 `system_one` 连接、模型 `perplexity/pplx-decider-v1.2`，在 `ranking_mode=off` 下经真实 Host、Node、Guest 与工具结算链路发出一次 HTTP 请求，耗时 1.398 秒。四份文件材料返回 `[false, true, false, true]`，保留 `writing.txt`、`guidance.txt` 的原文与来源后写入结果文件。同步可用性、空数组、非法条件、目录矩阵、provider prefix 和物理关闭均有断言。
+
+该验收的 ROOT 使用确定性驱动，真实网络验收对象是保存的 Decision 服务；两协议、分批、取消及完整权限矩阵由自动测试覆盖。辅助 chat 尝试在 SDK 入口被阻断，未发 chat HTTP，不将此报告视为真实 ROOT 模型的代理规划验收。配置未写回，凭证值不进入报告。
+
+复用了原来的八位 GPT-6 Astra subagent，交叉检查了服务协议与生命周期、工具及 Host 注入、入口准入、Node 冻结路径、设置界面、提示与 Skill，以及真实验收证据。复审发现的非法概率类型转换、超大整数概率、待投递取消、关闭失败后准入及提前读取 binding 问题均已修复，原反例经独立复核关闭。
+
+现行 `unified_safe_point`、`known_agents_handoff`、`builtin_default_null` dogfood 的派发说明、入口识别和 trace reader 已同步；共享 trace 从 canonical invocation 读取真实 Code Mode 来源。三个更早的脚本 `run_prompt_cognitive_dogfood.py`、`run_unified_final_input_budget_dogfood.py`、`run_unified_reference_dogfood.py` 仍引用本次任务前已失效的 `spawn_agent`、旧 task／model API，不作为当前验收证据，本次未扩展到其历史接口重写。

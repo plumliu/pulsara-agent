@@ -87,8 +87,8 @@ def source(stage2_migrated_postgres_database):
             AssistantToolCallBlock(
                 random_id("block"),
                 call_id,
-                "run_agent",
-                freeze_json({"instruction": "Investigate."}),
+                "exec_cell",
+                freeze_json({"code": 'await tools.run_agent({instruction:"Investigate."});'}),
             ),
         ),
         occurred_at=now(),
@@ -103,33 +103,41 @@ def source(stage2_migrated_postgres_database):
                 "SELECT * FROM pulsara_v3.turns WHERE id=%s", (turn_id,)
             ).fetchone()
         )
-        invocation_id = derive_id(
-            "call", "model-invocation", lease.guard.session_id, entry_id, call_id
+    repository.accept_tool_attempt(
+        lease.guard, attempt_id=attempt_id, assistant_entry_id=entry_id, tool_call_id=call_id,
+        authorization_kind="BYPASS", authorization_reference="test", actor_kind="runtime", actor_id="test",
+        remote_idempotency_key=None, retry_of_attempt_id=None,
+        permission_snapshot_fingerprint=permission.snapshot_fingerprint, occurred_at=now(),
+        deadline_monotonic=deadline(),
+    )
+    repository.freeze_code_mode_source(lease.guard, attempt_id=attempt_id,
+        content=InlineContent.from_bytes(b'await tools.run_agent({instruction:"Investigate."});',
+            media_type="text/javascript"), deadline_monotonic=deadline())
+    from pulsara_agent.conversation_kernel.tool_invocations import (
+        ToolInvocationSource, ToolInvocationSourceKind, current_tool_invocation,
+    )
+    code_call_id, code_attempt_id = random_id("call"), random_id("attempt")
+    source = ToolInvocationSource(code_call_id, ToolInvocationSourceKind.CODE_MODE_CALL, turn_id,
+        source_exec_attempt_id=attempt_id, call_sequence=1, tool_name="run_agent",
+        original_arguments=freeze_json({"instruction": "Investigate."}))
+    token = current_tool_invocation.set(source)
+    try:
+        repository.accept_tool_attempt(
+            lease.guard, attempt_id=code_attempt_id, assistant_entry_id=None, tool_call_id=code_call_id,
+            authorization_kind="BYPASS", authorization_reference="test", actor_kind="runtime", actor_id="test",
+            remote_idempotency_key=None, retry_of_attempt_id=None,
+            permission_snapshot_fingerprint=permission.snapshot_fingerprint, occurred_at=now(),
+            deadline_monotonic=deadline(),
         )
-        c.execute(
-            "INSERT INTO pulsara_v3.tool_invocations (id,session_id,turn_id,source_kind,assistant_entry_id,tool_call_id) VALUES (%s,%s,%s,'MODEL_TOOL_CALL',%s,%s)",
-            (invocation_id, lease.guard.session_id, turn_id, entry_id, call_id),
-        )
-        c.execute(
-            """INSERT INTO pulsara_v3.tool_execution_attempts (id,session_id,invocation_id,assistant_entry_id,tool_call_id,
-            authorization_kind,authorization_reference,permission_snapshot_fingerprint,actor_kind,actor_id)
-            VALUES (%s,%s,%s,%s,%s,'BYPASS','test',%s,'runtime','test')""",
-            (
-                attempt_id,
-                lease.guard.session_id,
-                invocation_id,
-                entry_id,
-                call_id,
-                permission.snapshot_fingerprint,
-            ),
-        )
+    finally:
+        current_tool_invocation.reset(token)
 
     def admit(*requests):
         return repository.admit_agent_requests(
             lease.guard,
             requests=requests,
             source_turn_id=turn_id,
-            source_tool_attempt_id=attempt_id,
+            source_tool_attempt_id=code_attempt_id,
             model_call_binding=binding,
             permission_snapshot=permission,
             occurred_at=now(),
@@ -411,10 +419,15 @@ def test_work_input_identities_are_confirmed_and_graph_does_not_hydrate(
             "SELECT * FROM pulsara_v3.turns WHERE session_id=%s AND status='RUNNING'",
             (root.guard.session_id,),
         ).fetchone()
-        attempt = connection.execute(
-            "SELECT id FROM pulsara_v3.tool_execution_attempts WHERE session_id=%s",
+        attempts = connection.execute(
+            """SELECT a.id, i.source_exec_attempt_id
+               FROM pulsara_v3.tool_execution_attempts a
+               JOIN pulsara_v3.tool_invocations i ON i.session_id=a.session_id AND i.id=a.invocation_id
+               WHERE a.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent'""",
             (root.guard.session_id,),
-        ).fetchone()
+        ).fetchall()
+        assert len(attempts) == 1
+        attempt = attempts[0]
         permission = repository._permission_from_row(turn)
     from pulsara_agent.llm.model_connections import model_call_binding_from_dict
 
@@ -431,6 +444,11 @@ def test_work_input_identities_are_confirmed_and_graph_does_not_hydrate(
         )[0]["work_id"]
         == receiver.work_id
     )
+    with pytest.raises(Exception, match="differs from its prepared"):
+        repository.confirm_agent_requests(
+            root.guard, requests=(receiver,),
+            **{**confirmation, "source_tool_attempt_id": attempt["source_exec_attempt_id"]},
+        )
     with pytest.raises(Exception, match="differs from its prepared"):
         repository.confirm_agent_requests(
             root.guard,

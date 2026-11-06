@@ -65,6 +65,7 @@ from pulsara_agent.workspace_identity import (
 )
 from tests.support.model_config import test_model_binding, test_model_runtime
 from tests.support.round3 import CallbackScriptedKernelModel, ScriptedKernelModel
+from tests.test_agent_session_host import _delegate, _delegation_progress
 
 
 pytestmark = pytest.mark.postgres
@@ -320,9 +321,13 @@ class _AgentWorkHookModel(CallbackScriptedKernelModel):
     async def _stream(self, request):
         identity = request.compiled_input.canonical_input_identity
         if identity.conversation_scope_kind is ModelInputScopeKind.ROOT:
+            if progress := _delegation_progress(self, request):
+                for item in progress:
+                    yield item
+                return
             if request.model_call_index == 1:
-                items = _tool_stream(
-                    "run_agent",
+                items = _delegate(
+                    self,
                     "call:round9-2-work",
                     {"instruction": "Exercise child Work lifecycle Hooks exactly once."},
                 )
@@ -1269,7 +1274,8 @@ def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_conti
         workspace_root=workspace,
         user_config=_config(
             _command(driver, log_path, "USER"),
-            ("SessionStart", "UserPromptSubmit", stop_event, "SessionEnd"),
+            ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", stop_event, "SessionEnd"),
+            tool_matcher="run_agent",
             scope_policy="BOTH",
         ),
         workspace_config=None,
@@ -1327,6 +1333,38 @@ def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_conti
             assert second.messages[:len(first.messages)] == first.messages
             assert rows[0]["turn_id"] == child_requests[0].turn_id == child_requests[1].turn_id
             assert rows[0]["final"] == "CHILD_FINAL_COMPLETION"
+            tool_hooks = [
+                entry["stdin"] for entry in _log_values(log_path)
+                if entry["stdin"]["hook_event_name"] in {"PreToolUse", "PostToolUse"}
+            ]
+            assert [entry["hook_event_name"] for entry in tool_hooks] == ["PreToolUse", "PostToolUse"]
+            assert all(entry["tool_name"] == "run_agent" for entry in tool_hooks)
+            assert all(entry["input_origin"] == "CODE_MODE_CALL" for entry in tool_hooks)
+            assert all(entry["session_id"] == session.session_id for entry in tool_hooks)
+            assert tool_hooks[0]["tool_use_id"] == tool_hooks[1]["tool_use_id"]
+            with session.repository.connection_provider.connection(
+                lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row,
+                deadline_monotonic=monotonic() + 5,
+            ) as connection:
+                invocation = connection.execute(
+                    "SELECT id,source_kind,source_exec_attempt_id,call_sequence,turn_id "
+                    "FROM pulsara_v3.tool_invocations WHERE session_id=%s AND tool_name='run_agent'",
+                    (session.session_id,),
+                ).fetchall()
+            assert len(invocation) == 1
+            assert invocation[0]["source_kind"] == "CODE_MODE_CALL"
+            assert invocation[0]["id"] == tool_hooks[0]["tool_use_id"]
+            assert invocation[0]["turn_id"] == tool_hooks[0]["turn_id"] == tool_hooks[1]["turn_id"]
+            assert invocation[0]["call_sequence"] == 1
+            frozen_source = await session._io.run(
+                session.repository.read_code_mode_source, session_id=session.session_id,
+                attempt_id=invocation[0]["source_exec_attempt_id"],
+                deadline_monotonic=monotonic() + 5,
+            )
+            assert frozen_source == (
+                'console.log({delegation:"call:round9-2-work",admitted:await tools.run_agent('
+                '{"instruction": "Exercise child Work lifecycle Hooks exactly once."})});'
+            )
             first_context = _hook_observations(child_requests[0])
             assert any(
                 "USER_PROMPT_CONTEXT:USER:Exercise child Work lifecycle Hooks exactly once." in item.body for item in first_context

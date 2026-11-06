@@ -364,9 +364,14 @@ class CodeModeHost:
 
     async def start(self, *, source: str, source_exec_attempt_id: str, turn_id: str,
                     snapshot: object, tool_catalog: Mapping[str, object], invoke: CodeModeInvoke,
+                    decision_available: bool,
                     prepare_batch: CodeModePrepareBatch | None = None,
                     on_cell_closed: Callable[[str], None] | None = None,
                     page_budget: ToolResultPageBudget | None = None) -> str:
+        if type(decision_available) is not bool:
+            raise CodeModeError("invalid_availability", "Code Mode Decision availability must be a boolean")
+        if "decide" not in tool_catalog:
+            raise CodeModeError("invalid_catalog", "Code Mode tool directory must include decide")
         if type(source) is not str or len(source.encode("utf-8")) > self.limits.value_bytes:
             raise CodeModeError("source_boundary", "Code Mode source exceeds the single-source UTF-8 boundary")
         if prepare_batch is None:
@@ -384,6 +389,7 @@ class CodeModeHost:
                      prepare_batch, asyncio.get_running_loop().create_future(),
                      on_cell_closed=on_cell_closed)
         command = {"type": "start", "cell_id": cell_id, "source": source,
+                   "decision_available": decision_available,
                    "tool_names": list(catalog), "catalog_bytes": len(catalog_json.encode("utf-8")) + 256}
         if _bytes(command) > self.limits.cell_bytes + self.limits.control_bytes:
             raise CodeModeError("ipc_boundary", "Code Mode source frame exceeds the current data boundary")

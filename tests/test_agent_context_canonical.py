@@ -312,10 +312,8 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
         "exec_cell",
         "query_cells",
         "manage_cell",
-        "run_agent",
         "query_agents",
         "send_agent_message",
-        "wait_agent",
         "stop_agent",
     }
     mode = PermissionMode(initial_mode)
@@ -354,6 +352,7 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
             ).final_text == "FINAL-1"
             first = model.requests[0].compiled_input
             first_names = {tool.name for tool in first.tools}
+            assert {"run_agent", "wait_agent", "decide"}.isdisjoint(first_names)
             assert operations.intersection(first_names) == (
                 operations if mode is PermissionMode.BYPASS_PERMISSIONS else set()
             )

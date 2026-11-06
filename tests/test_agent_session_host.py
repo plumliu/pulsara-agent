@@ -13,11 +13,56 @@ from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id
 from pulsara_agent.llm.input import LLMImagePart, PromptContent, text_part_values
+from pulsara_agent.model_input.lowering import decode_tool_result_observation
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.storage.postgres_connection_provider import PostgresConnectionLane
 from tests.test_round4_plan_host import _DetachedDraftModel, _open_test_session, _tool_call, _text
 
 pytestmark = pytest.mark.postgres
+
+
+def _delegate(model, call_id, arguments):
+    """Use the real Guest bridge and wait for its delivered admission receipt."""
+    model.pending_delegation = {"call_id": call_id, "marker": call_id, "target": None}
+    code = "console.log({delegation:" + json.dumps(call_id) + ",admitted:await tools.run_agent(" + json.dumps(arguments) + ")});"
+    return _tool_call('exec_cell', call_id, {'code': code})
+
+
+def _delegation_progress(model, request):
+    pending = getattr(model, 'pending_delegation', None)
+    if pending is None:
+        return None
+    for message in request.compiled_input.messages:
+        for text in text_part_values(message.content):
+            try:
+                value = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                value = value.get('pulsara_terminal_observation', value)
+            if not isinstance(value, dict) or value.get('schema_version') != 'cell_output.v1':
+                continue
+            record = value['record']
+            if record.get('kind') != 'log':
+                continue
+            receipt = json.loads(record['text'])
+            if receipt.get('delegation') == pending['marker']:
+                assert receipt['admitted']['work']['kind'] == 'WORK', receipt
+                model.pending_delegation = None
+                return None
+    message = next(message for message in reversed(request.compiled_input.messages)
+                   if message.role == 'tool_result' and message.tool_call_id == pending['call_id'])
+    observed = decode_tool_result_observation(text_part_values(message.content)[0])
+    assert observed['result_state'] == 'SUCCESS', observed
+    payload = json.loads(observed['body'])
+    if pending['target'] is None:
+        assert payload['accepted'], payload
+        pending['target'] = payload['target']
+    else:
+        assert payload['state'] not in {'failed', 'terminated'}, payload
+    pending['call_id'] = random_id('call')
+    return _tool_call('manage_cell', pending['call_id'],
+                      {'action': 'wait', 'target': pending['target'], 'yield_time_ms': 1000})
 
 
 class AgentModel(_DetachedDraftModel):
@@ -33,13 +78,17 @@ class AgentModel(_DetachedDraftModel):
     async def stream(self, request):
         self.requests.append(request)
         if request.session_id == self.root_id:
+            if progress := _delegation_progress(self, request):
+                for event in progress:
+                    yield event
+                return
             index = self.root_turns.get(request.turn_id, 0)
             self.root_turns[request.turn_id] = index + 1
             if index == 0:
                 parameters = {'instruction': 'CHILD_FIRST' if self.agent_id is None else 'CHILD_SECOND'}
                 if self.agent_id is not None:
                     parameters['target'] = {'kind': 'AGENT', 'agent_id': self.agent_id}
-                events = _tool_call('run_agent', random_id('call'), parameters)
+                events = _delegate(self, random_id('call'), parameters)
             else:
                 events = _text('ROOT_FINISHED')
         else:
@@ -77,6 +126,10 @@ class KnownQueryModel(_DetachedDraftModel):
     async def stream(self, request):
         self.requests.append(request)
         if request.session_id == self.root_id:
+            if progress := _delegation_progress(self, request):
+                for event in progress:
+                    yield event
+                return
             index = self.root_counts.get(request.turn_id, 0)
             self.root_counts[request.turn_id] = index + 1
             arguments = {'instruction': self.next_instruction}
@@ -88,9 +141,9 @@ class KnownQueryModel(_DetachedDraftModel):
             elif self.query_before_delegation and index == 1:
                 self.root_query_result_input = request.compiled_input
                 arguments['context'] = {'mode': 'last_n', 'turns': 1}
-                events = _tool_call('run_agent', random_id('call'), arguments)
+                events = _delegate(self, random_id('call'), arguments)
             else:
-                events = (_tool_call('run_agent', random_id('call'), arguments)
+                events = (_delegate(self, random_id('call'), arguments)
                           if index == 0 else _text('ROOT_FINISHED'))
         elif self.target_b is None or request.session_id == self.target_b:
             self.target_b = request.session_id
@@ -348,8 +401,12 @@ def test_agent_image_path_stays_text_until_real_view_image_tool(
 
         async def stream(self, request):
             if request.session_id == self.root_id:
+                if progress := _delegation_progress(self, request):
+                    for event in progress:
+                        yield event
+                    return
                 self.root_calls += 1
-                events = (_tool_call('run_agent', random_id('call'), {
+                events = (_delegate(self, random_id('call'), {
                     'instruction': 'Inspect image.png with view_image.',
                     'context': {'mode': 'last_n', 'turns': 1},
                 }) if self.root_calls == 1 else _text('ROOT_DONE'))
@@ -428,14 +485,18 @@ class StopDependencyModel(AgentModel):
                 yield event
             return
         self.requests.append(request)
+        if progress := _delegation_progress(self, request):
+            for event in progress:
+                yield event
+            return
         index = self.root_turns.get(request.turn_id, 0)
         self.root_turns[request.turn_id] = index+1
         if index == 0:
-            events = _tool_call('run_agent', random_id('call'), {
+            events = _delegate(self, random_id('call'), {
                 'target': {'kind':'AGENT','agent_id':self.agent_id},
                 'instruction':'INDEPENDENT_NEXT'})
         elif index == 1:
-            events = _tool_call('run_agent', random_id('call'), {
+            events = _delegate(self, random_id('call'), {
                 'instruction':'DEPENDENT_MUST_NOT_START',
                 'depends_on':[{'kind':'WORK','work_id':self.first_work_id}]})
         elif index == 2:
@@ -663,6 +724,10 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
         async def stream(self, request):
             if request.session_id == self.root_id:
                 self.requests.append(request)
+                if progress := _delegation_progress(self, request):
+                    for event in progress:
+                        yield event
+                    return
                 pending = self.pending_root_call.get(request.turn_id)
                 if pending is not None:
                     result = next((message for message in reversed(request.compiled_input.messages)
@@ -678,7 +743,7 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                     arguments['target'] = {'kind': 'AGENT', 'agent_id': self.agent_id}
                 call_id = random_id('call')
                 self.pending_root_call[request.turn_id] = call_id
-                for event in _tool_call('run_agent', call_id, arguments):
+                for event in _delegate(self, call_id, arguments):
                     yield event
                 if receive_during_tool_call and self.agent_id is not None and not self.message_injected:
                     from types import SimpleNamespace
@@ -769,11 +834,11 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
             if receive_during_tool_call:
                 with root.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,
                         row_factory=dict_row, deadline_monotonic=monotonic()+10) as connection:
-                    results = connection.execute('''SELECT r.result_state, r.attempt_id, b.tool_arguments
+                    results = connection.execute('''SELECT r.result_state, r.attempt_id, i.original_arguments AS tool_arguments
                         FROM pulsara_v3.tool_results r
                         JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id
-                        JOIN pulsara_v3.assistant_message_blocks b ON b.session_id=i.session_id AND b.tool_call_id=i.tool_call_id
-                        WHERE i.session_id=%s AND i.turn_id=%s ORDER BY r.observed_at''',
+                        WHERE i.session_id=%s AND i.turn_id=%s
+                        AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent' ORDER BY r.observed_at''',
                         (root.session_id, root_result.turn_id)).fetchall()
                     assert [row['result_state'] for row in results] == ['SUCCESS']
                     assert results[0]['attempt_id'] is not None

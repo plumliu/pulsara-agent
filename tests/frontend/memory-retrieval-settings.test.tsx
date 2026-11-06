@@ -36,15 +36,69 @@ function setup(initial = empty) {
   return { ...rendered, save, test, setEmbedding, setHistory, setRanking, clear, notify, saved: () => saved };
 }
 
-it('shows matching channel headings and two collapsed switches with one concise subtitle', () => {
+it.each(['off', 'rerank', 'decision'] as const)('keeps one shared Decision card available with ranking %s', async ranking_mode => {
+  const { save, test, setRanking, setEmbedding, saved } = setup({...empty, decision: conn('decision'), rerank: conn('rerank'), ranking_mode});
+  expect(screen.getAllByRole('button', {name: '配置 Jev-like Decision'})).toHaveLength(1);
+  expect(screen.getByText('用于 Code Mode 语义判断，也可用于记忆重排。')).toBeTruthy();
+  expect(screen.getAllByRole('switch')).toHaveLength(3);
+  fireEvent.click(screen.getByRole('button', {name: '配置 Jev-like Decision'}));
+  fireEvent.click(screen.getByRole('button', {name: '测试连接'}));
+  await waitFor(() => expect(test).toHaveBeenCalledExactlyOnceWith('decision', expect.objectContaining({activate: false})));
+  await waitFor(() => expect((screen.getByRole('button', {name: '保存'}) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.change(screen.getByLabelText('模型 ID'), {target: {value: 'shared-replacement'}});
+  fireEvent.click(screen.getByRole('button', {name: '保存'}));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(save).toHaveBeenCalledExactlyOnceWith('decision', expect.objectContaining({activate: false}));
+  expect(saved().decision?.model_id).toBe('shared-replacement');
+  expect(saved().ranking_mode).toBe(ranking_mode);
+  expect(setRanking).not.toHaveBeenCalled();
+  expect(setEmbedding).not.toHaveBeenCalled();
+});
+
+it('saving Decision after opening an empty ranking selector does not enable memory ranking', async () => {
+  const { save, setRanking, saved } = setup();
+  fireEvent.click(screen.getByRole('switch', {name: '启用重排'}));
+  fireEvent.click(screen.getByRole('button', {name: '配置 Jev-like Decision'}));
+  fireEvent.change(screen.getByLabelText('模型 ID'), {target: {value: 'decision-fixture'}});
+  fireEvent.change(screen.getByLabelText('API key'), {target: {value: 'fixture-key'}});
+  fireEvent.click(screen.getByRole('button', {name: '保存'}));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(save).toHaveBeenCalledExactlyOnceWith('decision', expect.objectContaining({activate: false}));
+  expect(saved().ranking_mode).toBe('off');
+  expect(setRanking).not.toHaveBeenCalled();
+  expect(screen.getByRole('switch', {name: '启用重排'}).getAttribute('aria-checked')).toBe('false');
+  fireEvent.click(screen.getByRole('switch', {name: '启用重排'}));
+  await waitFor(() => expect(saved().ranking_mode).toBe('decision'));
+  expect(setRanking).toHaveBeenCalledExactlyOnceWith('decision');
+  expect(screen.getAllByRole('button', {name: '配置 Jev-like Decision'})).toHaveLength(1);
+});
+
+it('saving the independent Decision connection preserves an unfinished Rerank setup', async () => {
+  const { saved } = setup({...empty, decision: conn('decision')});
+  fireEvent.click(screen.getByRole('switch', {name: '启用重排'}));
+  await waitFor(() => expect(saved().ranking_mode).toBe('decision'));
+  fireEvent.click(screen.getByRole('radio', {name: 'Rerank'}));
+  await waitFor(() => expect(saved().ranking_mode).toBe('off'));
+  fireEvent.click(screen.getByRole('button', {name: '配置 Jev-like Decision'}));
+  fireEvent.change(screen.getByLabelText('模型 ID'), {target: {value: 'shared-replacement'}});
+  fireEvent.click(screen.getByRole('button', {name: '保存'}));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  expect(saved().ranking_mode).toBe('off');
+  expect(screen.getByRole('switch', {name: '启用重排'}).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('button', {name: '配置 Rerank'})).toBeTruthy();
+  expect(screen.getByRole('button', {name: '重排 配置不完整'})).toBeTruthy();
+});
+
+it('shows the shared Decision card while memory model switches remain collapsed', () => {
   const { container } = setup();
   expect(screen.getByRole('switch', { name: '启用 Embedding' }).getAttribute('aria-checked')).toBe('false');
   expect(screen.getByRole('switch', { name: '启用重排' }).getAttribute('aria-checked')).toBe('false');
   expect(screen.getByRole('heading', { name: 'Embedding' })).toBeTruthy();
   expect(screen.getByRole('heading', { name: '重排' })).toBeTruthy();
   expect(screen.queryAllByRole('radio')).toHaveLength(0);
-  expect(screen.queryAllByRole('button', { name: /^配置 / })).toHaveLength(0);
-  expect(container.querySelectorAll('small,p')).toHaveLength(1);
+  expect(screen.getAllByRole('button', { name: /^配置 / })).toHaveLength(1);
+  expect(screen.getByRole('heading', {name: 'Jev-like Decision'})).toBeTruthy();
+  expect(container.querySelectorAll('small,p')).toHaveLength(2);
   expect(screen.queryByText('添加配置')).toBeNull();
 });
 
@@ -64,7 +118,7 @@ it('an unconfigured drawer opens with a warning; cancelling configuration keeps 
   expect(setRanking).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
 });
 
-it('OpenRouter preset uses System One; Save and Enable commits one slot and selection', async () => {
+it('OpenRouter preset uses System One and saves the shared connection without enabling ranking', async () => {
   const { save, setRanking, saved } = setup();
   fireEvent.click(screen.getByRole('switch', { name: '启用重排' }));
   fireEvent.click(screen.getByRole('button', { name: '配置 Jev-like Decision' }));
@@ -84,10 +138,11 @@ it('OpenRouter preset uses System One; Save and Enable commits one slot and sele
   expect((screen.getByLabelText('协议') as HTMLSelectElement).disabled).toBe(true);
   fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'openai/gpt-6-luna-decisions' } });
   fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fixture-key' } });
-  fireEvent.click(screen.getByRole('button', { name: '保存并启用' }));
+  fireEvent.click(screen.getByRole('button', { name: '保存' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(save).toHaveBeenCalledOnce(); expect(setRanking).not.toHaveBeenCalled();
-  expect(saved().ranking_mode).toBe('decision');
+  expect(saved().ranking_mode).toBe('off');
+  expect(save.mock.calls[0][1].activate).toBe(false);
   expect(saved().decision?.model_id).toBe('openai/gpt-6-luna-decisions');
   expect(screen.queryByRole('button', { name: '重排 配置不完整' })).toBeNull();
 });
@@ -161,7 +216,7 @@ it('custom decision preset clears the preset URL and can save a custom endpoint'
   fireEvent.change(screen.getByLabelText('请求地址'), { target: { value: 'https://provider.example/custom/systemone' } });
   fireEvent.change(screen.getByLabelText('模型 ID'), { target: { value: 'decision-fixture' } });
   fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'fixture-key' } });
-  fireEvent.click(screen.getByRole('button', { name: '保存并启用' }));
+  fireEvent.click(screen.getByRole('button', { name: '保存' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(saved().decision?.endpoint).toBe('https://provider.example/custom/systemone');
 });
@@ -176,7 +231,7 @@ it('a failed configured switch mutation retains the original selection and repor
   expect(screen.queryByRole('group', { name: '重排方式' })).toBeNull();
 });
 
-it('configured channels expand on enable, hide on disable and retain their configuration', async () => {
+it('memory channels expand on enable while Decision remains independently visible', async () => {
   const { saved } = setup({ ...empty, embedding: conn('embedding'), decision: conn('decision'), rerank: conn('rerank') });
   expect(screen.queryByRole('button', { name: '配置 Embedding' })).toBeNull();
   fireEvent.click(screen.getByRole('switch', { name: '启用 Embedding' }));
@@ -192,9 +247,9 @@ it('configured channels expand on enable, hide on disable and retain their confi
   fireEvent.click(screen.getByRole('radio', { name: 'Rerank' }));
   await waitFor(() => expect(saved().ranking_mode).toBe('rerank'));
   expect(screen.getByRole('button', { name: '配置 Rerank' })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: '配置 Jev-like Decision' })).toBeNull();
+  expect(screen.getAllByRole('button', { name: '配置 Jev-like Decision' })).toHaveLength(1);
   expect(screen.getByText('rerank-fixture')).toBeTruthy();
-  expect(screen.queryByText('decision-fixture')).toBeNull();
+  expect(screen.getByText('decision-fixture')).toBeTruthy();
   fireEvent.click(screen.getByRole('switch', { name: '启用重排' }));
   await waitFor(() => expect(screen.queryByRole('group', { name: '重排方式' })).toBeNull());
   expect(screen.queryByRole('button', { name: '配置 Rerank' })).toBeNull();
@@ -274,7 +329,7 @@ it.each(['embedding', 'decision', 'rerank'] as const)('deleting active %s keeps 
   expect(screen.getByRole('button', { name: `配置 ${label}` })).toBeTruthy();
   expect(screen.getByRole('button', { name: `配置 ${label}` }).closest('.model-config-card')?.querySelector('strong')?.textContent).toBe('未配置');
   fireEvent.click(screen.getByRole('button', { name: `配置 ${label}` }));
-  expect(screen.getByRole('button', { name: '保存并启用' })).toBeTruthy();
+  expect(screen.getByRole('button', { name: slot === 'decision' ? '保存' : '保存并启用' })).toBeTruthy();
 });
 
 it('model rows reuse main model title, protocol, ID, credential and edit/delete layout', () => {

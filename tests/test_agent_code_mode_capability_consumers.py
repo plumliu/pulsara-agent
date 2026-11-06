@@ -7,7 +7,6 @@ import pytest
 from pulsara_agent.capability.source_query import parse_query
 from pulsara_agent.capability.contracts import CapabilityKind, CapabilitySourceKind, capability_identity, capability_source_ref
 
-IDENTITY = capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="tool")
 from pulsara_agent.conversation_kernel.mcp.meta import (
     McpToolRefConsumerKind,
     ProcessLocalNewMcpToolRefOwner,
@@ -18,6 +17,8 @@ from pulsara_agent.mcp_config import McpScopePolicy
 from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.plugins.mcp_connection import PluginMcpConnectionOverlay, overlay_from_dict, overlay_to_dict
 from tests.test_round9_2_hook_subsystem import _provenance, _view
+
+IDENTITY = capability_identity(kind=CapabilityKind.TOOL, source=capability_source_ref(CapabilitySourceKind.MCP_SERVER, "fixture"), stable_name="tool")
 
 
 def test_full_inspect_delivery_is_consumer_and_session_specific_and_cell_survives_compaction():
@@ -100,14 +101,13 @@ def test_subagent_can_query_shared_sources_without_management_authority(tmp_path
     assert parse_query({"kind": "SKILL"}, subagent=True)["kind"] == "SKILL"
 
 
-def test_native_and_code_mode_expose_same_profile_free_run_agent_schema(tmp_path):
+def test_code_mode_uses_catalog_profile_free_run_agent_schema(tmp_path):
     import asyncio
     from types import SimpleNamespace
     from jsonschema import Draft202012Validator
     from pulsara_agent.conversation_kernel.live import LiveAgentEventBus
     from pulsara_agent.conversation_kernel.tool_policy import DefaultToolDispatchAuthorizationPolicy
     from pulsara_agent.conversation_kernel.tool_runtime import DirectKernelToolPort
-    from pulsara_agent.conversation_kernel.tool_surface import CodeModeToolDirectory
     from pulsara_agent.primitives.context import thaw_json
     from pulsara_agent.primitives.permission import PermissionMode
     from tests.support.round3 import prepare_test_direct_tool_surface
@@ -119,9 +119,12 @@ def test_native_and_code_mode_expose_same_profile_free_run_agent_schema(tmp_path
         port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"run_agent"})))
         try:
             surface = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            native = next(spec for spec in surface.model_surface.tool_specs if spec.name == "run_agent")
-            code = next(spec for spec in CodeModeToolDirectory.freeze(surface).tool_specs if spec.name == "run_agent")
-            assert native.parameters == code.parameters
+            from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+            from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+            assert "run_agent" not in {spec.name for spec in surface.model_surface.tool_specs}
+            code = next(spec for spec in port.freeze_code_mode_tool_directory(surface,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS).tool_specs if spec.name == "run_agent")
+            assert thaw_json(code.parameters) == thaw_tool_json_object(builtin_tool_catalog_entry("run_agent").descriptor.input_schema)
             schema = thaw_json(code.parameters)
             assert "profile" not in schema["properties"]
             for value in ("research_worker", None):

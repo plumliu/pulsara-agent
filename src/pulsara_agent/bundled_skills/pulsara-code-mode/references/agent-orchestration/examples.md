@@ -30,7 +30,7 @@ agent target continues the investigation:
 
 ```js
 const followup = await tools.run_agent({
-  target: { kind: "AGENT", agent_id: "session:<actual-agent-id>" },
+  target: investigation.agent,
   instruction: "Using your investigation, explain whether the current tests distinguish an empty string from whitespace-only input. Read additional tests if needed."
 });
 console.log({ agent: followup.agent, work: followup.work });
@@ -38,9 +38,10 @@ await tools.wait_agent.works({ targets: [followup.work] });
 console.log(await tools.query_agents({ target: followup.work }));
 ```
 
-Replace the illustrative target with `investigation.agent` from the actual output.
-This follow-up can be a new script: it does not rely on a variable from the first
-script. The agent keeps its conversation; ROOT need not repeat the investigation.
+This continuation uses `investigation.agent` returned earlier in the same script.
+For a new script, obtain the actual target with `query_agents` or copy the complete
+target from the earlier output. The agent keeps its conversation; ROOT need not
+repeat the investigation.
 A terminal state can mean either completion or a stopped assignment.
 
 ## 2. Let two active teammates compare their findings
@@ -120,92 +121,72 @@ not that the plan passed; the final contains the assessment. If a later assignme
 only needs an already ended Work as background, `materials` supplies that content
 without establishing a success dependency.
 
-## 4. Expand native research into a scripted workflow
+## 4. Reuse an existing agent in a scripted workflow
 
-**Situation:** The user initially asks only how a parser handles empty and
-whitespace-only input. One option is to delegate through native `run_agent`,
-read the findings, and answer the user. A short `exec_cell` script could also do this.
-
-Native `run_agent` arguments:
-
-```json
-{
-  "name": "Parser investigator",
-  "instruction": "Investigate how the parser handles empty and whitespace-only input. Explain the relevant code and tests. Do not edit files."
-}
-```
-
-Later, the user asks ROOT to make whitespace-only input behave like empty input
-and add the relevant tests. One possible arrangement is to reuse the investigator
-for planning alongside a new assessor and implementer. The example below shows
-that arrangement, using the investigator's actual agent target:
+**Situation:** An earlier investigation explained parser behavior. The user now
+asks for whitespace-only input to behave like empty input, with tests. Query the
+retained agents and reuse the investigator rather than repeating its research.
+This example looks for the role created in example 1. If the needed agent is on
+another page, copy the returned `next` call and continue the lookup.
 
 ```js
-const investigator = { kind: "AGENT", agent_id: "session:<actual-agent-id>" };
-const phase = await tools.run_agent.batch({
-  plan: {
-    target: investigator,
-    instruction: ({ assessment }) =>
-      `Use your earlier investigation to plan the change: whitespace-only input must behave like empty input, with tests covering spaces, tabs, and newlines.
-Compare your proposed behavior with the independent assessor ${JSON.stringify(assessment.agent)} using native send_agent_message.
-Report a concrete implementation plan and any unresolved differences.`
-  },
-  assessment: {
-    name: "Parser behavior assessor",
-    instruction: ({ plan }) =>
-      `Independently inspect the effects of treating whitespace-only parser input as empty input, including existing callers and tests.
-Compare findings with the investigator ${JSON.stringify(plan.agent)} using native send_agent_message.
-Report compatibility requirements and any unresolved differences.`
-  },
-  implementation: {
-    name: "Parser implementer",
-    depends_on: ({ plan, assessment }) => [plan.work, assessment.work],
-    instruction: "Implement whitespace-only input handling using the prerequisite plan and assessment. Add relevant tests. If the prerequisites leave a material behavior decision unresolved, report it for ROOT to decide before making that change. Report actual modifications and checks."
-  }
-});
-console.log({ implementation: phase.implementation });
-await tools.wait_agent.works({ targets: [phase.implementation.work] });
-console.log(await tools.query_agents({ target: phase.implementation.work }));
-```
-
-**How it works:** The reused investigator receives a new Work in its existing
-conversation. The assessor is new. Their assignments can run in parallel; the
-implementer starts after both succeed and receives both finals. Native and JS
-assignments all appear under the same agents when queried with `query_agents`.
-
-**Read the result:** The implementation final can inform any further action.
-Introducing a script changed the orchestration,
-not the investigator's identity or access to its previous conversation.
-
-## 5. Use native tools while a scripted workflow runs
-
-**Situation:** The script above has returned acceptance, and its implementer is still working.
-The user adds a concrete requirement. ROOT can send it directly through native
-`send_agent_message`, using `phase.implementation.agent` from the logged output.
-Replace the illustrative target below with that actual target:
-
-```json
-{
-  "target": {"kind": "AGENT", "agent_id": "session:<actual-implementation-agent-id>"},
-  "message": "Also cover mixed spaces and tabs in the tests, and include the observed behavior in your final."
+const agents = await tools.query_agents({});
+const investigator = agents.agents.find(agent => agent.name === "Parser investigator");
+if (investigator) {
+  const phase = await tools.run_agent.batch({
+    plan: {
+      target: investigator.agent,
+      instruction: ({ assessment }) =>
+        `Use your earlier investigation to plan the requested whitespace-only input change.
+Compare behavior with ${JSON.stringify(assessment.agent)} using native send_agent_message.
+Report the implementation plan and relevant tests.`
+    },
+    assessment: {
+      name: "Parser behavior assessor",
+      instruction: ({ plan }) =>
+        `Inspect callers and tests affected by treating whitespace-only input as empty input.
+Compare findings with ${JSON.stringify(plan.agent)} using native send_agent_message.
+Report compatibility requirements and unresolved differences.`
+    },
+    implementation: {
+      name: "Parser implementer",
+      depends_on: ({ plan, assessment }) => [plan.work, assessment.work],
+      instruction: "Implement the user-authorized change using the prerequisite findings. Test spaces, tabs and newlines. Report concrete changes and checks; return any unresolved product choice to ROOT."
+    }
+  });
+  console.log({ implementation: phase.implementation });
+  await tools.wait_agent.works({ targets: [phase.implementation.work] });
+  console.log(await tools.query_agents({ target: phase.implementation.work }));
+} else {
+  console.log({ agents: agents.agents, next: agents.next });
 }
 ```
 
-To inspect this exact assignment, use native `query_agents` with
-`phase.implementation.work`:
+**How it works:** The query supplies the real AGENT target. The investigator gets
+a new Work in its existing conversation; the new assessor works alongside it.
+The implementer receives both prerequisite finals. Creation and continuation use
+Code Mode, and native queries see the same work.
 
-```json
-{
-  "target": {"kind": "WORK", "work_id": "queue:<actual-implementation-work-id>"}
-}
-```
+**Read the result:** The implementation final can guide further work. Reusing the
+agent preserves its earlier findings; a script's lifetime does not own that history.
 
-Use an AGENT target with `query_agents` to inspect that agent's work history
-instead. These native calls observe or affect the same work the script is
-waiting for. No script restart or additional `exec_cell` is needed.
+## 5. Use native controls while a script runs
 
-**Read the result:** A message with `delivery: "queued"` was accepted for the
-active work; `inactive` or `not_started` means it was not delivered. If the agent
-has finished and the new requirement calls for more work, assign it a new Work
-through native `run_agent` or JS, using the same agent target. Selected script output arrives actively. Use `manage_cell` with `action:"wait"`
-only when you need its execution state.
+**Situation:** An implementer is still working when the user adds a requirement.
+ROOT can call native `query_agents` without a target to find actual retained
+agents, or with the logged `phase.implementation.work` to inspect that assignment.
+For another page, copy the returned `next` call.
+
+Use native `send_agent_message` with `target` set to the actual
+`phase.implementation.agent` and `message` set to the new requirement, for example:
+“Also cover mixed spaces and tabs in the tests, and report their observed behavior.”
+Use native `stop_agent` with the actual WORK target to stop that assignment, or
+its AGENT target to stop current and queued work. These are routine controls;
+ROOT need not stop the script, acquire a new Cell slot or start the Code Mode
+runtime first.
+
+**Read the result:** `delivery: "queued"` means the active work accepted the
+message; `inactive` or `not_started` means it did not. If the agent has finished,
+continue with `tools.run_agent` in a new Cell using the same AGENT target. A message
+does not create a Work. Selected script output arrives actively; `manage_cell`
+with `action:"wait"` reads execution state when needed.

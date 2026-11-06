@@ -4,7 +4,8 @@ import { performance } from 'node:perf_hooks';
 import { randomIdentity, isCanonicalIdentity } from '../../_vendor/code_mode/identity-core.mjs';
 import { QuickJS } from '../../_vendor/code_mode/quickjs-wasi/dist/index.js';
 
-const {limits, cellBuffer, hostBuffer, timingBuffer, toolNames} = workerData;
+const {limits, cellBuffer, hostBuffer, timingBuffer, toolNames, decisionAvailable} = workerData;
+if (typeof decisionAvailable !== 'boolean') throw new TypeError('Code Mode Decision availability must be a boolean');
 const cell = new Int32Array(cellBuffer, 8), used = new BigInt64Array(cellBuffer, 0, 1);
 const host = new BigInt64Array(hostBuffer);
 const timing = new Float64Array(timingBuffer);
@@ -234,11 +235,12 @@ try {
       emit(kind.toString(), text.toString()); return vm.undefined;
     });
     const names = vm.hostToHandle(toolNames);
+    const availability = vm.hostToHandle(decisionAvailable);
     const valueLimit = vm.newNumber(limits.value_bytes);
     const diagnosticChars = vm.newNumber(Math.max(1, Math.floor((diagnosticBytes - 1024) / 4)));
     const install = vm.evalCode(guest, 'pulsara-guest.js');
-    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, valueLimit, diagnosticChars); }
-    finally { install.dispose(); names.dispose(); valueLimit.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
+    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, valueLimit, diagnosticChars, availability); }
+    finally { install.dispose(); names.dispose(); availability.dispose(); valueLimit.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
     owned.push(helper);
     for (const [key, assign] of [
       ['deferred', h => deferredFactory = h], ['parse', h => parse = h], ['render', h => render = h],

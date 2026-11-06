@@ -48,18 +48,23 @@ async def run(workspace: Path, dsn: str, ready: Path):
     await root.set_subagent_capacity(1)
     await root.run_turn(PromptContent.text('Perform the first effect'),command_id=random_id('command'),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+    # AgentModel waits for the real exec_cell console receipt before ROOT finishes.
+    assert model.pending_delegation is None
     await asyncio.wait_for(model.first_child_started.wait(),15)
     ids=await root._io.run(root.repository.list_root_agent_session_ids,root_session_id=root.session_id,
         deadline_monotonic=core._canonical_deadline())
     model.agent_id=ids[0]
     await root.run_turn(PromptContent.text('Queue the independent continuation'),command_id=random_id('command'),
         requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+    assert model.pending_delegation is None
     works=await root._io.run(root.repository.list_agent_works,root_session_id=root.session_id,
         agent_id=model.agent_id,limit=10,deadline_monotonic=core._canonical_deadline())
     assert [work['status'] for work in works]==['running','queued']
     assert (workspace/'effect-count.txt').read_text()=='x'
-    ready.write_text(json.dumps({'root_session_id':root.session_id,'agent_id':model.agent_id,
+    staged_ready = ready.with_suffix('.tmp')
+    staged_ready.write_text(json.dumps({'root_session_id':root.session_id,'agent_id':model.agent_id,
         'first_work_id':works[0]['work_id'],'queued_work_id':works[1]['work_id']}))
+    staged_ready.replace(ready)
     # No finally/cleanup: the parent kills this process to exercise real loss of
     # VM, live Host objects and provider execution, rather than graceful close.
     await asyncio.Future()
