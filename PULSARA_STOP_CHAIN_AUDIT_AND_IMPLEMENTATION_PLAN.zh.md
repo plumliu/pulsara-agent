@@ -1,33 +1,34 @@
 # Pulsara 停止链路审计与修改实施方案
 
-状态：实施草案已完成两轮交叉复审，可作为实施基线；生产代码尚未修改。审计日期：2026-11-07。
+状态：F1–F4 已实施，多位 GPT-6 Astra 子代理交叉复审及保存的 DeepSeek 真实验收通过；合并回归结果见第 11 节。审计与验收日期：2026-11-07。
 
-审计基线：`b2df4babc672e420f506a2d109d55f7a38796098`。本文记录此 HEAD 的静态发现及拟议修复，不回推 0.1.1alpha.2 的历史实现。代码位置以该基线的文件、符号和行号定位；Git 管理内容身份。
+审计基线：`b2df4babc672e420f506a2d109d55f7a38796098`；实施起点：`4f03dcc7504133e410a64b17b6a700ce1586ca22`。第 3 节保留审计基线的 findings 和定位，第 5–9 节描述已实施的合同与验收要求，第 11 节记录实际验证。不回推 0.1.1alpha.2 的历史实现；Git 管理内容身份。
 
 ## 1. 结论与范围
 
 用户反馈是“只偶尔出现过，点停止无法停止”。截图中工具已显示“操作完成”，随后仍显示“思考中”和停止方块，连续点击产生“没有可停止的运行／当前没有可停止的任务”提示。
 
-最新 HEAD 存在可产生同类组合表现的确定路径：前端长期沿用控制快照中的停止请求截止时间；一小时后，新操作也携带旧期限，Host 在发起取消前拒绝请求，前端将真实的过期原因误报成没有任务。该问题不要求当前轮次本身运行一小时。
+审计基线存在可产生同类组合表现的确定路径：前端长期沿用控制快照中的停止请求截止时间；一小时后，新操作也携带旧期限，Host 在发起取消前拒绝请求，前端将真实的过期原因误报成没有任务。该问题不要求当前轮次本身运行一小时。当前实现为每次明确的新控制操作读取新期限，并展示实际拒绝原因。
 
 另有停止最终结果未跟踪、物理工具超时后取消漏记、模型流消费方异常后未汇合关闭三个独立缺口。后三者分别处理，不将它们拼成未经证实的现场因果链。截图不足以确定旧版本现场根因，也不能证明模型本身已经卡死。
 
-本次授权是记录 findings、起草方案及交叉复审。本文不代表生产修复、测试通过、真实 provider 验收或构建安装已完成。
+本次实施涵盖四项修复、测试、真实 provider 验收和代码交叉复审。真实验收使用保存的 DeepSeek 配置；没有据此宣称复现了旧版本截图的现场根因。
 
-实施范围是现有停止控制、对应前端适配、工具取消传播及 provider 流退出收尾。依据 [AGENTS.md](AGENTS.md)、[内核生命周期规格](PULSARA_KERNEL_LIFECYCLE_AND_SERVICE_COMPOSITION_IMPLEMENTATION_SPEC.zh.md)、[MCP 首次请求就绪规格](PULSARA_MCP_FIRST_REQUEST_READINESS_IMPLEMENTATION_SPEC.zh.md) 和当前生产代码。归档停止规格仅用于理解既有设计，不据其旧路径或旧状态覆盖当前合同。未跟踪的 Code Mode decide 草案不作为本方案依据。
+实施范围是现有停止控制、对应前端适配、工具取消传播及 provider 流退出收尾。依据 [AGENTS.md](AGENTS.md)、[内核生命周期规格](PULSARA_KERNEL_LIFECYCLE_AND_SERVICE_COMPOSITION_IMPLEMENTATION_SPEC.zh.md)、[MCP 首次请求就绪规格](PULSARA_MCP_FIRST_REQUEST_READINESS_IMPLEMENTATION_SPEC.zh.md) 和当前生产代码。归档停止规格仅用于理解既有设计，不据其旧路径或旧状态覆盖当前合同。Code Mode decide 文档不属于本次实施范围。
 
 ## 2. 当前停止链路
 
 ```text
 停止按钮捕获当前 session / Host / exact turn 或 manual command
-  → createUserControlCommandRef
+  → prepareUserControlCommand（ordered metadata snapshot，冻结原目标与新期限）
   → RuntimeConnection.stopActiveTurn / stopContextCompaction
   → renderer bridge 通用 command
   → v3 gateway
   → Host 校验 owner、command、准入期限、精确目标
   → 安装 USER_REQUEST，标记本轮 Cells，取消 ROOT task
   → 返回 PENDING，由 Host 继续物理停止、结果结算及终态确认
-  → query_control_command 提供本次命令最终结果
+  → 前端保留原 reference，query_control_command 查询最终结果
+  → 展示真实终态；UNKNOWN 继续查询，只有明确人工操作才新建命令
 
 另一路 observe 长轮询
   → canonical terminal/current_control + live 进展
@@ -48,7 +49,7 @@
 | 队列输入 | 使用独立队列取消入口，不隐式改为取消全部队列 |
 | 手动上下文整理 | 使用独立 exact manual command owner |
 
-## 3. 已确认 findings
+## 3. 审计基线中确认的 findings（均已修复）
 
 ### F1 P1 新停止操作复用过期截止时间，拒绝原因被错误展示
 
@@ -207,13 +208,15 @@ Runner 显式保存 `open_once(permit)` 返回的同一个迭代器，在正常�
 | 没有上述两项，仅物理收尾失败 | 向调用者抛出该失败 |
 | 上述情况均不存在 | 正常返回 |
 
-已安装的 USER_REQUEST／HOST_CLOSE intent 继续决定 ROOT 终态；保留原生成异常不改变该终态优先级。usage observation 维持现有 best-effort：普通异常只记录已有 warning，不属于反转主结果的物理关闭失败；观察至多一次，失败／取消生成不得建立成功 usage anchor。Runner 等待 DirectModel 原 finally，不重复执行 transport close、borrow release 或 usage。
+已安装的 USER_REQUEST／HOST_CLOSE intent 继续决定 ROOT 终态；保留原生成异常不改变该终态优先级。usage observation 维持现有 best-effort：普通异常只记录已有 warning，不属于反转主结果的物理关闭失败；观察至多一次。是否允许 usage anchor，在调用原 observer 的同步提交点判断：消费方提前关闭、读取失败或此时已收到取消均禁止成功 anchor，包括取消已请求而父 waiter 尚未恢复的同 tick 窗口。此前已经处理的取消计数不算本次新增取消。provider 已成功完成且 anchor 已同步提交后，随后等待 usage 持久化时发生的取消仍在完整汇合后传播，但不追溯撤销已提交的 anchor。这里不增加回滚或新的 usage owner。
+
+显式 `aclose()` 可以由另一 task 执行，因此 cleanup 等待者单独记录取消计数基线。shield 因 cleanup task 自身 `CancelledError` 而唤醒，不等于外部等待者被取消；物理 task 的原异常从其结果取回并保留身份。Runner 等待 DirectModel 原 finally，不重复执行 transport close、borrow release 或 usage。
 
 物理完成只由 `wait_physical_completion()==COMPLETED` 证明；`aclose()` 正常返回但 completion 为 BLOCKED 同样是未确认退出。`PHYSICALLY_CLOSED` 必须在确认后设置，不能先设置再检查。borrow 继续由原 DirectModel 唯一收尾路径处理一次；无法确认退出时保留真实失败，遵循现有依赖释放／隔离规则，不提前宣称成功或自动重放。不得仅增加 `aclosing` 包装就宣告覆盖这些分支。
 
 ## 7. 修改落点与删除项
 
-| 文件／模块 | 预计修改 |
+| 文件／模块 | 已实施修改 |
 | --- | --- |
 | `frontend/lib/runtime-adapter.ts` | 异步准备精确命令；复用 ordered snapshot；移除旧 projection deadline builder 路径 |
 | `frontend/app/pulsara-app.tsx` | ROOT/manual preparing 与原命令结果跟踪；按 publicCode 展示；重连／切会话归属保护 |
@@ -265,7 +268,7 @@ Host 控制准入、精确目标、命令查询和 protobuf 继续使用现有�
 6. 激活前使用保存的生产配置，经 `LocalSettingsStore` 与 `require_pulsara_home()` 只读加载并注入隔离环境，完成一次真实 provider 思考中停止、一次真实工具执行后停止；核对最终命令结果、canonical 中断及相关物理收尾。跨一小时场景用确定性时钟测试证明，不要求人为等待一小时。不能注入新环境凭据或打印真实凭据；证据保留具体请求、响应和失败详情。
 7. 确认无未结算测试 owner、无副作用重放、无新耐久分类及 provider 前缀变化后，才把文档状态更新为已实施／已验收。真实验收缺失时保持相应未完成状态。
 
-构建安装不是本次文档任务的一部分。后续实施是否安装按届时任务要求执行，不由本文推定。
+桌面前端构建属于本次验证；安装或发布不属于本次实施范围。
 
 ## 10. 交叉复审记录
 
@@ -279,4 +282,64 @@ Host 控制准入、精确目标、命令查询和 protobuf 继续使用现有�
 | Provider 关闭，并交叉检查工具取消 | GeneratorExit、主异常、收尾异常和取消的优先级；usage best-effort；关闭／usage 屏障与异常身份断言 | 无剩余方案阻塞 |
 | 独立架构与范围反证 | 后台唯一 refresh 查询并删除递归 poll；记录释放；无新增耐久类别、总寿命限制、兼容路径或 provider 前缀例外 | 可作为实施基线 |
 
-复审通过的是 findings 的静态依据、修改设计和验收要求。第 8–9 节的生产修复、测试及真实 provider 验收仍待实施；没有将文档复审记作行为验证通过。
+以上是方案复审。生产代码另经多位子代理交叉复审，行为验证与最终结论见第 11 节。
+
+## 11. 实施结果与验收证据
+
+### 11.1 修复与回归
+
+四项 finding 均已修复。没有新增协议字段、数据库迁移或耐久类别；没有增加任务总时限、重试次数或历史条数限制。旧同步 builder、projection deadline 注入和后台 stop 递归查询路径已删除。
+
+| 范围 | 行为证据 |
+| --- | --- |
+| F1 / A1–A4 | adapter 跨一小时三入口先红后绿；metadata snapshot 不安装 cursor；真实 gateway 验证 subscriber 重建、旧 cursor 回放、overflow GAP、controller takeover、过期零执行与已受理 exact-join |
+| F2 / A5、B1–B5 | App 17 项专项回归覆盖最终失败、UNKNOWN、同 Host 恢复、明确人工新操作、owner 失效、切会话晚回、observer 返回展示、慢查询单飞和释放后不复活；后台覆盖列表缺席、独立反馈、多视图／重挂节流及 owner 失效停止查询 |
+| F3 / C1–C6 | 新 IO 回归在旧实现出现 8 项失败；真实 Host＋runner 双工具批次在旧实现复现 Stop 后第二工具仍派发。修复后第一工具精确结算一次，第二工具零派发，无后续 provider，ROOT 为 INTERRUPTED |
+| F4 / D1–D4 | 真实 Runner＋PreparedKernelModelExecution 覆盖 assembler 异常、关闭／usage 屏障、首次及重复取消、跨 task aclose、原异常身份与物理 BLOCKED；Chat 与 Responses SDK 均覆盖消费方异常后的真实关闭汇合 |
+| E1 | Host、starting admission、manual compaction、Plan successor、MCP native stop lane、请求执行与反馈结算集成通过；既有前端终态清 busy 回归通过 |
+
+失败回归读取 Git 基线，在独立测试进程中复现；没有回退工作树，也没有为通过测试放宽断言或添加 skip／xfail。
+
+### 11.2 合并验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 前端全套 Vitest | 102 个文件，1,653 项通过 |
+| 后台／Inspector／Workspace 最终 focused 回归 | 57 项通过，包含最后补充的快速 UNKNOWN 后跨视图一秒节流及 OWNER_UNAVAILABLE 停止查询 |
+| Python 核心合并回归 | 366 项通过，覆盖 IO、provider retry／cleanup、控制协议、desktop bridge 和完整 conversation runner 模块 |
+| PostgreSQL Host 集成 | 39 项通过，覆盖工具批次取消、compaction 生命周期／successor、MCP、request host 和控制反馈 |
+| Provider 最终收尾专项 | 新增 24 项及既有 retry observation 7 项共 31 项通过，包含最后补充的原异常链身份和次要失败诊断 |
+| 前端 TypeScript、桌面构建 | 通过 |
+| 改动 Python 的 Ruff、改动前端生产文件 ESLint、diff whitespace | 通过；ESLint 无 error，6 个 Hook warning 与 Git 实施基线一致 |
+
+Python 集成使用根 `.venv`，设置 `CI=1` 确保数据库不可用时失败而非跳过；上述 405 项没有跳过。测试进程仅将 loopback 加入 `NO_PROXY`，避免继承的 HTTP 代理干扰本地 SDK 测试。Python 的 10 条 warning 来自现有 aiohttp `shutdown_timeout` 弃用提示；Vite 保留现有大 chunk 提示。未因这些提示扩大本次改动范围。
+
+本地日志保存在 `output/stop-chain-implementation/`。临时 PostgreSQL 集群使用仓库现有捆绑二进制创建；验明 data_directory、Unix socket、角色和目标库后供 fixture 使用。所有测试库均已删除，确认无残余测试库后停止并移除了该临时集群。用户保存的配置与用户数据库没有改写。
+
+### 11.3 保存的 DeepSeek 真实验收
+
+脚本：[run_stop_chain_dogfood.py](tests/dogfood/run_stop_chain_dogfood.py)。通过 `require_pulsara_home()` 和 `LocalSettingsStore` 只读读取保存的 `deepseek / deepseek-flash / openai_chat_completions` 连接，使用 high reasoning；随后在临时 home 中注入只读 settings 和独立测试库。没有将模型凭据导出到 shell。
+
+最终真实调用于 2026-11-07 03:03:15–03:03:39（Asia/Shanghai）完成。证据保存在本地 [report-final.json](output/stop-chain-dogfood/report-final.json)，包含具体提示、实际 SDK 请求、模型流输出、工具结果、原命令与停止命令结果及物理收尾记录；按实际保存的凭据值脱敏。首次验收的独立证据保留在同目录 `report.json`。
+
+| 场景 | 实际结果 |
+| --- | --- |
+| 真实 ThinkingDelta 到达后停止 | Stop 最终 `SUCCEEDED / ROOT_STOPPED`；原提交 `stopped / USER_STOPPED`；canonical turn `INTERRUPTED / USER_STOPPED` |
+| `exec_process` 成功后，第二次真实 ThinkingDelta 到达时停止 | 同样确认 Stop 与 canonical 中断；真实工具仅执行一次，marker 文件只有一行，无副作用重放 |
+
+两场景合计三次 SDK 请求，没有额外请求或重试。三个流均确认 `aclose()` 返回且 physical completion 为 `COMPLETED`；provider borrow 已释放，所有会话和 core 完成关闭。工具前后 SDK `tools` 精确相同，包含 SYSTEM 的此前完整 `messages` 保持前缀。脚本独立库已删除。
+
+跨一小时期限由确定性回归证明；真实 provider 验收验证保存配置下的实际取消、结算和资源退出，两类证据不互相替代。
+
+### 11.4 生产代码交叉复审
+
+复用原有 GPT-6 Astra 子代理，作者以外的多位代理独立核对代码及回归：
+
+| 交叉范围 | 已验证的关键边界 |
+| --- | --- |
+| adapter ↔ 真实 gateway | 精确目标冻结、ordered metadata 读取、cursor 不跳跃、最终 controller gate |
+| App ↔ 控制结果生命周期 | 失效原因不被旧 PENDING receipt 遮盖；只读视图可展示已知终态；查询仍遵守权限与 owner |
+| 后台面板 ↔ workspace | 每 command 单飞及节流；旧 UNKNOWN／反馈独立保留；释放后迟到结果不复活 |
+| IO ↔ provider 收尾，另加独立复核 | 取消事实与物理异常分开；usage 提交前同 tick 取消；cleanup 自身取消的异常身份；跨 task aclose 等待者；关闭与释放各一次 |
+
+复审提出的实现缺口均补充回归并修复，最终独立复核无剩余阻塞。原异常链已有原因时保持其身份，次要关闭失败通过现有凭据 scrubber 处理的 note 保留。代码复审结论不替代上面的实际测试与 DeepSeek 验收。

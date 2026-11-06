@@ -235,6 +235,7 @@ interface WorkbenchViewProps {
     requestPlan: boolean,
   ) => Promise<boolean>;
   onStop: () => void;
+  stopControl?: { busy: boolean; message: string; onRetry?: () => void; onDismiss: () => void };
   onCompact: () => Promise<void>;
   onRenameSession: () => void;
   onOpenScheduledTask?: () => void;
@@ -2487,6 +2488,7 @@ export function WorkbenchView({
   onModelCallBindingChange,
   onSend,
   onStop,
+  stopControl,
   onCompact,
   onRenameSession,
   onOpenScheduledTask,
@@ -3332,6 +3334,7 @@ export function WorkbenchView({
                   <button
                     className="send-button is-stop"
                     onClick={onStop}
+                    disabled={stopControl?.busy}
                     aria-label="停止本轮运行"
                     title="停止主助手本轮生成和后续执行；已启动操作仍按各自规则收尾，任务、排队输入和后台命令不会自动取消。"
                   ><Square size={14} fill="currentColor" strokeWidth={0} aria-hidden="true" /></button>
@@ -3345,6 +3348,11 @@ export function WorkbenchView({
           </div>
           </div>
         </div>
+        {stopControl && <div className="composer-note" role="status">
+          <span>{stopControl.message}</span>
+          {stopControl.onRetry && <button type="button" onClick={stopControl.onRetry}>再次请求停止</button>}
+          <button type="button" onClick={stopControl.onDismiss}>结束结果观察</button>
+        </div>}
         {modelPending ? <p className="composer-note" role="status">模型目录正在载入，请稍候。</p> : !welcome && !modelReady && <p className="composer-note composer-note--attention">{modelBindingMissing ? '原模型配置已删除，请重新选择' : '请先为此会话选择模型配置'}</p>}
       </div> : (
         <div className="observer-wrap composer-wrap" ref={composerWrapRef}>

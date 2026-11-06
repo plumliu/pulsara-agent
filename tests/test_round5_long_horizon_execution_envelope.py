@@ -426,6 +426,164 @@ def test_round5_tool_cancellation_callback_releases_physical_owner() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("cancel_before_timeout", [False, True])
+@pytest.mark.parametrize("callback_failure", [None, ValueError, asyncio.CancelledError])
+def test_tool_cancel_during_physical_drain_is_retained_once(
+    monkeypatch, caplog, cancel_before_timeout, callback_failure,
+):
+    from pulsara_agent.conversation_kernel import io as io_module
+
+    async def scenario():
+        entered, release = Event(), Event()
+        draining, notified = asyncio.Event(), asyncio.Event()
+        original_drain = io_module._drain_physical_task
+        callback_calls = 0
+
+        async def observe_drain(task, **kwargs):
+            draining.set()
+            return await original_drain(task, **kwargs)
+
+        monkeypatch.setattr(io_module, "_drain_physical_task", observe_drain)
+
+        def physical(*, deadline_monotonic):
+            entered.set()
+            assert release.wait(5), "test did not release physical work"
+            return "exact-after-cancellation"
+
+        def cancelled():
+            nonlocal callback_calls
+            callback_calls += 1
+            notified.set()
+            if callback_failure is not None:
+                raise callback_failure("cancellation notification failed")
+
+        owner = KernelSessionIO(maximum_concurrency=1)
+        task = asyncio.create_task(owner.run_tool_invocation(
+            physical, deadline_monotonic=monotonic() + (5 if cancel_before_timeout else .02),
+            on_caller_cancelled=cancelled,
+        ))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            if cancel_before_timeout:
+                task.cancel()
+            await asyncio.wait_for(draining.wait(), 2)
+            task.cancel()
+            await asyncio.wait_for(notified.wait(), 2)
+            # An event-loop barrier lets the next cancellation reach the real
+            # shielded join without assuming how long the worker takes.
+            task.cancel()
+            barrier = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(barrier.set_result, None)
+            await barrier
+            assert not task.done()
+            assert callback_calls == 1
+            assert len(owner._active) == 1
+            release.set()
+            outcome = await asyncio.wait_for(task, 2)
+            assert outcome.value == "exact-after-cancellation"
+            assert outcome.disposition is PhysicalToolInvocationDisposition.RETURNED_EXACT
+            assert outcome.caller_cancelled
+            assert outcome.timing is PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG
+            assert callback_calls == 1
+            if callback_failure is not None:
+                assert "tool_cancellation_notification_failed" in caplog.text
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await owner.aclose(deadline_monotonic=monotonic() + 2)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("external_cancel", [None, "during_drain", "at_physical_completion"])
+@pytest.mark.parametrize("physical_error_type", [OSError, asyncio.CancelledError])
+def test_tool_physical_error_and_waiter_cancellation_are_independent(
+    monkeypatch, external_cancel, physical_error_type,
+):
+    from pulsara_agent.conversation_kernel import io as io_module
+
+    async def scenario():
+        entered, release = Event(), Event()
+        draining = asyncio.Event()
+        original_drain = io_module._drain_physical_task
+        failure = physical_error_type("physical failure")
+        callback_calls = 0
+
+        async def observe_drain(task, **kwargs):
+            if external_cancel == "at_physical_completion":
+                waiter = asyncio.current_task()
+                task.add_done_callback(lambda _done: waiter.cancel())
+            draining.set()
+            return await original_drain(task, **kwargs)
+
+        monkeypatch.setattr(io_module, "_drain_physical_task", observe_drain)
+
+        def physical(*, deadline_monotonic):
+            entered.set()
+            assert release.wait(5)
+            raise failure
+
+        def cancelled():
+            nonlocal callback_calls
+            callback_calls += 1
+
+        owner = KernelSessionIO(maximum_concurrency=1)
+        task = asyncio.create_task(owner.run_tool_invocation(
+            physical, deadline_monotonic=monotonic() + .02,
+            on_caller_cancelled=cancelled,
+        ))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            await asyncio.wait_for(draining.wait(), 2)
+            if external_cancel == "during_drain":
+                task.cancel()
+            release.set()
+            outcome = await asyncio.wait_for(task, 2)
+            assert outcome.disposition is PhysicalToolInvocationDisposition.RAISED
+            assert isinstance(outcome.error, physical_error_type)
+            assert outcome.error is failure
+            assert outcome.caller_cancelled is (external_cancel is not None)
+            assert callback_calls == int(external_cancel is not None)
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await owner.aclose(deadline_monotonic=monotonic() + 2)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("previous_cancellation", [False, True])
+def test_tool_physical_cancelled_error_before_watchdog_is_not_caller_cancel(previous_cancellation):
+    async def scenario():
+        if previous_cancellation:
+            asyncio.current_task().cancel()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                pass
+            assert asyncio.current_task().cancelling() == 1
+        owner = KernelSessionIO(maximum_concurrency=1)
+        callbacks = []
+        failure = asyncio.CancelledError("physical operation cancelled itself")
+
+        def physical(*, deadline_monotonic):
+            raise failure
+
+        try:
+            outcome = await owner.run_tool_invocation(
+                physical, deadline_monotonic=monotonic() + 2,
+                on_caller_cancelled=lambda: callbacks.append(True),
+            )
+            assert outcome.disposition is PhysicalToolInvocationDisposition.RAISED
+            assert outcome.error is failure
+            assert not outcome.caller_cancelled
+            assert callbacks == []
+        finally:
+            await owner.aclose(deadline_monotonic=monotonic() + 2)
+
+    asyncio.run(scenario())
+
+
 def test_round5_io_close_reports_timeout_only_after_physical_thread_exit() -> None:
     entered = Event()
     release = Event()

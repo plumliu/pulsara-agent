@@ -41,7 +41,8 @@ import {
   compareSequence,
   projectRootStatus,
   type WorkspaceAvailability,
-  createUserControlCommandRef,
+  type UserControlCommandRef,
+  type UserControlTarget,
   RuntimeApiError,
   type RuntimeAdapter,
   type RuntimeBootstrap,
@@ -59,6 +60,29 @@ import {
   type CanonicalPromptImagePart,
 } from '../lib/runtime-adapter';
 import { promptContentTextProjection } from '../lib/prompt-content';
+
+type StopObservation = {
+  target: UserControlTarget;
+  reference?: UserControlCommandRef;
+  phase: 'preparing' | 'pending' | 'unknown' | 'terminal';
+  receipt?: CommandReceipt;
+  error?: string;
+  querying?: boolean;
+  lastQueryStarted?: number;
+};
+
+function stopResultMessage(receipt: CommandReceipt): string {
+  const messages: Record<string, string> = {
+    CONTROL_REQUEST_EXPIRED: '本次停止请求已过期，请重新请求停止。',
+    OWNER_UNAVAILABLE: '原会话运行实例已不可控制；不会改投新的实例。',
+    CONTROL_TARGET_UNAVAILABLE: '原目标当前无法停止，尚不能确认其执行已结束。',
+    CONTROL_TARGET_NOT_CURRENT: '原目标已不在当前执行中；不会停止其他任务。',
+    CONTROL_ALREADY_TERMINAL: '原目标已结束。',
+    ROOT_STOPPED: '本轮运行已停止。',
+  };
+  return messages[receipt.publicCode ?? ''] ?? receipt.publicMessage
+    ?? (receipt.status === 'failed' ? '停止结果未能确认。' : receipt.status === 'rejected' ? '这次停止请求未被接受。' : '停止状态已确认。');
+}
 import type {
   PluginImportOptions,
   ArchivedSessionDeletionItem,
@@ -226,6 +250,8 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   const [suggestionCache] = useState(() => new SessionSuggestionCache());
   const scheduledApi = useMemo(() => new LocalScheduledTasksApi(), []);
   const [activeView, setActiveView] = useState<AppView>('overview');
+  const stopView = useRef(activeView);
+  stopView.current = activeView;
   const [capabilityTab, setCapabilityTab] = useState<CapabilityTab>('plugins');
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>();
   const [settingsHighlightHome, setSettingsHighlightHome] = useState(false);
@@ -269,6 +295,15 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   // Selection feedback is local UI state; only a connected runtime becomes active.
   const [openingSessionId, setOpeningSessionId] = useState('');
   const [projection, setProjection] = useState<RuntimeProjection>(emptyProjection);
+  // These observations own only UI results, never the underlying execution.
+  const stopObservations = useRef<StopObservation[]>([]);
+  const [stopRevision, setStopRevision] = useState(0);
+  const publishStops = useCallback(() => setStopRevision(value => value + 1), []);
+  const forgetStops = useCallback((sessionId: string) => {
+    stopObservations.current = stopObservations.current.filter(item => item.target.sessionId !== sessionId);
+    publishStops();
+  }, [publishStops]);
+  useEffect(() => () => { stopObservations.current = []; }, [adapter]);
   const [queuePages, setQueuePages] = useState<{owner: RuntimeConnection | CanonicalHistoryView; items: QueuedPrompt[]; absent: Set<string>}>();
   const queuePagesRef = useRef(queuePages);
   queuePagesRef.current = queuePages;
@@ -719,6 +754,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
   }, [adapter, acceptUserCapabilities]);
 
   const forgetSession = useCallback((sessionId: string) => {
+    forgetStops(sessionId);
     suggestionCache.forget(sessionId);
     workspaceControl.current?.forgetSession(sessionId);
     changeSessionList(current => current.filter(s => s.id !== sessionId));
@@ -755,7 +791,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setRuntimeStatus('online');
     setRuntimeError(undefined);
     if (previous) void previous.close().catch(() => {});
-  }, [changeSessionList, promptDraftStore, suggestionCache]);
+  }, [changeSessionList, promptDraftStore, suggestionCache, forgetStops]);
 
   const readSessionList = useCallback(async (canPublish: () => boolean = () => true) => {
     const owner = {};
@@ -1605,6 +1641,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     const sessionId = activeSessionIdRef.current;
     const previous = connectionRef.current;
     if (!sessionId || !previous || !canControl) return;
+    forgetStops(sessionId);
     // The server's existing close operation owns execution settlement. Leaving
     // this page only retires its disposable readers and selection.
     const closing = adapter.closeSession(sessionId);
@@ -2061,59 +2098,139 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     }
   };
 
-  const stopRun = async () => {
-    const active = connectionRef.current;
-    const targetTurnId = projection.activeTurnId;
-    const manualCommandId = projection.manualCompactionCommandId;
-    if (!active || active.role !== 'controller' || (!targetTurnId && !manualCommandId)) return;
-    if (!projection.hostSessionId || !projection.controlAdmissionDeadlineMs) {
-      notify('暂时无法停止', '当前 Host 的控制身份尚未确认，请等待刷新后重试。', 'warning');
-      return;
+  const retainStopReceipt = useCallback((item: StopObservation, receipt: CommandReceipt) => {
+    if (!stopObservations.current.includes(item) || !item.reference) return;
+    if (receipt.commandId !== item.reference.commandId || (receipt.targetId && receipt.targetId !== item.reference.targetId)) {
+      throw new Error('停止响应与原操作身份不一致。');
     }
-    const reference = createUserControlCommandRef(
-      projection,
-      active.sessionId,
-      targetTurnId ? 'STOP_ACTIVE_TURN' : 'STOP_CONTEXT_COMPACTION',
-      targetTurnId ? 'ROOT_TURN' : 'MANUAL_COMPACTION',
-      targetTurnId ?? manualCommandId!,
-    );
-    try {
-      const receipt = await (targetTurnId ? active.stopActiveTurn(reference) : active.stopContextCompaction(reference));
-      if (!ownsConnection(active)) return;
-      notify(
-        receipt.status === 'rejected' ? '没有可停止的运行' : '停止请求已送达',
-        receipt.status === 'rejected' ? '当前没有可停止的任务。' : '正在停止当前任务。',
-        receipt.status === 'rejected' ? 'warning' : 'success',
-      );
-    } catch (error) {
-      const recovered = await recoverConnectionAfterOperation(error, active);
-      if (!recovered || !ownsConnection(recovered)) return;
-      try {
-        const query = await recovered.queryControlCommand(reference);
-        if (!ownsConnection(recovered)) return;
-        const receipt = query.receipt;
-        if (query.status === 'FOUND' && receipt) {
-          notify(
-            receipt.status === 'pending' ? '正在停止本轮运行' : '停止状态已确认',
-            receipt.publicMessage || '已按原操作身份恢复精确状态。',
-            receipt.status === 'failed' || receipt.status === 'rejected' ? 'warning' : 'success',
-          );
-          return;
-        }
-        notify(
-          query.status === 'OWNER_UNAVAILABLE' ? '原会话已不可控制' : '停止结果不可确认',
-          query.status === 'OWNER_UNAVAILABLE'
-            ? '原 Host 已失效；Pulsara 不会把这次操作改投新的 Host。'
-            : `${productMessage(error instanceof Error ? error.message : undefined, '当前无法取得这次操作的结果。')} 未查到原操作结果；Pulsara 不会自动重发。`,
-          'warning',
-        );
-        return;
-      } catch {
-        if (!ownsConnection(recovered)) return;
+    item.receipt = receipt;
+    item.phase = receipt.status === 'pending' ? 'pending' : 'terminal';
+    item.error = undefined;
+    publishStops();
+  }, [publishStops]);
+
+  useEffect(() => {
+    const retained = stopObservations.current.filter(item => item.reference || (activeView === 'workbench'
+      && connection?.sessionId === item.target.sessionId && connection.current().hostSessionId === item.target.hostSessionId));
+    if (retained.length !== stopObservations.current.length) {
+      stopObservations.current = retained;
+      publishStops();
+    }
+  }, [activeView, connection, publishStops]);
+
+  // Present already known results even when this session is now read-only.
+  // Controller authority is needed only for new reads and mutations.
+  useEffect(() => {
+    if (activeView !== 'workbench' || !activeSessionId || openingSessionId) return;
+    for (const item of [...stopObservations.current]) {
+      if (item.target.sessionId !== activeSessionId) continue;
+      if (item.phase !== 'terminal' && projection.hostSessionId && item.target.hostSessionId !== projection.hostSessionId) {
+        item.phase = 'terminal';
+        item.error = '原会话运行实例已失效；不会把停止操作改投新的实例。';
       }
-      notify('停止结果待确认', productMessage(error instanceof Error ? error.message : undefined, '重新连接后可按原操作身份查询；Pulsara 不会自动重发。'), 'warning');
+      if (item.phase !== 'terminal') continue;
+      notify(item.receipt?.status === 'succeeded' ? '停止状态已确认' : '停止未能确认',
+        item.error ?? (item.receipt ? stopResultMessage(item.receipt) : '原运行实例已不可查询。'),
+        item.receipt?.status === 'succeeded' ? 'success' : 'warning');
+      stopObservations.current = stopObservations.current.filter(value => value !== item);
+      publishStops();
+    }
+  }, [activeView, activeSessionId, openingSessionId, projection.hostSessionId, stopRevision, notify, publishStops]);
+
+  // Query cadence is UI read scheduling, not a deadline on long-running work.
+  useEffect(() => {
+    if (activeView !== 'workbench' || !connection || runtimeStatus !== 'online'
+      || connection.role !== 'controller' || openingSessionId
+      || !stopObservations.current.some(item => item.target.sessionId === connection.sessionId)) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = () => {
+      if (disposed || !ownsConnection(connection)) return;
+      const host = connection.current().hostSessionId;
+      for (const item of [...stopObservations.current]) {
+        if (item.target.sessionId !== connection.sessionId) continue;
+        if (host !== item.target.hostSessionId || !item.reference || item.querying || item.phase === 'preparing' || item.phase === 'terminal'
+          || performance.now() - (item.lastQueryStarted ?? -Infinity) < 1000) continue;
+        item.querying = true;
+        item.lastQueryStarted = performance.now();
+        const reference = item.reference;
+        void connection.queryControlCommand(reference).then(query => {
+          if (!stopObservations.current.includes(item)) return;
+          if (query.status === 'FOUND' && query.receipt) retainStopReceipt(item, query.receipt);
+          else {
+            item.phase = query.status === 'OWNER_UNAVAILABLE' ? 'terminal' : 'unknown';
+            item.error = query.status === 'OWNER_UNAVAILABLE'
+              ? '原 Host 已失效；不会把这次操作改投新的 Host。'
+              : item.error?.includes('未查到原操作结果') ? item.error
+                : `${item.error ? `${item.error} ` : ''}未查到原操作结果；Pulsara 不会自动重发。`;
+            publishStops();
+          }
+        }).catch(error => {
+          if (!stopObservations.current.includes(item)) return;
+          item.phase = 'unknown';
+          item.error = productMessage(error instanceof Error ? error.message : undefined, '停止结果暂时无法查询；不会自动重发。');
+          publishStops();
+        }).finally(() => { item.querying = false; });
+      }
+      timer = setTimeout(poll, 1000);
+    };
+    poll();
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [activeView, connection, openingSessionId, runtimeStatus, stopRevision, ownsConnection, notify, publishStops, retainStopReceipt]);
+
+  const stopRun = async (explicitNew = false) => {
+    const active = connectionRef.current;
+    if (!active || active.role !== 'controller' || !ownsConnection(active) || activeView !== 'workbench'
+      || active.sessionId !== activeSessionId) return;
+    // Freeze the target displayed by this render; a newer adapter observation
+    // must not silently redirect a click to a successor the user has not seen.
+    const current = projection;
+    const targetId = current.activeTurnId ?? current.manualCompactionCommandId;
+    if (!targetId || !current.hostSessionId || active.current().hostSessionId !== current.hostSessionId) return;
+    const target: UserControlTarget = Object.freeze({
+      sessionId: active.sessionId, hostSessionId: current.hostSessionId,
+      operation: current.activeTurnId ? 'STOP_ACTIVE_TURN' : 'STOP_CONTEXT_COMPACTION',
+      targetKind: current.activeTurnId ? 'ROOT_TURN' : 'MANUAL_COMPACTION', targetId,
+    });
+    const previous = stopObservations.current.filter(item => item.target.sessionId === target.sessionId
+      && item.target.hostSessionId === target.hostSessionId && item.target.targetId === targetId
+      && item.target.operation === target.operation).at(-1);
+    if (previous && (previous.phase === 'preparing' || previous.phase === 'pending'
+      || (previous.phase === 'unknown' && !explicitNew))) { publishStops(); return; }
+    const item: StopObservation = { target, phase: 'preparing' };
+    stopObservations.current.push(item);
+    publishStops();
+    try {
+      const reference = await active.prepareUserControlCommand(target);
+      if (!stopObservations.current.includes(item)) return;
+      if (!ownsConnection(active) || stopView.current !== 'workbench') {
+        stopObservations.current = stopObservations.current.filter(value => value !== item);
+        publishStops();
+        return;
+      }
+      item.reference = reference;
+      // Submission remains in preparing until its response; no query can race
+      // ahead of dispatch and interpret a missing attempt as an outcome.
+      const receipt = await (target.operation === 'STOP_ACTIVE_TURN'
+        ? active.stopActiveTurn(reference) : active.stopContextCompaction(reference));
+      retainStopReceipt(item, receipt);
+    } catch (error) {
+      if (!stopObservations.current.includes(item)) return;
+      const message = productMessage(error instanceof Error ? error.message : undefined, '停止请求暂时无法确认。');
+      if (!item.reference) {
+        stopObservations.current = stopObservations.current.filter(value => value !== item);
+        if (ownsConnection(active) && stopView.current === 'workbench') notify('暂时无法停止', message, 'warning');
+      } else {
+        item.phase = 'unknown';
+        item.error = message;
+        void recoverConnectionAfterOperation(error, active);
+      }
+      publishStops();
     }
   };
+  const visibleStopObservations = stopObservations.current.filter(item => item.target.sessionId === activeSessionId
+    && item.target.hostSessionId === projection.hostSessionId && item.phase !== 'terminal');
+  const currentStop = visibleStopObservations.filter(item => item.target.targetId === (projection.activeTurnId ?? projection.manualCompactionCommandId)).at(-1);
 
   const compact = async () => {
     const active = connectionRef.current;
@@ -2917,6 +3034,16 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           onModelCallBindingChange={updateModelCallBinding}
           onSend={sendPrompt}
           onStop={() => void stopRun()}
+          stopControl={visibleStopObservations.length ? {
+            busy: currentStop?.phase === 'preparing' || currentStop?.phase === 'pending',
+            message: currentStop?.phase === 'unknown' ? currentStop.error ?? '停止结果待确认。'
+              : currentStop ? '正在停止本轮运行…' : '之前的停止结果仍待确认。',
+            onRetry: currentStop?.phase === 'unknown' ? () => void stopRun(true) : undefined,
+            onDismiss: () => {
+              stopObservations.current = stopObservations.current.filter(item => !visibleStopObservations.includes(item));
+              publishStops();
+            },
+          } : undefined}
           onCompact={compact}
           onRenameSession={() => setRenameTarget(activeSession)}
           onOpenScheduledTask={runtimeStatus === 'online' && activeSchedule?.sessionId === activeSession.id ? () => {
@@ -2973,7 +3100,6 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
           capabilityBusy={capabilityBusy}
           backgroundOwnerKey={`${connection?.sessionId ?? ''}:${connection?.generation ?? 0}:${projection.hostSessionId ?? ''}`}
           backgroundHostSessionId={projection.hostSessionId}
-          backgroundControlAdmissionDeadlineMs={projection.controlAdmissionDeadlineMs}
           onLoadBackgroundProcesses={loadBackgroundProcesses}
           onReadBackgroundProcessLog={async (processId, cursor) => {
             const active = connectionRef.current;
@@ -2984,24 +3110,29 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
             if (!ownsConnection(active) || active.current().hostSessionId !== host) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
             return page;
           }}
+          onPrepareBackgroundControl={async (target) => {
+            const active = connectionRef.current;
+            if (!active || active.role !== 'controller' || active.sessionId !== target.sessionId
+              || active.current().hostSessionId !== target.hostSessionId) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '原进程实例已失效。', false);
+            const reference = await active.prepareUserControlCommand(target);
+            if (!ownsConnection(active) || active.current().hostSessionId !== target.hostSessionId) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '原进程实例已失效。', false);
+            return reference;
+          }}
           onTerminateBackgroundProcess={async (reference) => {
             const active = connectionRef.current;
             if (!active || active.role !== 'controller') throw new RuntimeApiError('CONTROL_UNAVAILABLE', '当前窗口没有控制权限。', false);
-            if (active.sessionId !== activeSessionId || active.current().hostSessionId !== projection.hostSessionId) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '原进程实例已失效。', false);
-            const receipt = await active.terminateBackgroundProcess(reference);
-            if (!ownsConnection(active)) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
-            return receipt;
+            if (active.sessionId !== reference.sessionId || active.current().hostSessionId !== reference.hostSessionId) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '原进程实例已失效。', false);
+            return active.terminateBackgroundProcess(reference);
           }}
           onQueryControl={async (reference) => {
             const active = connectionRef.current;
             if (!active || active.role !== 'controller') {
               throw new RuntimeApiError('CONTROL_UNAVAILABLE', '当前窗口没有控制权限。', false);
             }
-            const query = await active.queryControlCommand(reference);
-            if (!ownsConnection(active)) {
-              throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '后台命令所属的会话已经改变。', true);
-            }
-            return query;
+            if (active.sessionId !== reference.sessionId || active.current().hostSessionId !== reference.hostSessionId) throw new RuntimeApiError('BACKGROUND_OWNER_CHANGED', '原进程实例已失效。', false);
+            // The workspace record accepts an exact late receipt independently
+            // from whichever session is now visible.
+            return active.queryControlCommand(reference);
           }}
           onRetryCapabilities={() => activeSessionId && void loadCapabilities(activeSessionId)}
           onToggleProjectSkill={toggleProjectSkill}

@@ -620,6 +620,11 @@ class PreparedKernelModelExecution:
         observed_terminal: ProviderStreamTerminal | None = None
         operation_error: BaseException | None = None
         physically_closed = False
+        consumer_closed = False
+        cleanup_error: BaseException | None = None
+        cleanup_cancellation: asyncio.CancelledError | None = None
+        caller = asyncio.current_task()
+        cancellation_baseline = 0 if caller is None else caller.cancelling()
         try:
             while True:
                 item = await execution.read_next()
@@ -667,48 +672,97 @@ class PreparedKernelModelExecution:
                         semantic_error = self._provider_failure(item.error)
                     break
                 yield item
+        except GeneratorExit:
+            consumer_closed = True
         except BaseException as exc:
             operation_error = exc
         finally:
-            try:
-                await execution.aclose()
-                completion = await execution.wait_physical_completion()
-                with self._lock:
-                    self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
-                if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
-                    raise RuntimeError("provider physical operation did not exit")
-                physically_closed = True
-            except BaseException as exc:
-                if operation_error is None:
-                    operation_error = exc
-            finally:
+            # Explicit aclose may resume this generator from a different task
+            # than the one that consumed its previous yield.
+            cleanup_waiter = asyncio.current_task()
+            cleanup_cancellation_baseline = (
+                0 if cleanup_waiter is None else cleanup_waiter.cancelling()
+            )
+            async def close_and_observe() -> None:
+                nonlocal physically_closed, cleanup_error
                 try:
-                    borrowed.close()
+                    await execution.aclose()
+                    completion = await execution.wait_physical_completion()
+                    if completion.status is not ProviderPhysicalCompletionStatus.COMPLETED:
+                        raise RuntimeError("provider physical operation did not exit")
+                    with self._lock:
+                        self._state = _PreparedExecutionState.PHYSICALLY_CLOSED
+                    physically_closed = True
                 except BaseException as exc:
-                    physically_closed = False
-                    if operation_error is None:
-                        operation_error = exc
-            if self._usage_observer is not None:
+                    cleanup_error = exc
+                finally:
+                    try:
+                        borrowed.close()
+                    except BaseException as exc:
+                        physically_closed = False
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                        elif cleanup_error.__cause__ is not None or cleanup_error.__context__ is not None:
+                            cleanup_error.add_note(self.scrub_provider_detail(
+                                f"Additional provider cleanup failure: {type(exc).__name__}: {exc}"
+                            ))
+                        else:
+                            cleanup_error.__cause__ = exc
+                if self._usage_observer is not None:
+                    try:
+                        await self._usage_observer(
+                            request,
+                            (getattr(execution, "observed_usage", None) or TransportUsageReport(usage_status="missing", usage=None)) if observed_terminal is None else observed_terminal.usage,
+                            permit,
+                            None if observed_terminal is None else observed_terminal.terminal_kind,
+                            physically_closed and not consumer_closed and operation_error is None and cleanup_cancellation is None
+                            # A cancellation request can precede this child
+                            # continuation without its waiter having resumed.
+                            # Judge at usage submission, not at waiter wake-up.
+                            and (caller is None or caller.cancelling() == cancellation_baseline) and (
+                                self._completed is not None or isinstance(semantic_error, ProviderModelOutputIncomplete)
+                            ),
+                        )
+                    except Exception:
+                        logging.getLogger(__name__).warning("provider_usage_observation_failed")
+
+            # This same finally runs inside read_next cancellation as well as
+            # explicit generator close. Shield the whole physical/usage join;
+            # shielding only the caller's aclose would miss the former path.
+            cleanup = asyncio.create_task(close_and_observe(), name="provider-execution-close")
+            while not cleanup.done():
                 try:
-                    await self._usage_observer(
-                        request,
-                        (getattr(execution, "observed_usage", None) or TransportUsageReport(usage_status="missing", usage=None)) if observed_terminal is None else observed_terminal.usage,
-                        permit,
-                        None if observed_terminal is None else observed_terminal.terminal_kind,
-                        physically_closed and operation_error is None and (
-                            self._completed is not None or isinstance(semantic_error, ProviderModelOutputIncomplete)
-                        ),
-                    )
-                except asyncio.CancelledError:
-                    if operation_error is None and semantic_error is None:
-                        raise
-                except Exception:
-                    logging.getLogger(__name__).warning("provider_usage_observation_failed")
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError as exc:
+                    if cleanup_waiter is not None and cleanup_waiter.cancelling() > cleanup_cancellation_baseline:
+                        cleanup_cancellation = cleanup_cancellation or exc
+                except BaseException:
+                    break
+            try:
+                cleanup.result()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                elif cleanup_error.__cause__ is not None or cleanup_error.__context__ is not None:
+                    cleanup_error.add_note(self.scrub_provider_detail(
+                        f"Additional provider cleanup failure: {type(exc).__name__}: {exc}"
+                    ))
+                else:
+                    cleanup_error.__cause__ = exc
         self.clear_retry_observation()
-        if operation_error is not None:
-            raise operation_error
-        if semantic_error is not None:
-            raise semantic_error
+        primary_error = operation_error or semantic_error or cleanup_cancellation
+        if primary_error is not None:
+            if cleanup_error is not None:
+                if primary_error.__cause__ is None and primary_error.__context__ is None:
+                    raise primary_error from cleanup_error
+                primary_error.add_note(self.scrub_provider_detail(
+                    f"Provider cleanup failure: {type(cleanup_error).__name__}: {cleanup_error}"
+                ))
+            raise primary_error
+        if cleanup_error is not None:
+            raise cleanup_error
+        if consumer_closed:
+            return
         if self._completed is None:
             raise RuntimeError("provider execution ended without completed terminal")
 

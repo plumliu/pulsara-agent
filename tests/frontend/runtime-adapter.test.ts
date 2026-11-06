@@ -5,13 +5,13 @@ import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import {
-  createUserControlCommandRef,
   LocalHttpRuntimeAdapter,
   CanonicalHistoryView,
   RuntimeApiError,
   RuntimeGapError,
   agentReaderRequiresReopen,
   type RuntimeProjection,
+  type UserControlTarget,
 } from '../../frontend/lib/runtime-adapter';
 
 const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABLE' as const, reason: null};
@@ -319,6 +319,241 @@ it('carries the connected workspace observation without another workspace reques
   expect(fetchMock.mock.calls[0][0]).toBe('/api/sessions/session-1/connections');
 });
 
+it.each([
+  ['STOP_ACTIVE_TURN', 'ROOT_TURN', 'stopActiveTurn'],
+  ['STOP_CONTEXT_COMPACTION', 'MANUAL_COMPACTION', 'stopContextCompaction'],
+  ['TERMINATE_BACKGROUND_PROCESS', 'BACKGROUND_PROCESS', 'terminateBackgroundProcess'],
+] as const)('prepares a fresh %s after the same healthy connection outlives admission', async (operation, targetKind, send) => {
+  // The existing Host admission window is one hour, not a connection lifetime.
+  const admissionWindowMs = 3_600_000;
+  let hostNow = 10_000;
+  const initialDeadline = hostNow + admissionWindowMs;
+  const commands: Record<string, unknown>[] = [];
+  const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input);
+    if (path.endsWith('/connections')) return new Response(JSON.stringify(connectPayload([], {}, [], {
+      host_session_id: 'host:one', control_admission_deadline_ms: String(initialDeadline),
+    })));
+    if (path.endsWith('/live-control-snapshot')) return new Response(JSON.stringify({live_control_snapshot: {snapshot: {
+      host_session_id: 'host:one', control_admission_deadline_ms: String(hostNow + admissionWindowMs),
+    }}}));
+    if (path.endsWith('/observe')) return new Response(JSON.stringify({observation: {
+      active_root_turn_id: 'turn:just-started', through_event_sequence: '0',
+    }}));
+    const body = JSON.parse(String(init?.body));
+    commands.push(body);
+    const expired = body.control_admission_deadline_ms <= hostNow;
+    return new Response(JSON.stringify({command_outcome: {
+      command_id: body.command_id, status: expired ? 'REJECTED' : 'PENDING',
+      public_code: expired ? 'CONTROL_REQUEST_EXPIRED' : 'CONTROL_ACCEPTED',
+    }}));
+  });
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  hostNow = initialDeadline + 1;
+  await connection.observe();
+  const reference = await connection.prepareUserControlCommand({sessionId: 'session-1', hostSessionId: 'host:one',
+    operation, targetKind, targetId: 'exact-target'});
+  expect(await connection[send](reference)).toMatchObject({status: 'pending', publicCode: 'CONTROL_ACCEPTED'});
+  expect(commands[0].control_admission_deadline_ms).toBe(hostNow + admissionWindowMs);
+  expect(fetcher.mock.calls.filter(([input]) => String(input).endsWith('/connections'))).toHaveLength(1);
+});
+
+const rootControlTarget: UserControlTarget = Object.freeze({
+  sessionId: 'session-1', hostSessionId: 'host:one', operation: 'STOP_ACTIVE_TURN',
+  targetKind: 'ROOT_TURN', targetId: 'turn:original',
+});
+
+it('orders control preparation between observes without installing snapshot state or skipping interaction events', async () => {
+  let releaseObserve!: () => void;
+  let releaseSnapshot!: () => void;
+  let releaseNextObserve!: () => void;
+  const observeGate = new Promise<void>(resolve => { releaseObserve = resolve; });
+  const snapshotGate = new Promise<void>(resolve => { releaseSnapshot = resolve; });
+  const nextObserveGate = new Promise<void>(resolve => { releaseNextObserve = resolve; });
+  const requests: Array<{operation: string; body: Record<string, unknown>}> = [];
+  let observations = 0;
+  const originalInteraction = {interaction_id: 'interaction:old', interaction_kind: 'TOOL_CONFIRMATION', public_prompt: 'original'};
+  stubRuntimeFetch(vi.fn(async (input, init) => {
+    const operation = String(input).split('/').at(-1)!;
+    if (operation === 'connections') return new Response(JSON.stringify(connectPayload([], {}, [], {
+      owner_epoch: '7', live_revision: '4', host_session_id: 'host:one',
+      active_root_turn_id: 'turn:original', current_interaction: originalInteraction,
+    })));
+    const body = JSON.parse(String(init?.body));
+    requests.push({operation, body});
+    if (operation === 'live-control-snapshot') {
+      await snapshotGate;
+      return new Response(JSON.stringify({live_control_snapshot: {snapshot: {
+        owner_epoch: '8', live_revision: '90', host_session_id: 'host:one', control_admission_deadline_ms: '8000000',
+        active_root_turn_id: 'turn:successor', manual_compaction_command_id: 'command:manual',
+        current_interaction: {interaction_id: 'interaction:unobserved', interaction_kind: 'TOOL_CONFIRMATION'},
+        current_todos: [{todo_run_id: 'todo-run:new'}], media_ranges: [{attempt_id: 'attempt:new'}],
+      }}}));
+    }
+    if (++observations === 1) {
+      await observeGate;
+      return new Response(JSON.stringify({observation: {
+        through_event_sequence: '1', live_owner_epoch: '1', through_live_revision: '2',
+        live_control_owner_epoch: '7', through_live_control_revision: '5', active_root_turn_id: 'turn:original',
+      }}));
+    }
+    await nextObserveGate;
+    return new Response(JSON.stringify({observation: {
+      through_event_sequence: '1', live_owner_epoch: '1', through_live_revision: '2',
+      live_control_owner_epoch: '7', through_live_control_revision: '7', active_root_turn_id: 'turn:successor',
+      live_control: [{kind: 'LIVE_INTERACTION_CLOSED'}, {kind: 'LIVE_INTERACTION_OPENED',
+        interaction: {interaction_id: 'interaction:next', interaction_kind: 'TOOL_CONFIRMATION', public_prompt: 'next'}}],
+    }}));
+  }));
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const first = connection.observe();
+  const target = {...rootControlTarget};
+  const preparing = connection.prepareUserControlCommand(target);
+  target.targetId = 'turn:mutated';
+  target.hostSessionId = 'host:mutated';
+  const second = connection.observe();
+  await vi.waitFor(() => expect(requests.map(value => value.operation)).toEqual(['observe']));
+  releaseObserve();
+  const beforePreparation = await first;
+  await vi.waitFor(() => expect(requests.map(value => value.operation)).toEqual(['observe', 'live-control-snapshot']));
+  expect(connection.current()).toEqual(beforePreparation);
+  releaseSnapshot();
+  const reference = await preparing;
+  expect(reference).toMatchObject({...rootControlTarget, admissionDeadlineMs: 8000000});
+  expect(Object.isFrozen(reference)).toBe(true);
+  expect(connection.current()).toEqual(beforePreparation);
+  expect(beforePreparation.liveControl.current_interaction).toEqual(originalInteraction);
+  releaseNextObserve();
+  const next = await second;
+  expect(requests[2]).toMatchObject({operation: 'observe', body: {
+    after_event_sequence: '1', live_owner_epoch: 1, after_live_revision: 2,
+    live_control_owner_epoch: 7, after_live_control_revision: 5,
+  }});
+  expect(next.liveControl).toMatchObject({current_interaction: {interaction_id: 'interaction:next'}});
+  expect(next.liveControl.current_todos).toBeUndefined();
+  expect(next.liveControl.media_ranges).toBeUndefined();
+  expect(next.manualCompactionCommandId).toBeUndefined();
+  expect(next.activeTurnId).toBe('turn:successor');
+  expect(reference.targetId).toBe('turn:original');
+});
+
+it('keeps a control preparation snapshot from concealing a subsequent live-control gap', async () => {
+  const payload = connectPayload([], {}, [], {host_session_id: 'host:one', owner_epoch: '2', live_revision: '3'});
+  const responses = [payload,
+    {live_control_snapshot: {snapshot: {host_session_id: 'host:one', owner_epoch: '2', live_revision: '99', control_admission_deadline_ms: '10000'}}},
+    {observation: {gap: {kind: 'LIVE_CONTROL_GAP', reason: 'LIVE_CONTROL_RING_GAP'}, through_live_control_revision: '99'}},
+  ];
+  const fetcher = vi.fn(async () => new Response(JSON.stringify(responses.shift())));
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await connection.prepareUserControlCommand(rootControlTarget);
+  await expect(connection.observe()).rejects.toMatchObject({gapKind: 'LIVE_CONTROL_GAP'});
+  expect(connection.current()).toMatchObject({liveControlOwnerEpoch: 2, liveControlRevision: 3});
+  expect(JSON.parse(String(fetcher.mock.calls.at(-1)?.[1]?.body))).toMatchObject({
+    live_control_owner_epoch: 2, after_live_control_revision: 3,
+  });
+});
+
+it.each([
+  ['another Host', {host_session_id: 'host:other', control_admission_deadline_ms: '9000'}, 'OWNER_UNAVAILABLE'],
+  ['missing Host', {control_admission_deadline_ms: '9000'}, 'OWNER_UNAVAILABLE'],
+  ['missing deadline', {host_session_id: 'host:one'}, 'PROTOCOL_RESPONSE_INVALID'],
+  ['zero deadline', {host_session_id: 'host:one', control_admission_deadline_ms: '0'}, 'PROTOCOL_RESPONSE_INVALID'],
+  ['fractional deadline', {host_session_id: 'host:one', control_admission_deadline_ms: '1.5'}, 'PROTOCOL_RESPONSE_INVALID'],
+  ['unsafe deadline', {host_session_id: 'host:one', control_admission_deadline_ms: '9007199254740992'}, 'PROTOCOL_RESPONSE_INVALID'],
+] as const)('rejects control preparation with %s without allocating a command', async (_label, snapshot, code) => {
+  const allocate = vi.fn(webcrypto.getRandomValues.bind(webcrypto));
+  vi.stubGlobal('crypto', {getRandomValues: allocate});
+  const responses = [connectPayload([], {}, [], {host_session_id: 'host:one'}), {live_control_snapshot: {snapshot}}];
+  const fetcher = vi.fn(async () => new Response(JSON.stringify(responses.shift())));
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  allocate.mockClear();
+  await expect(connection.prepareUserControlCommand(rootControlTarget)).rejects.toMatchObject({code});
+  expect(allocate).not.toHaveBeenCalled();
+  expect(fetcher).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  ['observer', {role: 'observer'}, {}, 'CONTROL_UNAVAILABLE'],
+  ['foreign session', {}, {sessionId: 'session:other'}, 'CONTROL_REFERENCE_INVALID'],
+  ['foreign Host', {}, {hostSessionId: 'host:other'}, 'OWNER_UNAVAILABLE'],
+  ['missing target', {}, {targetId: ''}, 'CONTROL_REFERENCE_INVALID'],
+  ['operation/target mismatch', {}, {targetKind: 'BACKGROUND_PROCESS'}, 'CONTROL_REFERENCE_INVALID'],
+] as const)('rejects %s before reading control preparation metadata', async (_label, connectionFields, targetFields, code) => {
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({
+    ...connectPayload([], {}, [], {host_session_id: 'host:one'}), ...connectionFields,
+  })));
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await expect(connection.prepareUserControlCommand({...rootControlTarget, ...targetFields})).rejects.toMatchObject({code});
+  expect(fetcher).toHaveBeenCalledOnce();
+});
+
+it('rejects a connection closed during or before control preparation without allocating a command', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const allocate = vi.fn(webcrypto.getRandomValues.bind(webcrypto));
+  vi.stubGlobal('crypto', {getRandomValues: allocate});
+  const fetcher = vi.fn(async (input, init) => {
+    if (String(input).endsWith('/connections')) return new Response(JSON.stringify(connectPayload([], {}, [], {host_session_id: 'host:one'})));
+    if (init?.method === 'DELETE') return new Response('{}');
+    await gate;
+    return new Response(JSON.stringify({live_control_snapshot: {snapshot: {host_session_id: 'host:one', control_admission_deadline_ms: '9000'}}}));
+  });
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  allocate.mockClear();
+  const preparing = connection.prepareUserControlCommand(rootControlTarget);
+  const rejected = expect(preparing).rejects.toMatchObject({code: 'CONNECTION_CLOSED'});
+  await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+  expect(allocate).not.toHaveBeenCalled();
+  await connection.close();
+  release();
+  await rejected;
+  await expect(connection.prepareUserControlCommand(rootControlTarget)).rejects.toMatchObject({code: 'CONNECTION_CLOSED'});
+  expect(fetcher).toHaveBeenCalledTimes(3);
+  expect(allocate).not.toHaveBeenCalled();
+});
+
+it('retries an unsent preparation but keeps the final controller gate and original target authoritative', async () => {
+  const responses = [connectPayload([], {}, [], {host_session_id: 'host:one', active_root_turn_id: 'turn:original'}),
+    {error: {stable_code: 'SERVER_OPERATION_FAILED'}},
+    {live_control_snapshot: {snapshot: {host_session_id: 'host:one', control_admission_deadline_ms: '9000', active_root_turn_id: 'turn:successor'}}},
+    {error: {stable_code: 'CONTROL_UNAVAILABLE'}},
+  ];
+  const fetcher = vi.fn(async () => new Response(JSON.stringify(responses.shift())));
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  await expect(connection.prepareUserControlCommand(rootControlTarget)).rejects.toMatchObject({code: 'SERVER_OPERATION_FAILED'});
+  const reference = await connection.prepareUserControlCommand(rootControlTarget);
+  await expect(connection.stopActiveTurn(reference)).rejects.toMatchObject({code: 'CONTROL_UNAVAILABLE'});
+  expect(JSON.parse(String(fetcher.mock.calls.at(-1)?.[1]?.body))).toMatchObject({
+    target_turn_id: 'turn:original', expected_host_session_id: 'host:one', command_id: reference.commandId,
+  });
+});
+
+it('prepares new identities without renewing an earlier command deadline for queries', async () => {
+  const responses = [connectPayload([], {}, [], {host_session_id: 'host:one'}),
+    {live_control_snapshot: {snapshot: {host_session_id: 'host:one', control_admission_deadline_ms: '9000'}}},
+    {live_control_snapshot: {snapshot: {host_session_id: 'host:one', control_admission_deadline_ms: '4000000'}}},
+    {query_command: {found: true, control_query_status: 'CONTROL_QUERY_FOUND', outcome: {status: 'SUCCEEDED', public_code: 'ROOT_STOPPED'}}},
+  ];
+  const fetcher = vi.fn(async () => new Response(JSON.stringify(responses.shift())));
+  stubRuntimeFetch(fetcher);
+  const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
+  const original = await connection.prepareUserControlCommand(rootControlTarget);
+  const next = await connection.prepareUserControlCommand(rootControlTarget);
+  expect(next.commandId).not.toBe(original.commandId);
+  expect(next.admissionDeadlineMs).toBe(4000000);
+  expect(original.admissionDeadlineMs).toBe(9000);
+  expect(await connection.queryControlCommand(original)).toMatchObject({status: 'FOUND', receipt: {publicCode: 'ROOT_STOPPED'}});
+  expect(JSON.parse(String(fetcher.mock.calls.at(-1)?.[1]?.body))).toMatchObject({
+    command_id: original.commandId, expected_control: {admission_deadline_ms: 9000, target_id: 'turn:original'},
+  });
+});
+
 it('preserves PR03 exact control/query identities and typed query retirement states', async () => {
   vi.stubGlobal('crypto', { getRandomValues: webcrypto.getRandomValues.bind(webcrypto),
     ...globalThis.crypto,
@@ -330,6 +565,7 @@ it('preserves PR03 exact control/query identities and typed query retirement sta
       active_root_turn_id: 'turn:A',
       control_admission_deadline_ms: '9000',
     }),
+    {live_control_snapshot: {snapshot: {host_session_id: 'host:one', control_admission_deadline_ms: '9000'}}},
     { command_outcome: {
       command_id: 'command:control:9000:66666666-6666-4666-8666-666666666666',
       status: 'PENDING',
@@ -379,10 +615,8 @@ it('preserves PR03 exact control/query identities and typed query retirement sta
   }));
 
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
-  const projection = connection.current();
-  const reference = createUserControlCommandRef(
-    projection, 'session-1', 'STOP_ACTIVE_TURN', 'ROOT_TURN', 'turn:A',
-  );
+  const reference = await connection.prepareUserControlCommand({sessionId: 'session-1', hostSessionId: 'host:one',
+    operation: 'STOP_ACTIVE_TURN', targetKind: 'ROOT_TURN', targetId: 'turn:A'});
   const accepted = await connection.stopActiveTurn(reference);
   expect(accepted).toMatchObject({
     status: 'pending',
@@ -399,7 +633,8 @@ it('preserves PR03 exact control/query identities and typed query retirement sta
     status: 'FOUND',
     receipt: { status: 'succeeded', userControl: { execution: 'FINISHED' } },
   });
-  expect(requests[0]).toEqual({
+  expect(requests[0]).toEqual({operation: 'live-control-snapshot', body: {}});
+  expect(requests[1]).toEqual({
     operation: 'command',
     body: {
       command_id: reference.commandId,
@@ -411,7 +646,7 @@ it('preserves PR03 exact control/query identities and typed query retirement sta
       target_turn_id: 'turn:A',
     },
   });
-  expect(requests.slice(1).every((request) => (
+  expect(requests.slice(2).every((request) => (
     request.operation === 'query-command'
     && (request.body.expected_control as Record<string, unknown>).target_id === 'turn:A'
   ))).toBe(true);
@@ -3270,6 +3505,7 @@ it('stops an idle manual owner with its command identity and clears ended owner 
       host_session_id: 'host:one', control_admission_deadline_ms: '9000',
       manual_compaction_command_id: 'command:manual-original',
     }),
+    {live_control_snapshot: {snapshot: {host_session_id: 'host:one', control_admission_deadline_ms: '9000'}}},
     {command_outcome: {status: 'PENDING', target_id: 'command:manual-original'}},
     {observation: {
       through_event_sequence: '0', live_owner_epoch: '1', through_live_revision: '0',
@@ -3285,8 +3521,8 @@ it('stops an idle manual owner with its command identity and clears ended owner 
   const connection = await new LocalHttpRuntimeAdapter().connect('session-1');
   expect(connection.current()).toMatchObject({isRunning: false, manualCompactionCommandId: 'command:manual-original'});
   expect(connection.current().activeTurnId).toBeUndefined();
-  const reference = createUserControlCommandRef(connection.current(), 'session-1',
-    'STOP_CONTEXT_COMPACTION', 'MANUAL_COMPACTION', 'command:manual-original');
+  const reference = await connection.prepareUserControlCommand({sessionId: 'session-1', hostSessionId: 'host:one',
+    operation: 'STOP_CONTEXT_COMPACTION', targetKind: 'MANUAL_COMPACTION', targetId: 'command:manual-original'});
   await connection.stopContextCompaction(reference);
   expect(bodies.at(-1)).toMatchObject({
     command_kind: 'STOP_CONTEXT_COMPACTION', target_compaction_command_id: 'command:manual-original',

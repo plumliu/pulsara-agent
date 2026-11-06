@@ -57,7 +57,7 @@ describe('PulsaraApp', () => {
   it('keeps the original stop error when its command result is unavailable, without resending', async () => {
     const adapter = new FakeAdapter();
     adapter.connectionValue = {
-      ...projection(), hostSessionId: 'host:stop-error', controlAdmissionDeadlineMs: 42_000,
+      ...projection(), hostSessionId: 'host:stop-error',
     };
     renderWorkbench(<PulsaraApp adapter={adapter} />);
     await screen.findByLabelText('发送给 Pulsara');

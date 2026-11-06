@@ -2734,9 +2734,11 @@ class ConversationKernelRunner:
         if self._active_execution is not None:
             raise RuntimeError("another provider execution is already active")
         self._active_execution = execution
+        stream = execution.open_once(permit)
+        collection_error: BaseException | None = None
         try:
             execution.set_draft_identity(proposed_entry_id)
-            async for item in execution.open_once(permit):
+            async for item in stream:
                 if isinstance(item, ProviderGenerationRetry):
                     # No assistant settlement or tool dispatch has happened.
                     # Replace only disposable output, keeping the installed
@@ -2805,14 +2807,50 @@ class ConversationKernelRunner:
                 provider_replay=provider_replay,
             )
         except BaseException as exc:
+            collection_error = exc
             abort_generation(f"MODEL_STREAM_{type(exc).__name__.upper()}")
             raise
         finally:
+            # A consumer failure leaves open_once suspended at its yield. Own
+            # its explicit close through repeated cancellation, rather than
+            # leaving transport/borrow retirement to async-generator GC.
+            closing = asyncio.create_task(stream.aclose(), name="provider-consumer-close")
+            caller = asyncio.current_task()
+            cancellation_baseline = 0 if caller is None else caller.cancelling()
+            cancellation: asyncio.CancelledError | None = None
+            close_error: BaseException | None = None
             try:
-                execution.clear_retry_observation()
+                while not closing.done():
+                    try:
+                        await asyncio.shield(closing)
+                    except asyncio.CancelledError as exc:
+                        if caller is not None and caller.cancelling() > cancellation_baseline:
+                            cancellation = cancellation or exc
+                    except BaseException:
+                        break
+                try:
+                    closing.result()
+                except BaseException as exc:
+                    close_error = exc
             finally:
-                if self._active_execution is execution:
-                    self._active_execution = None
+                try:
+                    execution.clear_retry_observation()
+                finally:
+                    if self._active_execution is execution:
+                        self._active_execution = None
+            if collection_error is not None:
+                if close_error is not None:
+                    if collection_error.__cause__ is None and collection_error.__context__ is None:
+                        raise collection_error from close_error
+                    collection_error.add_note(execution.scrub_provider_detail(
+                        f"Provider cleanup failure: {type(close_error).__name__}: {close_error}"
+                    ))
+            elif cancellation is not None or close_error is not None:
+                error = cancellation if cancellation is not None else close_error
+                abort_generation(f"MODEL_STREAM_{type(error).__name__.upper()}")
+                if cancellation is not None and close_error is not None:
+                    raise cancellation from close_error
+                raise error
 
     def _offer_compile_observation(
         self,

@@ -339,7 +339,6 @@ export interface RuntimeProjection {
   activeTurnId?: string;
   manualCompactionCommandId?: string;
   hostSessionId?: string;
-  controlAdmissionDeadlineMs?: number;
   control: ProtocolCanonicalControl;
   liveControl: ProtocolLiveControlSnapshot;
   todo?: TodoRun;
@@ -444,41 +443,17 @@ export interface BackgroundProcessLog {
 }
 
 export interface UserControlCommandRef {
-  admissionDeadlineMs: number;
-  commandId: string;
-  operation: 'STOP_ACTIVE_TURN' | 'STOP_CONTEXT_COMPACTION' | 'TERMINATE_BACKGROUND_PROCESS';
-  sessionId: string;
-  hostSessionId: string;
-  targetKind: 'ROOT_TURN' | 'MANUAL_COMPACTION' | 'BACKGROUND_PROCESS';
-  targetId: string;
+  readonly admissionDeadlineMs: number;
+  readonly commandId: string;
+  readonly operation: 'STOP_ACTIVE_TURN' | 'STOP_CONTEXT_COMPACTION' | 'TERMINATE_BACKGROUND_PROCESS';
+  readonly sessionId: string;
+  readonly hostSessionId: string;
+  readonly targetKind: 'ROOT_TURN' | 'MANUAL_COMPACTION' | 'BACKGROUND_PROCESS';
+  readonly targetId: string;
 }
 
-export function createUserControlCommandRef(
-  projection: Pick<RuntimeProjection, 'hostSessionId' | 'controlAdmissionDeadlineMs'>,
-  sessionId: string,
-  operation: UserControlCommandRef['operation'],
-  targetKind: UserControlCommandRef['targetKind'],
-  targetId: string,
-): UserControlCommandRef {
-  const hostSessionId = projection.hostSessionId ?? '';
-  const deadline = projection.controlAdmissionDeadlineMs ?? 0;
-  if (!sessionId || !hostSessionId || !targetId || deadline < 1) {
-    throw new RuntimeApiError(
-      'CONTROL_TARGET_UNAVAILABLE',
-      '当前控制身份尚未确认，请刷新后重试。',
-      true,
-    );
-  }
-  return {
-    commandId: randomIdentity('command'),
-    admissionDeadlineMs: deadline,
-    operation,
-    sessionId,
-    hostSessionId,
-    targetKind,
-    targetId,
-  };
-}
+export type UserControlTarget = Readonly<Pick<UserControlCommandRef,
+  'operation' | 'sessionId' | 'hostSessionId' | 'targetKind' | 'targetId'>>;
 
 export interface UserControlReceipt {
   accepted: boolean;
@@ -824,6 +799,7 @@ export interface RuntimeConnection {
   ): Promise<CommandReceipt>;
   cancelQueuedPrompt(commandId: string, queueItemId: string): Promise<CommandReceipt>;
   steerQueuedPrompt(commandId: string, queueItemId: string, targetTurnId: string): Promise<CommandReceipt>;
+  prepareUserControlCommand(target: UserControlTarget): Promise<UserControlCommandRef>;
   stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt>;
   stopContextCompaction(reference: UserControlCommandRef): Promise<CommandReceipt>;
   terminateBackgroundProcess(reference: UserControlCommandRef): Promise<CommandReceipt>;
@@ -3410,6 +3386,45 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
     return this.command('STEER_QUEUED_PROMPT', { target_queue_item_id: queueItemId, target_turn_id: targetTurnId }, commandId);
   }
 
+  prepareUserControlCommand(target: UserControlTarget): Promise<UserControlCommandRef> {
+    const frozen = Object.freeze({
+      operation: target.operation, sessionId: target.sessionId,
+      hostSessionId: target.hostSessionId, targetKind: target.targetKind, targetId: target.targetId,
+    });
+    const assertOwner = () => {
+      if (this.closed) throw new RuntimeApiError('CONNECTION_CLOSED', '本地连接已经关闭。', true);
+      if (this.role !== 'controller') throw new RuntimeApiError('CONTROL_UNAVAILABLE', '当前页面没有运行控制权。', true);
+      if (!frozen.targetId || !frozen.hostSessionId || frozen.sessionId !== this.sessionId
+        || ({STOP_ACTIVE_TURN: 'ROOT_TURN', STOP_CONTEXT_COMPACTION: 'MANUAL_COMPACTION',
+          TERMINATE_BACKGROUND_PROCESS: 'BACKGROUND_PROCESS'} as const)[frozen.operation] !== frozen.targetKind) {
+        throw new RuntimeApiError('CONTROL_REFERENCE_INVALID', '控制操作的 owner 或目标身份不一致。', false);
+      }
+      if (frozen.hostSessionId !== this.liveControl.host_session_id) {
+        throw new RuntimeApiError('OWNER_UNAVAILABLE', '原会话运行实例已不可控制。', true);
+      }
+    };
+    return this.ordered(async () => {
+      assertOwner();
+      // This endpoint replaces the server subscriber. Serialize it with observe,
+      // but retain our old cursor so its unobserved interaction suffix is replayed.
+      const frame = await this.post<{
+        live_control_snapshot?: { snapshot?: ProtocolLiveControlSnapshot }; error?: ProtocolError;
+      }>('live-control-snapshot', {});
+      assertProtocolFrame(frame);
+      assertOwner();
+      const snapshot = frame.live_control_snapshot?.snapshot;
+      if (!snapshot) throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '当前控制身份暂时无法读取。', true);
+      if (snapshot.host_session_id !== frozen.hostSessionId) {
+        throw new RuntimeApiError('OWNER_UNAVAILABLE', '原会话运行实例已不可控制。', true);
+      }
+      const deadline = Number(snapshot.control_admission_deadline_ms);
+      if (!Number.isSafeInteger(deadline) || deadline < 1) {
+        throw new RuntimeApiError('PROTOCOL_RESPONSE_INVALID', '本地服务返回的控制准入期限无效。', true);
+      }
+      return Object.freeze({...frozen, admissionDeadlineMs: deadline, commandId: randomIdentity('command')});
+    });
+  }
+
   stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt> {
     this.assertControlReference(reference, 'STOP_ACTIVE_TURN', 'ROOT_TURN');
     return this.command('STOP_ACTIVE_TURN', {
@@ -4369,9 +4384,6 @@ class LocalRuntimeConnection extends CanonicalHistoryReader implements RuntimeCo
       activeTurnId: this.liveControl.active_root_turn_id || activeTurn?.turn_id,
       manualCompactionCommandId: manualCommandId || undefined,
       hostSessionId: this.liveControl.host_session_id || undefined,
-      controlAdmissionDeadlineMs: numeric(
-        this.liveControl.control_admission_deadline_ms,
-      ) || undefined,
       control: this.control,
       liveControl: this.liveControl,
       todo,

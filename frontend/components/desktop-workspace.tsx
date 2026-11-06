@@ -34,7 +34,24 @@ export type WorkspaceTab = WorkspaceTabBase & (
   | { kind: 'agent'; entityId: string; hostSessionId?: never }
   | { kind: 'cell'; sourceExecAttemptId: string; entityId?: string; hostSessionId?: string }
   | { kind: 'cell-graph'; entityId: string; hostSessionId: string })));
-export type BackgroundControlMemory = Map<string, { reference?: UserControlCommandRef; control?: CommandReceipt; error?: string }>;
+export interface BackgroundControlAttempt {
+  reference: UserControlCommandRef;
+  control?: CommandReceipt;
+  error?: string;
+  unknown?: boolean;
+  ownerUnavailable?: boolean;
+  sending?: boolean;
+  query?: Promise<void>;
+  lastQueryStarted?: number;
+}
+export interface BackgroundControlRecord {
+  process: BackgroundProcess;
+  preparing: boolean;
+  prepareError?: string;
+  currentCommandId?: string;
+  attempts: Map<string, BackgroundControlAttempt>;
+}
+export type BackgroundControlMemory = Map<string, BackgroundControlRecord>;
 export interface PreparedWorkspaceTab { adopt: () => WorkspaceTab | undefined; release: () => void; start?: () => void }
 interface WorkspaceContext {
   interact: () => void;

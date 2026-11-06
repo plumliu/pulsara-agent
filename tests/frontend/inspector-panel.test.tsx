@@ -141,7 +141,6 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
     onReadPromptImage: vi.fn(),
     backgroundOwnerKey: 'session-one:host-one',
     backgroundHostSessionId: 'host-one',
-    backgroundControlAdmissionDeadlineMs: 4_200,
     onLoadBackgroundProcesses: vi.fn(async () => ({ processes: [backgroundProcess] })),
     onReadBackgroundProcessLog: vi.fn(async () => ({
       process: backgroundProcess,
@@ -152,7 +151,7 @@ function props(overrides: Partial<ComponentProps<typeof InspectorPanel>> = {}): 
       truncatedByResponseBound: false,
       sourceCoverage: 'COMPLETE',
     })),
-    onTerminateBackgroundProcess: vi.fn(),
+    onPrepareBackgroundControl: vi.fn(), onTerminateBackgroundProcess: vi.fn(),
     onQueryControl: vi.fn(async () => ({ status: 'RESULT_UNAVAILABLE' as const })),
     onRetryCapabilities: vi.fn(),
     onToggleProjectSkill: vi.fn(async () => undefined),

@@ -5,8 +5,9 @@ import { afterEach, beforeEach, vi } from 'vitest';
 import { LocalMemoryApi } from '../../frontend/lib/memory-api';
 
 
+import { randomIdentity } from '../../frontend/lib/identity';
 import { RuntimeApiError } from '../../frontend/lib/runtime-adapter';
-import type { CommandReceipt, BackgroundProcessLog, BackgroundProcessPage, ForkOutcome, RuntimeAdapter, RuntimeBootstrap, ModelCatalogReadModel, RuntimeConnection, RuntimeInteractionContent, RuntimeInteractionSummary, RuntimeProjection, UserControlQueryResult, UserControlCommandRef, CanonicalPromptContent, CanonicalPromptImagePart, EditablePromptContent, ModelCallBindingPayload } from '../../frontend/lib/runtime-adapter';
+import type { CommandReceipt, BackgroundProcessLog, BackgroundProcessPage, ForkOutcome, RuntimeAdapter, RuntimeBootstrap, ModelCatalogReadModel, RuntimeConnection, RuntimeInteractionContent, RuntimeInteractionSummary, RuntimeProjection, UserControlQueryResult, UserControlCommandRef, UserControlTarget, CanonicalPromptContent, CanonicalPromptImagePart, EditablePromptContent, ModelCallBindingPayload } from '../../frontend/lib/runtime-adapter';
 import type { CapabilitySnapshot, SessionSummary, SessionWorkspaceSelection, UserCapabilitySnapshot } from '../../frontend/lib/pulsara-types';
 import { WELCOME_TYPEWRITER_PHRASES } from '../../frontend/components/welcome-typewriter';
 
@@ -407,9 +408,14 @@ class FakeConnection implements RuntimeConnection {
     return { commandId, status: 'succeeded' };
   }
 
-  async stopActiveTurn(_reference: UserControlCommandRef): Promise<CommandReceipt> {
-    void _reference;
-    return { commandId: 'command-3', status: 'succeeded' };
+  prepareUserControlCommand = vi.fn(async (target: UserControlTarget): Promise<UserControlCommandRef> => Object.freeze({ ...target, commandId: randomIdentity('command'), admissionDeadlineMs: 42_000 }));
+
+  async stopActiveTurn(reference: UserControlCommandRef): Promise<CommandReceipt> {
+    return { commandId: reference.commandId, targetId: reference.targetId, status: 'succeeded' };
+  }
+
+  async stopContextCompaction(reference: UserControlCommandRef): Promise<CommandReceipt> {
+    return { commandId: reference.commandId, targetId: reference.targetId, status: 'succeeded' };
   }
 
   async terminateBackgroundProcess(): Promise<CommandReceipt> {

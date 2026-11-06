@@ -56,6 +56,7 @@ import type {
   ToolOutputPage,
   CanonicalPromptImagePart,
   UserControlCommandRef,
+  UserControlTarget,
   UserControlQueryResult,
   RuntimeAdapter,
 } from '../lib/runtime-adapter';
@@ -78,7 +79,7 @@ interface InspectorPanelProps {
   onReadToolOutput: (resultEntryId: string, position: ToolOutputPage['position']) => Promise<ToolOutputPage>;
   backgroundOwnerKey: string;
   backgroundHostSessionId?: string;
-  backgroundControlAdmissionDeadlineMs?: number;
+  onPrepareBackgroundControl: (target: UserControlTarget) => Promise<UserControlCommandRef>;
   onLoadBackgroundProcesses: (cursor?: string) => Promise<BackgroundProcessPage>;
   onReadBackgroundProcessLog: (processId: string, cursor?: string) => Promise<BackgroundProcessLog>;
   onTerminateBackgroundProcess: (reference: UserControlCommandRef) => Promise<CommandReceipt>;
@@ -506,7 +507,7 @@ export function InspectorPanel({
   capabilityBusy,
   backgroundOwnerKey,
   backgroundHostSessionId,
-  backgroundControlAdmissionDeadlineMs,
+  onPrepareBackgroundControl,
   onLoadBackgroundProcesses,
   onReadBackgroundProcessLog,
   onTerminateBackgroundProcess,
@@ -593,7 +594,7 @@ export function InspectorPanel({
             ownerKey={backgroundOwnerKey}
             sessionId={session.id}
             hostSessionId={backgroundHostSessionId}
-            controlAdmissionDeadlineMs={backgroundControlAdmissionDeadlineMs}
+            prepareControl={onPrepareBackgroundControl}
             canControl={canControl}
             loadProcesses={onLoadBackgroundProcesses}
             readLog={onReadBackgroundProcessLog}

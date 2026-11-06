@@ -9,6 +9,7 @@ physical operation exits; Host close also drains every admitted task.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -217,6 +218,28 @@ class KernelSessionIO:
                 task.add_done_callback(self._retire)
             timed_out = False
             caller_cancelled = False
+            waiter = asyncio.current_task()
+            assert waiter is not None
+            cancellation_baseline = waiter.cancelling()
+
+            def observe_caller_cancellation() -> None:
+                nonlocal caller_cancelled
+                # A worker can itself raise CancelledError. Only a new cancel
+                # request on this waiter is a caller cancellation; retain that
+                # fact even when the physical task also becomes cancelled.
+                if caller_cancelled or waiter.cancelling() <= cancellation_baseline:
+                    return
+                caller_cancelled = True
+                if on_caller_cancelled is not None:
+                    try:
+                        on_caller_cancelled()
+                    except BaseException:
+                        # Notification cannot detach physical work or replace
+                        # its exact result, including when it raises cancellation.
+                        logging.getLogger(__name__).warning(
+                            "tool_cancellation_notification_failed", exc_info=True
+                        )
+
             remaining = deadline_monotonic - monotonic()
             if remaining > 0:
                 try:
@@ -224,9 +247,7 @@ class KernelSessionIO:
                 except TimeoutError:
                     timed_out = True
                 except asyncio.CancelledError:
-                    caller_cancelled = True
-                    if on_caller_cancelled is not None:
-                        on_caller_cancelled()
+                    observe_caller_cancellation()
                 except BaseException:
                     # Collect the completed task's exact exception below, with
                     # its timing and observation, so the tool owner can classify it.
@@ -234,7 +255,8 @@ class KernelSessionIO:
             else:
                 timed_out = True
             if not task.done():
-                await _drain_physical_task(task)
+                await _drain_physical_task(task, on_cancel=observe_caller_cancellation)
+            observe_caller_cancellation()
             timing = (
                 PhysicalToolInvocationTiming.LATE_AFTER_WATCHDOG
                 if timed_out or caller_cancelled
@@ -308,13 +330,17 @@ class KernelSessionIO:
             raise TimeoutError("foreground physical I/O exited after close deadline")
 
 
-async def _drain_physical_task(task: asyncio.Task[object]) -> None:
+async def _drain_physical_task(
+    task: asyncio.Task[object], *, on_cancel: Callable[[], None] | None = None,
+) -> None:
     """Join one admitted thread even if its logical waiter is cancelled again."""
 
     while not task.done():
         try:
             await asyncio.shield(task)
         except asyncio.CancelledError:
+            if on_cancel is not None:
+                on_cancel()
             # Repeated cancellation only detaches the logical waiter after the
             # physical operation has reached a terminal state.
             continue
