@@ -787,3 +787,23 @@ description: {description}
         encoding="utf-8",
     )
     return skill_dir
+
+
+def test_script_manual_is_only_projected_to_root(tmp_path):
+    from pulsara_agent.capability.plugin_skill_contracts import PluginSkillDefinitionsDisposition
+    from pulsara_agent.conversation_kernel.capability import KernelSkillProjectionComposer
+    from pulsara_agent.model_input.contracts import ModelInputScopeKind
+
+    with BundledSkillDistributionBindingOwner() as binding:
+        composer = KernelSkillProjectionComposer(
+            workspace_root=tmp_path, bundled_binding_owner=binding,
+            plugin_definitions_provider=lambda: FrozenPluginSkillDefinitions(PluginSkillDefinitionsDisposition.COMPLETE),
+            loose_producer=LooseSkillDefinitionProducer(
+                user_product_skills_root=tmp_path / 'user', user_agents_skills_root=tmp_path / 'agents'),
+        )
+        root = composer.freeze_owner_snapshot(conversation_scope_kind=ModelInputScopeKind.ROOT)
+        child = composer.freeze_owner_snapshot(conversation_scope_kind=ModelInputScopeKind.SUBAGENT)
+        assert 'pulsara-code-mode' in {s.name for s in root.inspection.winners}
+        assert 'pulsara-code-mode' not in {s.name for s in child.inspection.winners}
+        assert len(root.source_snapshot.facts) == len(child.source_snapshot.facts) + 1
+        assert composer.freeze_projection_input(child).inspection is child.inspection

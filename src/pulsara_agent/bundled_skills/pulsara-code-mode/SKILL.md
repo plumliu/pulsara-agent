@@ -16,8 +16,6 @@ to inspect, supplement or stop work directly while scripts run. These are normal
 control entry points, available independently of Cell capacity and the Code Mode
 runtime. Their `tools.*` counterparts operate on the same Agent and Work targets.
 New assignments and waits use Code Mode; native messages supplement active work.
-Subagents keep native `query_agents`, `send_agent_message` and `wait_agent` for
-their own visible work and known teammates. They do not run scripts.
 
 For ordinary tools offered in both forms, native calls and `tools.name(...)`
 share their arguments and operate on the same files, processes and saved results.

@@ -119,12 +119,12 @@ def test_code_mode_uses_catalog_profile_free_run_agent_schema(tmp_path):
         port.bind_subagent_port(SimpleNamespace(tool_names=frozenset({"run_agent"})))
         try:
             surface = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+            from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
             from pulsara_agent.ports.tool_execution import thaw_tool_json_object
             assert "run_agent" not in {spec.name for spec in surface.model_surface.tool_specs}
             code = next(spec for spec in port.freeze_code_mode_tool_directory(surface,
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS).tool_specs if spec.name == "run_agent")
-            assert thaw_json(code.parameters) == thaw_tool_json_object(builtin_tool_catalog_entry("run_agent").descriptor.input_schema)
+            assert thaw_json(code.parameters) == thaw_tool_json_object(execution_catalog_entry("run_agent").descriptor.input_schema)
             schema = thaw_json(code.parameters)
             assert "profile" not in schema["properties"]
             for value in ("research_worker", None):

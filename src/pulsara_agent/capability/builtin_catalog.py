@@ -829,13 +829,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         is_read_only=True,
         permission_category="agent_local",
     ),
-    "run_agent": _descriptor(
-        name="run_agent",
-        description="Submit an ordered array of assignments through tools.run_agent in ROOT Code Mode. Omit target to create an Agent or reuse an AGENT target to continue its history. work_title describes this Work; context applies only to creation. Return aligned agents, works and details arrays after atomic acceptance. Acceptance is not completion; copy details inspect calls for WORK results. Ordinary final completes work.",
-        input_schema=run_agent_parameters_schema(),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=False, permission_category="subagent_runtime",
-    ),
     "query_agents": _descriptor(
         name="query_agents",
         description=(
@@ -866,28 +859,6 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         input_schema=object_schema(properties={"target": {"oneOf": [target_schema("AGENT"), target_schema("WORK")]}}, required=["target"]),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
-    ),
-    "decide": _descriptor(
-        name="decide",
-        description=(
-            "Evaluate one natural-language yes/no condition independently for each supplied text "
-            "using the configured Jev-like Decision model. Returns {decisions: boolean[]} in input "
-            "order. Compose with any tools or agent operations for filtering, branching, loops or "
-            "further calls. Include needed context in each input. Guard calls with "
-            "if (tools.decide.available()); this local synchronous method reports configuration "
-            "availability captured at Cell startup. Otherwise pass the condition and material to "
-            "ROOT to continue. Use JavaScript for exact comparisons. Empty inputs return an empty "
-            "array. Service failures reject the call. Decision configuration is independent of "
-            "memory reranking."
-        ),
-        input_schema=object_schema(properties={
-            "condition": {"type": "string", "minLength": 1,
-                "description": "One explicit yes/no condition to evaluate independently for each input."},
-            "inputs": {"type": "array", "items": {"type": "string"},
-                "description": "Texts to judge in order. Include the context needed for each judgment in that text."},
-        }, required=["condition", "inputs"]),
-        provider_kind=BuiltinToolDomainKind.WORKFLOW,
-        is_read_only=True, permission_category="subagent_runtime",
     ),
     "exec_cell": _descriptor(
         name="exec_cell",
@@ -1104,6 +1075,54 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
 }
 
 
+# Script APIs have Host execution metadata, but no native capability registration.
+# Reuse the dispatch descriptor value type; is_model_callable is always false.
+_SCRIPT_API_DESCRIPTORS = {
+    "run_agent": _descriptor(
+        name="run_agent",
+        description="Submit an ordered array of assignments through tools.run_agent in ROOT Code Mode. Omit target to create an Agent or reuse an AGENT target to continue its history. work_title describes this Work; context applies only to creation. Return aligned agents, works and details arrays after atomic acceptance. Acceptance is not completion; copy details inspect calls for WORK results. Ordinary final completes work.",
+        input_schema=run_agent_parameters_schema(),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=False, permission_category="subagent_runtime",
+    ),
+    "decide": _descriptor(
+        name="decide",
+        description=(
+            "Evaluate one natural-language yes/no condition independently for each supplied text "
+            "using the configured Jev-like Decision model. Returns {decisions: boolean[]} in input "
+            "order. Compose with any tools or agent operations for filtering, branching, loops or "
+            "further calls. Include needed context in each input. Guard calls with "
+            "if (tools.decide.available()); this local synchronous method reports configuration "
+            "availability captured at Cell startup. Otherwise pass the condition and material to "
+            "ROOT to continue. Use JavaScript for exact comparisons. Empty inputs return an empty "
+            "array. Service failures reject the call. Decision configuration is independent of "
+            "memory reranking."
+        ),
+        input_schema=object_schema(properties={
+            "condition": {"type": "string", "minLength": 1,
+                "description": "One explicit yes/no condition to evaluate independently for each input."},
+            "inputs": {"type": "array", "items": {"type": "string"},
+                "description": "Texts to judge in order. Include the context needed for each judgment in that text."},
+        }, required=["condition", "inputs"]),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW,
+        is_read_only=True, permission_category="subagent_runtime",
+    ),
+}
+_SCRIPT_API_DESCRIPTORS = {
+    name: replace(descriptor, is_model_callable=False)
+    for name, descriptor in _SCRIPT_API_DESCRIPTORS.items()
+}
+_SCRIPT_API_DESCRIPTORS["wait_agent"] = replace(
+    _BUILTIN_DESCRIPTORS["wait_agent"], is_model_callable=False,
+    input_schema=wait_agent_parameters_schema(include_works=True),
+    description=("Wait using exactly one array: works for exact WORK terminal outcomes, "
+        "or agents for messages or bound current work. settle is all or first. "
+        "Only agents accepts timeout_seconds (default 30, maximum 300); "
+        "timeout ends this observation only. Messages can end an agents wait early. "
+        "Use query_agents to read final or diagnostic text."),
+)
+
+
 class BuiltinToolBindingKind(StrEnum):
     SESSION_QUERY = "session_query"
     FILESYSTEM = "filesystem"
@@ -1240,18 +1259,20 @@ def builtin_tool_catalog_entry(name: str) -> BuiltinToolCatalogEntry:
         raise KeyError(f"unknown builtin tool catalog entry: {name}") from exc
 
 
-def builtin_tool_descriptor(name: str, *, code_mode: bool = False) -> BuiltinToolDescriptor:
-    """Project one sealed builtin owner onto its actual invocation entry."""
-    descriptor = builtin_tool_catalog_entry(name).descriptor
-    if name == "wait_agent" and code_mode:
-        return replace(descriptor,
-            input_schema=wait_agent_parameters_schema(include_works=True),
-            description=("Wait using exactly one array: works for exact WORK terminal outcomes, "
-                "or agents for messages or bound current work. settle is all or first. "
-                "Only agents accepts timeout_seconds (default 30, maximum 300); "
-                "timeout ends this observation only. Messages can end an agents wait early. "
-                "Use query_agents to read final or diagnostic text."))
-    return descriptor
+def builtin_tool_descriptor(name: str) -> BuiltinToolDescriptor:
+    """A native tool definition; script-only APIs are not in this inventory."""
+    return builtin_tool_catalog_entry(name).descriptor
+
+
+def script_api_catalog_entry(name: str) -> BuiltinToolCatalogEntry:
+    return _SCRIPT_API_CATALOG_BY_NAME[name]
+
+
+def execution_catalog_entry(name: str, *, code_mode: bool = False) -> BuiltinToolCatalogEntry:
+    """Shared Host settlement metadata, selected at the actual invocation boundary."""
+    if name in _SCRIPT_API_CATALOG_BY_NAME and (code_mode or name not in _BUILTIN_DESCRIPTORS):
+        return script_api_catalog_entry(name)
+    return builtin_tool_catalog_entry(name)
 
 
 def builtin_action_permission_override(
@@ -1327,9 +1348,12 @@ def _recovery_contract_identity_fingerprint(
 
 
 def _catalog_entry(
-    name: str, descriptor: BuiltinToolDescriptor
+    name: str, descriptor: BuiltinToolDescriptor, *, code_mode: bool = False
 ) -> BuiltinToolCatalogEntry:
     binding_kind, availability_kind, owners, family = _catalog_shape(name)
+    if code_mode:
+        owners = (ToolInvocationOwnerKind.HOST_MAIN_RUN,)
+        family = "code_mode"
     availability = BuiltinToolAvailabilityRequirement(
         kind=availability_kind,
         allowed_invocation_owners=owners,
@@ -1482,6 +1506,10 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "subagent_parent",
         )
+    if name == "wait_agent":
+        return (BuiltinToolBindingKind.SUBAGENT_CONTROL,
+                BuiltinToolAvailabilityKind.REQUIRES_SHARED_AGENT_CONTROL,
+                (ToolInvocationOwnerKind.SUBAGENT,), "subagent_shared")
     if name in _SUBAGENT_SHARED:
         return (
             BuiltinToolBindingKind.SUBAGENT_CONTROL,
@@ -1582,6 +1610,11 @@ _BUILTIN_TOOL_CATALOG = tuple(
 _BUILTIN_TOOL_CATALOG_BY_NAME = {entry.name: entry for entry in _BUILTIN_TOOL_CATALOG}
 if set(_BUILTIN_TOOL_CATALOG_BY_NAME) != set(_BUILTIN_DESCRIPTORS):
     raise RuntimeError("builtin tool catalog and descriptor inventory drifted")
+
+_SCRIPT_API_CATALOG_BY_NAME = {
+    name: _catalog_entry(name, descriptor, code_mode=True)
+    for name, descriptor in _SCRIPT_API_DESCRIPTORS.items()
+}
 
 FILE_WRITE_TOOL_NAMES = frozenset(
     entry.name

@@ -8,7 +8,7 @@ from unittest.mock import ANY, AsyncMock
 import pytest
 from jsonschema import Draft202012Validator
 
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
 from pulsara_agent.identity import random_id
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     prepared_request,
@@ -37,7 +37,7 @@ from pulsara_agent.scheduling.service import ScheduledTaskService
 
 def schema(name):
     return thaw_tool_json_object(
-        builtin_tool_catalog_entry(name).descriptor.input_schema
+        execution_catalog_entry(name).descriptor.input_schema
     )
 
 

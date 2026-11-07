@@ -292,6 +292,11 @@ await tools.wait_agent({ works: next.works });
 | ROOT 原生 | 无 | 无 | 保留 `query_agents`、`send_agent_message`、`stop_agent`，不依赖 Cell 名额或 sidecar |
 | 子代理原生 | 无 | `wait_agent({agents})`，不开放 `works` 分支 | 保留既有查询、通信；不开放停止其他代理 |
 
+模型可见合同按调用角色独立提供。原生 catalog 不登记 `run_agent` 或 `decide`；两者只在脚本 API 目录中拥有 schema 与宿主执行元数据。原生 `wait_agent` 的调用 owner 仅为子代理，ROOT 的脚本 `wait_agent` 使用独立的 schema 和说明。宿主结算、取消及执行服务继续复用，不把脚本 API 注册成原生 capability 后再隐藏。
+
+ROOT 的系统提示及 bundled Code Mode Skill 只说明 ROOT 可用的调用方式，不介绍子代理的原生等待入口。子代理的提示及原生工具定义只说明其自身调用方式，不教授 ROOT 的脚本 API；子代理的默认 Skill 投影不包含 ROOT 专属的 bundled `pulsara-code-mode` 手册。此处规定主动提供的调用指导，不改变文件读取权限或用户显式共享上下文的语义。
+
+
 权限范围沿用现有合同：ROOT 的 Code Mode 与协作入口仍限 bypass-permissions；不借本次接口收敛扩大其他权限模式或子代理能力。
 
 一次硬切删除旧单项对象派发、具名 batch、`.batch`／`.works` helper、旧等待 `targets` 字段及派发 `name` 参数。内部批次用有序成员和真实 ID 关联，删除仅为具名表服务的成员 key、peer 名称映射及校验。数组位置是局部关联信息，不是新的 Pulsara 对象 ID。
@@ -304,23 +309,11 @@ provider 前缀仍只能在新 cold epoch 或显式采用的 compaction successo
 
 ### 7.1 Schema 与实际授权
 
-`wait_agent` 的 JS schema 包含 `works`／`agents` 两个互斥分支，子代理 native schema 只包含 `agents`。通过共用分支 schema 定义构造各入口投影，并为每份实际 descriptor 配对其精确 execution binding；不能仅修改 provider 展示 schema 而破坏现有 specs／binding 对应关系，也不能让 JS 目录偷偷绕过 catalog 校验。
+脚本 API 目录的 `wait_agent` schema 包含 `works`／`agents` 两个互斥分支，子代理 native schema 只包含 `agents`。通过共用分支 schema 定义构造各角色独立的入口合同，并为每份实际 descriptor 配对其精确 execution binding；不能仅修改 provider 展示 schema 而破坏现有 specs／binding 对应关系，也不能让 JS 目录偷偷绕过 catalog 校验。
 
 实际 prepare／authorize／invoke 和协作 owner 都须按真实 scope／source 拒绝子代理的 `works` 分支，不能因统一名称 `wait_agent` 已在子代理白名单就放行全部参数。ROOT 原生等待仍拒绝。Agent 重复目标校验须在 `ROOT` 别名解析后再次按真实身份检查，保留原有可见性与消息游标归属。
 
-对真实 `InstalledCapabilityEpochPredecessor` 保留的 builtin 描述，若其 descriptor 已不符合当前入口合同，保留原 provider spec，并配对不可执行的 builtin 拒绝绑定，维持名称、顺序及 descriptor 的逐项对应。调用通过现有无执行 attempt 的拒绝结算返回 `TOOL_UNAVAILABLE`，同轮其他合法工具仍可执行。不能调用旧执行器、翻译旧参数、重写前缀或使轮次在规划时异常退出；只有已有合法 epoch 边界才能安装新描述。
-
-这个处理仅限真实已安装前缀，依据现有 planning predecessor 与其完整原 surface 校验；新建 surface 的 descriptor 不一致仍是结构错误，不能以不可用绑定掩盖。复用“保留描述、不可执行 leaf、普通拒绝结算”的已有模式，但现有 MCP unavailable gate 带有 MCP 专属 owner，不能假装 builtin 是 MCP。必要时增加最小的 builtin 拒绝 leaf，不新增旧 schema 注册表、兼容执行器或持久状态。其独立必要性是同时满足前缀不变与入口硬切，并避免 `prepare_planned_tool_surface` 的 descriptor 不匹配提前抛异常。
-
-### 7.2 逐成员 Hook 与原子准入
-
-唯一 `run_agent` 始终是批次操作。保留每成员 PreTool／PostTool 的业务合同，但移除靠 `.batch` 与 `run_agent` 两个名称区分的分发条件。以明确的内部成员位置区分外层批次和成员 hook；位置是本次调用的普通序号，不是新对象 ID 或另一工具。
-
-若沿用现有递归辅助函数，必须用 `member_index is None` 区分外层；第 0 项是合法成员，不能用真假值判断，否则会重新进入批次分发。外部工具名称、canonical invocation／attempt／result 仍只有一个 `run_agent` 调用，不把每成员伪造成新的工具执行。
-
-每成员 PreTool 接收该项配置，允许现有合同内的业务字段改写。全部 PreTool 后，重新校验成员数、声明顺序、逐位置预分配身份、target、标题、上下文、依赖／材料及显式依赖与同 Agent FIFO 的联合环。W1 在同 Agent 的 W2 之前，却依赖 W2，必须整批拒绝；不能通过重排成员修复。
-
-结果预算预检使用 hook 改写后的完整三个返回数组，包括 `work_title` 和 inspect；任一拒绝发生在整批受理之前，不能遗留部分 Work。PostTool 按相同下标关联各项真实结果；一项 PostTool 失败不能撤销已受理 Work、重复派发或跳过其他成员应执行的结算。
+已有会话按已丢弃处理。开发合同变更不保留旧描述、拒绝 leaf、旧会话迁移或恢复分支；当前合同的 descriptor 不一致直接作为结构错误处理。当前版本新建会话内的前缀连续性仍按正常运行合同验证。
 
 ## 8. 实施落点与验收
 
@@ -343,7 +336,7 @@ provider 前缀仍只能在新 cold epoch 或显式采用的 compaction successo
 5. ROOT 原生 run／wait 仍不可执行；子代理保留 Agent 活动等待，不获得 Work 等待、派发或停止权限。Code Mode 不可用时原生三个控制入口仍可用。
 6. Cell Stop、Host 关闭、VM 排队、工具结算、已受理 Work 保留、同 epoch provider 前缀连续性继续通过。
 7. 同一 Agent 先后执行不同标题的工作，排队时不抢占当前标题；消息驱动 turn 不误报空闲或 Work 数量；同 Host 标题更新、未选中标签、切根会话后迟到响应、关闭重开标签均正确。阅读状态与历史定位保持，同标题不同 Work 分别定位；冷读历史与未启动即停止的卡片使用自己的标题。
-8. 到达宿主的旧参数误用产生正常工具拒绝；旧 JS helper 按现有脚本错误交付，两者均不异常终止 ROOT。用真实 Host 完整请求链验证旧冻结 child `wait_agent({targets})` 的规划、借用、无 attempt 拒绝与 prefix 连续性，同轮其他合法工具仍可执行；合法新 epoch 的 `{agents}` 正常工作。不能只直调 authorize，也不能遗留新增 Agent／Work、执行准备或挂起任务。
+8. 非法调用与已删除 JS helper 不创建工作；当前入口的角色、来源和参数校验正常拒绝误用，不添加旧会话兼容。
 9. 用真实 Node／Guest 运行更新后的 Skill 示例；使用保存的真实 provider 配置做必要的单项、批量、依赖和续派验收，核对实际入参、Target、标题、结果与清理。配置只读，证据排除实际凭证值。
 10. 模型认知验收覆盖“单项派发、整批等待、选定 Work、消息观察、同 Agent 续派、跨 Cell 查询复用”，检查是否误用旧 helper、具名表、标题寻址或把消息当成任务完成。未经实际验收，不宣称已证明模型误用率下降。
 11. 第 0 项及后续成员的 Pre／Post hooks 都运行且不递归；Pre 改写 work_title 后保存／确认／回执一致，身份改写、参数超限或后项拒绝均整批零受理。Post 失败不回滚或重复工作；确认相同 attempt 与新的相同参数派发分别得到正确结果。
@@ -370,8 +363,8 @@ Python 使用仓库 `.venv`，PostgreSQL 使用独立临时本地集群，集成
 
 ### 9.1 自动验证与界面
 
-- 综合后端回归包含 628 项用例与 15 个子测试：626 项及所有子测试首次通过，两个 hooks 用例仍期望单对象脚本。将严格源码期望更新为数组后，该 hooks 模块 12 项全部通过，原有来源、前缀、取消与续行断言保留。
-- bundled Skill 20 项测试通过，包括真实 Node／Guest 执行主文档双成员示例和带 Decision 分支的实现／复审流程；与上述综合回归有重叠，不累计为独立总数。
+- 当前入口归属、角色隔离、真实 Host 执行、脚本 schema 与 Skill 的定向验证 105 项通过；正常调用、非法来源、取消及前缀连续性断言保留，不构造旧会话兼容场景。
+- bundled Skill 21 项测试通过，包括真实 Node／Guest 执行主文档双成员示例和带 Decision 分支的实现／复审流程；与上述定向验证有重叠，不累计为独立总数。
 - 验收记录器相关 3 项测试通过；真实 Host 产生冻结对象、派发及 Work 快照后，阶段记录和关闭记录均可完整保存。68,800,219 字节证据写盘校验内容完全一致，事件循环最大心跳间隔 0.482 秒，序列化与凭证清洗在线程中进行。
 - 前端全套 102 个测试文件、1,667 项通过。TypeScript、ESLint、桌面构建与生成协议合同检查通过；ESLint 保留 10 个现有警告，构建保留已有 chunk 提示。
 - clean-v0 迁移邻接检查 16 项通过；`test_compatible_vector_and_unrelated_native_extension_are_preserved` 所在环境缺少 PostgreSQL `intagg` 扩展，相关用例未能通过，未改断言或跳过。实际受影响的 schema、catalog、Work 标题保存、不可变性及查询已通过临时数据库验证。
@@ -379,7 +372,7 @@ Python 使用仓库 `.venv`，PostgreSQL 使用独立临时本地集群，集成
 
 ### 9.2 交叉复审
 
-复用原来的八位 GPT-6 Astra subagent。入口与 Guest、hook 与 runtime、协作 API 与 canonical 存储、协议读链与前端元数据 owner 均完成双向复核，另有整链独立复审。发现的准备回执超限资源清理、异步回调返回后的工具提交、不可执行 builtin 的 image 预算访问及测试调用接缝均已闭合。Skill 主示例经过独立复核，明确提供新 Agent 的任务上下文。
+复用原来的八位 GPT-6 Astra subagent。入口与 Guest、hook 与 runtime、协作 API 与 canonical 存储、协议读链与前端元数据 owner 均完成双向复核，另有整链独立复审。发现的准备回执超限资源清理、异步回调返回后的工具提交、权限与测试调用接缝均已闭合。Skill 主示例经过独立复核，明确提供新 Agent 的任务上下文。
 
 ### 9.3 真实模型证据
 

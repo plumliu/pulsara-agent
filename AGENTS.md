@@ -48,6 +48,9 @@ This file applies to the entire repository. Human instructions and the active im
 
 ## 6. Hard-cut product and architecture changes during development
 
+- Treat pre-existing sessions as discarded when changing development contracts. Do not preserve, migrate, restore, or provide compatibility for sessions created under an earlier implementation. Do not add old-session descriptors, unavailable leaves, adapters, fallback paths, or compatibility tests, and do not ask the user to preserve old sessions. Update the current clean baseline and current-contract tests directly.
+- Provider-prefix continuity and normal lifecycle correctness still apply within sessions created under the current contract; they do not justify cross-version session compatibility.
+
 - This repository is still in active development. When an authorized change modifies product semantics, architecture, schema shape, provider contract, or an internal ownership boundary, implement it as one complete hard cut.
 - Remove the superseded path in the same change. Do not add migration-period compatibility, legacy aliases, dual reads or writes, shadow state, old/new negotiation, deprecated wrappers, fallback branches, or transitional repair machinery unless the user or active specification explicitly requires compatibility with an external deployed state.
 - Update the clean-v0 baseline, active specifications, tests, dogfood, and documentation to describe only the new truth. Historical documents may remain as history, but production code must not continue implementing their superseded contract.

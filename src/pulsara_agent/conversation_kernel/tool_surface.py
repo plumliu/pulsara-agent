@@ -153,30 +153,7 @@ class PreparedToolExecutionBinding:
             raise TypeError("tool execution policy union is open")
 
 
-@dataclass(frozen=True, slots=True)
-class PreparedUnavailableBuiltinGate:
-    """An installed provider description retained without execution authority."""
-
-    spec: FrozenToolSpec
-
-    @property
-    def tool_name(self) -> str:
-        return self.spec.name
-
-    @property
-    def descriptor_fingerprint(self) -> str:
-        return self.spec.descriptor_fingerprint
-
-    @property
-    def executor_binding_fingerprint(self) -> None:
-        return None
-
-    @property
-    def public_message(self) -> str:
-        return f"The installed {self.tool_name} tool contract is no longer available."
-
-
-DirectToolAccessLeaf = PreparedToolExecutionBinding | PreparedUnavailableDirectMcpGate | PreparedUnavailableBuiltinGate
+DirectToolAccessLeaf = PreparedToolExecutionBinding | PreparedUnavailableDirectMcpGate
 
 
 def tool_observation_origin_for_binding(
@@ -241,7 +218,7 @@ class PreparedKernelToolSurface:
             raise ValueError("prepared surface does not join capability plan")
 
     @property
-    def executor_binding_fingerprints(self) -> tuple[str | None, ...]:
+    def executor_binding_fingerprints(self) -> tuple[str, ...]:
         return tuple(
             item.executor_binding_fingerprint for item in self.execution_bindings
         )
@@ -388,7 +365,6 @@ __all__ = [
     "OwnerIssuedCapabilityDispatchObservation",
     "PreparedKernelToolSurface",
     "PreparedToolExecutionBinding",
-    "PreparedUnavailableBuiltinGate",
     "ProcessLocalToolSurfaceAccess",
     "ProcessLocalToolSurfaceBorrow",
     "ToolExecutionPolicy",

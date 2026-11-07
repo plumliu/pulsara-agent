@@ -28,8 +28,8 @@ JS also has array-based `tools.run_agent([...])` and `tools.wait_agent({works: [
 in [Coordination](../agent-orchestration/coordination.md). ROOT assigns, continues
 and waits for agent work through these JS operations, including single calls.
 Native `query_agents`, `send_agent_message` and `stop_agent` remain independent
-controls for the same work. Subagents use native query, message and wait tools.
-`decide` is a Code Mode tool; `available()` is a local method, not another tool call.
+controls for the same work.
+`decide` is a script API; `available()` is a local method, not another tool call.
 Other native tools,
 including `view_image`, memory, Plan, capability management,
 and the `exec_cell`, `query_cells`, and `manage_cell` controls, are called outside the script.

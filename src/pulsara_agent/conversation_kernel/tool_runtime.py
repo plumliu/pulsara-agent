@@ -42,6 +42,7 @@ from pulsara_agent.capability.builtin_catalog import (
     builtin_availability_requirement_identity_fingerprint,
     builtin_permission_contract_identity_fingerprint,
     builtin_tool_catalog_entry,
+    execution_catalog_entry,
     builtin_tool_descriptor,
 )
 from pulsara_agent.capability.pulsara_home import (
@@ -56,7 +57,6 @@ from pulsara_agent.capability.contracts import (
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
     FrozenToolCapabilityExposurePlan,
-    InstalledCapabilityEpochPredecessor,
     ToolCapabilityRouteKind,
     ToolCapabilityOrigin,
     capability_identity,
@@ -91,6 +91,7 @@ from pulsara_agent.ports.terminal import (
     parse_query_processes_input,
 )
 from pulsara_agent.ports.tool_execution import (
+    ToolInvocationOwnerKind,
     Tool,
     ToolCall,
     ToolExecutionResult,
@@ -226,7 +227,6 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     PreparedToolExecutionBinding,
     PreparedUnavailableDirectMcpGate,
-    PreparedUnavailableBuiltinGate,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
     execution_policy_fingerprint,
@@ -375,7 +375,7 @@ def _production_executor_binding(
 ) -> ProductionBuiltinExecutorBinding:
     if not tool_name or not executor_identity:
         raise ValueError("production executor binding identity is incomplete")
-    entry = builtin_tool_catalog_entry(tool_name)
+    entry = execution_catalog_entry(tool_name)
     descriptor = entry.descriptor
     contract = entry.binding_contract
     if descriptor.name != tool_name or contract.tool_name != tool_name:
@@ -1001,12 +1001,12 @@ class DirectKernelToolPort:
             assert self._builtin_composition_seal is not None
             bindings = self._sealed_builtin_bindings
             # Provider selection is distinct from the sealed execution catalog.
-            # Existing epoch schemas are still realized by prepare_planned_tool_surface;
-            # actual invocation admission rejects their removed native entry points.
-            hidden = {"decide"}
-            if conversation_scope_kind is ModelInputScopeKind.ROOT:
-                hidden.update({"run_agent", "wait_agent"})
-            bindings = tuple(item for item in bindings if item.tool_name not in hidden)
+            # Only the actual role's native definitions enter provider selection.
+            invocation_owner = (ToolInvocationOwnerKind.HOST_MAIN_RUN
+                if conversation_scope_kind is ModelInputScopeKind.ROOT else ToolInvocationOwnerKind.SUBAGENT)
+            bindings = tuple(item for item in bindings
+                if item.catalog_entry.descriptor.is_model_callable
+                and invocation_owner in item.catalog_entry.availability_requirement.allowed_invocation_owners)
             if conversation_scope_kind is ModelInputScopeKind.ROOT and effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
                 bindings = tuple(item for item in bindings if item.tool_name not in {
                     "exec_cell", "query_cells", "manage_cell", "run_agent", "query_agents", "send_agent_message", "wait_agent", "stop_agent",
@@ -1288,8 +1288,9 @@ class DirectKernelToolPort:
             for owner in self._sealed_builtin_bindings:
                 if owner.tool_name not in CODE_MODE_SHARED_TOOL_NAMES:
                     continue
-                entry = owner.catalog_entry
-                descriptor = builtin_tool_descriptor(owner.tool_name, code_mode=True)
+                entry = execution_catalog_entry(owner.tool_name, code_mode=True)
+                descriptor = entry.descriptor
+                owner = replace(owner, catalog_entry=entry)
                 spec = FrozenToolSpec(name=owner.tool_name, description=descriptor.description,
                     parameters=freeze_json(_json_schema_value(descriptor.input_schema)),
                     descriptor_fingerprint=descriptor.fingerprint())
@@ -1320,10 +1321,12 @@ class DirectKernelToolPort:
             scope is ModelInputScopeKind.ROOT and tool_name in {"run_agent", "wait_agent"}
         ):
             if not code:
-                return f"{tool_name} requires ROOT Code Mode; use exec_cell with tools.{tool_name}(...)"
+                if scope is ModelInputScopeKind.SUBAGENT:
+                    return f"tool unavailable: {tool_name}"
+                return f"{tool_name} requires Code Mode; use exec_cell with tools.{tool_name}(...)"
         if tool_name == "wait_agent" and scope is ModelInputScopeKind.SUBAGENT:
             if borrow.code_cell_id is not None or "works" in arguments:
-                return "Subagents may wait only through native wait_agent with agents."
+                return "wait_agent accepts only agents."
         return None
 
     def prepare_resolved_invocation(
@@ -1371,9 +1374,6 @@ class DirectKernelToolPort:
                 "tool-surface:revoked",
                 f"tool unavailable: {tool_name}",
             )
-        if isinstance(binding, PreparedUnavailableBuiltinGate):
-            return reject(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "builtin:installed-contract-unavailable", binding.public_message)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             return reject(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
@@ -1391,10 +1391,10 @@ class DirectKernelToolPort:
             except ValueError as exc:
                 return reject(KernelToolAuthorizationKind.INVALID_ARGUMENTS, "decision-arguments", str(exc))
         entry = (
-            builtin_tool_catalog_entry(tool_name) if isinstance(binding.execution_policy, BuiltinExecutionPolicyRef) else None
+            execution_catalog_entry(tool_name, code_mode=surface_borrow.code_cell_id is not None) if isinstance(binding.execution_policy, BuiltinExecutionPolicyRef) else None
         )
         if entry is not None:
-            schema = _json_schema_value(builtin_tool_descriptor(tool_name, code_mode=surface_borrow.code_cell_id is not None).input_schema)
+            schema = _json_schema_value(execution_catalog_entry(tool_name, code_mode=surface_borrow.code_cell_id is not None).descriptor.input_schema)
             try:
                 _validate_builtin_call_schema(tool_name, schema, arguments)
             except ValidationError as exc:
@@ -1582,9 +1582,7 @@ class DirectKernelToolPort:
                 is not self._builtin_composition_seal
             ):
                 raise RuntimeError("foreign or unsealed builtin snapshot")
-            # Selection describes what a new epoch offers. Physical bindings
-            # also realize schemas retained by an already installed prefix;
-            # each invocation still checks its actual turn permission below.
+            # Bind current-contract frozen specs to the sealed execution owners.
             builtin_by_name = {
                 item.tool_name: item for item in self._sealed_builtin_bindings
             }
@@ -1605,12 +1603,8 @@ class DirectKernelToolPort:
                 builtin_binding = builtin_by_name.get(spec.name)
                 if builtin_binding is not None:
                     entry = builtin_binding.catalog_entry
-                    if builtin_tool_descriptor(spec.name).fingerprint() != spec.descriptor_fingerprint:
-                        predecessor = plan.dispatch_view.planning_input.predecessor
-                        if (isinstance(predecessor, InstalledCapabilityEpochPredecessor)
-                            and surface is predecessor.tool_surface):
-                            leaves.append(PreparedUnavailableBuiltinGate(spec))
-                            continue
+                    if (not entry.descriptor.is_model_callable
+                        or builtin_tool_descriptor(spec.name).fingerprint() != spec.descriptor_fingerprint):
                         raise RuntimeError("planned builtin descriptor drifted")
                     policy = BuiltinExecutionPolicyRef(
                         tool_name=spec.name,
@@ -1984,9 +1978,6 @@ class DirectKernelToolPort:
                 "tool-surface:revoked",
                 f"tool unavailable: {tool_name}",
             )
-        if isinstance(binding, PreparedUnavailableBuiltinGate):
-            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
-                "builtin:installed-contract-unavailable", binding.public_message)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
@@ -2034,8 +2025,8 @@ class DirectKernelToolPort:
                 ),
                 "memory use was disabled by the user for this run",
             )
-        entry = builtin_tool_catalog_entry(tool_name)
-        schema = _json_schema_value(builtin_tool_descriptor(tool_name, code_mode=surface_borrow.code_cell_id is not None).input_schema)
+        entry = execution_catalog_entry(tool_name)
+        schema = _json_schema_value(execution_catalog_entry(tool_name, code_mode=surface_borrow.code_cell_id is not None).descriptor.input_schema)
         try:
             _validate_builtin_call_schema(tool_name, schema, arguments)
         except ValidationError as exc:
@@ -3408,7 +3399,7 @@ class DirectKernelToolPort:
         if tool_name == "decide" and invocation_context.effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
             raise RuntimeError("decide requires ROOT bypass-permissions mode")
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
-        if isinstance(binding, (PreparedUnavailableDirectMcpGate, PreparedUnavailableBuiltinGate)):
+        if isinstance(binding, PreparedUnavailableDirectMcpGate):
             raise RuntimeError("unavailable gate cannot invoke a physical tool")
         page_budget = _invocation_page_budget(invocation_context)
         if invocation_context.cell_cancel_event is not None and invocation_context.cell_cancel_event.is_set():
@@ -4762,7 +4753,7 @@ def _physical_effect_class(tool_name: str, arguments: Mapping[str, object]) -> s
         raise RuntimeError("manage_process action escaped its closed catalog")
     if tool_name == "exec_process":
         return "TERMINAL_EFFECT"
-    return builtin_tool_catalog_entry(tool_name).recovery_contract.severity
+    return execution_catalog_entry(tool_name).recovery_contract.severity
 
 
 def _execute_terminal_tool_call(

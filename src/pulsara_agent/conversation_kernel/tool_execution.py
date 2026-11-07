@@ -141,7 +141,7 @@ from pulsara_agent.conversation_kernel.memory.dispatch import (
     MemoryContextProjectionPort,
 )
 
-from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.capability.builtin_catalog import execution_catalog_entry
 from pulsara_agent.tools.builtins.media import IMAGE_TOOL_NAMES, parse_image_tool_source
 
 
@@ -2686,7 +2686,7 @@ def _tool_effect_class(
         raise RuntimeError("manage_process action escaped its closed catalog")
     if tool_name == "exec_process":
         return "TERMINAL_EFFECT"
-    return builtin_tool_catalog_entry(tool_name).recovery_contract.severity
+    return execution_catalog_entry(tool_name).recovery_contract.severity
 
 
 async def _await_tool_result_settlement(

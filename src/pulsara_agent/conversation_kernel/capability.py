@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Callable
@@ -47,6 +48,8 @@ from pulsara_agent.capability.resolver import (
 )
 from pulsara_agent.capability.types import (
     LooseSkillOrigin,
+    BundledSkillOrigin,
+    ShadowedSkillCandidateIssue,
     SkillManifest,
     SkillProjectionResolveContext,
 )
@@ -141,6 +144,17 @@ class KernelSkillProjectionComposer:
         if not isinstance(plugin, FrozenPluginSkillDefinitions):
             raise TypeError("Plugin Skill definition provider returned a foreign batch")
         inspection = self._resolver.resolve(loose, plugin, bundled)
+        if (conversation_scope_kind is ModelInputScopeKind.SUBAGENT
+            and isinstance(inspection, CompleteEffectiveSkillCatalogInspection)):
+            # The bundled script manual belongs to ROOT's invocation surface.
+            excluded = {(item.name, item.origin, item.path) for item in inspection.winners
+                if item.name == "pulsara-code-mode" and isinstance(item.origin, BundledSkillOrigin)}
+            inspection = replace(inspection,
+                winners=tuple(item for item in inspection.winners
+                    if (item.name, item.origin, item.path) not in excluded),
+                candidate_issues=tuple(issue for issue in inspection.candidate_issues
+                    if not (isinstance(issue, ShadowedSkillCandidateIssue)
+                        and (issue.name, issue.winner_origin, issue.winner_path) in excluded)))
         check_skill_deadline(deadline_monotonic)
         source = capability_source_ref(
             CapabilitySourceKind.LOCAL_SKILL_CATALOG,

@@ -92,8 +92,7 @@ Agent observation binds once: current Work if active, `not_started` if only queu
 work exists, otherwise the latest Work if one exists, or `inactive`. It does not
 follow subsequent assignments. Its timeout defaults to 30 seconds and accepts
 0–300 seconds. Waiting for `ROOT` observes messages, with no bound Work. Waiting
-for your own current Work is invalid. Subagents use native `wait_agent` with the
-`agents` form to coordinate with ROOT and known teammates.
+for your own current Work is invalid.
 
 Works have `queued`, `running`, `completed`, or `stopped` status. A settled wait
 means its condition was met, not that the work succeeded or its review approved
@@ -149,8 +148,6 @@ not see messages exchanged between subagents. Before judging whether they compar
 evidence, verify what was actually sent, received and checked. A lack of visible
 messages in ROOT context is not proof that no exchange occurred.
 
-Subagents keep their native query,
-message and Agent-observation tools, without Code Mode or delegation authority.
 
 | Incorrect form or inference | Correct usage |
 | --- | --- |
