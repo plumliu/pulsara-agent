@@ -44,17 +44,16 @@
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  padding: 20px 15px 14px;
+  padding: 14px 15px;
   overflow: hidden;
   border-right: 1px solid var(--line);
   background: color-mix(in srgb, var(--paper-raised) 92%, transparent);
   box-shadow: 12px 0 32px rgba(28,27,23,.025);
 }
-.brand-row { display: flex; align-items: center; justify-content: space-between; padding: 0 5px 16px; }
+.brand-row { display: flex; align-items: center; justify-content: space-between; padding: 0 5px 12px; }
 .brand-lockup { display: flex; align-items: center; gap: 9px; }
 .brand-lockup .brand-mark { display: none; }
-.brand-row h1 { margin: 2px 0 0; font-family: var(--serif); font-size: var(--type-display-brand); font-weight: 600; letter-spacing: -.04em; line-height: 1; }
-.brand-row p { margin: 0; }
+.brand-row h1 { margin: 0; font-family: var(--serif); font-size: var(--type-display-brand); font-weight: 600; letter-spacing: -.04em; line-height: 1; }
 .runtime-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px color-mix(in srgb, var(--green) 12%, transparent); }
 .runtime-dot--starting, .runtime-dot--reconnecting { background: var(--amber); box-shadow: 0 0 0 4px color-mix(in srgb, var(--amber) 12%, transparent); }
 .runtime-dot--offline, .runtime-dot--failed { background: var(--red); box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 12%, transparent); }

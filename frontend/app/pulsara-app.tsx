@@ -1661,7 +1661,7 @@ export default function PulsaraApp({ adapter = defaultAdapter, onStartupSettled 
     setCapabilityError(undefined);
     setRuntimeError(undefined);
     setRuntimeFailure(undefined);
-    setActiveView('overview');
+    setActiveView('workbench');
     void closing.catch(error => {
       notify('会话停止状态待确认', productMessage(error instanceof Error ? error.message : undefined,
         '请稍后查看会话状态。'), 'warning');

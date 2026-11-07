@@ -265,10 +265,7 @@ export function SessionSidebar({
         <header className="brand-row">
           <div className="brand-lockup">
             <BrandMark compact />
-            <div>
-              <p className="eyebrow">本地智能工作台</p>
-              <h1>Pulsara</h1>
-            </div>
+            <h1>Pulsara</h1>
           </div>
           <span className={`runtime-dot runtime-dot--${runtimeStatus}`} title={connectionLabels[runtimeStatus]} />
         </header>

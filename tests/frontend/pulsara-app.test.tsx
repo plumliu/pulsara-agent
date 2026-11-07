@@ -4248,7 +4248,7 @@ it('replaces commands with session search and opens a result outside the loaded 
 });
 
 describe('explicit runtime reopen owner', () => {
-  it('leaves a closing session immediately and preserves history while the server owns settlement', async () => {
+  it('clears the selected session while staying in the workbench during server close settlement', async () => {
     const adapter = new FakeAdapter();
     const accepted = deferred<{ status: 'closing' }>();
     adapter.closeSession.mockImplementation(() => accepted.promise);
@@ -4258,7 +4258,9 @@ describe('explicit runtime reopen owner', () => {
     fireEvent.click(screen.getByRole('button', { name: '更多会话操作' }));
     fireEvent.click(screen.getByRole('button', { name: /停止并关闭会话/ }));
     expect(adapter.closeSession).toHaveBeenCalledExactlyOnceWith(initialSession.id);
-    expect(screen.queryByRole('region', { name: '会话工作台' })).toBeNull();
+    expect(screen.getByRole('region', { name: '会话工作台' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '尚未选择会话' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '创建会话' })).toBeTruthy();
     expect(screen.queryByLabelText('发送给 Pulsara')).toBeNull();
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(adapter.sessions.some(session => session.id === initialSession.id)).toBe(true);
@@ -4266,6 +4268,7 @@ describe('explicit runtime reopen owner', () => {
     expect(original.closed).toBe(false);
     await act(async () => accepted.resolve({ status: 'closing' }));
     await waitFor(() => expect(original.closed).toBe(true));
+    expect(screen.getByRole('heading', { name: '尚未选择会话' })).toBeTruthy();
     expect(adapter.connectCalls).toHaveLength(1);
     expect(adapter.sessions.some(session => session.id === initialSession.id)).toBe(true);
   });
