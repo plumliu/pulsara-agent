@@ -1278,7 +1278,6 @@ def test_raw_close_http_returns_accepted_while_existing_owner_joins_only_its_ses
         other = _RuntimeReopenConnection("connection:other", 'session:744hkamlh7wp6hdanqkno5tvf4')
         bridge._connections.update({previous.connection_id: previous, other.connection_id: other})
         bridge._controller_by_session.update({old.session_id: previous.connection_id, other.session_id: other.connection_id})
-        bridge.require_chat_controller = AsyncMock()
         runtime = test_model_runtime()
         (tmp_path / "index.html").write_text("Pulsara")
         server = LocalHttpServer(
@@ -1289,6 +1288,18 @@ def test_raw_close_http_returns_accepted_while_existing_owner_joins_only_its_ses
         )
         await server.start()
         try:
+            async with ClientSession() as client:
+                async with client.post(f"{server.origin}/api/sessions/{old.session_id}/close", json={}) as response:
+                    assert response.status == 409
+                    assert (await response.json())["error"]["code"] == "CHAT_CONTROLLER_REQUIRED"
+                async with client.post(f"{server.origin}/api/sessions/{old.session_id}/close", json={},
+                    headers={"X-Pulsara-Connection-Id": previous.connection_id,
+                             "X-Pulsara-Connection-Generation": "2"}) as response:
+                    assert response.status == 409
+                    assert (await response.json())["error"]["code"] == "CHAT_CONTROLLER_REQUIRED"
+            assert not entered.is_set()
+            assert not previous.close_attempted
+            assert old.session_id not in controller._operations
             async with ClientSession(headers={"X-Pulsara-Connection-Id": previous.connection_id,
                                               "X-Pulsara-Connection-Generation": "1"}) as client:
                 async with client.post(f"{server.origin}/api/sessions/{old.session_id}/close", json={}) as response:

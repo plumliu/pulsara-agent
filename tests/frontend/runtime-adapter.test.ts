@@ -18,12 +18,46 @@ const connectedWorkspaceAvailability = {path: '/tmp/project', outcome: 'AVAILABL
 let historyOwnerFixture: Record<string, unknown> = {};
 afterEach(() => { delete window.pulsaraDesktop; vi.unstubAllGlobals(); historyOwnerFixture = {}; });
 
-it('submits explicit session close through the existing route without deleting the session', async () => {
-  const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: 'closing' }), { status: 202 }));
+it('submits explicit session close with its live controller identity and generation', async () => {
+  const sessionId = deriveIdentity('session', 'close-test', 'selected');
+  const payload = connectPayload();
+  payload.session_id = payload.snapshot.snapshot.session_id = sessionId;
+  payload.connection_generation = 7;
+  const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(payload)))
+    .mockImplementation(async (_url, init) => {
+      const headers = new Headers(init?.headers);
+      const authorized = headers.get('X-Pulsara-Connection-Id') === payload.connection_id
+        && headers.get('X-Pulsara-Connection-Generation') === '7';
+      return new Response(JSON.stringify(authorized ? {status:'closing'} : {
+        error: {code:'CHAT_CONTROLLER_REQUIRED', message:'当前窗口没有会话控制权，请重新连接。'},
+      }), {status: authorized ? 202 : 409});
+    });
   vi.stubGlobal('fetch', fetchMock);
-  expect(await new LocalHttpRuntimeAdapter().closeSession('session:close/a')).toEqual({ status: 'closing' });
-  expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/sessions/session%3Aclose%2Fa/close',
-    expect.objectContaining({ method: 'POST', body: '{}', keepalive: true }));
+  const adapter = new LocalHttpRuntimeAdapter();
+  await adapter.connect(sessionId);
+  expect(await adapter.closeSession(sessionId)).toEqual({status:'closing'});
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+  expect(fetchMock).toHaveBeenLastCalledWith(`/api/sessions/${encodeURIComponent(sessionId)}/close`,
+    expect.objectContaining({method:'POST',body:'{}',keepalive:true,headers:expect.objectContaining({
+      'X-Pulsara-Connection-Id':payload.connection_id,'X-Pulsara-Connection-Generation':'7',
+    })}));
+});
+
+it.each(['disconnected','observer','other-session','closed'] as const)('does not submit close from a %s connection', async mode => {
+  const payload = connectPayload();
+  if (mode === 'observer') payload.role = 'observer';
+  const fetchMock = vi.fn().mockImplementation(async (_url, init) => new Response(JSON.stringify(
+    init?.method === 'DELETE' ? {} : payload,
+  )));
+  vi.stubGlobal('fetch', fetchMock);
+  const adapter = new LocalHttpRuntimeAdapter();
+  if (mode !== 'disconnected') {
+    const connection = await adapter.connect(payload.session_id);
+    if (mode === 'closed') await connection.close();
+  }
+  await expect(adapter.closeSession(mode === 'other-session' ? 'other-session' : payload.session_id))
+    .rejects.toMatchObject({code:mode === 'closed' ? 'CHAT_CONNECTION_CLOSED' : 'CHAT_CONTROLLER_REQUIRED'});
+  expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/close'))).toEqual([]);
 });
 
 it('keeps an unconfirmed closing runtime as a read-only history view', async () => {

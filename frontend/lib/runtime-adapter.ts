@@ -1488,7 +1488,7 @@ export class LocalHttpRuntimeAdapter implements RuntimeAdapter {
   }
 
   async closeSession(sessionId: string): Promise<{ status: 'closing' }> {
-    return apiRequest(`/api/sessions/${encodeURIComponent(sessionId)}/close`, {
+    return this.sessionRequest(sessionId, `/api/sessions/${encodeURIComponent(sessionId)}/close`, {
       method: 'POST', body: JSON.stringify({}), keepalive: true,
     });
   }
