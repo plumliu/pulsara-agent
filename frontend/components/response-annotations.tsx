@@ -308,7 +308,7 @@ export function ResponseAnnotations({ sessionId, store, canAnnotate, onLocate, o
     };
   }, [sessionId, closeEditor, canAnnotate]);
   return <AnnotationContext.Provider value={locate}><DraftAnnotationContext.Provider value={{ editable: canAnnotate, activeId: active?.id, edit, preview: setHovered }}>
-    <div ref={owner} style={{ display: 'contents' }}>{children}</div>
+    <div ref={owner} className="response-annotations-scope" style={{ display: 'contents' }}>{children}</div>
     {typeof document !== 'undefined' && createPortal(<>
       {canAnnotate && items.filter(item => item.value.source).map(item => <AnnotationMarker key={item.id} item={item}
         siblings={items.filter(other => other.value.source?.entry_id === item.value.source!.entry_id).sort((a, b) => a.value.source!.start - b.value.source!.start || a.number - b.number)}

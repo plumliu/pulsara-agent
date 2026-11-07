@@ -528,6 +528,9 @@ function TraceCard({
   const showTargets = useContext(PresentationContext);
   const sourceWorkspace = useDesktopWorkspace();
   const openSource = useInputNavigation(onNotify);
+  const cellSource = trace.toolName === 'exec_cell' && trace.attemptId && sourceWorkspace
+    ? { kind: 'cell' as const, rootSessionId: sourceWorkspace.sessionId, sourceExecAttemptId: trace.attemptId }
+    : undefined;
   const presentation = trace.toolName === 'open_in_pulsara' && trace.status === 'completed' && trace.outputBody?.sourceCoverage === 'COMPLETE' && trace.outputBody?.omitted === false
     ? parsePresentationResult(trace.resultText ?? '') : undefined;
   const terminalOutput = trace.toolName === 'exec_process'
@@ -559,10 +562,10 @@ function TraceCard({
   const outputUnavailable = Boolean(showRawResult && trace.outputBody?.omitted && !trace.outputBody.available);
   const hasMediaEvidence = ['read_video_frames', 'read_transcript'].includes(trace.toolName ?? '')
     && Boolean(trace.resultText || trace.resultContent);
-  const expandable = Boolean(trace.programCalls?.length) || Boolean(
+  const expandable = trace.toolName !== 'exec_cell' && (Boolean(trace.programCalls?.length) || Boolean(
     presentation || trace.command || diffText || hasTerminalOutput || hasRawResult
     || trace.resultContent || mcpDetail || canReadOutput || outputUnavailable || hasMediaEvidence
-  );
+  ));
   const outputAtEnd = Boolean(outputPage && !outputPage.next);
   const outputIsSinglePage = Boolean(
     outputAtEnd
@@ -612,13 +615,16 @@ function TraceCard({
     purpose={!showPurposeAsTitle && trace.toolName && purpose !== trace.toolName ? purpose : undefined}
     subtitle={subtitle} status={trace.status}
     state={trace.status === 'running' ? `进行中 · ${trace.duration ?? ''}` : trace.duration ?? (builtinSummary ? undefined : trace.meta)}
-    action={expandable && <ChevronRight className="trace-chevron" size={13} />} />;
+    action={(cellSource || expandable) && <ChevronRight className="trace-chevron" size={13} />} />;
 
   return (
     <div className={`trace-node trace-node--${trace.status}`}>
       <span className="trace-node__dot" />
-      <article data-result-entry={trace.resultEntryId} className={`trace-card${expanded ? ' is-expanded' : ''}`}>
-        {expandable ? (
+      <article data-result-entry={trace.resultEntryId} className={`trace-card${expandable && expanded ? ' is-expanded' : ''}`}>
+        {cellSource ? (
+          <button type="button" className="trace-card__summary" aria-label="查看运行脚本"
+            onClick={() => void openSource(cellSource)}>{summary}</button>
+        ) : expandable ? (
           <button
             data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary"
             onClick={() => {
@@ -630,7 +636,6 @@ function TraceCard({
             aria-label={`${expanded ? '收起' : '展开'}工具详情：${trace.toolName ?? trace.title}`}
           >{summary}</button>
         ) : <div data-thread-disclosure="" data-disclosure-key={JSON.stringify(['trace', disclosureOwnerId, trace.id])} className="trace-card__summary">{summary}</div>}
-        {trace.toolName === 'exec_cell' && trace.attemptId && sourceWorkspace && <button type="button" className="input-source-link" onClick={() => void openSource({ kind: 'cell', rootSessionId: sourceWorkspace.sessionId, sourceExecAttemptId: trace.attemptId! })}>查看源码</button>}
         {expandable && <AnimatedDisclosure unmountOnClose open={expanded} className="trace-card__disclosure">
           {trace.programCalls?.map(call => <TraceCard key={call.id} trace={call} disclosureOwnerId={disclosureOwnerId}
             skills={skills} mcpToolRefs={mcpToolRefs} outputOwnerKey={outputOwnerKey}
@@ -1073,6 +1078,8 @@ function UserMessage({
   return (
     <article className="user-turn">
       <header className="user-heading">
+        {message.inputOrigin === 'AGENT_INSTRUCTION' && <span className="user-work-title" data-work-id={message.inputSource?.queueItemId}
+          title={workTitle(message.inputSource?.workTitle)}>{workTitle(message.inputSource?.workTitle)}</span>}
         {copyButton}
         <strong>{message.userKind === 'scheduled' ? '定时任务' : label}</strong>
         {message.userKind === 'scheduled' ? <AgentInputAvatar kind="scheduled" />
@@ -1580,7 +1587,6 @@ export function ConversationMessages({
     return <HistoryMessageHost key={messageViewKey(message)} message={message}
       contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
       ? <UserMessage message={message} label={inputLabel} senderKind={inputSender} onNotify={onNotify} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
-      {message.role === 'user' && message.inputOrigin === 'AGENT_INSTRUCTION' && <div className="agent-work-divider" data-work-id={message.inputSource?.queueItemId} title={message.inputSource?.queueItemId}><span>任务</span><strong>{workTitle(message.inputSource?.workTitle)}</strong></div>}
       {message.role === 'user'
         ? <UserMessage message={message} label={inputLabel} senderKind={inputSender} onNotify={onNotify} onReadPromptImage={onReadPromptImage} visible={visible} />
         : assistant(message)}

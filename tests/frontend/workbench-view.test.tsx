@@ -18,6 +18,7 @@ import { DesktopWorkspaceProvider, useDesktopWorkspace } from '../../frontend/co
 import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 import { WELCOME_TYPEWRITER_PHRASES } from '../../frontend/components/welcome-typewriter';
 import type { Message } from '../../frontend/lib/pulsara-types';
+import { randomIdentity } from '../../frontend/lib/identity';
 
 const isWelcomeHeading = (name: string) => (WELCOME_TYPEWRITER_PHRASES as readonly string[]).includes(name);
 
@@ -3488,6 +3489,38 @@ it.each(['agent','cell','scheduled'] as const)('opens the correct source for ove
  }
  expect(readAgent).toHaveBeenCalledTimes(kind==='agent'?1:0);
  expect(readSource).toHaveBeenCalledTimes(kind==='cell'?1:0);
+});
+
+it.each(['running', 'completed'] as const)('opens the %s Cell bubble in the sidebar without expanding inline output', async status => {
+ const sessionId = randomIdentity('session'), attemptId = randomIdentity('attempt');
+ const readSource = vi.spyOn(agentCellApi, 'source').mockResolvedValue({
+  source_exec_attempt_id: attemptId,
+  source: {status:'AVAILABLE',text:'console.log(1)',offset_chars:0,returned_chars:14,total_chars:14,has_more:false,next_offset_chars:null},
+  live_cell: null,
+ });
+ let workspace: ReturnType<typeof useDesktopWorkspace>;
+ function Probe() { workspace = useDesktopWorkspace(); return null; }
+ const onShow = vi.fn(), readOutput = vi.fn();
+ const messages: Message[] = [{id:'cell-request',role:'assistant',assistantKind:'tool-request',time:'',body:'',
+  traces:[{id:'cell-call',kind:'tool',toolName:'exec_cell',attemptId,title:'运行脚本',subtitle:'脚本已接纳',status,
+   resultText:'inline Cell receipt',resultEntryId:'cell-result'}]}];
+ const view = renderWithRawResults(<DesktopWorkspaceProvider sessionId={sessionId} onShow={onShow}>
+  <Probe/><ConversationMessages messages={messages} outputOwnerKey={sessionId} onReadToolOutput={readOutput} onNotify={vi.fn()}/>
+ </DesktopWorkspaceProvider>);
+ fireEvent.click(screen.getByRole('button', {name:'展开处理过程'}));
+ expect(screen.queryByText('查看源码')).toBeNull();
+ const bubble = await screen.findByRole('button', {name:'查看运行脚本'});
+ expect(bubble.hasAttribute('aria-expanded')).toBe(false);
+ fireEvent.click(bubble);
+ await waitFor(() => expect(onShow).toHaveBeenCalledTimes(1));
+ const tab = workspace!.tabs.find(item => item.id === workspace!.activeId)!;
+ expect(tab.kind).toBe('cell');
+ expect(tab.sessionId).toBe(sessionId);
+ if (tab.kind === 'cell') expect(tab.sourceExecAttemptId).toBe(attemptId);
+ expect(readSource).toHaveBeenCalledTimes(1);
+ expect(view.container.querySelector('.trace-card.is-expanded')).toBeNull();
+ expect(screen.queryByText('inline Cell receipt')).toBeNull();
+ expect(readOutput).not.toHaveBeenCalled();
 });
 
 it('keeps process and final views distinct while targeting the canonical entry', async () => {

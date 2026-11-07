@@ -102,12 +102,11 @@ export function MemoryRetrievalSettingsPanel({ adapter, value, onChanged, onNoti
     onConfirmDelete={() => void update(() => adapter.clearMemoryModel(slot), () => setDeleteCandidate(undefined))}
     onEdit={() => {
       setDeleteCandidate(undefined);
-      const activate = slot === 'embedding' ? embeddingOpen && !value.embedding_enabled
-        : slot === 'rerank' && rankingOpen && preferredRanking === slot && value.ranking_mode !== slot;
+      const activate = slot === 'embedding' ? embeddingOpen && !value.embedding_enabled : rankingOpen && preferredRanking === slot && value.ranking_mode !== slot;
       setEditor({ slot, activate });
     }} />;
   return <section className="settings-group retrieval-settings">
-    <header><Brain size={16} /><div><h2>记忆检索</h2><p>配置记忆检索与 Code Mode 语义判断使用的模型。</p></div>{busy && <span className="retrieval-spinner"><LoaderCircle size={15} /></span>}</header>
+    <header><Brain size={16} /><div><h2>记忆检索</h2><p>配置记忆召回使用的语义检索与重排模型。</p></div>{busy && <span className="retrieval-spinner"><LoaderCircle size={15} /></span>}</header>
     <section className="retrieval-channel" aria-labelledby="retrieval-embedding-heading">
     <div className="retrieval-channel-heading"><h3 id="retrieval-embedding-heading">Embedding</h3>
       <div className="retrieval-channel-controls">
@@ -116,11 +115,6 @@ export function MemoryRetrievalSettingsPanel({ adapter, value, onChanged, onNoti
       </div>
     </div>
     {embeddingOpen && <div className="retrieval-drawer">{card('embedding')}</div>}
-    </section>
-    <section className="retrieval-channel" aria-labelledby="retrieval-decision-heading">
-      <div className="retrieval-channel-heading"><h3 id="retrieval-decision-heading">Jev-like Decision</h3></div>
-      <p>用于 Code Mode 语义判断，也可用于记忆重排。</p>
-      <div className="retrieval-drawer">{card('decision')}</div>
     </section>
     <section className="retrieval-channel" aria-labelledby="retrieval-ranking-heading">
     <div className="retrieval-channel-heading"><h3 id="retrieval-ranking-heading">重排</h3>
@@ -134,21 +128,15 @@ export function MemoryRetrievalSettingsPanel({ adapter, value, onChanged, onNoti
       <button type="button" role="switch" aria-label="启用重排" aria-checked={rankingOpen} className="settings-switch" disabled={busy} onClick={toggleRanking}><span /></button>
     </div>
     </div>
-    {rankingOpen && preferredRanking === 'rerank' && <div className="retrieval-drawer">
-    <div className="model-card-list">{card('rerank')}</div></div>}
+    {rankingOpen && <div className="retrieval-drawer">
+    <div className="model-card-list">{card(preferredRanking)}</div></div>}
     </section>
     <section className="retrieval-channel" aria-labelledby="retrieval-history-heading">
       <div className="retrieval-channel-heading"><h3 id="retrieval-history-heading">历史会话检索</h3>
         <div className="retrieval-channel-controls"><button type="button" role="switch" aria-label="启用历史会话检索" aria-checked={value.history_enabled} className="settings-switch" disabled={busy} onClick={() => void update(() => adapter.setHistoryEnabled(!value.history_enabled))}><span /></button></div>
       </div>
     </section>
-    {editor && <MemoryModelDialog key={editor.slot} slot={editor.slot} activate={editor.activate} value={value} adapter={adapter} onChanged={next => {
-      adopt(next);
-      // Saving the shared connection does not enable memory ranking. Retire
-      // the empty selector's local enable intent once its model is configured.
-      if (editor.slot === 'decision' && preferredRanking === 'decision'
-        && next.ranking_mode === 'off' && isConfigured(next.decision)) setRankingOpen(false);
-    }} onNotify={onNotify} onClose={() => setEditor(undefined)} />}
+    {editor && <MemoryModelDialog key={editor.slot} slot={editor.slot} activate={editor.activate} value={value} adapter={adapter} onChanged={adopt} onNotify={onNotify} onClose={() => setEditor(undefined)} />}
   </section>;
 }
 

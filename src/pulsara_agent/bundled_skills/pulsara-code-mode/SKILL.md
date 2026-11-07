@@ -57,10 +57,21 @@ identifies the reusable conversation; a WORK identifies this assignment.
 `work_title` is an optional display title for the assignment, not an identifier.
 Use `target: investigation.agents[0]` to give the same agent another Work.
 
+The runtime randomly assigns subagent Session names from a pool of 100 historical
+mathematicians, physicists, and computer scientists. These display names can help
+you distinguish agents, but may repeat. Do not supply a name as a tool parameter
+or use it as an identifier; use the actual Target instead.
+
 When several assignments are ready together, put them in one array. Each receives
 its own Work and result position. To give parallel teammates each other's identity
 before they start, use synchronous instruction functions with the preallocated
-`agents` array. This example copies the latest ROOT turn for the task context;
+`agents` array. `({ agents }) => ...` declares a callback-local parameter; it does
+not create an outer `agents` variable. A plain template string is evaluated before
+`run_agent` starts, so current-batch references belong inside the callback. The
+outer `team` result becomes available only after the dispatch resolves. Callbacks
+receive identities, not reports or promises of future results.
+
+This example copies the latest ROOT turn for the task context;
 include explicit file paths and requirements when that turn is not sufficient:
 
 ```js
@@ -100,6 +111,9 @@ A Cell has its own JavaScript variables. When another Cell needs a returned targ
 log it with `console.log`, then copy that complete target into the next script or
 query it through `query_agents`. A variable from the previous Cell does not exist
 in a new one. The Agent's conversation and accepted Works remain available.
+For continuation, pass the retained AGENT target to `run_agent`; wait on the new
+WORK targets returned by that call. Waiting on an earlier WORK only observes that
+earlier assignment. Titles and query positions do not substitute for identity.
 
 `console.log(...)` sends selected values to ROOT. Each call is one independent
 input, including repeated text. Internal tool results stay in the script; Work

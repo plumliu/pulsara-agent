@@ -210,13 +210,13 @@ Pulsara 驻留为页、argv/路径批次、管道缓存和**最大单条 rg JSON
 
 当前实现入口：
 
-- [完整页预算](src/pulsara_agent/primitives/tool_result_budget.py)
-- [唯一 native 投影](src/pulsara_agent/conversation_kernel/tool_result_display.py)
-- [正文存储及 scope-bound 读取](src/pulsara_agent/conversation_kernel/tool_outputs.py)
-- [精确来源共享类型](src/pulsara_agent/ports/tool_output.py)
-- [统一文本分页](src/pulsara_agent/primitives/text_paging.py)
-- [文件读取、复制与编辑](src/pulsara_agent/tools/builtins/filesystem.py)
-- [搜索扫描 owner](src/pulsara_agent/tools/builtins/filesystem_search.py)
+- [完整页预算](../src/pulsara_agent/primitives/tool_result_budget.py)
+- [唯一 native 投影](../src/pulsara_agent/conversation_kernel/tool_result_display.py)
+- [正文存储及 scope-bound 读取](../src/pulsara_agent/conversation_kernel/tool_outputs.py)
+- [精确来源共享类型](../src/pulsara_agent/ports/tool_output.py)
+- [统一文本分页](../src/pulsara_agent/primitives/text_paging.py)
+- [文件读取、复制与编辑](../src/pulsara_agent/tools/builtins/filesystem.py)
+- [搜索扫描 owner](../src/pulsara_agent/tools/builtins/filesystem_search.py)
 
 ## 6. 语义审计与激活门槛
 

@@ -653,6 +653,53 @@ def test_code_mode_main_skill_dispatches_teammates_with_real_refs():
     assert [item["target"] for item in output[1]] == queried
 
 
+def test_code_mode_examples_continue_agents_in_fresh_cell_with_work_dependency():
+    from pulsara_agent.code_mode import CodeModeToolResult
+
+    batches, waits = [], []
+
+    async def invoke(call):
+        if call.tool_name == "run_agent":
+            members = call.arguments["members"]
+            agents = [{"kind": "AGENT", "agent_id": m["agent_id"]} for m in members]
+            works = [{"kind": "WORK", "work_id": m["work_id"]} for m in members]
+            if batches:
+                assert agents == batches[0]["agents"]
+                assert all(target not in batches[0]["works"] for target in works)
+                assert [m["parameters"]["target"] for m in members] == agents
+                assert members[1]["parameters"]["depends_on"] == [works[0]]
+                assert all("context" not in m["parameters"] for m in members)
+            value = {"agents": agents, "works": works, "details": [{}, {}]}
+            batches.append(value)
+        elif call.tool_name == "wait_agent":
+            waits.append(call.arguments)
+            value = {"state": "settled", "works": [], "pending_targets": []}
+        else:
+            assert call.tool_name == "query_agents"
+            assert call.arguments["target"] in batches[-1]["works"]
+            value = {"target": call.arguments["target"], "status": "completed", "final": "Evidence"}
+        return CodeModeToolResult(value=value)
+
+    first_source = _code_mode_example("agent-orchestration/examples.md", 2)
+    first_output = asyncio.run(_execute_code_mode_example(first_source, invoke, False))
+    assert first_output[0]["agents"] == batches[0]["agents"]
+
+    # A separate execution has fresh JS globals. Transfer the exact logged JSON,
+    # as ROOT does when constructing another Cell, rather than sharing a variable.
+    next_source = "const team = " + json.dumps(first_output[0]) + ";\n"
+    next_source += _code_mode_example("agent-orchestration/examples.md", 3)
+    next_output = asyncio.run(_execute_code_mode_example(next_source, invoke, False))
+
+    assert len(batches) == 2
+    assert waits == [
+        {"works": batches[0]["works"]},
+        {"works": [batches[1]["works"][1]]},
+    ]
+    assert next_output[0]["agents"] == first_output[0]["agents"]
+    assert next_output[0]["works"] == batches[1]["works"]
+    assert next_output[1]["target"] == batches[1]["works"][1]
+
+
 @pytest.mark.parametrize("available", [False, True])
 def test_code_mode_history_example_preserves_sources_and_positional_judgments(
     available: bool,

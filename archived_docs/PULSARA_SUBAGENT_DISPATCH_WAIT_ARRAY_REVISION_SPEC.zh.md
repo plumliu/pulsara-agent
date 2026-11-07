@@ -1,6 +1,6 @@
 # Subagent 派发与等待：数组接口及工作标题修订规范
 
-日期：2026-11-07。状态：实现、自动回归和交叉复审已完成；DeepSeek 完整真实模型验收按用户决定暂缓；本文规定当前工作树的接口。
+日期：2026-11-07。状态：实现、自动回归和交叉复审已完成；DeepSeek 两轮应用内手工验收已完成，覆盖双成员派发、通信、跨 Cell 复用、依赖及等待的正常路径，具体范围见第 9.4 节；本文规定当前工作树的接口。
 
 本文修订 [Code Mode 语义判断与代理工具入口规范](PULSARA_CODE_MODE_DECIDE_IMPLEMENTATION_SPEC.zh.md) 中的代理派发、等待、参数与结果形状、标题归属及相关前端展示。冲突处以本文为准。`decide`、原生控制独立性、权限边界、provider 输入连续性、停止和关闭合同继续有效。
 
@@ -208,9 +208,15 @@ await tools.wait_agent({
 
 UI 的当前 Work 必须关联真正的 `AGENT_INSTRUCTION` 队列行；Agent 是否正在执行、普通消息队列与 Work 队列数量是不同事实。基线通用 runtime 查询的 `current_work_id`／`queued_count` 还可能覆盖普通消息，不得直接当作标题展示所需的严格 Work 投影。复用现有查询 owner 提供类型明确的 UI 投影；不要为此直接改变 Agent 等待所依赖的通用绑定字段语义。若实现需要统一调整底层字段，必须先补齐消息驱动 turn 的等待语义分析和回归。
 
-不得把 `work_title` 写入 Agent 的长期会话标题，或者拿它寻找／重建 Agent target。本次不新增另一个 `agent_name` 参数；Agent 原有会话身份展示沿用现有 owner，无独立标题时沿用“子代理”及必要的身份区分展示。
+不得把 `work_title` 写入 Agent 的长期会话标题，或者拿它寻找／重建 Agent target。不新增另一个 `agent_name` 参数。新 Agent 在原子准入事务中，从 `conversation_kernel/subagents/names.py` 的 100 位数学、物理、计算机学家预设中随机选取最多两个单词的名称，写入现有 Session `title`。同一 ROOT 内优先选择未使用的名称，同批分配也不重复；使用完预设后允许重名，不限制代理数量。名称不承担唯一身份，寻址与授权仍用完整 Target。
 
-标题不自动拼入子代理的 instruction、SYSTEM、context 或 materials，也不参与扫描文本以引入队友可见性的逻辑。ROOT 在正常工具回执／查询中看到标题属于该次真实结果。UI 任务分隔通过现有 Work 关联展示标题，不增加模型消息、transcript entry 或修改原消息正文。
+名称复用现有 Session 标题的保存与读取 owner，不新增表、事件、名称注册表或模型命名请求。续派只创建新 Work，不重选或覆盖 Agent 名称。前端列表、标签页、工作流及历史署名读取同一 Session 标题；ROOT 和有可见权限的子代理通过现有 `query_agents` 列表的 `name` 字段也能看到名称。不把名称额外注入 SYSTEM、工具定义或原有消息。预设耗尽时的重名可通过完整 ID 区分。
+
+预设姓名采用通行的短写法；分类仅方便维护，不影响分配概率或代理能力。人名参考 [MacTutor 数学史档案](https://mathshistory.st-andrews.ac.uk/) 和 [ACM 图灵奖名录](https://amturing.acm.org/)。
+
+名称分配定向验证：预设库及协作 API、canonical PostgreSQL 派发与持久化相关 65 项测试、15 项子测试通过。覆盖 100 个不重复且最多两个单词的预设、用完前不重名、耗尽后仍能分配、同批及跨批去重、续派保留 Session 名称、Work 标题独立和工具查询读到保存名称。数据库测试使用核验过的本地 PostgreSQL 下独立创建并删除的测试库，未修改应用会话。
+
+标题不自动拼入子代理的 instruction、SYSTEM、context 或 materials，也不参与扫描文本以引入队友可见性的逻辑。ROOT 在正常工具回执／查询中看到标题属于该次真实结果。UI 通过现有 Work 关联，在该次派发消息的署名行展示标题，不增加模型消息、transcript entry 或修改原消息正文。
 
 ## 5. 前端展示
 
@@ -231,7 +237,7 @@ Agent 的稳定身份和当前工作的标题分别显示：
 - 标签页内部顶部：在代理名称下明确显示“当前任务：xxx”。已经打开的页也应随工作切换更新，不只在首次打开时读取。
 - 列表只展示当前任务和排队 Work 数量；各项排队标题在现有分页队列视图中读取，不在每个 AgentRow 中嵌入整个队列。新工作入队时不能覆盖尚在运行的当前任务。
 - 无当前 Work 但 Agent 仍在处理消息等输入时显示“处理中”，不误报空闲，也不把消息当成 Work。只有排队 Work 时显示“待开始”或“排队中”；没有活动及待执行工作时显示“空闲”。若展示最近工作，标题写为“最近任务：xxx”，完成／停止状态另行显示。
-- 历史消息的代理署名不随当前工作切换而被重写。在各次工作对应的任务分隔位置显示该 Work 自己的标题。
+- 历史消息的代理署名不随当前工作切换而被重写。各次工作对应的派发消息，在 ROOT 署名前以灰色小字显示该 Work 自己的标题，不另设任务分隔条；长标题省略并可悬停查看全文。
 
 稳定 Agent label 与当前 Work 标题使用独立字段。不能简单把 `tab.title` 改成 `work_title`：基线将该值一路传给会话中所有历史助手署名。页眉的当前任务与用户定位的历史 Work 也必须分开。
 
@@ -254,11 +260,11 @@ Agent 的稳定身份和当前工作的标题分别显示：
 
 图中某个 Cell 涉及的 Work 不一定是该 Agent 此刻正在处理的 Work。图节点必须显示所选 Work 本身的标题与状态，不能拿 Agent 当前任务副行替代节点事实。相同标题不合并节点。
 
-现有读取接口需提供足够的标题事实：`AgentRow` 的当前工作投影、`WorkFact`、工作详情及任务分隔读取。复用现有读取和刷新 owner，不因展示标题增加持久事件或全局刷新机制。
+现有读取接口需提供足够的标题事实：`AgentRow` 的当前工作投影、`WorkFact`、工作详情及历史派发消息标题。复用现有读取和刷新 owner，不因展示标题增加持久事件或全局刷新机制。
 
 标题还需贯穿现有队列／canonical entry 元数据、协议序列化及前端投影，不只改 graph API。历史 `AGENT_INSTRUCTION` 按其自身 `input_source.queue_item_id` 关联 Work；`source_work_id` 是来源工作，不能用它找接收方本次任务的标题。读取使用既有分页及批量关联，避免逐消息额外调用 work API。
 
-已消费 Work 在原有任务分隔位置展示标题；未启动就停止的 Work 没有 turn 或 consumed entry，仍从 canonical Work 行读取，并在现有队列／所选终止工作卡片展示。不能为显示标题伪造 transcript 消息，也不能在该卡片显示 Agent 当前或最近的另一项标题。
+已消费 Work 在对应派发消息的署名行展示标题；未启动就停止的 Work 没有 turn 或 consumed entry，仍从 canonical Work 行读取，并在现有队列／所选终止工作卡片展示。不能为显示标题伪造 transcript 消息，也不能在该卡片显示 Agent 当前或最近的另一项标题。
 
 ## 6. Target 与跨 Cell 使用
 
@@ -359,7 +365,7 @@ provider 前缀仍只能在新 cold epoch 或显式采用的 compaction successo
 
 ## 9. 实施验证
 
-Python 使用仓库 `.venv`，PostgreSQL 使用独立临时本地集群，集成测试在 `CI=1` 下执行。保存的生产设置只读，真实模型验收使用独立工作区、Pulsara home 和测试数据库。
+Python 使用仓库 `.venv`，自动测试的 PostgreSQL 使用独立临时本地集群，集成测试在 `CI=1` 下执行。保存的生产设置只读；自动真实模型验收使用独立工作区、Pulsara home 和测试数据库，应用内手工验收的环境见第 9.4 节。
 
 ### 9.1 自动验证与界面
 
@@ -378,10 +384,47 @@ Python 使用仓库 `.venv`，PostgreSQL 使用独立临时本地集群，集成
 
 验收入口为 `tests/dogfood/run_subagent_array_dogfood.py`。只向保存的 DeepSeek 发送自然任务，不给模型预写 Cell；记录实际 provider 请求与返回、冻结源码、工具参数和结果、Work 与历史、日志及最终文件。认知结果按实际行为评估，不对调用次数、代码措辞或选定脚本加断言；权限、真实身份、同 epoch 前缀及物理关闭仍作必要验证。
 
-已保存的首轮有效行为证据包含 51 次 DeepSeek 模型调用、2 个 Agent、4 项 Work 和 4 个 Cell。模型通过单元素数组派发，跨 Cell 复用实际 Agent Target，完成 Work 等待及 Agent 消息等待；同 epoch provider 输入连续性检查覆盖 48 对相邻请求。该证据不代表多成员同批与依赖续派的两轮完整验收已通过。
+已保存的首轮有效行为证据包含 51 次 DeepSeek 模型调用、2 个 Agent、4 项 Work 和 4 个 Cell。模型通过单元素数组派发，跨 Cell 复用实际 Agent Target，完成 Work 等待及 Agent 消息等待；同 epoch provider 输入连续性检查覆盖 48 对相邻请求。该次自动运行未完成多成员同批与依赖续派的两轮验收；对应的应用内手工验收见第 9.4 节。
 
-依据首轮实际行为，bundled Skill 主文档补充了提供任务上下文的双成员数组与同步引用回调示例、消息 Target 的完整嵌套形式，以及工作查询不能作为完整通信日志的边界。说明直接教授当前正确用法，错误形式仅作为反例。
+bundled Skill 主文档和编排参考按说明书描述任务上下文、双成员数组、同步回调作用域、消息 Target 的完整嵌套形式、跨 Cell 的实际 Target 传递和同批依赖续派。工作查询不作为完整通信日志；错误形式仅作为反例，不以历史故障或接口变迁组织教学。
 
 验收记录器曾遇到大日志同步写盘阻塞与冻结对象复制失败，已修复并用真实 Host 数据及完整大日志回归验证。其后一次真实运行记录到 DeepSeek HTTP 500，重试流仅返回片段后持续停滞，达到观察超时；该次 Session 物理关闭与独立数据库删除均完成。用户结合社群信息确认服务端故障，决定暂缓后续 DeepSeek 验收，不将其作为本次实现缺陷或完整验收成功。
 
 本地原始证据保存在 `output/subagent-array-dogfood/`：`report.json` 保留首轮模型行为，`first-trial-observations.json` 为其派生观察，`final-report.json` 保留 HTTP 500 与流停滞诊断；`retry-report.json` 和 `responses-report.json` 保留用户要求停止时的运行记录。日志与截图沿用仓库输出目录规则，不纳入源码提交。
+
+### 9.4 DeepSeek 应用内两轮手工验收
+
+2026-11-07，用户在已安装的 Pulsara 中使用保存的 DeepSeek 连接完成会话“双代理审查分页导出实现”。验收对象为工作区 `output/deepseek-manual-acceptance/` 中的 `paging.py`、`requirements.md` 与 `README.md`。第一轮要求两位子代理分别检查需求一致性和边界情况，必要时直接交流；第二轮要求复用原代理，同批派发“补充用例”和“依赖前者完成后复核”两项新工作，等待真实结果并写入 `review.md`，不修改实现。
+
+验收后通过 PostgreSQL 只读连接核对真实 Session、canonical 工具调用及结果、冻结 Cell 源码、Work 输入、turn 终态和最终消息。连接核验 `data_directory` 为有效 Pulsara home 下的 `desktop/postgres`，未重置或修改应用数据库，未代用户触发任务。两轮采用生产应用及其数据库，与第 9.3 节隔离式自动运行分开记录；未保存新的逐请求 provider 原始流或重跑前缀检查。快照按保存配置的实际凭证值清洗，未导出凭证或原始设置。
+
+主会话为 `session:tatwjimdss7dgmwntbubkotkdq`。两位代理始终分别为：
+
+| 代理 | 第一轮 Work | 第二轮 Work |
+| --- | --- | --- |
+| `session:wn77znv3i6ewabwxpsmtrme75m` | 核对实现与需求的一致性 | 复核补充用例是否与需求矛盾 |
+| `session:z42jen5mmnwzrqysdwo4vqtomi` | 独立排查边界与异常输入 | 补充三种情况的最小用例与预期 |
+
+第一轮实际行为：
+
+- 首个 Cell 在普通模板字符串中引用尚未定义的 `agents`，产生 `ReferenceError: agents is not defined`，没有创建 Agent／Work。模型随后查询已有代理，改用 `instruction: ({ agents }) => ...` 注入搭档实际 AGENT Target；一次数组派发受理两位成员。最终只有两个 Agent 和两项 Work，未重复创建。
+- 子代理之间共九次 `send_agent_message` 调用：八次返回 `queued`，对应八条 `AGENT_MESSAGE` 输入均已消费；最后一次返回 `inactive`，未被接收。消息输入不计作新派发 Work。双方实际运行具体用例，并根据对方的实测意见调整问题分类。
+- ROOT 在后续 Cell 中复制两个真实 WORK Target 执行 `wait_agent({ works })`，返回 `settled`、无 pending，两项均为 `completed`。随后读取实际报告。该行为证明跨 Cell 等待，尚不单独证明 Agent 续派。
+
+第二轮实际行为：
+
+- ROOT 在新 Cell 中声明两个保留的完整 AGENT Target，作为两个 assignment 的 `target`。一次 `run_agent([...])` 返回两个新 WORK Target；Session 总数仍为 ROOT 加两个代理，实际派发 Work 总数由二增加到四。
+- 补充 Work 为 `queue:p4odlgydg45acbmbyt74bb5gv4`；复核 Work 为 `queue:b3cag2fuh6cp3cf2ek56zy2btq`。两项同属 `attempt:owet5o7icdxe5yo74acdl3ixvu`，后者的 `depends_on: ({ works }) => [works[0]]` 求值为前者真实 WORK Target。
+- 补充 turn 于北京时间 `20:33:58.928844` 完成，复核 turn 于 `20:33:58.978161` 受理。复核 Work 的 `work_inputs` 中有一项 `dependency`，其 `source_work_id` 指向补充 Work，正文与补充最终报告逐字一致；接收方 transcript 也包含该材料。
+- ROOT 再用独立 Cell 等待两个新 WORK Target，返回 `settled`、两项 `completed`、无 pending；第二轮两个 ROOT Cell 均无脚本错误。复核子代理出现一次 shell 引号语法错误，自行改用 heredoc 后重新验证。
+- 复核员发现补充材料中“只修末页判断仍会循环”的单记录反例不成立，给出双记录反例及单独由零值游标触发循环的证据。ROOT 独立运行验证后，在 `review.md` 标明复核修正与补充；没有改动 `paging.py`。
+
+结果质量与解释边界：
+
+- 第一轮主报告把双记录输入 `page([{'id':0},{'id':1}],1,0)` 的预期写成 `[]`；正确值为 `{'items':[{'id':1}],'next_cursor':None}`。第二轮对应条目已写对。此项属于模型内容错误，没有发现 runtime 更改结果的证据。
+- 第二轮复核员及 ROOT 声称“本轮两次消息返回 inactive”，但该轮实际仅一次发送调用，返回 `inactive`；跨两轮合计才有两次。应按实际调用记录统计，不能把最终叙述当作通信回执。顺序依赖启动时前序已完成，返回 `inactive` 符合活动消息语义；该轮未验证新的双向通信。
+- 两轮为数组派发、真实 Target、跨 Cell 代理续派、新 Work 等待、成功依赖及最终结果传递提供正常路径证据。标题属于各自 Work，未作为调用索引。未验证取消、依赖失败传播、重启恢复或本次标题的前端视觉展示，也不据此宣称模型误用率降低。
+
+本地证据保存在 `output/manual-deepseek-inspection/`：`session.json` 为第一轮快照，`round2-session.json` 为完成第二轮后的累计快照，`round2-turn-times.json` 为第二轮 turn 时间。用户会话产物分别为 `output/deepseek-manual-acceptance/review-report.md` 与 `review.md`。这些输出沿用仓库忽略规则，不纳入源码提交。
+
+本次 Skill 验证：结构校验通过，`tests/test_bundled_skills.py` 共 22 项通过。新增用例通过真实 Node／Guest 执行手册中的双代理示例，再把其实际输出 JSON 复制到独立 Cell，验证复用相同 AGENT、创建不同 WORK、同步依赖回调引用新 Work，以及等待新工作。协作工具结果由测试提供，此项用于验证说明书示例与 Guest 的接缝，不替代上述真实数据库的调度及结果传递证据。

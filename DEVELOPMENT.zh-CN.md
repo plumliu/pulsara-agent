@@ -17,7 +17,7 @@ MCP 网络所有权、可选资源模板发现和真实模型验收遵循 [MCP �
 
 随包资源包括 PostgreSQL 17.9、pgvector 0.8.1、pg_search 0.26.1、Python 和 Playwright Chromium。pg_search 使用 macOS ARM64 Sequoia 与 Ubuntu Noble PG17 x86_64/ARM64 制品。
 
-本地解码使用锁定的 PyAV wheel 和随包 FFmpeg 库，Pillow 负责拼图，pysubs2 处理 ASS 样式。可选云端服务使用 OpenAI 转写协议。在本机桌面数据库运行时，使用 `.venv/bin/python -m tests.dogfood.run_media_understanding_dogfood --model <已保存的视觉模型> --output output/media-acceptance/provider.json` 可在独立数据库和临时 home 中验证真实 Host 调用。验收范围见[媒体实现规格](PULSARA_VIDEO_UNDERSTANDING_IMPLEMENTATION_SPEC.zh.md)。
+本地解码使用锁定的 PyAV wheel 和随包 FFmpeg 库，Pillow 负责拼图，pysubs2 处理 ASS 样式。可选云端服务使用 OpenAI 转写协议。在本机桌面数据库运行时，使用 `.venv/bin/python -m tests.dogfood.run_media_understanding_dogfood --model <已保存的视觉模型> --output output/media-acceptance/provider.json` 可在独立数据库和临时 home 中验证真实 Host 调用。验收范围见[媒体实现规格](archived_docs/PULSARA_VIDEO_UNDERSTANDING_IMPLEMENTATION_SPEC.zh.md)。
 
 ## macOS
 

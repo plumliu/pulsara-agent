@@ -59,6 +59,7 @@ Report agreed fields and unresolved differences. Do not edit files.`,
     context: { mode: "last_n", turns: 1 }
   }
 ]);
+console.log({ agents: team.agents, works: team.works });
 await tools.wait_agent({ works: team.works });
 const findings = await Promise.all(team.works.map(target => tools.query_agents({ target })));
 console.log(findings);
@@ -71,27 +72,38 @@ can continue the appropriate Agent with a new Work.
 
 ## 3. A reviewer that needs a finished investigation
 
+Continue the two Agents from example 2 with new work. In the same Cell, `team` is
+already available. In another Cell, first declare `team` with the complete
+`agents` array copied from that example's output, or recover the selected Targets
+by querying their actual work. Do not refer to an undeclared variable from the
+earlier Cell. The two array positions below are the chosen retained Agents, not
+positions in an unrelated query page.
+
 ```js
 const phase = await tools.run_agent([
   {
-    work_title: "Investigate the change",
-    instruction: "Inspect the requested change and propose a complete implementation plan with meaningful validation.",
-    context: { mode: "last_n", turns: 1 }
+    target: team.agents[0],
+    work_title: "Supplement concrete acceptance cases",
+    instruction: "Continue your investigation. Supply minimal inputs, current outputs, expected results grounded in the requirements, and behavior a fix must preserve. Do not edit files."
   },
   {
-    work_title: "Review the proposal",
+    target: team.agents[1],
+    work_title: "Review supplementary acceptance cases",
     depends_on: ({ works }) => [works[0]],
-    instruction: "Review the prerequisite plan against the request and actual code. Identify actionable gaps or explain why it is ready.",
-    context: { mode: "last_n", turns: 1 }
+    instruction: "Review the prerequisite final supplied as input against the requirements and actual code. Check the expected results and preservation cases. Report contradictions with evidence, or explain why the cases are sound. Do not edit files."
   }
 ]);
+console.log({ agents: phase.agents, works: phase.works });
 await tools.wait_agent({ works: [phase.works[1]] });
 console.log(await tools.query_agents({ target: phase.works[1] }));
 ```
 
 The review starts after the investigation succeeds and receives its final as a
 separate input. The investigator should finish rather than wait for this reviewer
-to reply: the reviewer is blocked until that prerequisite completes.
+to reply: the reviewer is blocked until that prerequisite completes. The two
+AGENT Targets stay the same; both WORK Targets are new. To wait in a further Cell,
+copy the new WORK Targets from `phase`'s output into that Cell's local array and
+call `tools.wait_agent({ works: copiedWorks })`.
 
 ## 4. Reuse an Agent in another Cell
 

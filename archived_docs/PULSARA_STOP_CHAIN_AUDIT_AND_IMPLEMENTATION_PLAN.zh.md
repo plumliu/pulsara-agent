@@ -14,7 +14,7 @@
 
 本次实施涵盖四项修复、测试、真实 provider 验收和代码交叉复审。真实验收使用保存的 DeepSeek 配置；没有据此宣称复现了旧版本截图的现场根因。
 
-实施范围是现有停止控制、对应前端适配、工具取消传播及 provider 流退出收尾。依据 [AGENTS.md](AGENTS.md)、[内核生命周期规格](PULSARA_KERNEL_LIFECYCLE_AND_SERVICE_COMPOSITION_IMPLEMENTATION_SPEC.zh.md)、[MCP 首次请求就绪规格](PULSARA_MCP_FIRST_REQUEST_READINESS_IMPLEMENTATION_SPEC.zh.md) 和当前生产代码。归档停止规格仅用于理解既有设计，不据其旧路径或旧状态覆盖当前合同。Code Mode decide 文档不属于本次实施范围。
+实施范围是现有停止控制、对应前端适配、工具取消传播及 provider 流退出收尾。依据 [AGENTS.md](../AGENTS.md)、[内核生命周期规格](PULSARA_KERNEL_LIFECYCLE_AND_SERVICE_COMPOSITION_IMPLEMENTATION_SPEC.zh.md)、[MCP 首次请求就绪规格](PULSARA_MCP_FIRST_REQUEST_READINESS_IMPLEMENTATION_SPEC.zh.md) 和当前生产代码。归档停止规格仅用于理解既有设计，不据其旧路径或旧状态覆盖当前合同。Code Mode decide 文档不属于本次实施范围。
 
 ## 2. 当前停止链路
 
@@ -37,7 +37,7 @@
 
 实际通信是 POST 长轮询，不是 SSE。工具“操作完成”只表明该工具结果已结束，后续 provider 生成仍可运行。停止命令结果与目标当前状态是不同事实：目标已结束不证明这次停止成功；命令 PENDING 也不证明任务已经停止。
 
-后端现有目标处理见 [host.py](src/pulsara_agent/conversation_kernel/host.py) `request_stop_turn`（5415–5537）：
+后端现有目标处理见 [host.py](../src/pulsara_agent/conversation_kernel/host.py) `request_stop_turn`（5415–5537）：
 
 | 目标状态 | 当前行为 |
 | --- | --- |
@@ -57,46 +57,46 @@
 
 **证据链：**
 
-1. [user_control.py](src/pulsara_agent/conversation_kernel/user_control.py) 第 14 行的准入窗口为 `3_600_000ms`；[host.py](src/pulsara_agent/conversation_kernel/host.py) `control_admission_deadline_ms`（4635–4638）返回当前 Host 单调时间加窗口。
-2. [v3_gateway.py](src/pulsara_agent/terminal_protocol/v3_gateway.py) `_live_control_snapshot`（539–545）携带新期限；普通 `_observe` 响应（697–713）不携带该字段。
-3. [runtime-adapter.ts](frontend/lib/runtime-adapter.ts) 构造函数第 3216 行保存初始 liveControl。普通 observe（3315–3317）只更新运行目标等字段；current-work 失效后即使读取新 baseline，也只采用 todos/media（3377–3387）。
+1. [user_control.py](../src/pulsara_agent/conversation_kernel/user_control.py) 第 14 行的准入窗口为 `3_600_000ms`；[host.py](../src/pulsara_agent/conversation_kernel/host.py) `control_admission_deadline_ms`（4635–4638）返回当前 Host 单调时间加窗口。
+2. [v3_gateway.py](../src/pulsara_agent/terminal_protocol/v3_gateway.py) `_live_control_snapshot`（539–545）携带新期限；普通 `_observe` 响应（697–713）不携带该字段。
+3. [runtime-adapter.ts](../frontend/lib/runtime-adapter.ts) 构造函数第 3216 行保存初始 liveControl。普通 observe（3315–3317）只更新运行目标等字段；current-work 失效后即使读取新 baseline，也只采用 todos/media（3377–3387）。
 4. 同文件 `createUserControlCommandRef`（456–480）每次生成新 command ID，却复制 projection 中的旧期限。
 5. Host 在目标查找前校验期限（5433–5438），过期直接返回 `CONTROL_REQUEST_EXPIRED`（4803–4807）；尚未调用 `task.cancel()`，也未安装控制 attempt。
-6. [pulsara-app.tsx](frontend/app/pulsara-app.tsx) `stopRun`（2081–2087）将所有 rejected 显示成“没有可停止的运行”，忽略 publicCode/publicMessage；该正常返回不进入异常恢复分支。
+6. [pulsara-app.tsx](../frontend/app/pulsara-app.tsx) `stopRun`（2081–2087）将所有 rejected 显示成“没有可停止的运行”，忽略 publicCode/publicMessage；该正常返回不进入异常恢复分支。
 
 **可观察结果：** 真实任务仍运行，停止按钮仍显示；重复点击产生新命令，但仍带旧期限，因此持续被拒。空闲连接放置一小时后启动新任务也会触发。重连／完整 gap 恢复可刷新期限，符合偶发而非每轮必现的描述。
 
-**影响面：** ROOT 停止、手动上下文整理停止、后台命令终止共用此期限。后台链还有一个恢复限制：[background-terminal-panel.tsx](frontend/components/background-terminal-panel.tsx) `stop`（279–283）在已有控制记录时只查询旧命令；实施时必须区分未发送、结果未知和已拒绝，不能让已拒绝操作永久阻止新的人工操作。
+**影响面：** ROOT 停止、手动上下文整理停止、后台命令终止共用此期限。后台链还有一个恢复限制：[background-terminal-panel.tsx](../frontend/components/background-terminal-panel.tsx) `stop`（279–283）在已有控制记录时只查询旧命令；实施时必须区分未发送、结果未知和已拒绝，不能让已拒绝操作永久阻止新的人工操作。
 
-**已有覆盖与缺口：** [test_desktop_user_controls.py](tests/test_desktop_user_controls.py)（163–174）已验证过期必拒且没有 attempt。前端测试只覆盖初始化期限透传、目标刷新，没有跨一小时健康连接的新控制操作。
+**已有覆盖与缺口：** [test_desktop_user_controls.py](../tests/test_desktop_user_controls.py)（163–174）已验证过期必拒且没有 attempt。前端测试只覆盖初始化期限透传、目标刷新，没有跨一小时健康连接的新控制操作。
 
 ### F2 P2 正常受理的停止命令没有最终结果跟踪
 
 **触发条件：** 停止请求正常返回 PENDING，随后物理收尾或终态确认产生 FAILED，或长时间仍未完成。
 
-[host.py](src/pulsara_agent/conversation_kernel/host.py) `_execute_stop_turn_attempt`（5588–5653）会在停止 Cells、汇合 ROOT、结算、读取终态后形成最终结果；`_finish_control_attempt_locked`（4868–4894）更新进程内 attempt，由现有 query 接口读取。
+[host.py](../src/pulsara_agent/conversation_kernel/host.py) `_execute_stop_turn_attempt`（5588–5653）会在停止 Cells、汇合 ROOT、结算、读取终态后形成最终结果；`_finish_control_attempt_locked`（4868–4894）更新进程内 attempt，由现有 query 接口读取。
 
-[pulsara-app.tsx](frontend/app/pulsara-app.tsx) `stopRun` 的正常响应分支不保存 reference、不继续 query。异常恢复分支查询到 PENDING 后同样立即返回（2092–2101）。因此最终失败或无法确认没有准确展示。
+[pulsara-app.tsx](../frontend/app/pulsara-app.tsx) `stopRun` 的正常响应分支不保存 reference、不继续 query。异常恢复分支查询到 PENDING 后同样立即返回（2092–2101）。因此最终失败或无法确认没有准确展示。
 
-**结论边界：** FAILED 可能只是确认读取失败，不能据此断言真实任务一定未停止。[test_pr03_user_controls.py](tests/test_pr03_user_controls.py)（88–129）已有“实际中断但确认失败”的后端用例。此 finding 不解释 F1 的拒绝提示，属于独立结果展示缺口。
+**结论边界：** FAILED 可能只是确认读取失败，不能据此断言真实任务一定未停止。[test_pr03_user_controls.py](../tests/test_pr03_user_controls.py)（88–129）已有“实际中断但确认失败”的后端用例。此 finding 不解释 F1 的拒绝提示，属于独立结果展示缺口。
 
 ### F3 P2 物理工具超时后的首次取消没有传播到结算事实
 
 **可达时序：** 物理工具未完成 → `wait_for(shield(task))` 超过现有 watchdog → 进入 drain → 用户首次停止 → drain 捕获并忽略 CancelledError。
 
-[io.py](src/pulsara_agent/conversation_kernel/io.py) `run_tool_invocation` 仅在原始 timed wait 的取消分支设置 `caller_cancelled` 并调用 `on_caller_cancelled`（223–229）；随后调用 `_drain_physical_task`（236–237），其取消分支仅继续等待（311–324）。
+[io.py](../src/pulsara_agent/conversation_kernel/io.py) `run_tool_invocation` 仅在原始 timed wait 的取消分支设置 `caller_cancelled` 并调用 `on_caller_cancelled`（223–229）；随后调用 `_drain_physical_task`（236–237），其取消分支仅继续等待（311–324）。
 
-因此这个窗口中取消回调不执行，物理结果中的 `caller_cancelled` 仍为 false。工具返回后，[tool_execution.py](src/pulsara_agent/conversation_kernel/tool_execution.py) 第 1879 行不会重抛取消，同一批次尚未派发的工具可能继续执行。下一次 provider 前的 [runner.py](src/pulsara_agent/conversation_kernel/runner.py) 第 1705 行仍检查停止原因，不应扩大描述为全部后续模型调用都会继续。
+因此这个窗口中取消回调不执行，物理结果中的 `caller_cancelled` 仍为 false。工具返回后，[tool_execution.py](../src/pulsara_agent/conversation_kernel/tool_execution.py) 第 1879 行不会重抛取消，同一批次尚未派发的工具可能继续执行。下一次 provider 前的 [runner.py](../src/pulsara_agent/conversation_kernel/runner.py) 第 1705 行仍检查停止原因，不应扩大描述为全部后续模型调用都会继续。
 
 继续汇合真实工具是必要行为；漏洞是汇合期间丢失首次取消事实。现有取消回调若直接抛错，也可能跳过此处物理 join，修复该局部路径时一并封闭。
 
-现有 [test_round5_long_horizon_execution_envelope.py](tests/test_round5_long_horizon_execution_envelope.py) 第 330 行用例覆盖迟到精确结果，第 391 行用例覆盖超时前取消，未覆盖超时后才取消。截图阶段与本窗口不直接吻合。
+现有 [test_round5_long_horizon_execution_envelope.py](../tests/test_round5_long_horizon_execution_envelope.py) 第 330 行用例覆盖迟到精确结果，第 391 行用例覆盖超时前取消，未覆盖超时后才取消。截图阶段与本窗口不直接吻合。
 
 ### F4 P2 模型流消费方抛错后没有显式汇合生成器关闭
 
-[runner.py](src/pulsara_agent/conversation_kernel/runner.py) `_collect_model`（2739–2754）直接遍历 `execution.open_once(permit)`；循环体的 `assembler.apply()` 可能抛错，例如 [assembler.py](src/pulsara_agent/conversation_kernel/assembler.py) `_delta`（269–271）拒绝超过现有拼装容量的内容。
+[runner.py](../src/pulsara_agent/conversation_kernel/runner.py) `_collect_model`（2739–2754）直接遍历 `execution.open_once(permit)`；循环体的 `assembler.apply()` 可能抛错，例如 [assembler.py](../src/pulsara_agent/conversation_kernel/assembler.py) `_delta`（269–271）拒绝超过现有拼装容量的内容。
 
-此时异步生成器暂停在 [direct_model.py](src/pulsara_agent/conversation_kernel/direct_model.py) `open_once` 的 yield（669）。其 finally（672–706）才负责 provider `aclose()`、物理完成确认和 borrow 收尾。`async for` 的消费方抛错不会自动等待这个关闭；Runner 的异常/finally（2807–2815）仅撤销草稿并清除 active execution，可能先结束而物理关闭仍依赖异步生成器 finalizer。
+此时异步生成器暂停在 [direct_model.py](../src/pulsara_agent/conversation_kernel/direct_model.py) `open_once` 的 yield（669）。其 finally（672–706）才负责 provider `aclose()`、物理完成确认和 borrow 收尾。`async for` 的消费方抛错不会自动等待这个关闭；Runner 的异常/finally（2807–2815）仅撤销草稿并清除 active execution，可能先结束而物理关闭仍依赖异步生成器 finalizer。
 
 **修复相关边界：** 仅添加 `contextlib.aclosing` 尚不足以说明重复取消与关闭错误正确。现有 `open_once` 将 GeneratorExit 记为 operation_error，随后 close 错误只在没有 operation_error 时保存；显式 aclose 时必须避免把真实关闭失败隐藏在 GeneratorExit 后面。
 
@@ -145,7 +145,7 @@
 
 准备方法不必串行化耗时控制执行，也不在全局锁内等待停止；它只加入现有观察读取顺序。无需修改 protobuf、添加 heartbeat 或定时续期服务。
 
-此处保留原 cursor 有当前实现依据：[live_control.py](src/pulsara_agent/conversation_kernel/live_control.py) 的 subscriber 只记录 owner epoch（71–72），snapshot／detach 不裁剪共享 ring（103–114、208–210）；observe 按请求中的 after_revision 回放（122–163）。[v3_gateway.py](src/pulsara_agent/terminal_protocol/v3_gateway.py) 第 653–656 行使用客户端 cursor，而非 snapshot 写入的 state.live_control_revision 作为下限。同 owner 且 ring 尚保留时可回放订阅重建前后的过渡事件；ring 已溢出时走既有 LIVE_CONTROL_GAP 重连／完整 baseline 恢复，绝不推进未交付 cursor。A3 对两条路径都做集成验证。
+此处保留原 cursor 有当前实现依据：[live_control.py](../src/pulsara_agent/conversation_kernel/live_control.py) 的 subscriber 只记录 owner epoch（71–72），snapshot／detach 不裁剪共享 ring（103–114、208–210）；observe 按请求中的 after_revision 回放（122–163）。[v3_gateway.py](../src/pulsara_agent/terminal_protocol/v3_gateway.py) 第 653–656 行使用客户端 cursor，而非 snapshot 写入的 state.live_control_revision 作为下限。同 owner 且 ring 尚保留时可回放订阅重建前后的过渡事件；ring 已溢出时走既有 LIVE_CONTROL_GAP 重连／完整 baseline 恢复，绝不推进未交付 cursor。A3 对两条路径都做集成验证。
 
 删除 `RuntimeProjection.controlAdmissionDeadlineMs` 对新命令创建的依赖、同步 `createUserControlCommandRef` 公共入口，以及 App → InspectorPanel → BackgroundTerminalPanel 的旧 deadline props。snapshot wire 字段与后端校验保留，由新准备方法消费。现有 hostSessionId 展示和精确 owner 判断继续使用。
 
@@ -318,9 +318,9 @@ Python 集成使用根 `.venv`，设置 `CI=1` 确保数据库不可用时失败
 
 ### 11.3 保存的 DeepSeek 真实验收
 
-脚本：[run_stop_chain_dogfood.py](tests/dogfood/run_stop_chain_dogfood.py)。通过 `require_pulsara_home()` 和 `LocalSettingsStore` 只读读取保存的 `deepseek / deepseek-flash / openai_chat_completions` 连接，使用 high reasoning；随后在临时 home 中注入只读 settings 和独立测试库。没有将模型凭据导出到 shell。
+脚本：[run_stop_chain_dogfood.py](../tests/dogfood/run_stop_chain_dogfood.py)。通过 `require_pulsara_home()` 和 `LocalSettingsStore` 只读读取保存的 `deepseek / deepseek-flash / openai_chat_completions` 连接，使用 high reasoning；随后在临时 home 中注入只读 settings 和独立测试库。没有将模型凭据导出到 shell。
 
-最终真实调用于 2026-11-07 03:03:15–03:03:39（Asia/Shanghai）完成。证据保存在本地 [report-final.json](output/stop-chain-dogfood/report-final.json)，包含具体提示、实际 SDK 请求、模型流输出、工具结果、原命令与停止命令结果及物理收尾记录；按实际保存的凭据值脱敏。首次验收的独立证据保留在同目录 `report.json`。
+最终真实调用于 2026-11-07 03:03:15–03:03:39（Asia/Shanghai）完成。证据保存在本地 [report-final.json](../output/stop-chain-dogfood/report-final.json)，包含具体提示、实际 SDK 请求、模型流输出、工具结果、原命令与停止命令结果及物理收尾记录；按实际保存的凭据值脱敏。首次验收的独立证据保留在同目录 `report.json`。
 
 | 场景 | 实际结果 |
 | --- | --- |

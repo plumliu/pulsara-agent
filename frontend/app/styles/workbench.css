@@ -114,6 +114,7 @@
 .user-heading { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 3px 8px 0; }
 .user-heading .user-message-copy, .user-steer__heading .user-message-copy { flex: none; }
 .user-heading strong { font-family: var(--serif); font-size: var(--type-title-small); }
+.user-work-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px/1.5 var(--sans); }
 .user-message { width: fit-content; max-width: 100%; margin-left: auto; padding: 12px 14px; border: 1px solid var(--line); border-radius: 15px 4px 15px 15px; background: color-mix(in srgb, var(--paper-solid) 90%, transparent); box-shadow: var(--shadow-sm); --type-body: 16px; }
 .user-message p { margin: 0; font-size: var(--type-body); line-height: 1.72; }
 .prompt-content-body { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--type-body); line-height: 1.72; }

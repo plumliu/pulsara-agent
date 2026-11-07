@@ -318,7 +318,7 @@ Host 测试使用独立临时 PostgreSQL，验证接受后的图片/索引归属
 
 ### 10.2 自然视觉任务
 
-复用 `tests/dogfood/run_media_natural_benchmark.py --native-only`，使用保存的 `qwen3.8-flash` 配置、生产 Host 和独立数据库。三个问题均未规定 mode 或调用路线。原问题、实际参数、工具结果、provider 请求、回答、usage 与耗时保存在 [natural-host.json](output/detail-three-targets/natural-host.json)。
+复用 `tests/dogfood/run_media_natural_benchmark.py --native-only`，使用保存的 `qwen3.8-flash` 配置、生产 Host 和独立数据库。三个问题均未规定 mode 或调用路线。原问题、实际参数、工具结果、provider 请求、回答、usage 与耗时保存在 [natural-host.json](../output/detail-three-targets/natural-host.json)。
 
 | 任务 | 模型实际选择 | 结果 | 工具调用 / 图片 |
 | --- | --- | --- | --- |
@@ -330,6 +330,6 @@ Host 测试使用独立临时 PostgreSQL，验证接受后的图片/索引归属
 
 录屏首次把 crop 写成宽高后自行修正；工具字段和 Skill 已补充明确的左右/上下坐标及数值示例。讲课回答给出的约略页面区间使用了 overview 代表范围，因此这里只验主题和标题；Skill 已补充“用实际帧时刻定位主题，需要精确转变时间时使用 motion”的正向指引。
 
-额外的 Skill 加载检查显式点名 `pulsara-video-review`，其余仍为自然问题。模型实际读取 bundled `SKILL.md`、定位素材，再使用 detail 50–51 和带合法 crop 的 detail 50.1–50.3，正确读出标题及 49.3 万，并在隔离会话内留下时间线批注。共 5 次模型调用，约 222 秒，含一次服务断连重试；完整记录见 [skill-host-recheck.json](output/detail-three-targets/skill-host-recheck.json)。首次临时脚本从 stdin 启动造成多进程入口失败，已终止并清理对应临时数据库；失败记录保留为 `output/detail-three-targets/skill-host-launch-error.json`，随后使用带 main guard 的文件入口完成上述检查。
+额外的 Skill 加载检查显式点名 `pulsara-video-review`，其余仍为自然问题。模型实际读取 bundled `SKILL.md`、定位素材，再使用 detail 50–51 和带合法 crop 的 detail 50.1–50.3，正确读出标题及 49.3 万，并在隔离会话内留下时间线批注。共 5 次模型调用，约 222 秒，含一次服务断连重试；完整记录见 [skill-host-recheck.json](../output/detail-three-targets/skill-host-recheck.json)。首次临时脚本从 stdin 启动造成多进程入口失败，已终止并清理对应临时数据库；失败记录保留为 `output/detail-three-targets/skill-host-launch-error.json`，随后使用带 main guard 的文件入口完成上述检查。
 
 已按用户要求重新构建 macOS ARM64 桌面应用并安装到 `/Applications/Pulsara.app`。标准 `desktop:verify` 中 149 项桌面测试通过，随包环境的重定位、数据库、媒体解码和浏览器 smoke 通过；应用包与安装后的严格递归签名校验通过。安装包内本次修改的 9 个 Python/Skill 文件与工作目录一致，随包 Python 实测 `frames-v3`、恰好两秒接受、超限拒绝及新版 Skill 内容通过。

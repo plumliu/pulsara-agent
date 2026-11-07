@@ -6,10 +6,13 @@ Use the returned complete targets to identify both; display titles are not keys.
 ## Dispatch an array of assignments
 
 ```ts
+type BatchReferences = { agents: AgentTarget[]; works: WorkTarget[] };
 tools.run_agent([
-  { work_title?: string, instruction: string, target?: AgentTarget,
+  { work_title?: string,
+    instruction: string | ((refs: BatchReferences) => string), target?: AgentTarget,
     context?: {mode: "none"} | {mode: "last_n", turns: number},
-    depends_on?: WorkTarget[], materials?: WorkTarget[] }
+    depends_on?: WorkTarget[] | ((refs: BatchReferences) => WorkTarget[]),
+    materials?: WorkTarget[] }
 ]): Promise<{agents: AgentTarget[], works: WorkTarget[], details: object[]}>
 ```
 
@@ -52,6 +55,19 @@ after `run_agent`, not from its parameter functions. Keep these functions pure a
 synchronous: do not use `async`, return a Promise, or schedule asynchronous work.
 An async function or returned Promise is a Cell contract error and blocks further tool submissions
 from that Cell, even if the script catches it.
+
+The callback parameter is local to that function. For example,
+`` instruction: ({ agents }) => `Compare with ${JSON.stringify(agents[1])}` ``
+can use this batch's peer Target. Writing the same template directly as
+`` instruction: `Compare with ${JSON.stringify(agents[1])}` `` evaluates it before
+dispatch, when no callback has supplied `agents`. Likewise, the outer `batch`
+variable is not available until `await run_agent(...)` returns. Existing local
+values such as file contents may be captured normally by a callback.
+
+Use `works[i]` inside `depends_on` to describe a prerequisite, not to fetch its
+result. The scheduler starts the dependent Work after success and supplies the
+prerequisite final as a separate input. Its instruction should tell the agent what
+to check in that supplied material; ROOT need not copy the report into a message.
 
 ```js
 const batch = await tools.run_agent([
@@ -128,6 +144,14 @@ retained agents and their works. Follow the returned `next` calls for further pa
 and `inspect` for details. Use task evidence to choose the right retained Agent;
 its position in a new query page or a matching title does not establish identity.
 
+Redeclare local variables in the new Cell using complete Target objects from the
+earlier output. Retain the `kind` and identity field unchanged. Pass an AGENT as
+assignment `target` to preserve the conversation and create a new Work. Keep that
+call's returned WORK targets for waiting and querying; an old WORK does not become
+the new assignment when its Agent is reused. A synchronous `depends_on` callback
+can connect new Works in the same batch even when their Agents are retained from
+earlier Cells. Array order alone does not declare such a dependency.
+
 The same Agent may appear more than once in a dispatch result when it receives
 several Works. Use the unique `works` array to wait for those assignments; to
 observe that Agent, pass its AGENT target once.
@@ -155,6 +179,9 @@ messages in ROOT context is not proof that no exchange occurred.
 | `run_agent.batch(...)` or `wait_agent.works(...)` | `run_agent([...])` or `wait_agent({works: [...]})` |
 | `send_agent_message({...agentTarget, message})` | `send_agent_message({target: agentTarget, message})` |
 | Sending `name` or using a title as target | Use `work_title` for display and the actual Target for identity |
+| Interpolating current-batch `agents` in a plain instruction string | Use `instruction: ({ agents }) => ...` and interpolate inside the function |
+| Reading `batch.works` while constructing that same dispatch | Use `depends_on: ({ works }) => [works[0]]` |
 | Reading a previous Cell's local variable | Copy its logged Target into the new script or query the actual object |
+| Waiting on an earlier Work after continuing its Agent | Wait on the new `run_agent` result's `works` |
 | Treating a message or accepted Cell as completed work | Wait for the exact WORK and query its result |
 | Retrying a dispatch just to obtain its output | Observe the accepted Cell and query the existing Work |

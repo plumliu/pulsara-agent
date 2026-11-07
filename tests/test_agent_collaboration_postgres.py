@@ -17,6 +17,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_api import (
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     work_target,
 )
+from pulsara_agent.conversation_kernel.subagents.names import SCIENTIST_NAMES
 from pulsara_agent.llm.model_connections import model_call_binding_from_dict
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
@@ -285,6 +286,9 @@ async def test_real_work_titles_belong_to_each_admission_not_agent_session(api_s
     repository, root, api, runtime, context = api_source
     _, args = envelope([{'instruction': 'first exact body', 'work_title': '第一项'}])
     first = await call(api, context, 'run_agent', args)
+    initial_agents = await call(api, context, 'query_agents', {})
+    agent_name = initial_agents['agents'][0]['name']
+    assert agent_name in SCIENTIST_NAMES
     _, args = envelope([
         {'target': first['agents'][0], 'instruction': 'second exact body', 'work_title': '同名'},
         {'target': first['agents'][0], 'instruction': 'third exact body', 'work_title': '同名'},
@@ -310,4 +314,22 @@ async def test_real_work_titles_belong_to_each_admission_not_agent_session(api_s
     ) as connection:
         row = connection.execute('SELECT title FROM pulsara_v3.sessions WHERE id=%s',
             (first['agents'][0]['agent_id'],)).fetchone()
-    assert row['title'] is None
+    assert row['title'] == agent_name
+
+
+@async_test
+async def test_new_agents_receive_distinct_saved_names_across_batches(api_source):
+    repository, root, api, runtime, context = api_source
+    targets = []
+    for _ in range(2):
+        _, args = envelope([{'instruction': 'first'}, {'instruction': 'second'}])
+        result = await call(api, context, 'run_agent', args)
+        targets.extend(result['agents'])
+    listed = await call(api, context, 'query_agents', {})
+    names = {item['agent']['agent_id']: item['name'] for item in listed['agents']}
+    assert set(names) == {target['agent_id'] for target in targets}
+    assert len(set(names.values())) == 4
+    assert set(names.values()) <= set(SCIENTIST_NAMES)
+    for agent_id, name in names.items():
+        row = repository.read_agent_runtime_state(session_id=agent_id, deadline_monotonic=deadline())
+        assert row['title'] == name

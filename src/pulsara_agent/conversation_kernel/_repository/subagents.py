@@ -23,6 +23,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     validate_work_inputs,
     validate_agent_request_graph,
 )
+from pulsara_agent.conversation_kernel.subagents.names import choose_agent_name
 from pulsara_agent.conversation_kernel.vocabulary import CommittedEventType, SubjectSlot
 from pulsara_agent.identity import ID_PAYLOAD_PATTERN
 from pulsara_agent.llm.input import FrozenPromptContent, LLMTextPart
@@ -331,6 +332,12 @@ class _SubagentOperations:
             batch_ids = {r.work_id for r in requests}
             if len(batch_ids) != len(requests):
                 raise ValueError("duplicate Work identity")
+            used_names = {
+                row["title"] for row in connection.execute(
+                    "SELECT DISTINCT title FROM pulsara_v3.sessions WHERE root_session_id=%s AND title IS NOT NULL",
+                    (root_guard.session_id,),
+                ).fetchall()
+            } if any(req.create_agent for req in requests) else set()
             for req in requests:
                 session = connection.execute(
                     "SELECT * FROM pulsara_v3.sessions WHERE id=%s FOR NO KEY UPDATE",
@@ -341,15 +348,18 @@ class _SubagentOperations:
                         raise ConversationKernelConflict(
                             "prepared Agent identity already exists"
                         )
+                    title = choose_agent_name(used_names)
+                    used_names.add(title)
                     connection.execute(
                         """INSERT INTO pulsara_v3.sessions
-                        (id,root_session_id,workspace_id,memory_domain_id,lifecycle,writer_generation,model_call_binding)
-                        VALUES (%s,%s,%s,%s,'OPEN',1,%s)""",
+                        (id,root_session_id,workspace_id,memory_domain_id,title,lifecycle,writer_generation,model_call_binding)
+                        VALUES (%s,%s,%s,%s,%s,'OPEN',1,%s)""",
                         (
                             req.agent_id,
                             root_guard.session_id,
                             root["workspace_id"],
                             root["memory_domain_id"],
+                            title,
                             Jsonb(model_call_binding_to_dict(model_call_binding)),
                         ),
                     )
