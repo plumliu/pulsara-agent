@@ -1007,10 +1007,6 @@ class DirectKernelToolPort:
             bindings = tuple(item for item in bindings
                 if item.catalog_entry.descriptor.is_model_callable
                 and invocation_owner in item.catalog_entry.availability_requirement.allowed_invocation_owners)
-            if conversation_scope_kind is ModelInputScopeKind.ROOT and effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
-                bindings = tuple(item for item in bindings if item.tool_name not in {
-                    "exec_cell", "query_cells", "manage_cell", "run_agent", "query_agents", "send_agent_message", "wait_agent", "stop_agent",
-                })
             if conversation_scope_kind is ModelInputScopeKind.SUBAGENT:
                 bindings = tuple(
                     item
@@ -2087,7 +2083,7 @@ class DirectKernelToolPort:
                 or surface_borrow.prepared.access.conversation_scope_kind is not ModelInputScopeKind.ROOT
                 or permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS):
                 return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "code-mode:root-bypass-required", "Code Mode requires ROOT bypass-permissions mode")
+                    "code-mode:root-bypass-required", f"{tool_name} is available only in bypass-permissions mode.")
         if tool_name == "reload_capabilities":
             access = surface_borrow.prepared.access
             if (
@@ -2107,12 +2103,11 @@ class DirectKernelToolPort:
         if subagent:
             access = surface_borrow.prepared.access
             root_tools = {"run_agent", "stop_agent"}
-            if ((access.conversation_scope_kind is ModelInputScopeKind.ROOT
-                 and permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS)
+            if (permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS
                 or (access.conversation_scope_kind is not ModelInputScopeKind.ROOT and tool_name in root_tools)):
                 return KernelToolAuthorization(
                     KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "agent_requires_root_bypass", "Agent management requires ROOT bypass-permissions mode",
+                    "agent_requires_bypass", f"{tool_name} is available only in bypass-permissions mode.",
                 )
             argument_error = self._subagent.validate_arguments(
                 tool_name=tool_name,

@@ -404,7 +404,7 @@ def test_real_host_adopts_midturn_handoff_and_sends_exact_owner_state(tmp_path, 
                     transcript = "\n".join(text for request in model.root_calls[successor_index + 1:]
                         for message in request.compiled_input.messages for text in text_part_values(message.content))
                     assert "PERMISSION_DENIED" in transcript or "permission_denied" in transcript
-                    assert not {"query_agents", "query_cells"} & {tool.name for tool in successor.compiled_input.tools}
+                    assert {"query_agents", "query_cells"} <= {tool.name for tool in successor.compiled_input.tools}
             # The first suffix after adoption keeps the successor's installed
             # SYSTEM/tools and its entire messages prefix, across actual calls.
             following = model.root_calls[successor_index + 1].compiled_input

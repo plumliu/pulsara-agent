@@ -1,6 +1,6 @@
 ---
 name: pulsara-code-mode
-description: Use for ROOT agent assignments, continuations and waits, including a single assignment, and for composing ordinary tools and optional semantic judgments in JavaScript. Available to ROOT in bypass-permissions mode; native query, message and stop controls remain independently available.
+description: Use for ROOT agent assignments, continuations and waits, including a single assignment, and for composing ordinary tools and optional semantic judgments in JavaScript. Execution requires ROOT bypass-permissions mode; native query, message and stop controls remain independently available.
 ---
 
 # Pulsara Code Mode
@@ -16,6 +16,8 @@ to inspect, supplement or stop work directly while scripts run. These are normal
 control entry points, available independently of Cell capacity and the Code Mode
 runtime. Their `tools.*` counterparts operate on the same Agent and Work targets.
 New assignments and waits use Code Mode; native messages supplement active work.
+The control tools stay listed in every permission mode. Execution requires
+bypass-permissions; other modes return a hint stating that requirement.
 
 For ordinary tools offered in both forms, native calls and `tools.name(...)`
 share their arguments and operate on the same files, processes and saved results.

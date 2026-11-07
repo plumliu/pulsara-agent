@@ -653,8 +653,8 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('permission_mode', ['read-only', 'ask-permissions', 'bypass-permissions'])
-def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_prefix(permission_mode, tmp_path):
+@pytest.mark.parametrize('permission_mode', ['read-only', 'ask-permissions', 'accept-edits', 'bypass-permissions'])
+def test_role_surface_keeps_control_tools_visible_and_rejects_restricted_execution(permission_mode, tmp_path):
     from types import SimpleNamespace
     from pulsara_agent.identity import random_id
     from pulsara_agent.model_input.contracts import ModelInputScopeKind
@@ -676,27 +676,23 @@ def test_cold_surface_filters_code_and_root_agent_tools_without_rewriting_old_pr
             surface = prepare_test_direct_tool_surface(port,conversation_scope_kind=ModelInputScopeKind.ROOT,
                 effective_permission_mode=mode)
             names = {item.name for item in surface.model_surface.tool_specs}
-            assert names.intersection(operations) == (operations - {'run_agent', 'wait_agent'} if mode is PermissionMode.BYPASS_PERMISSIONS else set())
+            assert names.intersection(operations) == operations - {'run_agent', 'wait_agent'}
             if mode is not PermissionMode.BYPASS_PERMISSIONS:
-                # A retained epoch may still carry these exact schemas. The
-                # new turn's execution permission rejects every operation.
-                retained = prepare_test_direct_tool_surface(port,conversation_scope_kind=ModelInputScopeKind.ROOT,
-                    effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-                prefix = tuple(item.canonical_bytes for item in retained.model_surface.tool_specs)
-                borrow = port.borrow_tool_surface(retained)
+                prefix = tuple(item.canonical_bytes for item in surface.model_surface.tool_specs)
+                borrow = port.borrow_tool_surface(surface)
                 permission = build_run_permission_snapshot(snapshot_id=random_id('permission'),requested_mode=mode,
                     effective_mode=mode,admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
                 agent = {'kind':'AGENT','agent_id':random_id('session')}
                 arguments = {'exec_cell':{'code':'return 1;'},'manage_cell':{'action':'wait','target':{'kind':'CELL','cell_id':'cell:'+'a'*26}},'query_cells':{},
                     'run_agent':{'instruction':'work'},'query_agents':{'target':agent},
-                    'send_agent_message':{'target':agent,'message':'hello'},'wait_agent':{'targets':[agent]},'stop_agent':{'target':agent}}
+                    'send_agent_message':{'target':agent,'message':'hello'},'wait_agent':{'agents':[agent]},'stop_agent':{'target':agent}}
                 try:
                     for name in operations:
                         authorization = await port.authorize(tool_name=name,arguments=arguments[name],tool_call_id=random_id('call'),
                             turn_id=random_id('turn'),assistant_entry_id=random_id('entry'),permission_snapshot=permission,
                             surface_borrow=borrow,memory_context=FrozenModelCallMemoryContext())
                         assert authorization.kind is (KernelToolAuthorizationKind.TOOL_UNAVAILABLE if name in {'run_agent', 'wait_agent'} else KernelToolAuthorizationKind.PERMISSION_DENIED)
-                    assert tuple(item.canonical_bytes for item in retained.model_surface.tool_specs) == prefix
+                    assert tuple(item.canonical_bytes for item in surface.model_surface.tool_specs) == prefix
                 finally:
                     borrow.close()
         finally:

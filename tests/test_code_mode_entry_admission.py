@@ -54,13 +54,16 @@ def test_root_native_and_cell_directories_select_sealed_owners_independently(tmp
 def test_entry_matrix_by_role_and_permission(tmp_path, scope, mode):
     async def scenario():
         port = _port(tmp_path)
+        from pulsara_agent.code_mode import CodeModeHost
+        port.bind_code_mode_port(CodeModeHost())
         try:
             surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=scope, effective_permission_mode=mode)
             names = {spec.name for spec in surface.model_surface.tool_specs}
             expected = ({'query_agents', 'send_agent_message', 'wait_agent'} if scope is ModelInputScopeKind.SUBAGENT
-                else {'query_agents', 'send_agent_message', 'stop_agent'} if mode is PermissionMode.BYPASS_PERMISSIONS else set())
+                else {'query_agents', 'send_agent_message', 'stop_agent'})
             assert names & COLLABORATION == expected
             assert 'decide' not in names
+            assert bool({'exec_cell', 'query_cells', 'manage_cell'} <= names) == (scope is ModelInputScopeKind.ROOT)
             if scope is not ModelInputScopeKind.ROOT or mode is not PermissionMode.BYPASS_PERMISSIONS:
                 with pytest.raises(PermissionError):
                     port.freeze_code_mode_tool_directory(surface, effective_permission_mode=mode)
@@ -347,3 +350,39 @@ def test_native_inventory_and_script_apis_have_distinct_role_owners():
     assert 'works' not in thaw_tool_json_object(native.descriptor.input_schema)['properties']
     assert not any(text in DEFAULT_SYSTEM_PROMPT for text in ('Subagents keep their native', 'native wait_agent'))
     assert not any(text in DEFAULT_SUBAGENT_SYSTEM_PROMPT for text in ('tools.run_agent', 'tools.decide', 'exec_cell'))
+
+
+@pytest.mark.parametrize('scope', [ModelInputScopeKind.ROOT, ModelInputScopeKind.SUBAGENT])
+@pytest.mark.parametrize('mode', [mode for mode in PermissionMode if mode is not PermissionMode.BYPASS_PERMISSIONS])
+def test_visible_control_tools_return_bypass_hint_without_execution(tmp_path, scope, mode):
+    from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
+    from pulsara_agent.identity import random_id
+
+    async def scenario():
+        port = _port(tmp_path)
+        from pulsara_agent.code_mode import CodeModeHost
+        port.bind_code_mode_port(CodeModeHost())
+        target = {'kind': 'AGENT', 'agent_id': random_id('session')}
+        calls = {'query_agents': {}, 'send_agent_message': {'target': target, 'message': 'hello'}}
+        if scope is ModelInputScopeKind.ROOT:
+            calls.update({'stop_agent': {'target': target}, 'exec_cell': {'code': 'return 1;'},
+                'query_cells': {}, 'manage_cell': {'action': 'wait', 'target': {'kind': 'CELL', 'cell_id': random_id('cell')}}})
+        else:
+            calls['wait_agent'] = {'agents': [target]}
+        try:
+            surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=scope, effective_permission_mode=mode)
+            assert set(calls) <= {spec.name for spec in surface.model_surface.tool_specs}
+            borrow = port.borrow_tool_surface(surface)
+            try:
+                for name, arguments in calls.items():
+                    auth = await port.authorize(tool_name=name, arguments=arguments,
+                        tool_call_id=random_id('call'), turn_id=random_id('turn'), assistant_entry_id=random_id('entry'),
+                        permission_snapshot=_permission(mode), surface_borrow=borrow, memory_context=SimpleNamespace())
+                    assert auth.kind is KernelToolAuthorizationKind.PERMISSION_DENIED
+                    assert 'only in bypass-permissions mode' in auth.public_message
+            finally:
+                borrow.close()
+            assert not port._code_mode.snapshot_cell_index()
+        finally:
+            await port.aclose()
+    asyncio.run(scenario())

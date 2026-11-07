@@ -260,3 +260,43 @@ def test_subagent_evidence_saves_real_host_frozen_values_and_closed_sessions(
             assert len(saved["closed"]) == 2 and all(saved["closed"])
             assert saved["snapshot"]["cell_sources"]
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('mode', [PermissionMode.READ_ONLY, PermissionMode.ASK_PERMISSIONS, PermissionMode.ACCEPT_EDITS])
+def test_non_bypass_host_advertises_controls_and_returns_hint(tmp_path, monkeypatch, stage2_migrated_postgres_database, mode):
+    from pulsara_agent.llm.input import MessageRole, text_part_values
+    from pulsara_agent.model_input.lowering import decode_tool_result_observation
+
+    async def scenario():
+        monkeypatch.setenv('PULSARA_HOME', str(tmp_path / 'home'))
+        requests = []
+
+        async def stream(request):
+            requests.append(request)
+            names = {tool.name for tool in request.compiled_input.tools}
+            assert {'exec_cell', 'query_cells', 'manage_cell', 'query_agents', 'send_agent_message', 'stop_agent'} <= names
+            if len(requests) == 1:
+                events = _tool_call('exec_cell', random_id('call'), {'code': 'throw new Error("must not execute");'})
+                events += _tool_call('query_agents', random_id('call'), {})
+            else:
+                results = [decode_tool_result_observation(text_part_values(m.content)[0])
+                    for m in request.compiled_input.messages if m.role is MessageRole.TOOL_RESULT]
+                assert len(results) == 2
+                assert all(r['result_state'] == 'PERMISSION_DENIED' for r in results)
+                assert all('only in bypass-permissions mode' in str(r['body']) for r in results)
+                events = _text('Permission hint received')
+            for event in events:
+                yield event
+
+        core, root = await _open_test_session(tmp_path=tmp_path, model=CallbackScriptedKernelModel(stream),
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch)
+        try:
+            result = await root.run_turn(PromptContent.text('Probe control permissions'), command_id=random_id('command'),
+                requested_permission_mode=mode)
+            assert result.final_text == 'Permission hint received'
+            assert len(requests) == 2 and not root.code_mode_cells()
+            assert root.repository.list_root_agent_session_ids(root_session_id=root.session_id,
+                deadline_monotonic=monotonic() + 10) == ()
+        finally:
+            await core.shutdown()
+    asyncio.run(scenario())
