@@ -1,132 +1,99 @@
 # Workflows
 
-For a user-authorized code change, the same script can read project context,
-coordinate investigation and implementation, and decide whether a review calls
-for another assignment. These stages illustrate one task, not a required workflow.
-Use the tools and conditions that the actual request needs.
+Combine tools and agent work according to the actual task. A success dependency
+passes prerequisite finals directly to the next Work; materials carry an ended
+Work's findings into a continuation. Use actual targets to preserve Agent history.
 
-The creation calls below start new agents. If suitable agents already investigated
-the problem in another script, use their actual targets without creation-only
-`name` and `context` fields. ROOT can query, message or stop active work through
-native controls while this script runs, without starting another Cell.
+## Investigate, implement and review
 
-## Investigate, implement, then interpret the review
-
-The investigators pass their finals to a critic. The next batch reuses the design
-investigator and critic and gives the revised plan to an implementer. A semantic
-condition combines the source context and code review to choose whether the same
-implementer needs another Work. All AGENT and WORK targets come from actual calls.
+This script reads project context, investigates a change, and submits implementation
+and review. It illustrates composition rather than a mandatory sequence.
 
 ```js
 const readme = await tools.read_file({
   target: { kind: "PATH", path: "README.md" }, limit: 160
 });
-const phase1 = await tools.run_agent.batch({
-  design: {
-    name: "Design investigator",
-    instruction: `Investigate the requested change and propose its simplest complete design.
-Read the relevant code. Starting README excerpt:
+const investigation = await tools.run_agent([
+  {
+    work_title: "Design the requested change",
+    instruction: `Investigate the user's requested change and propose its simplest complete design.
+Read relevant code. README excerpt:
 ${readme.content}`,
     context: { mode: "last_n", turns: 1 }
   },
-  integration: {
-    name: "Integration investigator",
-    instruction: "Inspect the requested change's callers, integration points, and meaningful validation. Explain the implementation boundaries.",
-    context: { mode: "last_n", turns: 1 }
-  },
-  critic: {
-    name: "Design critic",
-    depends_on: ({ design, integration }) => [design.work, integration.work],
-    instruction: ({ design, integration }) =>
-      `Review the prerequisite findings against the user's requested change.
-Identify concrete gaps and recommend a complete implementation plan.
-The design investigator is ${JSON.stringify(design.agent)};
-the integration investigator is ${JSON.stringify(integration.agent)}.
-Ask an investigator for clarification if it is still active; otherwise state the unresolved question.`,
+  {
+    work_title: "Check integration and validation",
+    instruction: "Inspect callers and integration points for the requested change. Propose meaningful validation.",
     context: { mode: "last_n", turns: 1 }
   }
-});
-console.log({ phase1 });
-await tools.wait_agent.works({ targets: [phase1.critic.work] });
-const proposalReview = await tools.query_agents({ target: phase1.critic.work });
-if (proposalReview.status !== "completed") {
-  console.log({ phase1, proposalReview });
+]);
+console.log({ agents: investigation.agents, works: investigation.works });
+await tools.wait_agent({ works: investigation.works });
+const findings = await Promise.all(investigation.works.map(target => tools.query_agents({ target })));
+if (findings.some(work => work.status !== "completed")) {
+  console.log({ findings });
 } else {
-  const phase2 = await tools.run_agent.batch({
-    revision: {
-      target: phase1.design.agent,
-      materials: [phase1.critic.work],
-      instruction: "Revise your proposal using the critic's findings. Resolve concrete gaps within the user's request and produce the implementation plan."
+  const phase = await tools.run_agent([
+    {
+      target: investigation.agents[0],
+      work_title: "Implement the change",
+      materials: investigation.works,
+      instruction: "Implement the user-authorized change using the investigation findings. Run meaningful checks and report actual results."
     },
-    implementation: {
-      name: "Implementer",
-      depends_on: ({ revision }) => [revision.work],
-      instruction: "Implement the user-authorized prerequisite plan and run the checks relevant to its behavior. Report the changes and actual verification."
-    },
-    review: {
-      target: phase1.critic.agent,
-      depends_on: ({ revision, implementation }) => [revision.work, implementation.work],
-      instruction: "Review the implemented code against the plan and implementation report. Inspect the actual files. Report actionable findings or explain why the change is ready."
+    {
+      target: investigation.agents[1],
+      work_title: "Review the implementation",
+      depends_on: ({ works }) => [works[0]],
+      instruction: "Review the actual changed code and its validation. Report concrete defects or explain why the requested change is ready."
     }
-  });
-  console.log({ phase2 });
-  await tools.wait_agent.works({ targets: [phase2.review.work] });
-  const codeReview = await tools.query_agents({ target: phase2.review.work });
-  if (codeReview.status !== "completed") {
-    console.log({ phase2, codeReview });
+  ]);
+  console.log({ agents: phase.agents, works: phase.works });
+  await tools.wait_agent({ works: [phase.works[1]] });
+  const review = await tools.query_agents({ target: phase.works[1] });
+  if (review.status !== "completed") {
+    console.log({ review });
   } else {
-    const condition = "Does this code review identify a concrete defect in the requested implementation that needs a code or test change?";
-    const inputs = [JSON.stringify({ project_context: readme.content, review: codeReview.final })];
+    const condition = "Does this review identify a concrete defect in the requested implementation that requires a code or test change?";
+    const inputs = [JSON.stringify({ project_context: readme.content, review: review.final })];
     if (tools.decide.available()) {
       const { decisions } = await tools.decide({ condition, inputs });
       if (decisions[0]) {
-        const fix = await tools.run_agent({
-          target: phase2.implementation.agent,
-          materials: [phase2.review.work],
-          instruction: "Address the concrete code-review findings within the requested change. Inspect the current code, make the necessary fixes, and run relevant checks. Report any finding that requires a product decision to ROOT."
-        });
-        console.log({ fix });
-        await tools.wait_agent.works({ targets: [fix.work] });
-        console.log(await tools.query_agents({ target: fix.work }));
+        const fix = await tools.run_agent([
+          {
+            target: phase.agents[0],
+            work_title: "Address review findings",
+            materials: [phase.works[1]],
+            instruction: "Address the concrete review findings within the requested change. Inspect the code, make necessary fixes, and run relevant checks. Report unresolved product choices to ROOT."
+          }
+        ]);
+        await tools.wait_agent({ works: fix.works });
+        console.log(await tools.query_agents({ target: fix.works[0] }));
       } else {
-        console.log({ phase2, codeReview });
+        console.log({ agents: phase.agents, works: phase.works, review });
       }
     } else {
-      console.log({ condition, inputs, source: readme, phase2, codeReview });
+      console.log({ condition, inputs, source: readme, agents: phase.agents, works: phase.works, review });
     }
   }
 }
 ```
 
-The context setting copies the latest ROOT turn for the investigators. Supply any
-additional task details in their instructions. Dependencies carry successful
-finals into new work; `materials` carries the prior review into a continuation.
-A `completed` Work only means the assignment ended normally. Its final contains
-the assessment, which the boolean condition interprets. A stopped Work is reported
-with its diagnostic instead of being treated as a successful review.
-
-Unavailable Decision returns the condition, materials and actual Agent/Work
-references to ROOT for judgment. The completed ordinary work remains usable;
-configuration is not required to continue. ROOT can read the same review and
-continue the implementer through `tools.run_agent` in a new script. When Decision
-is available, the branch stays in this script. After a fix, further inspection or
-another review can reuse the returned targets as the task requires.
+Decision is optional. When unavailable, the logged condition, material and targets
+let ROOT interpret the review and continue the same implementer in a new Cell.
+A completed Work means the assignment ended normally; its actual final determines
+whether the proposed design or implementation is satisfactory.
 
 ## Continue after interruption
 
-Native `query_agents` shows current and recent work. ROOT can reuse completed
-findings, follow running work, send a message or stop a real target independently
-of Code Mode availability. All new assignments and waits use Code Mode.
-Reusing an unloaded agent loads its existing conversation automatically; it does
-not rerun its previous assignment.
+Use native queries to inspect retained Agents and exact Works. Finished results
+remain usable. An Agent target can receive another Work after a previous one
+finishes or stops; an old Work target continues to identify only that old Work.
 
-A stopped prerequisite stops its dependent work. Build the remaining phase with
-new Work targets; old terminal Works do not become running again. Previously
-completed effects stay in place. Inspect the current files or other tool results
-when the interrupted operation's effects are uncertain.
+Stopping a prerequisite stops success-dependent work. Build the remaining phase
+with new Work targets and reuse the actual Agents when useful. Do not repeat
+completed changes just to recreate a local JavaScript variable.
 
-Logging selected Agent/Work targets makes them available to later scripts.
-Progress arrives only when the script outputs it; `manage_cell` with `action:"wait"`
-observes execution state without fetching progress or result bodies. If its host
-has closed, the old script cannot be resumed; agent state remains queryable and
-further assignments use a new script with the actual targets.
+Each Cell has fresh variables. Pass actual targets through console output, then
+copy them into a later Cell or query their objects. If the host has closed, the
+old script cannot resume; query retained agent work and submit any continuation
+through a new Cell. Native control stays available independently of Cell capacity.

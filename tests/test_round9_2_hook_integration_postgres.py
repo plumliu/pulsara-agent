@@ -1363,7 +1363,7 @@ def test_round9_2_agent_work_prompt_and_stop_share_real_owner_and_one_shot_conti
             )
             assert frozen_source == (
                 'console.log({delegation:"call:round9-2-work",admitted:await tools.run_agent('
-                '{"instruction": "Exercise child Work lifecycle Hooks exactly once."})});'
+                '[{"instruction": "Exercise child Work lifecycle Hooks exactly once."}])});'
             )
             first_context = _hook_observations(child_requests[0])
             assert any(

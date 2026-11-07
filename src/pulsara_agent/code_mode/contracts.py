@@ -138,7 +138,7 @@ class CodeModeToolResult:
 
 
 CodeModeInvoke = Callable[[CodeModeInvocation], Awaitable[CodeModeToolResult]]
-CodeModePrepareBatch = Callable[[Mapping[str, Mapping[str, object]]], Mapping[str, object]]
+CodeModePrepareBatch = Callable[[list[Mapping[str, object]]], Mapping[str, object]]
 CellState = Literal["queued", "running", "completed", "failed", "terminated"]
 
 

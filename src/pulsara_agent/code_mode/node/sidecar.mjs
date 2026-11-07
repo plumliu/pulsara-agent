@@ -107,7 +107,8 @@ function command(message) {
     const buffer = new SharedArrayBuffer(16), timingBuffer = new SharedArrayBuffer(16);
     const cell = {id: message.cell_id, buffer, usage: new BigInt64Array(buffer, 0, 1), flags: new Int32Array(buffer, 8), timingBuffer,
       timing: new Float64Array(timingBuffer), timers: new Set(), worker: null, terminal: false,
-      start: {source: message.source, toolNames: message.tool_names, decisionAvailable: message.decision_available},
+      start: {source: message.source, toolNames: message.tool_names, decisionAvailable: message.decision_available,
+        runAgentFields: message.run_agent_fields},
       sourceCharge: 0, preparations: new Map()};
     const sourceCharge = Buffer.byteLength(JSON.stringify(message), 'utf8') + 256;
     if (!reserve(cell, sourceCharge + limits.control_bytes + (message.catalog_bytes || 0))) {

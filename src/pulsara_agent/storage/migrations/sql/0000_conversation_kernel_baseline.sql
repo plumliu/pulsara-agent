@@ -891,6 +891,8 @@ CREATE TABLE pulsara_v3.prompt_queue_items (
     source_tool_attempt_id text,
     initial_context jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(initial_context)='array'),
     work_inputs jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(work_inputs)='array'),
+    work_title text CHECK (work_title IS NULL OR (input_origin = 'AGENT_INSTRUCTION'
+        AND btrim(work_title) <> '' AND octet_length(work_title) <= 256)),
     CHECK ((input_origin IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL','CELL_OUTPUT')) = (command_id IS NULL AND client_submission_id IS NULL)),
     CHECK (input_origin NOT IN ('AGENT_INSTRUCTION','AGENT_MESSAGE','AGENT_MATERIAL','CELL_OUTPUT') OR source_session_id IS NOT NULL),
     scheduled_task_id text,
@@ -2140,6 +2142,9 @@ BEGIN
     END IF;
 
     IF TG_TABLE_NAME = 'prompt_queue_items' THEN
+        IF TG_OP = 'UPDATE' AND OLD.work_title IS DISTINCT FROM NEW.work_title THEN
+            RAISE EXCEPTION 'accepted Work title is immutable' USING ERRCODE = '23514';
+        END IF;
         IF NEW.consumed_entry_id IS NOT NULL AND NOT EXISTS (
             SELECT 1 FROM pulsara_v3.transcript_entries
             WHERE session_id = NEW.session_id AND id = NEW.consumed_entry_id

@@ -1,3 +1,4 @@
+import { agentCellApi, type AgentRow } from '../../frontend/lib/agent-cell-api';
 import { uiPreferences } from '../../frontend/lib/ui-preferences';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
@@ -8,7 +9,7 @@ import { PromptDraftStore } from '../../frontend/lib/prompt-draft';
 import { rejectDirectoryDrop } from '../../frontend/lib/file-drop';
 import type { PulsaraDesktop } from '../../frontend/lib/desktop-host';
 
-afterEach(() => { cleanup(); delete window.pulsaraDesktop; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); delete window.pulsaraDesktop; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 let workspace: NonNullable<ReturnType<typeof useDesktopWorkspace>>;
 function Content({ onClose = () => {} }: { onClose?: () => void }) { workspace = useDesktopWorkspace()!; return <DesktopWorkspace isOpen onClose={onClose} toolbar={null} renderTab={tab => <p>{tab.sessionId}:{tab.entityId}</p>} />; }
 function Host({ sessionId, onClose }: { sessionId: string; onClose?: () => void }) { return <DesktopWorkspaceProvider sessionId={sessionId} onShow={() => {}}><Content onClose={onClose} /></DesktopWorkspaceProvider>; }
@@ -427,4 +428,52 @@ it('releases a late user webpage allocation when the workspace owner is destroye
   view.unmount();
   await act(async () => resolve({instanceId:'late',tabId:id,url:'',pendingUrl:null,title:'',loading:false,canGoBack:false,canGoForward:false,error:null,crashed:false}));
   expect(browser.clear).toHaveBeenCalledOnce(); expect(browser.close).toHaveBeenCalledWith('late');
+});
+
+it('refreshes inactive Agent tab metadata serially without replacing its identity or reading state', async () => {
+  vi.useFakeTimers();
+  const row = (work: string): AgentRow => ({agent_id:'session:agent',title:'Researcher',current_work:{work_id:work,work_title:work,status:'running'},queued_work_count:1,has_running_turn:true});
+  let finish!: (value: {agent:AgentRow}) => void;
+  const pending = new Promise<{agent:AgentRow}>(resolve => {finish=resolve;});
+  const fetch = vi.spyOn(agentCellApi,'agent').mockResolvedValueOnce({agent:row('先前调查')}).mockReturnValueOnce(pending).mockResolvedValue({agent:row('后续复核')});
+  render(<Host sessionId="a" />);
+  act(() => { workspace.open({id:'agent-tab',sessionId:'a',kind:'agent',entityId:'session:agent',title:'Researcher',workLocation:{workId:'queue:history',requestId:1}}); workspace.open({id:'file',sessionId:'a',kind:'file',title:'file'}); });
+  await act(async () => {});
+  const reading=workspace.tabs.find(tab=>tab.id==='agent-tab')!.view!;
+  reading.top=117;
+  const locate=workspace.tabs.find(tab=>tab.id==='agent-tab')!.workLocation;
+  expect(screen.getByRole('tab',{name:'Researcher'}).getAttribute('title')).toContain('当前任务：先前调查');
+  await act(async () => { await vi.advanceTimersByTimeAsync(12000); });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  await act(async () => { finish({agent:row('后续复核')}); await pending; });
+  expect(screen.getByRole('tab',{name:'Researcher'}).getAttribute('title')).toContain('当前任务：后续复核');
+  const tab=workspace.tabs.find(tab=>tab.id==='agent-tab')!;
+  expect(tab.title).toBe('Researcher'); expect(tab.view).toBe(reading); expect(tab.view!.top).toBe(117); expect(tab.workLocation).toBe(locate);
+  expect(workspace.activeId).toBe('file');
+});
+it('ignores metadata from a closed Agent tab after reopening its exact target', async () => {
+  let finish!: (value: {agent:AgentRow}) => void;
+  const pending = new Promise<{agent:AgentRow}>(resolve => {finish=resolve;});
+  const row:AgentRow={agent_id:'session:agent',title:'Researcher',current_work:null,queued_work_count:0,has_running_turn:true};
+  vi.spyOn(agentCellApi,'agent').mockReturnValueOnce(pending).mockResolvedValue({agent:row});
+  render(<Host sessionId="a" />);
+  const tab={id:'agent-tab',sessionId:'a',kind:'agent' as const,entityId:'session:agent',title:'Researcher'};
+  await act(async () => { workspace.open(tab); });
+  act(() => workspace.close(tab.id));
+  await act(async () => { workspace.open(tab); });
+  await act(async () => { finish({agent:{...row,current_work:{work_id:'queue:old',work_title:'迟到旧标题',status:'running'}}}); await pending; });
+  expect(screen.getByRole('tab',{name:'Researcher'}).getAttribute('title')).toContain('处理中');
+  expect(screen.getByRole('tab',{name:'Researcher'}).getAttribute('title')).not.toContain('迟到旧标题');
+});
+it('does not publish Agent metadata across a root switch', async () => {
+  let finish!: (value: {agent:AgentRow}) => void;
+  const pending = new Promise<{agent:AgentRow}>(resolve => {finish=resolve;});
+  vi.spyOn(agentCellApi,'agent').mockReturnValueOnce(pending).mockResolvedValue({agent:{agent_id:'session:b',title:'B',current_work:null,queued_work_count:0,has_running_turn:false}});
+  const view=render(<Host sessionId="a" />);
+  await act(async () => { workspace.open({id:'agent-a',sessionId:'a',kind:'agent',entityId:'session:a',title:'A'}); });
+  view.rerender(<Host sessionId="b" />);
+  await act(async () => { workspace.open({id:'agent-b',sessionId:'b',kind:'agent',entityId:'session:b',title:'B'}); });
+  await act(async () => { finish({agent:{agent_id:'session:a',title:'A',current_work:{work_id:'queue:old',work_title:'旧会话标题',status:'running'},queued_work_count:0,has_running_turn:true}}); await pending; });
+  expect(screen.queryByRole('tab',{name:'A'})).toBeNull();
+  expect(screen.getByRole('tab',{name:'B'}).getAttribute('title')).not.toContain('旧会话标题');
 });

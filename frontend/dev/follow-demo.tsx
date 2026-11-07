@@ -1,3 +1,4 @@
+import { AgentWorkDemo, installAgentWorkDemo } from './agent-work-demo';
 import { StrictMode, useEffect, useMemo, useState, type ComponentProps } from 'react';
 import { createRoot } from 'react-dom/client';
 import { WorkbenchView } from '../components/workbench-view';
@@ -96,5 +97,9 @@ function Demo() {
   </aside><WorkbenchView {...props}/></>;
 }
 initializeUiPreferences({});
-const style=document.createElement('style');style.textContent=`#root{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr)}.follow-demo-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 16px;background:var(--paper-solid);font:13px var(--sans);border-bottom:1px solid var(--line)}.follow-demo-controls button{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper-raised)}.follow-demo-controls span{flex-basis:100%;color:var(--muted)}`;document.head.append(style);
-createRoot(document.getElementById('root')!).render(<StrictMode><Demo/></StrictMode>);
+const style=document.getElementById('follow-demo-style') ?? document.createElement('style');style.id='follow-demo-style';style.textContent=`#root{height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr)}.follow-demo-controls{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 16px;background:var(--paper-solid);font:13px var(--sans);border-bottom:1px solid var(--line)}.follow-demo-controls button{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper-raised)}.follow-demo-controls span{flex-basis:100%;color:var(--muted)}`;document.head.append(style);
+const agentDemo=new URLSearchParams(location.search).has('agents');
+if(agentDemo) { installAgentWorkDemo(); style.textContent += '.agent-work-demo{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:0;max-width:1100px;width:100%;margin:0 auto}.agent-work-demo>.desktop-workspace{grid-column:2;--workspace-visible-width:100%;width:100%;max-width:none}.agent-work-demo>section{overflow:auto;border-left:1px solid var(--line);background:var(--paper)}'; }
+const reactRoot=import.meta.hot?.data.reactRoot ?? createRoot(document.getElementById('root')!);
+if(import.meta.hot) import.meta.hot.data.reactRoot=reactRoot;
+reactRoot.render(<StrictMode>{agentDemo?<AgentWorkDemo/>:<Demo/>}</StrictMode>);

@@ -1,5 +1,5 @@
 // Evaluated only by QuickJS; potentially user-controlled getters/toJSON stay timed.
-((invokeHost, prepareHost, discardHost, outputHost, names, valueLimit, diagnosticChars, decisionAvailable) => {
+((invokeHost, prepareHost, discardHost, outputHost, names, valueLimit, diagnosticChars, decisionAvailable, runAgentFields) => {
   'use strict';
   if (typeof decisionAvailable !== 'boolean') throw new TypeError('Code Mode Decision availability must be a boolean');
   const stringify = JSON.stringify, parse = JSON.parse, apply = Reflect.apply;
@@ -10,6 +10,7 @@
   const arrayIsArray = Array.isArray, numberFinite = Number.isFinite;
   const numberInteger = Number.isInteger, numberSafe = Number.isSafeInteger;
   const objectPrototype = Object.prototype;
+  const asyncFunctionPrototype = getPrototypeOf(async function() {});
   const NativePromise = Promise, NativeSet = Set, NativeString = String, NativeNumber = Number;
   const NativeError = Error, NativeTypeError = TypeError, NativeRangeError = RangeError;
   const setHas = Set.prototype.has, setAdd = Set.prototype.add, setDelete = Set.prototype.delete;
@@ -42,6 +43,11 @@
     return value;
   }
   let preparing = false;
+  let callbackFailure = false;
+  function requireToolSubmission() {
+    if(callbackFailure) throw new NativeTypeError('Asynchronous parameter callback invalidated this Cell tool submission');
+    if(preparing) throw new NativeTypeError('Tool calls are forbidden in parameter functions');
+  }
   function jsonClone(value, seen = new NativeSet()) {
     if(value === null || typeof value === 'boolean') return value;
     if(typeof value === 'string') return argumentString(value);
@@ -87,61 +93,86 @@
     return value;
   }
   function call(name, parameters, preparation = null) {
-    if(preparing) throw new NativeTypeError('Tool calls are forbidden in batch parameter functions');
+    requireToolSubmission();
     return invokeHost(name, encode(parameters), preparation);
   }
   const tools = create(null);
   each(names, name => tools[name] = parameters => call(name, parameters));
   defineProperty(tools.decide, 'available', {value: freeze(() => decisionAvailable), enumerable: true});
   if(tools.run_agent) {
-    tools.run_agent.batch = function(specs) {
-      if(preparing) throw new NativeTypeError('Tool calls are forbidden in batch parameter functions');
-      // Snapshot concrete fields before yielding for allocation. Internal iteration
-      // uses captured intrinsics, so guest prototype changes cannot omit JSON fields.
-      const captured = [];
-      each(entries(specs), pair => {
-        const key = pair[0], member = pair[1], parameters = create(null);
-        each(entries(member), pair => {
-          const field = pair[0], value = pair[1];
+    if(!arrayIsArray(runAgentFields)) throw new NativeTypeError('Missing run_agent assignment fields');
+    const allowedFields = new NativeSet(runAgentFields);
+    tools.run_agent = function(assignments) {
+      requireToolSubmission();
+      if(!arrayIsArray(assignments) || assignments.length === 0)
+        throw new NativeTypeError('run_agent requires a nonempty assignment array');
+      // Capture the dense collection and ordinary JSON fields before the first await.
+      // The catalog owns the field vocabulary; callbacks remain local to this VM.
+      const length = assignments.length, indices = ownKeys(assignments);
+      if(indices.length !== length + 1) throw new NativeTypeError('run_agent requires a dense array without extra properties');
+      each(indices, key => {
+        if(key === 'length') return;
+        const index = typeof key === 'string' ? NativeNumber(key) : -1;
+        if(!numberInteger(index) || index < 0 || NativeString(index) !== key || index >= length)
+          throw new NativeTypeError('run_agent rejects array properties');
+      });
+      const captured = [], identities = [];
+      setPrototypeOf(captured, null); setPrototypeOf(identities, null);
+      for(let index=0; index<length; index++) {
+        const member = assignments[index];
+        if(member === null || typeof member !== 'object' || arrayIsArray(member)
+            || (getPrototypeOf(member) !== objectPrototype && getPrototypeOf(member) !== null))
+          throw new NativeTypeError('run_agent members must be configuration objects');
+        const parameters = create(null);
+        each(ownKeys(member), field => {
+          if(typeof field !== 'string' || !apply(setHas, allowedFields, [field]))
+            throw new NativeTypeError('Unknown run_agent assignment field');
+          const value = member[field];
+          if(typeof value === 'function' && (field === 'instruction' || field === 'depends_on')
+              && getPrototypeOf(value) === asyncFunctionPrototype) {
+            callbackFailure = true;
+            throw new NativeTypeError('Parameter functions must return synchronously');
+          }
           parameters[field] = typeof value === 'function' && (field === 'instruction' || field === 'depends_on')
             ? value : parse(encode(value));
         });
-        captured[captured.length] = [key, parameters];
-      });
-      const identities = create(null);
-      each(captured, pair => {
-        identities[pair[0]] = pair[1].target === undefined ? {} : {target: pair[1].target};
-      });
+        captured[index] = parameters;
+        identities[index] = parameters.target === undefined ? {} : {target: parameters.target};
+      }
       return (async () => {
         const prepared = await prepareHost(encode(identities));
-        const peers = freezeTree(prepared.peers);
+        const refs = freezeTree(prepared.refs);
         try {
           const members = [];
-          each(captured, pair => {
-            const key = pair[0], parameters = create(null);
-            each(entries(pair[1]), pair => {
+          setPrototypeOf(members, null);
+          each(captured, (member, index) => {
+            const parameters = create(null);
+            each(entries(member), pair => {
               const field = pair[0]; let value = pair[1];
               if(typeof value === 'function') {
                 preparing = true;
                 try {
-                  value = value(peers);
+                  value = value(refs);
                   if(value !== null && (typeof value === 'object' || typeof value === 'function')
-                      && typeof value.then === 'function')
-                    throw new NativeTypeError('Batch parameter functions must return synchronously');
+                      && typeof value.then === 'function') {
+                    // A rejected thenable can still run its own continuations. Seal
+                    // new tool submissions in this Cell; admitted calls still settle.
+                    callbackFailure = true;
+                    throw new NativeTypeError('Parameter functions must return synchronously');
+                  }
                   value = parse(encode(value));
                 } finally { preparing = false; }
               }
               parameters[field] = value;
             });
-            members[members.length] = {key, agent_id: peers[key].agent.agent_id,
-              work_id: peers[key].work.work_id, parameters};
+            members[index] = {agent_id: refs.agents[index].agent_id,
+              work_id: refs.works[index].work_id, parameters};
           });
-          return await call('run_agent.batch', {members}, prepared.request_id);
+          return await call('run_agent', {members}, prepared.request_id);
         } finally { discardHost(prepared.request_id); }
       })();
     };
   }
-  if(tools.wait_agent) tools.wait_agent.works = parameters => call('wait_agent.works', parameters);
   each(names, name => freeze(tools[name]));
   freeze(tools);
   defineProperty(globalThis, 'tools', {value: tools});

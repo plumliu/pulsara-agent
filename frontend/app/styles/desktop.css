@@ -232,3 +232,8 @@
 :root:active-view-transition-type(agent-cell-update)::view-transition-old(root),
 :root:active-view-transition-type(agent-cell-update)::view-transition-new(root) { animation-duration: .16s; }
 @media (prefers-reduced-motion: reduce) { .agent-cell-row,.agent-cell-graph-card { transition: none; } }
+
+.agent-cell-row-copy { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.agent-cell-row-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: 12px/1.5 var(--sans); }
+.agent-cell-row-copy > small { color: var(--faint); font: 11px/1.5 var(--sans); }
+.workspace-tab .agent-cell-indicator { margin-left: 2px; }

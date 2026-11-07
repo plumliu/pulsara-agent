@@ -359,6 +359,7 @@ interface QueuedPromptBase {
   status: 'pending';
   contentUnavailable?: boolean;
   inputOrigin?: string;
+  workTitle?: string | null;
   scheduledInput?: Message['scheduledInput'];
   cellOutput?: Message['cellOutput'];
   waitingOn?: readonly string[];
@@ -925,7 +926,7 @@ interface ProtocolEntry {
     source_coverage_reason?: string; output_unavailability_reason?: string; result_facts_json?: string;
   };
   input_origin?: string;
-  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string };
+  input_source?: { queue_item_id?: string; command_id?: string; delivery_mode?: string; source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; work_title?: string };
   scheduled_input?: { task_id: string; task_revision: string | number; due_at_utc: string; trigger_source: 'TIMER' | 'RUN_ONCE' };
   visualizations?: Array<{
     ordinal: string | number; state: string; content_digest?: string;
@@ -960,7 +961,7 @@ export interface ProtocolCanonicalControl {
   prompt_queue?: Array<{
     queue_item_id?: string; command_id?: string; queue_sequence?: string | number;
     status?: string; delivery_mode?: string; target_turn_id?: string; accepted_at_utc?: string; input_origin?: string;
-    source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; scheduled_input?: ProtocolEntry['scheduled_input']; waiting_on?: string[];
+    source_session_id?: string; source_work_id?: string; source_turn_id?: string; source_tool_attempt_id?: string; work_title?: string; scheduled_input?: ProtocolEntry['scheduled_input']; waiting_on?: string[];
     content?: ProtocolContent; requested_permission_mode?: string; permission?: { requested_mode?: string; effective_mode?: string };
   }>;
   prompt_queue_total_count?: string | number;
@@ -5210,7 +5211,7 @@ function projectInputSource(
   if (!item) return undefined;
   const identity = inputSourceIdentity(item, origin);
   const mode = deliveryMode(item.delivery_mode);
-  if (item.queue_item_id) return {identityKind:'queue', queueItemId:item.queue_item_id, deliveryMode:mode, ...identity};
+  if (item.queue_item_id) return {identityKind:'queue', queueItemId:item.queue_item_id, deliveryMode:mode, ...identity, ...(origin === 'AGENT_INSTRUCTION' ? {workTitle: item.work_title ?? null} : {})};
   if (identity.sourceKind === 'command') return {identityKind:'revision', deliveryMode:mode, ...identity};
   if (identity.sourceKind === 'agent' || identity.sourceKind === 'cell') return {identityKind:'origin', deliveryMode:mode, ...identity};
   return undefined;
@@ -5232,6 +5233,7 @@ function projectQueuedPrompts(control: ProtocolCanonicalControl): QueuedPrompt[]
         sequence: decimal(item.queue_sequence),
         status: 'pending' as const,
         inputOrigin: item.input_origin,
+        ...(item.input_origin === 'AGENT_INSTRUCTION' ? {workTitle: item.work_title ?? null} : {}),
         scheduledInput: projectScheduledInput(item.scheduled_input),
         cellOutput: item.input_origin === 'CELL_OUTPUT' && item.content?.inline_content !== undefined ? decodeCellOutput(item.content).source : undefined,
         waitingOn: item.waiting_on?.length ? item.waiting_on : undefined,

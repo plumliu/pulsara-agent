@@ -8,13 +8,13 @@ import pytest
 from psycopg.rows import dict_row
 
 from pulsara_agent.identity import random_id
+from tests.test_agent_collaboration_array_contracts import envelope
 from pulsara_agent.conversation_kernel.io import KernelSessionIO
 from pulsara_agent.conversation_kernel.repository import ConversationKernelConflict
 from pulsara_agent.conversation_kernel.subagents.collaboration_api import (
     CollaborationToolPort,
 )
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
-    prepare_batch_refs,
     work_target,
 )
 from pulsara_agent.llm.model_connections import model_call_binding_from_dict
@@ -117,29 +117,14 @@ async def test_public_batch_atomic_rejection_and_wait_then_query_exact_real_fina
     api_source,
 ):
     repository, root, api, runtime, context = api_source
-    peers = prepare_batch_refs({"a": {}, "b": {}})
-    bad = {
-        "members": [
-            dict(
-                key=key,
-                agent_id=ref["agent"]["agent_id"],
-                work_id=ref["work"]["work_id"],
-                parameters={
-                    "instruction": key,
-                    **(
-                        {"materials": [work_target("queue:aaaaaaaaaaaaaaaaaaaaaaaaaa")]}
-                        if key == "b"
-                        else {}
-                    ),
-                },
-            )
-            for key, ref in peers.items()
-        ]
-    }
+    peers, bad = envelope([
+        {"instruction": "a"},
+        {"instruction": "b", "materials": [work_target("queue:aaaaaaaaaaaaaaaaaaaaaaaaaa")]},
+    ])
     with pytest.raises(
         ConversationKernelConflict, match="material Work must have ended"
     ):
-        await call(api, context, "run_agent.batch", bad)
+        await call(api, context, "run_agent", bad)
     assert (
         repository.list_root_agent_session_ids(
             root_session_id=root.guard.session_id, deadline_monotonic=deadline()
@@ -148,25 +133,25 @@ async def test_public_batch_atomic_rejection_and_wait_then_query_exact_real_fina
     )
     bad["members"][1]["parameters"] = {
         "instruction": "compare",
-        "depends_on": [peers["a"]["work"]],
+        "depends_on": [peers["works"][0]],
     }
-    accepted = await call(api, context, "run_agent.batch", bad)
-    assert accepted["a"]["work"] == peers["a"]["work"]
+    accepted = await call(api, context, "run_agent", bad)
+    assert accepted["works"][0] == peers["works"][0]
     waiting = asyncio.create_task(
         call(
             api,
             context,
-            "wait_agent.works",
-            {"targets": [peers["a"]["work"], peers["b"]["work"]]},
+            "wait_agent",
+            {"works": [peers["works"][0], peers["works"][1]]},
         )
     )
     while not runtime.waiters:
         await asyncio.sleep(0)
     a = request(
-        agent_id=peers["a"]["agent"]["agent_id"], work_id=peers["a"]["work"]["work_id"]
+        agent_id=peers["agents"][0]["agent_id"], work_id=peers["works"][0]["work_id"]
     )
     b = request(
-        agent_id=peers["b"]["agent"]["agent_id"], work_id=peers["b"]["work"]["work_id"]
+        agent_id=peers["agents"][1]["agent_id"], work_id=peers["works"][1]["work_id"]
     )
     lease_a, candidate_a = start(repository, a)
     final_a = "full-final:" + "x" * 100_000
@@ -192,11 +177,11 @@ async def test_public_batch_atomic_rejection_and_wait_then_query_exact_real_fina
     subsequent.cell_cancel_event = asyncio.Event()
     selected_a = await call(api, subsequent, "query_agents", {"target": result["works"][0]["target"]})
     selected_b = await call(api, subsequent, "query_agents", {"target": result["works"][1]["target"]})
-    assert selected_a["target"] == peers["a"]["work"]
-    assert selected_a["agent"] == peers["a"]["agent"]
+    assert selected_a["target"] == peers["works"][0]
+    assert selected_a["agent"] == peers["agents"][0]
     assert selected_a["final"] == final_a
-    assert selected_b["target"] == peers["b"]["work"]
-    assert selected_b["agent"] == peers["b"]["agent"]
+    assert selected_b["target"] == peers["works"][1]
+    assert selected_b["agent"] == peers["agents"][1]
     assert selected_b["final"] == "comparison final"
     assert result["pending_targets"] == []
 
@@ -206,34 +191,34 @@ async def test_public_stop_cascades_queued_dependencies_and_preserves_history(
     api_source,
 ):
     repository, root, api, runtime, context = api_source
-    a = await call(api, context, "run_agent", {"instruction": "first"})
+    a = await call(api, context, "run_agent", envelope([{"instruction": "first"}])[1])
     b = await call(
         api,
         context,
         "run_agent",
-        {"instruction": "dependent", "depends_on": [a["work"]]},
+        envelope([{"instruction": "dependent", "depends_on": [a["works"][0]]}])[1],
     )
     independent = await call(
         api,
         context,
         "run_agent",
-        {"target": b["agent"], "instruction": "independent next"},
+        envelope([{"target": b["agents"][0], "instruction": "independent next"}])[1],
     )
-    stopped = await call(api, context, "stop_agent", {"target": a["work"]})
+    stopped = await call(api, context, "stop_agent", {"target": a["works"][0]})
     assert stopped["works"][0]["status"] == "stopped"
-    dependent = await call(api, context, "query_agents", {"target": b["work"]})
+    dependent = await call(api, context, "query_agents", {"target": b["works"][0]})
     assert dependent["status"] == "stopped"
-    assert dependent["failed_dependency"] == a["work"]
-    assert (await call(api, context, "query_agents", {"target": independent["work"]}))[
+    assert dependent["failed_dependency"] == a["works"][0]
+    assert (await call(api, context, "query_agents", {"target": independent["works"][0]}))[
         "status"
     ] == "queued"
-    rows = await call(api, context, "query_agents", {"target": b["agent"]})
+    rows = await call(api, context, "query_agents", {"target": b["agents"][0]})
     assert [work["target"] for work in rows["works"]] == [
-        b["work"],
-        independent["work"],
+        b["works"][0],
+        independent["works"][0],
     ]
-    outcome = await call(api, context, "stop_agent", {"target": b["agent"]})
-    assert [work["target"] for work in outcome["works"]] == [independent["work"]]
+    outcome = await call(api, context, "stop_agent", {"target": b["agents"][0]})
+    assert [work["target"] for work in outcome["works"]] == [independent["works"][0]]
 
 
 @async_test
@@ -241,8 +226,8 @@ async def test_public_agent_wait_observes_real_inbox_without_copying_message_bod
     api_source,
 ):
     repository, root, api, runtime, context = api_source
-    a = await call(api, context, "run_agent", {"instruction": "send a question"})
-    work = request(agent_id=a["agent"]["agent_id"], work_id=a["work"]["work_id"])
+    a = await call(api, context, "run_agent", envelope([{"instruction": "send a question"}])[1])
+    work = request(agent_id=a["agents"][0]["agent_id"], work_id=a["works"][0]["work_id"])
     child, candidate = start(repository, work)
     queued = repository.enqueue_agent_steer(
         root.guard,
@@ -257,12 +242,12 @@ async def test_public_agent_wait_observes_real_inbox_without_copying_message_bod
     )
     assert queued is not None
     result = await call(
-        api, context, "wait_agent", {"targets": [a["agent"]], "timeout_seconds": 0}
+        api, context, "wait_agent", {"agents": [a["agents"][0]], "timeout_seconds": 0}
     )
     assert result["state"] == "message_available"
-    assert result["message_sources"] == [a["agent"]]
+    assert result["message_sources"] == [a["agents"][0]]
     assert "actual question body" not in str(result)
-    assert result["bindings"][0]["work"] == a["work"]
+    assert result["bindings"][0]["work"] == a["works"][0]
 
 
 @async_test
@@ -283,13 +268,46 @@ async def test_public_admission_confirms_a_real_commit_after_acknowledgement_los
         api,
         context,
         "run_agent",
-        {"instruction": "confirm this exact accepted request"},
+        envelope([{"instruction": "confirm this exact accepted request"}])[1],
     )
-    assert submissions == [(accepted["work"]["work_id"],)]
+    assert submissions == [(accepted["works"][0]["work_id"],)]
     actual = repository.query_agent_work(
         root_session_id=root.guard.session_id,
-        work_id=accepted["work"]["work_id"],
+        work_id=accepted["works"][0]["work_id"],
         deadline_monotonic=deadline(),
     )
     assert actual["instruction"] == "confirm this exact accepted request"
     assert runtime.wakes == 1
+
+
+@async_test
+async def test_real_work_titles_belong_to_each_admission_not_agent_session(api_source):
+    repository, root, api, runtime, context = api_source
+    _, args = envelope([{'instruction': 'first exact body', 'work_title': '第一项'}])
+    first = await call(api, context, 'run_agent', args)
+    _, args = envelope([
+        {'target': first['agents'][0], 'instruction': 'second exact body', 'work_title': '同名'},
+        {'target': first['agents'][0], 'instruction': 'third exact body', 'work_title': '同名'},
+        {'target': first['agents'][0], 'instruction': 'fourth exact body'},
+    ])
+    next_result = await call(api, context, 'run_agent', args)
+    assert next_result['agents'] == first['agents'] * 3
+    assert len({item['work_id'] for item in first['works'] + next_result['works']}) == 4
+    assert [item['work_title'] for item in next_result['details']] == ['同名', '同名', None]
+    targets = first['works'] + next_result['works']
+    for target, title, instruction in zip(targets, ['第一项', '同名', '同名', None],
+            ['first exact body', 'second exact body', 'third exact body', 'fourth exact body'], strict=True):
+        fact = await call(api, context, 'query_agents', {'target': target})
+        assert fact['work_title'] == title and fact['instruction'] == instruction
+    listed = await call(api, context, 'query_agents', {'target': first['agents'][0]})
+    assert [item['target'] for item in listed['works']] == targets
+    assert [item['work_title'] for item in listed['works']] == ['第一项', '同名', '同名', None]
+    await call(api, context, 'stop_agent', {'target': targets[-1]})
+    stopped = await call(api, context, 'query_agents', {'target': targets[-1]})
+    assert stopped['work_title'] is None and stopped['status'] == 'stopped'
+    with repository.connection_provider.connection(
+        lane=PostgresConnectionLane.INSPECTOR, row_factory=dict_row, deadline_monotonic=deadline()
+    ) as connection:
+        row = connection.execute('SELECT title FROM pulsara_v3.sessions WHERE id=%s',
+            (first['agents'][0]['agent_id'],)).fetchone()
+    assert row['title'] is None

@@ -397,7 +397,7 @@ export interface Message {
   scheduledInput?: { taskId: string; taskRevision: number; dueAtUtc: string; triggerSource: 'TIMER' | 'RUN_ONCE' };
   cellOutput?: { cellId: string; sourceTurnId: string; sourceExecAttemptId: string; recordSequence: number; kind: string };
   inputOrigin?: string;
-  inputSource?: { deliveryMode: 'new-turn' | 'steer' } & (
+  inputSource?: { deliveryMode: 'new-turn' | 'steer'; workTitle?: string | null } & (
     | { identityKind: 'queue'; queueItemId: string; sourceKind: 'command'; commandId: string }
     | { identityKind: 'queue'; queueItemId: string; sourceKind: 'agent'; commandId?: never; sourceSessionId?: string; sourceWorkId?: string }
     | { identityKind: 'queue'; queueItemId: string; sourceKind: 'cell'; commandId?: never; sourceSessionId?: string; sourceTurnId?: string; sourceExecAttemptId?: string }

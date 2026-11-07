@@ -23,7 +23,7 @@ For ordinary tools offered in both forms, native calls and `tools.name(...)`
 share their arguments and operate on the same files, processes and saved results.
 Use returned Agent/Work targets across scripts and native controls. Query existing
 agents when their findings may help, then reuse their actual AGENT targets with
-`tools.run_agent`. See [agent reuse](references/agent-orchestration/examples.md#4-reuse-an-existing-agent-in-a-scripted-workflow).
+`tools.run_agent`. See [agent reuse](references/agent-orchestration/examples.md#4-reuse-an-agent-in-another-cell).
 
 ## Start with one script
 
@@ -37,27 +37,74 @@ For a focused investigation, read project context and assign one agent:
 const readme = await tools.read_file({
   target: { kind: "PATH", path: "README.md" }, limit: 120
 });
-const investigation = await tools.run_agent({
-  name: "Entry-point investigator",
-  instruction: `Explain how the project's main entry point initializes.
+const investigation = await tools.run_agent([
+  {
+    work_title: "Investigate parser initialization",
+    instruction: `Explain how the project's main entry point initializes.
 Read the relevant source files. This README excerpt is starting context:
 ${readme.content}`
-});
-console.log({ agent: investigation.agent, work: investigation.work });
-await tools.wait_agent.works({ targets: [investigation.work] });
-const result = await tools.query_agents({ target: investigation.work });
+  }
+]);
+console.log({ agents: investigation.agents, works: investigation.works });
+await tools.wait_agent({ works: investigation.works });
+const result = await tools.query_agents({ target: investigation.works[0] });
 console.log(result);
 ```
 
-To continue with the same agent, pass `investigation.agent` as `target` in a later
-`tools.run_agent` call. Across scripts, copy the actual target from output or obtain
-it with `query_agents`; each Cell has fresh variables.
+`run_agent` always takes an array, including one assignment. Its result has
+`agents`, `works`, and `details` arrays in the same order as the input. An AGENT
+identifies the reusable conversation; a WORK identifies this assignment.
+`work_title` is an optional display title for the assignment, not an identifier.
+Use `target: investigation.agents[0]` to give the same agent another Work.
 
-`console.log(...)` actively sends selected values to ROOT. Each call is one
-independent input, including repeated text. Internal tool results stay in the
-script; Work finals are not automatically reported to ROOT. Agent messages retain
-their active-turn delivery. ROOT receives script output at a safe point, or as a
-queued new turn when idle. Output requests processing; it does not grant permission.
+When several assignments are ready together, put them in one array. Each receives
+its own Work and result position. To give parallel teammates each other's identity
+before they start, use synchronous instruction functions with the preallocated
+`agents` array. This example copies the latest ROOT turn for the task context;
+include explicit file paths and requirements when that turn is not sufficient:
+
+```js
+const team = await tools.run_agent([
+  {
+    work_title: "Check requirements",
+    context: { mode: "last_n", turns: 1 },
+    instruction: ({ agents }) => `Check the implementation against the requirements.
+Your independent reviewer is ${JSON.stringify(agents[1])}. Share concrete disagreements
+if needed, then finish with your own evidence.`
+  },
+  {
+    work_title: "Check boundary cases",
+    context: { mode: "last_n", turns: 1 },
+    instruction: ({ agents }) => `Independently test boundary cases.
+Your requirements reviewer is ${JSON.stringify(agents[0])}. Share concrete disagreements
+if needed, then finish with your own evidence.`
+  }
+]);
+console.log({ agents: team.agents, works: team.works });
+await tools.wait_agent({ works: team.works });
+console.log(await Promise.all(team.works.map(target => tools.query_agents({ target }))));
+```
+
+The functions only construct parameters; they must not call tools or start async
+work. To start a review after another assignment succeeds, set
+`depends_on: ({works}) => [works[0]]` on the review assignment. Its prerequisite
+final is supplied directly. Independent discussion and success dependencies serve
+different purposes; do not wait for a reply from work blocked on your completion.
+See [coordination](references/agent-orchestration/coordination.md) for both forms.
+
+`wait_agent({works: [...]})` waits for exact assignments to end. Read their results
+with `query_agents`. For messages or the work bound to an agent when waiting begins,
+use `wait_agent({agents: [...]})`; a message can wake that observation early.
+
+A Cell has its own JavaScript variables. When another Cell needs a returned target,
+log it with `console.log`, then copy that complete target into the next script or
+query it through `query_agents`. A variable from the previous Cell does not exist
+in a new one. The Agent's conversation and accepted Works remain available.
+
+`console.log(...)` sends selected values to ROOT. Each call is one independent
+input, including repeated text. Internal tool results stay in the script; Work
+finals are not automatically reported to ROOT. Read and log the result when ROOT
+needs it. Agent messages retain their normal delivery to the active turn.
 
 ## Use semantic judgments in the same script
 
@@ -97,8 +144,8 @@ with “yes, do that.” Process paged sources as the task needs. See the
 - Native `query_cells` lists retained live cells, or reads a selected CELL's state
   and frozen source. Reading does not consume output. Historical source remains
   available through the original exec record after the live Cell retires.
-- ROOT uses `tools.wait_agent` for AGENT messages/current work and
-  `tools.wait_agent.works` for exact Work outcomes. These return states and targets;
+- ROOT uses `tools.wait_agent({agents: [...]})` for Agent activity and
+  `tools.wait_agent({works: [...]})` for exact Work outcomes. These return states and targets;
   read selected finals or diagnostics with `query_agents`. Dependencies/materials
   pass results directly between Work inputs without ROOT relaying them.
 - `manage_cell` with `action:"stop"` stops further script execution and submissions.

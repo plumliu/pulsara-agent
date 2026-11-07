@@ -45,7 +45,7 @@ def test_mixed_inputs_wait_for_real_batch_then_arrive_in_fifo_order(
                 self.steps[request.turn_id] = step + 1
                 if self.phase == 'create':
                     events = (_tool_call('exec_cell', 'call:create-fifo-agent',
-                                         {'code': 'await tools.run_agent({instruction: "Wait for the test gate."});'})
+                                         {'code': 'await tools.run_agent([{instruction: "Wait for the test gate."}]);'})
                               if step == 0 else _text('AGENT_CREATED'))
                 else:
                     self.batch_requests.append(request)

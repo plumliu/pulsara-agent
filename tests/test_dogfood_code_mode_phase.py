@@ -60,7 +60,7 @@ def test_phase_waits_for_actual_admission_output_and_root_idle_without_waiting_c
                 root_requests.append(request)
                 if len(root_requests) == 1:
                     events = _tool_call("exec_cell", random_id("call"), {
-                        "code": 'console.log(await tools.run_agent({instruction:"Wait for the child release"}));',
+                        "code": 'console.log(await tools.run_agent([{instruction:"Wait for the child release"}]));',
                     })
                 elif len(root_requests) == 2:
                     events = _text("SOURCE_TURN_DONE_BEFORE_ADMISSION")
@@ -134,4 +134,129 @@ def test_phase_waits_for_actual_admission_output_and_root_idle_without_waiting_c
                 waiting.cancel()
                 await asyncio.gather(waiting, return_exceptions=True)
             await core.shutdown()
+    asyncio.run(scenario())
+
+
+def test_decision_dogfood_program_uses_current_guest_surface_without_network():
+    import json
+
+    from pulsara_agent.code_mode import CodeModeHost, CodeModeToolResult
+    from tests.dogfood.run_code_mode_decide_dogfood import MATERIALS, CONDITION, _program
+    from tests.test_code_mode_runtime import _finish, _start
+
+    async def run():
+        calls, writes = [], []
+        material_by_path = {path: text for path, text, _ in MATERIALS}
+        async def invoke(call):
+            calls.append(call.tool_name)
+            args = call.arguments
+            if call.tool_name == 'query_agents':
+                value = {'agents': [], 'next': None}
+            elif call.tool_name == 'read_file':
+                value = {'target': args['target'], 'content': material_by_path[args['target']['path']]}
+            elif call.tool_name == 'decide':
+                if not args['condition'].strip():
+                    return CodeModeToolResult(state='FAILED', error_code='INVALID_ARGUMENTS',
+                                              error_message='condition must be nonblank')
+                assert args['condition'] == CONDITION
+                value = {'decisions': [expected for _, _, expected in MATERIALS] if args['inputs'] else []}
+            elif call.tool_name == 'write_file':
+                writes.append(json.loads(args['content']))
+                value = {'target': args['target']}
+            else:
+                raise AssertionError(f'unexpected network or delegation: {call.tool_name}')
+            return CodeModeToolResult(value=value)
+
+        host = CodeModeHost()
+        try:
+            catalog = {name: {} for name in ('run_agent', 'query_agents', 'send_agent_message',
+                                             'wait_agent', 'stop_agent', 'read_file', 'write_file')}
+            page, records = await _finish(host, await _start(host, _program(), invoke, catalog,
+                                                            decision_available=True))
+            assert page.state == 'completed', page.error
+            returned = json.loads(next(item['text'] for item in records if item['kind'] == 'return'))
+            assert 'helpers' not in returned
+            assert returned['decisions'] == [expected for _, _, expected in MATERIALS]
+            assert [item['source']['path'] for item in returned['selected']] == ['writing.txt', 'guidance.txt']
+            assert writes == [{'condition': CONDITION, 'decisions': returned['decisions'],
+                               'selected': returned['selected']}]
+            assert calls == ['query_agents', *(['read_file'] * 4), *(['decide'] * 3), 'write_file']
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_subagent_evidence_saves_real_host_frozen_values_and_closed_sessions(
+    tmp_path, monkeypatch, stage2_migrated_postgres_database,
+):
+    import json
+    from collections.abc import Mapping
+    from contextlib import ExitStack
+    from dataclasses import fields, is_dataclass
+
+    from pulsara_agent.settings import LocalSettingsStore
+    from tests.dogfood.run_stop_chain_dogfood import Evidence
+    from tests.dogfood.run_subagent_array_dogfood import _observe_sessions, _save, _settle, _snapshot
+
+    def has_frozen_mapping(value):
+        if isinstance(value, Mapping):
+            return not isinstance(value, dict) or any(has_frozen_mapping(v) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(has_frozen_mapping(v) for v in value)
+        if is_dataclass(value) and not isinstance(value, type):
+            return any(has_frozen_mapping(getattr(value, f.name)) for f in fields(value))
+        return False
+
+    async def scenario():
+        monkeypatch.setenv("PULSARA_HOME", str(tmp_path / "home"))
+        destination = tmp_path / "evidence.json"
+        evidence = Evidence(destination, LocalSettingsStore(tmp_path / "home/local-settings.yaml").read(), "https://api.deepseek.com")
+        evidence.data["inputs"] = []
+        original_stream = OpenAIChatCompletionsTransport.stream
+
+        async def auxiliary(adapter, *, call, context):
+            adapter._mock_chunks = [
+                {"choices": [{"index": 0, "delta": {"content": "DONE"}}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            ]
+            async for event in original_stream(adapter, call=call, context=context):
+                yield event
+
+        async def stream(request):
+            evidence.data["inputs"].append(request.wire_input_plan.materialization)
+            events = _tool_call("exec_cell", random_id("call"), {
+                "code": 'console.log(await tools.run_agent([{work_title:"Probe", instruction:"Reply DONE"}]));',
+            }) if len(evidence.data["inputs"]) == 1 else _text("DONE")
+            for event in events:
+                yield event
+
+        monkeypatch.setattr(OpenAIChatCompletionsTransport, "stream", auxiliary)
+        core, root = await _open_test_session(
+            tmp_path=tmp_path, model=CallbackScriptedKernelModel(stream),
+            postgres_dsn=stage2_migrated_postgres_database.runtime_dsn, monkeypatch=monkeypatch,
+        )
+        with ExitStack() as stack:
+            sessions = _observe_sessions(stack, core)
+            sessions.append(root)  # The helper opened ROOT before observation was installed.
+            try:
+                evidence.data["result"] = await root.run_turn(
+                    PromptContent.text("Delegate one small work"), command_id=random_id("command"),
+                    requested_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
+                )
+                await _settle(root, core)
+                evidence.data["snapshot"] = await asyncio.to_thread(_snapshot, root)
+                assert has_frozen_mapping(evidence.data), "Exercise actual frozen Host values, not decoded JSON"
+                await _save(evidence)
+                saved = json.loads(destination.read_text())
+                assert saved["snapshot"]["works"][0]["work_title"] == "Probe"
+                assert len(saved["inputs"]) == len(evidence.data["inputs"])
+                assert saved["result"]["final_text"] == "DONE"
+                assert not destination.with_suffix(".writing").exists()
+            finally:
+                await core.shutdown()
+                evidence.data["closed"] = [session.physical_close_complete for session in sessions]
+                await _save(evidence)
+            saved = json.loads(destination.read_text())
+            assert len(saved["closed"]) == 2 and all(saved["closed"])
+            assert saved["snapshot"]["cell_sources"]
     asyncio.run(scenario())

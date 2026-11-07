@@ -1,6 +1,7 @@
+import type { AgentMetadata } from '../lib/agent-metadata';
 import { usePendingSteerPages } from '../lib/pending-steer-pages';
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AgentCellError, agentCellApi } from '../lib/agent-cell-api';
+import { AgentCellError, agentCellApi, agentTaskLabel } from '../lib/agent-cell-api';
 import type { AgentConversationReader, QueuedPrompt, RuntimeAdapter, RuntimeProjection } from '../lib/runtime-adapter';
 import { agentReaderRequiresReopen, compareSequence } from '../lib/runtime-adapter';
 import { FileLinkContext } from './file-link-context';
@@ -11,8 +12,8 @@ import './agent-conversation-pane.css';
 
 export type { AgentReadingState } from './workbench-view';
 
-export function AgentConversationPane({ rootSessionId, agentSessionId, agentName, adapter, readingState, onNotify, workLocation }: {
-  rootSessionId: string; agentSessionId: string; agentName: string;
+export function AgentConversationPane({ rootSessionId, agentSessionId, agentName, metadata, adapter, readingState, onNotify, workLocation }: {
+  rootSessionId: string; agentSessionId: string; agentName: string; metadata: AgentMetadata;
   adapter: Pick<RuntimeAdapter, 'openAgentReader' | 'createAgentContentReader'>;
   readingState: AgentReadingState; onNotify: MarkdownNotify;
   workLocation?: { workId: string; requestId: number };
@@ -35,8 +36,10 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
   const queueRef = useRef<QueuedPrompt[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [entryLocation, setEntryLocation] = useState<{entryId: string; requestId: number}>();
-  const [terminalWork, setTerminalWork] = useState<{workId: string; status: string; reason?: string | null}>();
+  const [terminalWork, setTerminalWork] = useState<{workId: string; workTitle: string | null; status: string; reason?: string | null}>();
   const [queueLocation, setQueueLocation] = useState<{workId: string; requestId: number}>();
+  const metadataRef = useRef(metadata); metadataRef.current = metadata;
+  const probeRef = useRef<() => void>(() => {});
   const pane = useRef<HTMLElement>(null);
   const readerRef = useRef<AgentConversationReader | undefined>(undefined);
   const invalidateReader = useRef<(owner: AgentConversationReader) => void>(() => {});
@@ -79,8 +82,10 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
       try {
         if (closing) await closing;
         if (disposed || abort.signal.aborted) return;
-        const { agent } = await agentCellApi.agent(rootSessionId, agentSessionId, abort.signal);
-        const host = agent.host_session_id ?? null;
+        const current = metadataRef.current;
+        if (current.unavailable) throw new AgentCellError(404, '子代理已不可用');
+        if (!current.agent) return;
+        const host = current.agent.host_session_id ?? null;
         if (disposed) return;
         setUnavailable(false);
         if (readerRef.current && currentHost === host) {
@@ -136,10 +141,10 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
       closing = owner.close().catch(() => {});
       void closing.then(() => { closing = undefined; if (!disposed) void probe(); });
     };
+    probeRef.current = () => void probe();
     void probe();
-    const timer = window.setInterval(() => void probe(), 3000);
     return () => {
-      disposed = true; abort.abort(); window.clearInterval(timer); queueRevision.current++;
+      disposed = true; abort.abort(); probeRef.current = () => {}; queueRevision.current++;
       invalidateReader.current = () => {};
       for (const request of queueRequests.current) request.abort();
       queueRequests.current.clear();
@@ -147,6 +152,8 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
       if (previous) void previous.close();
     };
   }, [rootSessionId, agentSessionId, adapter, readingState, refreshQueue]);
+
+  useEffect(() => { probeRef.current(); }, [metadata]);
 
   useEffect(() => {
     if (unavailable) { readingState.choices.clear(); delete readingState.anchor; }
@@ -211,7 +218,7 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
         if (work.agent_id !== agentSessionId) throw new Error('任务不属于此子代理。');
         if (work.consumed_entry_id) setEntryLocation({entryId: work.consumed_entry_id, requestId: workLocation.requestId});
         else if (work.status === 'stopped' || work.status === 'completed') {
-          setTerminalWork({workId: workLocation.workId, status: work.status, reason: work.terminal_reason});
+          setTerminalWork({workId: workLocation.workId, workTitle: work.work_title, status: work.status, reason: work.terminal_reason});
           setQueueLocation(workLocation);
         } else throw new Error('任务状态正在变化，请重试。');
       } catch (cause) {
@@ -247,11 +254,11 @@ export function AgentConversationPane({ rootSessionId, agentSessionId, agentName
   for (const item of projection?.queuedPrompts ?? []) visibleInputs.set(item.queueItemId,item);
   for (const item of steerReading.items) visibleInputs.set(item.queueItemId,item);
   if (unavailable) return <div className="agent-pane-status" role="status">子代理已不可用。</div>;
-  if (!reader || !projection) return <div className="agent-pane-status" role="status">{error ?? '正在读取子代理…'}</div>;
+  if (!reader || !projection) return <div className="agent-pane-status" role="status">{error ?? metadata.error ?? '正在读取子代理…'}</div>;
   return <FileLinkContext.Provider value={links}>
     <VisualizationOwnerContext.Provider value={checkOwner}>
     <section ref={pane} className="agent-conversation-pane" aria-label={`${agentName} 会话`}>
-      <header><strong>{agentName}</strong>{error && <span role="status">暂时无法刷新：{error}</span>}</header>
+      <header><div className="agent-conversation-heading"><strong title={agentSessionId}>{agentName}</strong>{metadata.agent && <span className="agent-conversation-current" title={agentTaskLabel(metadata.agent)}>{agentTaskLabel(metadata.agent)}</span>}</div>{(error || metadata.error) && <span role="status">暂时无法刷新：{error || metadata.error}</span>}</header>
       <AgentConversationView key={readerEpoch} sessionId={agentSessionId} agentName={agentName} reader={reader} contentReader={contentReader} projection={projection}
         queue={[...visibleInputs.values()].sort((a,b)=>compareSequence(a.sequence,b.sequence))} queueCursor={cursor}
         steerNextCursor={steerReading.nextCursor} steerLoading={steerReading.loading} steerReadError={steerReading.error} onMoreSteers={steerReading.more} onMoreQueue={more} readingState={readingState} onNotify={onNotify}

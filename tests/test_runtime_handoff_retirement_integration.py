@@ -246,7 +246,7 @@ class _HostCompactionModel(CallbackScriptedKernelModel):
         self.root_calls.append(request)
         index = len(self.root_calls)
         if index == 1 and self.variant == "large_todo":
-            events = _tool_call("exec_cell", "call:existing-agent", {"code": 'console.log(await tools.run_agent({"instruction": "Keep this existing Work active."}));'})
+            events = _tool_call("exec_cell", "call:existing-agent", {"code": 'console.log(await tools.run_agent([{"instruction": "Keep this existing Work active."}]));'})
         elif index == (2 if self.variant == "large_todo" else 1):
             if self.variant == "large_todo":
                 await asyncio.wait_for(self.child_started.wait(), 20)
@@ -462,11 +462,11 @@ class _SubagentCompactionModel(_HostCompactionModel):
         root = request.session_id == self.session.session_id
         if root:
             if index == 1:
-                events = _tool_call("exec_cell", "call:sibling", {"code": 'console.log(await tools.run_agent({"instruction": "OTHER_WORK: remain active until released."}));'})
+                events = _tool_call("exec_cell", "call:sibling", {"code": 'console.log(await tools.run_agent([{"instruction": "OTHER_WORK: remain active until released."}]));'})
             elif index == 2:
                 await asyncio.wait_for(self.sibling_ready.wait(), 20)
                 await self._process_for(self.session, request)
-                events = _tool_call("exec_cell", "call:compact-child", {"code": 'console.log(await tools.run_agent({"instruction": "CURRENT_WORK: inspect with mid-turn compaction."}));'})
+                events = _tool_call("exec_cell", "call:compact-child", {"code": 'console.log(await tools.run_agent([{"instruction": "CURRENT_WORK: inspect with mid-turn compaction."}]));'})
             else:
                 await asyncio.wait_for(self.target_finished.wait(), 60)
                 events = _text("text:root-finished", "ROOT_SCOPE_FINISHED")

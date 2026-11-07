@@ -469,7 +469,7 @@ class ToolBatchExecutor:
             original_arguments=arguments,
         )
         borrow = self._tools.borrow_code_mode_surface(snapshot.tool_directory,
-            cell_id=invocation.cell_id, tool_name=invocation.tool_name)
+            cell_id=invocation.cell_id)
         captured = []
         source_token = current_tool_invocation.set(source)
         snapshot_token = _code_snapshot.set(snapshot)
@@ -585,17 +585,17 @@ class ToolBatchExecutor:
         from .subagents.collaboration_contracts import parse_batch_members, validate_batch_identities, agent_target, work_target
         arguments = thaw_json(prepared.resolved_arguments)
         members = parse_batch_members(arguments)
-        peers = {key: {"agent": agent_target(member.agent_id), "work": work_target(member.work_id)}
-                 for key, member in members}
+        refs = {"agents": [agent_target(member.agent_id) for member in members],
+                "works": [work_target(member.work_id) for member in members]}
         diagnostics = []
         blocked = None
-        for (key, _), concrete in zip(members, arguments["members"]):
+        for index, concrete in enumerate(arguments["members"]):
             frozen = freeze_json(concrete["parameters"])
             member_prepared = PreparedResolvedToolInvocation("run_agent", "run_agent", frozen)
             outcome, causal = await self._dispatch_pre_tool(
                 view=view, scope=scope, prepared=member_prepared, turn_id=turn_id,
                 assistant_entry_id=assistant_entry_id, tool_call_id=tool_call_id,
-                request=request, canonical_facts=canonical_facts, _member_key=key)
+                request=request, canonical_facts=canonical_facts, _member_index=index)
             diagnostics.extend(outcome.diagnostics)
             if self._hook_context is not None:
                 reservation = self._hook_context.prepare_sync(scope=scope, causal_ref=causal,
@@ -609,10 +609,14 @@ class ToolBatchExecutor:
                 break
         if blocked is None:
             try:
-                validate_batch_identities(arguments, peers)
+                validate_batch_identities(arguments, refs)
+                resolved_members = parse_batch_members(arguments)
+                if any(original.create_agent != resolved.create_agent
+                       for original, resolved in zip(members, resolved_members)):
+                    raise ValueError("batch target creation or reuse changed after preparation")
             except ValueError as error:
                 blocked = str(error)
-        causal = PreToolRef(turn_id, assistant_entry_id, tool_call_id, "run_agent.batch",
+        causal = PreToolRef(turn_id, assistant_entry_id, tool_call_id, "run_agent",
             invocation_id=current_tool_invocation.get().invocation_id)
         return GateOutcome(decision=GateDecision.BLOCK if blocked is not None else GateDecision.PROCEED,
             reason=blocked, diagnostics=tuple(diagnostics), updated_input=arguments), causal
@@ -628,10 +632,10 @@ class ToolBatchExecutor:
         tool_call_id: str,
         request: KernelModelExecutionRequest,
         canonical_facts: FrozenCanonicalCompileSnapshot,
-        _member_key: str | None = None,
+        _member_index: int | None = None,
     ):
         assert self._hooks is not None
-        if prepared.requested_tool_name == "run_agent.batch":
+        if prepared.requested_tool_name == "run_agent" and _member_index is None:
             return await self._dispatch_batch_pre_tool(view=view, scope=scope, prepared=prepared,
                 turn_id=turn_id, assistant_entry_id=assistant_entry_id, tool_call_id=tool_call_id,
                 request=request, canonical_facts=canonical_facts)
@@ -650,7 +654,7 @@ class ToolBatchExecutor:
             tool_call_id,
             prepared.canonical_tool_name,
             invocation_id=(current_tool_invocation.get().invocation_id if current_tool_invocation.get() else None),
-            member_key=_member_key,
+            member_index=_member_index,
         )
         public_input = PreToolUseInput(
             session_id=request.session_id,
@@ -751,28 +755,46 @@ class ToolBatchExecutor:
         request: KernelModelExecutionRequest,
         canonical_facts: FrozenCanonicalCompileSnapshot,
         continuity_scope: ProviderInputContinuityScope,
-        _member_key: str | None = None,
+        _member_index: int | None = None,
         _member_response: object = None,
     ) -> None:
         if self._hooks is None:
             return
-        if prepared.requested_tool_name == "run_agent.batch":
+        if prepared.requested_tool_name == "run_agent" and _member_index is None:
             from .subagents.collaboration_contracts import parse_batch_members
             values = _code_result.get()
             business = values[0][0].public_value() if values else None
-            for key, member in parse_batch_members(thaw_json(prepared.resolved_arguments)):
-                member_args = freeze_json(next(item["parameters"] for item in thaw_json(prepared.resolved_arguments)["members"] if item["key"] == key))
+            arguments = thaw_json(prepared.resolved_arguments)
+            try:
+                parse_batch_members(arguments)
+            except ValueError:
+                if settlement.result_state != "SUCCESS":
+                    # Rejected old or malformed calls have no valid members.
+                    # Their ordinary no-attempt result is already settled.
+                    return
+                raise
+            interrupted = None
+            for index, member in enumerate(arguments["members"]):
+                member_args = freeze_json(member["parameters"])
+                member_response = business
+                if isinstance(business, dict) and all(key in business for key in ("agents", "works", "details")):
+                    member_response = {"agent": business["agents"][index], "work": business["works"][index],
+                                       **business["details"][index]}
                 try:
                     await self._dispatch_post_tool(view=view, scope=scope,
                         prepared=PreparedResolvedToolInvocation("run_agent", "run_agent", member_args),
                         settlement=replace(settlement, tool_name="run_agent", public_arguments=member_args),
                         request=request, canonical_facts=canonical_facts, continuity_scope=continuity_scope,
-                        _member_key=key, _member_response=business.get(key) if isinstance(business, dict) else business)
-                except Exception as error:
+                        _member_index=index, _member_response=member_response)
+                except BaseException as error:
                     self._offer_operational_best_effort(OperationalHookOffer(
                         event_type=OperationalHookType.TOOL_INVOCATION_OBSERVED, session_id=request.session_id,
-                        turn_id=settlement.turn_id, public_payload={"tool_name":"run_agent", "member_key":key,
+                        turn_id=settlement.turn_id, public_payload={"tool_name":"run_agent", "member_index":index,
                             "outcome":"POST_TOOL_HOOK_FAILED", "diagnostic":str(error)}))
+                    if not isinstance(error, Exception) and interrupted is None:
+                        interrupted = error
+            if interrupted is not None:
+                raise interrupted
             return
         snapshot = _code_snapshot.get()
         epoch_nonce = snapshot.hook_epoch_nonce if snapshot is not None else _tool_hook_epoch.get()
@@ -814,7 +836,7 @@ class ToolBatchExecutor:
             settlement.result_state,
             epoch_nonce,
             invocation_id=(current_tool_invocation.get().invocation_id if current_tool_invocation.get() else None),
-            member_key=_member_key,
+            member_index=_member_index,
         )
         public_input = PostToolUseInput(
             session_id=request.session_id,
@@ -826,7 +848,7 @@ class ToolBatchExecutor:
             tool_name=subject.canonical_subject,
             tool_use_id=settlement.tool_call_id,
             tool_input=thaw_json(settlement.public_arguments),
-            tool_response=_member_response if _member_key is not None else response_value,
+            tool_response=_member_response if _member_index is not None else response_value,
             permission_mode=external_permission_mode(
                 canonical_facts.run_permission_snapshot.effective_mode.value,
                 active_plan_workflow=(
@@ -2664,10 +2686,6 @@ def _tool_effect_class(
         raise RuntimeError("manage_process action escaped its closed catalog")
     if tool_name == "exec_process":
         return "TERMINAL_EFFECT"
-    if tool_name == "run_agent.batch":
-        tool_name = "run_agent"
-    elif tool_name == "wait_agent.works":
-        tool_name = "wait_agent"
     return builtin_tool_catalog_entry(tool_name).recovery_contract.severity
 
 

@@ -98,7 +98,7 @@ def test_collaboration_observes_only_validated_targets_before_wait_or_message_re
         repo, seen = RepositoryOwner(root), []
         repo.agents.add(agent)
         repo.rows[work] = {"agent_id": agent, "work_id": work, "instruction": "work",
-                           "status": "running", "terminal_reason": None}
+                           "status": "running", "terminal_reason": None, "work_title": None}
         runtime = RuntimeOwner(repo)
         port = CollaborationToolPort(repository=repo, root_session_id=root, session_id=root,
             runtime=runtime, admission_facts=lambda *_: {}, io=KernelSessionIO())
@@ -111,14 +111,15 @@ def test_collaboration_observes_only_validated_targets_before_wait_or_message_re
         context = SimpleNamespace(session_id=root, code_cell_id=random_id("cell"),
             page_budget=ToolResultPageBudget(tool_call_id=random_id("call")),
             effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS,
-            agent_message_cursors={}, cell_cancel_event=asyncio.Event())
+            agent_message_cursors={}, cell_cancel_event=asyncio.Event(),
+            invocation_source=SimpleNamespace(kind="CODE_MODE_CALL"))
         await port.invoke(tool_name="query_agents", arguments={}, invocation_context=context)
         assert seen == []
         with pytest.raises(ValueError):
             await port.invoke(tool_name="query_agents", arguments={"target": agent_target(random_id("session"))}, invocation_context=context)
         assert seen == []
         task = asyncio.create_task(port.invoke(tool_name="wait_agent",
-            arguments={"targets": [agent_target(agent)], "timeout_seconds": 30}, invocation_context=context))
+            arguments={"agents": [agent_target(agent)], "timeout_seconds": 30}, invocation_context=context))
         async with asyncio.timeout(5):
             while runtime.waiters == 0:
                 await asyncio.sleep(.001)
@@ -220,9 +221,9 @@ def test_actual_cell_work_graph_pages_use_canonical_source_and_root(tmp_path, mo
             else:
                 root_calls += 1
                 if root_calls == 1:
-                    code = ("const x=await tools.run_agent.batch({a:{instruction:'first'},"
-                            "b:{instruction:'second'}}); "
-                            "await tools.wait_agent.works({targets:[x.a.work,x.b.work]});")
+                    code = ("const x=await tools.run_agent([{instruction:'first'},"
+                            "{instruction:'second'}]); "
+                            "await tools.wait_agent({works:x.works});")
                     events = _tool_call("exec_cell", random_id("call"), {"code": code})
                 else:
                     events = _text("root done")

@@ -61,8 +61,8 @@ for (let index = 0; index < 5; index++)
   if (tools.decide.available() !== available) throw new Error("availability changed within Cell");
 const jsTools = ["run_agent", "query_agents", "send_agent_message", "wait_agent", "stop_agent"];
 if (jsTools.some(name => typeof tools[name] !== "function")
-    || typeof tools.run_agent.batch !== "function" || typeof tools.wait_agent.works !== "function")
-  throw new Error("JS collaboration directory is incomplete");
+    || "batch" in tools.run_agent || "works" in tools.wait_agent)
+  throw new Error("JS collaboration directory does not match the unified array contract");
 const knownAgents = await tools.query_agents({});
 const candidates = [];
 for (const path of PATHS) {
@@ -83,7 +83,7 @@ if (!Array.isArray(decisions) || decisions.length !== candidates.length
 const selected = candidates.filter((_, index) => decisions[index]);
 const output = {condition,decisions,selected};
 const written = await tools.write_file({target:{kind:"PATH",path:"selected.json"},content:JSON.stringify(output)});
-return {available,jsTools,helpers:["run_agent.batch","wait_agent.works"],knownAgents,
+return {available,jsTools,knownAgents,
   empty,invalid,candidates,decisions,selected,written};
 """.replace("PATHS", json.dumps([path for path, _, _ in MATERIALS])).replace("CONDITION", json.dumps(CONDITION, ensure_ascii=False))
 

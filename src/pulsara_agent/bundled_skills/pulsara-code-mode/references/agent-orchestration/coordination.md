@@ -1,155 +1,163 @@
 # Agent coordination
 
-For single-agent, teammate, dependency, reuse and native-control scenarios, see
-[Agent examples](examples.md).
+An Agent is a reusable conversation. A Work is one assignment to that Agent.
+Use the returned complete targets to identify both; display titles are not keys.
 
-## An Agent persists; a Work is one assignment
+## Dispatch an array of assignments
 
-ROOT uses `tools.run_agent` in Code Mode for every assignment, including one
-simple delegation. It accepts an `instruction` and immediately gives an `agent` target,
-a `work` target, and the current `status`. Acceptance is not completion.
+```ts
+tools.run_agent([
+  { work_title?: string, instruction: string, target?: AgentTarget,
+    context?: {mode: "none"} | {mode: "last_n", turns: number},
+    depends_on?: WorkTarget[], materials?: WorkTarget[] }
+]): Promise<{agents: AgentTarget[], works: WorkTarget[], details: object[]}>
+```
 
-These identities belong to the agent and assignment, not to the tool entry point
-or script. Reuse a retained agent in a later script or batch. Native `query_agents`,
-`send_agent_message` and `stop_agent` inspect, supplement or stop the same work
-while scripts run; no Cell slot or working Code Mode runtime is needed for those
-controls. Follow-up assignments still use `tools.run_agent`. Changing the entry
-point of a control operation does not reset the agent's conversation.
+Each input position corresponds to the same position in all three result arrays.
+`details[i]` contains `work_title`, acceptance `status`, and `inspect`, a query for
+that Work. Acceptance means the Work exists; use a wait and query for its outcome.
+One assignment uses a one-element array. More assignments use the same form.
 
-- Omit `target` to create an agent. Optional `name` identifies its role. New agents
-  receive the instruction and supplied context; ROOT history is not copied by
-  default. For recent ROOT context, use `context: { mode: "last_n", turns: 1 }`
-  with one to three turns.
-- Pass a prior `agent` target to give that same agent another Work. Its conversation
-  continues, and assignments run in queue order. `name` and `context` are creation
-  options, so omit them when reusing an agent.
+Omit `target` to create an Agent. Pass an actual AGENT target to append a Work to
+that Agent's queue and preserve its conversation. `work_title` describes this Work
+and can be supplied for creation or continuation. Titles may repeat. Omitting it
+leaves the Work untitled. `context` is creation-only: the default copies no ROOT
+history; `last_n` accepts one to three recent ROOT turns. Put necessary task detail
+in the instruction. Images can be supplied as accessible paths or references so
+the agent can read them with its own tools.
 
-Use the complete targets supplied by the tools: AGENT has a `session:` ID and
-WORK has a `queue:` ID. `agent_id: "ROOT"` addresses ROOT for messages or waiting;
-it is not a target for assigning new subagent work.
+Assignments to one Agent run in input order. Different Agents can run concurrently
+as capacity permits. Each call accepts 1–16 assignments, each with up to 16
+dependencies and 16 materials, and at most 64 explicit dependency edges in total.
+Submit further work in later calls as needed.
 
-ROOT can query its retained agents. A subagent can use native `query_agents` to
-find itself and teammates introduced through accepted instructions, context,
-materials, or messages; the list also returns the `ROOT` communication alias.
-Query results do not introduce additional teammates. A valid teammate ID may be
-used for messaging or waiting even before it appears in the query list.
+## Supply prerequisites and prior results
 
-## Give results to the next assignment
+- `depends_on: [workTarget]` starts this Work after its prerequisites succeed;
+  their finals are supplied as separate inputs. A stopped prerequisite stops
+  dependent work without starting it.
+- `materials: [workTarget]` supplies an already ended Work's outcome as background.
+- Queue order waits for the earlier Work to end; only `depends_on` requires success.
 
-| Field | Use |
-| --- | --- |
-| `depends_on: [workTarget]` | When this assignment needs a prerequisite to succeed before it can begin. |
-| `materials: [workTarget]` | When an earlier outcome is useful background for this assignment. |
+A dependency cycle, including a cycle through the same Agent's queue, is rejected
+before the batch starts. An earlier queued assignment cannot depend on a later
+assignment to the same Agent. Do not reorder targets or invent IDs to bypass this.
 
-Delegated instructions, initial context, prerequisite results, explicit materials, and
-agent messages are plain text. To share an image, supply its accessible path or
-reference in text so the agent can use `view_image`.
+## Refer to members before they start
 
-The new instruction and each prerequisite result remain separate input messages.
-ROOT does not need to copy finals into an instruction just to pass them along.
-Alternatively, inspect a result, make a decision, then create the next Work.
-
-## Introduce teammates in the first instruction
-
-`tools.run_agent.batch(specs)` accepts an object of locally named assignments.
-Before any member starts, it supplies each parameter function with all members'
-exact `agent` and `work` targets. The resulting assignments are accepted together.
+`instruction` and `depends_on` also accept synchronous functions. Each receives
+`{agents, works}`, the exact targets for all input positions. These are references,
+not future results. Compute parameters inside the function; call tools before or
+after `run_agent`, not from its parameter functions. Keep these functions pure and
+synchronous: do not use `async`, return a Promise, or schedule asynchronous work.
+An async function or returned Promise is a Cell contract error and blocks further tool submissions
+from that Cell, even if the script catches it.
 
 ```js
-const pair = await tools.run_agent.batch({
-  parser: {
-    name: "Parser developer",
-    instruction: ({ caller }) =>
-      `Implement the parser. Agree on parse(input) with the caller developer:
-${JSON.stringify(caller.agent)}. Use native send_agent_message to coordinate.`
+const batch = await tools.run_agent([
+  {
+    work_title: "Investigate the change",
+    instruction: "Inspect the requested behavior and report a proposed design."
   },
-  caller: {
-    name: "Caller developer",
-    instruction: ({ parser }) =>
-      `Integrate the parser's caller. Agree on parse(input) with the parser developer:
-${JSON.stringify(parser.agent)}. Use native send_agent_message to coordinate.`
+  {
+    work_title: "Review the proposal",
+    instruction: "Review the prerequisite proposal against the relevant code.",
+    depends_on: ({ works }) => [works[0]]
   }
-});
-console.log({ parser: pair.parser.agent, caller: pair.caller.agent });
-await tools.wait_agent.works({ targets: [pair.parser.work, pair.caller.work] });
-const outcomes = await Promise.all([pair.parser.work, pair.caller.work].map(
-  target => tools.query_agents({ target })
-));
-console.log(outcomes.map(work => ({ target: work.target, final: work.final, diagnostic: work.diagnostic })));
+]);
+await tools.wait_agent({ works: [batch.works[1]] });
+console.log(await tools.query_agents({ target: batch.works[1] }));
 ```
 
-Only `instruction` and `depends_on` accept synchronous parameter functions.
-Use them to construct text or target arrays from the supplied references; perform
-tool calls before or after the batch. The references contain identities, not
-future results. Teammate references alone do not impose execution dependencies.
+For parallel discussion, embed `JSON.stringify(agents[i])` in the other member's
+instruction. Leave them independent if they need to communicate while active.
+An Agent blocked on your own completion cannot reply before you finish.
 
-Each batch accepts up to 16 assignments, each with up to 16 dependencies and 16
-materials, with up to 64 dependency edges per batch. More work can be submitted
-in subsequent batches. Work assigned to the same agent runs in declaration order.
-Queue order requires the earlier Work to end; only an explicit `depends_on`
-requires it to succeed. Later queue entries cannot supply a prerequisite to an
-earlier one. A batch with a dependency cycle is rejected before members start.
+## Choose what to wait for
 
-For example, two agents could implement separate parts and then review each other:
-
-```text
-Agent A queue: implement A → review B
-Agent B queue: implement B → review A
-review B depends_on implement B
-review A depends_on implement A
+```ts
+tools.wait_agent({works: WorkTarget[], settle?: "all" | "first"})
+tools.wait_agent({agents: AgentTarget[], settle?: "all" | "first", timeout_seconds?: number})
 ```
 
-Each review starts after its own agent's implementation ends and the other
-agent's implementation succeeds.
+Supply exactly one nonempty array, `works` or `agents`. Targets within that array
+must be distinct. Both forms default to `settle: "all"`.
 
-## Message, wait, or stop
-
-`send_agent_message` supplements an active Work. It does not start work or load an
-idle agent. Its result reports whether delivery was accepted; a known target can
-still be inactive or not yet started. `tools.run_agent` in a Cell assigns new work
-to an idle agent. ROOT can send messages through either native or JS tools.
-Subagents retain native `query_agents`, `send_agent_message` and `wait_agent`;
-they coordinate directly with ROOT and known teammates without Code Mode.
-
-| Operation | Observe |
+| Input | What wakes the wait |
 | --- | --- |
-| ROOT `tools.wait_agent`; subagent native `wait_agent` | AGENT targets: messages from those agents or the end of their work bound at the start of this wait. It does not follow a later assignment automatically. |
-| `tools.wait_agent.works({ targets: [...], settle: "all" })` | Exact WORK targets until all end; ordinary messages do not wake this wait. `all` is the default. |
-| `tools.wait_agent.works({ targets: [...], settle: "first" })` | Any selected Work ending. Read `pending_targets` for the rest. |
+| `works` | The selected exact Works end; `first` waits for any one, `all` for all. Messages do not wake it. No observation timeout. |
+| `agents` | Any selected Agent has an available message, or its bound work meets the `settle` condition, or the observation times out. |
 
-WORK waits have no observation timeout; `exec_cell` returns acceptance while the wait continues.
-AGENT waits use the tool's timeout parameter. Waiting does not notify or start
-the target. Waiting for ROOT is useful when a reply has been arranged; an idle
-ROOT may have no work or reply to finish.
+Agent observation binds once: current Work if active, `not_started` if only queued
+work exists, otherwise the latest Work if one exists, or `inactive`. It does not
+follow subsequent assignments. Its timeout defaults to 30 seconds and accepts
+0–300 seconds. Waiting for `ROOT` observes messages, with no bound Work. Waiting
+for your own current Work is invalid. Subagents use native `wait_agent` with the
+`agents` form to coordinate with ROOT and known teammates.
 
-Work states are `queued`, `running`, `completed`, and `stopped`.
-`tools.wait_agent.works` returns `state` (`settled` or `interrupted`), `works`, and
-`pending_targets`. `settled` means the requested wait condition was met, not that
-every Work succeeded. `works` reports all selected Works, including those still
-queued or running. Waits never include instruction/final/diagnostic bodies;
-query a selected WORK for its actual result. Final completion itself does not
-notify ROOT.
+Works have `queued`, `running`, `completed`, or `stopped` status. A settled wait
+means its condition was met, not that the work succeeded or its review approved
+a change. Query actual results to decide what to do next.
 
-For example, continue observing the returned pending targets:
+Wait results contain `state`, `works` status objects and `pending_targets`.
+The `works` property of a wait result is not an array of WORK targets: use each
+item's `target` or `inspect` to read it. `pending_targets` is directly usable with
+the same input field that started the wait. Agent observations also contain
+`bindings`, and message/unavailable results identify their relevant sources.
+`message_available`, `settled`, `timeout`, `unavailable`, and `interrupted` have
+different meanings. In the Agent form, `all` does not mean collecting a message
+from every Agent; any selected source's available message wakes it.
 
 ```js
-const first = await tools.wait_agent.works({
-  targets: [pair.parser.work, pair.caller.work], settle: "first"
-});
+const first = await tools.wait_agent({ works: batch.works, settle: "first" });
 console.log(first);
-if (first.pending_targets.length) {
-  console.log(await tools.wait_agent.works({ targets: first.pending_targets }));
+if (first.state === "settled" && first.pending_targets.length) {
+  console.log(await tools.wait_agent({ works: first.pending_targets }));
 }
 ```
 
-Here `pair` is the actual batch result from the earlier example in the same script.
+A timeout or interruption ends the observation, not the target Work. To stop an
+assignment use `stop_agent` with its WORK target; to stop an Agent's current and
+queued work use its AGENT target. Completed work remains completed and the Agent
+can receive another Work.
 
-`pending_targets` contains complete WORK targets and can be passed to the next
-wait when nonempty. It is empty when all selected Works have ended. An interrupted
-wait includes the last observed states and remaining targets as well.
+## Keep targets across scripts
 
-`stop_agent` with a WORK target stops that assignment. With an AGENT target, it
-stops current and already queued work. Read actual outcomes; completed work stays
-completed, and the agent remains reusable. A stopped prerequisite propagates to
-its success-dependent work; independent work can continue. Stopping a script
-with `manage_cell` with `action:"stop"` does not perform these agent stops.
+Each Cell starts with fresh variables. Log the actual targets and selected results
+that ROOT needs. In a later Cell, reuse targets copied from that output, or query
+retained agents and their works. Follow the returned `next` calls for further pages
+and `inspect` for details. Use task evidence to choose the right retained Agent;
+its position in a new query page or a matching title does not establish identity.
+
+The same Agent may appear more than once in a dispatch result when it receives
+several Works. Use the unique `works` array to wait for those assignments; to
+observe that Agent, pass its AGENT target once.
+
+## Direct controls and useful corrections
+
+ROOT can natively query, message and stop the same targets while scripts run,
+even when a Cell cannot start. Messages supplement active work; they do not create
+assignments or wake an idle Agent to perform a new task. For a follow-up assignment,
+use `run_agent` with its retained AGENT target. A message uses
+`send_agent_message({target: agentTarget, message: text})`: keep the complete Target
+inside `target`; do not repeat its identity fields at the outer argument level.
+An `inactive` result means the message was not delivered to active work. Do not
+count it as a received instruction.
+
+Agent and Work queries describe work, not a complete communication log. ROOT may
+not see messages exchanged between subagents. Before judging whether they compared
+evidence, verify what was actually sent, received and checked. A lack of visible
+messages in ROOT context is not proof that no exchange occurred.
+
+Subagents keep their native query,
+message and Agent-observation tools, without Code Mode or delegation authority.
+
+| Incorrect form or inference | Correct usage |
+| --- | --- |
+| `run_agent({instruction: ...})` | `run_agent([{instruction: ...}])` |
+| `run_agent.batch(...)` or `wait_agent.works(...)` | `run_agent([...])` or `wait_agent({works: [...]})` |
+| `send_agent_message({...agentTarget, message})` | `send_agent_message({target: agentTarget, message})` |
+| Sending `name` or using a title as target | Use `work_title` for display and the actual Target for identity |
+| Reading a previous Cell's local variable | Copy its logged Target into the new script or query the actual object |
+| Treating a message or accepted Cell as completed work | Wait for the exact WORK and query its result |
+| Retrying a dispatch just to obtain its output | Observe the accepted Cell and query the existing Work |

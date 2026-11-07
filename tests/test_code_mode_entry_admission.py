@@ -13,6 +13,7 @@ from pulsara_agent.model_input.contracts import ModelInputScopeKind
 from pulsara_agent.primitives.permission import PermissionMode
 from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from tests.support.round3 import prepare_test_direct_tool_surface
+from pulsara_agent.identity import random_id
 
 COLLABORATION = frozenset({'run_agent', 'query_agents', 'send_agent_message', 'wait_agent', 'stop_agent'})
 
@@ -132,8 +133,9 @@ def test_retained_native_schema_rejected_even_with_self_reported_or_code_source(
 
 
 @pytest.mark.parametrize('name,arguments', [
-    ('run_agent', {'instruction': 'do this'}), ('wait_agent', {'targets': []}),
-    ('run_agent.batch', {'items': []}), ('wait_agent.works', {'targets': []}),
+    ('run_agent', {'members': [{'agent_id': random_id('session'), 'work_id': random_id('queue'), 'parameters': {'instruction': 'do this'}}]}),
+    ('wait_agent', {'agents': [{'kind': 'AGENT', 'agent_id': random_id('session')}]}),
+    ('wait_agent', {'works': [{'kind': 'WORK', 'work_id': random_id('queue')}]}),
     ('decide', {'condition': 'contains x', 'inputs': []}),
 ])
 def test_code_entry_requires_both_host_source_and_cell_borrow(tmp_path, name, arguments):
@@ -145,7 +147,7 @@ def test_code_entry_requires_both_host_source_and_cell_borrow(tmp_path, name, ar
         port = _port(tmp_path)
         native = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
         directory = port.freeze_code_mode_tool_directory(native, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-        borrow = port.borrow_code_mode_surface(directory, cell_id=random_id('cell'), tool_name=name)
+        borrow = port.borrow_code_mode_surface(directory, cell_id=random_id('cell'))
         try:
             denied = port.prepare_resolved_invocation(tool_name=name, arguments=arguments, surface_borrow=borrow)
             assert denied.authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
@@ -267,7 +269,7 @@ def test_child_native_wait_keeps_shared_owner_without_cell_source(tmp_path):
         surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
             effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
         borrow = port.borrow_tool_surface(surface)
-        arguments = {'targets': [{'kind': 'AGENT', 'agent_id': random_id('session')}]}
+        arguments = {'agents': [{'kind': 'AGENT', 'agent_id': random_id('session')}]}
         try:
             prepared = port.prepare_resolved_invocation(tool_name='wait_agent', arguments=arguments, surface_borrow=borrow)
             assert isinstance(prepared, PreparedResolvedToolInvocation)
@@ -275,6 +277,13 @@ def test_child_native_wait_keeps_shared_owner_without_cell_source(tmp_path):
                 assistant_entry_id='entry', permission_snapshot=_permission(), surface_borrow=borrow,
                 memory_context=SimpleNamespace())
             assert auth.kind is KernelToolAuthorizationKind.ALLOW
+            forbidden = {'works': [{'kind': 'WORK', 'work_id': random_id('queue')}]}
+            denied = port.prepare_resolved_invocation(tool_name='wait_agent', arguments=forbidden, surface_borrow=borrow)
+            assert denied.authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
+            auth = await port.authorize(tool_name='wait_agent', arguments=forbidden, tool_call_id='call', turn_id='turn',
+                assistant_entry_id='entry', permission_snapshot=_permission(), surface_borrow=borrow,
+                memory_context=SimpleNamespace())
+            assert auth.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
             for name in ('decide', 'run_agent', 'stop_agent', 'exec_cell'):
                 denied = port.prepare_resolved_invocation(tool_name=name, arguments={}, surface_borrow=borrow)
                 assert denied.authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
@@ -282,3 +291,176 @@ def test_child_native_wait_keeps_shared_owner_without_cell_source(tmp_path):
             borrow.close()
             await port.aclose()
     asyncio.run(scenario())
+
+
+def test_wait_schema_is_projected_per_entry_and_old_targets_are_rejected(tmp_path):
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.identity import random_id
+    from pulsara_agent.primitives.context import thaw_json
+
+    async def scenario():
+        port = _port(tmp_path)
+        try:
+            root = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            directory = port.freeze_code_mode_tool_directory(root, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            child = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            js = next(spec for spec in directory.tool_specs if spec.name == 'wait_agent')
+            native = next(spec for spec in child.model_surface.tool_specs if spec.name == 'wait_agent')
+            agent = {'kind': 'AGENT', 'agent_id': random_id('session')}
+            work = {'kind': 'WORK', 'work_id': random_id('queue')}
+            for spec in (js, native):
+                validator = Draft202012Validator(thaw_json(spec.parameters))
+                assert validator.is_valid({'agents': [agent]})
+                assert not validator.is_valid({'targets': [agent]})
+                assert not validator.is_valid({'agents': [agent], 'works': [work]})
+            assert Draft202012Validator(thaw_json(js.parameters)).is_valid({'works': [work]})
+            assert not Draft202012Validator(thaw_json(native.parameters)).is_valid({'works': [work]})
+            assert js.descriptor_fingerprint == directory.binding('wait_agent').descriptor_fingerprint
+            assert native.descriptor_fingerprint == child.binding('wait_agent').descriptor_fingerprint
+            assert js.descriptor_fingerprint != native.descriptor_fingerprint
+        finally:
+            await port.aclose()
+    asyncio.run(scenario())
+
+
+def test_run_schema_accepts_only_ordered_prepared_members():
+    from jsonschema import Draft202012Validator
+    from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+    from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+    from pulsara_agent.identity import random_id
+    schema = thaw_tool_json_object(builtin_tool_catalog_entry('run_agent').descriptor.input_schema)
+    validator = Draft202012Validator(schema)
+    member = {'agent_id': random_id('session'), 'work_id': random_id('queue'),
+              'parameters': {'instruction': 'inspect', 'work_title': 'Review'}}
+    assert validator.is_valid({'members': [member]})
+    assert not validator.is_valid({'instruction': 'inspect'})
+    assert not validator.is_valid([{'instruction': 'inspect'}])
+    assert not validator.is_valid({'members': []})
+    assert not validator.is_valid({'members': [{**member, 'key': 'old'}]})
+    assert not validator.is_valid({'members': [{**member, 'parameters': {'instruction': 'inspect', 'name': 'old'}}]})
+
+
+def test_installed_old_builtin_schema_is_retained_but_cannot_execute(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from pulsara_agent.capability.contracts import InstalledCapabilityEpochPredecessor
+    from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptor
+    from pulsara_agent.conversation_kernel import tool_runtime
+    from pulsara_agent.conversation_kernel.tool_surface import PreparedUnavailableBuiltinGate
+    from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
+    from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+
+    descriptor = builtin_tool_descriptor('wait_agent')
+    old_schema = thaw_tool_json_object(descriptor.input_schema)
+    old_schema['properties']['targets'] = old_schema['properties'].pop('agents')
+    old_schema['required'] = ['targets']
+    old_descriptor = replace(descriptor, input_schema=old_schema)
+
+    def old_catalog(name, *, code_mode=False):
+        return old_descriptor if name == 'wait_agent' else builtin_tool_descriptor(name, code_mode=code_mode)
+
+    async def scenario():
+        port = _port(tmp_path)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(tool_runtime, 'builtin_tool_descriptor', old_catalog)
+                old = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
+                    effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            plan = old.capability_exposure_plan
+            predecessor = InstalledCapabilityEpochPredecessor(1, 'installed-prefix', old.model_surface,
+                plan.direct_projection_set, plan.mcp_catalog_route_projection)
+            current = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS, predecessor=predecessor)
+            assert current.model_surface is old.model_surface
+            gate = current.binding('wait_agent')
+            assert isinstance(gate, PreparedUnavailableBuiltinGate)
+            assert gate.spec is next(spec for spec in old.model_surface.tool_specs if spec.name == 'wait_agent')
+            assert gate.executor_binding_fingerprint is None
+            borrow = port.borrow_tool_surface(current)
+            try:
+                arguments = {'targets': [{'kind': 'AGENT', 'agent_id': random_id('session')}]}
+                rejection = port.prepare_resolved_invocation(tool_name='wait_agent', arguments=arguments, surface_borrow=borrow)
+                assert rejection.authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
+                authorization = await port.authorize(tool_name='wait_agent', arguments=arguments, tool_call_id='call',
+                    turn_id='turn', assistant_entry_id='entry', permission_snapshot=_permission(),
+                    surface_borrow=borrow, memory_context=SimpleNamespace())
+                assert authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
+                query = await port.authorize(tool_name='query_agents', arguments={}, tool_call_id='query',
+                    turn_id='turn', assistant_entry_id='entry', permission_snapshot=_permission(),
+                    surface_borrow=borrow, memory_context=SimpleNamespace())
+                assert query.kind is KernelToolAuthorizationKind.ALLOW
+            finally:
+                borrow.close()
+            # A cold plan never acquires unavailable-leaf authority from descriptor drift.
+            builtin = port.sealed_builtin_capability_snapshot(conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
+                effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            with pytest.raises(RuntimeError, match='planned builtin descriptor drifted'):
+                port.prepare_planned_tool_surface(plan=plan, builtin=builtin)
+        finally:
+            await port.aclose()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('name', ['run_agent.batch', 'wait_agent.works'])
+def test_removed_helpers_have_no_execution_binding_even_with_cell_authority(tmp_path, name):
+    from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
+    from pulsara_agent.conversation_kernel.tool_invocations import current_tool_invocation
+
+    async def scenario():
+        port = _port(tmp_path)
+        try:
+            native = prepare_test_direct_tool_surface(port, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            directory = port.freeze_code_mode_tool_directory(native, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
+            borrow = port.borrow_code_mode_surface(directory, cell_id=random_id('cell'))
+            try:
+                token = current_tool_invocation.set(_source(name, {}))
+                try:
+                    rejection = port.prepare_resolved_invocation(tool_name=name, arguments={}, surface_borrow=borrow)
+                    assert rejection.authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
+                finally:
+                    current_tool_invocation.reset(token)
+            finally:
+                borrow.close()
+        finally:
+            await port.aclose()
+    asyncio.run(scenario())
+
+
+def test_unavailable_image_builtin_receives_only_ordinary_result_budget(monkeypatch):
+    from pulsara_agent.conversation_kernel import runner as module
+    from pulsara_agent.conversation_kernel.assembler import CompletedAssistantMessage, CompletedToolCallBlock
+    from pulsara_agent.conversation_kernel.direct_model import ProviderFollowupWireResourceQuote
+    from pulsara_agent.conversation_kernel.tool_surface import PreparedUnavailableBuiltinGate
+    from pulsara_agent.capability.builtin_catalog import builtin_tool_descriptor
+    from pulsara_agent.model_input.contracts import FrozenToolSpec
+    from pulsara_agent.primitives.context import freeze_json
+    from pulsara_agent.ports.tool_execution import thaw_tool_json_object
+
+    descriptor = builtin_tool_descriptor('view_image')
+    gate = PreparedUnavailableBuiltinGate(FrozenToolSpec(name='view_image', description=descriptor.description,
+        parameters=freeze_json(thaw_tool_json_object(descriptor.input_schema)), descriptor_fingerprint=descriptor.fingerprint()))
+    wire_plan = SimpleNamespace(quote=SimpleNamespace(effective_input_budget_tokens=200_000))
+    identity = SimpleNamespace(conversation_scope_kind=ModelInputScopeKind.ROOT)
+    runner = object.__new__(module.ConversationKernelRunner)
+    runner._continuity = SimpleNamespace(current_usage_anchor=lambda scope: None,
+        current_view=lambda scope: SimpleNamespace(epoch_nonce='epoch', epoch_revision=1,
+            wire_input_plan=wire_plan, logical_bytes=0))
+    runner._context_source_collector = SimpleNamespace(freeze_post_response_call_source_upper=lambda: ())
+    runner._hook_output_source_upper = lambda **kwargs: None
+    runner._subagent_runtime = None
+    monkeypatch.setattr(module, 'quote_provider_followup_wire_resources',
+        lambda **kwargs: ProviderFollowupWireResourceQuote(1000, 1000, 1000, 3))
+    call_id = random_id('call')
+    completed = CompletedAssistantMessage(random_id('entry'), (CompletedToolCallBlock(
+        random_id('block'), call_id, 'view_image', freeze_json({'target': {'kind': 'PATH', 'path': '/tmp/image.png'}})),), '')
+    quote = runner._quote_post_response_resources(
+        request=SimpleNamespace(wire_input_plan=wire_plan,
+            prepared_call=SimpleNamespace(tool_surface=SimpleNamespace(binding=lambda name: gate), call=object()),
+            compiled_input=SimpleNamespace(canonical_input_identity=identity)),
+        permit=SimpleNamespace(scope=None, epoch_nonce='epoch', epoch_revision=1),
+        collected=SimpleNamespace(completed=completed, provider_replay=None),
+        canonical_facts=SimpleNamespace(canonical_input=SimpleNamespace(identity=identity,
+            canonical_expanded_bytes=0, items=()), plan_workflow_fact=None))
+    assert quote.image_call_allowances == ()
+    assert len(quote.result_page_budgets) == 1
+    assert quote.result_page_budgets[0].tool_call_id == call_id

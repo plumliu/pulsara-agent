@@ -2,7 +2,7 @@ import type { ListMcpPrompts, PreviewMcpPrompt } from '../lib/mcp-prompts';
 import { createPortal } from 'react-dom';
 import { usePromptHover } from '../lib/prompt-hover';
 import { useDesktopWorkspace } from './desktop-workspace';
-import { prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
+import { workTitle, prepareSessionTarget, type SessionNavigation } from '../lib/agent-cell-api';
 import { ProviderRetryStatus } from './provider-retry-status';
 import { PresentationContext } from './presentation-provider';
 import { parsePresentationResult } from '../lib/presentation-targets';
@@ -1580,6 +1580,7 @@ export function ConversationMessages({
     return <HistoryMessageHost key={messageViewKey(message)} message={message}
       contextLoadingSummarized={history?.windows.some(window => window.id === message.historyWindowId && window.contextState === 'loading')} knownContent={pendingContent
       ? <UserMessage message={message} label={inputLabel} senderKind={inputSender} onNotify={onNotify} onReadPromptImage={onReadPromptImage} pendingContent={pendingContent} deliveryStatus="本地已知内容" /> : knownAssistant}>
+      {message.role === 'user' && message.inputOrigin === 'AGENT_INSTRUCTION' && <div className="agent-work-divider" data-work-id={message.inputSource?.queueItemId} title={message.inputSource?.queueItemId}><span>任务</span><strong>{workTitle(message.inputSource?.workTitle)}</strong></div>}
       {message.role === 'user'
         ? <UserMessage message={message} label={inputLabel} senderKind={inputSender} onNotify={onNotify} onReadPromptImage={onReadPromptImage} visible={visible} />
         : assistant(message)}
@@ -2348,7 +2349,7 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
   steerNextCursor?: string | null; steerLoading?: boolean; steerReadError?: string; onMoreSteers?: () => void;
   onMoreQueue: () => void; readingState: AgentReadingState; onNotify: MarkdownNotify;
   entryLocation?: { entryId: string; requestId: number };
-  terminalWork?: { workId: string; status: string; reason?: string | null };
+  terminalWork?: { workId: string; workTitle: string | null; status: string; reason?: string | null };
 }) {
   const onLoadHistory = useCallback(async (windowId?: string, direction?: 'older' | 'newer') => { await reader.readHistory(windowId, direction); }, [reader]);
   const onHydrateEntries = useCallback(async (ids: string[], includeReasoning?: boolean) => { await reader.hydrateEntries(ids, undefined, includeReasoning); }, [reader]);
@@ -2415,12 +2416,12 @@ export function AgentConversationView({ sessionId, agentName, reader, contentRea
         <div className="agent-conversation-queue">
           {projection.todo && <TodoDock todo={projection.todo} interactionOpen={false} onLayoutChange={reading.restoreReadingPosition} />}
           {terminalWork && <article data-queue-item-id={terminalWork.workId} tabIndex={-1}>
-            <strong>任务已结束</strong><small className="agent-conversation-queue__status">{terminalWork.status === 'stopped' ? '已停止' : terminalWork.status === 'completed' ? '已完成' : terminalWork.status}{terminalWork.reason ? `：${terminalWork.reason}` : ''}</small>
+            <strong className="agent-work-title" title={terminalWork.workId}>{workTitle(terminalWork.workTitle)}</strong><span>任务已结束</span><small className="agent-conversation-queue__status">{terminalWork.status === 'stopped' ? '已停止' : terminalWork.status === 'completed' ? '已完成' : terminalWork.status}{terminalWork.reason ? `：${terminalWork.reason}` : ''}</small>
           </article>}
           <AnimatedPromptQueue>
             {pending.map(item => <article key={item.queueItemId} data-queue-item-id={item.queueItemId} tabIndex={-1}>
               <CornerDownRight size={13} aria-hidden="true" />
-              <div className="composer-queue__body">{item.contentUnavailable ? <p>正文暂时无法读取。</p> : <PromptContentView content={item.content} variant="queue" onReadImage={contentReader.readPromptImage} />}
+              <div className="composer-queue__body">{item.inputOrigin === 'AGENT_INSTRUCTION' && <strong className="agent-work-title" title={item.queueItemId}>{workTitle(item.workTitle)}</strong>}{item.contentUnavailable ? <p>正文暂时无法读取。</p> : <PromptContentView content={item.content} variant="queue" onReadImage={contentReader.readPromptImage} />}
                 <small className="agent-conversation-queue__status">{item.waitingOn?.length ? `等待依赖：${item.waitingOn.join('、')}` : '排队中'}</small></div>
             </article>)}
             {queueCursor && <button key="queue-more" type="button" onClick={onMoreQueue}>加载更多排队任务</button>}

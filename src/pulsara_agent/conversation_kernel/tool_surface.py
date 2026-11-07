@@ -153,7 +153,30 @@ class PreparedToolExecutionBinding:
             raise TypeError("tool execution policy union is open")
 
 
-DirectToolAccessLeaf = PreparedToolExecutionBinding | PreparedUnavailableDirectMcpGate
+@dataclass(frozen=True, slots=True)
+class PreparedUnavailableBuiltinGate:
+    """An installed provider description retained without execution authority."""
+
+    spec: FrozenToolSpec
+
+    @property
+    def tool_name(self) -> str:
+        return self.spec.name
+
+    @property
+    def descriptor_fingerprint(self) -> str:
+        return self.spec.descriptor_fingerprint
+
+    @property
+    def executor_binding_fingerprint(self) -> None:
+        return None
+
+    @property
+    def public_message(self) -> str:
+        return f"The installed {self.tool_name} tool contract is no longer available."
+
+
+DirectToolAccessLeaf = PreparedToolExecutionBinding | PreparedUnavailableDirectMcpGate | PreparedUnavailableBuiltinGate
 
 
 def tool_observation_origin_for_binding(
@@ -218,7 +241,7 @@ class PreparedKernelToolSurface:
             raise ValueError("prepared surface does not join capability plan")
 
     @property
-    def executor_binding_fingerprints(self) -> tuple[str, ...]:
+    def executor_binding_fingerprints(self) -> tuple[str | None, ...]:
         return tuple(
             item.executor_binding_fingerprint for item in self.execution_bindings
         )
@@ -279,7 +302,6 @@ class ProcessLocalToolSurfaceBorrow:
     _release: Callable[["ProcessLocalToolSurfaceBorrow"], None] = field(repr=False)
     _closed: bool = False
     code_cell_id: str | None = None
-    internal_binding: PreparedToolExecutionBinding | None = field(default=None, repr=False)
 
     @property
     def tool_specs(self) -> tuple[FrozenToolSpec, ...]:
@@ -366,6 +388,7 @@ __all__ = [
     "OwnerIssuedCapabilityDispatchObservation",
     "PreparedKernelToolSurface",
     "PreparedToolExecutionBinding",
+    "PreparedUnavailableBuiltinGate",
     "ProcessLocalToolSurfaceAccess",
     "ProcessLocalToolSurfaceBorrow",
     "ToolExecutionPolicy",

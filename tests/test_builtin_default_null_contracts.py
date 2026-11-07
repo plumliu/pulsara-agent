@@ -9,6 +9,7 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from pulsara_agent.capability.builtin_catalog import builtin_tool_catalog_entry
+from pulsara_agent.identity import random_id
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     prepared_request,
     validate_collaboration_parameters,
@@ -51,27 +52,36 @@ def assert_shape(name, arguments, valid):
         ).is_valid(arguments)
 
 
-@pytest.mark.parametrize("field", ["context", "target", "name"])
-def test_run_agent_omitted_creation_options_and_explicit_null_have_distinct_meaning(
+def dispatch_arguments(parameters):
+    return {"members": [{"agent_id": random_id("session"), "work_id": random_id("queue"),
+                          "parameters": parameters}]}
+
+
+@pytest.mark.parametrize("field", ["context", "target", "work_title"])
+def test_run_agent_omitted_options_and_explicit_null_have_distinct_meaning(
     field,
 ):
     omitted = prepared_request({"instruction": "Inspect"})
-    assert omitted.create_agent and omitted.context_mode == "none"
+    assert omitted.create_agent and omitted.context_mode == "none" and omitted.work_title is None
+    arguments = dispatch_arguments({"instruction": "Inspect"})
+    assert_shape("run_agent", arguments, True)
+    validate_collaboration_parameters("run_agent", arguments)
+    arguments["members"][0]["parameters"][field] = None
+    assert_shape("run_agent", arguments, False)
     with pytest.raises(ValueError):
-        validate_collaboration_parameters(
-            "run_agent", {"instruction": "Inspect", field: None}
-        )
+        validate_collaboration_parameters("run_agent", arguments)
 
 
 @pytest.mark.parametrize("value", ["research_worker", None])
 def test_run_agent_removed_profile_is_rejected_by_schema_and_runtime(value):
-    arguments = {"instruction": "Inspect", "profile": value}
+    parameters = {"instruction": "Inspect", "profile": value}
+    arguments = dispatch_arguments(parameters)
     assert_shape("run_agent", arguments, False)
     assert not Draft202012Validator(lower_openai_function_parameters(schema("run_agent"))).is_valid(arguments)
     with pytest.raises(ValueError, match="unexpected or missing parameter"):
         validate_collaboration_parameters("run_agent", arguments)
     with pytest.raises(ValueError, match="unexpected or missing parameter"):
-        prepared_request(arguments)
+        prepared_request(parameters)
 
 
 def test_null_effort_is_an_exact_choice_not_an_omitted_selection():
@@ -263,9 +273,10 @@ def test_scheduled_create_rejects_invalid_status(status):
 def test_existing_empty_values_remain_operations():
     assert_shape("todo", {"items": []}, True)
     assert_shape(
-        "run_agent", {"instruction": "Inspect", "materials": [], "depends_on": []}, True
+        "run_agent", dispatch_arguments({"instruction": "Inspect", "materials": [], "depends_on": []}), True
     )
-    assert_shape("wait_agent", {"targets": []}, False)
+    assert_shape("wait_agent", {"agents": []}, False)
+    assert_shape("wait_agent", {"works": []}, False)
 
 
 def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():

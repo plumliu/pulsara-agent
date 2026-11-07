@@ -17,6 +17,9 @@ from pulsara_agent.code_mode import (
 async def _start(host, source, invoke=None, catalog=None, **kwargs):
     async def empty(_):
         return CodeModeToolResult(value={})
+    if catalog is not None and 'run_agent' in catalog:
+        from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import run_agent_parameters_schema
+        catalog = {**catalog, 'run_agent': {'parameters': run_agent_parameters_schema()}}
     captured = getattr(host, "_test_cells", {})
     host._test_cells = captured
     closed = kwargs.pop("on_cell_closed", None)
@@ -535,25 +538,254 @@ def test_batch_preallocates_frozen_refs_then_one_real_descriptor():
         calls = []
         async def invoke(call):
             calls.append(call)
-            if call.tool_name == 'run_agent.batch':
-                return CodeModeToolResult(value={m['key']:{'agent':{'kind':'AGENT','agent_id':m['agent_id']},
-                    'work':{'kind':'WORK','work_id':m['work_id']}} for m in call.arguments['members']})
+            if call.tool_name == 'run_agent':
+                return CodeModeToolResult(value={'agents':[{'kind':'AGENT','agent_id':m['agent_id']} for m in call.arguments['members']],
+                    'works':[{'kind':'WORK','work_id':m['work_id']} for m in call.arguments['members']],
+                    'details':[{'work_title':m['parameters'].get('work_title'),'status':'queued',
+                        'inspect':{'tool':'query_agents','arguments':{'target':{'kind':'WORK','work_id':m['work_id']}}}}
+                        for m in call.arguments['members']]})
             return CodeModeToolResult(value={'state':'settled'})
         try:
             page, output = await _finish(host, await _start(host, '''
-                const result=await tools.run_agent.batch({
-                  first:{instruction:({second})=>JSON.stringify(second.agent)},
-                  second:{instruction:'Review',depends_on:({first})=>[first.work]}
-                });
-                console.log(await tools.wait_agent.works({targets:[result.second.work]}));
+                const result=await tools.run_agent([
+                  {instruction:({agents})=>JSON.stringify(agents[1])},
+                  {instruction:'Review',depends_on:({works})=>[works[0]]}
+                ]);
+                if(result.agents.length!==2 || result.works.length!==2 || result.details.length!==2)
+                  throw Error('dispatch arrays lost position');
+                console.log(await tools.wait_agent({works:[result.works[1]]}));
             ''', invoke, {'run_agent':{}, 'wait_agent':{}}))
             assert page.state == 'completed', page.error
-            assert [call.tool_name for call in calls] == ['run_agent.batch', 'wait_agent.works']
+            assert [call.tool_name for call in calls] == ['run_agent', 'wait_agent']
             assert [call.sequence for call in calls] == [1, 2]
             a, b = calls[0].arguments['members']
             assert json.loads(a['parameters']['instruction'])['agent_id'] == b['agent_id']
             assert b['parameters']['depends_on'] == [{'kind':'WORK','work_id':a['work_id']}]
             assert output == [{'kind':'log','text':'{"state":"settled"}'}]
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('expression', [
+    '{}', '[]', '[, {instruction:"x"}]', '[undefined]', '[null]', '[1]', '[[]]',
+    'Object.assign([{instruction:"x"}], {extra:1})',
+    'Object.assign([{instruction:"x"}], {[Symbol("extra")]:1})',
+    '[{instruction:"x", name:"old title"}]', '[{instruction:"x", unknown:true}]',
+    '[{instruction:"x", target:()=>({})}]', '[{instruction:"x", work_title:()=>"title"}]',
+])
+def test_dispatch_rejects_invalid_public_arrays_before_preparation(expression):
+    async def run():
+        host, requests, calls = CodeModeHost(), [], []
+        original = host._accept_request
+        def accept(cell, message):
+            requests.append(message)
+            original(cell, message)
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        host._accept_request = accept
+        try:
+            page, output = await _finish(host, await _start(host,
+                f'try {{ await tools.run_agent({expression}); }} catch(e) {{ return "rejected"; }}',
+                invoke, {'run_agent': {}}))
+            assert page.state == 'completed', page.error
+            assert output == [{'kind': 'return', 'text': 'rejected'}]
+            assert not requests and not calls
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_dispatch_captures_values_before_await_and_callbacks_once_in_order():
+    async def run():
+        host, calls = CodeModeHost(), []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        try:
+            page, output = await _finish(host, await _start(host, '''
+              const order=[];
+              const context={mode:'none'};
+              const assignments=[
+                {instruction:refs=>{order.push('instruction0');return 'original';},context},
+                {instruction:'second',depends_on:refs=>{order.push('depends1');return [refs.works[0]];}}
+              ];
+              const pending=tools.run_agent(assignments);
+              assignments.reverse(); assignments.length=0;
+              context.mode='last_n'; context.turns=100;
+              await pending;
+              console.log(order);
+            ''', invoke, {'run_agent': {}}))
+            assert page.state == 'completed', page.error
+            assert output == [{'kind': 'log', 'text': '["instruction0","depends1"]'}]
+            assert len(calls) == 1 and calls[0].tool_name == 'run_agent'
+            first, second = calls[0].arguments['members']
+            assert first['parameters'] == {'instruction': 'original', 'context': {'mode': 'none'}}
+            assert second['parameters']['depends_on'] == [{'kind': 'WORK', 'work_id': first['work_id']}]
+            assert all(set(member) == {'agent_id', 'work_id', 'parameters'} for member in calls[0].arguments['members'])
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('count', [1, 2])
+def test_dispatch_reused_agent_keeps_distinct_ordered_work_references(count):
+    from pulsara_agent.identity import random_id
+    target = {'kind': 'AGENT', 'agent_id': random_id('session')}
+    async def run():
+        host, calls = CodeModeHost(), []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        assignments = [{'target': target, 'work_title': 'same display title', 'instruction': f'work {index}'}
+                       for index in range(count)]
+        try:
+            page, _ = await _finish(host, await _start(host,
+                'await tools.run_agent(' + json.dumps(assignments) + ');', invoke, {'run_agent': {}}))
+            assert page.state == 'completed', page.error
+            assert len(calls) == 1
+            members = calls[0].arguments['members']
+            assert [member['parameters'] for member in members] == assignments
+            assert [member['agent_id'] for member in members] == [target['agent_id']] * count
+            assert len({member['work_id'] for member in members}) == count
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_dispatch_catalog_requires_actual_assignment_field_schema():
+    async def run():
+        host = CodeModeHost()
+        async def invoke(call):
+            pytest.fail('invalid catalog must not dispatch')
+        try:
+            with pytest.raises(CodeModeError, match='canonical member parameter schema'):
+                await host.start(source='return 1;', source_exec_attempt_id='test-attempt', turn_id='test-turn',
+                    snapshot=object(), tool_catalog={'decide': {}, 'run_agent': {}}, invoke=invoke,
+                    decision_available=False)
+            assert host._process is None and not host._cells
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('tampering', ['reorder', 'target_added', 'identity', 'missing_preparation'])
+def test_dispatch_host_checks_exact_preparation_order_and_creation_intent(tampering):
+    async def run():
+        host, calls = CodeModeHost(), []
+        original = host._accept_request
+        def accept(cell, message):
+            if message['type'] == 'call' and message['tool_name'] == 'run_agent':
+                message = dict(message)
+                arguments = json.loads(message['arguments_json'])
+                members = arguments['members']
+                if tampering == 'reorder':
+                    members.reverse()
+                elif tampering == 'target_added':
+                    members[0]['parameters']['target'] = {'kind': 'AGENT', 'agent_id': members[0]['agent_id']}
+                elif tampering == 'identity':
+                    members[0]['work_id'] = members[1]['work_id']
+                else:
+                    message.pop('preparation')
+                message['arguments_json'] = json.dumps(arguments)
+            original(cell, message)
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        host._accept_request = accept
+        try:
+            cell = await _start(host, '''
+              try { await tools.run_agent([{instruction:'first'},{instruction:'second'}]); }
+              catch(e) { return 'rejected'; }
+            ''', invoke, {'run_agent': {}})
+            page, output = await _finish(host, cell)
+            assert page.state == 'completed', page.error
+            assert output == [{'kind': 'return', 'text': 'rejected'}]
+            assert not calls and not host._test_cells[cell].preparations
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_dispatch_preparation_cannot_be_used_from_another_cell():
+    async def run():
+        host, calls, held = CodeModeHost(), [], []
+        original = host._accept_request
+        def accept(cell, message):
+            if message['type'] == 'call' and message['tool_name'] == 'run_agent':
+                held.append((cell, dict(message)))
+                if len(held) == 2:
+                    first, second = held
+                    first[1]['preparation'], second[1]['preparation'] = second[1]['preparation'], first[1]['preparation']
+                    for owner, call in held:
+                        original(owner, call)
+                return
+            original(cell, message)
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        host._accept_request = accept
+        try:
+            cells = [await _start(host, '''
+              try { await tools.run_agent([{instruction:'not accepted'}]); }
+              catch(e) { return 'rejected'; }
+            ''', invoke, {'run_agent': {}}) for _ in range(2)]
+            for cell in cells:
+                page, output = await _finish(host, cell)
+                assert page.state == 'completed', page.error
+                assert output == [{'kind': 'return', 'text': 'rejected'}]
+                assert not host._test_cells[cell].preparations
+            assert not calls
+        finally:
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_rejected_preparation_delivery_releases_python_record_while_cell_lives():
+    async def run():
+        host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=1024))
+        waiting, release = asyncio.Event(), asyncio.Event()
+        calls = []
+        async def invoke(call):
+            calls.append(call)
+            waiting.set()
+            await release.wait()
+            return CodeModeToolResult(value={})
+        try:
+            cell = await _start(host, '''
+              try { await tools.run_agent(Array.from({length:8},()=>({instruction:'x'}))); }
+              catch(e) { if(e.code!=='value_boundary') throw e; }
+              await tools.read_file({});
+              return 'done';
+            ''', invoke, {'run_agent': {}, 'read_file': {}})
+            await asyncio.wait_for(waiting.wait(), 5)
+            assert [call.tool_name for call in calls] == ['read_file']
+            assert not host._test_cells[cell].preparations
+            release.set()
+            page, output = await _finish(host, cell)
+            assert page.state == 'completed', page.error
+            assert output == [{'kind': 'return', 'text': 'done'}]
+        finally:
+            release.set()
+            await host.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('source', [
+    'await tools.run_agent.batch({a:{instruction:"old"}});',
+    'await tools.wait_agent.works({targets:[]});',
+])
+def test_removed_helpers_fail_as_script_errors_without_tool_calls(source):
+    async def run():
+        host, calls = CodeModeHost(), []
+        async def invoke(call):
+            calls.append(call)
+            return CodeModeToolResult(value={})
+        try:
+            page, _ = await _finish(host, await _start(host, source, invoke, {'run_agent': {}, 'wait_agent': {}}))
+            assert page.state == 'failed' and page.error['name'] == 'TypeError'
+            assert not calls
         finally:
             await host.aclose()
     asyncio.run(run())
@@ -592,8 +824,8 @@ def test_worker_request_ids_preserve_batch_preparation_resume_and_concurrent_res
         try:
             cell_id = await _start(host, '''
               await Promise.all([
-                tools.run_agent.batch({a:{instruction:'first batch'}}),
-                tools.run_agent.batch({b:{instruction:'second batch'}})
+                tools.run_agent([{instruction:'first batch'}]),
+                tools.run_agent([{instruction:'second batch'}])
               ]);
               console.log(await Promise.all([
                 tools.read_file({value:'slow'}), tools.read_file({value:'fast'})
@@ -607,7 +839,7 @@ def test_worker_request_ids_preserve_batch_preparation_resume_and_concurrent_res
             first_reply = json.loads(replies[0]['json'])
             assert first_reply['request_id'] == replies[0]['request_id']
             assert first_reply['request_id'] in prepare_ids
-            assert set(first_reply) == {'request_id', 'peers'}
+            assert set(first_reply) == {'request_id', 'refs'}
             resume_preparation.set()
             page, output = await _finish(host, cell_id)
             assert page.state == 'completed', page.error
@@ -621,12 +853,12 @@ def test_worker_request_ids_preserve_batch_preparation_resume_and_concurrent_res
             assert all('sequence' not in m for m in prepares.values())
             assert [m['sequence'] for m in actual] == ['1', '2', '3', '4']
             assert [call.sequence for call in calls] == [1, 2, 3, 4]
-            batches = [m for m in actual if m['tool_name'] == 'run_agent.batch']
+            batches = [m for m in actual if m['tool_name'] == 'run_agent']
             assert {m['preparation'] for m in batches} == set(prepares)
             assert all(m['request_id'] != m['preparation'] for m in batches)
             by_request = {m['request_id']: json.loads(m['json']) for m in replies}
             for preparation in prepares:
-                assert set(by_request[preparation]) == {'request_id', 'peers'}
+                assert set(by_request[preparation]) == {'request_id', 'refs'}
                 assert by_request[preparation]['request_id'] == preparation
             assert not owned.pending and not owned.preparations
             await asyncio.wait_for(owned.vm_released.wait(), 5)
@@ -707,7 +939,7 @@ def test_batch_does_not_accept_legacy_preparation_result_id_field():
         async def send(message):
             if message['type'] == 'result':
                 value = json.loads(message['json'])
-                if 'peers' in value:
+                if 'refs' in value:
                     value['id'] = value.pop('request_id')
                     message = {**message, 'json': json.dumps(value)}
             await original_send(message)
@@ -719,7 +951,7 @@ def test_batch_does_not_accept_legacy_preparation_result_id_field():
         host._send = send
         try:
             cell_id = await _start(host, '''
-              await tools.run_agent.batch({a:{instruction:'must not dispatch'}});
+              await tools.run_agent([{instruction:'must not dispatch'}]);
               console.log('must not continue');
             ''', invoke, {'run_agent': {}})
             page, output = await _finish(host, cell_id)
@@ -745,7 +977,7 @@ def test_batch_functions_are_synchronous_and_cannot_submit_tools(instruction):
             return CodeModeToolResult(value={})
         try:
             page, _ = await _finish(host, await _start(host,
-                f'await tools.run_agent.batch({{a:{{instruction:{instruction}}},b:{{instruction:"b"}}}});',
+                f'await tools.run_agent([{{instruction:{instruction}}},{{instruction:"b"}}]);',
                 invoke, {'run_agent':{}, 'read_file':{}}))
             assert page.state == 'failed'
             assert not calls
@@ -754,7 +986,58 @@ def test_batch_functions_are_synchronous_and_cannot_submit_tools(instruction):
     asyncio.run(run())
 
 
-def test_batch_peer_objects_are_deeply_frozen_even_in_nonstrict_callbacks():
+@pytest.mark.parametrize('callback', [
+    "async refs=>{await Promise.resolve();await tools.read_file({which:'continuation'});return 'x';}",
+    "refs=>Promise.resolve().then(()=>tools.read_file({which:'continuation'})).then(()=> 'x').catch(()=> 'blocked')",
+])
+def test_async_dispatch_callback_seals_only_new_submissions_in_its_cell(callback):
+    async def run():
+        host, calls = CodeModeHost(), []
+        entered, rejected, release, completed = (asyncio.Event() for _ in range(4))
+        original_append = host._append_output
+        def append(cell, output):
+            original_append(cell, output)
+            if output.value == {'kind': 'log', 'text': 'new submission rejected'}:
+                rejected.set()
+        host._append_output = append
+        async def invoke(call):
+            calls.append(call)
+            if call.arguments.get('which') == 'already admitted':
+                entered.set()
+                await release.wait()
+                completed.set()
+            return CodeModeToolResult(value='settled')
+        try:
+            first = await _start(host, '''
+              const existing=tools.read_file({which:'already admitted'});
+              try { await tools.run_agent([{instruction:CALLBACK}]); }
+              catch(e) { console.log('callback rejected'); }
+              try { await tools.read_file({which:'after catch'}); }
+              catch(e) { console.log('new submission rejected'); }
+              console.log(await existing);
+            '''.replace('CALLBACK', callback), invoke, {'run_agent': {}, 'read_file': {}})
+            await asyncio.wait_for(asyncio.gather(entered.wait(), rejected.wait()), 5)
+            assert not completed.is_set()
+            release.set()
+            page, output = await _finish(host, first)
+            assert page.state == 'completed', page.error
+            assert [item['text'] for item in output] == ['callback rejected', 'new submission rejected', 'settled']
+            assert [call.arguments for call in calls] == [{'which': 'already admitted'}]
+            second = await _start(host, '''
+              await tools.run_agent([{instruction:refs=>'ordinary sync callback'}]);
+              return await tools.read_file({which:'other Cell'});
+            ''', invoke, {'run_agent': {}, 'read_file': {}})
+            page, output = await _finish(host, second)
+            assert page.state == 'completed', page.error
+            assert output == [{'kind': 'return', 'text': 'settled'}]
+            assert [call.tool_name for call in calls] == ['read_file', 'run_agent', 'read_file']
+        finally:
+            release.set()
+            await host.aclose()
+    asyncio.run(run())
+
+
+def test_dispatch_reference_arrays_are_deeply_frozen_even_in_nonstrict_callbacks():
     async def run():
         host = CodeModeHost()
         calls = []
@@ -763,15 +1046,15 @@ def test_batch_peer_objects_are_deeply_frozen_even_in_nonstrict_callbacks():
             return CodeModeToolResult(value={})
         try:
             page, _ = await _finish(host, await _start(host, '''
-              await tools.run_agent.batch({
-                a:{instruction:peers=>{
-                  if(!Object.isFrozen(peers)||!Object.isFrozen(peers.b.work)) throw Error('not frozen');
-                  const before=peers.b.work.work_id;
-                  peers.b.work.work_id='changed';
-                  if(peers.b.work.work_id!==before)throw Error('identity was mutable');
+              await tools.run_agent([
+                {instruction:refs=>{
+                  if(!Object.isFrozen(refs)||!Object.isFrozen(refs.works)||!Object.isFrozen(refs.agents)||!Object.isFrozen(refs.works[1])) throw Error('not frozen');
+                  const before=refs.works[1].work_id;
+                  refs.works[1].work_id='changed';
+                  if(refs.works[1].work_id!==before)throw Error('identity was mutable');
                   return before;
-                }}, b:{instruction:'b'}
-              });
+                }}, {instruction:'b'}
+              ]);
             ''', invoke, {'run_agent':{}}))
             assert page.state == 'completed', page.error
             assert len(calls) == 1
@@ -1048,7 +1331,11 @@ def test_parallel_calls_settle_by_completion_without_slow_call_blocking_fast_cal
     asyncio.run(run())
 
 
-def test_many_failed_batch_preparations_release_current_data_without_total_call_cap():
+@pytest.mark.parametrize('assignment', [
+    "{instruction:()=>{throw Error('cancel preparation')}}",
+    "{instruction:'invalid target',target:{kind:'AGENT',agent_id:'invalid'}}",
+])
+def test_many_failed_batch_preparations_release_current_data_without_total_call_cap(assignment):
     async def run():
         host = CodeModeHost(limits=replace(CodeModeLimits(), value_bytes=8192, cell_bytes=32768, host_bytes=65536, control_bytes=12288, page_bytes=8192))
         calls = []
@@ -1058,11 +1345,11 @@ def test_many_failed_batch_preparations_release_current_data_without_total_call_
         try:
             page, output = await _finish(host, await _start(host, '''
               for(let i=0;i<150;i++){
-                try{await tools.run_agent.batch({a:{instruction:()=>{throw Error('cancel preparation')}}})}
+                try{await tools.run_agent([ASSIGNMENT])}
                 catch(e){}
               }
               return 'all preparations released';
-            ''', invoke, {'run_agent':{}}))
+            '''.replace('ASSIGNMENT', assignment), invoke, {'run_agent':{}}))
             assert page.state == 'completed', page.error
             assert not calls
             assert output == [{'kind':'return','text':'all preparations released'}]

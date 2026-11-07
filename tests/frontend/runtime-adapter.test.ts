@@ -2062,6 +2062,40 @@ describe('exact prompt projection', () => {
     await reader.close();
   });
 
+  it('projects each Work title from its own queue metadata without rewriting message bodies', async () => {
+    const agent = 'session-agent';
+    const entries = [
+      {entry_id:'first',turn_id:'turn-first',entry_sequence:'1',entry_kind:'USER_MESSAGE',scope_kind:'SUBAGENT',
+        input_origin:'AGENT_INSTRUCTION',content:inlinePrompt('same instruction'),
+        input_source:{queue_item_id:'queue-first',source_work_id:'unrelated-source',delivery_mode:'NEW_TURN',work_title:'调查'}},
+      {entry_id:'second',turn_id:'turn-second',entry_sequence:'2',entry_kind:'USER_MESSAGE',scope_kind:'SUBAGENT',
+        input_origin:'AGENT_INSTRUCTION',content:inlinePrompt('same instruction'),
+        input_source:{queue_item_id:'queue-second',source_work_id:'queue-first',delivery_mode:'NEW_TURN',work_title:'复审'}},
+      {entry_id:'unnamed',turn_id:'turn-third',entry_sequence:'3',entry_kind:'USER_MESSAGE',scope_kind:'SUBAGENT',
+        input_origin:'AGENT_INSTRUCTION',content:inlinePrompt('untitled'),input_source:{queue_item_id:'queue-third',delivery_mode:'NEW_TURN'}},
+      {entry_id:'message',turn_id:'turn-third',entry_sequence:'4',entry_kind:'USER_MESSAGE',scope_kind:'SUBAGENT',
+        input_origin:'AGENT_MESSAGE',content:inlinePrompt('teammate message'),
+        input_source:{queue_item_id:'queue-message',source_work_id:'queue-second',delivery_mode:'STEER_ACTIVE_TURN'}},
+    ];
+    const snapshot = {session_id:agent,event_sequence_cut:'4',entry_sequence_cut:'4',entries,control:{prompt_queue:[
+      {queue_item_id:'queue-next',queue_sequence:'5',status:'PENDING',input_origin:'AGENT_INSTRUCTION',work_title:'下一项',content:inlinePrompt('next')},
+      {queue_item_id:'queue-unnamed',queue_sequence:'6',status:'PENDING',input_origin:'AGENT_INSTRUCTION',content:inlinePrompt('unnamed')},
+      {queue_item_id:'queue-msg',queue_sequence:'7',status:'PENDING',input_origin:'AGENT_MESSAGE',content:inlinePrompt('msg')},
+    ]}};
+    stubRuntimeFetch(vi.fn(async input => new Response(JSON.stringify(String(input).endsWith('/reader')
+      ? {view:'history',session_id:agent,workspace_availability:connectedWorkspaceAvailability,snapshot:{snapshot:{snapshot}}} : {}), {status:200})));
+    const reader = await new LocalHttpRuntimeAdapter().openAgentReader('root',agent);
+    await vi.waitFor(() => expect(reader.current().history?.initialReady).toBe(true));
+    expect(reader.current().messages.map(message => [message.inputSource?.queueItemId,message.inputSource?.workTitle,message.body])).toEqual([
+      ['queue-first','调查','same instruction'], ['queue-second','复审','same instruction'],
+      ['queue-third',null,'untitled'], ['queue-message',undefined,'teammate message'],
+    ]);
+    expect(reader.current().queuedPrompts.map(item => [item.queueItemId,item.workTitle])).toEqual([
+      ['queue-next','下一项'], ['queue-unnamed',null], ['queue-msg',undefined],
+    ]);
+    await reader.close();
+  });
+
   it('retains command-only revision identity without inventing a queue item', async () => {
     const entry = {entry_id:'revision',turn_id:'turn-1',entry_sequence:'1',entry_kind:'USER_MESSAGE',scope_kind:'ROOT',
       content:inlinePrompt('revised'),input_source:{command_id:'command-revision',delivery_mode:'NEW_TURN'}};

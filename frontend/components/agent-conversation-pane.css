@@ -13,3 +13,10 @@
 .agent-conversation-queue .todo-dock__item,
 .agent-conversation-queue .todo-dock__item small { color: var(--ink); font-size: inherit; }
 .agent-pane-status { padding: 16px; color: var(--ink); }
+
+.agent-conversation-heading { display: grid; gap: 4px; min-width: 0; }
+.agent-conversation-pane > header .agent-conversation-current { color: var(--muted); font: 12px/1.5 var(--sans); overflow-wrap: anywhere; }
+.agent-work-divider { display: flex; align-items: baseline; gap: 10px; margin: 16px 0 10px; padding-top: 12px; border-top: 1px solid var(--line); }
+.agent-work-divider > span { flex: none; color: var(--faint); font: 11px/1.5 var(--sans); }
+.agent-work-divider > strong { color: var(--ink); font: 550 13px/1.6 var(--sans); overflow-wrap: anywhere; }
+.agent-work-title { display: block; margin-bottom: 4px; font: 550 12px/1.6 var(--sans); overflow-wrap: anywhere; }

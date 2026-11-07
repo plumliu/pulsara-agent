@@ -475,7 +475,7 @@ def test_missing_directory_host_close_settles_root_and_child_with_original_close
                     payloads = _tool_call(
                         "exec_cell",
                         "call:spawn",
-                        {"code": 'await tools.run_agent({instruction: "Run terminal once."});'},
+                        {"code": 'await tools.run_agent([{instruction: "Run terminal once."}]);'},
                     )
                 else:
                     self.root_ready.set()

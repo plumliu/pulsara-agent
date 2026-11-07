@@ -74,6 +74,7 @@ def query_agents_input_schema() -> dict:
         # The existing collaboration per-page boundary, not a membership cap.
         "max_items": {"type": "integer", "minimum": 1, "maximum": 50, "default": 50},
     }
+
     return {
         "oneOf": [
             {
@@ -89,6 +90,105 @@ def query_agents_input_schema() -> dict:
             )
         ]
     }
+
+
+def assignment_parameters_schema() -> dict:
+    """One resolved assignment, shared by Guest fields and Host members."""
+    return {
+        "type": "object",
+        "properties": {
+            "target": target_schema("AGENT"),
+            "work_title": {"type": "string", "minLength": 1, "maxLength": 256},
+            "instruction": {"type": "string", "minLength": 1, "maxLength": 65_536},
+            "context": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"mode": {"const": "none"}},
+                        "required": ["mode"],
+                        "additionalProperties": False,
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"const": "last_n"},
+                            "turns": {"type": "integer", "minimum": 1, "maximum": 3},
+                        },
+                        "required": ["mode", "turns"],
+                        "additionalProperties": False,
+                    },
+                ]
+            },
+            **{
+                field: {
+                    "type": "array",
+                    "items": target_schema("WORK"),
+                    "maxItems": 16,
+                    "uniqueItems": True,
+                }
+                for field in ("materials", "depends_on")
+            },
+        },
+        "required": ["instruction"],
+        "additionalProperties": False,
+        "allOf": [
+            {"if": {"required": ["target"]}, "then": {"not": {"required": ["context"]}}}
+        ],
+    }
+
+
+def run_agent_parameters_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "members": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 16,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": target_schema("AGENT")["properties"]["agent_id"],
+                        "work_id": target_schema("WORK")["properties"]["work_id"],
+                        "parameters": assignment_parameters_schema(),
+                    },
+                    "required": ["agent_id", "work_id", "parameters"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["members"],
+        "additionalProperties": False,
+    }
+
+
+def wait_agent_parameters_schema(*, include_works: bool = True) -> dict:
+    def branch(field, kind):
+        properties = {
+            field: {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": True,
+                "items": target_schema(kind, allow_root=kind == "AGENT"),
+            },
+            "settle": {"type": "string", "enum": ["all", "first"], "default": "all"},
+        }
+        if field == "agents":
+            properties["timeout_seconds"] = {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 300,
+                "default": 30,
+            }
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": [field],
+            "additionalProperties": False,
+        }
+
+    agents = branch("agents", "AGENT")
+    return {"oneOf": [branch("works", "WORK"), agents]} if include_works else agents
 
 
 def _targets(
@@ -122,13 +222,13 @@ def _text(value: object, name: str, maximum_utf8_bytes: int | None = None) -> st
     return value
 
 
-def validate_run_parameters(arguments: Mapping[str, object]) -> None:
+def validate_assignment_parameters(arguments: Mapping[str, object]) -> None:
     a = closed(
         arguments,
         {
             "instruction",
             "target",
-            "name",
+            "work_title",
             "context",
             "materials",
             "depends_on",
@@ -139,12 +239,10 @@ def validate_run_parameters(arguments: Mapping[str, object]) -> None:
     _text(a["instruction"], "instruction", 65_536)
     if "target" in a:
         target_id(a["target"], "AGENT")
-        if "name" in a or "context" in a:
-            raise ValueError(
-                "name and context are available only when creating an Agent"
-            )
-    if "name" in a:
-        _text(a["name"], "name", 256)
+        if "context" in a:
+            raise ValueError("context is available only when creating an Agent")
+    if "work_title" in a:
+        _text(a["work_title"], "work_title", 256)
     if "context" in a:
         context = closed(a["context"], {"mode", "turns"}, {"mode"})
         if context["mode"] == "none":
@@ -222,9 +320,6 @@ def validate_collaboration_parameters(
     if name == "run_agent":
         validate_run_parameters(arguments)
         return
-    if name == "run_agent.batch":
-        parse_batch_members(arguments)
-        return
     if name == "query_agents":
         a = closed(arguments, {"target", "cursor", "max_items"})
         if not Draft202012Validator(query_agents_input_schema()).is_valid(dict(a)):
@@ -241,17 +336,15 @@ def validate_collaboration_parameters(
         a = closed(arguments, {"target", "message"}, {"target", "message"})
         target_id(a["target"], "AGENT", allow_root=True)
         _text(a["message"], "message", 16_384)
-    elif name in {"wait_agent", "wait_agent.works"}:
-        works = name.endswith(".works")
+    elif name == "wait_agent":
+        works = "works" in arguments
         a = closed(
             arguments,
-            {"targets", "settle"}
-            if works
-            else {"targets", "settle", "timeout_seconds"},
-            {"targets"},
+            {"works", "settle"} if works else {"agents", "settle", "timeout_seconds"},
+            {"works" if works else "agents"},
         )
         _targets(
-            a["targets"],
+            a["works" if works else "agents"],
             "WORK" if works else "AGENT",
             nonempty=True,
             allow_root=not works,
@@ -263,8 +356,8 @@ def validate_collaboration_parameters(
             if (
                 isinstance(timeout, bool)
                 or not isinstance(timeout, (int, float))
-                or not math.isfinite(timeout)
                 or not 0 <= timeout <= 300
+                or not math.isfinite(timeout)
             ):
                 raise ValueError("timeout_seconds must be in 0..300")
     else:
@@ -283,7 +376,7 @@ class PreparedAgentRequest:
     work_id: str
     instruction: str
     create_agent: bool
-    name: str | None = None
+    work_title: str | None = None
     context_mode: str = "none"
     context_turns: int | None = None
     materials: tuple[str, ...] = ()
@@ -307,9 +400,9 @@ class PreparedAgentRequest:
             "materials": [work_target(x) for x in self.materials],
             "depends_on": [work_target(x) for x in self.depends_on],
         }
+        if self.work_title is not None:
+            arguments["work_title"] = self.work_title
         if self.create_agent:
-            if self.name is not None:
-                arguments["name"] = self.name
             arguments["context"] = {
                 "mode": self.context_mode,
                 **(
@@ -320,34 +413,25 @@ class PreparedAgentRequest:
             }
         else:
             arguments["target"] = agent_target(self.agent_id)
-            if (
-                self.name is not None
-                or self.context_mode != "none"
-                or self.context_turns is not None
-            ):
+            if self.context_mode != "none" or self.context_turns is not None:
                 raise ValueError("reused Agent cannot carry creation options")
-        validate_run_parameters(arguments)
+        validate_assignment_parameters(arguments)
 
 
-def prepare_batch_refs(specs: Mapping[str, Mapping[str, object]]) -> dict[str, dict]:
-    if not isinstance(specs, Mapping) or not 1 <= len(specs) <= 16:
-        raise ValueError("one batch accepts 1..16 members")
-    peers = {}
-    for key, spec in specs.items():
-        if not isinstance(key, str) or not key or not isinstance(spec, Mapping):
-            raise ValueError(
-                "batch member must have a nonempty key and object specification"
-            )
+def prepare_batch_refs(specs: list[Mapping[str, object]]) -> dict[str, list[dict]]:
+    if not isinstance(specs, (list, tuple)) or not 1 <= len(specs) <= 16:
+        raise ValueError("one dispatch accepts 1..16 members")
+    agents, works = [], []
+    for spec in specs:
+        spec = closed(spec, {"target"})
         identity = (
             target_id(spec["target"], "AGENT")
             if "target" in spec
             else random_id("session")
         )
-        peers[key] = {
-            "agent": agent_target(identity),
-            "work": work_target(random_id("queue")),
-        }
-    return peers
+        agents.append(agent_target(identity))
+        works.append(work_target(random_id("queue")))
+    return {"agents": agents, "works": works}
 
 
 def prepared_request(
@@ -356,7 +440,7 @@ def prepared_request(
     agent_id: str | None = None,
     work_id: str | None = None,
 ) -> PreparedAgentRequest:
-    validate_run_parameters(parameters)
+    validate_assignment_parameters(parameters)
     create = "target" not in parameters
     actual_agent = (
         target_id(parameters["target"], "AGENT")
@@ -371,7 +455,7 @@ def prepared_request(
         work_id=work_id or random_id("queue"),
         instruction=parameters["instruction"],
         create_agent=create,
-        name=parameters.get("name"),
+        work_title=parameters.get("work_title"),
         context_mode=context["mode"],
         context_turns=context.get("turns"),
         materials=_targets(parameters.get("materials", []), "WORK", maximum=16),
@@ -381,52 +465,57 @@ def prepared_request(
 
 def parse_batch_members(
     arguments: Mapping[str, object],
-) -> tuple[tuple[str, PreparedAgentRequest], ...]:
+) -> tuple[PreparedAgentRequest, ...]:
     a = closed(arguments, {"members"}, {"members"})
     members = a["members"]
     if not isinstance(members, (list, tuple)) or not 1 <= len(members) <= 16:
-        raise ValueError("one batch accepts 1..16 members")
+        raise ValueError("one dispatch accepts 1..16 members")
     result = []
     for member in members:
         m = closed(
             member,
-            {"key", "agent_id", "work_id", "parameters"},
-            {"key", "agent_id", "work_id", "parameters"},
+            {"agent_id", "work_id", "parameters"},
+            {"agent_id", "work_id", "parameters"},
         )
-        key = _text(m["key"], "member key")
+        # Explicit member identities are mandatory even if a malformed value
+        # would otherwise trigger prepared_request's fresh-ID default.
+        require_id(m["agent_id"], "session")
+        require_id(m["work_id"], "queue")
         result.append(
-            (
-                key,
-                prepared_request(
-                    m["parameters"], agent_id=m["agent_id"], work_id=m["work_id"]
-                ),
+            prepared_request(
+                m["parameters"], agent_id=m["agent_id"], work_id=m["work_id"]
             )
         )
-    if len({k for k, _ in result}) != len(result) or len(
-        {r.work_id for _, r in result}
-    ) != len(result):
-        raise ValueError("batch member identities must be unique")
-    if sum(len(r.depends_on) for _, r in result) > 64:
-        raise ValueError("one batch accepts at most 64 explicit dependencies")
-    validate_agent_request_graph(tuple(r for _, r in result))
-    batch_ids = {r.work_id for _, r in result}
-    if any(batch_ids.intersection(r.materials) for _, r in result):
+    if len({r.work_id for r in result}) != len(result):
+        raise ValueError("dispatch Work identities must be unique")
+    if sum(len(r.depends_on) for r in result) > 64:
+        raise ValueError("one dispatch accepts at most 64 explicit dependencies")
+    validate_agent_request_graph(tuple(result))
+    batch_ids = {r.work_id for r in result}
+    if any(batch_ids.intersection(r.materials) for r in result):
         raise ValueError("unfinished batch work must use depends_on, not materials")
     return tuple(result)
 
 
+def validate_run_parameters(arguments: Mapping[str, object]) -> None:
+    parse_batch_members(arguments)
+
+
 def validate_batch_identities(
-    arguments: Mapping[str, object], peers: Mapping[str, Mapping[str, object]]
+    arguments: Mapping[str, object], refs: Mapping[str, object]
 ) -> None:
     members = parse_batch_members(arguments)
-    if list(peers) != [k for k, _ in members]:
-        raise ValueError("batch member order or keys changed")
-    for key, request in members:
-        if peers[key] != {
-            "agent": agent_target(request.agent_id),
-            "work": work_target(request.work_id),
-        }:
-            raise ValueError("batch identities changed after preparation")
+    refs = closed(refs, {"agents", "works"}, {"agents", "works"})
+    if any(
+        not isinstance(refs[field], (list, tuple)) or len(refs[field]) != len(members)
+        for field in ("agents", "works")
+    ):
+        raise ValueError("dispatch member count changed after preparation")
+    for index, request in enumerate(members):
+        if refs["agents"][index] != agent_target(request.agent_id) or refs["works"][
+            index
+        ] != work_target(request.work_id):
+            raise ValueError("dispatch identities changed after preparation")
 
 
 def validate_agent_request_graph(

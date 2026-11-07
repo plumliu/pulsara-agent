@@ -354,7 +354,7 @@ class PreToolRef:
     tool_call_id: str
     resolved_tool_identity: str
     invocation_id: str | None = None
-    member_key: str | None = None
+    member_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,7 +373,7 @@ class PostToolRef:
     result_state: str
     epoch_nonce: object = field(repr=False, compare=False)
     invocation_id: str | None = None
-    member_key: str | None = None
+    member_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

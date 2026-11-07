@@ -51,9 +51,9 @@ class WaitControlModel(_DetachedDraftModel):
                     _tool_call(
                         "exec_cell",
                         random_id("call"),
-                        {"code": "await tools.run_agent(" + json.dumps({
+                        {"code": "await tools.run_agent(" + json.dumps([{
                             "instruction": "SELECTED_WORK" if step == 0 else "OTHER_WORK"
-                        }) + ");"},
+                        }]) + ");"},
                     )
                     if step < 2
                     else _text("ROOT_READY")
@@ -61,11 +61,11 @@ class WaitControlModel(_DetachedDraftModel):
             else:
                 self.control_requests.append(request)
                 if step == 0:
-                    operation = "wait_agent.works" if self.mode == "work" else "wait_agent"
-                    arguments = {"targets": [self.selected_work if self.mode == "work" else self.selected_agent]}
+                    arguments = {"works" if self.mode == "work" else "agents":
+                                 [self.selected_work if self.mode == "work" else self.selected_agent]}
                     if self.mode == "agent":
                         arguments["timeout_seconds"] = 300
-                    code = "const outcome=await tools." + operation + "(" + json.dumps(arguments) + ");"
+                    code = "const outcome=await tools.wait_agent(" + json.dumps(arguments) + ");"
                     code += ('console.log("UNREACHABLE_AFTER_STOP");' if self.mode == "work"
                              else 'console.log(outcome);')
                     events = _tool_call("exec_cell", random_id("call"), {"code": code})
@@ -185,7 +185,7 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                             JOIN pulsara_v3.tool_invocations i ON i.id=a.invocation_id AND i.session_id=a.session_id
                             LEFT JOIN pulsara_v3.tool_results r ON r.session_id=a.session_id AND r.attempt_id=a.id
                             WHERE a.session_id=%s AND i.source_kind='CODE_MODE_CALL'
-                            AND i.tool_name IN ('wait_agent.works','wait_agent') AND r.id IS NULL""",
+                            AND i.tool_name='wait_agent' AND r.id IS NULL""",
                             (root.session_id,),
                         ).fetchone()
                         return row is not None

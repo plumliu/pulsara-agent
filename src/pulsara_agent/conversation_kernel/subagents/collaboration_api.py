@@ -20,7 +20,6 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     agent_target,
     work_target,
     parse_batch_members,
-    prepared_request,
     target_id,
     validate_collaboration_parameters,
 )
@@ -42,10 +41,20 @@ def _require_fits(context, value, *, include_read=False):
         raise ToolResultPageBoundary("The minimum agent result does not fit this call's result allowance")
 
 
-def _admission_receipt(request):
-    target = work_target(request.work_id)
-    return {"agent": agent_target(request.agent_id), "work": target,
-            "status": "queued", "inspect": _query_call(target)}
+def _dispatch_receipt(rows):
+    return {
+        "agents": [agent_target(row["agent_id"]) for row in rows],
+        "works": [work_target(row["work_id"]) for row in rows],
+        "details": [{"work_title": row["work_title"], "status": row["status"],
+                     "inspect": _query_call(work_target(row["work_id"]))} for row in rows],
+    }
+
+
+def _admission_receipt(requests):
+    # The longest existing status spelling reserves the whole accepted receipt,
+    # including a request that settles before the admission acknowledgement.
+    return _dispatch_receipt([dict(agent_id=r.agent_id, work_id=r.work_id,
+        work_title=r.work_title, status="completed") for r in requests])
 
 
 def _fit_page(rows, *, limit, build, budget):
@@ -189,13 +198,13 @@ class CollaborationToolPort:
             "agent": agent_target(row["agent_id"]),
             "status": row["status"],
             "terminal_reason": row.get("terminal_reason"),
+            "work_title": row["work_title"],
         }
         for field in (
             "instruction",
             "final",
             "diagnostic",
             "failed_dependency",
-            "name",
         ):
             if row.get(field) is not None:
                 result[field] = row[field]
@@ -209,7 +218,7 @@ class CollaborationToolPort:
     @staticmethod
     def _work_summary(row: Mapping) -> dict:
         value = CollaborationToolPort._public_work({
-            key: row[key] for key in ("work_id", "agent_id", "status", "terminal_reason", "failed_dependency")
+            key: row[key] for key in ("work_id", "agent_id", "status", "terminal_reason", "failed_dependency", "work_title")
             if key in row
         })
         value["inspect"] = _query_call(value["target"])
@@ -267,14 +276,7 @@ class CollaborationToolPort:
                 if rows is None:
                     raise outcome.error
         await self.runtime.wake_agent_requests(self.root_session_id)
-        return tuple(
-            {
-                "agent": agent_target(row["agent_id"]),
-                "work": work_target(row["work_id"]),
-                "status": row["status"],
-            }
-            for row in rows
-        ), outcome
+        return _dispatch_receipt(rows), outcome
 
     async def invoke(self, *, tool_name, arguments, invocation_context):
         error = self.validate_arguments(tool_name=tool_name, arguments=arguments)
@@ -286,26 +288,28 @@ class CollaborationToolPort:
             raise ValueError("collaboration operations require bypass permissions")
         if tool_name not in {"query_agents", "send_agent_message", "wait_agent"} and not is_root:
             raise ValueError("operation is available only to ROOT")
-        if (
-            tool_name in {"run_agent.batch", "wait_agent.works"}
-            and getattr(getattr(context, "invocation_source", None), "kind", None)
-            != "CODE_MODE_CALL"
-        ):
+        source_kind = getattr(getattr(context, "invocation_source", None), "kind", None)
+        if tool_name in {"run_agent", "wait_agent"} and is_root and source_kind != "CODE_MODE_CALL":
             raise ValueError("operation requires a live Code Mode invocation")
+        if tool_name == "wait_agent" and "works" in arguments and not is_root:
+            raise ValueError("Work waiting is available only to ROOT Code Mode")
         outcome = None
         page_complete = False
         required_facts = {}
         if tool_name == "run_agent":
-            request = prepared_request(arguments)
-            _require_fits(context, _admission_receipt(request))
-            rows, outcome = await self._run((request,), context)
-            result = rows[0]
-        elif tool_name == "run_agent.batch":
-            members = parse_batch_members(arguments)
-            _require_fits(context, {key: _admission_receipt(request) for key, request in members})
-            rows, outcome = await self._run(tuple(r for _, r in members), context)
-            result = {key: {**row, "inspect": _query_call(row["work"])}
-                      for (key, _), row in zip(members, rows, strict=True)}
+            requests = parse_batch_members(arguments)
+            try:
+                _require_fits(context, _admission_receipt(requests))
+            except ToolResultPageBoundary as error:
+                # This is a known pre-admission rejection: no member has been
+                # submitted, so it must settle as an ordinary tool failure.
+                facts = {"error": "RESULT_BUDGET_EXCEEDED", "message": str(error)}
+                return KernelToolResult(
+                    state="APPLICATION_ERROR", content=canonical_json_bytes(facts),
+                    public_format=ToolOutputSourceFormatHint.JSON,
+                    page_complete=True, required_facts=facts, effect_class="read_only",
+                )
+            result, outcome = await self._run(requests, context)
         elif tool_name == "query_agents" and "target" not in arguments:
             limit = arguments.get("max_items", 50)
             rows = await self._read(
@@ -372,24 +376,19 @@ class CollaborationToolPort:
         elif tool_name == "stop_agent":
             result, outcome = await self._stop(arguments["target"], context)
         elif tool_name == "wait_agent":
-            result = await self._wait_agents(arguments, context)
-        else:
-            result = await self._wait_works(arguments, context)
+            result = await (self._wait_works(arguments, context) if "works" in arguments
+                            else self._wait_agents(arguments, context))
         if tool_name == "run_agent":
-            result = {**result, "inspect": _query_call(result["work"])}
             required_facts = result
             page_complete = True
         elif tool_name == "send_agent_message":
             required_facts = {key: result[key] for key in ("recipient", "work", "delivery")}
             page_complete = True
-        elif tool_name == "run_agent.batch":
-            required_facts = result
-            page_complete = True
         elif tool_name == "query_agents" and arguments.get("target", {}).get("kind") == "WORK":
-            required_facts = {key: result[key] for key in ("target", "agent", "status", "terminal_reason")}
+            required_facts = {key: result[key] for key in ("target", "agent", "status", "terminal_reason", "work_title")}
         elif tool_name == "stop_agent":
             required_facts = {key: result[key] for key in ("target", "stop_requested", "stopped", "affected_count", "status_counts")}
-        elif tool_name in {"wait_agent", "wait_agent.works"}:
+        elif tool_name == "wait_agent":
             required_facts = {"state": result["state"],
                 **{key + "_count": len(result[key]) for key in
                    ("bindings", "works", "pending_targets", "message_sources", "unavailable_targets") if key in result}}
@@ -420,19 +419,13 @@ class CollaborationToolPort:
     def _public_agent(row):
         result = {
             "agent": agent_target(row["agent_id"]),
-            "name": row.get("name", row.get("title")),
-            **{
-                k: row[k]
-                for k in ("current_work", "queued_count")
-                if k in row
-            },
+            "name": row.get("title"),
+            "current_work": (None if row["ui_current_work_id"] is None
+                             else work_target(row["ui_current_work_id"])),
+            "current_work_title": row["ui_current_work_title"],
+            "current_work_status": row["ui_current_work_status"],
+            "queued_work_count": row["ui_queued_work_count"],
         }
-        if "current_work_id" in row:
-            result["current_work"] = (
-                None
-                if row["current_work_id"] is None
-                else work_target(row["current_work_id"])
-            )
         result["inspect"] = _query_call(result["agent"])
         return result
 
@@ -528,7 +521,7 @@ class CollaborationToolPort:
             await asyncio.gather(*observers, return_exceptions=True)
 
     async def _wait_works(self, arguments, context):
-        identities = tuple(target_id(t, "WORK") for t in arguments["targets"])
+        identities = tuple(target_id(t, "WORK") for t in arguments["works"])
         async with self._suspend(context):
             while True:
                 revision = self.runtime.agent_change_revision()
@@ -598,7 +591,7 @@ class CollaborationToolPort:
             self.root_session_id
             if (identity := target_id(t, "AGENT", allow_root=True)) == "ROOT"
             else identity
-            for t in arguments["targets"]
+            for t in arguments["agents"]
         )
         if len(set(identities)) != len(identities):
             raise ValueError("duplicate resolved AGENT targets")

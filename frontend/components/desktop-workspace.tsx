@@ -1,3 +1,5 @@
+import { agentActivity, agentTaskLabel } from '../lib/agent-cell-api';
+import { useAgentMetadata, type AgentMetadata } from '../lib/agent-metadata';
 import { deriveIdentity } from '../lib/identity';
 import { BrowserTabs, browserTitle, type BrowserTabRecord } from '../lib/browser-tabs';
 import { desktopHost } from '../lib/desktop-host';
@@ -17,6 +19,7 @@ interface WorkspaceTabBase {
   view?: { top: number; left: number; reader?: { top: number; left: number }; graph?: CellGraphReadingState; agentReadingState?: AgentReadingState };
   id: string;
   title: string;
+  agentMetadata?: AgentMetadata;
   workLocation?: { workId: string; requestId: number };
   render?: () => ReactNode;
   onClose?: () => void;
@@ -183,6 +186,11 @@ export function DesktopWorkspaceProvider({ sessionId, onShow, children, controlR
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 const icons = { browser: Globe, file: FileText, visualization: FileText, capabilities: Blocks, mcp: Server, background: TerminalSquare, process: TerminalSquare, subagents: Bot, agent: Bot, cells: FileCode2, 'cells-unavailable': FileCode2, cell: FileText, 'cell-graph': ListChecks };
+function AgentTabMetadata({ tab, update }: { tab: WorkspaceTab & {kind:'agent'}; update: (id: string, patch: Partial<WorkspaceTabBase>) => void }) {
+  const state = useAgentMetadata(tab.sessionId, tab.entityId);
+  useEffect(() => { update(tab.id, {agentMetadata:state}); }, [state, tab.id, update]);
+  return null;
+}
 function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: WorkspaceTab[]; selectedId?: string; activate: (id: string) => void; close: (id: string) => void }) {
   const list = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ left: false, right: false });
@@ -243,7 +251,7 @@ function WorkspaceTabStrip({ tabs, selectedId, activate, close }: { tabs: Worksp
     <div ref={list} className="workspace-tabs" role="tablist" aria-label="打开的内容" onScroll={() => {
       measure(); setScrolling(true); clearTimeout(timer.current);
       timer.current = setTimeout(() => setScrolling(false), 700);
-    }}>{tabs.map(tab => { const Icon = icons[tab.kind]; return <div key={tab.id} className={`workspace-tab${selectedId === tab.id ? ' is-active' : ''}`}><button type="button" role="tab" aria-selected={selectedId === tab.id} onClick={() => { if (tab.id === selectedId) return; if (!document.startViewTransition || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) activate(tab.id); else { const transition = document.startViewTransition(() => flushSync(() => activate(tab.id))); void transition.finished.catch(() => undefined); } }} title={tab.title}><Icon size={13} /><span>{tab.title}</span></button><button type="button" aria-label={`关闭 ${tab.title}`} title="关闭视图" onClick={() => close(tab.id)}><X size={12} /></button></div>; })}</div>
+    }}>{tabs.map(tab => { const Icon = icons[tab.kind]; return <div key={tab.id} className={`workspace-tab${selectedId === tab.id ? ' is-active' : ''}`}><button type="button" role="tab" aria-label={tab.title} aria-selected={selectedId === tab.id} onClick={() => { if (tab.id === selectedId) return; if (!document.startViewTransition || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) activate(tab.id); else { const transition = document.startViewTransition(() => flushSync(() => activate(tab.id))); void transition.finished.catch(() => undefined); } }} title={tab.kind === 'agent' ? `${tab.title}\n${tab.entityId}\n${tab.agentMetadata?.agent ? agentTaskLabel(tab.agentMetadata.agent) : tab.agentMetadata?.unavailable ? '子代理已不可用' : '正在刷新'}` : tab.title}><Icon size={13} /><span>{tab.title}</span>{tab.kind === 'agent' && <i className={`agent-cell-indicator${tab.agentMetadata?.agent?.has_running_turn ? ' is-active' : ''}`} aria-hidden="true" title={tab.agentMetadata?.unavailable ? '子代理已不可用' : tab.agentMetadata?.agent ? agentActivity(tab.agentMetadata.agent) : '正在刷新'} />}</button><button type="button" aria-label={`关闭 ${tab.title}`} title="关闭视图" onClick={() => close(tab.id)}><X size={12} /></button></div>; })}</div>
     <button type="button" className="workspace-tab-edge is-left" aria-label="向左滚动标签页" title="向左滚动" disabled={!edges.left} onClick={() => scroll(-1)}><ChevronLeft size={14} /></button>
     <button type="button" className="workspace-tab-edge is-right" aria-label="向右滚动标签页" title="向右滚动" disabled={!edges.right} onClick={() => scroll(1)}><ChevronRight size={14} /></button>
   </div>;
@@ -318,6 +326,7 @@ function WorkspacePane({ isOpen, onClose, toolbar, renderTab, sessionContentAvai
     <div className="workspace-toolbar">{!['linux', 'win32'].includes(desktopHost()?.platform ?? '') && toolbar}<button type="button" title="收起工作区" aria-label="收起工作区" onClick={onClose}><PanelRightClose size={15} /></button></div>
     </header>
     {['linux', 'win32'].includes(desktopHost()?.platform ?? '') && <div className="workspace-toolbar workspace-categories">{toolbar}</div>}
+    {isOpen && workspace.visible && sessionContentAvailable && workspace.tabs.filter((tab): tab is WorkspaceTab & {kind:'agent'} => tab.kind === 'agent').map(tab => <AgentTabMetadata key={tab.id} tab={tab} update={workspace.update} />)}
     <WorkspaceTabStrip key={sessionId} tabs={workspace.tabs} selectedId={selected?.id} activate={workspace.activate} close={closeTab} />
     <div className="workspace-content" role="tabpanel" key={selected?.id} ref={element => { if (element && selected?.view) { element.scrollTop = selected.view.top; element.scrollLeft = selected.view.left; } }} onScroll={event => { if (selected?.view) { selected.view.top = event.currentTarget.scrollTop; selected.view.left = event.currentTarget.scrollLeft; } }}>{selected?.browser ? <BrowserPanel record={selected.browser} tabs={workspace.browserTabs} isOpen={isOpen} /> : selected ? (!sessionContentAvailable ? <div className="workspace-empty" role="status"><strong>正在加载会话…</strong></div> : selected.render ? selected.render() : renderTab(selected)) : isOpen ? <div className="workspace-empty"><FolderKanban size={28} /><strong>从上方选择内容，或从对话打开文件。</strong></div> : null}</div>
     </div>

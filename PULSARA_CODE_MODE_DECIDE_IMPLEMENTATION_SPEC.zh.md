@@ -6,7 +6,7 @@
 
 上述功能在同一个实现提交中完成：包括生产实现、工具暴露与准入、设置界面、系统提示、bundled Skill 和必要测试。
 
-本文涉及的新增行为以本文为准。现有 Code Mode 执行、工具结果结算、记忆检索、内核生命周期和 provider 输入连续性合同在未涉及处保持有效。
+派发与等待的数组接口、Target 与 Work 标题合同由 [派发与等待修订规范](PULSARA_SUBAGENT_DISPATCH_WAIT_ARRAY_REVISION_SPEC.zh.md) 规定。本文规定 Decision 与原生入口权限。现有 Code Mode 执行、工具结果结算、记忆检索、内核生命周期和 provider 输入连续性合同在未涉及处保持有效。
 
 ## 0. 当前实现与所有权
 
@@ -334,12 +334,10 @@ ROOT 同时保留原生查询、发消息和停止能力。正在运行的脚本
 
 | 操作 | ROOT 原生 | ROOT Code Mode | 子代理原生 |
 | --- | --- | --- | --- |
-| `run_agent` | 不提供 | 提供 | 不提供 |
-| `run_agent.batch` | 不提供 | 提供既有批量 helper | 不提供 |
+| `run_agent` | 不提供 | 提供，数组派发 | 不提供 |
 | `query_agents` | 提供 | 提供 | 提供，保留可见范围 |
 | `send_agent_message` | 提供 | 提供 | 提供，保留目标及活跃工作语义 |
-| `wait_agent` | 不提供 | 提供，等待 AGENT 消息或当前绑定工作 | 提供 |
-| `wait_agent.works` | 不提供 | 提供，等待确切 WORK | 不提供 |
+| `wait_agent` | 不提供 | 提供，`agents` 观察或 `works` 等待 | 提供 `agents` 观察 |
 | `stop_agent` | 提供 | 提供 | 不提供 |
 | `decide` | 不提供 | 提供 | 不提供 |
 | `decide.available()` | 不是宿主工具 | 提供本地同步方法 | 不提供 |
@@ -359,12 +357,12 @@ ROOT 同时保留原生查询、发消息和停止能力。正在运行的脚本
 2. ROOT 原生表不包含 `run_agent`、`wait_agent`、`decide`；ROOT JS 目录仍包含它们及既有 JS 可用工具。子代理原生表继续包含自己的三个协作工具。
 3. 调用准入校验角色与真实 invocation source。ROOT 的原生 `run_agent`、`wait_agent` 请求按不可用拒绝；Code Mode 调用同名操作正常进入现有执行叶；子代理原生 `wait_agent` 正常执行。
 4. ROOT 原生 `query_agents`、`send_agent_message`、`stop_agent` 直接调用既有协作 owner，不在内部包装成 `exec_cell` 或经 JS 转发。
-5. `run_agent.batch` 和 `wait_agent.works` 保留既有 Code Mode 专用语义与校验；不在原生侧添加对应别名。
+5. `tools.run_agent([...])` 统一派发数组；`tools.wait_agent({works: [...]})` 等待确切 WORK，`tools.wait_agent({agents: [...]})` 观察代理。子代理原生等待只提供 `agents` 分支。
 6. MCP 的冻结签名、实际权限、consumer 绑定和调用引用保持现有合同。目录构造调整不能顺带让未授权的 MCP 或其他工具进入 JS。
 
 通过现有 catalog、surface 与执行准入表达这一矩阵，不新建第二套工具注册表、工具执行器、权限框架或代理调度器。配置、代理发现、运行中的控制操作均不重建 provider 输入根。
 
-`PreparedKernelToolSurface.__post_init__` 当前要求 provider specs 与 execution bindings 名称、顺序和 descriptor 逐项对应。保留这一不变量：不能向这个 provider surface 私塞隐藏的 JS binding，也不能仅从 specs 删除名字。两种目录从同一 sealed builtin composition／实际授权能力选择；JS 目录持有自己的冻结 schema 与原执行 binding，复用现有 access、borrow 和权限检查。`borrow_code_mode_surface` 为两个 helper 派生 binding 时仍须找到实际 `run_agent`／`wait_agent` owner。来源判断使用宿主建立的 invocation source 和 Cell borrow，不接受参数中自报“来自 Code Mode”。
+`PreparedKernelToolSurface.__post_init__` 当前要求 provider specs 与 execution bindings 名称、顺序和 descriptor 逐项对应。保留这一不变量：不能向这个 provider surface 私塞隐藏的 JS binding，也不能仅从 specs 删除名字。两种目录从同一 sealed builtin composition／实际授权能力选择；JS 目录持有自己的冻结 schema 与原执行 binding，复用现有 access、borrow 和权限检查。`borrow_code_mode_surface` 借用实际授权 owner 的冻结执行目录。来源判断使用宿主建立的 invocation source 和 Cell borrow，不接受参数中自报“来自 Code Mode”。
 
 ### 7.4 控制入口的独立可用性
 
@@ -390,7 +388,7 @@ Agent 与 Work 继续由原有 owner 管理，身份与执行不归某个 Cell �
 - `manage_cell.stop` 停止脚本后续执行与提交，不自动停止已接受的代理工作。需要停止工作时继续使用 `stop_agent`。
 - 单个 Cell 结束或失败后，已有工作和实际结果仍可查询；新的脚本可以按真实状态接续。不要仅因脚本失败重复创建代理、重复派发或重做已经完成的工作。
 - ROOT 新收到用户要求时，可以直接 native 查询／发消息／停止；如需要给已完成代理追加工作，则通过新的 Cell 调用 `tools.run_agent`，复用实际 AGENT target。
-- `tools.wait_agent` 继续等待消息或调用开始时绑定的当前工作；`tools.wait_agent.works` 继续等待确切 WORK，保留 `all`／`first`、停止和中断语义。移除 ROOT 原生等待不会把二者合并成另一种等待协议。
+- `tools.wait_agent({agents: [...]})` 等待消息或调用开始时绑定的工作；`tools.wait_agent({works: [...]})` 等待确切 WORK。统一入口保留两分支各自的 `all`／`first`、停止和中断语义。
 - 普通 Work final 不自动作为新输入送给 ROOT；脚本按需要等待、查询和输出。显式代理消息保留现有活跃轮次交付语义。
 - 原生查询结果正常进入发起调用的模型上下文；JS 内部查询结果留在脚本中，按已有输出规则交给 ROOT。调用入口不改变 canonical 记录、工具结果保存或 sidebar 对实际工作的展示。
 
@@ -525,7 +523,7 @@ if (tools.decide.available()) {
 
 使用 bundled Skill 现有“调查、审查、修订、实施”流程中的真实工具接口：
 
-1. 脚本按已有 `run_agent`、`wait_agent.works`、`query_agents` 合同取得已完成审查的结果，并保留实际 Agent／Work target。
+1. 脚本按 `run_agent([...])`、`wait_agent({works: [...]})`、`query_agents` 合同取得已完成审查的结果，并保留实际 Agent／Work target。
 2. 按任务需要用 `read_file`、`search_content` 或其他工具取得相关材料，与审查正文一起组成 `inputs` 中的一项。普通工具结果和代理结果作为同一种输入文本参与判断。
 3. 在 `tools.decide.available()` 为真时，调用 `decide`，例如询问“审查意见是否要求对本次任务的实现继续做出修改？”
 4. JavaScript 根据布尔值继续原有流程：需要修改时，用原实施代理的 target 发起新 Work，并将审查 Work 放入 `materials`；否则继续后续工具或代理步骤。具体分支由任务决定。
@@ -572,7 +570,7 @@ Code Mode 运行时不可用时，上述原生查询和控制仍直接使用已�
 4. **配置与记忆回归**：`ranking_mode=off/rerank/decision` 时 `decide` 均按同一 Decision 配置工作；删除或修改配置影响后续调用；在途调用保持同一连接；记忆排序、原概率和自动召回阈值保持不变。
 5. **真实 Code Mode 边界**：`decide` 和 `available()` 始终存在；后者同步返回 boolean，无工具或网络调用，方法及配置值不能被 Guest 改写；未配置或认证缺失时返回 `false`，脚本交回待判断的问题和材料，不将其当成语义 false 选择业务分支；实际判断经普通执行叶返回数组，`decide` 的原生或子代理入口不可用；空输入直接返回空数组；原 Cell 目录及可用性固定，新 Cell 按最新配置取得状态；执行时配置删除由宿主正常报不可用；共享闸门、停止、关闭和名额释放通过已有执行测试验证；配置变化保持 provider prefix 不变。
 6. **组合、Skill 与设置**：替换现有 Code Mode 组合流程中的相关用例，覆盖普通工具结果、代理结果及二者共同作为判断输入，布尔值能继续控制后续调用；正常中间结果留在脚本中。Skill 明确统一组合方式，不限定筛选或代理交接用途；示例先执行 `available()` 检查，未配置分支保留材料和 Work 引用交给 ROOT 继续；Decision 卡在重排关闭时可用；无产品 home 暴露或泛化的防御性话术。
-7. **角色与入口矩阵**：ROOT 原生表只保留三个代理控制工具，JS 中五个协作操作及两个既有 helper 均可用；子代理仍可原生查询、通信、等待，不能创建／停止代理或执行 Code Mode。`read-only`、`ask-permissions`、`accept-edits`、`bypass-permissions` 四种权限模式保持原准入规则；本规范的协作与 Code Mode 入口仍仅在 bypass 下可用。未配置 Decision 不影响这些接口。
+7. **角色与入口矩阵**：ROOT 原生表只保留三个代理控制工具，JS 中五个协作操作均可用，派发为数组、等待按 agents／works 分支；子代理仍可原生查询、通信、等待，不能创建／停止代理或执行 Code Mode。`read-only`、`ask-permissions`、`accept-edits`、`bypass-permissions` 四种权限模式保持原准入规则；本规范的协作与 Code Mode 入口仍仅在 bypass 下可用。未配置 Decision 不影响这些接口。
 8. **真实独立控制**：使用现有运行时测试占满 VM 名额并让 Cell 保持等待，原生查询、消息和停止仍可完成且没有新建／排队控制 Cell；覆盖 Code Mode 无法启动或 sidecar 已失效时相同的后端控制路径。停止 Cell 后，已接受 Work 保留真实状态，原生查询和停止可继续针对同一 Work 操作。
 9. **入口硬切与连续性**：保留已安装旧 schema 的测试中，SYSTEM/tools 字节不变，ROOT 原生 `run_agent`／`wait_agent` 调用被拒绝且不产生新 Work；JS 同名调用及子代理原生等待正常。新合法构建的 ROOT 工具表符合矩阵；执行能力与 JS 目录不依赖这两个原生条目的存在。所有调用继续复用同一结果结算和身份 owner。
 10. **提示与文档一致性**：活动系统提示、Skill 正文及参考文件不再指导 ROOT 原生创建／续派／等待；保留子代理原生等待的正确示例。简单委派使用短脚本，原生控制不要求先停脚本；正常任务不因未配置 Decision 而要求用户设置。
@@ -580,7 +578,7 @@ Code Mode 运行时不可用时，上述原生查询和控制仍直接使用已�
 对实施接缝补充以下集成断言，纳入上述用例而不另建框架：
 
 - 用真实 Node／worker／Guest 路径验证 `available()` 传递和冻结；Cell 排队期间修改配置，原 Cell 保持准入时的 boolean，新 Cell 使用新值，实际请求仍按调用时配置处理。
-- ROOT provider 表缺少 `run_agent`／`wait_agent` 时，真实 Cell 仍能调用两者及其 helper；新旧 provider 表上的 native 尝试均不能伪造调用来源。保持 provider surface specs／binding 对应约束及 MCP 授权回归。
+- ROOT provider 表缺少 `run_agent`／`wait_agent` 时，真实 Cell 仍能使用数组派发及两分支等待；新旧 provider 表上的 native 尝试均不能伪造调用来源。保持 provider surface specs／binding 对应约束及 MCP 授权回归。
 - Decision 排队、HTTP 在途、两子批之间分别触发 Cell Stop；没有后续子批，SDK 关闭只汇合一次，共享名额在关闭后释放，其他消费者继续执行。另覆盖重复取消和关闭失败，不能把失败包装成成功或复活已终止 Cell。
 - 同一非空调用的工具截止时间贯穿全部子批和等待；多批不能续期，也不能将单次 4 秒 HTTP timeout 错用于整个逻辑数组。会话 Host 关闭只影响其服务，最终无未汇合请求。
 - 保持停止链路的既有 IO、provider cleanup、Host 与 Cell 取消回归通过；本文真实 Decision 验收必须独立完成，不能用之前 DeepSeek 主模型停止验收替代。

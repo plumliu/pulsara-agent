@@ -1883,9 +1883,14 @@ class LocalSessionController:
 
     def _sidebar_agent_value(self, row):
         live = self.core._live_agent_session(str(row["agent_id"]))
+        current_work = None if row["ui_current_work_id"] is None else {
+            "work_id": row["ui_current_work_id"],
+            "work_title": row["ui_current_work_title"],
+            "status": row["ui_current_work_status"],
+        }
         return {"agent_id": str(row["agent_id"]), "title": row.get("title"),
-                "current_work_id": row.get("current_work_id"), "queued_count": row["queued_count"],
-                "has_pending_work": row["has_pending_work"], "has_running_turn": row["has_running_turn"],
+                "current_work": current_work, "queued_work_count": row["ui_queued_work_count"],
+                "has_running_turn": row["has_running_turn"],
                 "host_session_id": None if live is None else live.host_session_id}
 
     async def sidebar_agent(self, root_session_id: str, agent_session_id: str):
@@ -1912,7 +1917,7 @@ class LocalSessionController:
             root_session_id=root_session_id, work_id=work_id, deadline_monotonic=self.core._canonical_deadline())
         if value is None:
             raise KeyError(work_id)
-        return {"work": {key: value[key] for key in ("agent_id", "work_id", "status", "terminal_reason", "consumed_entry_id", "turn_id")},
+        return {"work": {key: value[key] for key in ("agent_id", "work_id", "work_title", "status", "terminal_reason", "consumed_entry_id", "turn_id")},
                 "inputs": value["inputs"]}
 
     async def _sidebar_root_host(self, root_session_id: str, host_session_id: str):

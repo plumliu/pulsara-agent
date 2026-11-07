@@ -770,8 +770,7 @@ class ToolSurfacePlanningPort(Protocol):
 class ToolInvocationPort(Protocol):
     def snapshot_workspace_root(self) -> Path: ...
 
-    def borrow_code_mode_surface(self, prepared: CodeModeToolDirectory, *, cell_id: str,
-                                tool_name: str | None = None) -> ProcessLocalToolSurfaceBorrow: ...
+    def borrow_code_mode_surface(self, prepared: CodeModeToolDirectory, *, cell_id: str) -> ProcessLocalToolSurfaceBorrow: ...
 
     def prepare_resolved_invocation(
         self,

@@ -42,6 +42,7 @@ from pulsara_agent.capability.builtin_catalog import (
     builtin_availability_requirement_identity_fingerprint,
     builtin_permission_contract_identity_fingerprint,
     builtin_tool_catalog_entry,
+    builtin_tool_descriptor,
 )
 from pulsara_agent.capability.pulsara_home import (
     UserHomeResolution,
@@ -55,6 +56,7 @@ from pulsara_agent.capability.contracts import (
     CapabilitySourceRefreshMode,
     CapabilitySourceSnapshotDisposition,
     FrozenToolCapabilityExposurePlan,
+    InstalledCapabilityEpochPredecessor,
     ToolCapabilityRouteKind,
     ToolCapabilityOrigin,
     capability_identity,
@@ -224,6 +226,7 @@ from pulsara_agent.conversation_kernel.tool_surface import (
     PreparedKernelToolSurface,
     PreparedToolExecutionBinding,
     PreparedUnavailableDirectMcpGate,
+    PreparedUnavailableBuiltinGate,
     ProcessLocalToolSurfaceAccess,
     ProcessLocalToolSurfaceBorrow,
     execution_policy_fingerprint,
@@ -1048,14 +1051,15 @@ class DirectKernelToolPort:
                 entry = builtin_tool_catalog_entry(binding.tool_name)
                 if entry is not binding.catalog_entry:
                     raise RuntimeError("builtin catalog/executor binding drifted")
-                schema = freeze_json(_json_schema_value(entry.descriptor.input_schema))
+                descriptor = builtin_tool_descriptor(binding.tool_name)
+                schema = freeze_json(_json_schema_value(descriptor.input_schema))
                 if not isinstance(schema, FrozenJsonObjectFact):
                     raise TypeError("builtin tool schema did not freeze to an object")
                 spec = FrozenToolSpec(
                     name=binding.tool_name,
-                    description=entry.descriptor.description,
+                    description=descriptor.description,
                     parameters=schema,
-                    descriptor_fingerprint=entry.descriptor.fingerprint(),
+                    descriptor_fingerprint=descriptor.fingerprint(),
                 )
                 facts.append(
                     freeze_tool_capability_fact(
@@ -1285,9 +1289,10 @@ class DirectKernelToolPort:
                 if owner.tool_name not in CODE_MODE_SHARED_TOOL_NAMES:
                     continue
                 entry = owner.catalog_entry
-                spec = FrozenToolSpec(name=owner.tool_name, description=entry.descriptor.description,
-                    parameters=freeze_json(_json_schema_value(entry.descriptor.input_schema)),
-                    descriptor_fingerprint=entry.descriptor.fingerprint())
+                descriptor = builtin_tool_descriptor(owner.tool_name, code_mode=True)
+                spec = FrozenToolSpec(name=owner.tool_name, description=descriptor.description,
+                    parameters=freeze_json(_json_schema_value(descriptor.input_schema)),
+                    descriptor_fingerprint=descriptor.fingerprint())
                 specs.append(spec)
                 bindings.append(PreparedToolExecutionBinding(tool_name=spec.name,
                     descriptor_fingerprint=spec.descriptor_fingerprint,
@@ -1305,17 +1310,20 @@ class DirectKernelToolPort:
             return CodeModeToolDirectory(tuple(specs), tuple(bindings), prepared.access)
 
     @staticmethod
-    def _entry_unavailable(tool_name: str, borrow: ProcessLocalToolSurfaceBorrow) -> str | None:
+    def _entry_unavailable(tool_name: str, borrow: ProcessLocalToolSurfaceBorrow, arguments: Mapping[str, object]) -> str | None:
         scope = borrow.prepared.access.conversation_scope_kind
         source = current_tool_invocation.get()
         code = (borrow.code_cell_id is not None and source is not None
             and source.kind is ToolInvocationSourceKind.CODE_MODE_CALL
             and source.tool_name == tool_name and scope is ModelInputScopeKind.ROOT)
-        if tool_name in {"decide", "run_agent.batch", "wait_agent.works"} or (
+        if tool_name in {"decide", "run_agent"} or (
             scope is ModelInputScopeKind.ROOT and tool_name in {"run_agent", "wait_agent"}
         ):
             if not code:
                 return f"{tool_name} requires ROOT Code Mode; use exec_cell with tools.{tool_name}(...)"
+        if tool_name == "wait_agent" and scope is ModelInputScopeKind.SUBAGENT:
+            if borrow.code_cell_id is not None or "works" in arguments:
+                return "Subagents may wait only through native wait_agent with agents."
         return None
 
     def prepare_resolved_invocation(
@@ -1344,7 +1352,7 @@ class DirectKernelToolPort:
                 KernelToolAuthorization(kind, reference, message),
             )
 
-        entry_error = self._entry_unavailable(tool_name, surface_borrow)
+        entry_error = self._entry_unavailable(tool_name, surface_borrow, arguments)
         if entry_error:
             return reject(KernelToolAuthorizationKind.TOOL_UNAVAILABLE, "tool-entry:code-mode-only", entry_error)
         if tool_name in MEDIA_TOOL_NAMES and (
@@ -1363,19 +1371,15 @@ class DirectKernelToolPort:
                 "tool-surface:revoked",
                 f"tool unavailable: {tool_name}",
             )
+        if isinstance(binding, PreparedUnavailableBuiltinGate):
+            return reject(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "builtin:installed-contract-unavailable", binding.public_message)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             return reject(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 f"mcp-direct:{binding.unavailable_reason_code}",
                 _mcp_unavailable_direct_message(binding.unavailable_reason_code, binding.target, binding.tool_name),
             )
-        if tool_name in {"run_agent.batch", "wait_agent.works"}:
-            if surface_borrow.code_cell_id is None or self._subagent is None:
-                return reject(KernelToolAuthorizationKind.TOOL_UNAVAILABLE, "code-only-descriptor", "Code Mode owner is unavailable")
-            error = self._subagent.validate_arguments(tool_name=tool_name, arguments=arguments)
-            if error:
-                return reject(KernelToolAuthorizationKind.INVALID_ARGUMENTS, "code-only-descriptor", error)
-            return PreparedResolvedToolInvocation(tool_name, tool_name, frozen_original)
         if self._subagent is not None and tool_name in self._subagent.tool_names:
             error = self._subagent.validate_arguments(tool_name=tool_name, arguments=arguments)
             if error:
@@ -1387,10 +1391,10 @@ class DirectKernelToolPort:
             except ValueError as exc:
                 return reject(KernelToolAuthorizationKind.INVALID_ARGUMENTS, "decision-arguments", str(exc))
         entry = (
-            builtin_tool_catalog_entry(tool_name) if tool_name in self._tools else None
+            builtin_tool_catalog_entry(tool_name) if isinstance(binding.execution_policy, BuiltinExecutionPolicyRef) else None
         )
         if entry is not None:
-            schema = _json_schema_value(entry.descriptor.input_schema)
+            schema = _json_schema_value(builtin_tool_descriptor(tool_name, code_mode=surface_borrow.code_cell_id is not None).input_schema)
             try:
                 _validate_builtin_call_schema(tool_name, schema, arguments)
             except ValidationError as exc:
@@ -1601,7 +1605,12 @@ class DirectKernelToolPort:
                 builtin_binding = builtin_by_name.get(spec.name)
                 if builtin_binding is not None:
                     entry = builtin_binding.catalog_entry
-                    if entry.descriptor.fingerprint() != spec.descriptor_fingerprint:
+                    if builtin_tool_descriptor(spec.name).fingerprint() != spec.descriptor_fingerprint:
+                        predecessor = plan.dispatch_view.planning_input.predecessor
+                        if (isinstance(predecessor, InstalledCapabilityEpochPredecessor)
+                            and surface is predecessor.tool_surface):
+                            leaves.append(PreparedUnavailableBuiltinGate(spec))
+                            continue
                         raise RuntimeError("planned builtin descriptor drifted")
                     policy = BuiltinExecutionPolicyRef(
                         tool_name=spec.name,
@@ -1698,7 +1707,7 @@ class DirectKernelToolPort:
             return borrow
 
     def borrow_code_mode_surface(
-        self, prepared: CodeModeToolDirectory, *, cell_id: str, tool_name: str | None = None
+        self, prepared: CodeModeToolDirectory, *, cell_id: str
     ) -> ProcessLocalToolSurfaceBorrow:
         """Borrow a physical invocation without pinning a provider epoch."""
         self.prepare_tool_surface_safe_point()
@@ -1707,19 +1716,11 @@ class DirectKernelToolPort:
                 raise RuntimeError("Code Mode tool owner is unavailable")
             access = replace(prepared.access, surface_generation=self._surface_generation)
             physical_surface = replace(prepared, access=access)
-            internal_binding = None
-            if tool_name in {"run_agent.batch", "wait_agent.works"}:
-                base_name = "run_agent" if tool_name == "run_agent.batch" else "wait_agent"
-                base = prepared.binding(base_name)
-                if not isinstance(base, PreparedToolExecutionBinding) or not isinstance(base.execution_policy, BuiltinExecutionPolicyRef):
-                    raise RuntimeError("internal Agent descriptor requires its ordinary owner")
-                internal_binding = replace(base, tool_name=tool_name,
-                    execution_policy=replace(base.execution_policy, tool_name=tool_name))
             borrow = ProcessLocalToolSurfaceBorrow(
                 prepared=physical_surface, borrow_id=random_id("borrow"),
                 _authority=self._surface_authority,
                 _validate=self._validate_surface_borrow,
-                _release=self._release_surface_borrow, code_cell_id=cell_id, internal_binding=internal_binding,
+                _release=self._release_surface_borrow, code_cell_id=cell_id,
             )
             self._execution_borrows[borrow.borrow_id] = borrow
             return borrow
@@ -1911,8 +1912,6 @@ class DirectKernelToolPort:
                     or borrow._authority is not self._surface_authority
                     or self._execution_borrows.get(borrow.borrow_id) is not borrow):
                     raise RuntimeError("Code Mode invocation resource is unavailable")
-                if borrow.internal_binding is not None and borrow.internal_binding.tool_name == tool_name:
-                    return borrow.internal_binding
                 return borrow.prepared.binding(tool_name)
             if (
                 borrow._closed
@@ -1965,7 +1964,7 @@ class DirectKernelToolPort:
         surface_borrow: ProcessLocalToolSurfaceBorrow,
         memory_context: FrozenModelCallMemoryContext,
     ) -> KernelToolAuthorization:
-        entry_error = self._entry_unavailable(tool_name, surface_borrow)
+        entry_error = self._entry_unavailable(tool_name, surface_borrow, arguments)
         if entry_error:
             return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
                 "tool-entry:code-mode-only", entry_error)
@@ -1985,6 +1984,9 @@ class DirectKernelToolPort:
                 "tool-surface:revoked",
                 f"tool unavailable: {tool_name}",
             )
+        if isinstance(binding, PreparedUnavailableBuiltinGate):
+            return KernelToolAuthorization(KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
+                "builtin:installed-contract-unavailable", binding.public_message)
         if isinstance(binding, PreparedUnavailableDirectMcpGate):
             return KernelToolAuthorization(
                 KernelToolAuthorizationKind.TOOL_UNAVAILABLE,
@@ -2001,15 +2003,6 @@ class DirectKernelToolPort:
                 permission_snapshot=permission_snapshot,
                 surface_borrow=surface_borrow,
             )
-        if tool_name in {"run_agent.batch", "wait_agent.works"}:
-            if (surface_borrow.code_cell_id is None or self._subagent is None
-                or permission_snapshot.effective_mode is not PermissionMode.BYPASS_PERMISSIONS):
-                return KernelToolAuthorization(KernelToolAuthorizationKind.PERMISSION_DENIED,
-                    "code-only-descriptor", "This operation requires an admitted ROOT Code Mode cell")
-            error = self._subagent.validate_arguments(tool_name=tool_name, arguments=arguments)
-            return KernelToolAuthorization(
-                KernelToolAuthorizationKind.INVALID_ARGUMENTS if error else KernelToolAuthorizationKind.ALLOW,
-                "code-only:" + tool_name, error or "")
         tool = self._tools.get(tool_name)
         subagent = self._subagent is not None and tool_name in self._subagent.tool_names
         memory = self._memory is not None and tool_name in self._memory.tool_names
@@ -2042,7 +2035,7 @@ class DirectKernelToolPort:
                 "memory use was disabled by the user for this run",
             )
         entry = builtin_tool_catalog_entry(tool_name)
-        schema = _json_schema_value(entry.descriptor.input_schema)
+        schema = _json_schema_value(builtin_tool_descriptor(tool_name, code_mode=surface_borrow.code_cell_id is not None).input_schema)
         try:
             _validate_builtin_call_schema(tool_name, schema, arguments)
         except ValidationError as exc:
@@ -3409,14 +3402,14 @@ class DirectKernelToolPort:
         ):
             raise RuntimeError("tool invocation surface binding does not exact-join")
         self._validate_surface_borrow(invocation_context.surface_borrow, tool_name)
-        entry_error = self._entry_unavailable(tool_name, invocation_context.surface_borrow)
+        entry_error = self._entry_unavailable(tool_name, invocation_context.surface_borrow, arguments)
         if entry_error:
             raise RuntimeError(entry_error)
         if tool_name == "decide" and invocation_context.effective_permission_mode is not PermissionMode.BYPASS_PERMISSIONS:
             raise RuntimeError("decide requires ROOT bypass-permissions mode")
         binding = invocation_context.surface_borrow.execution_binding(tool_name)
-        if isinstance(binding, PreparedUnavailableDirectMcpGate):
-            raise RuntimeError("unavailable MCP gate cannot invoke a physical tool")
+        if isinstance(binding, (PreparedUnavailableDirectMcpGate, PreparedUnavailableBuiltinGate)):
+            raise RuntimeError("unavailable gate cannot invoke a physical tool")
         page_budget = _invocation_page_budget(invocation_context)
         if invocation_context.cell_cancel_event is not None and invocation_context.cell_cancel_event.is_set():
             key = (invocation_context.surface_borrow.prepared.access.surface_generation, tool_call_id)
@@ -3796,7 +3789,7 @@ class DirectKernelToolPort:
                     invocation_started, observation_origin
                 ),
             )
-        if self._subagent is not None and (tool_name in self._subagent.tool_names or tool_name in {"run_agent.batch", "wait_agent.works"}):
+        if self._subagent is not None and tool_name in self._subagent.tool_names:
             result = await self._subagent.invoke(
                 tool_name=tool_name,
                 arguments=arguments,

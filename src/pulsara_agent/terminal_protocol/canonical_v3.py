@@ -434,6 +434,8 @@ class CanonicalProtocolReader:
             waiting_on=[str(item["source_work_id"]) for item in row["work_inputs"]
                         if row["status"] == "PENDING" and item["kind"] == "dependency" and item["body"] is None],
         )
+        if row["input_origin"] == "AGENT_INSTRUCTION" and row["work_title"] is not None:
+            target.work_title = row["work_title"]
         if row["input_origin"] == "SCHEDULED_TASK":
             target.scheduled_input.CopyFrom(wire.ScheduledInputProvenance(
                 task_id=str(row["scheduled_task_id"]), task_revision=int(row["scheduled_task_revision"]),
@@ -1721,7 +1723,7 @@ class CanonicalProtocolReader:
                       result.output_omitted, result.output_source_coverage_reason,
                       result.output_unavailability_reason,
                       queue.id AS queue_item_id, queue.command_id, queue.delivery_mode, queue.source_session_id, queue.source_work_id,
-                      queue.source_turn_id, queue.source_tool_attempt_id,
+                      queue.source_turn_id, queue.source_tool_attempt_id, queue.work_title,
                       revision.command_id AS revision_command_id,
                       CASE e.entry_owner_kind
                         WHEN 'EXECUTED_TURN' THEN t.status IN ('COMPLETED', 'INTERRUPTED') AND t.final_entry_id=e.id
@@ -1747,7 +1749,7 @@ class CanonicalProtocolReader:
                LEFT JOIN pulsara_v3.tool_invocations invocation
                  ON invocation.session_id=result.session_id AND invocation.id=result.invocation_id
                LEFT JOIN LATERAL (
-                 SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id FROM pulsara_v3.prompt_queue_items
+                 SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id, work_title FROM pulsara_v3.prompt_queue_items
                  WHERE e.entry_owner_kind='EXECUTED_TURN' AND e.entry_kind IN ('USER_MESSAGE', 'USER_STEER', 'TERMINAL_OBSERVATION')
                    AND session_id=e.session_id AND consumed_entry_id=e.id LIMIT 1
                ) queue ON true
@@ -1891,7 +1893,7 @@ class CanonicalProtocolReader:
             if related is None:
                 source = connection.execute(
                     """
-                    SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id
+                    SELECT id, command_id, delivery_mode, source_session_id, source_work_id, source_turn_id, source_tool_attempt_id, work_title
                     FROM pulsara_v3.prompt_queue_items
                     WHERE session_id = %s AND consumed_entry_id = %s
                     """,
@@ -1907,6 +1909,8 @@ class CanonicalProtocolReader:
                     source_turn_id=str(source["source_turn_id"] or ""),
                     source_tool_attempt_id=str(source["source_tool_attempt_id"] or ""),
                 ))
+                if row["input_origin"] == "AGENT_INSTRUCTION" and source["work_title"] is not None:
+                    result.input_source.work_title = source["work_title"]
             elif row["entry_kind"] == "USER_MESSAGE":
                 revision = (
                     {"command_id": related["revision_command_id"]}

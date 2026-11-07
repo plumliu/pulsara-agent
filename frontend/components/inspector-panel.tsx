@@ -571,7 +571,7 @@ export function InspectorPanel({
     if (tab.kind === 'agent') {
       tab.view ??= { top: 0, left: 0 };
       tab.view.agentReadingState ??= { choices: new Map() };
-      return <AgentConversationPane key={`${session.id}:${tab.entityId}`} rootSessionId={session.id} agentSessionId={tab.entityId} agentName={tab.title} adapter={adapter} onNotify={onNotify} readingState={tab.view.agentReadingState} workLocation={tab.workLocation} />;
+      return <AgentConversationPane key={`${session.id}:${tab.entityId}`} rootSessionId={session.id} agentSessionId={tab.entityId} agentName={tab.title} metadata={tab.agentMetadata ?? {}} adapter={adapter} onNotify={onNotify} readingState={tab.view.agentReadingState} workLocation={tab.workLocation} />;
     }
     if (tab.kind === 'cell' || tab.kind === 'cell-graph') {
       if (tab.kind === 'cell') {

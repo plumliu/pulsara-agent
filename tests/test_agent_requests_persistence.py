@@ -18,6 +18,7 @@ from pulsara_agent.conversation_kernel.repository import (
 )
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     PreparedAgentRequest,
+    prepare_batch_refs,
 )
 from pulsara_agent.llm.input import FrozenPromptContent
 from pulsara_agent.primitives.context import freeze_json, canonical_json_bytes
@@ -88,7 +89,7 @@ def source(stage2_migrated_postgres_database):
                 random_id("block"),
                 call_id,
                 "exec_cell",
-                freeze_json({"code": 'await tools.run_agent({instruction:"Investigate."});'}),
+                freeze_json({"code": 'await tools.run_agent([{instruction:"Investigate."}]);'}),
             ),
         ),
         occurred_at=now(),
@@ -111,15 +112,20 @@ def source(stage2_migrated_postgres_database):
         deadline_monotonic=deadline(),
     )
     repository.freeze_code_mode_source(lease.guard, attempt_id=attempt_id,
-        content=InlineContent.from_bytes(b'await tools.run_agent({instruction:"Investigate."});',
+        content=InlineContent.from_bytes(b'await tools.run_agent([{instruction:"Investigate."}]);',
             media_type="text/javascript"), deadline_monotonic=deadline())
     from pulsara_agent.conversation_kernel.tool_invocations import (
         ToolInvocationSource, ToolInvocationSourceKind, current_tool_invocation,
     )
     code_call_id, code_attempt_id = random_id("call"), random_id("attempt")
+    refs = prepare_batch_refs([{}])
     source = ToolInvocationSource(code_call_id, ToolInvocationSourceKind.CODE_MODE_CALL, turn_id,
         source_exec_attempt_id=attempt_id, call_sequence=1, tool_name="run_agent",
-        original_arguments=freeze_json({"instruction": "Investigate."}))
+        original_arguments=freeze_json({"members": [{
+            "agent_id": refs["agents"][0]["agent_id"],
+            "work_id": refs["works"][0]["work_id"],
+            "parameters": {"instruction": "Investigate."},
+        }]}))
     token = current_tool_invocation.set(source)
     try:
         repository.accept_tool_attempt(

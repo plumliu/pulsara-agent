@@ -483,7 +483,7 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
                     if len(root_requests) == 1:
                         chunks = [{'choices': [{'index': 0, 'delta': {'tool_calls': [{
                             'index': 0, 'id': 'delegate_child', 'type': 'function',
-                            'function': {'name': 'exec_cell', 'arguments': json.dumps({'code': 'await tools.run_agent({instruction: "CHILD_MCP_ONLY"});'})},
+                            'function': {'name': 'exec_cell', 'arguments': json.dumps({'code': 'await tools.run_agent([{instruction: "CHILD_MCP_ONLY"}]);'})},
                         }]}}]}, {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]}]
                 else:
                     child_requests.append(payload)

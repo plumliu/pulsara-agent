@@ -265,6 +265,7 @@ from pulsara_agent.primitives.context import (
 )
 from pulsara_agent.conversation_kernel.tool_surface import (
     ProcessLocalToolSurfaceBorrow,
+    PreparedToolExecutionBinding,
 )
 from pulsara_agent.hooks.context import (
     HookContextOwner,
@@ -2985,7 +2986,9 @@ class ConversationKernelRunner:
                 binding = request.prepared_call.tool_surface.binding(call.tool_name)
             except KeyError:
                 continue
-            if not isinstance(binding.execution_policy, BuiltinExecutionPolicyRef):
+            if not isinstance(binding, PreparedToolExecutionBinding) or not isinstance(
+                binding.execution_policy, BuiltinExecutionPolicyRef
+            ):
                 continue
             arguments = thaw_json(call.arguments)
             if not isinstance(arguments, dict):

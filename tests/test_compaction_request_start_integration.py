@@ -120,7 +120,7 @@ def _delegate_in_cell(arguments):
     # assignment admission, not its completion, and do not publish Cell output
     # that would create a separate ROOT input during that barrier.
     return _tool_call("exec_cell", random_id("call"), {
-        "code": "await tools.run_agent(" + json.dumps(arguments) + ");",
+        "code": "await tools.run_agent(" + json.dumps([arguments]) + ");",
     })
 
 

@@ -147,8 +147,8 @@ def test_queued_root_continues_after_dependent_work_admission_conflict(
             root_calls += 1
             if root_calls == 1:
                 arguments = {"code": (
-                    'const first = await tools.run_agent({instruction:"wait for release",context:{mode:"none"}});'
-                    'await tools.run_agent({instruction:"use predecessor",depends_on:[first.work],context:{mode:"none"}});'
+                    'const first = await tools.run_agent([{instruction:"wait for release",context:{mode:"none"}}]);'
+                    'await tools.run_agent([{instruction:"use predecessor",depends_on:[first.works[0]],context:{mode:"none"}}]);'
                 )}
                 delta = {
                     "reasoning_content": "delegate safely",

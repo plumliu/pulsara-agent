@@ -195,6 +195,7 @@ message CanonicalInputSource {
   string delivery_mode = 3;
   string source_turn_id = 7;
   string source_tool_attempt_id = 8;
+  optional string work_title = 9;
 }
 
 message CanonicalVisualization {
@@ -268,6 +269,7 @@ message PromptQueueControl {
   string consumed_entry_id = 16;
   string source_turn_id = 17;
   string source_tool_attempt_id = 18;
+  optional string work_title = 19;
 }
 
 message PlanWorkflowControl {

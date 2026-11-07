@@ -24,7 +24,7 @@ pytestmark = pytest.mark.postgres
 def _delegate(model, call_id, arguments):
     """Use the real Guest bridge and wait for its delivered admission receipt."""
     model.pending_delegation = {"call_id": call_id, "marker": call_id, "target": None}
-    code = "console.log({delegation:" + json.dumps(call_id) + ",admitted:await tools.run_agent(" + json.dumps(arguments) + ")});"
+    code = "console.log({delegation:" + json.dumps(call_id) + ",admitted:await tools.run_agent(" + json.dumps([arguments]) + ")});"
     return _tool_call('exec_cell', call_id, {'code': code})
 
 
@@ -47,7 +47,10 @@ def _delegation_progress(model, request):
                 continue
             receipt = json.loads(record['text'])
             if receipt.get('delegation') == pending['marker']:
-                assert receipt['admitted']['work']['kind'] == 'WORK', receipt
+                admitted = receipt['admitted']
+                assert len(admitted['agents']) == len(admitted['works']) == len(admitted['details']) == 1, receipt
+                assert admitted['agents'][0]['kind'] == 'AGENT', receipt
+                assert admitted['works'][0]['kind'] == 'WORK', receipt
                 model.pending_delegation = None
                 return None
     message = next(message for message in reversed(request.compiled_input.messages)
@@ -159,7 +162,7 @@ class KnownQueryModel(_DetachedDraftModel):
             self.child_counts[request.session_id] = index + 1
             if index == 0:
                 events = _tool_call('wait_agent', random_id('call'),
-                                    {'targets': [{'kind': 'AGENT', 'agent_id': self.target_c}], 'timeout_seconds': 0})
+                                    {'agents': [{'kind': 'AGENT', 'agent_id': self.target_c}], 'timeout_seconds': 0})
             elif index == 1:
                 events = _tool_call('query_agents', random_id('call'),
                                     {'target': {'kind': 'WORK', 'work_id': self.work_b}})
@@ -842,8 +845,15 @@ def test_child_first_preparation_adopts_real_common_snapshot_for_next_work(
                         (root.session_id, root_result.turn_id)).fetchall()
                     assert [row['result_state'] for row in results] == ['SUCCESS']
                     assert results[0]['attempt_id'] is not None
-                    assert results[0]['tool_arguments'] == {
-                        'instruction': 'CHILD_SECOND', 'target': {'kind': 'AGENT', 'agent_id': model.agent_id}}
+                    continuation = connection.execute("""SELECT id FROM pulsara_v3.prompt_queue_items
+                        WHERE session_id=%s AND source_session_id=%s AND source_turn_id=%s
+                        AND input_origin='AGENT_INSTRUCTION'""",
+                        (model.agent_id, root.session_id, root_result.turn_id)).fetchall()
+                    assert len(continuation) == 1
+                    assert results[0]['tool_arguments'] == {'members': [{
+                        'agent_id': model.agent_id, 'work_id': continuation[0]['id'],
+                        'parameters': {'instruction': 'CHILD_SECOND',
+                            'target': {'kind': 'AGENT', 'agent_id': model.agent_id}}}]}
                     messages = connection.execute('''SELECT q.status, q.input_origin, e.entry_sequence
                         FROM pulsara_v3.prompt_queue_items q LEFT JOIN pulsara_v3.transcript_entries e
                         ON e.session_id=q.session_id AND e.id=q.consumed_entry_id

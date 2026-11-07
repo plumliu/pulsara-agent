@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronRight, FileCode2, LoaderCircle, Network } from 'lucide-react';
 import { flushSync } from 'react-dom';
-import { agentCellApi, AgentCellError, type AgentRow, type CellGraphPage, type CellRow, type Participant, type WorkFact } from '../lib/agent-cell-api';
+import { agentCellApi, AgentCellError, agentLabel, agentActivity, agentTaskLabel, workTitle, type AgentRow, type CellGraphPage, type CellRow, type Participant, type WorkFact } from '../lib/agent-cell-api';
 import { FilePreviewPanel, FileTextContent } from './file-preview-panel';
 import { WorkspaceLoading } from './workspace-loading';
 import { CellGraphMap, type CellGraphReadingState } from './cell-graph-map';
@@ -92,7 +92,7 @@ export function AgentList({ root, onOpen }: { root: string; onOpen: (agent: Agen
     {page.error && <div role="status" className="agent-cell-error">{page.error}</div>}
     {empty && <div className="inspector-empty"><Bot size={18}/><span>暂无子代理</span></div>}
     {page.rows.map(agent => <button key={agent.agent_id} type="button" className="agent-cell-row" onClick={event => onOpen(agent, event.currentTarget)}>
-      <span className="agent-cell-avatar"><Bot size={15}/></span><span className="agent-cell-row-name">{agent.title || '子代理'}</span><span className={`agent-cell-indicator${agent.current_work_id ? ' is-active' : ''}`} title={agent.current_work_id ? '工作中' : '空闲'} />{agent.queued_count > 0 && <span className="agent-cell-count">{agent.queued_count}</span>}<ChevronRight size={14}/>
+      <span className="agent-cell-avatar"><Bot size={15}/></span><span className="agent-cell-row-copy"><span className="agent-cell-row-name" title={agent.agent_id}>{agentLabel(agent)}</span><span className="agent-cell-row-task" title={agentTaskLabel(agent)}>{agentTaskLabel(agent)}</span>{agent.queued_work_count > 0 && <small>另有 {agent.queued_work_count} 项工作排队</small>}</span><span className={`agent-cell-indicator${agent.has_running_turn ? ' is-active' : ''}`} title={agentActivity(agent)} /><ChevronRight size={14}/>
     </button>)}
     {page.next && <button className="agent-cell-more" type="button" onClick={page.more}>加载更多</button>}
   </section>;
@@ -239,7 +239,7 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
       const labels: Record<string, string> = {}; const removed = new Set<string>();
       for (let i = 0; i < agents.length; i += 8) {
         const batch = await Promise.allSettled(agents.slice(i, i + 8).map(id => agentCellApi.agent(root, id, controller.signal)));
-        batch.forEach((item, index) => { const id = agents[i + index]; if (item.status === 'fulfilled') labels[id] = item.value.agent.title || '子代理'; else if (retired(item.reason)) removed.add(id); else partialRead = true; });
+        batch.forEach((item, index) => { const id = agents[i + index]; if (item.status === 'fulfilled') labels[id] = agentLabel(item.value.agent); else if (retired(item.reason)) removed.add(id); else partialRead = true; });
         if (controller.signal.aborted || expired.current || owner.current !== controller) return;
       }
       for (const [id, work] of Object.entries(updated)) if (removed.has(work.agent_id)) { delete updated[id]; removedWorks.add(id); }
@@ -267,7 +267,7 @@ export function CellGraph({ root, host, cell, onAgent, onWork, viewport }: { roo
       {groups.map(group => <article className="agent-cell-graph-card" key={group.id} data-agent={group.id}>
         <button type="button" className="agent-cell-graph-agent" onClick={() => onAgent(group.id)}><span className="agent-cell-avatar"><Bot size={14}/></span><strong>{names[group.id] ?? group.id}</strong><ChevronRight size={14}/></button>
         {group.works.map(work => <div className="agent-cell-graph-work" key={work.work_id} data-work={work.work_id}>
-          <button className="agent-cell-work-link" title="定位工作" onClick={() => onWork(work)}>{work.work_id}</button>
+          <button className="agent-cell-work-link" title={`${workTitle(work.work_title)}\n${work.work_id}`} onClick={() => onWork(work)}>{workTitle(work.work_title)}</button>
           <span className="agent-cell-work-status">{({ running: '运行中', queued: '排队中', completed: '已完成', stopped: '已停止' } as Record<string, string>)[work.status] ?? work.status}</span>
         </div>)}
       </article>)}

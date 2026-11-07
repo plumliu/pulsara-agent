@@ -109,7 +109,7 @@ class _Cell:
     delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     output: deque[_Output] = field(default_factory=deque)
     pending: dict[str, _Pending] = field(default_factory=dict)
-    preparations: dict[str, Mapping[str, object]] = field(default_factory=dict)
+    preparations: dict[str, tuple[list[Mapping[str, object]], Mapping[str, object]]] = field(default_factory=dict)
     agent_message_cursors: dict[str, int] = field(default_factory=dict)
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     terminal_event: asyncio.Event = field(default_factory=asyncio.Event)
@@ -380,6 +380,15 @@ class CodeModeHost:
         # Freeze the complete exact schemas; dispatch still checks live capability facts.
         catalog_json = json.dumps(dict(tool_catalog), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         catalog = json.loads(catalog_json)
+        run_agent_fields = None
+        if "run_agent" in catalog:
+            try:
+                fields = catalog["run_agent"]["parameters"]["properties"]["members"]["items"]["properties"]["parameters"]["properties"]
+                if not isinstance(fields, dict) or "instruction" not in fields:
+                    raise ValueError("missing assignment fields")
+                run_agent_fields = list(fields)
+            except (KeyError, TypeError, ValueError) as error:
+                raise CodeModeError("invalid_catalog", "run_agent requires its canonical member parameter schema") from error
         cell_id = random_id("cell")
         if page_budget is not None and not page_budget.fits(encode_tool_public_json(
                 {"accepted": True, "target": cell_target(cell_id)}).decode("utf-8")):
@@ -390,6 +399,7 @@ class CodeModeHost:
                      on_cell_closed=on_cell_closed)
         command = {"type": "start", "cell_id": cell_id, "source": source,
                    "decision_available": decision_available,
+                   "run_agent_fields": run_agent_fields,
                    "tool_names": list(catalog), "catalog_bytes": len(catalog_json.encode("utf-8")) + 256}
         if _bytes(command) > self.limits.cell_bytes + self.limits.control_bytes:
             raise CodeModeError("ipc_boundary", "Code Mode source frame exceeds the current data boundary")
@@ -426,27 +436,34 @@ class CodeModeHost:
         result: CodeModeToolResult | None = None
         try:
             arguments = json.loads(str(message["arguments_json"]))
-            if type(arguments) is not dict:
-                raise CodeModeError("invalid_arguments", "Tool arguments must be a JSON object")
+            expected = list if pending.sequence is None else dict
+            if type(arguments) is not expected:
+                raise CodeModeError("invalid_arguments", "Preparation requires an array; tool arguments require an object")
             _json(arguments)
             if cell.cancelled.is_set() or cell.state in _TERMINAL:
                 raise CodeModeError("not_dispatched", "Cell stopped before tool submission")
             if pending.sequence is None:
-                peers = cell.prepare_batch(arguments)
+                if "run_agent" not in cell.tool_catalog:
+                    raise CodeModeError("tool_unavailable", "run_agent is not in this cell's frozen catalog")
+                refs = cell.prepare_batch(arguments)
                 # Keep only temporary identities, not an admitted batch or Work state.
-                cell.preparations[pending.request_id] = peers
-                result = CodeModeToolResult(value={"request_id": pending.request_id, "peers": peers})
+                cell.preparations[pending.request_id] = (arguments, refs)
+                result = CodeModeToolResult(value={"request_id": pending.request_id, "refs": refs})
             else:
                 name = pending.tool_name
                 assert name is not None
-                if name not in cell.tool_catalog and name not in ("run_agent.batch", "wait_agent.works"):
+                if name not in cell.tool_catalog:
                     raise CodeModeError("tool_unavailable", "Tool is not in this cell's frozen catalog")
-                if name == "run_agent.batch":
+                if name == "run_agent":
                     from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import validate_batch_identities
                     prepared = cell.preparations.pop(require_id(message.get("preparation"), "request"), None)
                     if prepared is None:
                         raise CodeModeError("invalid_batch", "Batch does not own prepared identities")
-                    validate_batch_identities(arguments, prepared)
+                    identities, refs = prepared
+                    validate_batch_identities(arguments, refs)
+                    if any(("target" in identity) != ("target" in member["parameters"])
+                           for identity, member in zip(identities, arguments["members"], strict=True)):
+                        raise CodeModeError("invalid_batch", "Batch target changed after identities were prepared")
                 invocation = CodeModeInvocation(cell.cell_id, pending.sequence, name, arguments,
                                                 cell.snapshot, cell.source_exec_attempt_id,
                                                 cell.agent_message_cursors, cell.cancelled)
@@ -457,6 +474,8 @@ class CodeModeHost:
                         await self._deliver(cell, pending, result)
                     except CodeModeError as error:
                         if cell.state not in _TERMINAL:
+                            if pending.sequence is None:
+                                cell.preparations.pop(pending.request_id, None)
                             # Preserve accepted business effects, reject only the transport.
                             transport = CodeModeToolResult(state=result.state, error_code=error.code,
                                 error_message=str(error), read=result.read,
@@ -472,6 +491,8 @@ class CodeModeHost:
                 if not pending.delivered and pending.sequence is not None:
                     await self._late_result(cell, pending, result)
         except Exception as error:
+            if pending.sequence is None:
+                cell.preparations.pop(pending.request_id, None)
             code = error.code if isinstance(error, CodeModeError) else "bridge_error"
             failure = CodeModeToolResult(state="FAILED", error_code=code, error_message=str(error))
             async with cell.delivery_lock:
@@ -523,7 +544,7 @@ class CodeModeHost:
         else:
             await self._safe_send({"type": "resume", "cell_id": cell.cell_id,
                                    "request_id": pending.request_id,
-                                   "keep_preparation": pending.sequence is None})
+                                   "keep_preparation": pending.sequence is None and result.error_code is None})
 
     @staticmethod
     def _complete_retention(cell: _Cell, message: Mapping[str, object]) -> None:

@@ -281,14 +281,14 @@ async def run(admin_dsn, runtime_dsn, label):
                                         f"{SENDER}. Call native send_agent_message to ROOT with the exact message {MESSAGE}, "
                                         f"then give exactly {FINAL} as your final response. Do not call other tools."
                                     )
-                                    create_arguments = {
-                                        "name": "Sender",
+                                    create_arguments = [{
+                                        "work_title": "Sender",
                                         "instruction": sender_instruction,
-                                    }
+                                    }]
                                     trace_start = len(await asyncio.to_thread(_tool_trace, root))
                                     result = await root.run_turn(
                                         PromptContent.text(
-                                            "Use exec_cell to call tools.run_agent exactly once using the following exact JSON object as its arguments. "
+                                            "Use exec_cell to call tools.run_agent exactly once using the following exact JSON assignment array as its argument. "
                                             "Copy the entire instruction string verbatim; do not abbreviate or execute it yourself. "
                                             + json.dumps(
                                                 create_arguments, ensure_ascii=False

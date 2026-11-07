@@ -256,16 +256,19 @@ async def run(admin_root, runtime_root, selected_wire=None):
                                     deadline_monotonic=monotonic() + 30,
                                 )
 
-                            async def create(name, instruction):
+                            async def create(work_title, instruction):
                                 before = set(await ids())
+                                assignments = [{"work_title": work_title, "instruction": instruction}]
                                 result = await turn(
-                                    f"Use exec_cell to call tools.run_agent exactly once to create an agent named {name}. Its exact instruction is: {instruction} Log the returned Agent/Work targets with console.log, observe that output, then reply briefly after acceptance. Do not wait for the child to finish."
+                                    "Use exec_cell to call tools.run_agent exactly once with this one-element assignment array: "
+                                    + json.dumps(assignments, ensure_ascii=False)
+                                    + " Log the returned agents and works arrays with console.log, observe that output, then reply briefly after acceptance. Do not wait for the child to finish."
                                 )
                                 after = set(await ids())
                                 case.setdefault("creation_attempts", []).append(
-                                    {"name": name, "reply": result.final_text, "new_agents": list(after - before)}
+                                    {"work_title": work_title, "reply": result.final_text, "new_agents": list(after - before)}
                                 )
-                                assert len(after - before) == 1, f"{name}: expected one admitted Agent, got {list(after - before)}"
+                                assert len(after - before) == 1, f"{work_title}: expected one admitted Agent, got {list(after - before)}"
                                 return (after - before).pop()
 
                             c = await create(
@@ -354,7 +357,9 @@ async def run(admin_root, runtime_root, selected_wire=None):
                                 "Send that teammate an actual native send_agent_message saying HANDOFF_HELLO. Also use the returned ROOT alias to send ROOT the message ROOT_ALIAS_HELLO. Reply briefly after the tool results."
                             )
                             await turn(
-                                f"Use exec_cell to call tools.run_agent exactly once with target {{kind: 'AGENT', agent_id: '{a}'}} to assign a new Work to that existing agent. Its exact instruction is: {followup} Log the returned Agent/Work targets with console.log, observe that output, then reply briefly after acceptance."
+                                "Use exec_cell to call tools.run_agent exactly once with this one-element assignment array to assign a new Work to the existing Agent: "
+                                + json.dumps([{"target": {"kind": "AGENT", "agent_id": a}, "instruction": followup}], ensure_ascii=False)
+                                + " Log the returned agents and works arrays with console.log, observe that output, then reply briefly after acceptance."
                             )
 
                             async def second_done():

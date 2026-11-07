@@ -408,10 +408,10 @@ def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(rewrite, tm
     from time import monotonic
     async def scenario():
         scope = _scope()
-        specs = {'first':{'instruction':'first original'},'second':{'instruction':'second original'}}
-        peers = prepare_batch_refs(specs)
-        arguments = {'members':[{'key':key,'agent_id':peers[key]['agent']['agent_id'],
-            'work_id':peers[key]['work']['work_id'],'parameters':spec} for key,spec in specs.items()]}
+        specs = [{'instruction':'first original'}, {'instruction':'second original'}]
+        peers = prepare_batch_refs([{} for _ in specs])
+        arguments = {'members':[{'agent_id':peers['agents'][index]['agent_id'],
+            'work_id':peers['works'][index]['work_id'],'parameters':spec} for index,spec in enumerate(specs)]}
         replacement = {'instruction':'rewritten by hook'}
         if rewrite == 'identity':
             replacement['target'] = {'kind':'AGENT','agent_id':random_id('session')}
@@ -431,12 +431,12 @@ def test_batch_pre_hooks_use_each_run_member_and_one_real_invocation(rewrite, tm
             admission_source=RunPermissionAdmissionSource.USER_SUBMISSION)
         turn_id, call_id = random_id('turn'), random_id('call')
         source = ToolInvocationSource(call_id,ToolInvocationSourceKind.CODE_MODE_CALL,turn_id,
-            source_exec_attempt_id=random_id('attempt'),call_sequence=1,tool_name='run_agent.batch',original_arguments=freeze_json(arguments))
+            source_exec_attempt_id=random_id('attempt'),call_sequence=1,tool_name='run_agent',original_arguments=freeze_json(arguments))
         source_token = current_tool_invocation.set(source)
         reservation_token = _batch_reservations.set([])
         try:
             result, causal = await owner._dispatch_pre_tool(view=dispatcher.capture_view(),scope=scope,
-                prepared=PreparedResolvedToolInvocation('run_agent.batch','run_agent.batch',freeze_json(arguments)),
+                prepared=PreparedResolvedToolInvocation('run_agent','run_agent',freeze_json(arguments)),
                 turn_id=turn_id,assistant_entry_id=None,tool_call_id=call_id,
                 request=CodeModeToolRequest(scope.session_id,'test',None,FrozenModelCallMemoryContext()),
                 canonical_facts=CodeModeCallFacts(permission,SessionContentRange(0)))
@@ -518,7 +518,7 @@ def test_two_cells_and_native_batch_share_leaf_without_serializing_physical_wait
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize('rewrite', ['valid', 'identity', 'profile', 'profile_null'])
+@pytest.mark.parametrize('rewrite', ['valid', 'identity', 'profile', 'profile_null', 'later_block', 'title_boundary', 'budget'])
 def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_failure(rewrite, tmp_path, monkeypatch, stage2_migrated_postgres_database):
     from pulsara_agent.identity import random_id
     from pulsara_agent.conversation_kernel.host import KernelHostCore
@@ -535,15 +535,15 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
     import pulsara_agent.conversation_kernel.host as kernel_host
     root_session_id, cell_id = None, None
     root_calls = 0
-    pages, member_posts, diagnostics = [], [], []
+    pages, member_posts, diagnostics, member_pres, budget_quotes = [], [], [], [], []
     original_post = ToolBatchExecutor._dispatch_post_tool
     original_pre = ToolBatchExecutor._dispatch_pre_tool
     original_offer = ToolBatchExecutor._offer_operational_best_effort
     async def fail_one_member(owner, **values):
-        member = values.get('_member_key')
+        member = values.get('_member_index')
         if member is not None:
             member_posts.append(member)
-        if member == 'first' and rewrite == 'valid':
+        if member == 0 and rewrite == 'valid':
             raise RuntimeError('injected member post failure after actual batch admission')
         return await original_post(owner, **values)
     def observe_diagnostic(owner, offer):
@@ -552,7 +552,19 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
         original_offer(owner, offer)
     async def change_pre_identity(owner, **values):
         outcome, causal = await original_pre(owner, **values)
-        if rewrite != 'valid' and values.get('_member_key') == 'first':
+        if values.get('_member_index') is not None:
+            member_pres.append(values['_member_index'])
+        if rewrite in {'valid', 'budget'} and values.get('_member_index') is not None:
+            from pulsara_agent.primitives.context import thaw_json
+            updated = thaw_json(values['prepared'].resolved_arguments)
+            updated['work_title'] = f"final title {values['_member_index']}"
+            return replace(outcome, updated_input=updated), causal
+        if rewrite == 'later_block' and values.get('_member_index') == 1:
+            from pulsara_agent.hooks.contracts import GateDecision
+            return replace(outcome, decision=GateDecision.BLOCK, reason='second member refused'), causal
+        if rewrite == 'title_boundary' and values.get('_member_index') == 1:
+            return replace(outcome, updated_input={'instruction':'changed', 'work_title':'字' * 86}), causal
+        if rewrite in {'identity', 'profile', 'profile_null'} and values.get('_member_index') == 0:
             updated = {'instruction':'changed by hook'}
             if rewrite == 'identity':
                 updated['target'] = {'kind':'AGENT','agent_id':random_id('session')}
@@ -563,6 +575,18 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_pre_tool',change_pre_identity)
     monkeypatch.setattr(ToolBatchExecutor,'_dispatch_post_tool',fail_one_member)
     monkeypatch.setattr(ToolBatchExecutor,'_offer_operational_best_effort',observe_diagnostic)
+    if rewrite == 'budget':
+        from pulsara_agent.conversation_kernel.subagents.collaboration_api import CollaborationToolPort
+        invoke = CollaborationToolPort.invoke
+        async def quote_after_hooks(owner, *, tool_name, arguments, invocation_context):
+            if tool_name == 'run_agent':
+                def reject_receipt(body, _ids):
+                    budget_quotes.append(body)
+                    return False
+                invocation_context = replace(invocation_context,
+                    page_budget=replace(invocation_context.page_budget, accepts_provider_body=reject_receipt))
+            return await invoke(owner, tool_name=tool_name, arguments=arguments, invocation_context=invocation_context)
+        monkeypatch.setattr(CollaborationToolPort, 'invoke', quote_after_hooks)
     async def stream(request):
         nonlocal root_calls,cell_id
         if request.session_id != root_session_id:
@@ -570,7 +594,7 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
         else:
             root_calls += 1
             if root_calls == 1:
-                code = 'try { const admitted=await tools.run_agent.batch({first:{instruction:"first work"},second:{instruction:"second work"}});const finished=await tools.wait_agent.works({targets:Object.values(admitted).map(item=>item.work)});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
+                code = 'try { const admitted=await tools.run_agent([{instruction:"first work"},{instruction:"second work"}]);const finished=await tools.wait_agent({works:admitted.works});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
                 payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
             else:
                 if root_calls == 2:
@@ -598,19 +622,31 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
             records = await _settled_formal_records(session, expected=2 if rewrite == 'valid' else 1)
             batch = json.loads(next(record['text'] for record in records if record['kind']=='log'))
             with session.repository.connection_provider.connection(lane=PostgresConnectionLane.INSPECTOR,deadline_monotonic=monotonic()+10) as connection:
-                rows = connection.execute("SELECT r.result_state,r.attempt_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent.batch'",(root_session_id,)).fetchall()
+                rows = connection.execute("SELECT r.result_state,r.attempt_id FROM pulsara_v3.tool_results r JOIN pulsara_v3.tool_invocations i ON i.session_id=r.session_id AND i.id=r.invocation_id WHERE i.session_id=%s AND i.source_kind='CODE_MODE_CALL' AND i.tool_name='run_agent'",(root_session_id,)).fetchall()
                 assert len(rows) == 1
                 if rewrite != 'valid':
-                    assert batch == {'rejected':'PERMISSION_DENIED'}
-                    assert rows[0] == ('PERMISSION_DENIED',None)
+                    expected = 'APPLICATION_ERROR' if rewrite == 'budget' else 'PERMISSION_DENIED'
+                    assert batch == {'rejected':expected}
+                    assert rows[0][0] == expected
+                    assert (rows[0][1] is not None) is (rewrite == 'budget')
+                    if rewrite == 'budget':
+                        assert len(budget_quotes) == 1 and all(f'final title {i}' in budget_quotes[0] for i in range(2))
+                    assert member_pres == [0, 1]
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.sessions WHERE root_session_id=%s',(root_session_id,)).fetchone()[0] == 0
                     assert not diagnostics
                 else:
-                    assert set(batch) == {'first','second'}
-                    assert member_posts == ['first','second']
-                    assert len(diagnostics) == 1 and diagnostics[0]['member_key'] == 'first'
-                    work_ids = [item['work']['work_id'] for item in batch.values()]
+                    assert set(batch) == {'agents','works','details'}
+                    assert all(len(batch[key]) == 2 for key in batch)
+                    assert member_posts == [0,1]
+                    assert len(diagnostics) == 1 and diagnostics[0]['member_index'] == 0
+                    work_ids = [item['work_id'] for item in batch['works']]
                     assert connection.execute('SELECT count(*) FROM pulsara_v3.prompt_queue_items WHERE id=ANY(%s)',(work_ids,)).fetchone()[0] == 2
+                    assert [item['work_title'] for item in batch['details']] == ['final title 0', 'final title 1']
+                    titles = dict(connection.execute('SELECT id,work_title FROM pulsara_v3.prompt_queue_items WHERE id=ANY(%s)',(work_ids,)).fetchall())
+                    assert [titles[work] for work in work_ids] == ['final title 0', 'final title 1']
+                    original = connection.execute("SELECT original_arguments FROM pulsara_v3.tool_invocations WHERE session_id=%s AND tool_name='run_agent'",(root_session_id,)).fetchone()[0]
+                    assert all('work_title' not in item['parameters'] for item in original['members'])
+                    assert connection.execute('SELECT count(*) FROM pulsara_v3.tool_execution_attempts WHERE id=%s',(rows[0][1],)).fetchone()[0] == 1
                     assert rows[0][0] == 'SUCCESS' and rows[0][1] is not None
         finally:
             await core.shutdown()

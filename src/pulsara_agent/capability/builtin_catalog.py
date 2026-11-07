@@ -15,7 +15,7 @@ from pulsara_agent.ports.session_content import (
     session_query_input_schema,
 )
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from typing import Any, Literal
 from pulsara_agent.identity import ID_PAYLOAD_PATTERN
@@ -63,6 +63,8 @@ from pulsara_agent.code_mode.contracts import (
 )
 from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import (
     query_agents_input_schema,
+    run_agent_parameters_schema,
+    wait_agent_parameters_schema,
     target_schema,
 )
 
@@ -292,37 +294,6 @@ _MARK_MEMORY_RELATION_PARAMETERS = object_schema(
     },
     required=["source", "target", "relation_kind"],
 )
-
-def _run_agent_schema() -> dict[str, Any]:
-    works = {"type": "array", "maxItems": 16, "uniqueItems": True,
-             "items": target_schema("WORK")}
-    return object_schema(properties={
-        "instruction": {"type": "string", "minLength": 1, "maxLength": 65536},
-        "target": target_schema("AGENT"),
-        "name": {"type": "string", "minLength": 1, "maxLength": 256},
-        "context": {"oneOf": [
-            object_schema(properties={"mode": {"const": "none"}}, required=["mode"]),
-            object_schema(properties={"mode": {"const": "last_n"}, "turns": {"type": "integer", "minimum": 1, "maximum": 3}}, required=["mode", "turns"]),
-        ]},
-        "materials": {
-            **works,
-            "description": "Copy ended Works' finals or stopped diagnostics as background.",
-        },
-        "depends_on": {
-            **works,
-            "description": "Start after these Works complete successfully and supply their finals as input.",
-        },
-    }, required=["instruction"])
-
-
-def _wait_agent_schema() -> dict[str, Any]:
-    return object_schema(properties={
-        "targets": {"type": "array", "minItems": 1, "uniqueItems": True,
-                    "items": target_schema("AGENT", allow_root=True)},
-        "settle": {"type": "string", "enum": ["all", "first"], "default": "all"},
-        "timeout_seconds": {"type": "number", "minimum": 0, "maximum": 300, "default": 30},
-    }, required=["targets"])
-
 
 _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     **{name: _descriptor(name=name, description=description,
@@ -860,8 +831,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "run_agent": _descriptor(
         name="run_agent",
-        description="Submit work to a new or existing subagent and return its AGENT and WORK references immediately. Omit target to create an Agent; name and context apply only to creation. Reuse target to continue its history. Acceptance is not completion; copy the returned inspect call for the WORK result. Ordinary final completes work.",
-        input_schema=_run_agent_schema(),
+        description="Submit an ordered array of assignments through tools.run_agent in ROOT Code Mode. Omit target to create an Agent or reuse an AGENT target to continue its history. work_title describes this Work; context applies only to creation. Return aligned agents, works and details arrays after atomic acceptance. Acceptance is not completion; copy details inspect calls for WORK results. Ordinary final completes work.",
+        input_schema=run_agent_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
@@ -884,8 +855,8 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     ),
     "wait_agent": _descriptor(
         name="wait_agent",
-        description="Wait for a known subagent's message or current work result. Do not wait for ROOT unless ROOT has explicitly asked you to wait for its reply. Targets are AGENT references; an unstarted target returns unavailable. Waiting binds current work and never follows its next request. Returns status, targets and message sources only; use query_agents for final or diagnostic text. Timeout ends this observation only.",
-        input_schema=_wait_agent_schema(),
+        description="Wait for a known subagent's message or current work result. Do not wait for ROOT unless ROOT has explicitly asked you to wait for its reply. Pass agents as an array of AGENT references; an unstarted target returns unavailable. Waiting binds current work and never follows its next request. Returns state, bound Works, pending targets and applicable message sources; use query_agents for final or diagnostic text. Timeout ends this observation only.",
+        input_schema=wait_agent_parameters_schema(include_works=False),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
     ),
@@ -1267,6 +1238,20 @@ def builtin_tool_catalog_entry(name: str) -> BuiltinToolCatalogEntry:
         return _BUILTIN_TOOL_CATALOG_BY_NAME[name]
     except KeyError as exc:
         raise KeyError(f"unknown builtin tool catalog entry: {name}") from exc
+
+
+def builtin_tool_descriptor(name: str, *, code_mode: bool = False) -> BuiltinToolDescriptor:
+    """Project one sealed builtin owner onto its actual invocation entry."""
+    descriptor = builtin_tool_catalog_entry(name).descriptor
+    if name == "wait_agent" and code_mode:
+        return replace(descriptor,
+            input_schema=wait_agent_parameters_schema(include_works=True),
+            description=("Wait using exactly one array: works for exact WORK terminal outcomes, "
+                "or agents for messages or bound current work. settle is all or first. "
+                "Only agents accepts timeout_seconds (default 30, maximum 300); "
+                "timeout ends this observation only. Messages can end an agents wait early. "
+                "Use query_agents to read final or diagnostic text."))
+    return descriptor
 
 
 def builtin_action_permission_override(

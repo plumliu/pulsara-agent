@@ -1,8 +1,16 @@
 import { inspectorTab, type PreparedWorkspaceTab } from '../components/desktop-workspace';
 
-export interface AgentRow { agent_id: string; title: string | null; current_work_id: string | null; queued_count: number; host_session_id?: string | null }
+export interface AgentRow {
+  agent_id: string; title: string | null;
+  current_work: { work_id: string; work_title: string | null; status: 'running' } | null;
+  queued_work_count: number; has_running_turn: boolean; host_session_id?: string | null;
+}
+export function agentLabel(agent: Pick<AgentRow, 'agent_id' | 'title'>) { return agent.title || `子代理 ${agent.agent_id.split(':').at(-1)!.slice(0, 6)}`; }
+export function workTitle(title: string | null | undefined) { return title ?? '未命名任务'; }
+export function agentActivity(agent: AgentRow) { return agent.current_work ? '工作中' : agent.has_running_turn ? '处理中' : agent.queued_work_count > 0 ? '排队中' : '空闲'; }
+export function agentTaskLabel(agent: AgentRow) { return agent.current_work ? `当前任务：${workTitle(agent.current_work.work_title)}` : agentActivity(agent); }
 export interface CellRow { target: { kind: 'CELL'; cell_id: string }; state: string; has_unread_output: boolean; pending_calls: number; source_exec_attempt_id: string }
-export interface WorkFact { agent_id: string; work_id: string; status: string; terminal_reason?: string | null; consumed_entry_id?: string | null; turn_id?: string | null }
+export interface WorkFact { agent_id: string; work_id: string; work_title: string | null; status: string; terminal_reason?: string | null; consumed_entry_id?: string | null; turn_id?: string | null }
 export interface WorkInput { kind: 'dependency' | 'material'; source_work_id: string; ordinal: number }
 export interface Participant { agent_id: string; work_id: string | null; kinds: string[] }
 export type SourcePage = { status: 'AVAILABLE'; text: string; offset_chars: number; returned_chars: number; total_chars: number; has_more: boolean; next_offset_chars: number | null } | { status: 'UNAVAILABLE'; reason: string };
@@ -40,7 +48,7 @@ export async function prepareSessionTarget(intent: SessionNavigation, valid: () 
   let tab;
   if (intent.kind === 'agent') {
     const result = await agentCellApi.agent(intent.rootSessionId, intent.agentSessionId);
-    tab = inspectorTab(intent.rootSessionId, 'agent', result.agent.title || '子代理', intent.agentSessionId);
+    tab = inspectorTab(intent.rootSessionId, 'agent', agentLabel(result.agent), intent.agentSessionId);
   } else if (intent.kind === 'cell' || intent.kind === 'cell-graph') {
     if (intent.kind === 'cell') {
       const source = await agentCellApi.source(intent.rootSessionId, intent.sourceExecAttemptId);

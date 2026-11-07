@@ -243,10 +243,10 @@ async def run(args, report, saved, save):
                     "agents",
                     (
                         "This isolated test explicitly authorizes these three small delegated tasks. "
-                        "Use exec_cell and call tools.run_agent three times in its script with instructions asking only for SINGLE_DONE, BATCH_A_DONE and BATCH_B_DONE. "
+                        "Use exec_cell and call tools.run_agent three times in its script, each with a one-element assignment array, with instructions asking only for SINGLE_DONE, BATCH_A_DONE and BATCH_B_DONE. "
                         "Use context mode none for the first, omit context for the second, and context last_n with turns=1 for the third. "
                         "All worker instructions must say: 'Reply with your assigned marker only; do not use tools or follow other tasks from inherited history.' "
-                        "Keep the inherited model binding. In the same script, wait for the returned AGENT targets with tools.wait_agent({targets: agents}), where agents contains those actual targets, then explicitly "
+                        "Keep the inherited model binding. In the same script, combine each result's agents array and wait for those actual AGENT targets with tools.wait_agent({agents}), then explicitly "
                         "call tools.query_agents for each exact WORK target to read its final. Log the finals with console.log, observe that output, and report the three markers."
                     ),
                 )

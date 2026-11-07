@@ -43,6 +43,10 @@ _WORK_SELECT = f"""SELECT q.*, {REQUEST_EXECUTION_COLUMNS}, qt.id AS turn_id,
     WHERE s.root_session_id=%s AND q.input_origin='AGENT_INSTRUCTION'"""
 
 _RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, w.workspace_kind, w.workspace_root, w.workspace_label,
+    ui_work.id AS ui_current_work_id, ui_work.work_title AS ui_current_work_title,
+    CASE WHEN ui_work.id IS NOT NULL THEN 'running' END AS ui_current_work_status,
+    (SELECT count(*) FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id
+       AND q.input_origin='AGENT_INSTRUCTION' AND q.status='PENDING') AS ui_queued_work_count,
     EXISTS(SELECT 1 FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN') AS has_pending_work,
     EXISTS(SELECT 1 FROM pulsara_v3.turns t WHERE t.session_id=s.id AND t.status='RUNNING') AS has_running_turn,
     (SELECT q.id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
@@ -53,7 +57,13 @@ _RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, w.workspace_k
           WHERE i->>'kind'='dependency' AND i->'body'='null'::jsonb) FROM pulsara_v3.prompt_queue_items q
         WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN'
         ORDER BY q.queue_sequence LIMIT 1),false) AS head_ready
-    FROM pulsara_v3.sessions s JOIN pulsara_v3.workspaces w ON w.id=s.workspace_id AND w.memory_domain_id=s.memory_domain_id"""
+    FROM pulsara_v3.sessions s JOIN pulsara_v3.workspaces w ON w.id=s.workspace_id AND w.memory_domain_id=s.memory_domain_id
+    LEFT JOIN LATERAL (
+      SELECT q.id, q.work_title FROM pulsara_v3.prompt_queue_items q
+      JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
+      JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id
+      WHERE q.session_id=s.id AND q.input_origin='AGENT_INSTRUCTION' AND t.status='RUNNING'
+    ) ui_work ON true"""
 
 _SESSION_IN_TEXT = re.compile(
     r"(?<![A-Za-z0-9_:])session:" + ID_PAYLOAD_PATTERN + r"(?![A-Za-z0-9_:])"
@@ -187,6 +197,7 @@ class _SubagentOperations:
             "agent_id": str(row["session_id"]),
             "work_id": str(row["id"]),
             "instruction": self._agent_prompt_text(connection, row),
+            "work_title": row["work_title"],
             "status": execution.status.value,
             "terminal_reason": execution.terminal_reason,
             "turn_id": row["turn_id"],
@@ -222,7 +233,7 @@ class _SubagentOperations:
         if execution is None:
             raise ConversationKernelConflict("delegated work does not identify a NEW_TURN request")
         return {"work_id": str(row["id"]), "agent_id": str(row["session_id"]),
-                "status": execution.status.value, "terminal_reason": execution.terminal_reason,
+                "work_title": row["work_title"], "status": execution.status.value, "terminal_reason": execution.terminal_reason,
                 "cursor": str(row["id"])}
 
     @staticmethod
@@ -332,14 +343,13 @@ class _SubagentOperations:
                         )
                     connection.execute(
                         """INSERT INTO pulsara_v3.sessions
-                        (id,root_session_id,workspace_id,memory_domain_id,lifecycle,writer_generation,title,model_call_binding)
-                        VALUES (%s,%s,%s,%s,'OPEN',1,%s,%s)""",
+                        (id,root_session_id,workspace_id,memory_domain_id,lifecycle,writer_generation,model_call_binding)
+                        VALUES (%s,%s,%s,%s,'OPEN',1,%s)""",
                         (
                             req.agent_id,
                             root_guard.session_id,
                             root["workspace_id"],
                             root["memory_domain_id"],
-                            req.name,
                             Jsonb(model_call_binding_to_dict(model_call_binding)),
                         ),
                     )
@@ -460,13 +470,13 @@ class _SubagentOperations:
                     """INSERT INTO pulsara_v3.prompt_queue_items
                     (id,session_id,workspace_id,queue_sequence,delivery_mode,input_origin,
                      source_session_id,source_turn_id,source_tool_attempt_id,
-                     initial_context,work_inputs,model_call_binding,status,
+                     initial_context,work_inputs,work_title,model_call_binding,status,
                      inline_content,blob_id,content_digest,content_size,content_media_type,content_codec,
                      permission_snapshot_id,requested_permission_mode,effective_permission_mode,permission_admission_source,
                      permission_overlay,permission_plan_context_ordinal,permission_plan_workflow_id,
                      permission_plan_revision_at_admission,permission_inherited_from_turn_id,permission_contract_id,
                      permission_contract_fingerprint,permission_snapshot_fingerprint)
-                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,'PENDING',
+                    VALUES (%s,%s,%s,%s,'NEW_TURN','AGENT_INSTRUCTION',%s,%s,%s,%s,%s,%s,%s,'PENDING',
                     %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (
                         req.work_id,
@@ -478,6 +488,7 @@ class _SubagentOperations:
                         source_tool_attempt_id,
                         Jsonb(list(req.initial_context)),
                         Jsonb(list(validate_work_inputs(inputs))),
+                        req.work_title,
                         Jsonb(model_call_binding_to_dict(model_call_binding)),
                         *_content_columns(pub.body),
                         *self._permission_columns(permission_snapshot),
@@ -540,7 +551,7 @@ class _SubagentOperations:
             self._require_writer(connection, root_guard, lock=False)
             rows = tuple(
                 connection.execute(
-                    "SELECT q.*,s.root_session_id,s.title FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.sessions s ON s.id=q.session_id WHERE q.id=%s",
+                    "SELECT q.*,s.root_session_id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.sessions s ON s.id=q.session_id WHERE q.id=%s",
                     (r.work_id,),
                 ).fetchone()
                 for r in requests
@@ -577,8 +588,7 @@ class _SubagentOperations:
                         for x in validate_work_inputs(row["work_inputs"])
                     )
                     != prepared_work_input_refs(req)
-                    or req.create_agent
-                    and row["title"] != req.name
+                    or row["work_title"] != req.work_title
                     or row["model_call_binding"]
                     != model_call_binding_to_dict(model_call_binding)
                     or self._permission_from_row(row) != permission_snapshot
@@ -810,7 +820,7 @@ class _SubagentOperations:
             deadline_monotonic=deadline_monotonic,
         ) as connection:
             row = connection.execute(
-                f"""SELECT q.id, q.session_id, {REQUEST_EXECUTION_COLUMNS},
+                f"""SELECT q.id, q.session_id, q.work_title, {REQUEST_EXECUTION_COLUMNS},
                 COALESCE((SELECT jsonb_agg(i || jsonb_build_object('body', ''))
                     FROM jsonb_array_elements(q.work_inputs) i), '[]'::jsonb) AS inputs,
                 COALESCE((SELECT bool_and(CASE WHEN jsonb_typeof(i) = 'object' AND i ? 'body'
@@ -838,6 +848,7 @@ class _SubagentOperations:
             return {
                 "agent_id": str(row["session_id"]),
                 "work_id": str(row["id"]),
+                "work_title": row["work_title"],
                 "status": execution.status.value,
                 "terminal_reason": execution.terminal_reason,
                 "consumed_entry_id": row["execution_consumed_entry_id"],

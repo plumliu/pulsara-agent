@@ -4,7 +4,7 @@ import { performance } from 'node:perf_hooks';
 import { randomIdentity, isCanonicalIdentity } from '../../_vendor/code_mode/identity-core.mjs';
 import { QuickJS } from '../../_vendor/code_mode/quickjs-wasi/dist/index.js';
 
-const {limits, cellBuffer, hostBuffer, timingBuffer, toolNames, decisionAvailable} = workerData;
+const {limits, cellBuffer, hostBuffer, timingBuffer, toolNames, decisionAvailable, runAgentFields} = workerData;
 if (typeof decisionAvailable !== 'boolean') throw new TypeError('Code Mode Decision availability must be a boolean');
 const cell = new Int32Array(cellBuffer, 8), used = new BigInt64Array(cellBuffer, 0, 1);
 const host = new BigInt64Array(hostBuffer);
@@ -236,11 +236,12 @@ try {
     });
     const names = vm.hostToHandle(toolNames);
     const availability = vm.hostToHandle(decisionAvailable);
+    const assignmentFields = vm.hostToHandle(runAgentFields);
     const valueLimit = vm.newNumber(limits.value_bytes);
     const diagnosticChars = vm.newNumber(Math.max(1, Math.floor((diagnosticBytes - 1024) / 4)));
     const install = vm.evalCode(guest, 'pulsara-guest.js');
-    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, valueLimit, diagnosticChars, availability); }
-    finally { install.dispose(); names.dispose(); availability.dispose(); valueLimit.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
+    try { helper = vm.callFunction(install, vm.undefined, invoke, prepare, discard, output, names, valueLimit, diagnosticChars, availability, assignmentFields); }
+    finally { install.dispose(); names.dispose(); availability.dispose(); assignmentFields.dispose(); valueLimit.dispose(); diagnosticChars.dispose(); invoke.dispose(); prepare.dispose(); discard.dispose(); output.dispose(); }
     owned.push(helper);
     for (const [key, assign] of [
       ['deferred', h => deferredFactory = h], ['parse', h => parse = h], ['render', h => render = h],
@@ -278,7 +279,7 @@ parentPort.on('message', async message => {
       });
       awaitingResume = message.request_id;
       pending.delete(message.request_id); disposeDeferred(record);
-      if (record.type === 'prepare') preparationCharges.set(message.request_id, record.charge);
+      if (record.type === 'prepare' && !message.error) preparationCharges.set(message.request_id, record.charge);
       else release(record.charge);
       // Promise is settled; continuations wait until the existing delivery owner commits.
       send({type: 'delivered', request_id: message.request_id});

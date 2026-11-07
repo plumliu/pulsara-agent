@@ -1,12 +1,18 @@
+import type { ComponentProps } from 'react';
+import { useAgentMetadata } from '../../frontend/lib/agent-metadata';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentConversationView } from '../../frontend/components/workbench-view';
 import type { AgentConversationReader, QueuedPrompt, RuntimeProjection } from '../../frontend/lib/runtime-adapter';
 import { RuntimeApiError, RuntimeGapError } from '../../frontend/lib/runtime-adapter';
-import { AgentConversationPane } from '../../frontend/components/agent-conversation-pane';
+import { AgentConversationPane as Pane } from '../../frontend/components/agent-conversation-pane';
 import type { CanonicalPromptImagePart } from '../../frontend/lib/prompt-content';
 import { agentCellApi } from '../../frontend/lib/agent-cell-api';
 
+function AgentConversationPane(props: Omit<ComponentProps<typeof Pane>, 'metadata'>) {
+  const metadata = useAgentMetadata(props.rootSessionId, props.agentSessionId);
+  return <Pane {...props} metadata={metadata} />;
+}
 const reader = {
   readHistory: vi.fn(), hydrateEntries: vi.fn(), readLatestHistory: vi.fn(),
   readProcessEnd: vi.fn(), retainHistory: vi.fn(), locateEntry: vi.fn(),
@@ -17,7 +23,7 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstub
 
 describe('Agent conversation reader', () => {
   it('opens and releases a scoped read-only reader', async () => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent: {agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:null}});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent: {agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:0, host_session_id:null}});
     const projection = {messages:[], canonicalInputs:[], queuedPrompts:[], queuedCount:0, isRunning:false} as unknown as RuntimeProjection;
     const close = vi.fn(async () => {});
     const scoped = { ...reader, view:'history', current:() => projection, snapshot:vi.fn(async () => projection),
@@ -32,7 +38,7 @@ describe('Agent conversation reader', () => {
     vi.restoreAllMocks();
   });
   it('reads a canonical Agent tool image only on disclosure and releases its scoped URL and reader on unmount', async () => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:null}});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:0, host_session_id:null}});
     const image: CanonicalPromptImagePart = {type:'image',source:'canonical',owner:{kind:'entry',entryId:'agent:image-result'},
       refOrdinal:0,digest:`sha256:${'a'.repeat(64)}`,encodedBytes:4,mediaType:'image/png',width:2,height:1};
     const projection = {messages:[{id:'agent:image-request',turnId:'agent:turn',role:'assistant',assistantKind:'tool-request',time:'',body:'',status:'completed',
@@ -76,7 +82,7 @@ describe('Agent conversation reader', () => {
   it('removes the old live draft before a replacement Host opens, even at the same epoch', async () => {
     vi.useFakeTimers();
     let host = 'host:first';
-    vi.spyOn(agentCellApi, 'agent').mockImplementation(async () => ({agent: {agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:host}}));
+    vi.spyOn(agentCellApi, 'agent').mockImplementation(async () => ({agent: {agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:0, host_session_id:host}}));
     const projection = (body: string) => ({messages:[{id:'live:one', role:'assistant', assistantKind:'live', status:'running', time:'', body, turnId:'turn:one'}], canonicalInputs:[], queuedPrompts:[], queuedCount:0, isRunning:true, activeTurnId:'turn:one', liveOwnerEpoch:1}) as unknown as RuntimeProjection;
     const makeReader = (body: string) => ({...reader, view:'live', current:() => projection(body),
       subscribe:() => () => {}, observe:() => new Promise(() => {}),
@@ -104,7 +110,7 @@ describe('Agent conversation reader', () => {
     new RuntimeApiError('PROTOCOL_TRANSPORT_CLOSED', 'closed', true),
     new RuntimeApiError('LOCAL_RESOURCE_NOT_FOUND', 'missing connection', false),
   ])('reopens the read-only reader after an invalid observation: %s', async failure => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:'host:same'}});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:0, host_session_id:'host:same'}});
     const projection = (body: string) => ({messages:[{id:'live:one',role:'assistant',assistantKind:'live',status:'running',time:'',body,turnId:'turn:one'}],canonicalInputs:[],queuedPrompts:[],queuedCount:0,isRunning:true,activeTurnId:'turn:one',liveOwnerEpoch:1}) as unknown as RuntimeProjection;
     let fail!: (cause: unknown) => void;
     const observation = new Promise<RuntimeProjection>((_resolve, reject) => { fail = reject; });
@@ -128,7 +134,7 @@ describe('Agent conversation reader', () => {
   });
   it('keeps the current content and retries the same reader after a temporary transport failure', async () => {
     vi.useFakeTimers();
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:'host:same'}});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:0, host_session_id:'host:same'}});
     const projection = {messages:[{id:'live:one',role:'assistant',assistantKind:'live',status:'running',time:'',body:'Retained draft',turnId:'turn:one'}],canonicalInputs:[],queuedPrompts:[],queuedCount:0,isRunning:true,activeTurnId:'turn:one'} as unknown as RuntimeProjection;
     let fail!: (cause: unknown) => void;
     const first = new Promise<RuntimeProjection>((_resolve, reject) => { fail = reject; });
@@ -148,7 +154,7 @@ describe('Agent conversation reader', () => {
     view.unmount();
   });
   it('finishes slow queue scans between successive observations without starving the queue', async () => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:1, host_session_id:'host:same'}});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:1, host_session_id:'host:same'}});
     const projection = {messages:[],canonicalInputs:[],queuedPrompts:[],queuedCount:1,isRunning:true} as unknown as RuntimeProjection;
     const item = (text: string): QueuedPrompt => ({queueItemId:'queue:one',sequence:'1',status:'pending',sourceKind:'agent',inputOrigin:'AGENT_INSTRUCTION',deliveryMode:'new-turn',content:{parts:[{type:'text',text}]}});
     let finishFirst!: (value: {items:QueuedPrompt[];nextCursor:null}) => void;
@@ -176,7 +182,7 @@ describe('Agent conversation reader', () => {
     view.unmount();
   });
   it('does not treat a queue read failure as an observation gap', async () => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:'host:same'}});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:0, host_session_id:'host:same'}});
     const projection = {messages:[],canonicalInputs:[],queuedPrompts:[],queuedCount:0,isRunning:true} as unknown as RuntimeProjection;
     const observe = vi.fn(() => new Promise(() => {}));
     const scoped = {...reader,view:'live',current:() => projection,subscribe:() => () => {},observe,
@@ -190,8 +196,8 @@ describe('Agent conversation reader', () => {
     view.unmount();
   });
   it('locates a pending Work by queue identity and keeps it read-only', async () => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:1, host_session_id:null}});
-    vi.spyOn(agentCellApi, 'work').mockResolvedValue({work:{agent_id:'session:agent', work_id:'queue:target', status:'queued'},inputs:[]});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:1, host_session_id:null}});
+    vi.spyOn(agentCellApi, 'work').mockResolvedValue({work:{agent_id:'session:agent', work_id:'queue:target', work_title:'queue:target', status:'queued'},inputs:[]});
     const item = {queueItemId:'queue:target', sequence: '10', status:'pending', sourceKind:'agent', inputOrigin:'AGENT_INSTRUCTION', deliveryMode:'new-turn', content:{parts:[{type:'text', text:'Located Work'}]}} as QueuedPrompt;
     const projection = {messages:[],canonicalInputs:[],queuedPrompts:[],queuedCount:1,isRunning:false} as unknown as RuntimeProjection;
     const scoped = {...reader, view:'history', current:() => projection, snapshot:async () => projection,
@@ -209,7 +215,7 @@ describe('Agent conversation reader', () => {
     delete (HTMLElement.prototype as unknown as {scrollIntoView?: unknown}).scrollIntoView;
   });
   it('orders queue entries exactly beyond JavaScript safe integers', async () => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:2, host_session_id:null}});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:2, host_session_id:null}});
     const item = (queueItemId: string, sequence: string, text: string): QueuedPrompt => ({queueItemId, sequence, status:'pending', sourceKind:'agent', inputOrigin:'AGENT_INSTRUCTION', deliveryMode:'new-turn', content:{parts:[{type:'text', text}]}});
     const projection = {messages:[],canonicalInputs:[],queuedPrompts:[],queuedCount:2,isRunning:false} as unknown as RuntimeProjection;
     const scoped = {...reader,view:'history',current:() => projection,snapshot:async () => projection,subscribe:() => () => {},
@@ -221,8 +227,8 @@ describe('Agent conversation reader', () => {
     view.unmount();
   });
   it('shows a never-started terminal Work without adding it to pending inputs', async () => {
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:null, queued_count:0, host_session_id:null}});
-    vi.spyOn(agentCellApi, 'work').mockResolvedValue({work:{agent_id:'session:agent', work_id:'queue:stopped', status:'stopped', terminal_reason:'cancelled'},inputs:[]});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:null, has_running_turn:false, queued_work_count:0, host_session_id:null}});
+    vi.spyOn(agentCellApi, 'work').mockResolvedValue({work:{agent_id:'session:agent', work_id:'queue:stopped', work_title:'取消的回归任务', status:'stopped', terminal_reason:'cancelled'},inputs:[]});
     const projection = {messages:[],canonicalInputs:[],queuedPrompts:[],queuedCount:0,isRunning:false} as unknown as RuntimeProjection;
     const scoped = {...reader, view:'history', current:() => projection, snapshot:async () => projection,
       subscribe:() => () => {}, readQueuePage:async () => ({items:[],nextCursor:null}), readQueueItem:async () => null,
@@ -232,14 +238,15 @@ describe('Agent conversation reader', () => {
       adapter={{openAgentReader:async () => scoped, createAgentContentReader:() => reader}} readingState={{choices:new Map()}} onNotify={() => {}}
       workLocation={{workId:'queue:stopped',requestId:1}} />);
     expect(await screen.findByText('任务已结束')).toBeTruthy();
+    expect(screen.getByText('取消的回归任务')).toBeTruthy();
     expect(screen.queryByText('排队中')).toBeNull();
     view.unmount();
     delete (HTMLElement.prototype as unknown as {scrollIntoView?: unknown}).scrollIntoView;
   });
   it('repeats navigation to a started Work using its instruction entry', async () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {configurable:true, value:vi.fn()});
-    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work_id:'queue:work', queued_count:0, host_session_id:null}});
-    vi.spyOn(agentCellApi, 'work').mockResolvedValue({work:{agent_id:'session:agent', work_id:'queue:work', status:'running', consumed_entry_id:'entry:instruction', turn_id:'turn:one'},inputs:[]});
+    vi.spyOn(agentCellApi, 'agent').mockResolvedValue({agent:{agent_id:'session:agent', title:'Researcher', current_work:{work_id:'queue:work',work_title:null,status:'running'}, has_running_turn:true, queued_work_count:0, host_session_id:null}});
+    vi.spyOn(agentCellApi, 'work').mockResolvedValue({work:{agent_id:'session:agent', work_id:'queue:work', work_title:'queue:work', status:'running', consumed_entry_id:'entry:instruction', turn_id:'turn:one'},inputs:[]});
     const projection = {messages:[{id:'entry:instruction',role:'user',userKind:'prompt',inputOrigin:'AGENT_INSTRUCTION',time:'',body:'The instruction'}],canonicalInputs:[],queuedPrompts:[],queuedCount:0,isRunning:false} as unknown as RuntimeProjection;
     const locate = vi.fn(async () => projection);
     const scoped = {...reader, view:'history', current:() => projection, snapshot:async () => projection, locateEntry:locate,
@@ -310,4 +317,25 @@ describe('Agent conversation reader', () => {
     expect(screen.queryByRole('button', {name:'删除'})).toBeNull();
     expect(screen.queryByRole('textbox')).toBeNull();
   });
+});
+
+it('updates the current title on the same Host without reopening or rewriting historical Work titles', async () => {
+  vi.useFakeTimers();
+  let title='正在调查';
+  vi.spyOn(agentCellApi,'agent').mockImplementation(async()=>({agent:{agent_id:'session:agent',title:'Researcher',current_work:{work_id:'queue:current',work_title:title,status:'running'},queued_work_count:1,has_running_turn:true,host_session_id:'host:same'}}));
+  const projection={messages:[{id:'entry:old',role:'user',inputOrigin:'AGENT_INSTRUCTION',inputSource:{identityKind:'queue',queueItemId:'queue:old',sourceKind:'agent',deliveryMode:'new-turn',workTitle:'历史任务'},time:'',body:'相同指令'},
+    {id:'entry:answer',role:'assistant',assistantKind:'terminal',turnId:'turn:old',time:'',body:'历史答复',status:'completed',rootFinal:true}],canonicalInputs:[],queuedPrompts:[],queuedCount:1,isRunning:false} as unknown as RuntimeProjection;
+  const queued:QueuedPrompt={queueItemId:'queue:next',sequence:'2',status:'pending',sourceKind:'agent',inputOrigin:'AGENT_INSTRUCTION',workTitle:'仍在排队',deliveryMode:'new-turn',content:{parts:[{type:'text',text:'下一项指令'}]}};
+  const close=vi.fn(async()=>{});
+  const scoped={...reader,view:'history',current:()=>projection,snapshot:async()=>projection,subscribe:()=>()=>{},readQueuePage:async()=>({items:[queued],nextCursor:null}),close} as unknown as AgentConversationReader;
+  const open=vi.fn(async()=>scoped);
+  const view=render(<AgentConversationPane rootSessionId="session:root" agentSessionId="session:agent" agentName="Researcher" adapter={{openAgentReader:open,createAgentContentReader:()=>reader}} readingState={{choices:new Map()}} onNotify={()=>{}} />);
+  await act(async()=>{});
+  expect(screen.getByText('当前任务：正在调查')).toBeTruthy(); expect(screen.getByText('历史任务')).toBeTruthy(); expect(screen.getByText('仍在排队')).toBeTruthy();
+  title='切换后的工作';
+  await act(async()=>{await vi.advanceTimersByTimeAsync(3000);});
+  expect(screen.getByText('当前任务：切换后的工作')).toBeTruthy(); expect(screen.getByText('历史任务')).toBeTruthy();
+  expect(view.container.querySelector('[data-work-id="queue:old"]')?.textContent).toContain('历史任务');
+  expect(view.container.querySelectorAll('.assistant-heading').length).toBeGreaterThan(0);
+  expect(open).toHaveBeenCalledTimes(1); expect(close).not.toHaveBeenCalled();
 });
