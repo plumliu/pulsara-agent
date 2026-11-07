@@ -3040,7 +3040,7 @@ export function WorkbenchView({
               </button>
               <button type="button" onClick={() => { if (!canControl) return; setSessionActionsOpen(false); onCloseSession(); }}>
                 <Square size={15} />
-                <span><strong>停止并关闭会话</strong></span>
+                <span><strong>停止并关闭会话</strong><small>停止会话及后台工作并保留聊天记录</small></span>
               </button>
             </div>}
           </div>
