@@ -28,7 +28,11 @@ ${readme.content}`,
   }
 ]);
 console.log({ agents: investigation.agents, works: investigation.works });
-await tools.wait_agent({ works: investigation.works });
+const investigationWait = await tools.wait_agent({
+  agents: [...new Map(investigation.agents.map(target => [target.agent_id, target])).values()],
+  until: "idle"
+});
+if (investigationWait.state !== "settled") console.log({ observation: investigationWait });
 const findings = await Promise.all(investigation.works.map(target => tools.query_agents({ target })));
 if (findings.some(work => work.status !== "completed")) {
   console.log({ findings });
@@ -48,7 +52,8 @@ if (findings.some(work => work.status !== "completed")) {
     }
   ]);
   console.log({ agents: phase.agents, works: phase.works });
-  await tools.wait_agent({ works: [phase.works[1]] });
+  const reviewWait = await tools.wait_agent({ agents: [phase.agents[1]], until: "idle" });
+  if (reviewWait.state !== "settled") console.log({ observation: reviewWait });
   const review = await tools.query_agents({ target: phase.works[1] });
   if (review.status !== "completed") {
     console.log({ review });
@@ -66,7 +71,11 @@ if (findings.some(work => work.status !== "completed")) {
             instruction: "Address the concrete review findings within the requested change. Inspect the code, make necessary fixes, and run relevant checks. Report unresolved product choices to ROOT."
           }
         ]);
-        await tools.wait_agent({ works: fix.works });
+        const fixWait = await tools.wait_agent({
+          agents: [...new Map(fix.agents.map(target => [target.agent_id, target])).values()],
+          until: "idle"
+        });
+        if (fixWait.state !== "settled") console.log({ observation: fixWait });
         console.log(await tools.query_agents({ target: fix.works[0] }));
       } else {
         console.log({ agents: phase.agents, works: phase.works, review });

@@ -286,13 +286,13 @@ class CollaborationToolPort:
         is_root = context.session_id == self.root_session_id
         if context.effective_permission_mode != PermissionMode.BYPASS_PERMISSIONS:
             raise ValueError("collaboration operations require bypass permissions")
-        if tool_name not in {"query_agents", "send_agent_message", "wait_agent"} and not is_root:
+        if tool_name not in {"query_agents", "send_agent_message", "wait_message"} and not is_root:
             raise ValueError("operation is available only to ROOT")
         source_kind = getattr(getattr(context, "invocation_source", None), "kind", None)
-        if tool_name in {"run_agent", "wait_agent"} and is_root and source_kind != "CODE_MODE_CALL":
+        if tool_name in {"run_agent", "wait_agent"} and source_kind != "CODE_MODE_CALL":
             raise ValueError("operation requires a live Code Mode invocation")
-        if tool_name == "wait_agent" and "works" in arguments and not is_root:
-            raise ValueError("Work waiting is available only to ROOT Code Mode")
+        if tool_name == "wait_message" and (is_root or source_kind != "MODEL_TOOL_CALL"):
+            raise ValueError("message waiting is available only to native subagent calls")
         outcome = None
         page_complete = False
         required_facts = {}
@@ -376,8 +376,10 @@ class CollaborationToolPort:
         elif tool_name == "stop_agent":
             result, outcome = await self._stop(arguments["target"], context)
         elif tool_name == "wait_agent":
-            result = await (self._wait_works(arguments, context) if "works" in arguments
-                            else self._wait_agents(arguments, context))
+            result = await self._wait_agents(arguments, context)
+            page_complete = True
+        elif tool_name == "wait_message":
+            result = await self._wait_message(arguments, context)
         if tool_name == "run_agent":
             required_facts = result
             page_complete = True
@@ -388,10 +390,10 @@ class CollaborationToolPort:
             required_facts = {key: result[key] for key in ("target", "agent", "status", "terminal_reason", "work_title")}
         elif tool_name == "stop_agent":
             required_facts = {key: result[key] for key in ("target", "stop_requested", "stopped", "affected_count", "status_counts")}
-        elif tool_name == "wait_agent":
+        elif tool_name in {"wait_agent", "wait_message"}:
             required_facts = {"state": result["state"],
                 **{key + "_count": len(result[key]) for key in
-                   ("bindings", "works", "pending_targets", "message_sources", "unavailable_targets") if key in result}}
+                   ("observations", "pending_targets", "message_sources", "unavailable_targets") if key in result}}
         if page_complete and tool_name == "query_agents" and not context.page_budget.fits(canonical_json_bytes(result).decode("utf-8")):
             raise ToolResultPageBoundary("The complete agent result does not fit this call's result allowance")
         return KernelToolResult(
@@ -520,147 +522,119 @@ class CollaborationToolPort:
                     observer.cancel()
             await asyncio.gather(*observers, return_exceptions=True)
 
-    async def _wait_works(self, arguments, context):
-        identities = tuple(target_id(t, "WORK") for t in arguments["works"])
-        async with self._suspend(context):
-            while True:
-                revision = self.runtime.agent_change_revision()
-                works = [await self._work_status(identity) for identity in identities]
-                self._observe_cell(context, tuple(
-                    (work["agent"]["agent_id"], work["target"]["work_id"], "wait") for work in works))
-                pending = [
-                    work["target"] for work in works if work["status"] not in TERMINAL
-                ]
-                if self._interrupted(context):
-                    return {
-                        "state": "interrupted",
-                        "works": works,
-                        "pending_targets": pending,
-                    }
-                if not pending or (
-                    arguments.get("settle", "all") == "first"
-                    and len(pending) < len(works)
-                ):
-                    return {
-                        "state": "settled",
-                        "works": works,
-                        "pending_targets": pending,
-                    }
-                change = await self._wait_change(revision, context)
-                if change == "interrupted":
-                    return {
-                        "state": "interrupted",
-                        "works": works,
-                        "pending_targets": pending,
-                    }
-
-    async def _bind(self, identities, context):
-        bindings, unavailable = [], []
-        for identity in identities:
-            target = agent_target(identity)
-            if identity == self.root_session_id:
-                bindings.append({"target": target, "work": None})
-                continue
-            row = await self._read(
-                self.repository.read_agent_runtime_state,
-                session_id=identity,
-                deadline_monotonic=self.runtime.read_deadline(),
-            )
-            if row is None or row["root_session_id"] != self.root_session_id:
-                raise ValueError("AGENT does not exist in this collaboration")
-            active = row["current_work_id"]
-            if active is not None:
-                if identity == context.session_id:
-                    raise ValueError("cannot wait for your own current Work")
-                bindings.append({"target": target, "work": work_target(active)})
-            elif row["has_pending_work"]:
-                unavailable.append({"target": target, "reason": "not_started"})
-                bindings.append({"target": target, "work": None})
-            elif row["latest_work_id"] is not None:
-                bindings.append(
-                    {"target": target, "work": work_target(row["latest_work_id"])}
-                )
-            else:
-                unavailable.append({"target": target, "reason": "inactive"})
-                bindings.append({"target": target, "work": None})
-
-        return bindings, unavailable
-
-    async def _wait_agents(self, arguments, context):
-        identities = tuple(
-            self.root_session_id
-            if (identity := target_id(t, "AGENT", allow_root=True)) == "ROOT"
-            else identity
-            for t in arguments["agents"]
-        )
-        if len(set(identities)) != len(identities):
-            raise ValueError("duplicate resolved AGENT targets")
-        # The cell owns its sender-specific observation cursors. Native waits
-        # rely only on the receiving context's normal consumed input position.
-        owner_cursors = getattr(context, "agent_message_cursors", None)
-        after = dict(owner_cursors or {})
+    async def _wait_message(self, arguments, context):
         deadline = monotonic() + arguments.get("timeout_seconds", 30)
+        revision = self.runtime.agent_change_revision()
+        if await self.runtime.has_pending_agent_message(invocation_context=context):
+            return {"state": "message_available"}
+        if monotonic() >= deadline:
+            return {"state": "timeout"}
+        # Do not yield a physical slot for a poll or an already available input.
+        # Keep the pre-query revision so arrivals before suspension still wake us.
         async with self._suspend(context):
-            revision = self.runtime.agent_change_revision()
-            bindings, unavailable = await self._bind(identities, context)
-            self._observe_cell(context, tuple(
-                (binding["target"]["agent_id"],
-                 None if binding["work"] is None else binding["work"]["work_id"], "wait")
-                for binding in bindings if binding["target"]["agent_id"] != self.root_session_id))
             while True:
-                sources = await self.runtime.pending_message_sources(
-                    recipient_session_id=context.session_id,
-                    source_agent_ids=identities,
-                    after_by_sender=after,
-                    invocation_context=context,
-                )
-                works = [
-                    await self._work_status(binding["work"]["work_id"])
-                    for binding in bindings
-                    if binding["work"] is not None
-                ]
-                done = {
-                    work["target"]["work_id"]
-                    for work in works
-                    if work["status"] in TERMINAL
-                }
-                pending = [
-                    binding["target"]
-                    for binding in bindings
-                    if binding["work"] is None or binding["work"]["work_id"] not in done
-                ]
-                result = {
-                    "bindings": bindings,
-                    "works": works,
-                    "pending_targets": pending,
-                }
-                if self._interrupted(context):
-                    return {"state": "interrupted", **result}
-                if sources:
-                    if owner_cursors is not None:
-                        for sender, sequence in sources.items():
-                            owner_cursors[sender] = max(
-                                owner_cursors.get(sender, 0), sequence
-                            )
-                    return {
-                        "state": "message_available",
-                        **result,
-                        "message_sources": [
-                            agent_target(identity) for identity in sources
-                        ],
-                    }
-                if unavailable:
-                    return {
-                        "state": "unavailable",
-                        **result,
-                        "unavailable_targets": unavailable,
-                    }
-                if not pending or (arguments.get("settle", "all") == "first" and done):
-                    return {"state": "settled", **result}
                 remaining = deadline - monotonic()
                 if remaining <= 0:
-                    return {"state": "timeout", **result}
+                    return {"state": "timeout"}
                 change = await self._wait_change(revision, context, timeout=remaining)
                 if change in {"timeout", "interrupted"}:
-                    return {"state": change, **result}
+                    return {"state": change}
                 revision = self.runtime.agent_change_revision()
+                if await self.runtime.has_pending_agent_message(invocation_context=context):
+                    return {"state": "message_available"}
+
+    async def _agent_wait_snapshot(self, identities, bound_work_ids):
+        rows = await self._read(
+            self.repository.read_agent_wait_states,
+            root_session_id=self.root_session_id,
+            agent_ids=identities,
+            bound_work_ids=bound_work_ids,
+            deadline_monotonic=self.runtime.read_deadline(),
+        )
+        if tuple(row["agent_id"] for row in rows) != identities:
+            raise ValueError("AGENT does not exist in this collaboration")
+        for row, work_id in zip(rows, bound_work_ids, strict=True):
+            if work_id is not None and row["bound_work_id"] != work_id:
+                raise ValueError("bound Work no longer exists for this Agent")
+        return rows
+
+    async def _wait_agents(self, arguments, context):
+        identities = tuple(target_id(t, "AGENT") for t in arguments["agents"])
+        if self.root_session_id in identities:
+            raise ValueError("cannot observe ROOT through wait_agent")
+        until = arguments.get("until", "idle")
+        settle = arguments.get("settle", "all")
+        deadline = monotonic() + arguments.get("timeout_seconds", 30)
+        owner_cursors = getattr(context, "agent_message_cursors", None)
+        after = dict(owner_cursors or {})
+        revision = self.runtime.agent_change_revision()
+        rows = await self._agent_wait_snapshot(identities, (None,) * len(identities))
+        bindings = tuple(row["current_work_id"] if until == "work_end" else None for row in rows)
+        initial = tuple(
+            "pending" if work_id is not None else
+            "not_started" if row["has_pending_work"] else "idle"
+            for row, work_id in zip(rows, bindings, strict=True)
+        )
+        if until == "work_end" and any(
+            row["has_running_turn"] and work_id is None
+            for row, work_id in zip(rows, bindings, strict=True)
+        ):
+            raise ValueError("Agent active turn does not identify its current Work")
+        self._observe_cell(context, tuple(
+            (identity, work_id, "wait") for identity, work_id in zip(identities, bindings, strict=True)
+        ))
+
+        def observations(current, *, first=False):
+            result = []
+            for row, work_id, condition in zip(current, bindings, initial, strict=True):
+                if until == "idle":
+                    condition = "pending" if row["has_running_turn"] or row["has_pending_work"] else "idle"
+                elif work_id is not None:
+                    condition = ("work_ended" if not first and row["bound_work_status"] in TERMINAL else "pending")
+                result.append({"target": agent_target(row["agent_id"]), "condition": condition,
+                               **({"work": work_target(work_id)} if work_id is not None else {})})
+            return result
+
+        async def evaluate(current):
+            sources = await self.runtime.pending_message_sources(
+                recipient_session_id=context.session_id, source_agent_ids=identities,
+                after_by_sender=after, invocation_context=context,
+            )
+            pending = [item["target"] for item in current if item["condition"] not in {"idle", "work_ended"}]
+            unavailable = [{"target": item["target"], "reason": "not_started"}
+                           for item in current if item["condition"] == "not_started"]
+            result = {"until": until, "observations": current, "pending_targets": pending}
+            if self._interrupted(context):
+                state = "interrupted"
+            elif sources:
+                state = "message_available"
+                result["message_sources"] = [agent_target(identity) for identity in sources]
+            elif not pending or (settle == "first" and len(pending) < len(current)):
+                state = "settled"
+            elif unavailable and (settle == "all" or len(unavailable) == len(current)):
+                state = "unavailable"
+                result["unavailable_targets"] = unavailable
+            elif monotonic() >= deadline:
+                state = "timeout"
+            else:
+                return None
+            result = {"state": state, **result}
+            _require_fits(context, result)
+            if state == "message_available" and owner_cursors is not None:
+                for sender, sequence in sources.items():
+                    owner_cursors[sender] = max(owner_cursors.get(sender, 0), sequence)
+            return result
+
+        current = observations(rows, first=True)
+        if result := await evaluate(current):
+            return result
+        async with self._suspend(context):
+            while True:
+                await self._wait_change(revision, context, timeout=max(0, deadline - monotonic()))
+                revision = self.runtime.agent_change_revision()
+                # A fresh statement is also needed on timeout/control so the
+                # result reports one current snapshot rather than stale busy state.
+                rows = await self._agent_wait_snapshot(identities, bindings)
+                current = observations(rows)
+                if result := await evaluate(current):
+                    return result

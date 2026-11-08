@@ -119,7 +119,7 @@ def test_collaboration_observes_only_validated_targets_before_wait_or_message_re
             await port.invoke(tool_name="query_agents", arguments={"target": agent_target(random_id("session"))}, invocation_context=context)
         assert seen == []
         task = asyncio.create_task(port.invoke(tool_name="wait_agent",
-            arguments={"agents": [agent_target(agent)], "timeout_seconds": 30}, invocation_context=context))
+            arguments={"agents": [agent_target(agent)], "until": "work_end", "timeout_seconds": 30}, invocation_context=context))
         async with asyncio.timeout(5):
             while runtime.waiters == 0:
                 await asyncio.sleep(.001)
@@ -223,7 +223,7 @@ def test_actual_cell_work_graph_pages_use_canonical_source_and_root(tmp_path, mo
                 if root_calls == 1:
                     code = ("const x=await tools.run_agent([{instruction:'first'},"
                             "{instruction:'second'}]); "
-                            "await tools.wait_agent({works:x.works});")
+                            "await tools.wait_agent({agents:[...new Map(x.agents.map(a=>[a.agent_id,a])).values()],until:'idle'});")
                     events = _tool_call("exec_cell", random_id("call"), {"code": code})
                 else:
                     events = _text("root done")

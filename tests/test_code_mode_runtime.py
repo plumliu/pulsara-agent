@@ -553,7 +553,7 @@ def test_batch_preallocates_frozen_refs_then_one_real_descriptor():
                 ]);
                 if(result.agents.length!==2 || result.works.length!==2 || result.details.length!==2)
                   throw Error('dispatch arrays lost position');
-                console.log(await tools.wait_agent({works:[result.works[1]]}));
+                console.log(await tools.wait_agent({agents:[result.agents[1]],until:"idle"}));
             ''', invoke, {'run_agent':{}, 'wait_agent':{}}))
             assert page.state == 'completed', page.error
             assert [call.tool_name for call in calls] == ['run_agent', 'wait_agent']
@@ -561,6 +561,7 @@ def test_batch_preallocates_frozen_refs_then_one_real_descriptor():
             a, b = calls[0].arguments['members']
             assert json.loads(a['parameters']['instruction'])['agent_id'] == b['agent_id']
             assert b['parameters']['depends_on'] == [{'kind':'WORK','work_id':a['work_id']}]
+            assert calls[1].arguments == {'agents': [{'kind':'AGENT','agent_id':b['agent_id']}], 'until':'idle'}
             assert output == [{'kind':'log','text':'{"state":"settled"}'}]
         finally:
             await host.aclose()

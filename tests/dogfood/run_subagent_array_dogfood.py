@@ -384,8 +384,8 @@ def _invariants(evidence, root_id):
         if value is None:
             continue  # Auxiliary owners have their own input contracts.
         names = set(value["native_tools"])
-        forbidden = {"run_agent", "decide"} | (
-            {"wait_agent"}
+        forbidden = {"run_agent", "decide", "wait_agent", "wait_work"} | (
+            {"wait_message"}
             if value["session_id"] == root_id
             else {"exec_cell", "stop_agent"}
         )
@@ -419,13 +419,13 @@ def _invariants(evidence, root_id):
             if tool["tool_name"] in {"run_agent", "exec_cell", "stop_agent", "decide"}:
                 assert tool["session_id"] == root_id
             if tool["tool_name"] == "wait_agent":
-                if tool["session_id"] == root_id:
-                    assert tool["source_kind"] == "CODE_MODE_CALL"
-                else:
-                    assert (
-                        "agents" in tool["arguments"]
-                        and "works" not in tool["arguments"]
-                    )
+                assert tool["session_id"] == root_id
+                assert tool["source_kind"] == "CODE_MODE_CALL"
+                assert "agents" in tool["arguments"] and "works" not in tool["arguments"]
+                assert tool["arguments"].get("until", "idle") in {"idle", "work_end"}
+            if tool["tool_name"] == "wait_message":
+                assert tool["session_id"] != root_id
+                assert set(tool["arguments"]) <= {"timeout_seconds"}
             if tool["tool_name"] == "run_agent":
                 assert (
                     tool["source_kind"] == "CODE_MODE_CALL"
@@ -531,7 +531,7 @@ def _observations(phases):
                         )
                     }
                     for item in tools
-                    if item["tool_name"] == "wait_agent"
+                    if item["tool_name"] in {"wait_agent", "wait_message"}
                 ],
                 "tool_errors": [
                     item

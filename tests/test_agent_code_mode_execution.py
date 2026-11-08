@@ -594,7 +594,7 @@ def test_batch_hooks_reject_invalid_rewrites_and_keep_accepted_work_after_post_f
         else:
             root_calls += 1
             if root_calls == 1:
-                code = 'try { const admitted=await tools.run_agent([{instruction:"first work"},{instruction:"second work"}]);const finished=await tools.wait_agent({works:admitted.works});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
+                code = 'try { const admitted=await tools.run_agent([{instruction:"first work"},{instruction:"second work"}]);const finished=await tools.wait_agent({agents:[...new Map(admitted.agents.map(a=>[a.agent_id,a])).values()],until:"idle"});console.log(admitted);console.log(finished); } catch(error) { console.log({rejected:error.code}); }'
                 payloads = _tool_call('exec_cell',random_id('call'),{'code':code})
             else:
                 if root_calls == 2:
@@ -663,7 +663,7 @@ def test_role_surface_keeps_control_tools_visible_and_rejects_restricted_executi
     from pulsara_agent.conversation_kernel.memory.contracts import FrozenModelCallMemoryContext
     from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
     from tests.support.round3 import prepare_test_direct_tool_surface
-    operations = {'exec_cell','query_cells','manage_cell','run_agent','query_agents','send_agent_message','wait_agent','stop_agent'}
+    operations = {'exec_cell','query_cells','manage_cell','run_agent','query_agents','send_agent_message','wait_agent','wait_message','stop_agent'}
     mode = PermissionMode(permission_mode)
     async def scenario():
         port = DirectKernelToolPort(scheduled_tasks=scheduled_task_service(), workspace_root=tmp_path,host_owner_id='mode-host',session_id=random_id('session'),
@@ -676,7 +676,7 @@ def test_role_surface_keeps_control_tools_visible_and_rejects_restricted_executi
             surface = prepare_test_direct_tool_surface(port,conversation_scope_kind=ModelInputScopeKind.ROOT,
                 effective_permission_mode=mode)
             names = {item.name for item in surface.model_surface.tool_specs}
-            assert names.intersection(operations) == operations - {'run_agent', 'wait_agent'}
+            assert names.intersection(operations) == operations - {'run_agent', 'wait_agent', 'wait_message'}
             if mode is not PermissionMode.BYPASS_PERMISSIONS:
                 prefix = tuple(item.canonical_bytes for item in surface.model_surface.tool_specs)
                 borrow = port.borrow_tool_surface(surface)
@@ -685,13 +685,13 @@ def test_role_surface_keeps_control_tools_visible_and_rejects_restricted_executi
                 agent = {'kind':'AGENT','agent_id':random_id('session')}
                 arguments = {'exec_cell':{'code':'return 1;'},'manage_cell':{'action':'wait','target':{'kind':'CELL','cell_id':'cell:'+'a'*26}},'query_cells':{},
                     'run_agent':{'instruction':'work'},'query_agents':{'target':agent},
-                    'send_agent_message':{'target':agent,'message':'hello'},'wait_agent':{'agents':[agent]},'stop_agent':{'target':agent}}
+                    'send_agent_message':{'target':agent,'message':'hello'},'wait_agent':{'agents':[agent]},'wait_message':{},'stop_agent':{'target':agent}}
                 try:
                     for name in operations:
                         authorization = await port.authorize(tool_name=name,arguments=arguments[name],tool_call_id=random_id('call'),
                             turn_id=random_id('turn'),assistant_entry_id=random_id('entry'),permission_snapshot=permission,
                             surface_borrow=borrow,memory_context=FrozenModelCallMemoryContext())
-                        assert authorization.kind is (KernelToolAuthorizationKind.TOOL_UNAVAILABLE if name in {'run_agent', 'wait_agent'} else KernelToolAuthorizationKind.PERMISSION_DENIED)
+                        assert authorization.kind is (KernelToolAuthorizationKind.TOOL_UNAVAILABLE if name in {'run_agent', 'wait_agent', 'wait_message'} else KernelToolAuthorizationKind.PERMISSION_DENIED)
                     assert tuple(item.canonical_bytes for item in surface.model_surface.tool_specs) == prefix
                 finally:
                     borrow.close()

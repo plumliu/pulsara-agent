@@ -111,7 +111,7 @@ async def _exercise(runtime, binding_connection, workspace, evidence, timeout, s
         evidence.data["root_driver_requests"].append({"turn_id":request.turn_id,
             "native_tools":names, "message_count":len(request.compiled_input.messages)})
         assert {"query_agents", "send_agent_message", "stop_agent", "exec_cell"} <= set(names)
-        assert not {"run_agent", "wait_agent", "decide"} & set(names)
+        assert not {"run_agent", "wait_agent", "wait_work", "wait_message", "decide"} & set(names)
         if not requested:
             requested = True
             payloads = _tool_call("exec_cell", random_id("call"), {"code":program})

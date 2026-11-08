@@ -202,7 +202,7 @@ def test_actual_js_directory_keeps_shared_calls_and_excludes_native_owners(tmp_p
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             names = {spec.name for spec in directory.tool_specs}
             assert {"query_capabilities", "query_agents", "exec_process", "query_processes", "manage_process", "read_file", "write_file", "decide", "run_agent", "wait_agent"} <= names
-            assert not names & {"exec_cell", "query_cells", "manage_cell", "query_monitors", "manage_monitor", "query_schedules", "manage_schedule", "search_memory", "get_memory"}
+            assert not names & {"wait_work", "exec_cell", "query_cells", "manage_cell", "query_monitors", "manage_monitor", "query_schedules", "manage_schedule", "search_memory", "get_memory"}
             for name in names & {spec.name for spec in prepared.model_surface.tool_specs}:
                 assert directory.binding(name) == prepared.binding(name)
             for name in ("exec_process", "query_processes", "manage_process"):
@@ -283,7 +283,7 @@ def test_native_subagent_query_binding_and_authorization_keep_management_closed(
                 conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             names = {item.name for item in surface.model_surface.tool_specs}
-            assert {"query_agents", "send_agent_message", "wait_agent"} <= names
+            assert {"query_agents", "send_agent_message", "wait_message"} <= names
             assert not {"run_agent", "stop_agent", "exec_cell", "query_cells", "manage_cell"} & names
             prefix = tuple(item.canonical_bytes for item in surface.model_surface.tool_specs)
             borrow = port.borrow_tool_surface(surface)

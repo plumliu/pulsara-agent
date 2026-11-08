@@ -352,7 +352,7 @@ def test_real_host_cold_permission_selection_and_retained_epoch_prefix(
             ).final_text == "FINAL-1"
             first = model.requests[0].compiled_input
             first_names = {tool.name for tool in first.tools}
-            assert {"run_agent", "wait_agent", "decide"}.isdisjoint(first_names)
+            assert {"run_agent", "wait_agent", "wait_work", "wait_message", "decide"}.isdisjoint(first_names)
             assert operations.intersection(first_names) == operations
             if mode is PermissionMode.BYPASS_PERMISSIONS:
                 result = await session.run_turn(

@@ -13,7 +13,11 @@ const investigation = await tools.run_agent([
   }
 ]);
 console.log({ agents: investigation.agents, works: investigation.works });
-await tools.wait_agent({ works: investigation.works });
+const investigationWait = await tools.wait_agent({
+  agents: [...new Map(investigation.agents.map(target => [target.agent_id, target])).values()],
+  until: "idle"
+});
+if (investigationWait.state !== "settled") console.log({ observation: investigationWait });
 console.log(await tools.query_agents({ target: investigation.works[0] }));
 ```
 
@@ -28,7 +32,11 @@ const followup = await tools.run_agent([
     instruction: "Using your investigation, explain whether the tests distinguish empty input from whitespace-only input. Read additional tests as needed."
   }
 ]);
-await tools.wait_agent({ works: followup.works });
+const followupWait = await tools.wait_agent({
+  agents: [...new Map(followup.agents.map(target => [target.agent_id, target])).values()],
+  until: "idle"
+});
+if (followupWait.state !== "settled") console.log({ observation: followupWait });
 console.log(await tools.query_agents({ target: followup.works[0] }));
 ```
 
@@ -60,7 +68,11 @@ Report agreed fields and unresolved differences. Do not edit files.`,
   }
 ]);
 console.log({ agents: team.agents, works: team.works });
-await tools.wait_agent({ works: team.works });
+const teamWait = await tools.wait_agent({
+  agents: [...new Map(team.agents.map(target => [target.agent_id, target])).values()],
+  until: "idle"
+});
+if (teamWait.state !== "settled") console.log({ observation: teamWait });
 const findings = await Promise.all(team.works.map(target => tools.query_agents({ target })));
 console.log(findings);
 ```
@@ -94,7 +106,8 @@ const phase = await tools.run_agent([
   }
 ]);
 console.log({ agents: phase.agents, works: phase.works });
-await tools.wait_agent({ works: [phase.works[1]] });
+const reviewWait = await tools.wait_agent({ agents: [phase.agents[1]], until: "idle" });
+if (reviewWait.state !== "settled") console.log({ observation: reviewWait });
 console.log(await tools.query_agents({ target: phase.works[1] }));
 ```
 
@@ -102,8 +115,9 @@ The review starts after the investigation succeeds and receives its final as a
 separate input. The investigator should finish rather than wait for this reviewer
 to reply: the reviewer is blocked until that prerequisite completes. The two
 AGENT Targets stay the same; both WORK Targets are new. To wait in a further Cell,
-copy the new WORK Targets from `phase`'s output into that Cell's local array and
-call `tools.wait_agent({ works: copiedWorks })`.
+copy the AGENT target from `phase.agents[1]` to observe its queue with
+`tools.wait_agent({ agents: [reviewer], until: "idle" })`. Keep the new WORK target
+from `phase.works[1]` to query this exact review. A new wait takes a new observation.
 
 ## 4. Reuse an Agent in another Cell
 
@@ -116,7 +130,8 @@ Follow this procedure when the next user request builds on an earlier assignment
    unique identity keys.
 2. Copy the selected AGENT target into the new script's assignment `target`.
    Write a new `work_title` and instruction. Keep `context` out of continuations.
-3. Wait on the newly returned Work, then query and log its result. The Agent keeps
+3. Observe the returned Agent with `until: "idle"`, then query the newly returned
+   Work and log its actual state and result. The Agent keeps
    its previous conversation; there is no need to rerun the investigation.
 
 For the same operation within one Cell, example 1 shows the exact continuation

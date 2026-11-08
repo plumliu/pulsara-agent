@@ -51,7 +51,7 @@ _RUNTIME_SELECT = """SELECT s.*, s.id AS agent_id, s.id AS cursor, w.workspace_k
     EXISTS(SELECT 1 FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN') AS has_pending_work,
     EXISTS(SELECT 1 FROM pulsara_v3.turns t WHERE t.session_id=s.id AND t.status='RUNNING') AS has_running_turn,
     (SELECT q.id FROM pulsara_v3.prompt_queue_items q JOIN pulsara_v3.transcript_entries e ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
-       JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id WHERE q.session_id=s.id AND t.status='RUNNING' LIMIT 1) AS current_work_id,
+       JOIN pulsara_v3.turns t ON t.session_id=e.session_id AND t.id=e.turn_id WHERE q.session_id=s.id AND q.input_origin='AGENT_INSTRUCTION' AND t.status='RUNNING' LIMIT 1) AS current_work_id,
     (SELECT count(*) FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.status='PENDING' AND q.delivery_mode='NEW_TURN') AS queued_count,
     (SELECT q.id FROM pulsara_v3.prompt_queue_items q WHERE q.session_id=s.id AND q.input_origin='AGENT_INSTRUCTION' ORDER BY q.queue_sequence DESC LIMIT 1) AS latest_work_id,
     coalesce((SELECT NOT EXISTS (SELECT 1 FROM jsonb_array_elements(q.work_inputs) i
@@ -1027,6 +1027,46 @@ class _SubagentOperations:
             ).fetchone()
             return None if row is None else dict(row)
 
+    def read_agent_wait_states(
+        self, *, root_session_id, agent_ids, bound_work_ids, deadline_monotonic,
+    ):
+        # One statement supplies a common READ COMMITTED snapshot, including
+        # queue/turn transitions and any exact Work bound by this observation.
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            rows = connection.execute(
+                f"""WITH states AS ({_RUNTIME_SELECT}
+                    WHERE s.root_session_id=%s AND s.id=ANY(%s::text[])),
+                requested AS (
+                    SELECT * FROM unnest(%s::text[], %s::text[])
+                    WITH ORDINALITY AS r(agent_id, work_id, ordinal)
+                )
+                SELECT states.agent_id, states.current_work_id,
+                    states.has_running_turn, states.has_pending_work,
+                    q.id AS bound_work_id, {REQUEST_EXECUTION_COLUMNS}
+                FROM requested r JOIN states ON states.agent_id=r.agent_id
+                LEFT JOIN pulsara_v3.prompt_queue_items q
+                    ON q.session_id=r.agent_id AND q.id=r.work_id
+                    AND q.input_origin='AGENT_INSTRUCTION'
+                LEFT JOIN pulsara_v3.transcript_entries qe
+                    ON qe.session_id=q.session_id AND qe.id=q.consumed_entry_id
+                LEFT JOIN pulsara_v3.turns qt
+                    ON qt.session_id=qe.session_id AND qt.id=qe.turn_id
+                ORDER BY r.ordinal""",
+                (root_session_id, list(agent_ids), list(agent_ids), list(bound_work_ids)),
+            ).fetchall()
+            return tuple({
+                key: row[key] for key in (
+                    "agent_id", "current_work_id", "has_running_turn", "has_pending_work", "bound_work_id"
+                )
+            } | {"bound_work_status": (
+                None if row["bound_work_id"] is None
+                else request_execution_from_row(row).status.value
+            )} for row in rows)
+
     def read_session_root_id(self, *, session_id, deadline_monotonic):
         with self._provider.connection(
             lane=PostgresConnectionLane.INSPECTOR,
@@ -1247,6 +1287,28 @@ class _SubagentOperations:
             result = dict(row)
             result["work_id"] = work_id
             return result
+
+    def has_pending_agent_message(
+        self, *, session_id, turn_id, accepted_through_sequence, deadline_monotonic,
+    ):
+        with self._provider.connection(
+            lane=PostgresConnectionLane.INSPECTOR,
+            row_factory=dict_row,
+            deadline_monotonic=deadline_monotonic,
+        ) as connection:
+            row = connection.execute(
+                """SELECT EXISTS (
+                SELECT 1 FROM pulsara_v3.prompt_queue_items q
+                LEFT JOIN pulsara_v3.transcript_entries e
+                  ON e.session_id=q.session_id AND e.id=q.consumed_entry_id
+                WHERE q.session_id=%s AND q.target_turn_id=%s
+                  AND q.input_origin='AGENT_MESSAGE'
+                  AND (q.status='PENDING'
+                       OR (q.status='CONSUMED' AND e.entry_sequence>%s))
+                ) AS available""",
+                (session_id, turn_id, accepted_through_sequence),
+            ).fetchone()
+            return bool(row["available"])
 
     def pending_agent_message_sources(
         self,

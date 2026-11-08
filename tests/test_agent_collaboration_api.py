@@ -50,7 +50,7 @@ class ContractTests(unittest.TestCase):
             ("wait_agent", {"targets": [work_target(random_id("queue"))]}),
             ("wait_agent", {"agents": []}),
             (
-                "wait_agent",
+                "wait_work",
                 {"works": [work_target(random_id("queue"))], "timeout_seconds": 1},
             ),
             (
@@ -223,6 +223,20 @@ class RepositoryOwner:
             ui_queued_work_count=sum(row["status"] == "queued" for row in rows),
         )
 
+    def read_agent_wait_states(self, *, root_session_id, agent_ids, bound_work_ids, deadline_monotonic):
+        rows = []
+        for identity, work_id in zip(agent_ids, bound_work_ids, strict=True):
+            state = self.read_agent_runtime_state(session_id=identity, deadline_monotonic=deadline_monotonic)
+            if state is None or state["root_session_id"] != root_session_id:
+                continue
+            work = self.rows.get(work_id)
+            rows.append(dict(agent_id=identity, current_work_id=state["current_work_id"],
+                has_running_turn=state["current_work_id"] is not None,
+                has_pending_work=state["has_pending_work"],
+                bound_work_id=None if work is None else work["work_id"],
+                bound_work_status=None if work is None else work["status"]))
+        return tuple(rows)
+
     def _session_rows(
         self, *, root_session_id, cursor=None, limit=20, deadline_monotonic
     ):
@@ -315,6 +329,7 @@ class RuntimeOwner:
         self.wakes = 0
         self.waiters = 0
         self.suspended = 0
+        self.suspensions = 0
 
     @asynccontextmanager
     async def request_admission(self, root_session_id, requests):
@@ -343,10 +358,14 @@ class RuntimeOwner:
     @asynccontextmanager
     async def suspend_execution(self, context):
         self.suspended += 1
+        self.suspensions += 1
         try:
             yield
         finally:
             self.suspended -= 1
+
+    async def has_pending_agent_message(self, *, invocation_context):
+        return bool(self.messages)
 
     async def pending_message_sources(
         self, *, source_agent_ids, after_by_sender, **kwargs
@@ -376,6 +395,100 @@ class RuntimeOwner:
             status="stopped", terminal_reason="USER_CANCELLED"
         )
         await self.changed()
+
+
+class InboxWaitTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        FacadeTests.setUp(self)
+        self.api.session_id = self.context.session_id = random_id("session")
+        self.context.invocation_source = SimpleNamespace(kind="MODEL_TOOL_CALL")
+        self.context.cell_cancel_event = None
+        self.context.agent_message_cursors = None
+
+    async def call(self, name, arguments):
+        return await FacadeTests.call(self, name, arguments)
+
+    async def test_poll_and_existing_messages_do_not_yield_a_slot(self):
+        self.assertEqual(await self.call("wait_message", {"timeout_seconds": 0}), {"state": "timeout"})
+        self.runtime.messages[self.root] = 1
+        self.assertEqual(await self.call("wait_message", {}), {"state": "message_available"})
+        self.assertEqual(self.runtime.suspensions, 0)
+        self.assertEqual(self.runtime.messages, {self.root: 1})
+
+    async def test_fast_checks_keep_a_saturated_real_runtime_slot(self):
+        from pulsara_agent.conversation_kernel.subagent import AgentSessionRuntime
+
+        slots = AgentSessionRuntime(None)
+        await slots.set_capacity_target(1)
+        self.assertTrue(await slots.try_acquire(self.context.session_id))
+        competitor = random_id("session")
+        original_release = slots.release
+        released = []
+        async def competing_release(session_id):
+            released.append(session_id)
+            await original_release(session_id)
+            self.assertTrue(await slots.try_acquire(competitor))
+        slots.release = competing_release
+        self.runtime.suspend_execution = slots.suspend_execution
+        self.assertEqual(await asyncio.wait_for(self.call("wait_message", {"timeout_seconds": 0}), 1),
+                         {"state": "timeout"})
+        self.runtime.messages[self.root] = 1
+        self.assertEqual(await asyncio.wait_for(self.call("wait_message", {}), 1),
+                         {"state": "message_available"})
+        self.assertEqual(released, [])
+        self.assertFalse(await slots.try_acquire(competitor))
+        self.assertEqual(await slots.capacity_state(), (1, 1))
+
+    async def test_any_sender_wakes_and_unrelated_changes_do_not(self):
+        waiter = asyncio.create_task(self.call("wait_message", {}))
+        while not self.runtime.waiters:
+            await asyncio.sleep(0)
+        await self.runtime.changed()
+        while self.runtime.waiters < 2:
+            await asyncio.sleep(0)
+        self.assertFalse(waiter.done())
+        self.runtime.messages[random_id("session")] = 1
+        self.runtime.messages[self.root] = 2
+        await self.runtime.changed()
+        self.assertEqual(await asyncio.wait_for(waiter, 1), {"state": "message_available"})
+        self.assertEqual(len(self.runtime.messages), 2)
+        self.assertEqual(self.runtime.suspended, 0)
+
+    async def test_arrival_between_first_check_and_suspend_is_not_missed(self):
+        async def query(*, invocation_context):
+            if not self.runtime.messages:
+                self.runtime.messages[self.root] = 1
+                await self.runtime.changed()
+                return False
+            return True
+        self.runtime.has_pending_agent_message = query
+        self.assertEqual(await asyncio.wait_for(self.call("wait_message", {}), 1),
+                         {"state": "message_available"})
+        self.assertEqual(self.runtime.suspensions, 1)
+
+    async def test_cancel_releases_wait_and_does_not_consume_mail(self):
+        waiter = asyncio.create_task(self.call("wait_message", {}))
+        while not self.runtime.waiters:
+            await asyncio.sleep(0)
+        waiter.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await waiter
+        self.assertEqual(self.runtime.suspended, 0)
+        self.runtime.messages[self.root] = 1
+        self.assertEqual(await self.call("wait_message", {}), {"state": "message_available"})
+
+    async def test_unrelated_changes_do_not_extend_deadline(self):
+        waiter = asyncio.create_task(self.call("wait_message", {"timeout_seconds": 0.03}))
+        async def notify():
+            while not waiter.done():
+                await self.runtime.changed()
+                await asyncio.sleep(0.001)
+        notifier = asyncio.create_task(notify())
+        try:
+            self.assertEqual(await asyncio.wait_for(waiter, 1), {"state": "timeout"})
+        finally:
+            await notifier
+        self.assertEqual(self.runtime.suspended, 0)
 
 
 class FacadeTests(unittest.IsolatedAsyncioTestCase):
@@ -481,16 +594,15 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("diagnostic", item)
         self.assertTrue(all(self.repo.rows[identity]["status"] == "stopped" for identity in [running, *queued]))
 
-    async def test_both_wait_branches_read_status_without_hydrating_result_bodies(self):
-        agent, work = self.add_work(status="completed", final="full query result")
+    async def test_wait_modes_do_not_hydrate_or_replay_historical_result_bodies(self):
+        agent, _ = self.add_work(status="completed", final="full query result")
         def forbidden(**kwargs):
-            raise AssertionError("A status wait must not hydrate a complete Work result")
+            raise AssertionError("A wait must not hydrate a complete Work result")
         self.repo.query_agent_work = forbidden
-        for branch, target in (("agents", agent_target(agent)), ("works", work_target(work))):
-            waited = await self.call("wait_agent", {branch: [target]})
-            self.assertEqual(waited["works"][0]["status"], "completed")
-            for body in ("instruction", "final", "diagnostic"):
-                self.assertNotIn(body, waited["works"][0])
+        for until in ("idle", "work_end"):
+            waited = await self.call("wait_agent", {"agents": [agent_target(agent)], "until": until})
+            self.assertEqual(waited["state"], "settled")
+            self.assertEqual(waited["observations"], [{"target": agent_target(agent), "condition": "idle"}])
 
     async def test_run_receipt_never_leaks_final_from_fast_completed_admission(self):
         original = self.repo.admit_agent_requests
@@ -547,8 +659,8 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("profile", listed["works"][0])
         agents = await self.call("query_agents", {})
         self.assertNotIn("profile", agents["agents"][0])
-        waited = await self.call("wait_agent", {"works": [work_target(work)]})
-        self.assertNotIn("profile", waited["works"][0])
+        waited = await self.call("wait_agent", {"agents": [agent_target(agent)]})
+        self.assertNotIn("profile", waited["observations"][0])
         stopped = await self.call("stop_agent", {"target": work_target(work)})
         self.assertNotIn("profile", stopped["works"][0])
 
@@ -687,8 +799,8 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         other, first_work = self.add_work(status="completed", final="first")
         _, second_work = self.add_work(agent=other, status="completed", final="second")
         self.api.session_id = self.context.session_id = own
-        waited = await self.call("wait_agent", {"agents": [agent_target(other)]})
-        self.assertEqual(waited["works"][0]["target"], work_target(second_work))
+        with self.assertRaisesRegex(ValueError, "only to ROOT"):
+            await self.call("wait_agent", {"agents": [agent_target(other)]})
         self.assertNotIn(own, self.repo.known)
         self.repo.rows[second_work]["status"] = "running"
         sent = await self.call("send_agent_message", {"target": agent_target(other), "message": "hello"})
@@ -746,7 +858,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(delivery["delivery"], "not_started")
         result = await self.call(
-            "wait_agent", {"agents": [agent_target(agent)], "timeout_seconds": 0}
+            "wait_agent", {"agents": [agent_target(agent)], "until": "work_end", "timeout_seconds": 0}
         )
         self.assertEqual(result["state"], "unavailable")
         self.assertEqual(result["unavailable_targets"][0]["reason"], "not_started")
@@ -757,7 +869,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         agent, original = self.add_work()
         self.repo.rows[original]["profile"] = "research_worker"
         waiter = asyncio.create_task(
-            self.call("wait_agent", {"agents": [agent_target(agent)]})
+            self.call("wait_agent", {"agents": [agent_target(agent)], "until": "work_end"})
         )
         while not self.runtime.waiters:
             await asyncio.sleep(0)
@@ -766,13 +878,13 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         await self.runtime.changed()
         result = await asyncio.wait_for(waiter, 1)
         self.assertEqual(result["state"], "settled")
-        self.assertEqual(result["bindings"][0]["work"], work_target(original))
-        self.assertNotIn("final", result["works"][0])
-        self.assertNotIn("instruction", result["works"][0])
-        self.assertEqual(result["works"][0]["status"], "completed")
+        self.assertEqual(result["observations"][0]["work"], work_target(original))
+        self.assertNotIn("final", result["observations"][0])
+        self.assertNotIn("instruction", result["observations"][0])
+        self.assertEqual(result["observations"][0]["condition"], "work_ended")
         queried = await self.call("query_agents", {"target": work_target(original)})
         self.assertEqual(queried["final"], "original final")
-        self.assertNotIn("profile", result["works"][0])
+        self.assertNotIn("profile", result["observations"][0])
         self.assertEqual(self.repo.rows[next_work]["status"], "running")
 
     async def test_message_wakes_agent_wait_without_copying_body_or_skipping_other_senders(
@@ -817,38 +929,30 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(later["state"], "timeout")
 
-    async def test_work_wait_ignores_messages_and_returns_real_stopped_state(self):
-        agent, work = self.add_work(status="queued")
-        waiter = asyncio.create_task(
-            self.call("wait_agent", {"works": [work_target(work)]})
-        )
+    async def test_agent_wait_reports_stopped_bound_work_without_calling_it_success(self):
+        agent, work = self.add_work()
+        waiter = asyncio.create_task(self.call("wait_agent", {
+            "agents": [agent_target(agent)], "until": "work_end"}))
         while not self.runtime.waiters:
             await asyncio.sleep(0)
-        self.runtime.messages[agent] = 1
-        await self.runtime.changed()
-        await asyncio.sleep(0)
-        self.assertFalse(waiter.done())
-        self.repo.rows[work].update(
-            status="stopped", terminal_reason="DEPENDENCY_NOT_SUCCESSFUL"
-        )
+        self.repo.rows[work].update(status="stopped", terminal_reason="DEPENDENCY_NOT_SUCCESSFUL")
         await self.runtime.changed()
         result = await asyncio.wait_for(waiter, 1)
         self.assertEqual(result["state"], "settled")
-        self.assertEqual(result["works"][0]["status"], "stopped")
-        self.assertNotIn("final", result["works"][0])
+        self.assertEqual(result["observations"], [{"target": agent_target(agent),
+            "condition": "work_ended", "work": work_target(work)}])
+        self.assertEqual((await self.call("query_agents", {"target": work_target(work)}))["status"], "stopped")
         self.assertEqual(self.runtime.suspended, 0)
 
-    async def test_cell_control_interrupts_work_observation_without_stopping_work(self):
-        _, work = self.add_work(status="queued")
-        waiter = asyncio.create_task(
-            self.call("wait_agent", {"works": [work_target(work)]})
-        )
+    async def test_cell_control_interrupts_idle_observation_without_stopping_work(self):
+        agent, work = self.add_work(status="queued")
+        waiter = asyncio.create_task(self.call("wait_agent", {"agents": [agent_target(agent)]}))
         while not self.runtime.waiters:
             await asyncio.sleep(0)
         self.context.cell_cancel_event.set()
         result = await asyncio.wait_for(waiter, 1)
         self.assertEqual(result["state"], "interrupted")
-        self.assertEqual(result["pending_targets"], [work_target(work)])
+        self.assertEqual(result["pending_targets"], [agent_target(agent)])
         self.assertEqual(self.repo.rows[work]["status"], "queued")
         self.assertEqual(self.runtime.suspended, 0)
 
@@ -875,7 +979,7 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repo.rows[work]["status"], "running")
         self.assertNotIn(other, self.context.agent_message_cursors)
 
-    async def test_native_wait_ignores_unselected_message_until_selected_sender(self):
+    async def test_code_mode_wait_filters_senders_without_cell_cursors(self):
         selected, _ = self.add_work()
         other, _ = self.add_work()
         self.context.cell_cancel_event = None
@@ -931,30 +1035,33 @@ class FacadeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.repo.rows[first['works'][0]['work_id']]['work_title'], '旧标题')
         self.assertEqual([row['instruction'] for row in self.repo.rows.values()], ['create', 'second', 'third', 'fourth'])
 
-    async def test_root_native_and_child_work_wait_rejected_at_actual_owner(self):
+    async def test_root_native_and_child_object_waits_rejected_at_actual_owner(self):
         agent, work = self.add_work(status='completed')
         self.context.invocation_source = SimpleNamespace(kind='MODEL_TOOL_CALL')
         for name, args in [('run_agent', envelope([{'instruction': 'forbidden'}])[1]),
-                           ('wait_agent', {'agents': [agent_target(agent)]}),
-                           ('wait_agent', {'works': [work_target(work)]})]:
+                           ('wait_agent', {'agents': [agent_target(agent)]})]:
             with self.assertRaisesRegex(ValueError, 'live Code Mode'):
                 await self.call(name, args)
+        with self.assertRaisesRegex(ValueError, 'native subagent'):
+            await self.call('wait_message', {})
         self.api.session_id = self.context.session_id = random_id('session')
-        with self.assertRaisesRegex(ValueError, 'only to ROOT Code Mode'):
-            await self.call('wait_agent', {'works': [work_target(work)]})
-        waited = await self.call('wait_agent', {'agents': [agent_target(agent)]})
-        self.assertEqual(waited['state'], 'settled')
-        self.assertEqual(waited['works'][0]['target'], work_target(work))
+        for name, args in [('wait_agent', {'agents': [agent_target(agent)]})]:
+            with self.assertRaisesRegex(ValueError, 'only to ROOT'):
+                await self.call(name, args)
+        self.context.invocation_source = SimpleNamespace(kind='CODE_MODE_CALL')
+        with self.assertRaisesRegex(ValueError, 'native subagent'):
+            await self.call('wait_message', {})
         self.assertEqual(self.repo.admissions, [])
 
-    async def test_root_alias_duplicates_are_rejected_after_resolution(self):
-        with self.assertRaisesRegex(ValueError, 'duplicate resolved'):
-            await self.call('wait_agent', {'agents': [agent_target('ROOT'), agent_target(self.root)], 'timeout_seconds': 0})
+    async def test_root_alias_and_actual_root_target_are_rejected(self):
+        for target in (agent_target("ROOT"), agent_target(self.root)):
+            with self.assertRaises(ValueError):
+                await self.call("wait_agent", {"agents": [target], "timeout_seconds": 0})
 
     async def test_wait_collection_does_not_inherit_dispatch_member_limit(self):
-        works = [work_target(self.add_work(status='completed')[1]) for _ in range(17)]
-        result = await self.call('wait_agent', {'works': works})
-        self.assertEqual([item['target'] for item in result['works']], works)
+        agents = [agent_target(self.add_work(status='completed')[0]) for _ in range(17)]
+        result = await self.call('wait_agent', {'agents': agents})
+        self.assertEqual([item['target'] for item in result['observations']], agents)
         self.assertEqual(result['state'], 'settled')
 
     async def test_title_receipt_budget_rejects_whole_dispatch_before_admission(self):

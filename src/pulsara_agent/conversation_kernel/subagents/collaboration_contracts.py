@@ -18,6 +18,7 @@ AGENT_TOOLS = frozenset(
         "run_agent",
         "query_agents",
         "send_agent_message",
+        "wait_message",
         "wait_agent",
         "stop_agent",
     }
@@ -162,33 +163,46 @@ def run_agent_parameters_schema() -> dict:
     }
 
 
-def wait_agent_parameters_schema(*, include_works: bool = True) -> dict:
-    def branch(field, kind):
-        properties = {
-            field: {
+def _wait_timeout_schema() -> dict:
+    return {"type": "number", "minimum": 0, "maximum": 300, "default": 30}
+
+
+def wait_message_parameters_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {"timeout_seconds": _wait_timeout_schema()},
+        "additionalProperties": False,
+    }
+
+
+def wait_agent_parameters_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "agents": {
                 "type": "array",
                 "minItems": 1,
                 "uniqueItems": True,
-                "items": target_schema(kind, allow_root=kind == "AGENT"),
+                "items": target_schema("AGENT"),
             },
+            "until": {"type": "string", "enum": ["work_end", "idle"], "default": "idle"},
             "settle": {"type": "string", "enum": ["all", "first"], "default": "all"},
-        }
-        if field == "agents":
-            properties["timeout_seconds"] = {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 300,
-                "default": 30,
-            }
-        return {
-            "type": "object",
-            "properties": properties,
-            "required": [field],
-            "additionalProperties": False,
-        }
+            "timeout_seconds": _wait_timeout_schema(),
+        },
+        "required": ["agents"],
+        "additionalProperties": False,
+    }
 
-    agents = branch("agents", "AGENT")
-    return {"oneOf": [branch("works", "WORK"), agents]} if include_works else agents
+
+def _validate_wait_timeout(arguments: Mapping[str, object]) -> None:
+    timeout = arguments.get("timeout_seconds", 30)
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not 0 <= timeout <= 300
+        or not math.isfinite(timeout)
+    ):
+        raise ValueError("timeout_seconds must be in 0..300")
 
 
 def _targets(
@@ -336,30 +350,22 @@ def validate_collaboration_parameters(
         a = closed(arguments, {"target", "message"}, {"target", "message"})
         target_id(a["target"], "AGENT", allow_root=True)
         _text(a["message"], "message", 16_384)
+    elif name == "wait_message":
+        a = closed(arguments, {"timeout_seconds"})
+        _validate_wait_timeout(a)
     elif name == "wait_agent":
-        works = "works" in arguments
         a = closed(
             arguments,
-            {"works", "settle"} if works else {"agents", "settle", "timeout_seconds"},
-            {"works" if works else "agents"},
+            {"agents", "until", "settle", "timeout_seconds"},
+            {"agents"},
         )
-        _targets(
-            a["works" if works else "agents"],
-            "WORK" if works else "AGENT",
-            nonempty=True,
-            allow_root=not works,
-        )
+        _targets(a["agents"], "AGENT", nonempty=True)
+        until = a.get("until", "idle")
+        if not isinstance(until, str) or until not in {"work_end", "idle"}:
+            raise ValueError("until must be work_end or idle")
         if a.get("settle", "all") not in {"all", "first"}:
             raise ValueError("settle must be all or first")
-        if not works:
-            timeout = a.get("timeout_seconds", 30)
-            if (
-                isinstance(timeout, bool)
-                or not isinstance(timeout, (int, float))
-                or not 0 <= timeout <= 300
-                or not math.isfinite(timeout)
-            ):
-                raise ValueError("timeout_seconds must be in 0..300")
+        _validate_wait_timeout(a)
     else:
         raise ValueError("unknown collaboration operation")
     if "cursor" in a:

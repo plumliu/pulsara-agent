@@ -81,7 +81,8 @@ const batch = await tools.run_agent([
     depends_on: ({ works }) => [works[0]]
   }
 ]);
-await tools.wait_agent({ works: [batch.works[1]] });
+const reviewWait = await tools.wait_agent({ agents: [batch.agents[1]], until: "idle" });
+if (reviewWait.state !== "settled") console.log({ observation: reviewWait });
 console.log(await tools.query_agents({ target: batch.works[1] }));
 ```
 
@@ -92,49 +93,85 @@ An Agent blocked on your own completion cannot reply before you finish.
 ## Choose what to wait for
 
 ```ts
-tools.wait_agent({works: WorkTarget[], settle?: "all" | "first"})
-tools.wait_agent({agents: AgentTarget[], settle?: "all" | "first", timeout_seconds?: number})
+tools.wait_agent({agents: AgentTarget[], until?: "idle" | "work_end",
+                  settle?: "all" | "first", timeout_seconds?: number})
 ```
 
-Supply exactly one nonempty array, `works` or `agents`. Targets within that array
-must be distinct. Both forms default to `settle: "all"`.
+Pass a nonempty array of distinct subagent targets. ROOT itself is not accepted.
+Defaults are `until: "idle"`, `settle: "all"`, and `timeout_seconds: 30`.
+Timeout accepts 0–300 seconds; 0 performs the first check without suspending.
+An initially satisfied condition can return immediately: no new event is required.
 
-| Input | What wakes the wait |
-| --- | --- |
-| `works` | The selected exact Works end; `first` waits for any one, `all` for all. Messages do not wake it. No observation timeout. |
-| `agents` | Any selected Agent has an available message, or its bound work meets the `settle` condition, or the observation times out. |
+| Condition | `first` | `all` |
+| --- | --- | --- |
+| `idle` | Any selected Agent currently has no running or queued Work. | The entire original set is idle in one current snapshot. |
+| `work_end` | Any initially idle Agent or any initially bound Work reaches terminal state. Queued-only targets do not block other bound Works from satisfying first. | All initially idle targets and bound Works satisfy; a queued-only target makes this observation unavailable. |
 
-Agent observation binds once: current Work if active, `not_started` if only queued
-work exists, otherwise the latest Work if one exists, or `inactive`. It does not
-follow subsequent assignments. Its timeout defaults to 30 seconds and accepts
-0–300 seconds. Waiting for `ROOT` observes messages, with no bound Work. Waiting
-for your own current Work is invalid.
+`idle` includes waiting dependencies and assignments accepted during the wait.
+Waiting for tools, messages or a physical slot is still busy. A prior idle
+observation is not accumulated if that Agent becomes busy again. Do not shrink a
+first result's pending_targets to prove the original set is simultaneously idle;
+use the original set with `settle: "all"` for that goal.
 
-Works have `queued`, `running`, `completed`, or `stopped` status. A settled wait
-means its condition was met, not that the work succeeded or its review approved
-a change. Query actual results to decide what to do next.
+`work_end` binds each running Work once. An initially idle Agent stays satisfied;
+an initially queued-only Agent stays `not_started`, without binding future Work.
+Only an observation with no satisfied target and no bound Work is unavailable for
+first. A bound Work remains satisfied after it completes or stops even if the
+Agent has started a successor. Completion and stopping both meet the wait
+condition; they do not establish success. Historical Works are not new completions.
 
-Wait results contain `state`, `works` status objects and `pending_targets`.
-The `works` property of a wait result is not an array of WORK targets: use each
-item's `target` or `inspect` to read it. `pending_targets` is directly usable with
-the same input field that started the wait. Agent observations also contain
-`bindings`, and message/unavailable results identify their relevant sources.
-`message_available`, `settled`, `timeout`, `unavailable`, and `interrupted` have
-different meanings. In the Agent form, `all` does not mean collecting a message
-from every Agent; any selected source's available message wakes it.
+Any listed sender's unread message can return early in either mode, including an
+Agent already satisfied or initially not_started. Other senders' messages remain
+on the normal input path. Caller control takes precedence, then a selected
+message, the settle condition, the applicable unavailable condition and timeout.
+
+Results contain `state`, `until`, ordered `observations` and `pending_targets`.
+An observation has `target` and `condition` (pending, work_ended, idle or
+not_started); a bound work_end observation also has its exact `work` target.
+In work_end, idle and not_started describe the initial classification, not current
+live activity. Its pending_targets can include not_started targets and exclude
+Agents already busy on later Work. In idle, these fields describe the current
+snapshot. message_available adds message_sources; unavailable adds
+unavailable_targets with reason not_started. A message can return even when no
+pending targets remain. No Work or message bodies are copied into this result.
+
+Keep the dispatch's Work targets for queries. Deduplicate its aligned Agent array
+before waiting; one Agent can receive several Works in one dispatch:
 
 ```js
-const first = await tools.wait_agent({ works: batch.works, settle: "first" });
-console.log(first);
-if (first.state === "settled" && first.pending_targets.length) {
-  console.log(await tools.wait_agent({ works: first.pending_targets }));
+const agents = [...new Map(batch.agents.map(target => [target.agent_id, target])).values()];
+const observation = await tools.wait_agent({ agents, until: "idle" });
+console.log(observation);
+const results = await Promise.all(batch.works.map(target => tools.query_agents({ target })));
+console.log(results);
+```
+
+Check observation state and actual Work status before proceeding. A timeout or
+message is an opportunity to inspect, not proof of completion. Another call is a
+new observation with fresh bindings; pending_targets does not resume an old
+binding. If an Agent is only queued, use idle to observe queue completion and
+query the retained Work for its exact result.
+
+For an Agent already observed running, use work_end to read the Work actually
+bound at the first wait snapshot. `runningAgent` below is its complete AGENT target
+from an actual query; it does not freeze that earlier query's Work identity.
+
+```js
+const current = await tools.wait_agent({ agents: [runningAgent], until: "work_end" });
+console.log(current);
+for (const item of current.observations) {
+  if (item.condition === "work_ended") {
+    console.log(await tools.query_agents({ target: item.work }));
+  }
 }
 ```
 
-A timeout or interruption ends the observation, not the target Work. To stop an
-assignment use `stop_agent` with its WORK target; to stop an Agent's current and
-queued work use its AGENT target. Completed work remains completed and the Agent
-can receive another Work.
+If the Agent became idle or queued-only before that first snapshot, the result
+reports that classification instead; do not infer a completed Work from its history.
+
+A timeout or interruption ends only the observation. To stop one assignment use
+`stop_agent` with its WORK target; to stop an Agent's current and queued work use
+its AGENT target. Stopping a Cell does not stop accepted assignments.
 
 ## Keep targets across scripts
 
@@ -147,20 +184,24 @@ its position in a new query page or a matching title does not establish identity
 Redeclare local variables in the new Cell using complete Target objects from the
 earlier output. Retain the `kind` and identity field unchanged. Pass an AGENT as
 assignment `target` to preserve the conversation and create a new Work. Keep that
-call's returned WORK targets for waiting and querying; an old WORK does not become
+call's returned WORK targets for exact queries; an old WORK does not become
 the new assignment when its Agent is reused. A synchronous `depends_on` callback
 can connect new Works in the same batch even when their Agents are retained from
 earlier Cells. Array order alone does not declare such a dependency.
 
 The same Agent may appear more than once in a dispatch result when it receives
-several Works. Use the unique `works` array to wait for those assignments; to
-observe that Agent, pass its AGENT target once.
+several Works. Deduplicate `agents` by agent_id before observing queue completion;
+query each unique WORK target for that assignment's actual outcome.
 
 ## Direct controls and useful corrections
 
 ROOT can natively query, message and stop the same targets while scripts run,
-even when a Cell cannot start. Messages supplement active work; they do not create
-assignments or wake an idle Agent to perform a new task. For a follow-up assignment,
+even when a Cell cannot start. Messages supplement active work and wake a subagent paused in native
+`wait_message({timeout_seconds: ...})`, regardless of sender. The native wait needs
+no target, returns only `message_available` or `timeout`, and leaves message bodies
+to normal input processing. Appending another Work only queues it until the current
+Work ends; it does not wake this inbox wait. Messages do not create assignments or
+wake an idle Agent to perform a new task. For a follow-up assignment,
 use `run_agent` with its retained AGENT target. A message uses
 `send_agent_message({target: agentTarget, message: text})`: keep the complete Target
 inside `target`; do not repeat its identity fields at the outer argument level.
@@ -176,7 +217,7 @@ messages in ROOT context is not proof that no exchange occurred.
 | Incorrect form or inference | Correct usage |
 | --- | --- |
 | `run_agent({instruction: ...})` | `run_agent([{instruction: ...}])` |
-| `run_agent.batch(...)` or `wait_agent.works(...)` | `run_agent([...])` or `wait_agent({works: [...]})` |
+| `run_agent.batch(...)` or `wait_agent.works(...)` | `run_agent([...])` or `wait_agent({agents: [...], until: "idle"})` |
 | `send_agent_message({...agentTarget, message})` | `send_agent_message({target: agentTarget, message})` |
 | Sending `name` or using a title as target | Use `work_title` for display and the actual Target for identity |
 | Interpolating current-batch `agents` in a plain instruction string | Use `instruction: ({ agents }) => ...` and interpolate inside the function |

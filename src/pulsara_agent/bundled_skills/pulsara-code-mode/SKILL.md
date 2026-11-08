@@ -46,7 +46,11 @@ ${readme.content}`
   }
 ]);
 console.log({ agents: investigation.agents, works: investigation.works });
-await tools.wait_agent({ works: investigation.works });
+const investigationWait = await tools.wait_agent({
+  agents: [...new Map(investigation.agents.map(target => [target.agent_id, target])).values()],
+  until: "idle"
+});
+if (investigationWait.state !== "settled") console.log({ observation: investigationWait });
 const result = await tools.query_agents({ target: investigation.works[0] });
 console.log(result);
 ```
@@ -92,7 +96,11 @@ if needed, then finish with your own evidence.`
   }
 ]);
 console.log({ agents: team.agents, works: team.works });
-await tools.wait_agent({ works: team.works });
+const teamWait = await tools.wait_agent({
+  agents: [...new Map(team.agents.map(target => [target.agent_id, target])).values()],
+  until: "idle"
+});
+if (teamWait.state !== "settled") console.log({ observation: teamWait });
 console.log(await Promise.all(team.works.map(target => tools.query_agents({ target }))));
 ```
 
@@ -103,17 +111,24 @@ final is supplied directly. Independent discussion and success dependencies serv
 different purposes; do not wait for a reply from work blocked on your completion.
 See [coordination](references/agent-orchestration/coordination.md) for both forms.
 
-`wait_agent({works: [...]})` waits for exact assignments to end. Read their results
-with `query_agents`. For messages or the work bound to an agent when waiting begins,
-use `wait_agent({agents: [...]})`; a message can wake that observation early.
+`wait_agent` accepts distinct subagent AGENT targets. Use `until: "idle"`
+(the default) for an empty running and queued workload, including assignments
+accepted during the wait. Use `until: "work_end"` for the Work running at the
+first observation; it never follows a successor. Both modes default to
+`settle: "all"` and a 30-second timeout (0–300 seconds). Messages from any listed
+Agent can return early. Check `state` and `observations`, then query retained
+WORK targets for actual results; timeout or a message does not establish completion.
+Deduplicate a dispatch's `agents` array by `agent_id`, preserving complete targets.
+See [coordination](references/agent-orchestration/coordination.md#choose-what-to-wait-for)
+for first/all, queued-only targets and subsequent independent observations.
 
 A Cell has its own JavaScript variables. When another Cell needs a returned target,
 log it with `console.log`, then copy that complete target into the next script or
 query it through `query_agents`. A variable from the previous Cell does not exist
 in a new one. The Agent's conversation and accepted Works remain available.
-For continuation, pass the retained AGENT target to `run_agent`; wait on the new
-WORK targets returned by that call. Waiting on an earlier WORK only observes that
-earlier assignment. Titles and query positions do not substitute for identity.
+For continuation, pass the retained AGENT target to `run_agent`; observe that
+Agent and query the new WORK targets returned by the call. Keep old WORK targets
+for their original results. Titles and query positions do not substitute for identity.
 
 `console.log(...)` sends selected values to ROOT. Each call is one independent
 input, including repeated text. Internal tool results stay in the script; Work
@@ -158,9 +173,9 @@ with “yes, do that.” Process paged sources as the task needs. See the
 - Native `query_cells` lists retained live cells, or reads a selected CELL's state
   and frozen source. Reading does not consume output. Historical source remains
   available through the original exec record after the live Cell retires.
-- ROOT uses `tools.wait_agent({agents: [...]})` for Agent activity and
-  `tools.wait_agent({works: [...]})` for exact Work outcomes. These return states and targets;
-  read selected finals or diagnostics with `query_agents`. Dependencies/materials
+- ROOT uses `tools.wait_agent({agents: [...], until: "idle"})` for empty queues
+  or `until: "work_end"` for initially running Works. The result describes the
+  observation; read retained WORK finals or diagnostics with `query_agents`. Dependencies/materials
   pass results directly between Work inputs without ROOT relaying them.
 - `manage_cell` with `action:"stop"` stops further script execution and submissions.
   Accepted agent work continues; use native `stop_agent` to stop that work too.

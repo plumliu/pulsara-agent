@@ -5306,7 +5306,8 @@ function toolDisplayName(name: string, argumentsJson?: string): string {
     } catch { return '查看能力'; }
   }
   if (normalized === 'use_new_mcp_tool') return '调用 MCP 工具';
-  if (normalized.includes('wait_agent')) return '等待任务';
+  if (normalized === 'wait_message') return '等待来信';
+  if (normalized === 'wait_agent') return '等待代理进展';
   if (normalized.includes('send_agent_message')) return '发送任务消息';
   if (normalized.includes('stop_agent')) return '停止任务';
   if (normalized === 'query_agents') return '查看任务';
@@ -5352,7 +5353,10 @@ function toolArgumentSummary(name: string, content: string): string {
     }
     if (normalized === 'use_new_mcp_tool') return '调用已经检查的 MCP 工具';
 
-    if (normalized.includes('wait_agent')) return '等待指定任务出现新进展';
+    if (normalized === 'wait_message') return '等待 ROOT 或其他代理发来的消息';
+    if (normalized === 'wait_agent') return value.until === 'work_end'
+      ? '等待指定代理当前任务结束或发来消息'
+      : '等待指定代理清空任务队列或发来消息';
     if (normalized.includes('send_agent_message')) return '向任务发送补充信息';
     if (normalized.includes('stop_agent')) return '停止指定任务';
     if (normalized === 'query_agents') return '读取当前任务状态';

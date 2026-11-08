@@ -1313,16 +1313,15 @@ class DirectKernelToolPort:
         code = (borrow.code_cell_id is not None and source is not None
             and source.kind is ToolInvocationSourceKind.CODE_MODE_CALL
             and source.tool_name == tool_name and scope is ModelInputScopeKind.ROOT)
-        if tool_name in {"decide", "run_agent"} or (
-            scope is ModelInputScopeKind.ROOT and tool_name in {"run_agent", "wait_agent"}
-        ):
+        if tool_name in {"decide", "run_agent", "wait_agent"}:
             if not code:
                 if scope is ModelInputScopeKind.SUBAGENT:
                     return f"tool unavailable: {tool_name}"
                 return f"{tool_name} requires Code Mode; use exec_cell with tools.{tool_name}(...)"
-        if tool_name == "wait_agent" and scope is ModelInputScopeKind.SUBAGENT:
-            if borrow.code_cell_id is not None or "works" in arguments:
-                return "wait_agent accepts only agents."
+        if tool_name == "wait_message" and (
+            scope is not ModelInputScopeKind.SUBAGENT or borrow.code_cell_id is not None
+        ):
+            return "wait_message requires a native subagent invocation."
         return None
 
     def prepare_resolved_invocation(

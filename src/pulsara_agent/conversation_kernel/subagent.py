@@ -150,9 +150,7 @@ class AgentSessionRuntime:
     async def stop_active_work(self, *, agent_id: str, work_id: str | None = None):
         return await self.core._stop_agent_active_work(agent_id, work_id)
 
-    async def pending_message_sources(self, *, recipient_session_id, source_agent_ids,
-                                      after_by_sender, invocation_context):
-        repository = await self.core._ensure_resources()
+    def _accepted_agent_message_through(self, recipient_session_id):
         live = self.core._live_agent_session(recipient_session_id)
         accepted_through = 0
         if live is not None:
@@ -162,13 +160,28 @@ class AgentSessionRuntime:
             )
             if view is not None:
                 accepted_through = view.canonical_frontier.through_sequence
+        return accepted_through
+
+    async def has_pending_agent_message(self, *, invocation_context):
+        repository = await self.core._ensure_resources()
+        return await self._io.run(
+            repository.has_pending_agent_message,
+            session_id=invocation_context.session_id,
+            turn_id=invocation_context.turn_id,
+            accepted_through_sequence=self._accepted_agent_message_through(invocation_context.session_id),
+            deadline_monotonic=self.core._canonical_deadline(),
+        )
+
+    async def pending_message_sources(self, *, recipient_session_id, source_agent_ids,
+                                      after_by_sender, invocation_context):
+        repository = await self.core._ensure_resources()
         return await self._io.run(
             repository.pending_agent_message_sources,
             session_id=recipient_session_id,
             turn_id=(None if getattr(getattr(invocation_context, "invocation_source", None), "kind", None) == "CODE_MODE_CALL" else invocation_context.turn_id),
             source_session_ids=tuple(source_agent_ids),
             after_by_sender=after_by_sender,
-            accepted_through_sequence=accepted_through,
+            accepted_through_sequence=self._accepted_agent_message_through(recipient_session_id),
             deadline_monotonic=self.core._canonical_deadline(),
         )
 

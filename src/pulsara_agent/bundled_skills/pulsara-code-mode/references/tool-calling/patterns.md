@@ -24,7 +24,7 @@ The JS directory includes:
 | Agents | `run_agent`, `query_agents`, `send_agent_message`, `wait_agent`, `stop_agent` |
 | Semantic conditions | `decide`, with its local synchronous `available()` method |
 
-JS also has array-based `tools.run_agent([...])` and `tools.wait_agent({works: [...]})`, described
+JS also has array-based `tools.run_agent([...])` and `tools.wait_agent({agents: [...], until: "idle"})`, described
 in [Coordination](../agent-orchestration/coordination.md). ROOT assigns, continues
 and waits for agent work through these JS operations, including single calls.
 Native `query_agents`, `send_agent_message` and `stop_agent` remain independent

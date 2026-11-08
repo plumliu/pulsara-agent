@@ -15,6 +15,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     assignment_parameters_schema,
     run_agent_parameters_schema,
     wait_agent_parameters_schema,
+    wait_message_parameters_schema,
 )
 
 
@@ -79,31 +80,52 @@ def test_work_title_on_create_and_reuse_has_one_utf8_contract(reuse):
             prepared_request({**base, "context": {"mode": "none"}})
 
 
-def test_wait_schemas_share_exact_branches_and_reject_old_forms():
-    agents = {"agents": [agent_target("ROOT")]}
+def test_wait_schemas_are_distinct_closed_contracts():
+    agents = {"agents": [agent_target(random_id("session"))]}
     works = {"works": [work_target(random_id("queue"))]}
-    for args in [agents, works]:
-        validate_collaboration_parameters("wait_agent", args)
-        assert Draft202012Validator(wait_agent_parameters_schema()).is_valid(args)
-    native = Draft202012Validator(wait_agent_parameters_schema(include_works=False))
-    assert native.is_valid(agents) and not native.is_valid(works)
-    for args in [
-        dict(agents, **works),
-        dict(works, timeout_seconds=1),
-        {"targets": agents["agents"]},
-        {"agents": []},
-        {"works": works["works"] * 2},
-        {"agents": agents["agents"] * 2},
+    definitions = {
+        "wait_message": (wait_message_parameters_schema(), [{}, {"timeout_seconds": 0}, {"timeout_seconds": 300}]),
+        "wait_agent": (wait_agent_parameters_schema(), [agents, *[dict(agents, until=until, settle=settle, timeout_seconds=timeout) for until in ("idle", "work_end") for settle in ("all", "first") for timeout in (0, 30, 300)]]),
+    }
+    for name, (schema, valid) in definitions.items():
+        validator = Draft202012Validator(schema)
+        for args in valid:
+            validate_collaboration_parameters(name, args)
+            assert validator.is_valid(args)
+        for args in [{"target": agent_target("ROOT")}, {"targets": []}, {"unknown": 1}]:
+            with pytest.raises(ValueError):
+                validate_collaboration_parameters(name, args)
+            assert not validator.is_valid(args)
+    for name, args in [
+        ("wait_message", agents), ("wait_message", works), ("wait_message", {"settle": "all"}),
+        ("wait_agent", {}), ("wait_agent", works), ("wait_agent", dict(agents, **works)),
+        ("wait_agent", {"agents": []}),
+        ("wait_agent", {"agents": agents["agents"] * 2}),
+        ("wait_agent", dict(agents, settle="any")),
+        ("wait_agent", dict(agents, until="next")), ("wait_agent", dict(agents, until=None)),
+        ("wait_agent", {"agents": [agent_target("ROOT")]}),
     ]:
         with pytest.raises(ValueError):
-            validate_collaboration_parameters("wait_agent", args)
+            validate_collaboration_parameters(name, args)
+        assert not Draft202012Validator(definitions[name][0]).is_valid(args)
     for name, args in [
         ("run_agent", {"instruction": "old single"}),
         ("run_agent.batch", {"members": []}),
         ("wait_agent.works", works),
+        ("wait_work", works),
     ]:
         with pytest.raises(ValueError):
             validate_collaboration_parameters(name, args)
+
+
+@pytest.mark.parametrize("name", ["wait_message", "wait_agent"])
+@pytest.mark.parametrize("timeout", [True, False, None, "30", [], {}, -1, 301, float("nan"), float("inf"), -float("inf")])
+def test_wait_timeout_rejects_invalid_values_at_actual_boundary(name, timeout):
+    args = {"timeout_seconds": timeout}
+    if name == "wait_agent":
+        args["agents"] = [agent_target(random_id("session"))]
+    with pytest.raises(ValueError):
+        validate_collaboration_parameters(name, args)
 
 
 def test_assignment_schema_is_the_internal_member_definition():
@@ -113,3 +135,18 @@ def test_assignment_schema_is_the_internal_member_definition():
         ]
         == assignment_parameters_schema()
     )
+
+
+def test_agent_wait_schema_defaults_match_observation_contract():
+    properties = wait_agent_parameters_schema()["properties"]
+    assert properties["until"]["default"] == "idle"
+    assert properties["settle"]["default"] == "all"
+    assert properties["timeout_seconds"]["default"] == 30
+
+
+@pytest.mark.parametrize("until", [None, True, False, 0, "", "next", [], {}])
+def test_agent_wait_rejects_invalid_until_types_and_values(until):
+    args = {"agents": [agent_target(random_id("session"))], "until": until}
+    with pytest.raises(ValueError):
+        validate_collaboration_parameters("wait_agent", args)
+    assert not Draft202012Validator(wait_agent_parameters_schema()).is_valid(args)

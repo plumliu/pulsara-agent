@@ -516,7 +516,7 @@ def test_new_child_canonical_work_uses_its_own_cold_readiness_scope(
             assert len(root_requests) == 2
             root_names = {item['function']['name'] for item in root_requests[0]['tools']}
             assert {'exec_cell', 'query_agents', 'send_agent_message', 'stop_agent'} <= root_names
-            assert not {'run_agent', 'wait_agent'} & root_names
+            assert not {'run_agent', 'wait_agent', 'wait_work', 'wait_message'} & root_names
             release.set()
             await asyncio.wait_for(child_sent.wait(), 10)
             assert len(child_requests) == 1

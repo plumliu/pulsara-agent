@@ -61,12 +61,10 @@ class WaitControlModel(_DetachedDraftModel):
             else:
                 self.control_requests.append(request)
                 if step == 0:
-                    arguments = {"works" if self.mode == "work" else "agents":
-                                 [self.selected_work if self.mode == "work" else self.selected_agent]}
-                    if self.mode == "agent":
-                        arguments["timeout_seconds"] = 300
+                    arguments = {"agents": [self.selected_agent], "until": self.mode,
+                                 "timeout_seconds": 300}
                     code = "const outcome=await tools.wait_agent(" + json.dumps(arguments) + ");"
-                    code += ('console.log("UNREACHABLE_AFTER_STOP");' if self.mode == "work"
+                    code += ('console.log("UNREACHABLE_AFTER_STOP");' if self.mode == "work_end"
                              else 'console.log(outcome);')
                     events = _tool_call("exec_cell", random_id("call"), {"code": code})
                 elif step == 1:
@@ -78,7 +76,7 @@ class WaitControlModel(_DetachedDraftModel):
                     # waits; unrelated messages must not complete either wait.
                     events = (_tool_call("manage_cell", random_id("call"),
                         {"action": "wait", "target": self.control_cell, "yield_time_ms": 30_000})
-                        if self.mode == "agent" else _text("ROOT_CONTROL_FINISHED"))
+                        if self.mode == "idle" else _text("ROOT_CONTROL_FINISHED"))
                 else:
                     events = _text("ROOT_CONTROL_FINISHED")
 
@@ -111,7 +109,7 @@ class WaitControlModel(_DetachedDraftModel):
             yield event
 
 
-@pytest.mark.parametrize("mode", ["work", "agent"])
+@pytest.mark.parametrize("mode", ["work_end", "idle"])
 def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_input(
     mode,
     tmp_path,
@@ -193,7 +191,7 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                 return await root._io.run(read, deadline_monotonic=monotonic() + 10)
 
             await eventually(wait_admitted)
-            if mode == "work":
+            if mode == "work_end":
                 await asyncio.wait_for(control, 10)
                 cell = root.code_mode_cells()[0]
                 assert cell["pending_calls"] == 1
@@ -256,7 +254,7 @@ def test_wait_observers_settle_on_cell_stop_or_natural_completion_after_human_in
                 work_id=model.selected_work["work_id"],
                 deadline_monotonic=monotonic() + 10,
             )
-            assert actual["status"] == ("running" if mode == "work" else "completed")
+            assert actual["status"] == ("running" if mode == "work_end" else "completed")
         finally:
             model.release.set()
             model.other_send.set()

@@ -161,8 +161,7 @@ class KnownQueryModel(_DetachedDraftModel):
             index = self.child_counts.get(request.session_id, 0)
             self.child_counts[request.session_id] = index + 1
             if index == 0:
-                events = _tool_call('wait_agent', random_id('call'),
-                                    {'agents': [{'kind': 'AGENT', 'agent_id': self.target_c}], 'timeout_seconds': 0})
+                events = _tool_call('wait_message', random_id('call'), {'timeout_seconds': 0})
             elif index == 1:
                 events = _tool_call('query_agents', random_id('call'),
                                     {'target': {'kind': 'WORK', 'work_id': self.work_b}})
@@ -215,7 +214,7 @@ def test_native_child_query_executes_and_tool_result_does_not_introduce_contacts
                 return model.query_result_input is not None
             await eventually(got_result)
             provider_tools = {tool.name for tool in model.query_result_input.tools}
-            assert {'query_agents', 'send_agent_message', 'wait_agent'} <= provider_tools
+            assert {'query_agents', 'send_agent_message', 'wait_message'} <= provider_tools
             assert not provider_tools.intersection({'run_agent', 'stop_agent', 'exec_cell',
                 'query_cells', 'manage_cell', 'enter_plan', 'ask_plan_question', 'exit_plan'})
             rendered = '\n'.join(t for message in model.query_result_input.messages

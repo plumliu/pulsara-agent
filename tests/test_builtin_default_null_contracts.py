@@ -277,6 +277,9 @@ def test_existing_empty_values_remain_operations():
     )
     assert_shape("wait_agent", {"agents": []}, False)
     assert_shape("wait_agent", {"works": []}, False)
+    assert_shape("wait_agent", {"agents": [{"kind": "AGENT", "agent_id": "ROOT"}]}, False)
+    assert_shape("wait_message", {}, True)
+    assert_shape("wait_message", {"timeout_seconds": None}, False)
 
 
 def test_scheduled_tool_rejects_run_now_and_switch_checks_permission():

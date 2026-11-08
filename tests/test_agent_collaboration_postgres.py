@@ -143,7 +143,7 @@ async def test_public_batch_atomic_rejection_and_wait_then_query_exact_real_fina
             api,
             context,
             "wait_agent",
-            {"works": [peers["works"][0], peers["works"][1]]},
+            {"agents": peers["agents"], "until": "idle"},
         )
     )
     while not runtime.waiters:
@@ -168,16 +168,16 @@ async def test_public_batch_atomic_rejection_and_wait_then_query_exact_real_fina
     await runtime.changed()
     result = await asyncio.wait_for(waiting, 3)
     assert result["state"] == "settled"
-    assert [work["status"] for work in result["works"]] == ["completed", "completed"]
+    assert [item["condition"] for item in result["observations"]] == ["idle", "idle"]
     assert all(not {"final", "diagnostic", "instruction"}.intersection(work)
-               for work in result["works"])
+               for work in result["observations"])
     # Exact Work targets remain usable from a subsequent CODE caller context;
     # the wait value carries status, while explicit query reads full content.
     subsequent = SimpleNamespace(**vars(context))
     subsequent.agent_message_cursors = {}
     subsequent.cell_cancel_event = asyncio.Event()
-    selected_a = await call(api, subsequent, "query_agents", {"target": result["works"][0]["target"]})
-    selected_b = await call(api, subsequent, "query_agents", {"target": result["works"][1]["target"]})
+    selected_a = await call(api, subsequent, "query_agents", {"target": peers["works"][0]})
+    selected_b = await call(api, subsequent, "query_agents", {"target": peers["works"][1]})
     assert selected_a["target"] == peers["works"][0]
     assert selected_a["agent"] == peers["agents"][0]
     assert selected_a["final"] == final_a
@@ -243,12 +243,74 @@ async def test_public_agent_wait_observes_real_inbox_without_copying_message_bod
     )
     assert queued is not None
     result = await call(
-        api, context, "wait_agent", {"agents": [a["agents"][0]], "timeout_seconds": 0}
+        api, context, "wait_agent", {"agents": [a["agents"][0]], "until": "work_end", "timeout_seconds": 0}
     )
     assert result["state"] == "message_available"
     assert result["message_sources"] == [a["agents"][0]]
     assert "actual question body" not in str(result)
-    assert result["bindings"][0]["work"] == a["works"][0]
+    assert result["observations"][0]["work"] == a["works"][0]
+
+
+@async_test
+async def test_wait_snapshot_reads_current_queue_and_exact_bound_work_together(api_source):
+    repository, root, api, runtime, context = api_source
+    result = await call(api, context, "run_agent", envelope([
+        {"instruction": "current"}, {"instruction": "still queued"},
+    ])[1])
+    a, b = [item["agent_id"] for item in result["agents"]]
+    w1, w2 = [item["work_id"] for item in result["works"]]
+    child, candidate = start(repository, request(agent_id=a, work_id=w1))
+    def snapshot():
+        return repository.read_agent_wait_states(root_session_id=root.guard.session_id,
+            agent_ids=(a, b), bound_work_ids=(w1, None), deadline_monotonic=deadline())
+    rows = snapshot()
+    assert rows[0] == dict(agent_id=a, current_work_id=w1, has_running_turn=True,
+        has_pending_work=False, bound_work_id=w1, bound_work_status="running")
+    assert rows[1] == dict(agent_id=b, current_work_id=None, has_running_turn=False,
+        has_pending_work=True, bound_work_id=None, bound_work_status=None)
+    finish(repository, child, candidate, "current complete")
+    followup = await call(api, context, "run_agent", envelope([
+        {"target": result["agents"][0], "instruction": "followup"},
+    ])[1])
+    rows = snapshot()
+    assert rows[0]["bound_work_status"] == "completed"
+    assert rows[0]["current_work_id"] is None and rows[0]["has_pending_work"]
+    next_child, next_candidate = start(repository, request(agent_id=a,
+        work_id=followup["works"][0]["work_id"]))
+    rows = snapshot()
+    assert rows[0]["current_work_id"] == followup["works"][0]["work_id"]
+    assert rows[0]["bound_work_id"] == w1 and rows[0]["bound_work_status"] == "completed"
+    assert rows[1]["has_pending_work"]
+
+
+@async_test
+async def test_same_agent_batch_waits_once_for_idle_and_queries_each_work(api_source):
+    repository, root, api, runtime, context = api_source
+    first = await call(api, context, "run_agent", envelope([{"instruction": "initial"}])[1])
+    a = first["agents"][0]
+    child, candidate = start(repository, request(agent_id=a["agent_id"], work_id=first["works"][0]["work_id"]))
+    finish(repository, child, candidate, "initial result")
+    batch = await call(api, context, "run_agent", envelope([
+        {"target": a, "instruction": "second"}, {"target": a, "instruction": "third"},
+    ])[1])
+    assert batch["agents"] == [a, a]
+    agents = list({target["agent_id"]: target for target in batch["agents"]}.values())
+    waiting = asyncio.create_task(call(api, context, "wait_agent", {"agents": agents}))
+    while not runtime.waiters:
+        await asyncio.sleep(0)
+    for index, target in enumerate(batch["works"]):
+        lease, candidate = start(repository, request(agent_id=a["agent_id"], work_id=target["work_id"]))
+        finish(repository, lease, candidate, f"result {index}")
+        await runtime.changed()
+        if index == 0:
+            while runtime.waiters < 2:
+                await asyncio.sleep(0)
+            assert not waiting.done()
+    result = await asyncio.wait_for(waiting, 3)
+    assert result["state"] == "settled"
+    assert result["observations"] == [{"target": a, "condition": "idle"}]
+    actual = [await call(api, context, "query_agents", {"target": target}) for target in batch["works"]]
+    assert [work["final"] for work in actual] == ["result 0", "result 1"]
 
 
 @async_test

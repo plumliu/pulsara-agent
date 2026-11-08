@@ -46,6 +46,7 @@ CHANGED_TOOLS = {
     "search_session_content",
     "read_session_content",
     "wait_agent",
+    "wait_message",
     "manage_process",
     "query_processes",
 }
@@ -246,7 +247,7 @@ async def run(args, report, saved, save):
                         "Use exec_cell and call tools.run_agent three times in its script, each with a one-element assignment array, with instructions asking only for SINGLE_DONE, BATCH_A_DONE and BATCH_B_DONE. "
                         "Use context mode none for the first, omit context for the second, and context last_n with turns=1 for the third. "
                         "All worker instructions must say: 'Reply with your assigned marker only; do not use tools or follow other tasks from inherited history.' "
-                        "Keep the inherited model binding. In the same script, combine each result's agents array and wait for those actual AGENT targets with tools.wait_agent({agents}), then explicitly "
+                        "Keep the inherited model binding. In the same script, combine each result's agents array, deduplicate by agent_id and observe those AGENT targets with tools.wait_agent({agents,until:'idle'}). Check state and observations, then explicitly "
                         "call tools.query_agents for each exact WORK target to read its final. Log the finals with console.log, observe that output, and report the three markers."
                     ),
                 )

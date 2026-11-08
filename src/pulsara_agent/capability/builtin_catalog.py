@@ -65,6 +65,7 @@ from pulsara_agent.conversation_kernel.subagents.collaboration_contracts import 
     query_agents_input_schema,
     run_agent_parameters_schema,
     wait_agent_parameters_schema,
+    wait_message_parameters_schema,
     target_schema,
 )
 
@@ -832,7 +833,7 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
     "query_agents": _descriptor(
         name="query_agents",
         description=(
-            "Query agents and their delegated work. ROOT can query all retained members; a subagent can query itself and agents introduced through accepted inputs or messages. The list also returns a separate ROOT target for send_agent_message and wait_agent; ROOT is not a query target. To list agents, omit target; optional fields: cursor, max_items. To list one agent's work, pass its AGENT target; optional fields: cursor, max_items. To inspect one work item, pass only its WORK target, without pagination fields. Continue by copying the complete next call. Lists contain summaries; copy an item's inspect call to read the selected WORK for instruction, final or stopped diagnostic text. Omit unused fields; target does not accept null. WORK results belong to that request, including stopped diagnostics."
+            "Query agents and their delegated work. ROOT can query all retained members; a subagent can query itself and agents introduced through accepted inputs or messages. The list also returns a separate ROOT target for send_agent_message; ROOT is not a query target. Native wait_message needs no target. To list agents, omit target; optional fields: cursor, max_items. To list one agent's work, pass its AGENT target; optional fields: cursor, max_items. To inspect one work item, pass only its WORK target, without pagination fields. Continue by copying the complete next call. Lists contain summaries; copy an item's inspect call to read the selected WORK for instruction, final or stopped diagnostic text. Omit unused fields; target does not accept null. WORK results belong to that request, including stopped diagnostics."
         ),
         input_schema=query_agents_input_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
@@ -846,10 +847,10 @@ _BUILTIN_DESCRIPTORS: dict[str, BuiltinToolDescriptor] = {
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=False, permission_category="subagent_runtime",
     ),
-    "wait_agent": _descriptor(
-        name="wait_agent",
-        description="Wait for a known subagent's message or current work result. Do not wait for ROOT unless ROOT has explicitly asked you to wait for its reply. Pass agents as an array of AGENT references; an unstarted target returns unavailable. Waiting binds current work and never follows its next request. Returns state, bound Works, pending targets and applicable message sources; use query_agents for final or diagnostic text. Timeout ends this observation only.",
-        input_schema=wait_agent_parameters_schema(include_works=False),
+    "wait_message": _descriptor(
+        name="wait_message",
+        description="Pause your execution until an unread message from ROOT or another Agent is available for your current turn. No target or sender list is needed. timeout_seconds defaults to 30 and accepts 0–300 seconds; 0 checks immediately. Returns only state: message_available or timeout. Message bodies arrive through normal input processing, subject to its resource rules. Timeout ends this observation, not your assignment. Queued assignments and Work completion do not wake this wait.",
+        input_schema=wait_message_parameters_schema(),
         provider_kind=BuiltinToolDomainKind.WORKFLOW,
         is_read_only=True, permission_category="subagent_runtime",
     ),
@@ -1113,13 +1114,18 @@ _SCRIPT_API_DESCRIPTORS = {
     for name, descriptor in _SCRIPT_API_DESCRIPTORS.items()
 }
 _SCRIPT_API_DESCRIPTORS["wait_agent"] = replace(
-    _BUILTIN_DESCRIPTORS["wait_agent"], is_model_callable=False,
-    input_schema=wait_agent_parameters_schema(include_works=True),
-    description=("Wait using exactly one array: works for exact WORK terminal outcomes, "
-        "or agents for messages or bound current work. settle is all or first. "
-        "Only agents accepts timeout_seconds (default 30, maximum 300); "
-        "timeout ends this observation only. Messages can end an agents wait early. "
-        "Use query_agents to read final or diagnostic text."),
+    _descriptor(name="wait_agent", input_schema=wait_agent_parameters_schema(),
+        provider_kind=BuiltinToolDomainKind.WORKFLOW, is_read_only=True,
+        permission_category="subagent_runtime",
+        description=("Observe selected subagents in ROOT Code Mode. Pass distinct agents targets; ROOT itself is not accepted. "
+            "until defaults to idle: wait for no running or queued work, including new assignments. "
+            "until work_end fixes each initially running Work; initial idle remains satisfied and queued-only targets "
+            "cannot bind. settle defaults to all; first accepts any satisfied target and can still observe a bound "
+            "Work when another target has not started. timeout_seconds defaults to 30 and accepts 0–300. "
+            "Any selected sender's message can end either observation early. Returns state, until, observations "
+            "and pending_targets; message_available and timeout do not establish completion. Query retained WORK "
+            "targets for final or stopped diagnostic text. New calls take new observations and bindings.")),
+    is_model_callable=False,
 )
 
 
@@ -1235,8 +1241,8 @@ _FILESYSTEM = frozenset(
 _MEMORY_MUTATION = frozenset({"remember", "mark_memory_relation"})
 _MEMORY_QUERY = frozenset({"get_memory"})
 _PLAN = frozenset({"ask_plan_question", "enter_plan", "exit_plan"})
-_SUBAGENT_PARENT = frozenset({"run_agent", "stop_agent"})
-_SUBAGENT_SHARED = frozenset({"query_agents", "send_agent_message", "wait_agent"})
+_SUBAGENT_PARENT = frozenset({"run_agent", "stop_agent", "wait_agent"})
+_SUBAGENT_SHARED = frozenset({"query_agents", "send_agent_message", "wait_message"})
 _CODE_MODE = frozenset({"exec_cell", "query_cells", "manage_cell"})
 _TERMINAL_PROCESS_ACTIONS = (
     "close_stdin",
@@ -1506,7 +1512,7 @@ def _catalog_shape(name: str):
             (ToolInvocationOwnerKind.HOST_MAIN_RUN,),
             "subagent_parent",
         )
-    if name == "wait_agent":
+    if name == "wait_message":
         return (BuiltinToolBindingKind.SUBAGENT_CONTROL,
                 BuiltinToolAvailabilityKind.REQUIRES_SHARED_AGENT_CONTROL,
                 (ToolInvocationOwnerKind.SUBAGENT,), "subagent_shared")

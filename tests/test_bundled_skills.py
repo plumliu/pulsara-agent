@@ -565,11 +565,11 @@ def test_code_mode_workflow_example_reuses_real_targets_and_guards_decision(
                 assert members[0]["parameters"]["materials"] == [batches[1]["works"][1]]
             batches.append(value)
         elif call.tool_name == "wait_agent":
-            expected = batches[-1]["works"]
+            expected = batches[-1]["agents"]
             if len(batches) == 2:
                 expected = [expected[1]]
-            assert call.arguments == {"works": expected}
-            value = {"state": "settled", "works": [], "pending_targets": []}
+            assert call.arguments == {"agents": expected, "until": "idle"}
+            value = {"state": "settled", "until": "idle", "observations": [], "pending_targets": []}
         elif call.tool_name == "query_agents":
             stopped = stopped_phase == len(batches)
             assert call.arguments["target"] in batches[-1]["works"]
@@ -621,6 +621,63 @@ def test_code_mode_workflow_example_reuses_real_targets_and_guards_decision(
         assert output[-1]["review"]["target"] == batches[1]["works"][1]
 
 
+
+@pytest.mark.parametrize("wake_state", ["timeout", "message_available"])
+def test_workflow_early_wake_does_not_advance_unfinished_work(wake_state):
+    from pulsara_agent.code_mode import CodeModeToolResult
+
+    source = _code_mode_example("agent-orchestration/workflows.md", 0)
+    calls, dispatches = [], []
+    async def invoke(call):
+        calls.append(call)
+        if call.tool_name == "read_file":
+            value = {"content": "Project context"}
+        elif call.tool_name == "run_agent":
+            assert not dispatches, "unfinished investigation must not submit implementation"
+            members = call.arguments["members"]
+            value = {"agents": [{"kind": "AGENT", "agent_id": m["agent_id"]} for m in members],
+                     "works": [{"kind": "WORK", "work_id": m["work_id"]} for m in members], "details": []}
+            dispatches.append(value)
+        elif call.tool_name == "wait_agent":
+            assert call.arguments == {"agents": dispatches[0]["agents"], "until": "idle"}
+            value = {"state": wake_state, "until": "idle", "observations": [
+                {"target": target, "condition": "pending"} for target in dispatches[0]["agents"]],
+                "pending_targets": dispatches[0]["agents"]}
+        else:
+            assert call.tool_name == "query_agents"
+            value = {"target": call.arguments["target"], "status": "running"}
+        return CodeModeToolResult(value=value)
+
+    output = asyncio.run(_execute_code_mode_example(source, invoke, True))
+    assert [call.tool_name for call in calls] == ["read_file", "run_agent", "wait_agent", "query_agents", "query_agents"]
+    assert output[1]["observation"]["state"] == wake_state
+    assert all(item["status"] == "running" for item in output[-1]["findings"])
+
+
+def test_coordination_example_deduplicates_agents_and_queries_each_work():
+    from pulsara_agent.code_mode import CodeModeToolResult
+    from pulsara_agent.identity import random_id
+
+    agent = {"kind": "AGENT", "agent_id": random_id("session")}
+    works = [{"kind": "WORK", "work_id": random_id("queue")} for _ in range(2)]
+    batch = {"agents": [agent, agent], "works": works}
+    source = "const batch = " + json.dumps(batch) + ";\n"
+    source += _code_mode_example("agent-orchestration/coordination.md", 1)
+    calls = []
+    async def invoke(call):
+        calls.append(call)
+        if call.tool_name == "wait_agent":
+            assert call.arguments == {"agents": [agent], "until": "idle"}
+            value = {"state": "settled", "until": "idle", "observations": [
+                {"target": agent, "condition": "idle"}], "pending_targets": []}
+        else:
+            assert call.tool_name == "query_agents"
+            value = {"target": call.arguments["target"], "status": "completed", "final": "Evidence"}
+        return CodeModeToolResult(value=value)
+    output = asyncio.run(_execute_code_mode_example(source, invoke, False))
+    assert [call.arguments["target"] for call in calls[1:]] == works
+    assert [item["target"] for item in output[1]] == works
+
 def test_code_mode_main_skill_dispatches_teammates_with_real_refs():
     from pulsara_agent.code_mode import CodeModeToolResult
 
@@ -640,14 +697,14 @@ def test_code_mode_main_skill_dispatches_teammates_with_real_refs():
             return CodeModeToolResult(value=result)
         if call.tool_name == "wait_agent":
             waited.append(call.arguments)
-            return CodeModeToolResult(value={"state": "settled", "works": [], "pending_targets": []})
+            return CodeModeToolResult(value={"state": "settled", "until": "idle", "observations": [], "pending_targets": []})
         assert call.tool_name == "query_agents"
         queried.append(call.arguments["target"])
         return CodeModeToolResult(value={"target": call.arguments["target"], "status": "completed", "final": "Evidence"})
 
     output = asyncio.run(_execute_code_mode_example(source, invoke, False))
     assert len(dispatches) == 1
-    assert waited == [{"works": dispatches[0]["works"]}]
+    assert waited == [{"agents": dispatches[0]["agents"], "until": "idle"}]
     assert queried == dispatches[0]["works"]
     assert output[0] == {key: dispatches[0][key] for key in ("agents", "works")}
     assert [item["target"] for item in output[1]] == queried
@@ -673,7 +730,7 @@ def test_code_mode_examples_continue_agents_in_fresh_cell_with_work_dependency()
             batches.append(value)
         elif call.tool_name == "wait_agent":
             waits.append(call.arguments)
-            value = {"state": "settled", "works": [], "pending_targets": []}
+            value = {"state": "settled", "until": "idle", "observations": [], "pending_targets": []}
         else:
             assert call.tool_name == "query_agents"
             assert call.arguments["target"] in batches[-1]["works"]
@@ -692,8 +749,8 @@ def test_code_mode_examples_continue_agents_in_fresh_cell_with_work_dependency()
 
     assert len(batches) == 2
     assert waits == [
-        {"works": batches[0]["works"]},
-        {"works": [batches[1]["works"][1]]},
+        {"agents": batches[0]["agents"], "until": "idle"},
+        {"agents": [batches[1]["agents"][1]], "until": "idle"},
     ]
     assert next_output[0]["agents"] == first_output[0]["agents"]
     assert next_output[0]["works"] == batches[1]["works"]

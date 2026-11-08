@@ -15,7 +15,7 @@ from pulsara_agent.primitives.tool_result_budget import ToolResultPageBudget
 from tests.support.round3 import prepare_test_direct_tool_surface
 from pulsara_agent.identity import random_id
 
-COLLABORATION = frozenset({'run_agent', 'query_agents', 'send_agent_message', 'wait_agent', 'stop_agent'})
+COLLABORATION = frozenset({'run_agent', 'query_agents', 'send_agent_message', 'wait_message', 'wait_agent', 'stop_agent'})
 
 
 def _port(tmp_path):
@@ -38,7 +38,8 @@ def test_root_native_and_cell_directories_select_sealed_owners_independently(tmp
             directory = port.freeze_code_mode_tool_directory(surface,
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             code = {spec.name for spec in directory.tool_specs}
-            assert COLLABORATION | {'decide'} <= code
+            assert (COLLABORATION - {'wait_message'}) | {'decide'} <= code
+            assert 'wait_message' not in code
             assert not code & {'exec_cell', 'query_cells', 'manage_cell'}
             assert tuple(x.name for x in surface.model_surface.tool_specs) == tuple(x.tool_name for x in surface.execution_bindings)
             assert tuple(x.name for x in directory.tool_specs) == tuple(x.tool_name for x in directory.execution_bindings)
@@ -59,7 +60,7 @@ def test_entry_matrix_by_role_and_permission(tmp_path, scope, mode):
         try:
             surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=scope, effective_permission_mode=mode)
             names = {spec.name for spec in surface.model_surface.tool_specs}
-            expected = ({'query_agents', 'send_agent_message', 'wait_agent'} if scope is ModelInputScopeKind.SUBAGENT
+            expected = ({'query_agents', 'send_agent_message', 'wait_message'} if scope is ModelInputScopeKind.SUBAGENT
                 else {'query_agents', 'send_agent_message', 'stop_agent'})
             assert names & COLLABORATION == expected
             assert 'decide' not in names
@@ -94,7 +95,7 @@ def _source(name, arguments):
 @pytest.mark.parametrize('name,arguments', [
     ('run_agent', {'members': [{'agent_id': random_id('session'), 'work_id': random_id('queue'), 'parameters': {'instruction': 'do this'}}]}),
     ('wait_agent', {'agents': [{'kind': 'AGENT', 'agent_id': random_id('session')}]}),
-    ('wait_agent', {'works': [{'kind': 'WORK', 'work_id': random_id('queue')}]}),
+    ('wait_agent', {'agents': [{'kind': 'AGENT', 'agent_id': random_id('session')}], 'until': 'work_end', 'settle': 'first', 'timeout_seconds': 0}),
     ('decide', {'condition': 'contains x', 'inputs': []}),
 ])
 def test_code_entry_requires_both_host_source_and_cell_borrow(tmp_path, name, arguments):
@@ -221,29 +222,20 @@ def test_decide_requires_bypass_even_with_authentic_cell_source(tmp_path, mode):
 
 def test_child_native_wait_keeps_shared_owner_without_cell_source(tmp_path):
     from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind, PreparedResolvedToolInvocation
-    from pulsara_agent.identity import random_id
 
     async def scenario():
         port = _port(tmp_path)
         surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
             effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
         borrow = port.borrow_tool_surface(surface)
-        arguments = {'agents': [{'kind': 'AGENT', 'agent_id': random_id('session')}]}
         try:
-            prepared = port.prepare_resolved_invocation(tool_name='wait_agent', arguments=arguments, surface_borrow=borrow)
+            prepared = port.prepare_resolved_invocation(tool_name='wait_message', arguments={}, surface_borrow=borrow)
             assert isinstance(prepared, PreparedResolvedToolInvocation)
-            auth = await port.authorize(tool_name='wait_agent', arguments=arguments, tool_call_id='call', turn_id='turn',
+            auth = await port.authorize(tool_name='wait_message', arguments={}, tool_call_id='call', turn_id='turn',
                 assistant_entry_id='entry', permission_snapshot=_permission(), surface_borrow=borrow,
                 memory_context=SimpleNamespace())
             assert auth.kind is KernelToolAuthorizationKind.ALLOW
-            forbidden = {'works': [{'kind': 'WORK', 'work_id': random_id('queue')}]}
-            denied = port.prepare_resolved_invocation(tool_name='wait_agent', arguments=forbidden, surface_borrow=borrow)
-            assert denied.authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
-            auth = await port.authorize(tool_name='wait_agent', arguments=forbidden, tool_call_id='call', turn_id='turn',
-                assistant_entry_id='entry', permission_snapshot=_permission(), surface_borrow=borrow,
-                memory_context=SimpleNamespace())
-            assert auth.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
-            for name in ('decide', 'run_agent', 'stop_agent', 'exec_cell'):
+            for name in ('wait_agent', 'wait_work', 'decide', 'run_agent', 'stop_agent', 'exec_cell'):
                 denied = port.prepare_resolved_invocation(tool_name=name, arguments={}, surface_borrow=borrow)
                 assert denied.authorization.kind is KernelToolAuthorizationKind.TOOL_UNAVAILABLE
         finally:
@@ -254,7 +246,6 @@ def test_child_native_wait_keeps_shared_owner_without_cell_source(tmp_path):
 
 def test_wait_schema_is_projected_per_entry_and_old_targets_are_rejected(tmp_path):
     from jsonschema import Draft202012Validator
-    from pulsara_agent.identity import random_id
     from pulsara_agent.primitives.context import thaw_json
 
     async def scenario():
@@ -264,20 +255,20 @@ def test_wait_schema_is_projected_per_entry_and_old_targets_are_rejected(tmp_pat
             directory = port.freeze_code_mode_tool_directory(root, effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
             child = prepare_test_direct_tool_surface(port, conversation_scope_kind=ModelInputScopeKind.SUBAGENT,
                 effective_permission_mode=PermissionMode.BYPASS_PERMISSIONS)
-            js = next(spec for spec in directory.tool_specs if spec.name == 'wait_agent')
-            native = next(spec for spec in child.model_surface.tool_specs if spec.name == 'wait_agent')
             agent = {'kind': 'AGENT', 'agent_id': random_id('session')}
             work = {'kind': 'WORK', 'work_id': random_id('queue')}
-            for spec in (js, native):
+            for name, owner, accepted, rejected in (
+                ('wait_message', child, {}, [{'agents': [agent]}, {'works': [work]}, {'settle': 'all'}]),
+                ('wait_agent', directory, {'agents': [agent], 'until': 'work_end'}, [{}, {'works': [work]}, {'agents': [agent], 'works': [work]}, {'agents': [{'kind':'AGENT','agent_id':'ROOT'}]}, {'agents': [agent], 'until':'next'}]),
+            ):
+                specs = owner.model_surface.tool_specs if name == 'wait_message' else owner.tool_specs
+                spec = next(item for item in specs if item.name == name)
                 validator = Draft202012Validator(thaw_json(spec.parameters))
-                assert validator.is_valid({'agents': [agent]})
-                assert not validator.is_valid({'targets': [agent]})
-                assert not validator.is_valid({'agents': [agent], 'works': [work]})
-            assert Draft202012Validator(thaw_json(js.parameters)).is_valid({'works': [work]})
-            assert not Draft202012Validator(thaw_json(native.parameters)).is_valid({'works': [work]})
-            assert js.descriptor_fingerprint == directory.binding('wait_agent').descriptor_fingerprint
-            assert native.descriptor_fingerprint == child.binding('wait_agent').descriptor_fingerprint
-            assert js.descriptor_fingerprint != native.descriptor_fingerprint
+                assert validator.is_valid(accepted)
+                assert all(not validator.is_valid(args) for args in rejected + [{'targets': [agent]}])
+                assert spec.descriptor_fingerprint == owner.binding(name).descriptor_fingerprint
+            assert not {'wait_agent', 'wait_work'} & {spec.name for spec in child.model_surface.tool_specs}
+            assert 'wait_message' not in {spec.name for spec in directory.tool_specs}
         finally:
             await port.aclose()
     asyncio.run(scenario())
@@ -302,7 +293,7 @@ def test_run_schema_accepts_only_ordered_prepared_members():
 
 
 
-@pytest.mark.parametrize('name', ['run_agent.batch', 'wait_agent.works'])
+@pytest.mark.parametrize('name', ['run_agent.batch', 'wait_agent.works', 'wait_work'])
 def test_removed_helpers_have_no_execution_binding_even_with_cell_authority(tmp_path, name):
     from pulsara_agent.conversation_kernel.tool_contracts import KernelToolAuthorizationKind
     from pulsara_agent.conversation_kernel.tool_invocations import current_tool_invocation
@@ -337,17 +328,18 @@ def test_native_inventory_and_script_apis_have_distinct_role_owners():
     from pulsara_agent.ports.tool_execution import ToolInvocationOwnerKind, thaw_tool_json_object
     from pulsara_agent.ports.system_prompt import DEFAULT_SYSTEM_PROMPT, DEFAULT_SUBAGENT_SYSTEM_PROMPT
 
-    assert not {'run_agent', 'decide'} & {d.name for d in builtin_tool_descriptors()}
-    assert not {'run_agent', 'decide'} & {e.name for e in builtin_tool_catalog()}
-    for name in ('run_agent', 'decide'):
+    assert not {'run_agent', 'decide', 'wait_agent', 'wait_work'} & {d.name for d in builtin_tool_descriptors()}
+    assert not {'run_agent', 'decide', 'wait_agent', 'wait_work'} & {e.name for e in builtin_tool_catalog()}
+    for name in ('run_agent', 'decide', 'wait_agent', 'wait_work'):
         with pytest.raises(KeyError):
             builtin_tool_catalog_entry(name)
-    native = builtin_tool_catalog_entry('wait_agent')
+    native = builtin_tool_catalog_entry('wait_message')
     script = script_api_catalog_entry('wait_agent')
     assert native.availability_requirement.allowed_invocation_owners == (ToolInvocationOwnerKind.SUBAGENT,)
     assert script.availability_requirement.allowed_invocation_owners == (ToolInvocationOwnerKind.HOST_MAIN_RUN,)
     assert native.descriptor.is_model_callable and not script.descriptor.is_model_callable
     assert 'works' not in thaw_tool_json_object(native.descriptor.input_schema)['properties']
+    assert thaw_tool_json_object(script.descriptor.input_schema)['properties']['until']['default'] == 'idle'
     assert not any(text in DEFAULT_SYSTEM_PROMPT for text in ('Subagents keep their native', 'native wait_agent'))
     assert not any(text in DEFAULT_SUBAGENT_SYSTEM_PROMPT for text in ('tools.run_agent', 'tools.decide', 'exec_cell'))
 
@@ -368,7 +360,7 @@ def test_visible_control_tools_return_bypass_hint_without_execution(tmp_path, sc
             calls.update({'stop_agent': {'target': target}, 'exec_cell': {'code': 'return 1;'},
                 'query_cells': {}, 'manage_cell': {'action': 'wait', 'target': {'kind': 'CELL', 'cell_id': random_id('cell')}}})
         else:
-            calls['wait_agent'] = {'agents': [target]}
+            calls['wait_message'] = {}
         try:
             surface = prepare_test_direct_tool_surface(port, conversation_scope_kind=scope, effective_permission_mode=mode)
             assert set(calls) <= {spec.name for spec in surface.model_surface.tool_specs}
